@@ -60,6 +60,10 @@ fn observe() -> Result<BTreeMap<String, String>> {
         ),
     ]))
 }
+/// Probe HVF before downloading immutable guest inputs; retain no VM or vCPU.
+pub fn check_host_access() -> Result<()> {
+    observe().map(|_| ())
+}
 impl MacExecutor {
     pub fn new(
         engine: &Path,
@@ -74,25 +78,7 @@ impl MacExecutor {
                 "--memory-mb: ARM guests require 64..3072 MiB".into(),
             ));
         }
-        let image = fs::read(kernel).map_err(|e| {
-            Error::Setup(format!(
-                "--kernel {}: {e}; provide an ARM64 Image",
-                kernel.display()
-            ))
-        })?;
-        BootSpec::for_application(
-            &image,
-            b"validation",
-            0,
-            u64::from(memory_mb) * 1024 * 1024,
-            seedbox_arm64::boot::DEFAULT_COMMAND_LINE,
-        )
-        .map_err(|e| {
-            Error::Setup(format!(
-                "--kernel {}: {e}; provide an ARM64 Image that fits --memory-mb",
-                kernel.display()
-            ))
-        })?;
+        validate_kernel(kernel, memory_mb)?;
         let kernel = crate::admission::file_digest(kernel)?;
         let mut parameters = crate::engine::arm_parameters();
         parameters.extend(observe()?);
@@ -151,6 +137,7 @@ impl MacExecutor {
         self
     }
     pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
+        validate_kernel(kernel, 3072)?;
         Ok(DoctorReport {
             engine: crate::admission::file_digest(engine)?,
             kernel: crate::admission::file_digest(kernel)?,
@@ -158,6 +145,28 @@ impl MacExecutor {
             observations: observe()?,
         })
     }
+}
+fn validate_kernel(kernel: &Path, memory_mb: u32) -> Result<()> {
+    let image = fs::read(kernel).map_err(|e| {
+        Error::Setup(format!(
+            "--kernel {}: {e}; provide an ARM64 Image",
+            kernel.display()
+        ))
+    })?;
+    BootSpec::for_application(
+        &image,
+        b"validation",
+        0,
+        u64::from(memory_mb) * 1024 * 1024,
+        seedbox_arm64::boot::DEFAULT_COMMAND_LINE,
+    )
+    .map_err(|e| {
+        Error::Setup(format!(
+            "--kernel {}: {e}; provide an ARM64 Image that fits --memory-mb",
+            kernel.display()
+        ))
+    })?;
+    Ok(())
 }
 fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
     if profile.backend != "seedbox-hvf"

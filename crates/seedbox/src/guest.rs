@@ -182,6 +182,28 @@ pub fn build_initramfs_with(
     archive.finish()
 }
 
+/// Package a Linux-produced tar without extracting Linux ownership, links or
+/// case-sensitive paths onto the host filesystem. Both transports use Newc.
+pub fn build_initramfs_from_tar(
+    rootfs: &Path,
+    init: &Path,
+    busybox: &Path,
+    mke2fs: Option<&Path>,
+    recipe: &[u8],
+    output: &Path,
+) -> Result<()> {
+    let mut archive = Newc::new(fs::File::create(output)?);
+    archive.owned("seedbox", 0o040755, &[])?;
+    archive.owned("init", 0o100755, &fs::read(init)?)?;
+    archive.owned("seedbox/busybox", 0o100755, &fs::read(busybox)?)?;
+    if let Some(path) = mke2fs {
+        archive.owned("seedbox/mke2fs", 0o100755, &fs::read(path)?)?;
+    }
+    archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
+    archive.tar_tree(rootfs)?;
+    archive.finish()
+}
+
 struct Newc<W> {
     output: W,
     next_inode: u32,
@@ -343,6 +365,98 @@ impl<W: Write> Newc<W> {
                     item.path().display()
                 )));
             }
+        }
+        Ok(())
+    }
+
+    fn tar_tree(&mut self, path: &Path) -> Result<()> {
+        let invalid = || Error::Integrity("invalid Linux root filesystem archive".into());
+        let name = |path: std::path::PathBuf| -> Result<String> {
+            let value = path.to_str().ok_or_else(invalid)?.trim_end_matches('/');
+            if !(value == "rootfs" || value.starts_with("rootfs/"))
+                || path
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(invalid());
+            }
+            Ok(value.to_owned())
+        };
+        // Resolve hard links first, without buffering file contents. The helper
+        // emits sorted tar entries with each hard-link target preceding its links.
+        let mut links = BTreeMap::<String, u32>::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in tar::Archive::new(fs::File::open(path)?).entries()? {
+            let entry = entry?;
+            let key = name(entry.path()?.into_owned())?;
+            if !seen.insert(key.clone()) {
+                return Err(invalid());
+            }
+            if entry.header().entry_type().is_file() {
+                links.insert(key, 1);
+            }
+            if entry.header().entry_type().is_hard_link() {
+                let target = name(entry.link_name()?.ok_or_else(invalid)?.into_owned())?;
+                let count = links.get_mut(&target).ok_or_else(invalid)?;
+                *count = count.checked_add(1).ok_or_else(invalid)?;
+            }
+        }
+        let mut inodes = BTreeMap::new();
+        for entry in tar::Archive::new(fs::File::open(path)?).entries()? {
+            let mut entry = entry?;
+            let key = name(entry.path()?.into_owned())?;
+            let header = entry.header();
+            let kind = header.entry_type();
+            let uid = u32::try_from(header.uid()?).map_err(|_| invalid())?;
+            let gid = u32::try_from(header.gid()?).map_err(|_| invalid())?;
+            let mtime = u32::try_from(header.mtime()?).map_err(|_| invalid())?;
+            let mode = header.mode()? & 0o7777;
+            let inode = self.next_inode;
+            self.next_inode += 1;
+            if kind.is_file() {
+                let size = u32::try_from(entry.size()).map_err(|_| invalid())?;
+                self.header(
+                    &key,
+                    inode,
+                    mode | 0o100000,
+                    uid,
+                    gid,
+                    links[&key],
+                    mtime,
+                    size,
+                )?;
+                inodes.insert(key, inode);
+                if io::copy(&mut entry, &mut self.output)? != u64::from(size) {
+                    return Err(invalid());
+                }
+                self.padding(size.into())?;
+            } else if kind.is_hard_link() {
+                let target = name(entry.link_name()?.ok_or_else(invalid)?.into_owned())?;
+                self.header(
+                    &key,
+                    *inodes.get(&target).ok_or_else(invalid)?,
+                    mode | 0o100000,
+                    uid,
+                    gid,
+                    links[&target],
+                    mtime,
+                    0,
+                )?;
+            } else if kind.is_dir() {
+                self.header(&key, inode, mode | 0o040000, uid, gid, 2, mtime, 0)?;
+            } else if kind.is_symlink() {
+                let target = entry.link_name()?.ok_or_else(invalid)?.into_owned();
+                let bytes = target.as_os_str().as_encoded_bytes();
+                let size = u32::try_from(bytes.len()).map_err(|_| invalid())?;
+                self.header(&key, inode, mode | 0o120000, uid, gid, 1, mtime, size)?;
+                self.output.write_all(bytes)?;
+                self.padding(size.into())?;
+            } else {
+                return Err(invalid());
+            }
+        }
+        if !seen.contains("rootfs") {
+            return Err(invalid());
         }
         Ok(())
     }

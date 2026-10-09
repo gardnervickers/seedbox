@@ -56,8 +56,8 @@ const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty li
     about = "Deterministic simulation of Compose applications on real Linux machines",
     long_about = "Deterministic simulation of Compose applications on real Linux machines.\n\n\
                   A seed plus the retained inputs regenerate the same execution. \
-                  `run` and `replay` support a qualified Linux KVM host with root, \
-                  or the development backend on Apple Silicon Mac."
+                  `run` and `replay` support Linux x86-64 KVM (PV needs KVM device access; \
+                  counter also needs PMU/MSR access), or native HVF on Apple Silicon Mac."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -82,13 +82,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Check execution-profile compatibility without images or guests (Linux KVM host, root; or Apple Silicon Mac).
+    /// Check execution-profile compatibility without images or guests (Linux KVM host; or Apple Silicon Mac).
     #[command(
-        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds missing runtime inputs."
+        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run a project first or pass --kernel."
     )]
     Doctor {
         #[command(flatten)]
         cpu: CpuArg,
+        #[command(flatten)]
+        clock: TimebaseArgs,
         /// Print the admitted observations as JSON.
         #[arg(long)]
         json: bool,
@@ -106,10 +108,8 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         inputs: RuntimeInputs,
-        #[command(flatten)]
-        build: BuildOptions,
     },
-    /// Prepare images and run a simulation (Linux KVM host, root; or Apple Silicon Mac).
+    /// Prepare images and run a simulation (Linux KVM host; or Apple Silicon Mac).
     #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Run {
         #[command(flatten)]
@@ -130,11 +130,9 @@ enum Command {
         #[command(flatten)]
         inputs: RuntimeInputs,
         #[command(flatten)]
-        build: BuildOptions,
-        #[command(flatten)]
         performance: Performance,
     },
-    /// Explore a finite seed sequence with one frozen preparation (Linux KVM host, root; or Apple Silicon Mac).
+    /// Explore a finite seed sequence with one frozen preparation (Linux KVM host; or Apple Silicon Mac).
     #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Explore {
         #[command(flatten)]
@@ -158,11 +156,9 @@ enum Command {
         #[command(flatten)]
         inputs: RuntimeInputs,
         #[command(flatten)]
-        build: BuildOptions,
-        #[command(flatten)]
         performance: Performance,
     },
-    /// Re-execute a recorded run from its retained inputs and compare (Linux KVM host, root; or Apple Silicon Mac).
+    /// Re-execute a recorded run from its retained inputs and compare (Linux KVM host; or Apple Silicon Mac).
     #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Replay {
         /// Run directory, as printed by `run`.
@@ -294,6 +290,13 @@ enum TimebaseArg {
     Pv,
 }
 
+#[derive(Args)]
+struct TimebaseArgs {
+    /// Timebase for guest progress; changes run identity and results [default: pv on Mac; counter on Linux].
+    #[arg(long, value_enum)]
+    timebase: Option<TimebaseArg>,
+}
+
 impl From<TimebaseArg> for Timebase {
     fn from(timebase: TimebaseArg) -> Self {
         match timebase {
@@ -375,8 +378,7 @@ impl StateArg {
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
 struct KvmInputs {
-    /// Guest kernel Image on Mac, or bzImage on Linux [default: packaged on Mac; Linux searches $SEEDBOX_ARTIFACTS, $SEEDBOX_WORK/artifacts,
-    /// packaged bzImage, ./artifacts, then ~/seedbox-sim/artifacts for the user and any sudo caller].
+    /// Guest kernel Image on Mac, or bzImage on Linux [default: download once and cache; unbundled Linux development builds search artifact directories].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
     /// Override with a legacy standalone VMM [default: the engine built into seedbox].
@@ -389,24 +391,26 @@ struct KvmInputs {
 struct RuntimeInputs {
     #[command(flatten)]
     kvm: KvmInputs,
-    /// Static guest supervisor [default: packaged helper, then the copy built into this binary].
+    /// Guest helper archive [default: download the latest release once and cache].
+    #[arg(long, env = "SEEDBOX_RUNTIME_ASSETS")]
+    runtime_assets: Option<PathBuf>,
+    /// Static guest supervisor [default: released helper, then the copy built into this binary].
     #[arg(long, env = "SEEDBOX_GUEST_INIT")]
     guest_init: Option<PathBuf>,
-    /// Static Linux BusyBox for the guest architecture [default: packaged helper, then busybox on PATH on Linux, if static].
+    /// Static Linux BusyBox for the guest architecture [default: released helper, then busybox on PATH on Linux, if static].
     #[arg(long, env = "SEEDBOX_BUSYBOX")]
     busybox: Option<PathBuf>,
-    /// Static Linux mke2fs for named volumes [default: packaged helper, then mke2fs on PATH on Linux, if static].
+    /// Static Linux mke2fs for named volumes [default: released helper, then mke2fs on PATH on Linux, if static].
     #[arg(long, env = "SEEDBOX_MKE2FS")]
     mke2fs: Option<PathBuf>,
-    /// Docker-compatible client for `build:` services.
-    #[arg(long, default_value = "podman")]
+    /// Container client for image preparation [default: discover a running Docker or Podman engine].
+    #[arg(long, env = "SEEDBOX_BUILDER", default_value = "auto")]
     builder: PathBuf,
     /// Guest RAM per service, in MiB.
     #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(64..=65536))]
     memory_mb: u32,
-    /// Timebase for guest progress; changes run identity and results [default: pv on Mac; counter on Linux].
-    #[arg(long, value_enum)]
-    timebase: Option<TimebaseArg>,
+    #[command(flatten)]
+    clock: TimebaseArgs,
     /// Arm clockevents through the time page (ABI 4, aimed at PV); changes run identity and results.
     #[arg(long)]
     page_timer: bool,
@@ -419,6 +423,8 @@ struct RuntimeInputs {
     /// Keep a seeded subset of unflushed disk sectors on crash (512-byte atomicity; off by default).
     #[arg(long)]
     torn_writes: bool,
+    #[command(flatten)]
+    build: BuildOptions,
 }
 
 impl RuntimeInputs {
@@ -430,7 +436,7 @@ impl RuntimeInputs {
                     "--vmm requires Linux KVM; use the built-in Mac engine".into(),
                 ));
             }
-            if matches!(self.timebase, Some(TimebaseArg::Counter)) {
+            if matches!(self.clock.timebase, Some(TimebaseArg::Counter)) {
                 return Err(Error::Setup(
                     "--timebase counter requires Linux KVM; use --timebase pv or omit it on Mac"
                         .into(),
@@ -453,9 +459,21 @@ impl RuntimeInputs {
         counter: CounterProfile,
         scratch: &Path,
         simulation: &config::Simulation,
+        cancellation: &CancellationToken,
     ) -> Result<(Preparer, Executor)> {
         self.validate_platform()?;
         let engine = defaults::engine(self.kvm.vmm.clone())?;
+        for (flag, path) in [
+            ("--kernel", &self.kvm.kernel),
+            ("--runtime-assets", &self.runtime_assets),
+            ("--guest-init", &self.guest_init),
+            ("--busybox", &self.busybox),
+            ("--mke2fs", &self.mke2fs),
+        ] {
+            if let Some(path) = path {
+                defaults::existing(flag, path.clone())?;
+            }
+        }
         let witness = if self.full_state {
             WitnessMode::FullState
         } else {
@@ -469,12 +487,12 @@ impl RuntimeInputs {
                 ));
             }
             let _ = (counter, scratch, simulation);
-            let runtime = backends::mac_runtime()?;
+            let runtime = backends::container_runtime(self.runtime_assets.clone(), cancellation)?;
             let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
                 Some(path) => defaults::existing(flag, path.clone()),
                 None => Ok(runtime.input(name)),
             };
-            let kernel = resolve("--kernel", &self.kvm.kernel, "Image")?;
+            let kernel = backends::guest_kernel(self.kvm.kernel.clone(), cancellation, true)?;
             let executor = seedbox::mac::MacExecutor::new(
                 &engine,
                 &kernel,
@@ -486,7 +504,7 @@ impl RuntimeInputs {
             let inputs = OciPreparer {
                 tools: OciTools {
                     docker: self.builder.clone(),
-                    ..runtime.manifest.tools.clone()
+                    ..OciTools::default()
                 },
                 kernel,
                 engine,
@@ -496,10 +514,12 @@ impl RuntimeInputs {
                 profile: executor.profile(),
             };
             Ok((
-                Preparer::Mac(Box::new(seedbox::mac_runtime::MacPreparer {
+                Preparer::Container(Box::new(seedbox::container_runtime::ContainerPreparer {
                     inputs,
                     runtime,
-                    cancellation: CancellationToken::default(),
+                    client: backends::container_client(&self.builder, cancellation)?,
+                    cancellation: cancellation.clone(),
+                    progress: backends::preparation_progress,
                 })),
                 Executor::Mac(executor),
             ))
@@ -512,10 +532,59 @@ impl RuntimeInputs {
                 VmmExecutor::new_internal(&engine, store, cpu, self.memory_mb, witness, counter)?
             }
             .with_torn_writes(self.torn_writes)
-            .with_timebase(self.timebase.unwrap_or(TimebaseArg::Counter).into())
+            .with_timebase(self.clock.timebase.unwrap_or(TimebaseArg::Counter).into())
             .with_page_timer(self.page_timer)
             .with_deferred_tx(self.deferred_tx);
-            let mut preparer = self.preparer(engine.clone(), store, scratch, executor.profile())?;
+            if backends::released_assets() || self.runtime_assets.is_some() {
+                let runtime =
+                    backends::container_runtime(self.runtime_assets.clone(), cancellation)?;
+                let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
+                    Some(path) => defaults::existing(flag, path.clone()),
+                    None => Ok(runtime.input(name)),
+                };
+                let mut executor = executor;
+                if self.kvm.vmm.is_some() {
+                    executor = executor.with_detected_contract(store, &engine)?;
+                }
+                let mut inputs = OciPreparer {
+                    tools: OciTools {
+                        docker: self.builder.clone(),
+                        build_epoch: self.build.build_epoch,
+                        ..OciTools::default()
+                    },
+                    kernel: backends::guest_kernel(self.kvm.kernel.clone(), cancellation, true)?,
+                    init: resolve("--guest-init", &self.guest_init, "compose-init")?,
+                    busybox: resolve("--busybox", &self.busybox, "busybox")?,
+                    mke2fs: Some(resolve("--mke2fs", &self.mke2fs, "mke2fs")?),
+                    engine,
+                    profile: executor.profile(),
+                };
+                let preparer = if self.build.build_epoch.is_some() {
+                    // Explicit timestamp control retains its native Podman contract.
+                    inputs.tools.skopeo = defaults::preparation_tool(&inputs.tools.skopeo)?;
+                    inputs.tools.umoci = defaults::preparation_tool(&inputs.tools.umoci)?;
+                    Preparer::Linux(Box::new(backends::LinuxPreparer {
+                        inputs,
+                        _assets: None,
+                    }))
+                } else {
+                    Preparer::Container(Box::new(seedbox::container_runtime::ContainerPreparer {
+                        inputs,
+                        runtime,
+                        client: backends::container_client(&self.builder, cancellation)?,
+                        cancellation: cancellation.clone(),
+                        progress: backends::preparation_progress,
+                    }))
+                };
+                return Ok((preparer, Executor::Linux(executor)));
+            }
+            let mut preparer = self.preparer(
+                engine.clone(),
+                store,
+                scratch,
+                executor.profile(),
+                cancellation,
+            )?;
             preparer.inputs.tools.skopeo =
                 defaults::preparation_tool(&preparer.inputs.tools.skopeo)?;
             preparer.inputs.tools.umoci = defaults::preparation_tool(&preparer.inputs.tools.umoci)?;
@@ -547,6 +616,7 @@ impl RuntimeInputs {
         store: &ContentStore,
         scratch: &Path,
         profile: ExecutionProfile,
+        cancellation: &CancellationToken,
     ) -> Result<backends::LinuxPreparer> {
         let resolved = defaults::linux_runtime(
             defaults::LinuxOverrides {
@@ -558,6 +628,7 @@ impl RuntimeInputs {
             scratch,
             seedbox::runtime_assets::AssetSelection::All,
             Some(store),
+            cancellation,
         )?;
         let mut tools = OciTools {
             docker: self.builder.clone(),
@@ -587,7 +658,7 @@ impl RuntimeInputs {
     }
 }
 
-#[derive(Args)]
+#[derive(Args, Clone, Copy)]
 #[command(next_help_heading = "Preparation")]
 struct BuildOptions {
     /// Clamp new build-layer timestamps to this Unix epoch (qualified native Podman only) [default: absent].
@@ -597,16 +668,21 @@ struct BuildOptions {
 
 impl BuildOptions {
     fn configure(&self, simulation: &config::Simulation, inputs: &mut RuntimeInputs) -> Result<()> {
+        if (backends::released_assets() || inputs.runtime_assets.is_some())
+            && self.build_epoch.is_none()
+        {
+            return Ok(());
+        }
+        if inputs.builder == Path::new("auto") {
+            inputs.builder = PathBuf::from("podman");
+        }
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             let _ = simulation;
-            if inputs.builder != Path::new("podman") {
-                return Err(Error::Setup(if self.build_epoch.is_some() {
-                    format!("--build-epoch: builder {} is unsupported; use the qualified project-Nix local Podman or omit --build-epoch",inputs.builder.display())
-                } else {
-                    "--builder: Mac preparation uses the packaged Linux Podman; omit --builder"
-                        .into()
-                }));
+            if self.build_epoch.is_some() {
+                return Err(Error::Setup(
+                    "--build-epoch requires native Linux preparation; omit it on Mac".into(),
+                ));
             }
             Ok(())
         }
@@ -628,6 +704,9 @@ impl BuildOptions {
                     ..OciTools::default()
                 }
                 .validate_build_epoch()?;
+            }
+            if self.build_epoch.is_some() && unsafe { libc::geteuid() } != 0 {
+                return Err(Error::Setup("--build-epoch native extraction requires image ownership permissions; run prepare inside `podman unshare`, or omit --build-epoch to use container preparation".into()));
             }
             Ok(())
         }
@@ -722,11 +801,19 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Doctor { cpu, inputs, json } => {
+        Command::Doctor {
+            cpu,
+            clock,
+            inputs,
+            json,
+        } => {
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
+                if matches!(clock.timebase, Some(TimebaseArg::Counter)) {
+                    return Err(Error::Setup("--timebase counter requires Linux KVM; use --timebase pv or omit it on Mac".into()));
+                }
                 cpu.admit(Ok(CounterProfile::Zen), Timebase::Pv)?;
                 if let Some(path) = inputs.vmm.as_ref() {
                     defaults::existing("--vmm", path.clone())?;
@@ -740,7 +827,7 @@ fn run(cli: Cli) -> Result<u8> {
                 let engine = defaults::engine(None)?;
                 let kernel = match inputs.kernel {
                     Some(path) => defaults::existing("--kernel", path)?,
-                    None => backends::mac_runtime()?.input("Image"),
+                    None => backends::guest_kernel(None, &cancellation, false)?,
                 };
                 if cancellation.is_cancelled() {
                     return Err(Error::Setup("doctor cancelled".into()));
@@ -769,20 +856,32 @@ fn run(cli: Cli) -> Result<u8> {
                     scratch.path(),
                     seedbox::runtime_assets::AssetSelection::Kernel,
                     None,
+                    &cancellation,
                 )?;
                 if cancellation.is_cancelled() {
                     return Err(Error::Setup("doctor cancelled".into()));
                 }
                 let kernel = &runtime.kernel;
                 let report = if internal {
-                    VmmExecutor::doctor_internal(&engine, kernel, cpu.cpu)?
+                    VmmExecutor::doctor_internal_with_timebase(
+                        &engine,
+                        kernel,
+                        cpu.cpu,
+                        clock.timebase.unwrap_or(TimebaseArg::Counter).into(),
+                    )?
                 } else {
-                    VmmExecutor::doctor(&engine, kernel, cpu.cpu)?
+                    VmmExecutor::doctor_with_timebase(
+                        &engine,
+                        kernel,
+                        cpu.cpu,
+                        clock.timebase.unwrap_or(TimebaseArg::Counter).into(),
+                    )?
                 };
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
                     println!("VALID: compatible execution profile");
+                    println!("timebase: {}", report.timebase.name());
                     println!("cpu: {}", report.cpu);
                     println!(
                         "cpus: {}",
@@ -807,7 +906,6 @@ fn run(cli: Cli) -> Result<u8> {
             output,
             state,
             mut inputs,
-            build,
         } => {
             inputs.validate_platform()?;
             if output.exists() {
@@ -817,19 +915,25 @@ fn run(cli: Cli) -> Result<u8> {
                 )));
             }
             let simulation = compose.load()?;
+            let build = inputs.build;
             build.configure(&simulation, &mut inputs)?;
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
-            let (mut preparer, _) =
-                inputs.backends(&store, None, counter, scratch.path(), &simulation)?;
+            let (mut preparer, _) = inputs.backends(
+                &store,
+                None,
+                counter,
+                scratch.path(),
+                &simulation,
+                &cancellation,
+            )?;
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
             preparer.tools.build_epoch = build.build_epoch;
-            preparer.cancellation(cancellation);
             let prepared = preparer.prepare(&simulation, &store)?;
             let file = std::fs::OpenOptions::new()
                 .write(true)
@@ -847,7 +951,6 @@ fn run(cli: Cli) -> Result<u8> {
             cpu,
             state,
             mut inputs,
-            build,
             performance,
         } => {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -864,6 +967,7 @@ fn run(cli: Cli) -> Result<u8> {
             if checkpoint_at_ns.is_some_and(|t| t >= simulation.limits.simulated_time_ns) {
                 return Err(Error::Setup("--checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint".into()));
             }
+            let build = inputs.build;
             build.configure(&simulation, &mut inputs)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
@@ -871,14 +975,24 @@ fn run(cli: Cli) -> Result<u8> {
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
-            let (mut preparer, executor) =
-                inputs.backends(&store, cpu.cpu, counter, scratch.path(), &simulation)?;
+            let (mut preparer, executor) = inputs.backends(
+                &store,
+                cpu.cpu,
+                counter,
+                scratch.path(),
+                &simulation,
+                &cancellation,
+            )?;
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
             cpu.admit(
                 detected,
-                inputs.timebase.map(Into::into).unwrap_or(Timebase::Counter),
+                inputs
+                    .clock
+                    .timebase
+                    .map(Into::into)
+                    .unwrap_or(Timebase::Counter),
             )?;
             let executor = match (checkpoint_at_ns, branch_seed) {
                 (Some(at), Some(branch)) => executor.with_checkpoint(at, branch)?,
@@ -888,7 +1002,6 @@ fn run(cli: Cli) -> Result<u8> {
             preparer.tools.build_epoch = build.build_epoch;
             let executor = performance.apply(executor)?;
             // Backend admission checks the selected core before preparation.
-            preparer.cancellation(cancellation.clone());
             let result = orchestrator.run(
                 &simulation,
                 RunOptions { seed, cancellation },
@@ -906,12 +1019,12 @@ fn run(cli: Cli) -> Result<u8> {
             cpu,
             state,
             mut inputs,
-            build,
             performance,
         } => {
             inputs.validate_platform()?;
             let resources = Resources::start();
             let simulation = compose.load()?;
+            let build = inputs.build;
             build.configure(&simulation, &mut inputs)?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
@@ -938,15 +1051,25 @@ fn run(cli: Cli) -> Result<u8> {
             let scratch = tempfile::tempdir()?;
             let detected = execution_counter();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
-            let (mut preparer, executor) =
-                inputs.backends(&store, cpu.cpu, counter, scratch.path(), &simulation)?;
+            let (mut preparer, executor) = inputs.backends(
+                &store,
+                cpu.cpu,
+                counter,
+                scratch.path(),
+                &simulation,
+                &cancellation,
+            )?;
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
             preparer.tools.build_epoch = build.build_epoch;
             cpu.admit(
                 detected,
-                inputs.timebase.map(Into::into).unwrap_or(Timebase::Counter),
+                inputs
+                    .clock
+                    .timebase
+                    .map(Into::into)
+                    .unwrap_or(Timebase::Counter),
             )?;
             preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
@@ -1459,6 +1582,7 @@ mod tests {
                 &store,
                 directory.path(),
                 profile.clone(),
+                &CancellationToken::default(),
             )
             .unwrap();
         assert!(preparer._assets.is_none());

@@ -1,62 +1,42 @@
-# Linux guest assets in the CLI
+# Build and run on Linux
 
-On an x86-64 Linux build host, from the checkout:
+Install Nix and a Linux Docker or Podman engine. Enable KVM and give your user
+read/write access to `/dev/kvm`. From the repository root:
 
 ```sh
 nix develop
-bash tools/linux-runtime/build-cli.sh
-sudo -E env PATH="$PATH" target/release/seedbox doctor
-sudo -E env PATH="$PATH" target/release/seedbox run PROJECT
-sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
+cargo build --release
+./target/release/seedbox run examples/etcd --timebase pv
+./target/release/seedbox replay .seedbox/runs/ATTEMPT
 ```
 
-The maintainer script invokes the existing pinned kernel and static supervisor
-builders, copies the development shell's static BusyBox/mke2fs, and embeds the
-resulting `artifacts/linux-runtime/runtime.tar.gz` in the release executable.
-The platform VMM is already linked into that executable. Runtime commands do
-not build, download or locate another VMM or guest helper. Skopeo, umoci and a
-Docker-compatible image builder remain installed host dependencies, provided by
-the development shell. Root/KVM access and the qualified host policy still apply.
-This is a maintainer build workflow; installer/distribution work is separate.
+The release build compiles the native CLI. Guest kernels, static helpers and
+filesystem tools are built independently in native Linux CI and downloaded on
+first use. Cargo needs no container engine or guest build step. There is one
+Seedbox executable. See [guest assets](../runtime/README.md) for the independent
+release/cache contract and manual Nix fallback, and the
+[shared workflow](../mac-runtime/README.md) for container-backed preparation.
 
-The optional build input `SEEDBOX_LINUX_RUNTIME_BUNDLE` selects the archive for
-Cargo. Set/change/unset and same-path archive replacement invalidate embedding.
-Ordinary Cargo builds without it keep the development input search and optional
-musl-compiled supervisor. The standalone VMM aliases and their lockfile,
-compiler wrapper and reproducibility contract are unchanged.
+PV execution requires KVM but no privileged performance-counter or MSR access.
+It should run as your ordinary user. For `/dev/kvm` permission errors, follow the
+specific instructions printed by Seedbox and log out and back in after changing
+group membership. NixOS users should declare the `kvm` group in their system
+configuration. Seedbox checks access before image preparation.
 
-The package has exactly seven regular USTAR members: `assets.json`, `bzImage`,
-`compose-init`, `busybox`, `mke2fs`, `NOTICE.txt`, and `provenance.json`. Its versioned
-manifest binds roles, lengths, SHA-256 digests, the host CLI platform and guest
-architecture. All three executable helpers run in the guest; mke2fs is embedded
-in the initramfs for named volumes. Actual upstream license texts come from the
-pinned source archives, and provenance binds those archives, source revision,
-recipe inputs and resulting asset hashes. Missing upstream notices fail the
-maintainer build. This provenance records inputs; it does not itself prove
-independent build reproducibility or host qualification.
+The default `counter` timebase retains its AMD/performance-counter requirements;
+select `--timebase pv` for the ordinary unprivileged workflow. Replay remembers
+the timebase and needs neither a container engine nor guest build tools.
+Debug builds and explicit legacy assets retain the native Linux development
+preparation path; use the release executable for application runs.
 
-The reader checks bounded compressed/decompressed sizes, exact names, duplicate
-entries/metadata keys, archive termination, roles, digests, executable headers
-and static linkage before returning an asset handle. Every installation owns a
-private directory created with mode 0700 beneath the caller's scratch directory;
-there is no persistent guest-asset cache. Helpers get mode 0755 and the kernel
-0600. The owner remains alive until preparation has retained consumed bytes,
-then removes the directory on success, error or cooperative cancellation.
-
-Explicit runtime flags and their environment path overrides win. For the kernel,
-existing configured `SEEDBOX_ARTIFACTS`/`SEEDBOX_WORK` locations precede packaged
-bytes; the package precedes incidental checkout/home searches. A missing configured
-directory preserves the old search behavior, while a missing explicit path fails.
-For static helpers, the package precedes the existing embedded-supervisor/PATH
-fallbacks. Fully explicit inputs need no package. Doctor shares kernel selection,
-validates a selected package and extracts only its kernel without creating state,
-preparing images or running packaged helpers. Replay uses retained inputs only;
-an installed package never repairs missing or corrupt retained bytes.
-
-Portable Mac tests cover archive/binary parsing with synthetic bytes, Python
-package output consumed by the Rust reader, override precedence, ownership and
-Cargo embedding invalidation. Synthetic executables are never run. Actual Linux
-package build, relocation outside the checkout, doctor/run/replay without guest
-asset overrides, named-volume recovery, retained replay after an upgrade and
-VMM/CLI reproducibility remain final merge-train checks. This package supports
-`x86_64-linux` only; it does not add an ARM Linux packaging path.
+The default kernel downloads on the first `run`, `explore` or `prepare`, with
+progress on stderr, and is cached under `~/.cache/seedbox/kernels` (or
+`$XDG_CACHE_HOME/seedbox/kernels`). Subsequent calls reuse it offline. Private
+release downloads require `GH_TOKEN` or `GITHUB_TOKEN` with repository read
+access. Only `--kernel` or `SEEDBOX_KERNEL` overrides it; old artifact-directory
+environment settings do not affect release runs. `doctor` uses a cached or
+explicitly supplied kernel and never downloads one. See
+[kernel releases](../../kernel/README.md). `--build-epoch` explicitly selects the existing native preparation path
+and requires the project-Nix Podman, Skopeo and umoci tools. It still uses the
+released guest assets. Native extraction needs image ownership permissions;
+rootless users can run `prepare` inside `podman unshare`.

@@ -9,21 +9,34 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
   Use `cargo run --release -- <command>` or the release executable for guest runs;
   the bundled engine uses the CLI build profile.
-- Linux x86-64 asset builds use `bash tools/linux-runtime/build-cli.sh` inside
-  `nix develop`. The optional `SEEDBOX_LINUX_RUNTIME_BUNDLE` build input embeds
-  only guest kernel/static helpers plus notices/provenance. Runtime extraction
-  stays bounded and private, with an owned lifetime through input retention.
-  CLI resolution owns environment lookup; the library receives explicit inputs.
-  Doctor extracts only the selected kernel and never creates state/prepares
-  images. Replay must not substitute installed package bytes for retained inputs.
-  Linux package execution/reproducibility requires the final merge train.
-- Apple Silicon application builds use `bash tools/mac-runtime/build-cli.sh`
-  inside `nix develop`. It packages the audited ARM kernel, static helpers and
-  Linux preparation tools into the signed CLI. Runtime preparation owns a
-  private Lima VM and stops it before native HVF execution; replay must never
-  start that VM or invoke Cargo. Mac application profiles use `arm64-world-v1`
-  with their actual guest inputs and diagnostic HVF host observations. CLI
-  platform selection lives in `cli/backends.rs`; the library
+- Linux x86-64 and Apple Silicon application builds use `cargo build --release`
+  inside `nix develop`. Cargo builds only the native CLI and signs the Mac
+  executable with the Hypervisor entitlement. Guest assets are never built or
+  downloaded by Cargo. `nix/runtime.nix` owns `runtimeAssets`, `preparationImage`,
+  `runtimeArchive` and `runtimeSources`; `nix/kernels.nix` builds kernels separately.
+  Native Linux CI builds/publishes both architectures when their declared input
+  paths change. Releases use ordinary CI run labels; Cargo does not hash sources
+  or embed release identifiers. CLI/application changes and kernel-only changes
+  must not rebuild helpers. Kernel metadata lives in
+  `kernel/source.json`. The optional legacy `SEEDBOX_LINUX_RUNTIME_BUNDLE` build
+  input still embeds only guest kernel/static helpers plus notices/provenance.
+  Runtime extraction remains bounded and private. Run/prepare/explore fetch
+  the latest published guest assets on a cache miss, with progress and verified
+  atomic caching. Cache hits require no HTTP or version admission.
+  `--kernel` and `--runtime-assets` (and their environment path overrides) bypass
+  their respective downloads; manual native Linux Nix builds are documented in
+  `tools/runtime/README.md`. The CLI owns HTTP configuration, credentials, cache
+  locations and platform/default selection; library callers supply explicit inputs.
+  Doctor selects only the cached or explicit kernel and never downloads, creates
+  state or prepares images. Replay uses retained bytes and never calls the
+  downloader, a compiler or container engine. Release runs ignore legacy kernel
+  artifact-directory searches; those remain for unbundled development builds.
+  Explicit `--build-epoch` retains native project-Nix preparation with released
+  guest assets.
+- Runtime preparation uses a Docker/Podman endpoint and a Linux filesystem-tools
+  container, with no second Seedbox executable. Native Mac application profiles
+  use `arm64-world-v1` with their actual guest inputs and diagnostic HVF host
+  observations. CLI platform selection lives in `cli/backends.rs`; the library
   receives explicit inputs and cancellation.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
@@ -271,7 +284,8 @@ deliberately change one.
   defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
 
-`doctor` shares execution admission and guest-kernel/VMM defaults; host-kernel
+`doctor --timebase pv` shares PV KVM permission and CPU-reservation admission;
+counter doctor retains its perf/MSR checks. Both use guest-kernel/VMM defaults; host-kernel
 bytes are not checked. VMM resolution is lookup-only and must never invoke a
 compiler or launch the worker. Success reports
 only the exact cleaned-up probe observations and selected core; the library does

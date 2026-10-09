@@ -1,0 +1,27 @@
+{
+  "common": [
+    "flake.lock",
+    "kernel/inputs.json",
+    "kernel/source.json",
+    "nix/kernels.nix"
+  ],
+  "x86_64": [
+    "kernel/apply.py",
+    "kernel/build.sh",
+    "kernel/config.options",
+    "kernel/seedbox.c",
+    "kernel/seedbox.h"
+  ],
+  "aarch64": [
+    "kernel-arm64/apply.py",
+    "kernel-arm64/application.fragment",
+    "kernel-arm64/audit.py",
+    "kernel-arm64/build.sh",
+    "kernel-arm64/check-config.py",
+    "kernel-arm64/config.fragment",
+    "kernel-arm64/seedbox.c",
+    "kernel-arm64/seedbox.h",
+    "kernel-arm64/supervisor-io.c",
+    "kernel-arm64/supervisor-io.h"
+  ]
+}

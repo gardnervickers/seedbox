@@ -5,7 +5,7 @@
 //! locations. A failed search names every place it looked and how to fix it.
 
 // Linux input resolvers remain covered by portable tests; native Mac inputs
-// come from the embedded preparation package.
+// come from the selected guest asset archive.
 #![cfg_attr(all(target_os = "macos", target_arch = "aarch64"), allow(dead_code))]
 
 use seedbox::{
@@ -128,7 +128,43 @@ pub fn linux_runtime(
     parent: &Path,
     selection: AssetSelection,
     store: Option<&ContentStore>,
+    cancellation: &seedbox::execution::CancellationToken,
 ) -> Result<LinuxRuntime> {
+    if crate::cli::backends::released_assets() {
+        let all = matches!(selection, AssetSelection::All);
+        let kernel = crate::cli::backends::guest_kernel(overrides.kernel, cancellation, all)?;
+        let runtime = if all {
+            Some(crate::cli::backends::container_runtime(None, cancellation)?)
+        } else {
+            None
+        };
+        let resolve = |flag, explicit: Option<PathBuf>, name| match explicit {
+            Some(path) => existing(flag, path),
+            None => runtime
+                .as_ref()
+                .map(|runtime| runtime.input(name))
+                .ok_or_else(|| Error::Integrity("missing preparation helpers".into())),
+        };
+        return Ok(LinuxRuntime {
+            kernel,
+            init: if all {
+                Some(resolve("--guest-init", overrides.init, "compose-init")?)
+            } else {
+                None
+            },
+            busybox: if all {
+                Some(resolve("--busybox", overrides.busybox, "busybox")?)
+            } else {
+                None
+            },
+            mke2fs: if all {
+                Some(resolve("--mke2fs", overrides.mke2fs, "mke2fs")?)
+            } else {
+                None
+            },
+            assets: None,
+        });
+    }
     resolve_linux_runtime(
         overrides,
         parent,

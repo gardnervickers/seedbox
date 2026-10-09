@@ -1,0 +1,18 @@
+{
+  "common": [
+    "flake.lock",
+    "nix/runtime.nix",
+    "tools/runtime/inputs.json",
+    "tools/runtime/package.py",
+    "tools/runtime/build-assets.sh",
+    "tools/runtime/filesystem.py",
+    "tools/linux-runtime/package.py",
+    "guest/build-compose.sh",
+    "guest/compose-init.c",
+    "guest/barrier.h",
+    "guest/control.h",
+    "guest/environment.h",
+    "guest/io.h",
+    "kernel-arm64/supervisor-io.h"
+  ]
+}

@@ -1,8 +1,7 @@
-//! Embed the static guest supervisor (`guest/compose-init.c`) so `seedbox run`
-//! works without a separately built `--guest-init`. The supervisor must be
-//! linked against a libc whose user/group lookups work without NSS modules,
-//! so only a musl toolchain is used: `SEEDBOX_STATIC_CC` (set by the Nix shell)
-//! or `musl-gcc`. Without one the CLI still builds and requires `--guest-init`.
+//! Select released guest assets and embed the native development supervisor.
+//! Release builds never download or compile guest assets. Unbundled
+//! Linux development builds retain the musl supervisor fallback, whose user/group
+//! lookups must work without NSS modules.
 
 use std::{
     env,
@@ -28,24 +27,26 @@ fn main() {
                 .display()
         );
     }
-    println!("cargo::rerun-if-env-changed=SEEDBOX_MAC_RUNTIME_BUNDLE");
-    let bundle = env::var_os("SEEDBOX_MAC_RUNTIME_BUNDLE").map(PathBuf::from);
-    let declaration = if let Some(bundle) = bundle {
-        let bundle =
-            std::fs::canonicalize(bundle).expect("Mac runtime bundle must exist at CLI build time");
-        println!("cargo::rerun-if-changed={}", bundle.display());
-        format!(
-            "pub const MAC_RUNTIME:Option<&[u8]>=Some(include_bytes!({:?}));\n",
-            bundle
-        )
-    } else {
-        "pub const MAC_RUNTIME:Option<&[u8]>=None;\n".into()
-    };
-    std::fs::write(
-        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("mac-runtime.rs"),
-        declaration,
-    )
-    .unwrap();
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
+    {
+        // Only the public CLI (which also hosts retained workers) needs HVF.
+        println!("cargo::rustc-link-arg-bin=seedbox=--seedbox-sign-hvf");
+    }
+    // Release builds use independent guest releases. Debug builds retain native
+    // development fallbacks for portable readers and tests.
+    let release = env::var("PROFILE").as_deref() == Ok("release");
+    let supported = matches!(
+        (
+            env::var("CARGO_CFG_TARGET_OS").as_deref(),
+            env::var("CARGO_CFG_TARGET_ARCH").as_deref()
+        ),
+        (Ok("linux"), Ok("x86_64")) | (Ok("macos"), Ok("aarch64"))
+    );
+    println!(
+        "cargo::rustc-env=SEEDBOX_RELEASE_ASSETS={}",
+        u8::from(release && supported)
+    );
     println!("cargo::rerun-if-env-changed=SEEDBOX_LINUX_RUNTIME_BUNDLE");
     let linux_bundle = env::var_os("SEEDBOX_LINUX_RUNTIME_BUNDLE").map(PathBuf::from);
     let linux_declaration = if let Some(bundle) = linux_bundle {
@@ -53,11 +54,11 @@ fn main() {
             std::fs::canonicalize(bundle).expect("Linux guest bundle must exist at CLI build time");
         println!("cargo::rerun-if-changed={}", bundle.display());
         format!(
-            "pub const LINUX_RUNTIME:Option<&[u8]>=Some(include_bytes!({:?}));\n",
+            "pub static LINUX_RUNTIME:Option<&[u8]>=Some(include_bytes!({:?}));\n",
             bundle
         )
     } else {
-        "pub const LINUX_RUNTIME:Option<&[u8]>=None;\n".into()
+        "pub static LINUX_RUNTIME:Option<&[u8]>=None;\n".into()
     };
     std::fs::write(
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("linux-runtime.rs"),
@@ -65,6 +66,11 @@ fn main() {
     )
     .unwrap();
     println!("cargo::rustc-check-cfg=cfg(seedbox_embedded_init)");
+    if release && supported {
+        // Release runs download Linux-built helpers. Native development builds
+        // keep the existing embedded-supervisor fallback.
+        return;
+    }
     let source = root.join("guest/compose-init.c");
     println!("cargo::rerun-if-changed={}", source.display());
     println!(

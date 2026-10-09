@@ -19,6 +19,10 @@ use std::{
 #[cfg(test)]
 pub(crate) static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+const TERMINATION_GRACE: Duration = Duration::from_millis(250);
+const REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
 const FILE_LIMIT: u64 = 4 * 1024 * 1024;
 const TOTAL_LIMIT: u64 = 64 * 1024 * 1024;
 const METADATA_LIMIT: u64 = 4 * 1024 * 1024;
@@ -85,6 +89,7 @@ pub struct PreparationContext {
     pub directory: PathBuf,
     quotas: Mutex<(u64, u64, u64)>,
     admitted_builder: Mutex<Option<PathBuf>>,
+    cleanup_timeout: Duration,
 }
 #[derive(Serialize)]
 struct Receipt {
@@ -98,6 +103,7 @@ struct Receipt {
     private_tag: Option<String>,
     local_mode: bool,
     cancelled: bool,
+    timed_out: bool,
     escalated: bool,
     reaped: bool,
     cleanup: String,
@@ -121,6 +127,7 @@ impl PreparationContext {
             directory,
             quotas: Mutex::new((0, 0, 0)),
             admitted_builder: Mutex::new(None),
+            cleanup_timeout: CLEANUP_TIMEOUT,
         })
     }
     pub fn check(&self) -> Result<()> {
@@ -239,6 +246,21 @@ impl PreparationContext {
         }
         self.run_owned(command, phase, tag, build, cleanup, None)
     }
+    /// Capture a small protocol reply with the same cancellation, quotas and
+    /// process ownership as preparation commands. Never use unbounded output().
+    pub(crate) fn output(
+        &self,
+        command: &mut Command,
+        phase: &str,
+        cleanup: bool,
+    ) -> Result<Vec<u8>> {
+        if !cleanup {
+            self.check()?;
+        }
+        let mut output = Vec::new();
+        self.run_owned(command, phase, None, false, cleanup, Some(&mut output))?;
+        Ok(output)
+    }
     #[cfg(unix)]
     fn run_owned(
         &self,
@@ -288,6 +310,7 @@ impl PreparationContext {
             private_tag: tag.map(str::to_owned),
             local_mode: command.get_args().any(|arg| arg == "--remote=false"),
             cancelled: false,
+            timed_out: false,
             escalated: false,
             reaped: false,
             cleanup: "unfinished".into(),
@@ -457,7 +480,7 @@ impl PreparationContext {
             })
         });
         let pid = child.id() as i32;
-        let mut cancellation_at = None;
+        let mut termination_at = None;
         let status = loop {
             let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
             let waited = unsafe {
@@ -488,25 +511,32 @@ impl PreparationContext {
                 };
                 break child.wait();
             }
-            if !cleanup && self.cancellation.is_cancelled() && cancellation_at.is_none() {
+            if !cleanup && self.cancellation.is_cancelled() && termination_at.is_none() {
                 receipt.cancelled = true;
-                cancellation_at = Some(Instant::now());
+                termination_at = Some(Instant::now());
+                unsafe {
+                    libc::kill(-pid, libc::SIGTERM);
+                };
+            }
+            // Container removal can perform slow daemon-side filesystem work.
+            // Give that operation its own deadline, then use the same short
+            // TERM/KILL/reap sequence as caller cancellation.
+            if cleanup && began.elapsed() >= self.cleanup_timeout && termination_at.is_none() {
+                receipt.timed_out = true;
+                termination_at = Some(Instant::now());
                 unsafe {
                     libc::kill(-pid, libc::SIGTERM);
                 };
             }
             if !receipt.escalated
-                && (cancellation_at.is_some_and(|at| at.elapsed() >= Duration::from_millis(250))
-                    || (cleanup && began.elapsed() >= Duration::from_secs(5)))
+                && termination_at.is_some_and(|at| at.elapsed() >= TERMINATION_GRACE)
             {
                 receipt.escalated = true;
                 unsafe {
                     libc::kill(-pid, libc::SIGKILL);
                 };
             }
-            if cancellation_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(5))
-                || (cleanup && began.elapsed() >= Duration::from_millis(5250))
-            {
+            if termination_at.is_some_and(|at| at.elapsed() >= REAP_TIMEOUT) {
                 break Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "owned leader did not exit after escalation",
@@ -598,6 +628,12 @@ impl PreparationContext {
                 "{phase}: output stream remained open after cleanup; private tag retained"
             )));
         }
+        if receipt.timed_out {
+            return Err(Error::PreparationCleanupUnverified(format!(
+                "{phase}: cleanup exceeded its {}-second deadline; daemon removal must be verified",
+                self.cleanup_timeout.as_secs_f64()
+            )));
+        }
         let status = status.map_err(|e| {
             Error::PreparationCleanupUnverified(format!(
                 "command {}: wait/reap ownership uncertain: {e}",
@@ -671,6 +707,62 @@ mod tests {
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+    #[test]
+    fn slow_cleanup_can_finish_without_being_mistaken_for_a_hung_process() {
+        let _process_creation = PROCESS_TEST_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let context =
+            PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
+        let cleanup = script(root.path(), "cleanup", "sleep 6");
+        context
+            .run(
+                &mut Command::new(cleanup),
+                "slow-cleanup",
+                None,
+                false,
+                true,
+            )
+            .unwrap();
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(context.directory.join("slow-cleanup.json")).unwrap())
+                .unwrap();
+        assert_eq!(receipt["timed_out"], false);
+        assert_eq!(receipt["escalated"], false);
+        assert_eq!(receipt["reaped"], true);
+    }
+    #[test]
+    fn cleanup_deadline_escalates_and_reaps_without_claiming_daemon_completion() {
+        let _process_creation = PROCESS_TEST_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut context =
+            PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
+        context.cleanup_timeout = Duration::from_millis(100);
+        let cleanup = script(root.path(), "cleanup", "exec sleep 30");
+        let mut command = Command::new(cleanup);
+        // Install before exec so even a slow process start cannot race TERM.
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let began = Instant::now();
+        let result = context.run(&mut command, "hung-cleanup", None, false, true);
+        assert!(matches!(
+            result,
+            Err(Error::PreparationCleanupUnverified(_))
+        ));
+        assert!(began.elapsed() < REAP_TIMEOUT);
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(context.directory.join("hung-cleanup.json")).unwrap())
+                .unwrap();
+        assert_eq!(receipt["timed_out"], true);
+        assert_eq!(receipt["cancelled"], false);
+        assert_eq!(receipt["escalated"], true);
+        assert_eq!(receipt["reaped"], true);
+        assert_eq!(receipt["output_complete"], true);
     }
     #[test]
     fn required_version_stdout_ignores_warnings_and_diagnostic_quota() {

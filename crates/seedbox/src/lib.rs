@@ -9,6 +9,7 @@
 pub mod admission;
 pub mod bundle;
 pub mod config;
+pub mod container_runtime;
 pub mod counter;
 pub mod diff;
 pub mod engine;
@@ -22,12 +23,11 @@ pub mod image;
 pub mod logs;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod mac;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub mod mac_runtime;
 pub mod oci;
 pub mod orchestration;
 pub mod preparation;
 mod preparation_command;
+pub mod release_download;
 mod retained;
 pub mod runtime_assets;
 pub mod store;

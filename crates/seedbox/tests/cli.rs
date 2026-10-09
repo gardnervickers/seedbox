@@ -33,19 +33,16 @@ fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("compose.yaml"), "name: mac-options\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
     for command in ["run", "explore", "doctor"] {
-        for flags in [&["--cpu", "1"][..]] {
-            let mut args = vec![command];
-            args.extend(flags);
-            let output = seedbox(&args, directory.path());
-            assert_eq!(output.status.code(), Some(2), "{args:?}");
-            assert!(output.stdout.is_empty(), "{args:?}");
-            assert_eq!(
-                stderr(&output),
-                "error: --cpu requires Linux KVM; omit it on Mac\n",
-                "{args:?}"
-            );
-            assert!(!directory.path().join(".seedbox").exists(), "{args:?}");
-        }
+        let args = [command, "--cpu", "1"];
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert_eq!(
+            stderr(&output),
+            "error: --cpu requires Linux KVM; omit it on Mac\n",
+            "{args:?}"
+        );
+        assert!(!directory.path().join(".seedbox").exists(), "{args:?}");
     }
 }
 
@@ -781,6 +778,12 @@ fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation(
         }
         let output = seedbox(&args, root.path());
         assert_eq!(output.status.code(), Some(2));
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(
+            stderr(&output),
+            "error: --build-epoch requires native Linux preparation; omit it on Mac\n"
+        );
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         assert_eq!(stderr(&output), "error: --build-epoch: builder ./builder is unsupported; use the qualified project-Nix local Podman or omit --build-epoch\n");
         assert!(output.stdout.is_empty());
         assert!(!root.path().join(".seedbox").exists());
@@ -900,8 +903,8 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     let help = seedbox(&["help", "doctor"], root);
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
-    assert!(text.contains("Linux KVM host, root"));
-    for flag in ["--cpu", "--kernel", "--vmm", "--json"] {
+    assert!(text.contains("Linux KVM host"));
+    for flag in ["--cpu", "--kernel", "--vmm", "--timebase", "--json"] {
         assert!(text.contains(flag), "{text}");
     }
     for flag in [
@@ -913,7 +916,20 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     ] {
         assert!(!text.contains(flag), "{text}");
     }
-    assert!(text.contains("Doctor never builds"));
+    assert!(text.contains("Doctor never builds or downloads"));
+    let invalid_timebase = seedbox(&["doctor", "--timebase", "invalid"], root);
+    assert_eq!(invalid_timebase.status.code(), Some(2));
+    assert!(stderr(&invalid_timebase).contains("--timebase"));
+    let pv_missing = seedbox(&["doctor", "--timebase", "pv", "--vmm", "missing"], root);
+    assert_eq!(stderr(&pv_missing), "error: --vmm missing: not found\n");
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let counter = seedbox(&["doctor", "--timebase", "counter"], root);
+        assert_eq!(
+            stderr(&counter),
+            "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
+        );
+    }
     let invalid = seedbox(&["doctor", "--cpu", "1024"], root);
     assert_eq!(invalid.status.code(), Some(2));
     assert!(stderr(&invalid).contains("--cpu"));
@@ -934,6 +950,58 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
         "error: --kernel missing: not found\n"
     );
     assert!(!root.join(".seedbox").exists());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn doctor_uses_kernel_cache_without_credentials_download_or_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    for override_cache in [false, true] {
+        let cache = if override_cache {
+            root.join("custom-cache")
+        } else {
+            root.join("Library/Caches")
+        };
+        let ready = cache.join("seedbox/kernels").join("aarch64/ready");
+        let run = || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
+            command
+                .args(["doctor", "--json"])
+                .current_dir(root)
+                .env_clear()
+                .env("HOME", root)
+                .env("PATH", "")
+                // Doctor must not even parse HTTP credentials.
+                .env("GH_TOKEN", "invalid\ncredential");
+            if override_cache {
+                command.env("XDG_CACHE_HOME", &cache);
+            }
+            command.output().unwrap()
+        };
+        let missing = run();
+        assert_eq!(missing.status.code(), Some(2));
+        assert!(missing.stdout.is_empty());
+        assert_eq!(stderr(&missing), format!(
+            "error: guest kernel is not cached at {}; run seedbox run to download it, or pass --kernel PATH\n",
+            ready.display()
+        ));
+        assert!(!cache.exists());
+        assert!(!root.join(".seedbox").exists());
+
+        fs::create_dir_all(&ready).unwrap();
+        let corrupt = run();
+        assert_eq!(corrupt.status.code(), Some(2));
+        assert!(corrupt.stdout.is_empty());
+        assert!(stderr(&corrupt).starts_with(&format!(
+            "error: kernel cache {} is invalid:",
+            ready.display()
+        )));
+        assert!(stderr(&corrupt)
+            .contains("remove that directory and retry a run, or pass --kernel PATH"));
+        assert!(!ready.parent().unwrap().join("lock").exists());
+        assert!(!root.join(".seedbox").exists());
+    }
 }
 
 #[test]
@@ -2166,4 +2234,89 @@ fn deferred_tx_help_is_presence_only_and_replay_uses_the_recorded_mode() {
     let output = seedbox(&["replay", "."], directory.path());
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("recorded --deferred-tx future"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn build_epoch_native_permissions_fail_before_state_creation() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("compose.yaml"), "name: epoch\nservices:\n  app: {image: alpine}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
+    let output = seedbox(
+        &["prepare", "--build-epoch", "0", "--output", "prepared.json"],
+        root.path(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output), "error: --build-epoch native extraction requires image ownership permissions; run prepare inside `podman unshare`, or omit --build-epoch to use container preparation\n");
+    assert!(!root.path().join(".seedbox").exists());
+    assert!(!root.path().join("prepared.json").exists());
+}
+
+#[test]
+fn runtime_assets_override_is_documented_and_missing_paths_fail_before_preparation() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    assert!(seedbox(&["init", "demo"], root).status.success());
+    let project = root.join("demo");
+    for command in ["run", "explore", "prepare"] {
+        let help = seedbox(&["help", command], root);
+        assert!(help.status.success());
+        let help = String::from_utf8_lossy(&help.stdout);
+        assert!(help.contains("--runtime-assets"), "{help}");
+        assert!(help.contains("SEEDBOX_RUNTIME_ASSETS"), "{help}");
+        assert!(help.contains("download once and cache"), "{help}");
+        let mut args = vec![command, "--runtime-assets", "missing.tar.gz"];
+        if command == "prepare" {
+            args.extend(["--output", "prepared.json"]);
+        }
+        let output = seedbox(&args, &project);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            stderr(&output),
+            "error: --runtime-assets missing.tar.gz: not found\n"
+        );
+        assert!(!project.join(".seedbox/runs").exists());
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .arg("run")
+        .current_dir(&project)
+        .env_clear()
+        .env("HOME", root)
+        .env("TMPDIR", root)
+        .env("PATH", "")
+        .env("SEEDBOX_RUNTIME_ASSETS", "env-missing.tar.gz")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: --runtime-assets env-missing.tar.gz: not found\n"
+    );
+    for command in ["doctor", "replay"] {
+        let help = seedbox(&["help", command], root);
+        assert!(help.status.success());
+        assert!(!String::from_utf8_lossy(&help.stdout).contains("--runtime-assets"));
+    }
+}
+
+#[test]
+fn invalid_local_runtime_archive_has_path_context_without_downloads_or_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    assert!(seedbox(&["init", "demo"], root).status.success());
+    let project = root.join("demo");
+    fs::write(project.join("invalid.tar.gz"), b"not an archive").unwrap();
+    let output = seedbox(&["run", "--runtime-assets", "invalid.tar.gz"], &project);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = stderr(&output);
+    assert!(
+        error.starts_with("error: runtime assets invalid.tar.gz:"),
+        "{error}"
+    );
+    assert!(!error.contains("downloading"), "{error}");
+    assert!(!project.join(".seedbox/runs").exists());
 }

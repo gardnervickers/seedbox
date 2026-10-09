@@ -9,53 +9,67 @@ interrupt timing.
 ## Quick start
 
 `validate`, `init`, `inspect`, `diff`, `logs`, `export` and `import` run on Linux
-or macOS. `run`, `explore` and `replay` use the qualified Linux KVM host as root,
-or the development native HVF backend on an Apple Silicon Mac.
+or macOS. `run`, `explore` and `replay` use Linux x86-64 KVM or the native HVF
+backend on an Apple Silicon Mac. Linux PV runs need KVM device permissions;
+counter mode also needs privileged performance-counter access.
 
-```sh
-nix develop                          # Rust, OCI tools, static BusyBox, musl
-bash kernel/build.sh                 # guest kernel -> ~/seedbox-sim/artifacts/bzImage
-cargo build --release                # target/release/seedbox
+Install Nix for the project toolchain. On Mac, also install Apple's Command Line
+Tools. Application preparation needs a running Linux Docker or Podman engine
+(Docker Desktop or a Podman machine on Mac). On Linux, enable KVM and grant your
+user read/write access to `/dev/kvm`.
 
-cargo run -- validate examples/etcd
-sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
-sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
-# Optional semantic mode: batch virtio-net TX until a deterministic poll.
-sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd --deferred-tx
-cargo run -- inspect .seedbox/runs/ATTEMPT
-cargo run -- logs .seedbox/runs/ATTEMPT --machine client --stream console --since-ns 1000000000
-cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
-```
-
-For a Linux x86-64 CLI with the guest kernel and static helpers included, use
-`bash tools/linux-runtime/build-cli.sh` inside the development shell. The resulting
-executable needs no guest-asset paths or runtime compiler. OCI preparation still
-uses the installed Skopeo, umoci and builder. This packaging path requires final
-Linux merge-train validation; the portable Mac tests validate its readers and
-resolution rules. See [Linux packaging](tools/linux-runtime/README.md).
-
-On Apple Silicon, build the signed CLI and its preparation payload once:
+From the repository root:
 
 ```sh
 nix develop
-bash tools/mac-runtime/build-cli.sh
-target/release/seedbox doctor
-target/release/seedbox run PROJECT
-target/release/seedbox replay .seedbox/runs/ATTEMPT
+cargo build --release
+
+# Apple Silicon Mac:
+./target/release/seedbox run examples/etcd
+# Linux x86-64 (KVM, no performance-counter permissions needed):
+./target/release/seedbox run examples/etcd --timebase pv
+
+# Both platforms; use the run directory printed above:
+./target/release/seedbox replay .seedbox/runs/ATTEMPT
+./target/release/seedbox inspect .seedbox/runs/ATTEMPT
+./target/release/seedbox logs .seedbox/runs/ATTEMPT --machine client --stream console
 ```
 
-The Mac CLI packages the ARM guest kernel and static helpers. It automatically
-owns a Linux preparation VM for the existing OCI tools, stops it before running,
-and executes application machines natively under HVF. Replay uses retained bytes
-without starting that preparation VM. No runtime compiler or separate VMM path
-is needed. Images must support `linux/arm64`; memory is limited to 3072 MiB per
-service. Mac execution remains a development backend with distinct admission.
-The guest supervisor defaults an unset `GOMAXPROCS` to the guest CPU count.
-New Mac profiles release initially parked guests at seeded per-service offsets,
-capped at 1 ms and the network lookahead. The profile and report bind this
-policy; its release phase stays within the configured absolute simulated-time
-limit.
-See [the Mac workflow](tools/mac-runtime/README.md).
+The release build compiles the native CLI and signs it on Mac. It needs no
+container engine and builds no Linux guest assets. On the first `run`, `explore`
+or `prepare`, Seedbox announces downloads of its guest kernel and helper archive
+from the latest guest releases on GitHub, verifies their SHA-256 digests and
+caches them. Later calls reuse the cached bytes without contacting GitHub. Caches live under
+`~/Library/Caches/seedbox` on Mac or `~/.cache/seedbox` on Linux;
+`XDG_CACHE_HOME` overrides the parent directory. Explicit `--kernel` and
+`--runtime-assets` paths bypass their respective downloads.
+
+Native Linux CI builds the kernel and helpers independently, only when their
+input paths change. Releases use CI run labels, with no source fingerprints or
+compiled-in asset versions. CLI and application changes reuse existing releases.
+To use newer guest assets, remove the relevant architecture cache entry or pass
+a local asset path.
+Because this repository is private, the first downloads need `GH_TOKEN` or
+`GITHUB_TOKEN` with repository read access. Without that access, build on Linux
+with `nix build .#guestKernel` and `nix build .#runtimeArchive`, then select those
+outputs with `--kernel` and `--runtime-assets`. See [kernel releases](kernel/README.md)
+and [guest assets](tools/runtime/README.md) for exact commands and cache behavior.
+
+Runtime image builds/pulls use your Docker/Podman endpoint. A Linux helper
+container unpacks application filesystems; Seedbox reads the resulting archive
+without extracting Linux metadata onto the host. Simulation runs directly
+through HVF on Mac or KVM on Linux. Replay uses retained bytes and needs no
+container engine, downloads, registry access or rebuild. There is no Lima
+dependency, separate packaging command or second Linux Seedbox executable.
+
+Use `--builder docker` or `--builder podman` to select the client. Ordinary client
+context/connection settings apply. Mac images must support `linux/arm64`; memory
+is limited to 3072 MiB per service and exploration is serial. Linux's default
+`counter` mode retains its hardware/performance-counter requirements; `pv` is
+the ordinary unprivileged option. Debug builds support portable development;
+use the release executable for application runs.
+See [Mac details](tools/mac-runtime/README.md) and
+[Linux details](tools/linux-runtime/README.md).
 
 `seedbox run` with no arguments runs the Compose project in the current
 directory. Every runtime input has a default, so no flags are required:
@@ -70,17 +84,18 @@ directory. Every runtime input has a default, so no flags are required:
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Deferred TX kicks (Linux KVM) | off; service TX as in the current engine | `--deferred-tx` (prepare/run/explore) |
 | Runtime checkpoint (Linux KVM) | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; B=P continues without reseeding; no environment backing) |
-| Timebase | Linux: `counter` (retired guest branches); Mac: `pv` | `--timebase` (prepare/run/explore) |
+| Timebase | Linux: `counter` (retired guest branches); Mac: `pv` | `--timebase` (prepare/run/explore/doctor) |
 | Page timer (Linux KVM) | off; ABI-4 clockevent stores, aimed at PV | `--page-timer` (prepare/run/explore) |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution; Mac currently requires `1` | `--workers` (1..32; Linux automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
-| Guest kernel | Mac: packaged ARM64 `Image`; Linux: configured `$SEEDBOX_ARTIFACTS`/`$SEEDBOX_WORK/artifacts`, then packaged `bzImage`, then `./artifacts` and `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
+| Guest kernel | downloaded once from the latest kernel release, then cached; unbundled Linux development builds retain artifact-directory searches | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
-| Guest supervisor | packaged on Mac or in the Linux asset build; otherwise built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl on Linux | `--guest-init`, `SEEDBOX_GUEST_INIT` |
-| BusyBox | packaged on Mac; Linux: `SEEDBOX_BUSYBOX` (set by `nix develop`), then packaged BusyBox, then a static `busybox` on `PATH` | `--busybox` |
-| mke2fs (only for named volumes) | packaged on Mac; Linux: `SEEDBOX_MKE2FS` (set by `nix develop`), then packaged mke2fs, then a static `mke2fs` on `PATH` | `--mke2fs` |
+| Guest helper archive | downloaded once from the latest helper release, then cached | `--runtime-assets`, `SEEDBOX_RUNTIME_ASSETS` |
+| Guest supervisor | from the helper archive; Linux development builds also have a compiled-in musl fallback | `--guest-init`, `SEEDBOX_GUEST_INIT` |
+| BusyBox | from the helper archive; Linux development builds search static tools on `PATH` | `--busybox`, `SEEDBOX_BUSYBOX` |
+| mke2fs (only for named volumes) | from the helper archive; Linux development builds search static tools on `PATH` | `--mke2fs`, `SEEDBOX_MKE2FS` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
@@ -138,12 +153,7 @@ admitted, and each run records their hashes.
 The host checks are the KVM and perf capabilities the engine needs; CPU model,
 microcode and CPUID are not pinned.
 
-`seedbox --version` reports the simulator version. Development builds identify
-their source commit as `0.1.0-dev+COMMIT`, with `.dirty` for staged or unstaged
-tracked changes. Missing or malformed source revisions report `-dev+unknown`. Only
-a checkout with no tracked changes at a matching release tag uses the release
-label. The label does not grant runtime qualification. Untracked build inputs
-remain covered by retained hashes. New runs retain the complete
+`seedbox --version` reports the package version. New runs retain the complete
 `seedbox` executable and its worker protocol; replay launches those
 retained bytes even after the installed CLI is upgraded. The executable hash is
 an internal integrity reference, so equal version labels never substitute for
@@ -155,7 +165,7 @@ The ARM application engine is linked into the Mac CLI. Both platform adapters
 use the shared world coordinator, including connection selectors and committed
 console triggers; ARM arbitrary snapshot/fork reuse remains unsupported. Its PV world identity,
 boot-layout evidence and HVF host admission are distinct from the existing ARM
-fixture and x86 KVM profiles. Mac defaults use packaged Image, supervisor,
+fixture and x86 KVM profiles. Mac defaults use released Image, supervisor,
 BusyBox and mke2fs, with `linux/arm64` as the image platform. `--cpu` and `--vmm`
 remain Linux-only; Mac exploration is serial.
 
@@ -188,8 +198,8 @@ PFNs on stderr. The files travel in bundles under the ordinary retention policy
 and are excluded from run identity, witnesses and replay verdicts. See the
 [binary format and diagnostic fields](docs/runtime.md#compare-retained-runs).
 
-Pause a running world from another terminal with `sudo seedbox pause RUN`, then
-continue it with `sudo seedbox resume RUN`. Use the executing attempt directory
+Pause a running world from another terminal with `seedbox pause RUN`, then
+continue it with `seedbox resume RUN`. Use the executing attempt directory
 (for replay, its new attempt), identifiable by `RUN/output/host-control`. Both
 commands wait for a boundary acknowledgement. All guests and virtual time freeze;
 wall-time limits and cancellation remain active. See [host pause](docs/runtime.md#host-pause)
@@ -270,6 +280,12 @@ cleanup alone does not prove builder cessation. Ordinary run/prepare continue
 supporting custom builders; the optional native timestamp policy below has a
 narrower admission requirement. See [preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
 
+On Linux, explicit `--build-epoch` selects native preparation with the
+project-Nix Podman, Skopeo and umoci tools, using the same released guest assets.
+Ordinary runs use container-backed preparation. Mac does not support this option.
+Native extraction needs image ownership permissions; rootless users can run
+`prepare` inside `podman unshare`.
+
 For optional build timestamp control, `--build-epoch 0` selects the admitted
 project-Nix native Podman's creation-time and new-layer timestamp policy.
 It changes guest-visible new-layer file and directory timestamps, so it is
@@ -289,7 +305,7 @@ rebuilt OCI images to have identical bytes.
 | `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
 | `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, PV cycle proof, the shared world coordinator and the [windowed scheduler](docs/windowed-scheduler.md) |
 | `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
-| `tools/mac-runtime/` | Signed Mac CLI build and packaged Linux preparation workflow |
+| `tools/mac-runtime/` | Automatic guest assets, signing and container preparation |
 | `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
@@ -426,7 +442,8 @@ fields in older records are kept as data and do not block replay.
 
 `seedbox doctor` checks the installed engine, guest kernel and selected host core
 with the same readiness checks used by execution. It needs a Linux
-KVM host and root, uses the normal `--cpu`, `--kernel` and `--vmm` defaults, and
+KVM host (PV needs KVM access; counter also needs PMU/MSR access), uses the normal
+`--cpu`, `--kernel` and `--vmm` defaults, and
 never builds a missing VMM, prepares images or starts guests. `--json` prints the
 exact admitted observations. Success prints `VALID` after probe resources and
 thread affinity are verified cleaned up; problems use the ordinary error and

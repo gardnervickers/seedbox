@@ -23,6 +23,7 @@ flate2 = "1"
 xattr = "1"
 libc.workspace = true
 signal-hook = "0.3"
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 seedbox-vmm = { path = "../seedbox-vmm" }

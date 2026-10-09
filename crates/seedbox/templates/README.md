@@ -1,8 +1,20 @@
 # Seedbox simulation example
 
+On Apple Silicon or Linux x86-64, build Seedbox once from its checkout with
+`nix develop` followed by `cargo build --release`. Cargo compiles the native CLI
+and signs it automatically on Mac. Native Linux CI builds guest assets separately.
+The first run announces downloads of the guest kernel and helper archive and
+caches them for later invocations. While Seedbox is private, first use needs
+`GH_TOKEN` or `GITHUB_TOKEN` with repository read access. Start Docker/Podman for
+application preparation, then run the release executable with this Compose
+directory as its positional argument. On Linux use `--timebase pv` for KVM
+without performance-counter requirements and give your user read/write access
+to `/dev/kvm`. No Lima or manual packaging script is needed. Replay uses retained
+inputs and needs no container engine or downloads.
+
 This project is self-contained. Use the same commands on Linux x86-64 KVM or
-Apple Silicon HVF after building the packaged CLI for that platform. Linux
-execution requires root and KVM access; Mac execution uses the current user.
+Apple Silicon HVF after building the release CLI for that platform. Linux PV execution requires read/write access to `/dev/kvm`; Mac execution
+uses the current user. Linux counter execution also needs privileged PMU/MSR access.
 The etcd and Redis templates passed real workloads,
 intentional failure controls, and exact replays on the supported Linux amd64 AMD Zen
 workstation with the controlled Seedbox kernel and 1024 MiB RAM per service.
@@ -11,8 +23,7 @@ This establishes those image versions, not compatibility with arbitrary OCI imag
 
 Production preparation uses one service per VM, with private RAM-backed storage
 retained across process restart only. The repository's `docs/compatibility.md`
-describes current draft formats and version-bound runtime evidence; V0 release
-compatibility and host-proof admission remain qualification gates.
+describes current draft formats and compatibility boundaries.
 
 Each service gets its service name as the hostname, a private `/dev` with
 64 MiB `/dev/shm` and devpts, soft/hard `nofile` limits of 1048576, and
@@ -25,12 +36,11 @@ in a Dockerfile and describes three registry-image members in Compose. The Redis
 template builds a dependency-free Rust workload that checks PING, SET acknowledgements,
 and exact GET values. Both use the Rust Seedbox configuration/orchestration APIs.
 
-From this directory, with the packaged `seedbox` executable on `PATH`:
+From this directory, with the release `seedbox` executable on `PATH`:
 
 ```sh
 seedbox validate
-seedbox doctor
-seedbox run
+seedbox run --timebase pv     # Linux; omit --timebase on Mac
 seedbox inspect .seedbox/runs/ATTEMPT --json
 seedbox logs .seedbox/runs/ATTEMPT --machine client --stream console
 seedbox replay .seedbox/runs/ATTEMPT
@@ -38,14 +48,25 @@ seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 seedbox explore --count 2
 ```
 
-The Linux maintainer build `bash tools/linux-runtime/build-cli.sh` from the
-Seedbox checkout includes the guest kernel, supervisor, BusyBox and mke2fs in
-one executable. Explicit runtime-input flags and their environment path overrides
-still win. Configured artifact directories precede the packaged kernel;
-packaged assets precede incidental checkout/home/PATH defaults. Skopeo, umoci
-and the image builder remain installed preparation tools. Unbundled developer
-builds keep the existing input search. Package execution on Linux remains a
-final merge-train check. Replay uses only retained inputs after an upgrade.
+The default kernel and helper archive are downloaded on first preparation and
+cached under the platform cache directory (`XDG_CACHE_HOME` overrides its parent).
+Explicit runtime flags and their environment path overrides win. `--kernel` and
+`--runtime-assets` bypass their respective downloads. Without private release
+access, use these commands from a Seedbox checkout on native Linux:
+
+```sh
+nix build .#guestKernel --out-link kernel-output
+nix build .#runtimeArchive --out-link runtime-assets.tar.gz
+```
+
+Pass `kernel-output/bzImage` through `--kernel` and the archive through
+`--runtime-assets` when running this project. On ARM64 Linux the kernel is
+`kernel-output/Image`. Mac users can copy that ARM64
+kernel and helper archive from a Linux builder, pass both paths and omit
+`--timebase pv`. Initial source builds fetch public dependencies; offline builds
+need cached inputs. Skopeo, umoci and tar run in the downloaded tools container;
+Docker/Podman supplies the endpoint. Unbundled Linux development builds retain
+existing input searches. Replay uses only retained inputs after an upgrade.
 
 On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
 prints up to five non-empty lines from the final 8 KiB of the attempt's
@@ -67,10 +88,10 @@ built engine and guest kernel is admitted. Native replay evidence remains separa
 Apple Silicon builds also support native ARM Compose execution through the shared
 world coordinator, including connection selectors and committed console triggers.
 Arbitrary ARM snapshot/fork reuse remains unsupported. Build once with
-`nix develop` and `bash tools/mac-runtime/build-cli.sh` from the Seedbox checkout.
-The signed CLI packages the ARM kernel and static helpers and automatically owns
-a Linux VM for preparation with Skopeo/umoci/Podman. That VM stops before native
-HVF execution; replay uses only retained bytes and never starts it. No runtime
+`nix develop` and `cargo build --release` from the Seedbox checkout.
+The signed CLI downloads and caches guest assets, and owns
+Linux filesystem-tools containers through your Docker/Podman endpoint.
+Replay uses retained bytes without that endpoint. No runtime
 compiler or extra VMM path is needed.
 Images must support `linux/arm64`, RAM is limited to 3072 MiB per guest, and
 exploration is serial. CPU/PMU flags apply to Linux. Mac profiles have distinct
@@ -148,6 +169,12 @@ acknowledgement; guest time, state and witnesses remain fixed while paused.
 Wall-time limits and cancellation remain active, and pause time counts against
 the wall limit. CPU leases remain held until execution ends. This requires a
 host-control-capable engine; see the repository's `docs/runtime.md` for details.
+
+On Linux, explicit `--build-epoch` selects native preparation with the
+project-Nix Podman, Skopeo and umoci tools, using the same released guest assets.
+Ordinary runs use container-backed preparation. Mac does not support this option.
+Native extraction needs image ownership permissions; rootless users can run
+`prepare` inside `podman unshare`.
 
 For optional build timestamp control, `prepare`, `run` and `explore` accept
 `--build-epoch SECONDS` (0..=4294967295; default absent, no environment backing).
@@ -252,8 +279,9 @@ Run/replay check that the host has the KVM and perf capabilities the engine
 needs; CPU model, microcode, CPUID, engine and kernel bytes are not pinned.
 Passing on a second machine is not cross-host qualification.
 
-Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM as
-root, or Apple Silicon Mac as the current user) before running. It uses the normal CPU/runtime defaults without building,
+Check the host and installed engine/kernel with `seedbox doctor --timebase pv`
+on Linux KVM, or `seedbox doctor` on Apple Silicon Mac, after the kernel is
+cached (or pass `--kernel PATH`). It uses the normal CPU/runtime defaults without building,
 preparing images or starting guests. `VALID` means execution-profile compatibility,
 not cross-host replay qualification; `--json` shows the admitted observations.
 

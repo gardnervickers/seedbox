@@ -1,4 +1,16 @@
-# OCI preparation and KVM execution
+# OCI preparation and execution
+
+On Apple Silicon or Linux x86-64, build Seedbox once with `nix develop` followed
+by `cargo build --release`. Cargo compiles the native CLI; Mac signing is
+automatic. On first preparation, Seedbox announces and caches downloads of the
+guest kernel and helper archive built by native Linux CI. Private releases need
+`GH_TOKEN` or `GITHUB_TOKEN` with repository read access. Start Docker/Podman to
+prepare application images, then run the release executable with the Compose
+directory as its positional argument. On Linux use `--timebase pv` for KVM
+without performance-counter requirements and give your user read/write access
+to `/dev/kvm`. No Lima or manual packaging script is needed. Replay uses retained
+inputs and needs no container engine or downloads. See
+[guest assets](../tools/runtime/README.md) for the manual source-build fallback.
 
 The etcd and Redis Compose examples have passed real guest runs, failure controls
 and replay on the qualified Linux workstation. See [the acceptance record](acceptance.md)
@@ -160,18 +172,15 @@ From the repository root:
 
 ```sh
 nix develop
-bash kernel/build.sh
 cargo build --release --locked
 ```
 
-A maintainer can instead run `bash tools/linux-runtime/build-cli.sh` in that
-shell to include the x86-64 guest kernel, supervisor, BusyBox and mke2fs in the
-release executable. The package includes license notices and source/build
-provenance. The existing pinned kernel/supervisor builders produce these assets;
-no compiler or guest-asset download is invoked at runtime. Skopeo, umoci and the
-Docker-compatible builder remain host preparation dependencies. See
-[the Linux package workflow](../tools/linux-runtime/README.md). Linux package
-execution and reproducibility remain final merge-train checks.
+The normal release build prepares and embeds static helpers and Linux filesystem
+tools through Nix directly on Linux, or through Docker/Podman on Mac. The guest
+kernel downloads on first use. The resulting CLI needs no extra build script or
+runtime compiler. Preparation uses the
+container endpoint; use `--timebase pv` and KVM device permissions to run as your
+ordinary user. See [Linux setup](../tools/linux-runtime/README.md).
 
 The platform VMM is linked into `seedbox`; ordinary runtime commands do not
 compile or find a separate executable. `cargo build-vmm` and `cargo test-vmm`
@@ -193,22 +202,16 @@ exact bytes retained for replay.
 Native execution and witness equivalence still need host evidence. Apple Silicon
 also supports the native development ARM Compose backend described below.
 
-Development versions carry the Git source commit (`0.1.0-dev+COMMIT`) and a
-`.dirty` suffix for staged or unstaged tracked changes. Missing or malformed source revisions
-report `-dev+unknown`; a matching release tag with no tracked changes
-is required for a release label. Untracked build inputs remain covered by
-retained hashes. This readable label does not replace exact retained bytes or
-qualify a new runtime. The Mac maintainer build propagates source provenance into
-its exported Linux helper without copying Git history.
+The simulator version is the package version. Replay uses its retained inputs.
 
-The `seedbox` build embeds the static guest supervisor from `guest/compose-init.c`,
-compiled with the shell's musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`).
-Without one it still builds, and `run`/`prepare` require `--guest-init`, for
-example the output of `bash guest/build-compose.sh FILE`.
+Release builds fetch the guest supervisor with the helper archive on first use.
+Unbundled Linux development builds embed `guest/compose-init.c` using the shell's
+musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`). Without one they require
+`--guest-init`, for example the output of `bash guest/build-compose.sh FILE`.
 
 Preparation requires `skopeo`, `umoci`, and a Docker-compatible builder (the shell
 supplies Podman). Rootful unpacking preserves image ownership and modes. Run on
-the supported Linux amd64 host, or use the packaged private preparation VM on Mac.
+the supported Linux amd64 host; container-backed preparation does not support this option.
 
 `skopeo` selects Linux amd64 and copies the original platform-specific manifest
 and blobs with preserved digests. Seedbox verifies descriptor hashes and sizes,
@@ -225,6 +228,12 @@ Use fully qualified Dockerfile `FROM` references such as
 `docker.io/library/busybox:1.37`; the supported Podman host has no default
 unqualified registry search list. `--builder docker` selects a Docker client
 instead when the host provides one.
+
+On Linux, explicit `--build-epoch` selects native preparation with the
+project-Nix Podman, Skopeo and umoci tools, using the same released guest assets.
+Ordinary runs use container-backed preparation. Mac does not support this option.
+Native extraction needs image ownership permissions; rootless users can run
+`prepare` inside `podman unshare`.
 
 `prepare`, `run` and `explore` accept optional `--build-epoch SECONDS`
 (0..=4294967295; no environment backing). It requires the inspected project-Nix
@@ -271,12 +280,13 @@ guarantee or an image reproducibility guarantee.
 ## Preparation, execution, and replay
 
 Apple Silicon uses the native development HVF application backend. Enter
-`nix develop` and run `bash tools/mac-runtime/build-cli.sh` to produce the signed
-CLI with its ARM kernel, static helpers and Linux preparation tools embedded.
+`nix develop` and run `cargo build --release` to produce the signed
+CLI with static helpers and Linux preparation tools embedded. The first run
+downloads and caches the ARM guest kernel from its matching GitHub Release.
 Use `target/release/seedbox run PROJECT` and
 `target/release/seedbox replay RUN`, without host root or
-separate binary paths. The owned preparation VM stops before HVF execution;
-replay never starts it. Runtime commands never invoke Rust. See
+separate binary paths. Docker/Podman handles image preparation through filesystem
+tools containers; replay needs no container engine. Runtime commands never invoke Rust. See
 [the full Mac workflow](../tools/mac-runtime/README.md).
 
 Mac profiles retain their own executable descriptor, ARM boot placement,
@@ -305,14 +315,13 @@ the phase stays within the existing absolute simulated-time limit. The numeric
 runs; replay clips it to network lookahead. `initial_launch` records the release
 evidence. Profiles without a numeric cap keep their earlier release behavior.
 
-After building the binaries above, as root with the Nix tools on PATH
-(`sudo -E env PATH="$PATH" ...` from the Nix shell):
+After the release build, run as your current user with KVM device access on
+Linux. Use PV to avoid the additional counter-mode privileges:
 
 ```sh
 seedbox=./target/release/seedbox
 
-"$seedbox" prepare examples/redis --output prepared.json
-"$seedbox" run examples/redis
+"$seedbox" prepare examples/redis --output prepared.json --timebase pv
 "$seedbox" run examples/redis --timebase pv
 "$seedbox" inspect .seedbox/runs/ATTEMPT --json
 "$seedbox" replay .seedbox/runs/ATTEMPT
@@ -320,22 +329,40 @@ seedbox=./target/release/seedbox
 
 Every input has a default; `seedbox help run` lists them with their overrides.
 On Linux, explicit flags and their `SEEDBOX_*` path overrides take precedence.
-The kernel then searches configured `$SEEDBOX_ARTIFACTS` and
-`$SEEDBOX_WORK/artifacts`, the packaged kernel, `./artifacts`, and
-`~/seedbox-sim/artifacts` (also in the invoking user's home under sudo).
-A missing configured directory preserves the development search; an explicit
-missing `--kernel` fails immediately. For the supervisor, BusyBox and mke2fs,
-packaged bytes precede the existing compiled-in supervisor or static tools on
+Release runs download their default kernel once and cache it;
+`SEEDBOX_ARTIFACTS` and `SEEDBOX_WORK` do not override it. Unbundled Linux development builds retain searches of those
+configured directories, `./artifacts`, and `~/seedbox-sim/artifacts` (also in the
+invoking user's home under sudo). An explicit missing `--kernel` fails immediately. For the supervisor, BusyBox and mke2fs,
+released helpers precede the existing compiled-in supervisor or static tools on
 PATH. Unbundled development builds keep those existing fallbacks. A package
 integrity error is reported instead of silently selecting unrelated files.
 
-Package validation and extraction use a private temporary directory held through
-preparation and input retention, then removed on success, error or cancellation.
-Doctor uses the same kernel selection and validates the package while extracting
-only the kernel; it creates no state directory and performs no OCI preparation.
-Random temporary paths do not enter run identity: retained bytes do. Replay
-continues to use the recorded executable, kernel and initramfs exclusively;
-missing or corrupt retained inputs never fall back to the installed package.
+Guest kernels are published by the [Guest assets workflow](../.github/workflows/kernels.yml)
+when the inputs listed in `kernel/inputs.json` change. The release tag is a
+content-based address, not runtime admission policy: explicit kernels remain
+supported. `run`, `explore` and `prepare` report first-use downloads on stderr.
+The private repository requires `GH_TOKEN` or `GITHUB_TOKEN` with read access.
+Downloads use GitHub's release-asset SHA-256, bounded streaming and an atomic
+cache install. Concurrent invocations share the download. Interrupted downloads
+never become usable cache entries. Every reuse verifies cached bytes locally;
+there is no network request on a cache hit. Without private release access,
+build with `nix build .#guestKernel` and `nix build .#runtimeArchive` on Linux,
+then select their outputs with `--kernel` and `--runtime-assets`. See
+[the guest asset workflow](../tools/runtime/README.md#build-without-private-release-access)
+and [the kernel contract](../kernel/README.md#build-without-private-release-access)
+for both architecture outputs and Mac usage. Helpers use an independent
+release identified by `tools/runtime/inputs.json`; kernel-only changes reuse it.
+
+Caches live under `~/Library/Caches/seedbox/kernels` on Mac and
+`~/.cache/seedbox/kernels` on Linux, or `$XDG_CACHE_HOME/seedbox/kernels` when set.
+Helper archives use the sibling `assets` directory and extracted tools use `runtime`.
+An explicit `--runtime-assets` or `SEEDBOX_RUNTIME_ASSETS` bypasses helper downloads.
+`doctor` looks up the cached or explicit kernel without downloading, creating
+cache/run state or performing OCI preparation. If the cache is empty, its error
+explains how to download through a run or select `--kernel PATH`. Random cache
+paths do not enter run identity: retained bytes do. Replay uses only the recorded
+executable, kernel and initramfs; missing or corrupt retained inputs never fall
+back to the cache or a fresh download.
 
 The VMM defaults to the engine linked into `seedbox`; `--vmm` explicitly selects
 the legacy standalone contract. A missing input fails before preparation starts
@@ -373,14 +400,14 @@ path. SIGKILL and host loss cannot guarantee cleanup.
 From a second terminal, pause or resume the host's entire executing world:
 
 ```sh
-sudo seedbox pause .seedbox/runs/ATTEMPT
-sudo seedbox resume .seedbox/runs/ATTEMPT
+seedbox pause .seedbox/runs/ATTEMPT
+seedbox resume .seedbox/runs/ATTEMPT
 ```
 
 The attempt directory exists before execution finishes. Find live attempts with
 `find .seedbox/runs -path '*/output/host-control'`; remove the `/output/host-control`
 suffix to get RUN. A replay creates a new attempt: control that directory, not
-the completed source run. Use the execution user's privileges (normally root).
+the completed source run. Use the same user that started the execution.
 `PAUSED: RUN` means the VMM acknowledged a slice boundary; `RESUMED: RUN` means
 it released the host gate. Requests are idempotent and concurrent requests take
 effect in receive order. A request waits at most five seconds for acknowledgement;
@@ -998,7 +1025,7 @@ unknown further byte count and cleanup-unverified ERROR. Compact command/cleanup
 receipts have a separate 4 MiB budget; version text is capped at 8 KiB. Required evidence
 write failure is ERROR. Receipts record program/hash/arguments/cwd, local mode,
 private tag and build-input digests, process status, cancellation/escalation/reap,
-elapsed time and cleanup disposition. Application stdout is never parsed for verdicts.
+elapsed time, deadline expiry and cleanup disposition. Application stdout is never parsed for verdicts.
 
 Initial build admission is the inspected project-Nix Linux Podman launcher and
 native binary closure, invoked through the launcher with `--remote=false`. Its
@@ -1011,8 +1038,11 @@ identity until final group signalling, then reaps it. Graceful termination escal
 after 250 ms; an unconfirmed exit after 5 s is cleanup-unverified ERROR. This cannot
 promise cleanup for a process blocked indefinitely in the kernel or delegated
 builder work. Cancelled builds remain cleanup-unverified and keep their unique tag;
-no image-rm races a potentially running build. After a completed build, private-tag
-cleanup is separately bounded; cleanup failure outranks clean cancellation. No
+no image-rm races a potentially running build. After a completed build, private-tag and helper-container
+cleanup have a 30-second daemon-operation deadline. Expiry starts the same
+250-ms termination grace and five-second reap bound; the receipt records the
+timeout, and daemon removal must still be verified. Slow filesystem removal is
+not treated as hung after only five seconds; cleanup failure outranks clean cancellation. No
 shared daemon, unrelated image/container, host service or cache is changed.
 
 CLI resource fields report self/reaped-child user/system CPU deltas and separate
