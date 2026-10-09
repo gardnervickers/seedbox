@@ -335,7 +335,7 @@ struct CpuArg {
 }
 
 impl CpuArg {
-    /// Refuse a missing host branch counter and warn about an unqualified one.
+    /// Refuse a missing host branch counter.
     /// PV reads no counter, so it admits any KVM host.
     fn admit(&self, detected: Result<CounterProfile>, timebase: Timebase) -> Result<()> {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -347,7 +347,8 @@ impl CpuArg {
         if timebase == Timebase::Pv {
             return Ok(());
         }
-        admit_counter(detected?)
+        detected?;
+        Ok(())
     }
 }
 
@@ -661,7 +662,7 @@ impl RuntimeInputs {
 #[derive(Args, Clone, Copy)]
 #[command(next_help_heading = "Preparation")]
 struct BuildOptions {
-    /// Clamp new build-layer timestamps to this Unix epoch (qualified native Podman only) [default: absent].
+    /// Clamp new build-layer timestamps to this Unix epoch (Podman) [default: absent].
     #[arg(long, allow_hyphen_values = true, value_parser = clap::value_parser!(u32))]
     build_epoch: Option<u32>,
 }
@@ -695,15 +696,9 @@ impl BuildOptions {
             {
                 match defaults::preparation_tool(&inputs.builder) {
                 Ok(builder) => inputs.builder = builder,
-                Err(error) if self.build_epoch.is_some() => return Err(Error::Setup(format!("--build-epoch: {error}; use the qualified project-Nix local Podman or omit --build-epoch"))),
+                Err(error) if self.build_epoch.is_some() => return Err(Error::Setup(format!("--build-epoch: {error}; install Podman or specify --builder or omit --build-epoch"))),
                 Err(_) => (), // Preserve ordinary custom-builder discovery at execution.
             }
-                OciTools {
-                    docker: inputs.builder.clone(),
-                    build_epoch: self.build_epoch,
-                    ..OciTools::default()
-                }
-                .validate_build_epoch()?;
             }
             if self.build_epoch.is_some() && unsafe { libc::geteuid() } != 0 {
                 return Err(Error::Setup("--build-epoch native extraction requires image ownership permissions; run prepare inside `podman unshare`, or omit --build-epoch to use container preparation".into()));
@@ -1140,7 +1135,7 @@ fn run(cli: Cli) -> Result<u8> {
             };
             let detected = execution_counter();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
-            // Historical/incompatible records must reach the retained-proof gate
+            // Historical/incompatible records must reach the retained-input validation
             // and remain captured as NOT_COMPARABLE before querying this host.
             if !is_mac
                 && timebase == Timebase::Counter
@@ -1397,18 +1392,6 @@ fn run(cli: Cli) -> Result<u8> {
     }
 }
 
-/// Say when the counter profile's results are unverified; never refuse it.
-fn admit_counter(counter: CounterProfile) -> Result<()> {
-    if counter.qualified() {
-        return Ok(());
-    }
-    eprintln!(
-        "warning: branch counter profile {} is unqualified; results are unverified",
-        counter.name()
-    );
-    Ok(())
-}
-
 /// A run replays only with the branch counter it was recorded with.
 fn same_counter(run: &Path, recorded: CounterProfile, host: CounterProfile) -> Result<()> {
     if recorded == host {
@@ -1611,9 +1594,7 @@ mod tests {
     }
 
     #[test]
-    fn unqualified_counters_run_with_a_warning() {
-        assert!(admit_counter(CounterProfile::Zen).is_ok());
-        assert!(admit_counter(CounterProfile::IntelSkylake).is_ok());
+    fn counter_mode_requires_a_profile_and_pv_does_not() {
         let cpu = CpuArg { cpu: None };
         let missing = || Err(Error::Setup("no branch counter profile".into()));
         assert!(cpu.admit(missing(), Timebase::Pv).is_ok());

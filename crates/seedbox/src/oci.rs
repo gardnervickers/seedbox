@@ -135,17 +135,6 @@ struct ImageConfig {
 }
 
 impl OciTools {
-    /// Reject unsupported timestamp policies before any image work.
-    pub fn validate_build_epoch(&self) -> Result<()> {
-        if self.build_epoch.is_some() {
-            let admitted = crate::preparation_command::inspect_native_builder(&self.docker)
-                .is_ok_and(|proof| proof.admitted);
-            if !admitted {
-                return Err(Error::Setup(format!("--build-epoch: builder {} is unsupported; use the qualified project-Nix local Podman or omit --build-epoch", self.docker.display())));
-            }
-        }
-        Ok(())
-    }
     /// `directory` must be a fresh per-image directory; the caller owns its
     /// lifetime until guest packaging finishes. No simulation or MSR work occurs.
     pub fn import(
@@ -191,9 +180,6 @@ impl OciTools {
         frozen: Option<&FrozenContext>,
         architecture: crate::guest::Architecture,
     ) -> Result<ImportedImage> {
-        if matches!(service.source, ImageSource::Build { .. }) {
-            self.validate_build_epoch()?;
-        }
         let local_builder =
             context_options.is_some() || self.build_epoch.is_some() || frozen.is_some();
         fs::create_dir_all(directory)?;
@@ -608,15 +594,21 @@ mod context_tests {
     #[test]
     fn failed_build_cleans_only_its_private_tag_without_pruning_in_both_paths() {
         // These are recorded host-process fixtures, never a native image build.
-        for owned in [false, true] {
+        for (owned, epoch) in [
+            (false, None),
+            (true, None),
+            (false, Some(0)),
+            (true, Some(123)),
+        ] {
             let root = tempfile::tempdir().unwrap();
             let context = root.path().join("context");
             fs::create_dir(&context).unwrap();
             fs::write(context.join("Dockerfile"), "FROM scratch\n").unwrap();
             let argv = root.path().join("cleanup-argv");
+            let build_argv = root.path().join("build-argv");
             let builder = root.path().join("builder");
             fs::write(&builder, format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo fixture-v1; exit 0; fi\nif [ \"$1\" = --remote=false ]; then shift; fi\ncase \"$1\" in build) exit 7;; image) printf '%s\\n' \"$@\" > '{}'; exit 0;; *) exit 9;; esac\n", argv.display())).unwrap();
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo fixture-v1; exit 0; fi\nif [ \"$1\" = --remote=false ]; then shift; fi\ncase \"$1\" in build) printf '%s\\n' \"$@\" > '{}'; exit 7;; image) printf '%s\\n' \"$@\" > '{}'; exit 0;; *) exit 9;; esac\n", build_argv.display(), argv.display())).unwrap();
             fs::set_permissions(&builder, fs::Permissions::from_mode(0o755)).unwrap();
             let transport = root.path().join("transport");
             fs::write(
@@ -632,7 +624,7 @@ mod context_tests {
                 docker: builder,
                 skopeo: transport.clone(),
                 umoci: transport,
-                build_epoch: None,
+                build_epoch: epoch,
             };
             let evidence = crate::preparation::PreparationContext::new(
                 root.path().join("evidence"),
@@ -648,6 +640,13 @@ mod context_tests {
             let error = result.err().unwrap();
             assert!(matches!(error, Error::Execution(_)));
             assert!(error.to_string().contains('7'));
+            let build = fs::read_to_string(&build_argv).unwrap();
+            assert_eq!(build.contains("--rewrite-timestamp"), epoch.is_some());
+            if let Some(epoch) = epoch {
+                assert!(build
+                    .lines()
+                    .any(|arg| arg == format!("--source-date-epoch={epoch}")));
+            }
             let actual = fs::read_to_string(&argv).unwrap();
             let args: Vec<_> = actual.lines().collect();
             assert_eq!(&args[..3], ["image", "rm", "--no-prune"]);
@@ -666,37 +665,6 @@ mod context_tests {
                 assert_eq!(receipt["reaped"], true);
             }
         }
-    }
-
-    #[test]
-    fn explicit_epoch_rejects_custom_builder_before_creating_import_directory() {
-        let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
-        let simulation = crate::config::parse("name: epoch\nservices:\n  app: {build: .}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &root.path().join("compose.yaml"), &BTreeMap::new()).unwrap();
-        let builder = root.path().join("custom-builder");
-        fs::write(&builder, "custom bytes").unwrap();
-        let tools = OciTools {
-            docker: builder,
-            build_epoch: Some(0),
-            ..OciTools::default()
-        };
-        let directory = root.path().join("must-not-exist");
-        let error = tools
-            .import(
-                &simulation.services["app"],
-                &directory,
-                &ContentStore::new(root.path().join("store")),
-            )
-            .err()
-            .unwrap();
-        assert!(matches!(error, Error::Setup(_)));
-        assert!(error.to_string().contains("--build-epoch"));
-        assert!(!directory.exists());
-        let off = OciTools {
-            build_epoch: None,
-            ..tools
-        };
-        assert!(off.validate_build_epoch().is_ok());
     }
 
     #[test]

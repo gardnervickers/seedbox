@@ -40,9 +40,13 @@ fn profile() -> ExecutionProfile {
 }
 
 #[test]
-fn cpu_model_microcode_and_cpuid_are_not_pinned() {
+fn cpu_vendor_model_microcode_and_cpuid_are_not_pinned() {
     let mut o = observed();
     validate_observation(&o).unwrap();
+    o.vendor = "GenuineIntel".into();
+    o.family = 6;
+    o.model = 0x55;
+    o.workaround_msr = 0;
     o.family += 1;
     o.model += 1;
     o.stepping += 1;
@@ -55,7 +59,6 @@ fn cpu_model_microcode_and_cpuid_are_not_pinned() {
 fn every_missing_engine_capability_is_rejected() {
     let changes: Vec<fn(&mut CoreObservation)> = vec![
         |o| o.architecture = "aarch64".into(),
-        |o| o.vendor = "GenuineIntel".into(),
         |o| o.kvm_api = 11,
         |o| o.immediate_exit = 0,
         |o| o.guest_debug = 0,

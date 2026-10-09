@@ -13,7 +13,7 @@ inputs and needs no container engine or downloads. See
 [guest assets](../tools/runtime/README.md) for the manual source-build fallback.
 
 The etcd and Redis Compose examples have passed real guest runs, failure controls
-and replay on the qualified Linux workstation. See [the acceptance record](acceptance.md)
+and replay on the Linux workstation. See [the acceptance record](acceptance.md)
 for the tested engine, kernel, image digests and lifecycle checks.
 
 These are version-bound results, not qualification of arbitrary OCI runtimes or
@@ -166,7 +166,7 @@ Compose named volumes. Unmounted application paths remain RAM-backed. Low-level
 disk fixtures, including the ext4 fsync ledger, are documented in
 [`harness/worlds/README.md`](../harness/worlds/README.md#retained-disk).
 
-## Build on the qualified Linux host
+## Build on a Linux KVM host
 
 From the repository root:
 
@@ -230,15 +230,14 @@ unqualified registry search list. `--builder docker` selects a Docker client
 instead when the host provides one.
 
 On Linux, explicit `--build-epoch` selects native preparation with the
-project-Nix Podman, Skopeo and umoci tools, using the same released guest assets.
+Podman, Skopeo and umoci tools, using the same released guest assets.
 Ordinary runs use container-backed preparation. Mac does not support this option.
 Native extraction needs image ownership permissions; rootless users can run
 `prepare` inside `podman unshare`.
 
 `prepare`, `run` and `explore` accept optional `--build-epoch SECONDS`
-(0..=4294967295; no environment backing). It requires the inspected project-Nix
-local Podman executable; custom wrappers, Docker and remote clients fail before
-image preparation when the option affects a build service. Seedbox passes
+(0..=4294967295; no environment backing). It uses the selected Podman executable without checking builder binary hashes.
+Seedbox passes
 `--source-date-epoch=SECONDS --rewrite-timestamp` to that native executable.
 The selected epoch and policy are retained in built-image provenance. Without
 the option, the builder's existing timestamp behavior remains unchanged.
@@ -272,7 +271,7 @@ epoch; `--build-epoch` still controls image build timestamps only.
 
 Each prepared application release is a captured input closure. Same-version
 deterministic execution and replay use its exact retained bytes, seed and
-qualified profile; they do not rebuild the application. Independently rebuilding
+compatible profile; they do not rebuild the application. Independently rebuilding
 an OCI image need not produce identical bytes for V0. The optional timestamp
 policy is user-selected metadata control, not a prerequisite for this execution
 guarantee or an image reproducibility guarantee.
@@ -391,7 +390,8 @@ protocol as `harness/batch.py`, before reading or changing MSRs. It snapshots ex
 values, sets bit 54 with readback, pins the VMM, and restores with readback only
 after reaping it. Only the Zen counter profile needs this workaround; on a host
 with another profile the executor leases the cores and leaves MSRs alone. Other
-profiles are unqualified and run with a warning that results are unverified. An unsuccessful restore retains `output/msr-original.json`.
+profiles use the same capability checks; Intel hardware acceptance remains
+untested. An unsuccessful restore retains `output/msr-original.json`.
 Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause cleanup through the same
 path. SIGKILL and host loss cannot guarantee cleanup.
 
@@ -1027,11 +1027,10 @@ write failure is ERROR. Receipts record program/hash/arguments/cwd, local mode,
 private tag and build-input digests, process status, cancellation/escalation/reap,
 elapsed time, deadline expiry and cleanup disposition. Application stdout is never parsed for verdicts.
 
-Initial build admission is the inspected project-Nix Linux Podman launcher and
-native binary closure, invoked through the launcher with `--remote=false`. Its
-local storage/runtime information is retained. Unknown opaque wrappers, remote-only
-clients, Docker daemon builders and unverified delegation are unsupported. Registry
-projects do not acquire a builder requirement. Existing run/prepare semantics remain.
+Exploration inspects the selected builder and invokes it with `--remote=false`
+to check local Podman operation and retain storage/runtime information. Builder
+binary hashes are observations, not admission checks. Registry projects do not
+acquire a builder requirement.
 
 Cancellation signals only an owned process group, preserving the unreaped leader
 identity until final group signalling, then reaps it. Graceful termination escalates
@@ -1179,38 +1178,26 @@ staging directories for manual removal after confirming no importer owns them.
 Inspect needs no original checkout or registry. Ordinary replay from the imported
 state uses the retained engine/guest/kernel inputs and preserves existing
 PASS/FAIL, ERROR, INCOMPLETE, TIMEOUT and MATCH/MISMATCH meanings. It requires the
-compatible installed Seedbox release and qualified host runtime/profile. Exporting
+compatible installed Seedbox release and a capable host with a compatible
+runtime/profile. Exporting
 engine bytes does not establish cross-host or cross-backend compatibility;
 missing KVM or perf capabilities are refused by host admission. Portable fixture
 replay verifies the bundle mechanism; offline application replay requires separate hardware acceptance.
 
-### Explicit unqualified counters
+### Counter capability checks
 
-Run, explore and replay accept a known non-Zen counter with a warning that
-results are unverified. Its `counter` semantic parameter identifies the
-experimental profile. Replay still requires the recorded counter and exact
-supported release/input bytes. It cannot bypass checksums,
-retained-profile checks or CPU ownership. This encoding is intentional; old
-records are not silently upgraded or relabeled.
+All supported counter profiles use the same preflight and leased checks. Each
+selected SMT sibling must provide the required KVM capabilities and allow the
+selected raw perf event to open disabled. The descriptor closes before affinity
+restoration; admission never enables, maps or reads a guest event. The engine
+checks actual guest counting during execution. Host observations use
+`host-static.json` and `host-leased.json` for every counter profile.
 
-The experimental path checks the counter on each selected SMT sibling and
-applicable KVM capabilities under a scoped affinity guard, then rechecks while
-all canonical leases are held. A counter without a workaround does not open,
-write or claim restoration of AMD MSRs. Every child is reaped before applicable
-restoration and lease release. `doctor` returns a setup refusal for unqualified
-counters, including when the experimental flag is present, so it never emits an
-AMD `VALID` success for Intel. Exit meanings remain unchanged.
-
-The current staged source pins frozen engine391f and accepted kernel68bf (K2).
-The artifact has build provenance but is not runtime qualified. Fresh ordinary
-full-state run/replay acceptance remains required. Experimental readiness opens
-the selected raw perf event disabled before preparation and under each held
-sibling lease, then closes it before restoring affinity. Counting attributes
-match the engine; admission adds PERF_FLAG_FD_CLOEXEC8 rather than engineopen0
-solely to protect descriptor inheritance. It never enables, maps or reads the
-guest event. Source tests and warned Intel opt-in are not Intel qualification or
-a determinism guarantee.
-
+The counter semantic parameter and replay's same-counter requirement are
+unchanged. Zen retains its functional SpeculativeLockMap workaround and exact
+MSR restoration; profiles without a workaround do not access AMD MSRs. CPU
+ownership and child cleanup remain required. Intel hardware run/replay acceptance
+has not been performed.
 ## Committed-time logs
 
 `seedbox logs RUN --machine NAME --stream console --since-ns 1000000000

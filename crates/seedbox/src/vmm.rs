@@ -378,35 +378,6 @@ impl VmmExecutor {
         })
     }
 
-    fn unqualified_preflight(&self, output: Option<&Path>) -> Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
-            let result =
-                crate::admission::check_unqualified(reservation.cpus.iter().copied(), self.counter);
-            if let Some(output) = output {
-                crate::admission::finish_admission(result, |_| {
-                    std::fs::write(
-                        output.join("host-unqualified.json"),
-                        serde_json::to_vec_pretty(
-                            &serde_json::json!({"counter":self.counter.name(),"qualified":false,"cpu":reservation.cpu,"cpus":reservation.cpus}),
-                        )?,
-                    )?;
-                    Ok(())
-                })
-            } else {
-                result
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = output;
-            Err(Error::Setup(
-                "experimental execution requires a Linux KVM host".into(),
-            ))
-        }
-    }
-
     fn probe(&self) -> AdmissionProbe {
         self.probe_capacity(1)
     }
@@ -426,7 +397,7 @@ impl VmmExecutor {
                             crate::admission::collect_admitted(
                                 reservation.cpus.iter().copied(),
                                 &mut observations,
-                                crate::admission::observe,
+                                |cpu| crate::admission::observe_counter(cpu, self.counter),
                             )?;
                         }
                         Ok(())
@@ -436,7 +407,7 @@ impl VmmExecutor {
             #[cfg(not(target_os = "linux"))]
             {
                 let _ = (&mut selected, workers);
-                observations.push(crate::admission::observe(0)?);
+                observations.push(crate::admission::observe_counter(0, self.counter)?);
             }
             Ok(())
         })();
@@ -576,31 +547,6 @@ impl VmmExecutor {
         crate::admission::validate_profile(&self.profile)?;
         if !self.counted() {
             return self.uncounted_preflight(workers);
-        }
-        if !self.counter.qualified() {
-            if workers == 1 {
-                return self.unqualified_preflight(output);
-            }
-            #[cfg(target_os = "linux")]
-            {
-                return with_capacity(
-                    workers,
-                    || crate::host::CpuReservation::acquire(self.cpu),
-                    |reservations| {
-                        for reservation in reservations {
-                            crate::admission::check_unqualified(
-                                reservation.cpus.iter().copied(),
-                                self.counter,
-                            )?;
-                        }
-                        Ok(())
-                    },
-                );
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                return self.unqualified_preflight(output);
-            }
         }
         let probe = self.probe_capacity(workers);
         let observations = probe.observations;
@@ -770,7 +716,7 @@ impl ExecutionBackend for VmmExecutor {
         {
             let _ = request;
             Err(Error::Execution(
-                "KVM execution requires the qualified Linux amd64 host".into(),
+                "KVM execution requires a Linux x86-64 host".into(),
             ))
         }
     }
@@ -1647,7 +1593,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         && raw.counter_profile.is_none()
     {
         return Err(Error::Integrity(
-            "unqualified VMM report is missing its counter profile".into(),
+            "VMM report is missing its counter profile".into(),
         ));
     }
     let expected = counted.name();
@@ -1946,40 +1892,22 @@ mod linux {
             .clone();
         let counted = timebase == Timebase::Counter;
         let workaround = backend.counter.workaround().filter(|_| counted);
-        if counted && backend.counter.qualified() {
+        if counted {
             fs::write(
                 request.output.join("host-static.json"),
                 serde_json::to_vec_pretty(&static_evidence)?,
             )?;
         }
-        let (cpu, mut lease) = HostLease::acquire_checked(
-            backend.cpu,
-            workaround,
-            request.output,
-            |reservation| {
+        let (cpu, mut lease) =
+            HostLease::acquire_checked(backend.cpu, workaround, request.output, |reservation| {
                 if !counted {
                     return Ok(());
-                }
-                if !backend.counter.qualified() {
-                    let check = crate::admission::check_unqualified(
-                        reservation.cpus.iter().copied(),
-                        backend.counter,
-                    );
-                    return crate::admission::finish_admission(check, |result| {
-                        fs::write(
-                            request.output.join("host-leased-unqualified.json"),
-                            serde_json::to_vec_pretty(
-                                &serde_json::json!({"counter":backend.counter.name(),"qualified":false,"cpu":reservation.cpu,"cpus":reservation.cpus,"applicable_checks_passed":result.is_ok(),"error":result.as_ref().err().map(ToString::to_string)}),
-                            )?,
-                        )?;
-                        Ok(())
-                    });
                 }
                 let mut observed = Vec::new();
                 let admission = crate::admission::collect_admitted(
                     reservation.cpus.iter().copied(),
                     &mut observed,
-                    crate::admission::observe,
+                    |cpu| crate::admission::observe_counter(cpu, backend.counter),
                 );
                 crate::admission::finish_admission(admission, |admission| {
                     fs::write(
@@ -1994,8 +1922,7 @@ mod linux {
                     }
                     Ok(())
                 })
-            },
-        )?;
+            })?;
         let originals = lease.original_registers();
         if workaround.is_some() {
             fs::write(
