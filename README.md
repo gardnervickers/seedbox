@@ -330,10 +330,8 @@ and removes both checkouts on success or failure. It needs neither KVM nor root.
 Equality assumes the same pinned toolchain, libraries and build options; this
 does not establish reproducibility across different toolchains.
 
-These flags change every engine hash. Existing pinned/accepted engine hashes
-cannot be reproduced from source with the new flags; the next engine re-pin
-must use the new build and complete host qualification. Retained old engine
-bytes remain the inputs for their existing runs. This change updates no pins.
+These build flags change engine bytes. Existing runs retain the engine they
+recorded; fresh runs use the current build.
 
 Run every suite available on the current platform from the project Nix shell:
 
