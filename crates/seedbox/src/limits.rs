@@ -10,7 +10,7 @@ pub(crate) struct Size(pub u64);
 impl Display for Size {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (shift, unit) in [(30, "GiB"), (20, "MiB"), (10, "KiB")] {
-            if self.0 >= 1 << shift && self.0 % (1 << shift) == 0 {
+            if self.0 >= 1 << shift && self.0.is_multiple_of(1 << shift) {
                 return write!(f, "{} {unit}", self.0 >> shift);
             }
         }
