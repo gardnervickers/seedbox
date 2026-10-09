@@ -323,7 +323,7 @@ impl Orchestrator {
             fs::create_dir(&output)?;
             executor.preflight(Some(&output))?;
             let mut artifacts = BTreeMap::new();
-            for digest in record.identity.inputs.digests() {
+            for digest in executor.runtime_inputs(&record.identity.inputs) {
                 if !artifacts.contains_key(digest) {
                     artifacts.insert(
                         digest.clone(),
