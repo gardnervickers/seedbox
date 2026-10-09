@@ -10,9 +10,9 @@ guest drivers. Seed sweeps are ordinary CLI loops.
 | --- | --- |
 | `etcd1.json`, `guest/etcd1.init` | Removed obsolete single-member boot fixture; use the etcd Compose example |
 | `cluster.json` | [etcd Compose example](../../examples/etcd/compose.yaml) |
-| `kill-3.5.2.json`, `short-kill-3.5.2.json` | [etcd 3.5.2 scenario](../acceptance/workloads/short-kill-3.5.2.yaml) |
-| `kill-3.5.3.json` | [etcd 3.5.3 scenario](../acceptance/workloads/kill-3.5.3.yaml) |
-| `sanity.json` | [planted-failure control](../acceptance/workloads/sanity.yaml) |
+| `kill-3.5.2.json`, `short-kill-3.5.2.json` | [key/value fault scenario](../acceptance/workloads/key-value.yaml) |
+| `kill-3.5.3.json` | [key/value fault scenario](../acceptance/workloads/key-value.yaml) |
+| `sanity.json` | Portable checker tests in `examples/faults/portable.py` |
 | `race.json`, `guest/race.init` | [race scenario](../acceptance/workloads/race.yaml), using the existing C workload |
 | `campaign.sh`, `campaign-result.py` and their tests | `seedbox run` exit status, retained reports, and CLI seed loops |
 

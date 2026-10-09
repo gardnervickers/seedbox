@@ -6,7 +6,7 @@ services:
     configs:
       - {source: driver, target: /runtime.js}
 configs:
-  driver: {file: ../driver/runtime_node.js}
+  driver: {file: ./runtime_node.js}
 x-seedbox:
   version: 1
   machine: {memory_mb: 2048}

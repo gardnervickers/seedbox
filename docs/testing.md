@@ -142,3 +142,15 @@ Android, .NET and Swift SDKs that Seedbox does not use before building.
 The separate Guest assets workflow also caches Nix builds per architecture and
 recipe, so repeated PR updates reuse kernels and helpers instead of rebuilding
 them. Its x86 job can also restore the PV job's Nix cache when available.
+
+The default application suite uses the Python TCP key/value fixture from
+`examples/faults` for acknowledged, fsynced writes, process restarts and overlapping
+partitions. `volume-crash` uses the same server on a named volume and verifies
+acknowledged values after a whole-machine crash/reboot. The etcd cluster stress
+workloads are no longer in default acceptance; `examples/etcd` remains available.
+Both fixtures retain two fresh runs, full-state comparison and replay.
+
+Third-party application/runtime demonstrations live under `examples/`, including
+`examples/runtimes`, and are not executed by default acceptance. The retained
+`runtime.yaml` is our synthetic syscall/interface probe, not an application
+compatibility test. Python and BusyBox images still host the synthetic fixtures.

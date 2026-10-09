@@ -26,16 +26,19 @@ retries and returns a nonzero exit for a failed assertion.
 
 For intentional failure controls, set the Redis client's
 `SEEDBOX_PLANT_FAILURE` to `"1"`, or append `--plant, missing` to the etcd client
-command list. The runtime suite checks FAIL plus replay MATCH for both.
+command list. Run and replay these explicitly to check FAIL plus replay MATCH.
 
 Each service gets a controlled Linux VM and private RAM-backed root filesystem;
-application data does not persist across fresh runs. Use the release executable, which downloads and caches the patched kernel and
-guest helpers on first use. Private releases require `GH_TOKEN` or `GITHUB_TOKEN`;
-[manual Linux builds](../tools/runtime/README.md#build-without-private-release-access)
-are also supported. Run on
+application data does not persist across fresh runs. Build guest assets explicitly
+with `bash tools/build-assets.sh` and use the release executable; runtime commands
+never download guest assets. See [asset build instructions](../tools/runtime/README.md). Run on
 Apple Silicon HVF or Linux KVM, with at least the tested 1024 MiB per service.
 The image supplies userspace dependencies. Image versions, launch metadata and
 filesystem layers are resolved and retained before execution.
 
 See [build/run instructions](../README.md), [the supported subset](../crates/seedbox/README.md),
 [acceptance evidence](../docs/acceptance.md), and [legacy fixture migration](../harness/worlds/README.md).
+
+[Application runtime examples](runtimes/README.md) cover JVM, nginx, Node,
+Postgres, Python and TLS. These and the etcd/Redis examples are optional runs,
+not part of the default synthetic acceptance suite.

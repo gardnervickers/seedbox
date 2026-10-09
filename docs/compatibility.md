@@ -97,8 +97,8 @@ seccomp allow filter, plus unprivileged UID/GID mapping and nested namespaces.
 Replay its retained run to check `MATCH`. This is a
 focused interface smoke test; application acceptance remains version-bound.
 
-The `runtime-postgres.yaml`, `runtime-nginx.yaml`, `runtime-python.yaml`,
-`runtime-jvm.yaml` and `runtime-node.yaml` projects in the same directory run
+The optional `postgres`, `nginx`, `python`, `jvm` and `node` projects in
+[`examples/runtimes`](../examples/runtimes/README.md) run
 initdb plus a SQL query, an HTTP request through nginx's ordinary stdout log,
 a Python process pool, JVM local hostname lookup and Node HTTP, respectively.
 Those projects set `x-seedbox.machine.memory_mb: 2048` to accommodate their image archives and

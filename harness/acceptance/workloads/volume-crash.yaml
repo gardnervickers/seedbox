@@ -1,38 +1,31 @@
 name: volume-crash
 services:
-  n1:
-    image: quay.io/coreos/etcd:v3.5.2
-    entrypoint: [/usr/local/bin/etcd]
-    command:
-      - --name=n1
-      - --data-dir=/data/n1
-      - --listen-client-urls=http://0.0.0.0:2379
-      - --advertise-client-urls=http://n1:2379
-      - --listen-peer-urls=http://0.0.0.0:2380
-      - --initial-advertise-peer-urls=http://n1:2380
-      - --initial-cluster=n1=http://n1:2380
-      - --initial-cluster-state=new
-      - --logger=zap
-      - --log-level=error
-    volumes: [n1data:/data]
+  server:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint: [python3, /scenario/main.py]
+    command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]
+    volumes: [data:/data]
+    configs:
+      - {source: workload, target: /scenario/main.py}
   client:
-    build: {context: ../../../examples/etcd/workload, dockerfile: acceptance.Dockerfile}
+    image: docker.io/library/python:3.13-alpine
     entrypoint: [python3, /scenario/volume.py]
     configs:
       - {source: driver, target: /scenario/volume.py}
+      - {source: workload, target: /scenario/main.py}
       - {source: api-package, target: /scenario/seedbox/__init__.py}
       - {source: api-control, target: /scenario/seedbox/control.py}
-    command: [--endpoint, "n1:2379", --keys, "20"]
 volumes:
-  n1data: {}
+  data: {}
 configs:
   driver: {file: ../driver/volume.py}
+  workload: {file: ../../../examples/faults/workload/main.py}
   api-package: {file: ../../../python/seedbox/__init__.py}
   api-control: {file: ../../../python/seedbox/control.py}
 x-seedbox:
   version: 1
   seed: 4100
-  limits: {simulated_time: 120s, wall_time: 30m}
+  limits: {simulated_time: 60s, wall_time: 10m}
   network: {latency: 1ms, jitter: 200us}
   schedule: {timer_jitter: 1ms, stop_tolerance: 2ms}
   control: {service: client}

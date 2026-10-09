@@ -7,7 +7,7 @@ services:
     configs:
       - {source: driver, target: /runtime.py}
 configs:
-  driver: {file: ../driver/runtime_python.py}
+  driver: {file: ./runtime_python.py}
 x-seedbox:
   version: 1
   machine: {memory_mb: 2048}
