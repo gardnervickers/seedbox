@@ -92,7 +92,7 @@ class SelectionTests(unittest.TestCase):
         with patch.object(check, "discover", return_value=unavailable), \
              patch.object(check, "root_prefix", return_value=None), \
              patch.object(check.platform, "system", return_value="Darwin"), \
-             patch.object(check.Checks, "run", side_effect=AssertionError("build before admission")), \
+             patch.object(check.Checks, "_step", side_effect=AssertionError("build before admission")), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(check.main(["--list", "--require", "kvm"]), 2)
             self.assertEqual(check.main(["--require", "kvm"]), 2)
@@ -116,9 +116,10 @@ class ExecutionTests(unittest.TestCase):
             output = json.dumps(dict(reason="compiler-artifact", executable=str(original),
                                      target=dict(name="new-hardware"), profile=dict(test=True)))
             checks = check.Checks(dict(os.environ, CARGO_TARGET_DIR="/workspace-cache"))
-            with patch.object(checks, "run", side_effect=[output, True, True]) as run:
+            with patch.object(checks, "capture", return_value=output) as capture, \
+                 patch.object(checks, "run", side_effect=[True, True]) as run:
                 checks.cargo_tests("seedbox-arm64", ["cargo", "test-arm64"], ["hvf-tests"], None, sign=True)
-                build, sign, execute = run.call_args_list
+                (build,), (sign, execute) = capture.call_args_list, run.call_args_list
                 self.assertNotIn("CARGO_TARGET_DIR", build.kwargs["environment"])
                 signed = sign.args[1][-1]
                 self.assertNotEqual(signed, str(original))
