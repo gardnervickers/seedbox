@@ -2,7 +2,6 @@
 
 use seedbox::{
     config::{Check, Limits, Network, Schedule},
-    counter::CounterProfile,
     execution::*,
     store::ContentDigest,
     vmm,
@@ -84,19 +83,20 @@ fn machine_row(name: &str, exit: Option<u8>) -> serde_json::Value {
     let hash = ContentDigest::of(b"witness");
     json!({"name":name,"state":"Running","time_ns":0,"guest_exit_code":exit,"guest_init_error":null,
         "infrastructure_error":false,"witness":hash,"state_digest":hash,"state_digest_parts":null,
-        "branches":0,"pending_io":null,"crashed_incarnations":[],"incarnation":0,"booted_at_ns":0,
+        "pending_io":null,"crashed_incarnations":[],"incarnation":0,"booted_at_ns":0,
         "exits":0,"pio":0,"pio_total":0,"mmio":0,"halts":0,"irqs":0,"window_exits":0,"eintr":0,
-        "precise_stops":0,"steps":0,"step_ms":0.0,"run_ms":0.0,"skid_max":0,"skid_count":0,
-        "skid_p50":null,"skid_p99":null,"final_margin":0,"yields":0,"yield_stops":0,"undo":null,
+        "run_ms":0.0,"stalls":0,"yields":0,"yield_stops":0,
+        "shadow":{"synced_pages":0,"restored_pages":0},
         "kvm_ms_by_exit":{},"kvm_n_by_exit":[],"control_channel":null,"net":null,"disk":null,
-        "timer":{"writes":0,"overdue":0,"overdue_max_ns":0,"overdue_syscalls_max":0,"guest_clock_skew":{}}})
+        "timer":{"writes":0,"overdue":0,"overdue_max_ns":0,"overdue_syscalls_max":0,"guest_clock_skew":{}},
+        "syscalls":0,"syscall_ns":0,"time_ns_by_cause":{}})
 }
 
-/// A complete counter-timebase engine report whose workload exited 0.
+/// A complete engine report whose workload exited 0.
 fn report() -> serde_json::Value {
     let hash = ContentDigest::of(b"witness");
-    json!({"report_version":1,"seed":1009,"timebase":"counter","deferred_tx":false,
-        "counter_profile":"amd-zen","outcome":"end_machine_exited","world_witness":hash,
+    json!({"report_version":1,"seed":1009,"deferred_tx":false,
+        "outcome":"end_machine_exited","world_witness":hash,
         "faults":[],"fault_error":null,"control_history":[],"control_latency_ns":0,
         "sim_seconds":0.0,"host_seconds":0.0,"speed":null,"slices":0,"frames_delivered":0,
         "frames_dropped":0,"network_counters":{},"network_witness":hash,"kills":[],
@@ -118,7 +118,6 @@ fn initial_arm_launch_uses_numeric_cap_and_network_bound() {
         let mut prepared = base.prepared.clone();
         prepared.profile.backend = Backend::Hvf;
         prepared.profile.semantic_parameters.engine = Some(seedbox::engine::arm_descriptor());
-        prepared.profile.semantic_parameters.clock = Clock::Pv;
         let request = ExecutionRequest {
             prepared: &prepared,
             ..*base
@@ -221,7 +220,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
             &typed(&checkpoint_world),
             request.seed,
             prepared.profile.engine.hex(),
-            "counter",
+            false,
             false,
             |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
         )
@@ -940,15 +939,18 @@ fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
         let a2 = t2 + latency;
         let e2 = a2 + 2_000;
         let mut raw = report();
-        raw["machines"].as_array_mut().unwrap().push(json!({"name":"scenario-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}));
+        raw["machines"]
+            .as_array_mut()
+            .unwrap()
+            .push(machine_row("scenario-machine", Some(0)));
         raw["control_latency_ns"] = json!(latency);
         let call = json!({"version":1,"id":1,"op":"clock_drift","target":{"service":"server"},"max_rate_ppb":1_000_000});
         let heal = json!({"version":1,"id":2,"op":"heal","handle":"p1"});
         let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000u64,"action":"clock_drift","handle":"p1","machine":"server-machine","max_rate_ppb":1_000_000});
         let heal_plan = json!({"id":2,"at_ns":a2,"deadline_ns":a2+5_000_000_000u64,"action":"heal","handle":"p1"});
         raw["control_history"] = json!([
-            {"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1","rate_ppb":-4321},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":e+latency},"delivered_at_ns":e+latency},
-            {"relay_id":2,"request":heal,"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":t2,"admitted_at_ns":a2,"effect_at_ns":e2,"replied_at_ns":e2+latency},"delivered_at_ns":e2+latency}
+            {"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1","rate_ppb":-4321},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":e+latency},"delivered_at_ns":e+latency},
+            {"relay_id":2,"session_id":1,"request":heal,"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":t2,"admitted_at_ns":a2,"effect_at_ns":e2,"replied_at_ns":e2+latency},"delivered_at_ns":e2+latency}
         ]);
         raw["faults"] = json!([
             {"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":e,"action":"clock_drift","machine":"server-machine","status":"applied","detail":"handle=p1; guest clock rate set to -4321 ppb","rate_ppb":-4321},
@@ -1305,27 +1307,6 @@ fn unavailable_at_admission_requires_prior_crash_without_intervening_reboot() {
 }
 
 #[test]
-fn counter_identity_requires_an_attributable_matching_engine_report() {
-    fixture(|base| {
-        let mut inputs = base.prepared.clone();
-        inputs.profile.semantic_parameters.clock = Clock::Counter(CounterProfile::IntelIceLake);
-        let request = ExecutionRequest {
-            prepared: &inputs,
-            ..*base
-        };
-        assert!(vmm::report(&serde_json::to_vec(&report()).unwrap(), &request).is_err());
-        let mut raw = report();
-        raw["counter_profile"] = json!("amd-zen");
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
-        raw["counter_profile"] = json!("intel-0x5111c4");
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
-        let mut json = serde_json::to_value(&inputs.profile).unwrap();
-        json["semantic_parameters"]["clock"]["counter"] = "unknown".into();
-        assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
-    });
-}
-
-#[test]
 fn committed_trigger_reports_correlate_arms_effects_cancellation_and_cutoff() {
     fixture(|base| {
         let c = seedbox::config::Control {
@@ -1502,15 +1483,7 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
     let engine = dir.path().join("engine");
     std::fs::write(&engine, b"engine").unwrap();
     let store = ContentStore::new(dir.path().join("objects"));
-    let executor = vmm::VmmExecutor::new(
-        &engine,
-        &store,
-        None,
-        512,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let executor = vmm::VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
     let original = executor.profile();
     assert!(!original.semantic_parameters.torn_writes);
     assert_eq!(original.semantic_parameters.memory_mb, 512);
@@ -1551,85 +1524,6 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
         let mut legacy = serde_json::to_value(&original).unwrap();
         legacy["semantic_parameters"]["disk_loss_survival_probability"] = "2.0".into();
         assert!(serde_json::from_value::<ExecutionProfile>(legacy).is_err());
-    });
-}
-
-#[test]
-fn timebase_reports_validate_recorded_semantics() {
-    fixture(|base| {
-        let counter = vmm::report(&serde_json::to_vec(&report()).unwrap(), base).unwrap();
-        assert_eq!(counter.timebase, Some(Timebase::Counter));
-        for timebase in [Timebase::Counter, Timebase::Pv] {
-            let mut prepared = base.prepared.clone();
-            prepared.profile.semantic_parameters.clock = Clock::new(timebase, CounterProfile::Zen);
-            let request = ExecutionRequest {
-                prepared: &prepared,
-                ..*base
-            };
-            let mut raw = report();
-            raw["timebase"] = json!(timebase.name());
-            if timebase == Timebase::Pv {
-                raw["counter_profile"] = json!(null);
-            }
-            let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
-            assert_eq!(parsed.timebase, Some(timebase));
-            assert_eq!(
-                serde_json::to_value(parsed).unwrap()["timebase"],
-                timebase.name()
-            );
-            for other in ["counter", "pv"] {
-                if other == timebase.name() {
-                    continue;
-                }
-                raw["timebase"] = json!(other);
-                let error = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains(&format!("--timebase {other}")), "{error}");
-            }
-            raw["timebase"] = json!("unknown");
-            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
-            raw.as_object_mut().unwrap().remove("timebase");
-            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
-        }
-        let mut json = serde_json::to_value(&base.prepared.profile).unwrap();
-        json["semantic_parameters"]["clock"] = "future".into();
-        assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
-    });
-}
-
-#[test]
-fn pv_reports_may_omit_counter_profile_but_counter_reports_must_not() {
-    fixture(|base| {
-        let mut prepared = base.prepared.clone();
-        for clock in [Clock::Counter(CounterProfile::IntelSkylake), Clock::Pv] {
-            prepared.profile.semantic_parameters.clock = clock;
-            let timebase = clock.timebase();
-            let request = ExecutionRequest {
-                prepared: &prepared,
-                ..*base
-            };
-            let mut raw = report();
-            raw["timebase"] = json!(timebase.name());
-            raw["counter_profile"] = json!(null);
-            let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
-            if timebase == Timebase::Counter {
-                assert!(parsed
-                    .unwrap_err()
-                    .to_string()
-                    .contains("VMM report is missing its counter profile"));
-            } else {
-                assert_eq!(parsed.unwrap().timebase, Some(Timebase::Pv));
-                continue;
-            }
-            raw["counter_profile"] = json!(CounterProfile::IntelSkylake.name());
-            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
-            raw["counter_profile"] = json!(CounterProfile::Zen.name());
-            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
-                .unwrap_err()
-                .to_string()
-                .contains("different branch counter profile"));
-        }
     });
 }
 
@@ -1698,80 +1592,72 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
 #[test]
 fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
     fixture(|base| {
-        for timebase in ["counter", "pv"] {
-            let mut inputs = Vec::new();
-            let mut worlds = Vec::new();
-            for (page_timer, deferred_tx) in
-                [(false, false), (true, false), (false, true), (true, true)]
-            {
-                let mut prepared = base.prepared.clone();
-                let parameters = &mut prepared.profile.semantic_parameters;
-                parameters.checkpoint = Some(Checkpoint {
-                    at_ns: 500,
-                    branch_seed: 42,
-                });
-                parameters.clock = if timebase == "pv" {
-                    Clock::Pv
+        let mut inputs = Vec::new();
+        let mut worlds = Vec::new();
+        for (page_timer, deferred_tx) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut prepared = base.prepared.clone();
+            let parameters = &mut prepared.profile.semantic_parameters;
+            parameters.checkpoint = Some(Checkpoint {
+                at_ns: 500,
+                branch_seed: 42,
+            });
+            parameters.page_timer = page_timer;
+            parameters.deferred_tx = deferred_tx;
+            let world = world_json(&ExecutionRequest {
+                prepared: &prepared,
+                ..*base
+            })
+            .unwrap();
+            let engine_parent = checkpoint_protocol::parent_identity(
+                &typed(&world),
+                base.seed,
+                prepared.profile.engine.hex(),
+                deferred_tx,
+                page_timer,
+                |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
+            )
+            .unwrap();
+            assert_eq!(world["checkpoint"]["parent_identity"], engine_parent);
+            inputs.push(prepared);
+            worlds.push(world);
+        }
+        for field in ["parent_identity", "branch_identity"] {
+            let ids: std::collections::BTreeSet<_> = worlds
+                .iter()
+                .map(|world| world["checkpoint"][field].as_str().unwrap())
+                .collect();
+            assert_eq!(ids.len(), 4, "{field}");
+        }
+        for (i, prepared) in inputs.iter().enumerate() {
+            let request = ExecutionRequest { prepared, ..*base };
+            for (j, world) in worlds.iter().enumerate() {
+                let mut raw = report();
+                raw["deferred_tx"] = json!(prepared.profile.semantic_parameters.deferred_tx);
+                raw["checkpoint"] = world["checkpoint"].clone();
+                let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
+                if i == j {
+                    assert!(result.is_ok(), "{result:?}");
                 } else {
-                    Clock::Counter(CounterProfile::Zen)
-                };
-                parameters.page_timer = page_timer;
-                parameters.deferred_tx = deferred_tx;
-                let world = world_json(&ExecutionRequest {
-                    prepared: &prepared,
-                    ..*base
-                })
-                .unwrap();
-                let engine_parent = checkpoint_protocol::parent_identity(
-                    &typed(&world),
-                    base.seed,
-                    prepared.profile.engine.hex(),
-                    &seedbox_engine_core::checkpoint::identity_timebase(timebase, deferred_tx),
-                    page_timer,
-                    |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
-                )
-                .unwrap();
-                assert_eq!(world["checkpoint"]["parent_identity"], engine_parent);
-                inputs.push(prepared);
-                worlds.push(world);
-            }
-            for field in ["parent_identity", "branch_identity"] {
-                let ids: std::collections::BTreeSet<_> = worlds
-                    .iter()
-                    .map(|world| world["checkpoint"][field].as_str().unwrap())
-                    .collect();
-                assert_eq!(ids.len(), 4, "{timebase} {field}");
-            }
-            for (i, prepared) in inputs.iter().enumerate() {
-                let request = ExecutionRequest { prepared, ..*base };
-                for (j, world) in worlds.iter().enumerate() {
-                    let mut raw = report();
-                    raw["timebase"] = json!(timebase);
-                    raw["deferred_tx"] = json!(prepared.profile.semantic_parameters.deferred_tx);
-                    raw["checkpoint"] = world["checkpoint"].clone();
-                    let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
-                    if i == j {
-                        assert!(result.is_ok(), "{result:?}");
-                    } else {
-                        assert!(result
-                            .unwrap_err()
-                            .to_string()
-                            .contains("VMM checkpoint identity mismatch"));
-                    }
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("VMM checkpoint identity mismatch"));
                 }
             }
-            let mut restored_off = inputs.pop().unwrap();
-            restored_off.profile.semantic_parameters.page_timer = false;
-            restored_off.profile.semantic_parameters.deferred_tx = false;
-            assert_eq!(
-                world_json(&ExecutionRequest {
-                    prepared: &restored_off,
-                    ..*base
-                })
-                .unwrap()["checkpoint"],
-                worlds[0]["checkpoint"]
-            );
         }
+        let mut restored_off = inputs.pop().unwrap();
+        restored_off.profile.semantic_parameters.page_timer = false;
+        restored_off.profile.semantic_parameters.deferred_tx = false;
+        assert_eq!(
+            world_json(&ExecutionRequest {
+                prepared: &restored_off,
+                ..*base
+            })
+            .unwrap()["checkpoint"],
+            worlds[0]["checkpoint"]
+        );
     });
 }
 
@@ -1808,7 +1694,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             &typed(&cfg),
             base.seed,
             inputs.profile.engine.hex(),
-            "counter",
+            false,
             false,
             |path| {
                 Ok(ContentDigest::of(&std::fs::read(path).unwrap())
@@ -1818,34 +1704,9 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         )
         .unwrap();
         assert_eq!(cfg["checkpoint"]["parent_identity"], parent);
-        let mut pv_inputs = inputs.clone();
-        pv_inputs.profile.semantic_parameters.clock = Clock::Pv;
-        let pv_world = world_json(&ExecutionRequest {
-            prepared: &pv_inputs,
-            artifacts: &artifacts,
-            ..*base
-        })
-        .unwrap();
-        let pv_parent = checkpoint_protocol::parent_identity(
-            &typed(&pv_world),
-            base.seed,
-            inputs.profile.engine.hex(),
-            "pv",
-            false,
-            |path| {
-                Ok(ContentDigest::of(&std::fs::read(path).unwrap())
-                    .hex()
-                    .to_owned())
-            },
-        )
-        .unwrap();
-        assert_eq!(pv_world["checkpoint"]["parent_identity"], pv_parent);
-        assert_ne!(pv_parent, parent);
         let mut deferred_worlds = Vec::new();
-        for (timebase, off_world) in [(Timebase::Counter, &cfg), (Timebase::Pv, &pv_world)] {
+        {
             let mut deferred_inputs = inputs.clone();
-            deferred_inputs.profile.semantic_parameters.clock =
-                Clock::new(timebase, CounterProfile::Zen);
             deferred_inputs.profile.semantic_parameters.deferred_tx = true;
             let deferred_world = world_json(&ExecutionRequest {
                 prepared: &deferred_inputs,
@@ -1857,7 +1718,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
                 &typed(&deferred_world),
                 base.seed,
                 inputs.profile.engine.hex(),
-                &format!("{}+deferred-tx", timebase.name()),
+                true,
                 false,
                 |path| {
                     Ok(ContentDigest::of(&std::fs::read(path).unwrap())
@@ -1872,11 +1733,11 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             );
             assert_ne!(
                 deferred_world["checkpoint"]["parent_identity"],
-                off_world["checkpoint"]["parent_identity"]
+                cfg["checkpoint"]["parent_identity"]
             );
             assert_ne!(
                 deferred_world["checkpoint"]["branch_identity"],
-                off_world["checkpoint"]["branch_identity"]
+                cfg["checkpoint"]["branch_identity"]
             );
             deferred_worlds.push((deferred_inputs, deferred_world));
         }
@@ -1930,15 +1791,8 @@ fn explicit_combined_cli_is_retained_with_its_actual_version() {
         .unwrap();
     assert!(expected.status.success());
     let version = String::from_utf8(expected.stdout).unwrap();
-    let executor = vmm::VmmExecutor::new_detected(
-        binary,
-        &store,
-        None,
-        512,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let executor =
+        vmm::VmmExecutor::new_detected(binary, &store, None, 512, WitnessMode::Exits).unwrap();
     let profile = executor.profile();
     let descriptor = profile.semantic_parameters.engine.as_ref().unwrap();
     assert_eq!(

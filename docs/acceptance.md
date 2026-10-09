@@ -4,7 +4,10 @@ Historical paths and commands below are as recorded, before the repository moved
 workspace (`sim/seedbox` is now `crates/seedbox`, `sim/vmm` is `crates/seedbox-vmm`,
 and the runners are under `harness/`). The engine hashes below are for builds
 from that layout; a VMM built from `crates/seedbox-vmm` embeds different source
-paths and is a new engine, even though its source is unchanged.
+paths and is a new engine, even though its source is unchanged. Entries that
+mention the counter timebase, `--margin`, `--undo` or MSR restoration predate
+the removal of counter mode; those settings no longer exist, and runs recorded
+with them do not replay on the current engine.
 
 ## 2026-10-08 — recorded guest epoch and unprivileged namespaces
 
@@ -523,3 +526,7 @@ single-member etcd fixture is preserved.
 The direct KVM results above retain their recorded engine identities; hardware
 execution was not repeated for this merge. The seed-4004 clock-bound failure is
 tracked in [issue #33](https://github.com/gardnervickers/seedbox/issues/33).
+
+The runtime application paths in the historical evidence above have since moved
+to `examples/runtimes/<runtime>/compose.yaml` (including TLS). They are optional
+examples and no longer run in default acceptance; the recorded evidence is unchanged.

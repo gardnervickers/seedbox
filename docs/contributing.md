@@ -19,17 +19,17 @@ Run tests from the project Nix shell by naming the platform suites you want:
 
 ```sh
 nix develop --command bash harness/check.sh   # portable (the default)
-bash harness/check.sh linux-kvm               # any Linux KVM host, including droplets
-bash harness/check.sh linux --cpu 14          # the AMD host
+bash harness/check.sh linux-kvm               # any Linux KVM host, including GitHub-hosted Ubuntu runners
+bash harness/check.sh linux --cpu 14          # a Linux KVM host
 bash harness/check.sh mac                     # Apple Silicon
-bash harness/check.sh linux-counter --list    # check requirements, build nothing
+bash harness/check.sh linux-apps --list       # check requirements, build nothing
 bash harness/check.sh --help                  # list suites and groups
 ```
 
 The runner never selects tests by probing the host. Every named suite runs, and
 a suite whose host requirements are missing fails with exit 2 before anything
-builds. The `linux` group covers generic KVM, counted x86 tests under CPU/SMT
-leases, OCI and applications; `mac` covers signed native HVF tests and
+builds. The `linux` group covers generic KVM, OCI and applications under a
+CPU/SMT lease; `mac` covers signed native HVF tests and
 applications. The guest-fixture suites need a hand-built kernel and initrd, so
 they are named explicitly (`linux-guests`, `mac-guests`). Application acceptance
 uses the release CLI, after building guest assets with `bash tools/build-assets.sh`.
@@ -54,26 +54,19 @@ have been removed. Their last versions are retained in Git at `c7d7c22`.
 
 `harness/batch.sh` remains for the raw kernel/network fixtures and the one-VM
 network comparison below, whose placement differs from one service per VM.
-Those fixtures still need the shared guest builders, CPU/SMT lease handling and
-MSR restoration. See [the fixture map](../harness/worlds/README.md).
+Those fixtures still need the shared guest builders and CPU/SMT lease handling.
+See [the fixture map](../harness/worlds/README.md).
 
-Stop placement settings affect speed only, never results. `--undo` controls the
-precise-stop rollback window (default 256; 0 disables it). `--margin` selects the
-PMU approach and stepping distance when undo is off (default `adaptive`). Neither
-setting decides where a stop lands: the first natural exit at or after the soft
-target and below the hard target, otherwise an exact count at the hard target. The
-standalone `seedbox-vmm` takes them as `--undo`/`--margin` or `SEEDBOX_UNDO`/`SEEDBOX_MARGIN`,
-which the low-level batch runner sets.
+`--watchdog-ms` affects speed only, never results: it sets how often the host
+watchdog observes a guest that makes no natural exits.
 
-A PMU overshoot aborts an execution. A separate invocation can use a larger
-margin; the failed evidence remains. Charged timer-port accesses apply their
+Charged timer-port accesses apply their
 device effect or sample their read response once and conserve their full 1000 ns
 cost across world and timer boundaries. The guest resumes only after that cost
 is paid and KVM completes the pending instruction. Terminal witnesses retain a
 pending operation, including its remaining cost and transferred bytes. Other
 clock advances, including guest time reads, retain the strict hard-stop check;
-crossing it fails with `clock bound exceeded`. A larger PMU margin does not fix
-that error.
+crossing it fails with `clock bound exceeded`.
 
 ## Acceptance scenarios
 
@@ -82,14 +75,12 @@ repository root on the qualified Linux host, after setting up the CLI runtime
 inputs described above:
 
 ```sh
-seedbox run harness/acceptance/workloads/short-kill-3.5.2.yaml
-seedbox run harness/acceptance/workloads/sanity.yaml
+seedbox run harness/acceptance/workloads/key-value.yaml
 seedbox run harness/acceptance/workloads/race.yaml
-seedbox run harness/acceptance/workloads/kill-3.5.3.yaml
 seedbox run harness/acceptance/workloads/volume-crash.yaml
 ```
 
-The YAML references the existing Go/C workload build contexts and loads the
+The YAML references the existing Python TCP key/value fixture and C race workload and loads the
 Python drivers and control API through Compose `configs`. No preparation script,
 generated project, or host scenario runner is required. Paths resolve relative
 to each YAML file, so these commands also work from another directory with an
@@ -115,11 +106,9 @@ execution path. Change the seed with `--seed`, request state digests with
 
 ```sh
 seedbox replay /path/to/retained/run
-seedbox replay /path/to/retained/run --undo 0
-seedbox replay /path/to/retained/run --undo 16
-seedbox replay /path/to/retained/run --margin 32768
+seedbox replay /path/to/retained/run --watchdog-ms 5
 
-seedbox explore harness/acceptance/workloads/kill-3.5.3.yaml --seed 4000 --count 11
+seedbox explore harness/acceptance/workloads/key-value.yaml --seed 4000 --count 11
 ```
 
 The CLI owns image preparation, CPU leases, restoration, retained evidence and
@@ -164,10 +153,9 @@ CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/cluster-fixed.json n
 Use a fresh output prefix for every invocation. The example CPU is the lane
 used for this investigation, not a requirement of the shared tooling. Check
 host topology and other jobs before choosing cores; keep SMT siblings unused
-by other workloads during measurements. `batch.sh` uses `harness/msr54.py`, keeps
-an invocation-specific snapshot, and restores the assigned cores after its
-children have finished. Do not reuse the historical fixed-CPU research runner
-for new fixture runs.
+by other workloads during measurements. `batch.sh` holds CPU/SMT leases until
+its children have finished; PV execution does not modify host MSRs. Do not
+reuse the historical fixed-CPU research runner for new fixture runs.
 
 `single-vm-controls.json` exercises packet isolation and directionality;
 `single-vm-sanity.json` plants a missing acknowledgement to check the checker;
@@ -195,7 +183,7 @@ These worlds deliberately retain a small fixed-delay, zero-jitter fixture.
 They do not reproduce the historical full `kill-3.5.2` hunt or establish its
 bug-finding rate. Before backend selection,
 [issue #10](https://github.com/gardnervickers/seedbox/issues/10) requires a
-matched optimized PV/undo comparison, qualified guest-local jitter, the full
+matched optimized comparison, qualified guest-local jitter, the full
 seeded kill/restart schedule, eight writers for 60 seconds, and etcd 3.5.3
 controls over the same seeds. The historical ABI1 timings are in
 [the historical networking report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/single-vm-network/REPORT.md)

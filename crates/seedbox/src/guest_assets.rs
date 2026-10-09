@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const REQUIRED: [&str; 3] = ["compose-init", "mke2fs", "NOTICE.txt"];
+const REQUIRED: [&str; 4] = ["compose-init", "mke2fs", "NOTICE.txt", "progress.tar"];
 const ARCHIVE_LIMIT: u64 = 512 << 20;
 const UNPACKED_LIMIT: u64 = 2 << 30;
 #[derive(Clone, Debug)]

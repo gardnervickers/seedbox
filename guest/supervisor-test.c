@@ -1,6 +1,9 @@
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <sys/resource.h>
+#include <unistd.h>
+static int application_execv(const char *path, char *const argv[]);
+#define execv application_execv
 static int application_setrlimit(int resource, const struct rlimit *limit);
 #define setrlimit application_setrlimit
 static int readiness_ioperm(unsigned long first, unsigned long count, int enabled);
@@ -14,11 +17,31 @@ static int test_adjtimex(struct timex *adjustment);
 #define SEEDBOX_SUPERVISOR_TEST
 #include "compose-init.c"
 #undef setrlimit
+#undef execv
 #include <assert.h>
 #include <sys/socket.h>
+/* Exercise supervisor process control on the host without installing the guest
+ * translator at /seedbox. Check its launch contract, then run the fixture. */
+static int application_execv(const char *path, char *const argv[]) {
+    assert(!strcmp(path, "/seedbox/progress/bin64/drrun"));
+    assert(!strcmp(argv[0], path));
+    assert(!strcmp(argv[1], "-opt_speed"));
+    assert(!strcmp(argv[2], "-disable_traces"));
+    size_t index = 3;
+#if defined(__aarch64__)
+    assert(!strcmp(argv[index++], "-no_ldstex2cas"));
+    assert(!strcmp(argv[index++], "-unsafe_build_ldstex"));
+#endif
+    assert(!strcmp(argv[index++], "-c"));
+    assert(!strcmp(argv[index++], "/seedbox/progress/libseedbox_progress.so"));
+    assert(!strcmp(argv[index++], "--"));
+    assert(argv[index]);
+    return execv(argv[index], argv + index);
+}
 static int application_setrlimit(int resource, const struct rlimit *limit) {
     assert(resource == RLIMIT_NOFILE && launch_error_fd >= 0);
-    assert(limit->rlim_cur == 1048576 && limit->rlim_max == 1048576);
+    assert(limit->rlim_cur == APPLICATION_NOFILE + INSTRUMENTATION_FDS);
+    assert(limit->rlim_max == APPLICATION_NOFILE + INSTRUMENTATION_FDS);
     /* An unprivileged host test cannot raise its inherited hard ceiling.
      * Check the requested default, then exercise inheritance within it. */
     struct rlimit allowed; assert(!getrlimit(resource, &allowed));
@@ -76,8 +99,9 @@ int main(int argc, char **argv) {
     if (argc > 1) {
         /* Every exec, including a restart, inherits the runtime limit. */
         struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE, &limit));
-        assert(limit.rlim_cur == limit.rlim_max && limit.rlim_max <= 1048576);
+        assert(limit.rlim_cur == limit.rlim_max && limit.rlim_max <= APPLICATION_NOFILE + INSTRUMENTATION_FDS);
     }
+    if (argc > 1 && !strcmp(argv[1], "exit-now")) _exit(1);
     if (argc > 1 && !strcmp(argv[1], "exit-later")) {
         /* Launched by the supervisor: SIGCHLD must not stay blocked. */
         sigset_t mask; assert(!sigprocmask(SIG_SETMASK, NULL, &mask));
@@ -275,7 +299,7 @@ int main(int argc, char **argv) {
         if (!check) {
             alarm(10); close(management); management = -1;
             watch_children();
-            char *exit_later[] = {argv[0], "exit-later", NULL}, *exit_now[] = {"false", NULL};
+            char *exit_later[] = {argv[0], "exit-later", NULL}, *exit_now[] = {argv[0], "exit-now", NULL};
             arguments = later ? exit_later : exit_now;
             child = start(); assert(child > 0);
             supervise(&child);

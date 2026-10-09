@@ -16,22 +16,6 @@ fn supervisor_io_survives_hidden_device_nodes_without_leaking_through_exec() {
     assert!(Command::new(binary).status().unwrap().success());
 }
 #[test]
-fn workload_environment_defaults_gomaxprocs_without_overwriting_explicit_values() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest");
-    let directory = tempfile::tempdir().unwrap();
-    let binary = directory.path().join("environment-test");
-    assert!(Command::new("cc")
-        .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
-        .arg(root.join("environment-test.c"))
-        .arg("-o")
-        .arg(&binary)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new(binary).status().unwrap().success());
-}
-
-#[test]
 fn actual_guest_command_parser_rejects_ambiguous_and_uncorrelated_ids() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest");
     let directory = tempfile::tempdir().unwrap();

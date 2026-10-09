@@ -9,12 +9,12 @@ use sha2::{Digest, Sha256};
 pub const INTERVAL_NS: u64 = 1_000_000;
 
 /// Bytes per entry in `NAME.witness-log`: little-endian u64 time_ns,
-/// branches, records and the first eight witness bytes read as little-endian.
-pub const ENTRY_BYTES: usize = 32;
+/// records and the first eight witness bytes read as little-endian.
+pub const ENTRY_BYTES: usize = 24;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WitnessLog {
-    entries: Vec<[u64; 4]>,
+    entries: Vec<[u64; 3]>,
     /// Witness records so far, across incarnations.
     records: u64,
     /// The next sample is taken by the first record at or after this time.
@@ -29,20 +29,19 @@ fn prefix(witness: &Sha256) -> u64 {
 impl WitnessLog {
     /// Count a record just hashed into `witness` and sample it if the
     /// machine has reached the next interval boundary.
-    pub fn record(&mut self, time_ns: u64, branches: u64, witness: &Sha256) {
+    pub fn record(&mut self, time_ns: u64, witness: &Sha256) {
         self.records += 1;
         if time_ns >= self.next_ns {
-            self.entries
-                .push([time_ns, branches, self.records, prefix(witness)]);
+            self.entries.push([time_ns, self.records, prefix(witness)]);
             self.next_ns = (time_ns / INTERVAL_NS + 1) * INTERVAL_NS;
         }
     }
 
     /// The samples, followed by the final state when it was not sampled.
-    pub fn encode(&self, time_ns: u64, branches: u64, witness: &Sha256) -> Vec<u8> {
+    pub fn encode(&self, time_ns: u64, witness: &Sha256) -> Vec<u8> {
         let mut entries = self.entries.clone();
-        if entries.last().is_none_or(|e| e[2] != self.records) {
-            entries.push([time_ns, branches, self.records, prefix(witness)]);
+        if entries.last().is_none_or(|e| e[1] != self.records) {
+            entries.push([time_ns, self.records, prefix(witness)]);
         }
         let mut bytes = Vec::with_capacity(entries.len() * ENTRY_BYTES);
         for value in entries.iter().flatten() {
@@ -56,7 +55,7 @@ impl WitnessLog {
 mod tests {
     use super::*;
 
-    fn entries(bytes: &[u8]) -> Vec<[u64; 4]> {
+    fn entries(bytes: &[u8]) -> Vec<[u64; 3]> {
         bytes
             .chunks_exact(ENTRY_BYTES)
             .map(|e| {
@@ -77,34 +76,29 @@ mod tests {
             (5_200_000, 5),
         ] {
             w.update([b as u8]);
-            log.record(t, b, &w);
+            log.record(t, &w);
         }
         // Same interval as the last sample: only the final entry shows it.
         w.update([6]);
-        log.record(5_300_000, 6, &w);
-        let got = entries(&log.encode(6_000_000, 7, &w));
-        let times: Vec<_> = got.iter().map(|e| (e[0], e[1], e[2])).collect();
+        log.record(5_300_000, &w);
+        let got = entries(&log.encode(6_000_000, &w));
+        let times: Vec<_> = got.iter().map(|e| (e[0], e[1])).collect();
         // One sample per interval reached; idle intervals add nothing.
         assert_eq!(
             times,
-            [
-                (0, 1, 1),
-                (1_000_000, 3, 3),
-                (5_200_000, 5, 5),
-                (6_000_000, 7, 6)
-            ]
+            [(0, 1), (1_000_000, 3), (5_200_000, 5), (6_000_000, 6)]
         );
-        assert_eq!(got[3][3], prefix(&w));
-        assert_ne!(got[2][3], got[3][3]);
+        assert_eq!(got[3][2], prefix(&w));
+        assert_ne!(got[2][2], got[3][2]);
     }
 
     #[test]
     fn final_state_is_not_repeated_when_last_record_was_sampled() {
         let mut log = WitnessLog::default();
         let w = Sha256::new();
-        log.record(0, 0, &w);
-        assert_eq!(log.encode(0, 0, &w).len(), ENTRY_BYTES);
-        assert_eq!(WitnessLog::default().encode(0, 0, &w).len(), ENTRY_BYTES);
+        log.record(0, &w);
+        assert_eq!(log.encode(0, &w).len(), ENTRY_BYTES);
+        assert_eq!(WitnessLog::default().encode(0, &w).len(), ENTRY_BYTES);
     }
 
     #[test]
@@ -112,7 +106,7 @@ mod tests {
         let mut w = Sha256::new();
         w.update(b"x");
         let before = w.clone().finalize();
-        WitnessLog::default().record(0, 0, &w);
+        WitnessLog::default().record(0, &w);
         assert_eq!(w.finalize(), before);
     }
 }

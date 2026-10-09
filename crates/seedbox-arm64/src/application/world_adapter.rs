@@ -283,6 +283,9 @@ impl ArmMachine {
         }
         match self.worker.call(Operation::Evidence {
             full_state: self.full_state,
+            ram_pages: self
+                .full_state
+                .then(|| self.output.join(format!("{}.pages", self.world.name))),
         })? {
             Answer::Evidence(evidence) => Ok(evidence),
             _ => self.reject("invalid machine evidence response".into()),
@@ -555,9 +558,6 @@ impl WorldMachine for ArmMachine {
     }
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<()> {
         Err("ARM machine speed reseeding is unsupported".into())
-    }
-    fn branches(&self) -> u64 {
-        0
     }
     fn exits(&self) -> u64 {
         self.physical.exits

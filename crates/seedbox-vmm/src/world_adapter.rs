@@ -1,5 +1,5 @@
 //! Direct KVM primitives for the shared world; no simulation loop lives here.
-use crate::machine::{ExitKind, Machine, MachineSnapshot};
+use crate::machine::{Machine, MachineSnapshot};
 use crate::{boot_machine, BootInputs, Clock};
 use seedbox_engine_core::{
     rng::Rng,
@@ -63,18 +63,13 @@ impl WorldMachine for Machine {
         Machine::succeed(self, old, at, seed, identity)
     }
     fn crash_observations(&self) -> serde_json::Value {
-        serde_json::json!({"pio_total":self.stats.kvm_n[ExitKind::Pio as usize],"net":self.net.as_ref().map(|n|n.report())})
+        serde_json::json!({"pio_total":self.stats.kvm_n[2],"net":self.net.as_ref().map(|n|n.report())})
     }
-    /// Clocks hold no checkpoint state: PV probes are per machine, and
-    /// `Machine::snapshot` refuses one inside a probe.
-    fn checkpoint_boundary(_: &Self::Clock) -> Result<(), String> {
-        Ok(())
+    fn checkpoint_boundary(clock: &Self::Clock) -> Result<(), String> {
+        clock.checkpoint_boundary()
     }
     fn restore_boundary(clock: &mut Self::Clock) -> Result<(), String> {
-        if let Clock::Pv(clock) = clock {
-            clock.restore_boundary()?;
-        }
-        Ok(())
+        clock.restore_boundary()
     }
     fn reseed_guest(&mut self, entropy: [u32; 8]) -> Result<(), String> {
         self.reseed_time_page(entropy)
@@ -113,17 +108,11 @@ impl WorldMachine for Machine {
         Ok(())
     }
     fn supports_throttle(&self) -> bool {
-        self.features.pv()
+        true
     }
     fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
-        if !self.features.pv() {
-            return Err("throttle needs the pv timebase".into());
-        }
         self.throttle_permille = Some(factor_permille);
         Ok(())
-    }
-    fn branches(&self) -> u64 {
-        self.branches
     }
     fn exits(&self) -> u64 {
         self.stats.exits
@@ -146,9 +135,6 @@ impl WorldMachine for Machine {
         request: SliceRequest,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String> {
-        match clock {
-            Clock::Counter(c) => self.run_until(c, request.hard_limit, request.early_slack, frames),
-            Clock::Pv(p) => self.run_until(p, request.hard_limit, request.early_slack, frames),
-        }
+        self.run_until(clock, request.hard_limit, request.early_slack, frames)
     }
 }

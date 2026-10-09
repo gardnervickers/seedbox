@@ -71,7 +71,7 @@ pub fn kvm_descriptor(kind: ExecutableKind, simulator_version: String) -> Engine
         host_arch: "x86_64".into(),
         guest_arch: "x86_64".into(),
         engine_backend: "kvm".into(),
-        engine_timebase: "counter-pv-v1".into(),
+        engine_timebase: "pv-v1".into(),
     }
 }
 

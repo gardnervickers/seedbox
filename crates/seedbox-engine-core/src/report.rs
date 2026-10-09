@@ -7,7 +7,6 @@
 //! the control log, the network counters), never these report types.
 
 use crate::faults::{FaultRow, RowStatus};
-pub use crate::launch::Timebase;
 use crate::network_counters;
 use crate::world::State;
 use crate::world_config::CheckpointConfig;
@@ -69,10 +68,7 @@ pub struct EngineReport {
     pub report_version: u32,
     /// The run seed; a checkpoint branch's own seed is in `checkpoint`.
     pub seed: u64,
-    pub timebase: Timebase,
     pub deferred_tx: bool,
-    /// The host's branch counter profile; `None` under the PV timebase.
-    pub counter_profile: Option<String>,
     #[serde(flatten)]
     pub evidence: WorldEvidence,
     pub sim_seconds: f64,
@@ -218,9 +214,6 @@ pub struct MachineOutcome {
     pub state_digest: Option<String>,
     /// Hashed state parts; `events` is descriptive text.
     pub state_digest_parts: Option<BTreeMap<String, String>>,
-    /// Guest branches retired. Absent from ARM reports.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branches: Option<u64>,
     /// An I/O operation still owed at the end. Absent from ARM reports.
     #[serde(default)]
     pub pending_io: Option<PendingIo>,
@@ -273,18 +266,13 @@ pub struct MachineReport {
     pub irqs: u64,
     pub window_exits: u64,
     pub eintr: u64,
-    pub precise_stops: u64,
-    pub steps: u64,
-    pub step_ms: f64,
     pub run_ms: f64,
-    pub skid_max: u64,
-    pub skid_count: usize,
-    pub skid_p50: Option<u64>,
-    pub skid_p99: Option<u64>,
-    pub final_margin: u64,
+    /// Watchdog observations of a run with no exit and no guest progress.
+    pub stalls: u64,
     pub yields: u64,
     pub yield_stops: u64,
-    pub undo: Option<UndoReport>,
+    /// Guest RAM pages copied to and from the fork-point shadow.
+    pub shadow: ShadowReport,
     pub kvm_ms_by_exit: BTreeMap<String, f64>,
     pub kvm_n_by_exit: Vec<u64>,
     pub control_channel: Option<ControlChannelReport>,
@@ -292,39 +280,16 @@ pub struct MachineReport {
     pub net: Option<Value>,
     pub disk: Option<DiskReport>,
     pub timer: TimerReport,
-    /// PV timebase only.
-    #[serde(flatten)]
-    pub pv: Option<PvReport>,
-}
-
-/// PV timebase diagnostics.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PvReport {
-    pub spin: SpinReport,
     pub syscalls: u64,
     pub syscall_ns: u64,
     pub time_ns_by_cause: BTreeMap<String, u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SpinReport {
-    pub probes: u64,
-    pub idles: u64,
-    pub false_alarms: u64,
-    pub clock_progress: u64,
-    pub mismatch: BTreeMap<String, u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UndoReport {
-    pub checkpoints: u64,
-    pub rollbacks: u64,
+pub struct ShadowReport {
     pub synced_pages: u64,
     pub restored_pages: u64,
-    pub checkpoint_ms: f64,
-    pub rollback_ms: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,6 +356,8 @@ pub struct FaultRecord {
     pub offset_ns: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_counts: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_ppb: Option<i64>,
     /// The plan as requested.
     pub request: Plan,
     pub requested_at_ns: u64,

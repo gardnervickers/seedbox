@@ -11,8 +11,7 @@ scheduler inside the worker.
 `WorldMachine` supplies physical boot, stopped execution, delivery, CPU/RAM
 capture and restoration, and architecture consequences of lifecycle operations.
 The clock, factory, boot inputs and snapshot types are opaque to the coordinator.
-No shared coordinator operation assumes a PMU. Transport-facing primitives are
-fallible. Timer reseeding uses the same explicit seed/domain as KVM, while ARM
+Transport-facing primitives are fallible. Timer reseeding uses the same explicit seed/domain as KVM, while ARM
 declares fixed PV cost rather than inventing randomized syscall-speed support.
 
 ## One machine record
@@ -89,8 +88,7 @@ the real `seedbox.barrier=1` handshake and physical time/entropy reconciliation.
 Deterministic time parking requires a completed stopped boundary without owed I/O.
 Release from arbitrary time parking and full snapshot capture/restore/fork reuse
 remain unsupported and return errors; empty snapshots or metadata-only restoration
-are never successful substitutes. General asynchronous ARM cycle proof remains
-disabled because debugger intervention changes the exclusive monitor.
+are never successful substitutes.
 
 ARM report rows for a machine currently down describe the retired predecessor's
 evidence, incarnation and time. The sole scheduler record describes the successor
@@ -111,5 +109,4 @@ trigger matcher/effect restoration, readiness reset and invalid adapters. The
 extraction is also checked against the actual pre-extraction KVM coordinator with
 identical mocked physical primitives and retained state/trace receipts. These are
 policy and extraction checks on Mac, not Linux CPU/KVM qualification. The existing
-real KVM tests remain for the final Linux merge train. ARM watchdog/proof and
-hidden-state limitations remain described in `progress-proof.md`.
+real KVM tests remain for the final Linux merge train.

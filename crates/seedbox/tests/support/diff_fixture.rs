@@ -37,7 +37,6 @@ fn fixture() -> sb::orchestration::RunRecord {
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
-            timebase: None,
             reason: StopReason::Completed,
             workload_exit: Some(WorkloadExit {
                 service: "workload".into(),
@@ -60,7 +59,7 @@ fn raw_report() -> serde_json::Value {
         "report_version": 1, "seed": 0, "outcome": "end_machine_exited",
         "world_witness": sb::store::ContentDigest::of(b"fixture"),
         "machines": [{"name":"workload", "witness":sb::store::ContentDigest::of(b"machine"),
-            "state":"Exited(0)", "time_ns":100, "branches":90, "guest_exit_code":0,
+            "state":"Exited(0)", "time_ns":100, "guest_exit_code":0,
             "guest_init_error":null, "infrastructure_error":false, "run_ms":10}]
     })
 }
@@ -103,9 +102,9 @@ fn write_fixture(
     write_fixture_logs(path, record, raw, &[("machines/workload.trace", trace)]);
 }
 
-/// Encode engine witness-log entries (time_ns, branches, records, witness prefix).
+/// Encode engine witness-log entries (time_ns, records, witness prefix).
 #[allow(dead_code)]
-fn witness_log_bytes(entries: &[[u64; 4]]) -> Vec<u8> {
+fn witness_log_bytes(entries: &[[u64; 3]]) -> Vec<u8> {
     entries.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
 }
 

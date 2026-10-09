@@ -2,8 +2,8 @@
 //! engine report on stdout.
 
 use clap::Parser;
-use seedbox_engine_core::launch::{parse_margin, MAX_MACHINE_WORKERS};
-use seedbox_vmm::{DebugEnv, MachineFeatures, Performance, Timebase, WorkerRequest};
+use seedbox_engine_core::launch::MAX_MACHINE_WORKERS;
+use seedbox_vmm::{DebugEnv, MachineFeatures, Performance, WorkerRequest};
 use std::path::PathBuf;
 
 /// Run one Seedbox world on KVM and print its engine report as JSON.
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 #[command(name = "seedbox-vmm")]
 struct Args {
     /// Launch request JSON written by the Seedbox CLI; conflicts with every
-    /// other flag and with SEEDBOX_UNDO/SEEDBOX_MARGIN.
+    /// other flag.
     #[arg(long, exclusive = true)]
     request: Option<PathBuf>,
     /// World JSON.
@@ -38,9 +38,6 @@ struct Args {
     /// Chunk index entries retained per console stream.
     #[arg(long)]
     log_chunk_limit: Option<usize>,
-    /// How guest progress advances virtual time.
-    #[arg(long, default_value = "counter", value_parser = parse_timebase)]
-    timebase: Timebase,
     /// Program the guest timer through the time page.
     #[arg(long)]
     page_timer: bool,
@@ -63,24 +60,6 @@ struct Args {
     /// Comma-separated CPUs, one per machine thread (performance only).
     #[arg(long, value_delimiter = ',')]
     machine_cpus: Vec<usize>,
-    /// Initial undo margin in branches; 0 disables undo (performance only).
-    #[arg(long, env = "SEEDBOX_UNDO")]
-    undo: Option<u64>,
-    /// Stepping margin in branches, or `adaptive` (performance only).
-    #[arg(long, env = "SEEDBOX_MARGIN", value_parser = margin)]
-    margin: Option<Margin>,
-}
-
-/// A parsed `--margin`: None adapts it.
-#[derive(Clone, Copy, Debug)]
-struct Margin(Option<u64>);
-
-fn margin(value: &str) -> Result<Margin, String> {
-    parse_margin(value).map(Margin)
-}
-
-fn parse_timebase(value: &str) -> Result<Timebase, String> {
-    Timebase::from_name(value).ok_or_else(|| "expected counter or pv".into())
 }
 
 impl Args {
@@ -91,7 +70,6 @@ impl Args {
             return serde_json::from_slice(&bytes)
                 .map_err(|e| format!("--request {}: {e}", path.display()));
         }
-        let defaults = Performance::default();
         let request = WorkerRequest {
             // Present unless --request was given (clap enforces it).
             config: self.config.unwrap_or_default(),
@@ -103,7 +81,6 @@ impl Args {
             console_limit: self.console_limit,
             log_chunk_limit: self.log_chunk_limit,
             features: MachineFeatures {
-                timebase: self.timebase,
                 page_timer: self.page_timer,
                 deferred_tx: self.deferred_tx,
             },
@@ -112,11 +89,8 @@ impl Args {
             machine_cpus: self.machine_cpus,
             stream_console: self.stream_console,
             trace: self.trace,
-            performance: Performance {
-                undo_margin: self.undo.unwrap_or(defaults.undo_margin),
-                margin: self.margin.map_or(defaults.margin, |Margin(margin)| margin),
-                ..defaults
-            },
+            performance: Performance::default(),
+            windowed_skew_us: 0,
         };
         request.validate()?;
         Ok(request)
@@ -173,18 +147,12 @@ mod tests {
             "123",
             "--log-chunk-limit",
             "456",
-            "--timebase",
-            "pv",
             "--stream-console",
             "--trace",
             "--page-timer",
             "--deferred-tx",
             "--checkpoint-at-ns",
             "100,200",
-            "--undo",
-            "0",
-            "--margin",
-            "64",
         ])
         .unwrap();
         let mut expected = WorkerRequest::new("world.json".into(), 7, "output".into());
@@ -194,23 +162,16 @@ mod tests {
         expected.console_limit = Some(123);
         expected.log_chunk_limit = Some(456);
         expected.features = MachineFeatures {
-            timebase: Timebase::Pv,
             page_timer: true,
             deferred_tx: true,
         };
         expected.checkpoint_at_ns = vec![100, 200];
         expected.stream_console = true;
         expected.trace = true;
-        expected.performance.undo_margin = 0;
-        expected.performance.margin = Some(64);
         assert_eq!(request, expected);
         assert_eq!(
             with(&[]).unwrap(),
             WorkerRequest::new("world.json".into(), 7, "output".into())
-        );
-        assert_eq!(
-            with(&["--margin", "adaptive"]).unwrap().performance.margin,
-            None
         );
     }
 
@@ -233,9 +194,6 @@ mod tests {
         assert!(with(&["--console-limit", "x"])
             .unwrap_err()
             .contains("--console-limit"));
-        assert!(with(&["--timebase", "bad"])
-            .unwrap_err()
-            .contains("expected counter or pv"));
         assert!(with(&["--checkpoint-at-ns"])
             .unwrap_err()
             .contains("--checkpoint-at-ns"));
@@ -256,7 +214,7 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("request.json");
         let mut request = WorkerRequest::new("w.json".into(), 3, "o".into());
-        request.features.timebase = Timebase::Pv;
+        request.features.deferred_tx = true;
         std::fs::write(&path, serde_json::to_vec(&request).unwrap()).unwrap();
         let path = path.to_str().unwrap();
         assert_eq!(parse(&["--request", path]).unwrap(), request);

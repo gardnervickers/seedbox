@@ -1,5 +1,5 @@
 {
-  "_comment": "Short undo-invariance control only; the same ordered faults as shaped.json, with every latency raised by 9 ms. A 10 ms horizon and 5 ms stop tolerance avoid forced stops between probe sends. Both U lanes use this world.",
+  "_comment": "Short control only; the same ordered faults as shaped.json, with every latency raised by 9 ms. A 10 ms horizon and 5 ms stop tolerance avoid forced stops between probe sends.",
   "kernel": "KERNEL",
   "mem_mb": 256,
   "duration_ns": 2500000000,

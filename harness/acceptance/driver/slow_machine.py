@@ -5,7 +5,10 @@ import socket
 import sys
 import time
 
-SYSCALLS = 20_000
+# Syscall charges reach the guest clock at exits, up to one 1 ms scheduler
+# window after the work. Measure roughly 200 ms so the uncharged tails at
+# either clock read cannot dominate the slowdown ratio.
+SYSCALLS = 200_000
 
 
 def worker():
@@ -60,7 +63,7 @@ def scenario():
     result = {"before_ns": before, "during_ns": during, "after_ns": after,
               "slowdown": round(during / before, 2), "recovered": round(after / before, 2)}
     print("SLOW_MACHINE_RESULT " + json.dumps(result, sort_keys=True), flush=True)
-    # Clock reads cost a fixed 100 ns each, so the ratio sits just under four.
+    # Clock reads and the partial scheduler windows are small at this work size.
     assert 3.5 <= during / before <= 4.05, result
     assert 0.9 <= after / before <= 1.1, result
     return 0

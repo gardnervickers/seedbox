@@ -1,24 +1,19 @@
 #!/usr/bin/env bash
-# Called by accept-runtime.sh after compilation; contains no direct MSR writes.
+# Called by accept-runtime.sh after compilation.
 set -euo pipefail
 cli=$1; vmm=$2; kernel=$3; cpu=$4; output=$5
 state="$output/state"
-capture_msr() {
-  python3 - "$cpu" <<'PY'
-import sys
-sys.path.insert(0, "harness")
-import batch, msr54
-msr54.show(sorted(batch.siblings(int(sys.argv[1]))))
-PY
-}
-capture_msr > "$output/msr-before.txt"
+# Every execution must release its CPU/SMT lease: the lock files are free again.
 verify_restore() {
-  capture_msr > "$output/msr-after.txt"
-  cmp "$output/msr-before.txt" "$output/msr-after.txt"
-  if test -d "$state/runs" && test -n "$(find "$state/runs" -name msr-original.json -print -quit)"; then
-    echo 'An MSR restoration snapshot remains' >&2
-    return 1
-  fi
+  python3 - "$cpu" <<'PY'
+import fcntl, sys
+sys.path.insert(0, "harness")
+import batch
+for cpu in sorted(batch.siblings(int(sys.argv[1]))):
+    with open(f"/tmp/seedbox-msr-cpu-{cpu}.lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+PY
 }
 trap verify_restore EXIT
 run_case() {
@@ -54,23 +49,15 @@ if test "${6:-}" = lifecycle; then
   run_case redis-full-state "$output/redis/compose.yaml" PASS 0 --full-state
   jq -e '.replay.full_state_matches == true and (.report.full_state | length) == 2' \
     "$output/redis-full-state-replay.json" >/dev/null
-  "$cli" replay "$attempt" --cpu "$cpu" --state "$state" --margin 10000 \
-    > "$output/redis-margin-replay.log" 2>&1
-  cat "$output/redis-margin-replay.log"
-  verify_restore
-  changed=$(sed -n 's/^[A-Z]*: //p' "$output/redis-margin-replay.log")
-  "$cli" inspect "$changed" --json > "$output/redis-margin-replay.json"
-  jq -e '.replay.status == "MATCH" and .replay.full_state_matches == true' \
-    "$output/redis-margin-replay.json" >/dev/null
-  for undo in 0 16; do
-    "$cli" replay "$attempt" --cpu "$cpu" --state "$state" --undo "$undo" \
-      > "$output/redis-undo-$undo.log" 2>&1
-    cat "$output/redis-undo-$undo.log"
+  for watchdog in 5 200; do
+    "$cli" replay "$attempt" --cpu "$cpu" --state "$state" --watchdog-ms "$watchdog" \
+      > "$output/redis-watchdog-$watchdog.log" 2>&1
+    cat "$output/redis-watchdog-$watchdog.log"
     verify_restore
-    changed=$(sed -n 's/^[A-Z]*: //p' "$output/redis-undo-$undo.log")
-    "$cli" inspect "$changed" --json > "$output/redis-undo-$undo.json"
+    changed=$(sed -n 's/^[A-Z]*: //p' "$output/redis-watchdog-$watchdog.log")
+    "$cli" inspect "$changed" --json > "$output/redis-watchdog-$watchdog.json"
     jq -e '.replay.status == "MATCH" and .replay.full_state_matches == true' \
-      "$output/redis-undo-$undo.json" >/dev/null
+      "$output/redis-watchdog-$watchdog.json" >/dev/null
   done
 
   sed 's/simulated_time: 60s/simulated_time: 1ms/' \
@@ -103,7 +90,7 @@ if test "${6:-}" = lifecycle; then
   jq -e '.outcome == "INCOMPLETE" and .replay.status == "NOT_COMPARABLE"' "$output/wall-replay.json" >/dev/null
 
   # Signal only our CLI, after observing its leased, live VMM child. This checks
-  # the real cancellation path, including reaping before exact MSR restoration.
+  # the real cancellation path, including reaping before the lease is released.
   baseline=$(sed -n 's/^[A-Z]*: //p' "$output/redis-full-state.log")
   "$cli" replay "$baseline" --cpu "$cpu" --state "$state" > "$output/cancel.log" 2>&1 &
   owned=$!
@@ -134,7 +121,7 @@ PY
   cancelled=$(sed -n 's/^[A-Z]*: //p' "$output/cancel.log")
   "$cli" inspect "$cancelled" --json > "$output/cancel.json"
   jq -e '.outcome == "INCOMPLETE" and .report.reason == "CANCELLED" and .replay.status == "NOT_COMPARABLE"' "$output/cancel.json" >/dev/null
-  echo 'PASS: full-state, changed-margin/undo replay, timeout, wall limit, cancellation; MSRs restored'
+  echo 'PASS: full-state, changed-watchdog replay, timeout, wall limit, cancellation; leases released'
   exit 0
 fi
 run_case redis "$output/redis/compose.yaml" PASS 0
@@ -145,4 +132,4 @@ run_case redis-failure "$output/redis/failure.yaml" FAIL 1
 sed 's/--writes, "20"/--writes, "20", --plant, missing/' \
   "$output/etcd/compose.yaml" > "$output/etcd/failure.yaml"
 run_case etcd-failure "$output/etcd/failure.yaml" FAIL 1
-echo 'PASS: registry-image workloads and intentional failures replayed; MSRs restored'
+echo 'PASS: registry-image workloads and intentional failures replayed; leases released'

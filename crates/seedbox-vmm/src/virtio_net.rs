@@ -41,6 +41,7 @@ impl VirtioNet {
     pub fn report(&self) -> serde_json::Value {
         self.model.report(&self.transport)
     }
+    #[cfg(test)]
     pub fn pending_tx(&self, m: &[u8]) -> Result<bool, String> {
         self.model.pending_tx(&self.transport, m, 0)
     }
@@ -126,7 +127,6 @@ impl VirtioNet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seedbox_engine_core::virtio_network::TX_POLL_NS;
     use seedbox_engine_core::virtqueue::{need_event as vring_need_event, Queue};
     const QSIZE: u16 = 256;
     const HDR: usize = 12;
@@ -773,7 +773,10 @@ mod tests {
     #[test]
     fn deferred_poll_bound_is_semantic_and_off_keeps_the_original_limit() {
         assert_eq!(poll_limit(100, 1_000_000, false), 1_000_000);
-        assert_eq!(poll_limit(100, 1_000_000, true), 100 + TX_POLL_NS);
+        assert_eq!(
+            poll_limit(100, 1_000_000, true),
+            100 + seedbox_engine_core::virtio_network::TX_POLL_NS
+        );
         assert_eq!(poll_limit(100, 500, true), 500);
         assert_eq!(poll_limit(u64::MAX - 1, u64::MAX, true), u64::MAX);
     }

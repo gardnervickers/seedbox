@@ -394,8 +394,11 @@ fn setup_errors_name_the_missing_input_and_the_fix() {
 fn bad_values_are_usage_errors() {
     let directory = tempfile::tempdir().unwrap();
     for (args, expected) in [
-        (&["run", "--margin", "0"][..], "positive branch count"),
-        (&["run", "--undo", "999999999"], "not in 0..=262144"),
+        (&["run", "--watchdog-ms", "0"][..], "--watchdog-ms"),
+        (
+            &["replay", "missing", "--watchdog-ms", "60001"],
+            "--watchdog-ms",
+        ),
         (&["run", "--cpu", "5000"], "not in 0..1024"),
         (
             &["init", "x", "--template", "bogus"],
@@ -409,6 +412,48 @@ fn bad_values_are_usage_errors() {
             "{args:?}: {}",
             stderr(&output)
         );
+    }
+}
+
+#[test]
+fn watchdog_is_the_only_explicit_performance_option() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["run", "replay", "explore"] {
+        let output = seedbox(&["help", command], directory.path());
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            help.contains("Performance (never changes results)"),
+            "{help}"
+        );
+        assert!(help.contains("--watchdog-ms"), "{help}");
+        assert!(help.contains("[default: 20]"), "{help}");
+        assert!(!help.contains("SEEDBOX_WATCHDOG_MS"), "{help}");
+        for removed in ["--pv-watchdog-ms", "--margin", "--undo", "--timebase"] {
+            assert!(!help.contains(removed), "{help}");
+        }
+    }
+    let accepted = seedbox(
+        &["replay", "missing", "--watchdog-ms", "200"],
+        directory.path(),
+    );
+    assert_eq!(accepted.status.code(), Some(2));
+    assert!(!stderr(&accepted).contains("unexpected argument"));
+    assert!(stderr(&accepted).contains("missing"));
+    for (flag, value) in [
+        ("--pv-watchdog-ms", "20"),
+        ("--margin", "adaptive"),
+        ("--undo", "0"),
+    ] {
+        for command in ["run", "replay", "explore"] {
+            let output = seedbox(&[command, "missing", flag, value], directory.path());
+            assert_eq!(output.status.code(), Some(2));
+            assert!(
+                stderr(&output).contains(&format!("unexpected argument '{flag}'")),
+                "{}",
+                stderr(&output)
+            );
+        }
     }
 }
 
@@ -754,7 +799,6 @@ fn old_records_stay_inspectable_and_transferable() {
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
-            timebase: None,
             reason: StopReason::Completed,
             workload_exit: Some(WorkloadExit {
                 service: "workload".into(),
@@ -804,7 +848,7 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("Linux KVM host"));
-    for flag in ["--cpu", "--kernel", "--vmm", "--timebase", "--json"] {
+    for flag in ["--cpu", "--kernel", "--vmm", "--json"] {
         assert!(text.contains(flag), "{text}");
     }
     for flag in [
@@ -820,16 +864,6 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     let invalid_timebase = seedbox(&["doctor", "--timebase", "invalid"], root);
     assert_eq!(invalid_timebase.status.code(), Some(2));
     assert!(stderr(&invalid_timebase).contains("--timebase"));
-    let pv_missing = seedbox(&["doctor", "--timebase", "pv", "--vmm", "missing"], root);
-    assert_eq!(stderr(&pv_missing), "error: --vmm missing: not found\n");
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        let counter = seedbox(&["doctor", "--timebase", "counter"], root);
-        assert_eq!(
-            stderr(&counter),
-            "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
-        );
-    }
     let invalid = seedbox(&["doctor", "--cpu", "1024"], root);
     assert_eq!(invalid.status.code(), Some(2));
     assert!(stderr(&invalid).contains("--cpu"));
@@ -893,7 +927,6 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
         .unwrap();
         fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    fs::write(root.join("kernel"), b"unqualified fixture kernel").unwrap();
     for json in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
         command.args(["doctor", "--kernel", "kernel"]);
@@ -911,6 +944,7 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert_eq!(stderr(&output), "error: --kernel kernel: not found\n");
         assert!(output.stdout.is_empty());
         assert!(
             !marker.exists(),
@@ -920,16 +954,9 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
         assert!(!root.join(".seedbox").exists());
         assert!(!root.join("output").exists());
     }
-    fs::write(root.join("engine"), b"unsupported engine").unwrap();
     let output = seedbox(&["doctor", "--vmm", "engine", "--kernel", "kernel"], root);
-    // Any engine is admitted; doctor still requires a supported, ready host.
     assert_eq!(output.status.code(), Some(2));
-    assert!(!stderr(&output).contains("engine is outside"));
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    assert_eq!(
-        stderr(&output),
-        "error: --vmm requires Linux KVM; use the built-in Mac engine\n"
-    );
+    assert_eq!(stderr(&output), "error: --vmm engine: not found\n");
     assert!(!marker.exists());
     assert!(output.stdout.is_empty());
 }
@@ -950,7 +977,7 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         assert_eq!(
             stderr(&output),
-            "error: branch counter detection requires an x86-64 host\n"
+            "error: host admission requires Linux x86_64 KVM; use an admitted host\n"
         );
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         assert_eq!(
@@ -1204,8 +1231,7 @@ mod diff_tests {
             ),
         )
         .unwrap();
-        let expected_stdout =
-            format!("ERROR: fixture (seed 0)\ntimebase: counter\nerror: {error}\n");
+        let expected_stdout = format!("ERROR: fixture (seed 0)\nerror: {error}\n");
         let output = seedbox(&["inspect", "failed"], root);
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
@@ -1256,13 +1282,13 @@ mod diff_tests {
             &root.join("a"),
             &mut fixture(),
             Some(&raw_report()),
-            Some(b"I 1 2 3 4\nH 5 6 7 8\n"),
+            Some(b"I 1 2 3\nH 5 6 7\n"),
         );
         write_fixture(
             &root.join("b"),
             &mut fixture(),
             Some(&raw_report()),
-            Some(b"I 1 2 3 4\nP 5 9 7 8\n"),
+            Some(b"I 1 2 3\nP 9 6 7\n"),
         );
         let output = seedbox(&["diff", "a", "a"], root);
         assert_eq!(output.status.code(), Some(0));
@@ -1347,7 +1373,7 @@ mod diff_tests {
         let root = dir.path();
         let mut b = fixture();
         b.identity.seed = 77;
-        write_fixture(&root.join("a"), &mut fixture(), None, Some(b"I 1 2 3 4\n"));
+        write_fixture(&root.join("a"), &mut fixture(), None, Some(b"I 1 2 3\n"));
         write_fixture(&root.join("b"), &mut b, None, None);
         let output = seedbox(&["diff", "a", "b", "--json"], root);
         assert_eq!(output.status.code(), Some(1));
@@ -1394,7 +1420,7 @@ mod diff_tests {
         write_fixture(&root.join("a"), &mut fixture(), None, Some(b"bad\n"));
         let output = seedbox(&["diff", "a", "a"], root);
         assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), "error: diff a: machines/workload.trace compared with a: input integrity: invalid trace record: expected kind branches time_ns extra(hex) rip(hex); use an intact retained run directory (import bundles first)\n");
+        assert_eq!(stderr(&output), "error: diff a: machines/workload.trace compared with a: input integrity: invalid trace record: expected kind time_ns extra(hex) rip(hex); use an intact retained run directory (import bundles first)\n");
     }
 
     #[cfg(unix)]
@@ -1435,7 +1461,7 @@ mod diff_tests {
             &root.join("original"),
             &mut record,
             Some(&raw_report()),
-            Some(b"I 1 2 3 4\n"),
+            Some(b"I 1 2 3\n"),
         );
         store
             .put(&serde_json::to_vec(&record.identity).unwrap())
@@ -1882,45 +1908,16 @@ fn checkpoint_flags_are_paired_typed_and_documented() {
 }
 
 #[test]
-fn timebase_help_values_and_replay_uses_only_the_recorded_choice() {
+fn timebase_is_no_longer_a_public_mode() {
     let directory = tempfile::tempdir().unwrap();
-    for command in ["run", "prepare", "explore"] {
+    for command in ["run", "prepare", "explore", "doctor", "replay"] {
         let help = seedbox(&["help", command], directory.path());
         assert!(help.status.success());
-        let help = String::from_utf8_lossy(&help.stdout);
-        assert!(help.contains("--timebase <TIMEBASE>"));
-        assert!(help.contains("[default: pv on Mac; counter on Linux]"));
-        assert!(help.contains("Count retired guest branches with the host PMU"));
-        assert!(help.contains("Advance time at guest exits, syscalls and clock reads"));
-        let bad = seedbox(&[command, "--timebase", "future"], directory.path());
-        assert_eq!(bad.status.code(), Some(2));
-        assert!(stderr(&bad).contains("--timebase <TIMEBASE>"));
-        assert!(stderr(&bad).contains("possible values: counter, pv"));
-    }
-    let help = seedbox(&["help", "replay"], directory.path());
-    assert!(help.status.success());
-    assert!(!String::from_utf8_lossy(&help.stdout).contains("--timebase"));
-    let override_attempt = seedbox(&["replay", ".", "--timebase", "pv"], directory.path());
-    assert_eq!(override_attempt.status.code(), Some(2));
-    assert!(stderr(&override_attempt).contains("unexpected argument '--timebase'"));
-    assert!(seedbox(&["init", "demo"], directory.path())
-        .status
-        .success());
-    for command in ["run", "explore"] {
+        assert!(!String::from_utf8_lossy(&help.stdout).contains("--timebase"));
         for value in ["counter", "pv"] {
-            let output = seedbox(
-                &[command, "no-such.yaml", "--timebase", value],
-                directory.path(),
-            );
+            let output = seedbox(&[command, "--timebase", value], directory.path());
             assert_eq!(output.status.code(), Some(2));
-            let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64"))
-                && value == "counter"
-            {
-                "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
-            } else {
-                "error: Compose file no-such.yaml: not found\n"
-            };
-            assert_eq!(stderr(&output), expected);
+            assert!(stderr(&output).contains("unexpected argument '--timebase'"));
         }
     }
 }
@@ -1935,103 +1932,46 @@ mod record_fixture {
     }
 }
 
-/// A retained counter or PV run; any other clock value is written as recorded.
-fn timebase_record(directory: &Path, timebase: Option<&str>) {
-    use seedbox::{
-        execution::{Clock, Timebase},
-        store::ContentDigest,
-    };
+/// A retained KVM run.
+fn kvm_record(directory: &Path) {
+    use seedbox::{execution::Backend, store::ContentDigest};
     let mut record = record_fixture::record();
-    if timebase == Some("pv") {
-        record.identity.inputs.profile.semantic_parameters.clock = Clock::Pv;
-    }
-    if let Some(report) = &mut record.report {
-        report.timebase = match timebase {
-            Some("pv") => Some(Timebase::Pv),
-            None => Some(Timebase::Counter),
-            _ => None,
-        };
-    }
+    record.identity.inputs.profile.backend = Backend::Kvm;
     record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
     let checksum = ContentDigest::of(&serde_json::to_vec(&record).unwrap());
-    let mut manifest = serde_json::json!({"sha256": checksum, "record": record});
-    if let Some(value) = timebase.filter(|value| *value != "pv") {
-        manifest["record"]["identity"]["inputs"]["profile"]["semantic_parameters"]["clock"] =
-            value.into();
-    }
     fs::write(
         directory.join("manifest.json"),
-        serde_json::to_vec(&manifest).unwrap(),
+        serde_json::to_vec(&serde_json::json!({"sha256": checksum, "record": record})).unwrap(),
     )
     .unwrap();
 }
 
 #[test]
-fn inspect_shows_timebase_and_json_preserves_library_fields() {
+fn inspect_prints_no_timebase_and_json_preserves_library_fields() {
     let directory = tempfile::tempdir().unwrap();
-    for (parameter, value) in [(None, "counter"), (Some("pv"), "pv")] {
-        timebase_record(directory.path(), parameter);
-        let output = seedbox(&["inspect", "."], directory.path());
-        assert!(output.status.success(), "{}", stderr(&output));
-        assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("\ntimebase: {value}\n")));
-        let text = String::from_utf8_lossy(&output.stdout);
-        assert_eq!(
-            text.lines()
-                .filter(|line| line
-                    .split_once(": ")
-                    .is_some_and(|(word, _)| !word.is_empty()
-                        && word.bytes().all(|byte| byte.is_ascii_uppercase())))
-                .count(),
-            1
-        );
-        let output = seedbox(&["inspect", ".", "--json"], directory.path());
-        assert!(output.status.success(), "{}", stderr(&output));
-        assert!(output.stderr.is_empty());
-        let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(record["report"]["timebase"], value);
-        assert_eq!(
-            record["identity"]["inputs"]["profile"]["semantic_parameters"]["clock"],
-            if parameter == Some("pv") {
-                serde_json::json!("pv")
-            } else {
-                serde_json::json!({"counter": "amd-zen"})
-            }
-        );
-    }
-}
-
-#[test]
-fn replay_rejects_unknown_recorded_timebase_before_host_checks() {
-    let directory = tempfile::tempdir().unwrap();
-    timebase_record(directory.path(), Some("future"));
-    let output = seedbox(&["replay", "."], directory.path());
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        stderr(&output).contains("unknown variant `future`"),
-        "{}",
-        stderr(&output)
+    kvm_record(directory.path());
+    let output = seedbox(&["inspect", "."], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!text.contains("timebase"), "{text}");
+    assert_eq!(
+        text.lines()
+            .filter(|line| line
+                .split_once(": ")
+                .is_some_and(|(word, _)| !word.is_empty()
+                    && word.bytes().all(|byte| byte.is_ascii_uppercase())))
+            .count(),
+        1
     );
-    assert!(output.stdout.is_empty());
-    assert!(!directory.path().join(".seedbox").exists());
-    // The identity is typed, so inspection rejects the record the same way.
-    let inspect = seedbox(&["inspect", "."], directory.path());
-    assert_eq!(inspect.status.code(), Some(2));
-    assert!(stderr(&inspect).contains("unknown variant `future`"));
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[test]
-fn mac_counter_timebase_is_rejected_before_preparation() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::write(directory.path().join("compose.yaml"), "name: mac-timebase\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app, exit_code: 0}\n").unwrap();
-    for command in ["run", "explore"] {
-        let output = seedbox(&[command, ".", "--timebase", "counter"], directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert_eq!(
-            stderr(&output),
-            "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
-        );
-    }
+    let output = seedbox(&["inspect", ".", "--json"], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(output.stderr.is_empty());
+    let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(record["report"].get("timebase").is_none());
+    assert!(record["report"]["reason"].is_string());
+    let parameters = &record["identity"]["inputs"]["profile"]["semantic_parameters"];
+    assert!(parameters.get("timebase").is_none());
+    assert!(parameters.get("clock").is_none());
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2039,16 +1979,15 @@ fn mac_counter_timebase_is_rejected_before_preparation() {
 fn mac_linux_only_runtime_modes_fail_before_state_or_preparation() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("compose.yaml"), "name: mac-modes\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app, exit_code: 0}\n").unwrap();
-    for (args, expected) in [(
-        vec!["run", ".", "--checkpoint-at-ns", "1", "--branch-seed", "2"],
-        "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n",
-    )] {
-        let output = seedbox(&args, directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), expected);
-        assert!(output.stdout.is_empty());
-        assert!(!directory.path().join(".seedbox").exists());
-    }
+    let args = ["run", ".", "--checkpoint-at-ns", "1", "--branch-seed", "2"];
+    let output = seedbox(&args, directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n"
+    );
+    assert!(output.stdout.is_empty());
+    assert!(!directory.path().join(".seedbox").exists());
     for option in ["page_timer", "deferred_tx"] {
         fs::write(directory.path().join("compose.yaml"), format!("name: mac-modes\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  machine: {{{option}: true}}\n  limits: {{simulated_time: 1s, wall_time: 1m}}\n  check: {{service: app, exit_code: 0}}\n")).unwrap();
         for command in ["run", "explore"] {
@@ -2066,7 +2005,7 @@ fn mac_linux_only_runtime_modes_fail_before_state_or_preparation() {
 #[test]
 fn replay_rejects_an_unknown_recorded_deferred_tx_mode() {
     let directory = tempfile::tempdir().unwrap();
-    timebase_record(directory.path(), None);
+    kvm_record(directory.path());
     let path = directory.path().join("manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();

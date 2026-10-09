@@ -58,7 +58,6 @@ pub(crate) struct ReportMachines {
 struct HvfReport {
     report_version: u32,
     seed: u64,
-    counter_profile: Option<String>,
     #[serde(flatten)]
     evidence: WorldEvidence,
     machines: Vec<MachineOutcome>,
@@ -853,29 +852,6 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             "VMM deferred_tx does not match recorded --deferred-tx".into(),
         ));
     }
-    let timebase = recorded_timebase(&request.prepared.profile)?;
-    let reported = raw.timebase.name();
-    if reported != timebase.name() {
-        return Err(Error::Integrity(format!(
-            "VMM --timebase {reported}: does not match recorded --timebase {}",
-            timebase.name()
-        )));
-    }
-    if timebase == Timebase::Counter && raw.counter_profile.is_none() {
-        return Err(Error::Integrity(
-            "VMM report is missing its counter profile".into(),
-        ));
-    }
-    let expected = recorded_counter(&request.prepared.profile)?.name();
-    if raw
-        .counter_profile
-        .as_deref()
-        .is_some_and(|name| name != expected)
-    {
-        return Err(Error::Integrity(format!(
-            "VMM counted with a different branch counter profile than the recorded {expected}"
-        )));
-    }
     let machines: Vec<_> = raw.machines.into_iter().map(|m| m.outcome).collect();
     checked_report(raw.evidence, &machines, request)
 }
@@ -885,9 +861,9 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) fn report_hvf(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionReport> {
     let raw: HvfReport = serde_json::from_slice(bytes)?;
-    if raw.report_version != 2 || raw.seed != request.seed || raw.counter_profile.is_some() {
+    if raw.report_version != 2 || raw.seed != request.seed {
         return Err(Error::Integrity(
-            "HVF application report version/seed/timebase mismatch".into(),
+            "HVF application report version/seed mismatch".into(),
         ));
     }
     crate::mac::validate_report(bytes, request)?;
@@ -936,7 +912,6 @@ pub(super) fn checked_report(
             .map(StateDigestParts::try_from)
             .transpose()?;
     }
-    let timebase = request.prepared.profile.timebase();
     let names: BTreeSet<_> = machines.iter().map(|machine| &machine.name).collect();
     if names.len() != machines.len() || names != request.prepared.guests.keys().collect() {
         return Err(Error::Integrity("VMM report machine set mismatch".into()));
@@ -1047,7 +1022,6 @@ pub(super) fn checked_report(
         reason = StopReason::Error;
     }
     Ok(ExecutionReport {
-        timebase: Some(timebase),
         reason,
         workload_exit,
         witness: Some(world_witness),

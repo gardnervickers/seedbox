@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Root supervisor: directly owns VMM children and locks through MSR restore."""
+"""Root supervisor: directly owns VMM children and holds their CPU/SMT locks until they are reaped."""
 import ctypes
 import contextlib
 import fcntl
@@ -9,10 +9,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-import tempfile
 import time
-
-import msr54
 
 # CPU/SMT lease files live here for every tool that leases cores, including
 # the Rust CLI (crates/seedbox/src/host.rs), so the directory is fixed rather
@@ -106,7 +103,7 @@ def stop_owned_group(child):
             break
 
 
-def run_batch(root, world, prefix, seeds, extra, cpus, timeout, vmm, margin,
+def run_batch(root, world, prefix, seeds, extra, cpus, timeout, vmm,
               lock_dir=LOCK_DIR):
     if not seeds or len(cpus) != len(seeds) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('expected nonempty seeds and positive timeout')
@@ -121,7 +118,6 @@ def run_batch(root, world, prefix, seeds, extra, cpus, timeout, vmm, margin,
                 raise FileExistsError(f'refusing to overwrite {path}')
     children = []
     result = 0
-    snapshot = None
     pending_signal = None
     def interrupted(signum, _frame):
         nonlocal pending_signal
@@ -133,13 +129,8 @@ def run_batch(root, world, prefix, seeds, extra, cpus, timeout, vmm, margin,
     previous = {sig: signal.signal(sig, interrupted) for sig in signals}
     try:
         with cpu_locks(protected, lock_dir):
-            state_dir = Path(tempfile.mkdtemp(prefix='seedbox-msr-', dir=lock_dir))
-            snapshot = state_dir / 'saved.json'
             try:
                 check_signal()
-                if msr54.required():
-                    msr54.show(sorted(protected))
-                    msr54.set_workaround(sorted(protected), snapshot)
                 for cpu, seed, out in zip(cpus, seeds, outputs):
                     check_signal()
                     out.parent.mkdir(parents=True, exist_ok=True)
@@ -148,7 +139,6 @@ def run_batch(root, world, prefix, seeds, extra, cpus, timeout, vmm, margin,
                             ['taskset', '-c', str(cpu), vmm, '--config', world,
                              '--seed', str(seed), '--out', str(out), *extra],
                             cwd=root, stdout=stdout, stderr=stderr,
-                            env={**os.environ, 'SEEDBOX_MARGIN': margin},
                             start_new_session=True)
                     children.append((child, out, time.monotonic(), None))
                 check_signal()
@@ -172,26 +162,13 @@ def run_batch(root, world, prefix, seeds, extra, cpus, timeout, vmm, margin,
                 print(f'batch: {error}', file=sys.stderr)
                 result = 1
             finally:
-                # Cleanup cannot itself be interrupted between reap and restore.
+                # Cleanup cannot itself be interrupted before every child is reaped.
                 for sig in signals:
                     signal.signal(sig, signal.SIG_IGN)
                 for child, out, _, status in children:
                     if status is None:
                         stop_owned_group(child)
                         Path(str(out)+'.status').write_text(f'{result or 1}\n')
-                if snapshot.exists():
-                    try:
-                        msr54.show(sorted(protected))
-                    except OSError as error:
-                        print(f'batch: pre-restore readback: {error}', file=sys.stderr)
-                        result = 1
-                    try:
-                        msr54.restore_snapshot(sorted(protected), snapshot)
-                    except (OSError, ValueError) as error:
-                        print(f'batch: restoration failed; retained {snapshot}: {error}', file=sys.stderr)
-                        result = 1
-                if not snapshot.exists():
-                    state_dir.rmdir()
     except Interrupted as error:
         result = 128 + error.signum
     finally:
@@ -204,8 +181,6 @@ def run_batch(root, world, prefix, seeds, extra, cpus, timeout, vmm, margin,
 DEFAULTS = {
     'CPU0': '2',
     'VMM': './crates/seedbox-vmm/target/release/seedbox-vmm',
-    'SEEDBOX_MARGIN': 'adaptive',
-    'SEEDBOX_UNDO': '256',
     'SEEDBOX_TIMEOUT': '3600',
 }
 
@@ -216,13 +191,10 @@ def main():
     world, prefix, seed_arg, *extra = sys.argv[1:]
     seeds = [int(seed) for seed in seed_arg.split()]
     setting = {key: os.environ.get(key) or default for key, default in DEFAULTS.items()}
-    # Children inherit the environment, so the VMM sees the same undo depth.
-    os.environ['SEEDBOX_UNDO'] = setting['SEEDBOX_UNDO']
     cpu0 = int(setting['CPU0'])
     return run_batch(Path(os.environ['SEEDBOX_ROOT']), world, prefix, seeds,
                      extra, list(range(cpu0, cpu0 + len(seeds))),
-                     float(setting['SEEDBOX_TIMEOUT']), setting['VMM'],
-                     setting['SEEDBOX_MARGIN'])
+                     float(setting['SEEDBOX_TIMEOUT']), setting['VMM'])
 
 
 if __name__ == '__main__':

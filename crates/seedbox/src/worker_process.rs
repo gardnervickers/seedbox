@@ -4,13 +4,11 @@
 
 use crate::{
     engine::ExecutableKind,
-    execution::{
-        CancellationToken, ExecutionReport, ExecutionRequest, StopReason, Timebase, WitnessMode,
-    },
+    execution::{CancellationToken, ExecutionReport, ExecutionRequest, StopReason, WitnessMode},
     host_control::Endpoint,
     Error, Result,
 };
-use seedbox_engine_core::launch::{self, Performance, WorkerRequest};
+use seedbox_engine_core::launch::{Performance, WorkerRequest};
 use std::{
     collections::BTreeMap,
     fs,
@@ -103,9 +101,8 @@ fn replacement_version_with_timeout(
     }
 }
 
-pub(crate) fn incomplete(reason: StopReason, timebase: Timebase) -> ExecutionReport {
+pub(crate) fn incomplete(reason: StopReason) -> ExecutionReport {
     ExecutionReport {
-        timebase: Some(timebase),
         reason,
         workload_exit: None,
         witness: None,
@@ -116,16 +113,19 @@ pub(crate) fn incomplete(reason: StopReason, timebase: Timebase) -> ExecutionRep
 }
 
 /// The x86 worker's performance settings from a run's recorded performance
-/// parameters (`SEEDBOX_MARGIN`, `SEEDBOX_UNDO`); absent ones take defaults.
+/// parameters (`SEEDBOX_WATCHDOG_MS`); absent ones take defaults.
 pub(crate) fn launch_performance(parameters: &BTreeMap<String, String>) -> Result<Performance> {
     let mut performance = Performance::default();
     for (key, value) in parameters {
         let invalid = || Error::Integrity(format!("invalid performance parameter {key}={value}"));
         match key.as_str() {
-            "SEEDBOX_MARGIN" => {
-                performance.margin = launch::parse_margin(value).map_err(|_| invalid())?
+            "SEEDBOX_WATCHDOG_MS" => {
+                performance.watchdog_ms = value
+                    .parse()
+                    .ok()
+                    .filter(|ms| *ms != 0)
+                    .ok_or_else(invalid)?
             }
-            "SEEDBOX_UNDO" => performance.undo_margin = value.parse().map_err(|_| invalid())?,
             _ => return Err(invalid()),
         }
     }
@@ -138,7 +138,6 @@ pub(crate) struct WorkerLaunch {
     report: PathBuf,
     endpoint: Endpoint,
     spawn_fix: &'static str,
-    timebase: Timebase,
 }
 
 /// Launch request beside `world.json` in the run output; the x86 worker reads it.
@@ -179,7 +178,7 @@ impl WorkerLaunch {
         let out = request.output.join(crate::vmm::MACHINE_OUTPUT_DIR);
         let console_limit = 1024 * 1024 * 1024 / streams;
         let digest = request.prepared.profile.witness_mode == WitnessMode::FullState;
-        let timebase = if kind == ExecutableKind::ArmWorld {
+        if kind == ExecutableKind::ArmWorld {
             // The ARM world keeps its own flag contract.
             command
                 .arg("--config")
@@ -195,7 +194,6 @@ impl WorkerLaunch {
             if digest {
                 command.arg("--digest");
             }
-            Timebase::Pv
         } else {
             let mut worker = WorkerRequest::new(world, request.seed, out);
             worker.digest = digest;
@@ -209,8 +207,7 @@ impl WorkerLaunch {
             let path = request.output.join(WORKER_REQUEST_FILE);
             fs::write(&path, serde_json::to_vec_pretty(&worker)?)?;
             command.arg("--request").arg(path);
-            worker.features.timebase
-        };
+        }
         command
             .env_clear()
             .stdout(fs::File::create(&report)?)
@@ -222,7 +219,6 @@ impl WorkerLaunch {
             report,
             endpoint,
             spawn_fix,
-            timebase,
         })
     }
 
@@ -241,7 +237,6 @@ impl WorkerLaunch {
             process: OwnedProcess(Some(child)),
             report: self.report,
             started,
-            timebase: self.timebase,
             _endpoint: self.endpoint,
         })
     }
@@ -252,7 +247,6 @@ pub(crate) struct RunningWorker {
     process: OwnedProcess,
     report: PathBuf,
     started: Instant,
-    timebase: Timebase,
     _endpoint: Endpoint,
 }
 
@@ -265,7 +259,7 @@ impl RunningWorker {
     ) -> Result<ExecutionReport> {
         let completion = (|| loop {
             if cancellation.is_cancelled() {
-                return Ok(incomplete(StopReason::Cancelled, self.timebase));
+                return Ok(incomplete(StopReason::Cancelled));
             }
             if let Some(success) = self.process.exited()? {
                 return if success {
@@ -275,7 +269,7 @@ impl RunningWorker {
                 };
             }
             if self.started.elapsed() >= Duration::from_nanos(wall_time_ns) {
-                return Ok(incomplete(StopReason::WallTimeLimit, self.timebase));
+                return Ok(incomplete(StopReason::WallTimeLimit));
             }
             std::thread::sleep(Duration::from_millis(10));
         })();
@@ -420,22 +414,19 @@ mod tests {
     }
 
     #[test]
-    fn prepared_launch_uses_recorded_dispatch_clock_and_retention_limits() {
+    fn prepared_launch_uses_recorded_dispatch_and_retention_limits() {
         use crate::{
             config::{Check, Limits, Network, Schedule},
-            execution::{Backend, Clock, ExecutionProfile, PreparedInputs, SemanticParameters},
+            execution::{Backend, ExecutionProfile, PreparedInputs, SemanticParameters},
             store::ContentDigest,
         };
         use std::collections::BTreeMap;
         let internal =
             crate::engine::kvm_descriptor(ExecutableKind::InternalWorker, "0.1.0-dev.1".into());
-        for (kind, clock) in [
-            (ExecutableKind::Standalone, None),
-            (ExecutableKind::Standalone, Some("counter")),
-            (ExecutableKind::Standalone, Some("pv")),
-            (ExecutableKind::InternalWorker, Some("counter")),
-            (ExecutableKind::InternalWorker, Some("pv")),
-            (ExecutableKind::ArmWorld, Some("pv")),
+        for kind in [
+            ExecutableKind::Standalone,
+            ExecutableKind::InternalWorker,
+            ExecutableKind::ArmWorld,
         ] {
             let directory = tempfile::tempdir().unwrap();
             let engine = directory.path().join("retained-engine");
@@ -447,9 +438,6 @@ mod tests {
                 ExecutableKind::InternalWorker => Some(internal.clone()),
                 ExecutableKind::ArmWorld => Some(crate::engine::arm_descriptor()),
             };
-            if clock == Some("pv") {
-                semantic_parameters.clock = Clock::Pv;
-            }
             let prepared = PreparedInputs {
                 wall_clock_epoch: None,
                 kernel: hash.clone(),
@@ -503,10 +491,10 @@ mod tests {
                 artifacts: &artifacts,
                 output: directory.path(),
                 cancellation: &CancellationToken::default(),
-                performance_parameters: &BTreeMap::from([
-                    ("SEEDBOX_MARGIN".into(), "64".into()),
-                    ("SEEDBOX_UNDO".into(), "16".into()),
-                ]),
+                performance_parameters: &BTreeMap::from([(
+                    "SEEDBOX_WATCHDOG_MS".into(),
+                    "50".into(),
+                )]),
             };
             let original = serde_json::to_vec(&prepared.profile).unwrap();
             let launch = WorkerLaunch::prepare(&request).unwrap();
@@ -555,19 +543,9 @@ mod tests {
                 expected.console_limit = Some(268435456);
                 expected.log_chunk_limit = Some(65536);
                 expected.stream_console = true;
-                expected.features.timebase = launch.timebase;
-                expected.performance.undo_margin = 16;
-                expected.performance.margin = Some(64);
+                expected.performance.watchdog_ms = 50;
                 assert_eq!(worker, expected);
             }
-            assert_eq!(
-                launch.timebase,
-                if kind == ExecutableKind::ArmWorld || clock == Some("pv") {
-                    Timebase::Pv
-                } else {
-                    Timebase::Counter
-                }
-            );
             assert_eq!(serde_json::to_vec(&prepared.profile).unwrap(), original);
             drop(launch);
             assert!(!directory.path().join("host-control").exists());
@@ -586,13 +564,13 @@ mod tests {
         };
         assert_eq!(decode(&[]).unwrap(), Performance::default());
         assert_eq!(
-            decode(&[("SEEDBOX_MARGIN", "adaptive"), ("SEEDBOX_UNDO", "256")]).unwrap(),
-            Performance::default()
+            decode(&[("SEEDBOX_WATCHDOG_MS", "50")]).unwrap(),
+            Performance { watchdog_ms: 50 }
         );
         for bad in [
-            ("SEEDBOX_MARGIN", "fast"),
-            ("SEEDBOX_UNDO", "-1"),
-            ("SEEDBOX_OTHER", "1"),
+            ("SEEDBOX_WATCHDOG_MS", "0"),
+            ("SEEDBOX_WATCHDOG_MS", "fast"),
+            ("SEEDBOX_MARGIN", "64"),
         ] {
             assert!(decode(&[bad]).is_err(), "{bad:?}");
         }
@@ -612,7 +590,6 @@ mod tests {
             report,
             endpoint: Endpoint::new(output).unwrap(),
             spawn_fix: "test worker",
-            timebase: Timebase::Counter,
         }
         .spawn()
         .unwrap()

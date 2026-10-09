@@ -1,5 +1,5 @@
-//! Host readiness: the KVM and perf capabilities the engine needs on this core.
-//! It does not pin CPU models, microcode, CPUID, engines or kernels.
+//! Host readiness: the KVM capabilities the engine needs on this core. It does
+//! not pin CPU vendors, models, microcode, CPUID, engines or kernels.
 use crate::{
     execution::ExecutionProfile, limits::Size, store::ContentDigest, Context, Error, Result,
 };
@@ -71,7 +71,6 @@ pub struct RequiredPolicy {
     pub immediate_exit: i32,
     pub guest_debug: i32,
     pub sync_regs_required: i32,
-    pub perf_type: u32,
 }
 
 pub fn required_policy() -> RequiredPolicy {
@@ -83,7 +82,6 @@ pub fn required_policy() -> RequiredPolicy {
         immediate_exit: 1,
         guest_debug: 1,
         sync_regs_required: 3,
-        perf_type: 4,
     }
 }
 
@@ -110,18 +108,10 @@ pub struct CoreObservation {
     pub immediate_exit: i32,
     pub guest_debug: i32,
     pub sync_regs: i32,
-    pub perf_type: u32,
-    pub perf_disabled_open: bool,
-    pub perf_error: Option<String>,
-    pub workaround_msr: u64,
     pub raw_cpuid: Vec<CpuidEntry>,
 }
 
 pub fn validate_observation(o: &CoreObservation) -> Result<()> {
-    validate_fields(o, true)
-}
-
-fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
     let p = required_policy();
     let checks = [
         (o.architecture == p.architecture, "architecture"),
@@ -135,11 +125,6 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
             o.sync_regs & p.sync_regs_required == p.sync_regs_required,
             "KVM sync-register capability",
         ),
-        (
-            o.perf_type == p.perf_type
-                && (!require_perf || (o.perf_disabled_open && o.perf_error.is_none())),
-            "disabled exact-event perf readiness",
-        ),
     ];
     for (valid, field) in checks {
         if !valid {
@@ -147,27 +132,6 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-// Retain static observations on refusal; no perf event is attempted until every
-// static capability is valid. Final validation uses
-// that same order, so an unattempted event cannot conceal the original failure.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
-fn probe_disabled_perf<T>(
-    mut observation: CoreObservation,
-    open: impl FnOnce() -> Result<T>,
-) -> CoreObservation {
-    if validate_fields(&observation, false).is_err() {
-        return observation;
-    }
-    match open() {
-        Ok(descriptor) => {
-            drop(descriptor);
-            observation.perf_disabled_open = true;
-        }
-        Err(error) => observation.perf_error = Some(error.to_string()),
-    }
-    observation
 }
 
 // observe returns only after its descriptor/affinity cleanup. Retain that
@@ -218,45 +182,6 @@ pub(crate) fn finish_admission(
     }
 }
 
-/// Disabled readiness attributes. Counting fields match the VMM's Counter::new;
-/// admission alone sets CLOEXEC atomically, protecting descriptor inheritance.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DisabledCounterSpec {
-    pub kind: u32,
-    pub config: u64,
-    pub period: u64,
-    pub read_format: u64,
-    pub flags: u64,
-    pub open_flags: u64,
-}
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
-pub(crate) fn disabled_counter_spec(
-    counter: crate::counter::CounterProfile,
-) -> DisabledCounterSpec {
-    DisabledCounterSpec {
-        kind: 4,
-        config: counter.branch_event(),
-        period: 1 << 62,
-        read_format: 3,
-        flags: 1 | (1 << 2) | (1 << 19),
-        open_flags: PERF_OPEN_FLAGS,
-    }
-}
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
-fn probe_selected_event<T>(
-    counter: crate::counter::CounterProfile,
-    open: impl FnOnce(DisabledCounterSpec) -> Result<T>,
-) -> Result<()> {
-    let descriptor = open(disabled_counter_spec(counter))?;
-    drop(descriptor); // No enable, map, read or descriptor survives affinity restore.
-    Ok(())
-}
-
-// PERF_FLAG_FD_CLOEXEC: set atomically by perf_event_open, never by later fcntl.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
-const PERF_OPEN_FLAGS: u64 = 1 << 3;
-
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
 fn checked_affinity_restore(
     expected: &[u32],
@@ -296,17 +221,16 @@ fn scoped_probe<T, G>(
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod linux;
 
-pub(crate) fn observe_counter(
-    cpu: u32,
-    counter: crate::counter::CounterProfile,
-) -> Result<CoreObservation> {
+/// Observe one core's KVM capabilities under a temporary affinity pin, which
+/// is restored before returning.
+pub(crate) fn observe(cpu: u32) -> Result<CoreObservation> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        linux::observe(cpu, counter)
+        linux::observe(cpu)
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     {
-        let _ = (cpu, counter);
+        let _ = cpu;
         Err(Error::Setup(
             "host admission requires Linux x86_64 KVM; use an admitted host".into(),
         ))
@@ -332,61 +256,18 @@ mod cleanup_tests {
             immediate_exit: p.immediate_exit,
             guest_debug: p.guest_debug,
             sync_regs: p.sync_regs_required,
-            perf_type: p.perf_type,
-            perf_disabled_open: false,
-            perf_error: None,
-            workaround_msr: 0,
             raw_cpuid: Vec::new(),
         }
     }
     #[test]
-    fn static_capability_refusal_is_honest_and_does_not_attempt_perf() {
-        use std::cell::Cell;
-        let attempted = Cell::new(false);
+    fn static_capability_refusal_names_the_capability_and_cleanup_takes_precedence() {
         let mut observation = static_observation();
         observation.immediate_exit = 0;
-        let original = validate_fields(&observation, false)
-            .unwrap_err()
-            .to_string();
-        let observed = probe_disabled_perf(observation, || {
-            attempted.set(true);
-            Ok(())
-        });
-        assert!(!attempted.get());
-        assert!(!observed.perf_disabled_open);
-        assert!(observed.perf_error.is_none());
-        let final_error = validate_observation(&observed).unwrap_err().to_string();
-        assert_eq!(final_error, original);
-        assert!(final_error.contains("KVM immediate-exit capability"));
-    }
-    #[test]
-    fn actual_perf_open_refusal_preserves_its_cause_and_cleanup_precedence() {
-        use std::cell::Cell;
-        let attempted = Cell::new(false);
-        let observed = probe_disabled_perf(static_observation(), || {
-            attempted.set(true);
-            Err::<(), _>(Error::Setup("perf_event_open: EACCES (13)".into()))
-        });
-        assert!(attempted.get());
-        assert!(!observed.perf_disabled_open);
-        assert_eq!(
-            observed.perf_error.as_deref(),
-            Some("perf_event_open: EACCES (13)")
-        );
-        assert!(validate_observation(&observed)
-            .unwrap_err()
-            .to_string()
-            .contains("disabled exact-event perf readiness"));
-
-        let mut static_refusal = static_observation();
-        static_refusal.immediate_exit = 0;
+        let error = validate_observation(&observation).unwrap_err().to_string();
+        assert!(error.contains("KVM immediate-exit capability"));
         let result = scoped_probe(
             (),
-            || {
-                Ok(probe_disabled_perf::<()>(static_refusal, || {
-                    panic!("unexpected perf attempt")
-                }))
-            },
+            || Ok(observation),
             |_| Err(Error::Execution("restore readback differs".into())),
         );
         let error = result.unwrap_err().to_string();
@@ -488,91 +369,9 @@ mod cleanup_tests {
         assert!(bounded.contains("[truncated]"));
     }
     #[test]
-    fn selected_disabled_events_match_vmm_counting_fields_and_close_before_restore() {
-        use crate::counter::CounterProfile;
-        use std::{io::Read, os::unix::net::UnixStream, time::Duration};
-        let policy = required_policy();
-        for (counter, event) in [
-            (CounterProfile::Zen, 0x5100d1),
-            (CounterProfile::IntelSkylake, 0x5101c4),
-            (CounterProfile::IntelIceLake, 0x5111c4),
-        ] {
-            let spec = disabled_counter_spec(counter);
-            assert_eq!(
-                (
-                    spec.kind,
-                    spec.config,
-                    spec.period,
-                    spec.read_format,
-                    spec.flags,
-                    spec.open_flags
-                ),
-                (4, event, 1 << 62, 3, 1 | (1 << 2) | (1 << 19), 8)
-            );
-            if counter == CounterProfile::Zen {
-                assert_eq!(spec.kind, policy.perf_type);
-            }
-            let (mut reader, writer) = UnixStream::pair().unwrap();
-            reader
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
-            scoped_probe(
-                (),
-                || {
-                    probe_selected_event(counter, |actual| {
-                        assert_eq!(actual, spec);
-                        Ok(writer)
-                    })
-                },
-                |_| {
-                    let mut byte = [0];
-                    assert_eq!(
-                        reader.read(&mut byte).unwrap(),
-                        0,
-                        "probe descriptor must close before restoring affinity"
-                    );
-                    Ok(())
-                },
-            )
-            .unwrap();
-            for restore_fails in [false, true] {
-                let mut restored = false;
-                let error = scoped_probe(
-                    (),
-                    || {
-                        probe_selected_event::<()>(counter, |actual| {
-                            assert_eq!(actual.config, event);
-                            Err(Error::Setup(
-                                "perf_event_open: Permission denied (os error 13)".into(),
-                            ))
-                        })
-                    },
-                    |_| {
-                        restored = true;
-                        if restore_fails {
-                            Err(Error::Execution("affinity readback mismatch".into()))
-                        } else {
-                            Ok(())
-                        }
-                    },
-                )
-                .unwrap_err()
-                .to_string();
-                assert!(restored);
-                assert!(error.contains("os error 13"));
-                assert_eq!(
-                    error.contains("host preflight cleanup failed"),
-                    restore_fails
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn selected_perf_refusal_is_before_application_preparation_or_execution() {
+    fn preflight_refusal_is_before_application_preparation_or_execution() {
         use crate::{
             config,
-            counter::CounterProfile,
             execution::*,
             orchestration::{Orchestrator, RunOptions},
             store::ContentStore,
@@ -591,29 +390,24 @@ mod cleanup_tests {
             fn preflight(&self, _: Option<&Path>) -> Result<()> {
                 scoped_probe(
                     (),
-                    || {
-                        probe_selected_event::<()>(CounterProfile::IntelIceLake, |spec| {
-                            assert_eq!(spec.config, 0x5111c4);
-                            Err(Error::Setup("selected event refused: EACCES (13)".into()))
-                        })
-                    },
+                    || Err(Error::Setup("cannot open /dev/kvm: EACCES (13)".into())),
                     |_| Ok(()),
                 )
             }
             fn execute(&self, _: ExecutionRequest<'_>) -> Result<ExecutionReport> {
-                panic!("must not execute after event refusal")
+                panic!("must not execute after host refusal")
             }
         }
         struct Prepare(AtomicUsize);
         impl PreparationBackend for Prepare {
             fn prepare(&self, _: &config::Simulation, _: &ContentStore) -> Result<PreparedInputs> {
                 self.0.fetch_add(1, Ordering::SeqCst);
-                panic!("must not prepare after event refusal")
+                panic!("must not prepare after host refusal")
             }
         }
         let root = tempfile::tempdir().unwrap();
         let prepare = Prepare(AtomicUsize::new(0));
-        let simulation=config::parse("name: event-refusal\nservices:\n  app: {image: fixture:synthetic}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n",&root.path().join("compose.yaml"),&BTreeMap::new()).unwrap();
+        let simulation=config::parse("name: host-refusal\nservices:\n  app: {image: fixture:synthetic}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n",&root.path().join("compose.yaml"),&BTreeMap::new()).unwrap();
         let orchestrator = Orchestrator::new(
             ContentStore::new(root.path().join("objects")),
             root.path().join("runs"),
@@ -624,12 +418,6 @@ mod cleanup_tests {
             .to_string();
         assert!(error.contains("EACCES (13)"));
         assert_eq!(prepare.0.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn perf_open_requires_atomic_close_on_exec() {
-        // Linux UAPI PERF_FLAG_FD_CLOEXEC, independent of perf event attributes.
-        assert_eq!(PERF_OPEN_FLAGS, 8);
     }
     #[test]
     fn successful_restore_setter_cannot_hide_restricted_or_unreadable_affinity() {

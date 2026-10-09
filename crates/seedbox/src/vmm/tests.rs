@@ -9,14 +9,7 @@ fn internal_world_refusal_precedes_retention_or_input_reading() {
     let store = ContentStore::new(&store_path);
     let missing = temporary.path().join("missing");
     let expected = "built-in Compose world execution requires Linux x86-64; ARM world integration is not available yet";
-    let result = VmmExecutor::new_internal(
-        &missing,
-        &store,
-        None,
-        512,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    );
+    let result = VmmExecutor::new_internal(&missing, &store, None, 512, WitnessMode::Exits);
     assert_eq!(result.unwrap_err().to_string(), expected);
     assert!(!store_path.exists());
     assert_eq!(
@@ -36,15 +29,8 @@ fn internal_doctor_reports_simulator_version() {
     std::fs::write(&executable, b"combined executable").unwrap();
     let store = ContentStore::new(temporary.path().join("objects"));
     let kernel = ContentDigest::of(b"kernel");
-    let executor = VmmExecutor::new_internal(
-        &executable,
-        &store,
-        None,
-        512,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let executor =
+        VmmExecutor::new_internal(&executable, &store, None, 512, WitnessMode::Exits).unwrap();
     let report = executor
         .doctor_report(
             kernel,
@@ -72,14 +58,11 @@ fn replay_preserves_historical_policy_data_without_current_defaults() {
         None,
         512,
         WitnessMode::Exits,
-        CounterProfile::Zen,
     )
     .unwrap()
     .profile;
     let before = serde_json::to_vec(&profile).unwrap();
-    let executor =
-        VmmExecutor::from_retained(&executable, &store, profile, None, CounterProfile::Zen)
-            .unwrap();
+    let executor = VmmExecutor::from_retained(&executable, &store, profile, None).unwrap();
     assert_eq!(serde_json::to_vec(&executor.profile).unwrap(), before);
     crate::admission::validate_profile(&executor.profile).unwrap();
     assert_eq!(
@@ -103,27 +86,13 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
     .unwrap();
     std::fs::write(&standalone, b"#!/bin/sh\nexit 2\n").unwrap();
     let store = ContentStore::new(directory.path().join("store"));
-    let original = VmmExecutor::new(
-        &standalone,
-        &store,
-        None,
-        512,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap()
-    .with_timebase(Timebase::Pv)
-    .with_page_timer(true)
-    .with_deferred_tx(true)
-    .with_torn_writes(true);
-    let combined = VmmExecutor::from_override(
-        &combined,
-        &store,
-        original.profile.clone(),
-        None,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let original = VmmExecutor::new(&standalone, &store, None, 512, WitnessMode::Exits)
+        .unwrap()
+        .with_page_timer(true)
+        .with_deferred_tx(true)
+        .with_torn_writes(true);
+    let combined =
+        VmmExecutor::from_override(&combined, &store, original.profile.clone(), None).unwrap();
     assert_eq!(
         combined
             .profile
@@ -144,20 +113,13 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
     assert_eq!(
         recorded_features(&combined.profile).unwrap(),
         seedbox_engine_core::launch::MachineFeatures {
-            timebase: Timebase::Pv,
             page_timer: true,
             deferred_tx: true,
         }
     );
     assert!(combined.profile.semantic_parameters.torn_writes);
-    let standalone = VmmExecutor::from_override(
-        &standalone,
-        &store,
-        combined.profile,
-        None,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let standalone =
+        VmmExecutor::from_override(&standalone, &store, combined.profile, None).unwrap();
     assert_eq!(standalone.profile, original.profile);
     assert_eq!(
         engine_command(Path::new("engine"), &standalone.profile)
@@ -173,7 +135,6 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
         None,
         512,
         WitnessMode::Exits,
-        CounterProfile::Zen,
     )
     .unwrap();
     assert_eq!(
@@ -189,10 +150,8 @@ fn retained_worker_launch_preserves_timer_and_deferred_tx_options() {
         None,
         512,
         WitnessMode::Exits,
-        CounterProfile::Zen,
     )
     .unwrap()
-    .with_timebase(Timebase::Pv)
     .with_page_timer(true)
     .with_deferred_tx(true);
     for internal in [false, true] {
@@ -214,7 +173,6 @@ fn retained_worker_launch_preserves_timer_and_deferred_tx_options() {
         assert_eq!(
             recorded_features(&retained).unwrap(),
             seedbox_engine_core::launch::MachineFeatures {
-                timebase: Timebase::Pv,
                 page_timer: true,
                 deferred_tx: true,
             }
@@ -227,127 +185,72 @@ fn retained_worker_launch_preserves_timer_and_deferred_tx_options() {
 }
 
 #[test]
-fn counter_and_pv_retain_identity_and_replay_through_worker_contract() {
+fn internal_profile_retains_identity_and_replays_through_worker_contract() {
     use crate::engine::{recorded_launch, ExecutableKind, INTERNAL_WORKER_V1};
     let temporary = tempfile::tempdir().unwrap();
     let executable = temporary.path().join("retained-worker");
     std::fs::write(&executable, b"combined executable").unwrap();
     let store = ContentStore::new(temporary.path().join("objects"));
-    let mut profiles = Vec::new();
-    for timebase in [Timebase::Counter, Timebase::Pv] {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        let executor = VmmExecutor::new_internal(
-            &executable,
-            &store,
-            None,
-            512,
-            WitnessMode::Exits,
-            CounterProfile::Zen,
-        )
-        .unwrap();
-        // A retained Linux profile is inspectable on a Mac without host admission.
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-        let executor = {
-            let mut executor = VmmExecutor::new(
-                &executable,
-                &store,
-                None,
-                512,
-                WitnessMode::Exits,
-                CounterProfile::Zen,
-            )
-            .unwrap();
-            executor.profile.semantic_parameters.engine = Some(crate::engine::kvm_descriptor(
-                crate::engine::ExecutableKind::InternalWorker,
-                crate::engine::SIMULATOR_VERSION.into(),
-            ));
-            executor
-        };
-        let executor = executor.with_timebase(timebase);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let executor =
+        VmmExecutor::new_internal(&executable, &store, None, 512, WitnessMode::Exits).unwrap();
+    // A retained Linux profile is inspectable on a Mac without host admission.
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let executor = {
+        let mut executor =
+            VmmExecutor::new(&executable, &store, None, 512, WitnessMode::Exits).unwrap();
+        executor.profile.semantic_parameters.engine = Some(crate::engine::kvm_descriptor(
+            crate::engine::ExecutableKind::InternalWorker,
+            crate::engine::SIMULATOR_VERSION.into(),
+        ));
+        executor
+    };
+    assert_eq!(
+        recorded_launch(&executor.profile).unwrap(),
+        ExecutableKind::InternalWorker
+    );
+    let bytes = serde_json::to_vec(&executor.profile).unwrap();
+    let retained: ExecutionProfile = serde_json::from_slice(&bytes).unwrap();
+    let replay = VmmExecutor::from_retained(&executable, &store, retained, Some(8)).unwrap();
+    assert_eq!(serde_json::to_vec(&replay.profile).unwrap(), bytes);
+    for profile in [&executor.profile, &replay.profile] {
+        let command = engine_command(&executable, profile).unwrap();
+        assert_eq!(command.get_program(), executable.as_os_str());
         assert_eq!(
-            recorded_launch(&executor.profile).unwrap(),
-            ExecutableKind::InternalWorker
-        );
-        assert_eq!(recorded_timebase(&executor.profile).unwrap(), timebase);
-        assert_eq!(
-            executor.profile.semantic_parameters.clock,
-            Clock::new(timebase, CounterProfile::Zen)
-        );
-        let bytes = serde_json::to_vec(&executor.profile).unwrap();
-        let retained: ExecutionProfile = serde_json::from_slice(&bytes).unwrap();
-        let replay =
-            VmmExecutor::from_retained(&executable, &store, retained, Some(8), CounterProfile::Zen)
-                .unwrap();
-        assert_eq!(serde_json::to_vec(&replay.profile).unwrap(), bytes);
-        for profile in [&executor.profile, &replay.profile] {
-            let command = engine_command(&executable, profile).unwrap();
-            assert_eq!(command.get_program(), executable.as_os_str());
-            assert_eq!(
-                command.get_args().collect::<Vec<_>>(),
-                ["__engine", INTERNAL_WORKER_V1]
-            );
-            assert_eq!(recorded_features(profile).unwrap().timebase, timebase);
-        }
-        profiles.push(executor.profile);
-    }
-    let mut pv_as_counter = profiles.pop().unwrap();
-    pv_as_counter.semantic_parameters.clock = Clock::Counter(CounterProfile::Zen);
-    assert_eq!(pv_as_counter, profiles[0]);
-    // #89 owns timebase even for historical standalone profiles.
-    let legacy = VmmExecutor::new(
-        &executable,
-        &store,
-        None,
-        512,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap();
-    for timebase in [Timebase::Counter, Timebase::Pv] {
-        let executor = legacy.clone().with_timebase(timebase);
-        assert_eq!(
-            recorded_launch(&executor.profile).unwrap(),
-            ExecutableKind::Standalone
+            command.get_args().collect::<Vec<_>>(),
+            ["__engine", INTERNAL_WORKER_V1]
         );
     }
+    // Historical standalone profiles keep their launch contract.
+    let legacy = VmmExecutor::new(&executable, &store, None, 512, WitnessMode::Exits).unwrap();
+    assert_eq!(
+        recorded_launch(&legacy.profile).unwrap(),
+        ExecutableKind::Standalone
+    );
 }
 
 #[test]
-fn recorded_descriptor_is_data_and_unknown_timebases_still_fail() {
+fn recorded_descriptor_is_data_and_unknown_settings_fail() {
     let temporary = tempfile::tempdir().unwrap();
     let executable = temporary.path().join("old-worker");
     std::fs::write(&executable, b"retained worker").unwrap();
     let store = ContentStore::new(temporary.path().join("objects"));
-    let mut profile = VmmExecutor::new(
-        &executable,
-        &store,
-        None,
-        512,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap()
-    .profile;
+    let mut profile = VmmExecutor::new(&executable, &store, None, 512, WitnessMode::Exits)
+        .unwrap()
+        .profile;
     profile.semantic_parameters.engine = Some(crate::engine::kvm_descriptor(
         crate::engine::ExecutableKind::InternalWorker,
         "0.1.0-dev.1".into(),
     ));
     let original = serde_json::to_vec(&profile).unwrap();
-    let executor = VmmExecutor::from_retained(
-        &executable,
-        &store,
-        profile.clone(),
-        None,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let executor = VmmExecutor::from_retained(&executable, &store, profile.clone(), None).unwrap();
     assert_eq!(serde_json::to_vec(&executor.profile).unwrap(), original);
     assert_eq!(
         crate::engine::recorded_launch(&executor.profile).unwrap(),
         crate::engine::ExecutableKind::InternalWorker
     );
     let mut json = serde_json::to_value(&profile).unwrap();
-    json["semantic_parameters"]["clock"] = "counted-branches-v1".into();
+    json["semantic_parameters"]["timebase"] = "counted-branches-v1".into();
     assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
 }
 
@@ -362,15 +265,12 @@ fn replay_override_changes_only_retained_executable_digest() {
         None,
         512,
         WitnessMode::Exits,
-        CounterProfile::Zen,
     )
     .unwrap()
     .profile;
     let mut expected = profile.clone();
     expected.engine = ContentDigest::of(b"replacement executable");
-    let executor =
-        VmmExecutor::from_retained(&executable, &store, profile, None, CounterProfile::Zen)
-            .unwrap();
+    let executor = VmmExecutor::from_retained(&executable, &store, profile, None).unwrap();
     assert_eq!(executor.profile, expected);
 }
 
@@ -426,7 +326,6 @@ fn parallel_preflight_preserves_the_experimental_admission_gate() {
         None,
         512,
         WitnessMode::Exits,
-        CounterProfile::Zen,
     )
     .unwrap();
     for workers in [0, 33] {
@@ -452,10 +351,6 @@ fn observed(cpu: u32) -> CoreObservation {
         immediate_exit: p.immediate_exit,
         guest_debug: p.guest_debug,
         sync_regs: 7,
-        perf_type: p.perf_type,
-        perf_disabled_open: true,
-        perf_error: None,
-        workaround_msr: 17,
         raw_cpuid: Vec::new(),
     }
 }
@@ -466,9 +361,17 @@ fn replay_reconstructs_checkpoint_profile_without_performance_changes() {
         None,
         512,
         WitnessMode::Exits,
-        CounterProfile::Zen,
     )
     .unwrap();
+    let slower_watchdog = ordinary.clone().with_watchdog_ms(200).unwrap();
+    assert_eq!(slower_watchdog.profile(), ordinary.profile());
+    assert_eq!(
+        slower_watchdog.performance_parameters()["SEEDBOX_WATCHDOG_MS"],
+        "200"
+    );
+    for invalid in [0, 60001] {
+        assert!(ordinary.clone().with_watchdog_ms(invalid).is_err());
+    }
     let branch = ordinary.clone().with_checkpoint(500, 42);
     assert_eq!(
         branch.performance_parameters(),
@@ -496,14 +399,8 @@ fn any_engine_and_kernel_pair_is_admitted() {
             ContentDigest::of(b"dev kernel"),
         ),
     ] {
-        let backend = VmmExecutor::from_engine_digest(
-            engine.clone(),
-            None,
-            512,
-            WitnessMode::Exits,
-            CounterProfile::Zen,
-        )
-        .unwrap();
+        let backend =
+            VmmExecutor::from_engine_digest(engine.clone(), None, 512, WitnessMode::Exits).unwrap();
         let inputs = PreparedInputs {
             wall_clock_epoch: None,
             profile: backend.profile(),
@@ -544,77 +441,12 @@ fn any_engine_and_kernel_pair_is_admitted() {
 }
 
 #[test]
-fn pv_carries_no_counter_profile_and_needs_no_counter_admission() {
-    let intel = VmmExecutor::from_engine_digest(
-        ContentDigest::of(b"engine"),
-        None,
-        512,
-        WitnessMode::Exits,
-        CounterProfile::IntelIceLake,
-    )
-    .unwrap();
-    let pv = intel.clone().with_timebase(Timebase::Pv);
-    assert_eq!(pv.profile.semantic_parameters.clock, Clock::Pv);
-    assert_eq!(recorded_counter(&pv.profile).unwrap(), CounterProfile::Zen);
-    let zen_pv = VmmExecutor::from_engine_digest(
-        ContentDigest::of(b"engine"),
-        None,
-        512,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap()
-    .with_timebase(Timebase::Pv);
-    assert_eq!(pv.profile, zen_pv.profile);
-    let counted = pv.with_timebase(Timebase::Counter);
-    assert_eq!(counted.profile, intel.profile);
-}
-
-#[test]
-fn experimental_mode_never_carries_amd_proof_and_cannot_relax_release_or_counter_checks() {
-    let make = |counter| {
-        VmmExecutor::from_engine_digest(
-            ContentDigest::of(b"engine"),
-            None,
-            512,
-            WitnessMode::Exits,
-            counter,
-        )
-        .unwrap()
-    };
-    let experimental = make(CounterProfile::IntelIceLake);
-    assert_eq!(
-        recorded_counter(&experimental.profile).unwrap(),
-        CounterProfile::IntelIceLake
-    );
-    assert!(crate::admission::validate_profile(&experimental.profile).is_ok());
-    let mut json = serde_json::to_value(&experimental.profile).unwrap();
-    json["semantic_parameters"]["clock"]["counter"] = "unknown".into();
-    assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
-    let inputs = PreparedInputs {
-        wall_clock_epoch: None,
-        kernel: ContentDigest::of(b"kernel"),
-        images: BTreeMap::new(),
-        placement: BTreeMap::new(),
-        guests: BTreeMap::new(),
-        profile: experimental.profile.clone(),
-        auxiliary: BTreeMap::new(),
-        provenance: BTreeMap::new(),
-    };
-    assert!(experimental.validate_retained(&inputs).is_ok());
-    assert!(make(CounterProfile::IntelSkylake)
-        .validate_retained(&inputs)
-        .is_err());
-}
-
-#[test]
 fn doctor_report_preserves_actual_selected_core_and_exact_admitted_observations() {
     let executor = VmmExecutor::from_engine_digest(
         ContentDigest::of(b"engine"),
         None,
         1024,
         WitnessMode::Exits,
-        CounterProfile::Zen,
     )
     .unwrap();
     let observations = vec![observed(2), observed(18)];
@@ -646,15 +478,11 @@ fn no_doctor_success_report_on_probe_cleanup_error_or_capability_drift() {
         Some(2),
         1024,
         WitnessMode::Exits,
-        CounterProfile::Zen,
     )
     .unwrap();
-    for case in 0..3 {
+    for case in 0..2 {
         let mut observation = observed(2);
         if case == 1 {
-            observation.perf_disabled_open = false;
-        }
-        if case == 2 {
             observation.immediate_exit = 0;
         }
         let result = if case == 0 {

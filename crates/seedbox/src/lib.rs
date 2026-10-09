@@ -11,7 +11,6 @@ mod build_context;
 pub mod bundle;
 pub mod config;
 pub mod container_images;
-pub mod counter;
 pub mod diff;
 pub mod engine;
 pub mod execution;

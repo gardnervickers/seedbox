@@ -2,13 +2,12 @@
 //!
 //! Backends must enforce simulated/wall limits, honor cancellation, isolate their
 //! output, and release any host reservation after stopping guests. A hardware
-//! backend must acquire the shared host reservation *before* changing CPU/MSR
-//! state, and restore it on normal return and catchable interruption. Neither a
-//! preparer nor the orchestrator is permitted to perform these host mutations.
+//! backend must acquire the shared host reservation *before* pinning a guest
+//! to a core, and release it on normal return and catchable interruption. Neither
+//! a preparer nor the orchestrator is permitted to perform these host mutations.
 
 use crate::{
     config::{Check, Limits, Network, Schedule, Simulation},
-    counter::CounterProfile,
     engine::ExecutableKind,
     image::Launch,
     store::{ContentDigest, ContentStore},
@@ -36,13 +35,6 @@ pub struct ExecutionProfile {
     pub semantic_parameters: SemanticParameters,
 }
 
-impl ExecutionProfile {
-    /// How guest progress advances virtual time in this run.
-    pub fn timebase(&self) -> Timebase {
-        self.semantic_parameters.clock.timebase()
-    }
-}
-
 /// The execution backend that records and replays a run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Backend {
@@ -66,7 +58,6 @@ pub struct SemanticParameters {
     pub control_channel: ControlChannel,
     /// Guest RAM of every machine.
     pub memory_mb: u32,
-    pub clock: Clock,
     /// Guest timer deadlines are read from the shared time page.
     pub page_timer: bool,
     /// Virtio-net TX kicks are deferred to deterministic polls.
@@ -83,13 +74,12 @@ pub struct SemanticParameters {
 }
 
 impl SemanticParameters {
-    /// Counter clock with the default AMD Zen profile and every option off.
+    /// Every option off.
     pub fn new(memory_mb: u32) -> Self {
         Self {
             guest_abi: GuestAbi::OciInitV1,
             control_channel: ControlChannel::VirtioConsoleV1,
             memory_mb,
-            clock: Clock::Counter(CounterProfile::Zen),
             page_timer: false,
             deferred_tx: false,
             torn_writes: false,
@@ -113,7 +103,6 @@ impl SemanticParameters {
             guest_abi,
             control_channel,
             memory_mb,
-            clock,
             page_timer,
             deferred_tx,
             torn_writes,
@@ -125,7 +114,6 @@ impl SemanticParameters {
             (guest_abi != &other.guest_abi, "guest_abi"),
             (control_channel != &other.control_channel, "control_channel"),
             (memory_mb != &other.memory_mb, "memory_mb"),
-            (clock != &other.clock, "clock"),
             (page_timer != &other.page_timer, "page_timer"),
             (deferred_tx != &other.deferred_tx, "deferred_tx"),
             (torn_writes != &other.torn_writes, "torn_writes"),
@@ -159,39 +147,6 @@ impl ControlChannel {
     pub fn name(self) -> &'static str {
         match self {
             Self::VirtioConsoleV1 => "virtio-console-v1",
-        }
-    }
-}
-
-/// The timebase together with the branch counter a counter run reads.
-/// PV reads no counter, so its identity carries none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Clock {
-    Counter(CounterProfile),
-    Pv,
-}
-
-impl Clock {
-    pub fn new(timebase: Timebase, counter: CounterProfile) -> Self {
-        match timebase {
-            Timebase::Counter => Self::Counter(counter),
-            Timebase::Pv => Self::Pv,
-        }
-    }
-
-    pub fn timebase(self) -> Timebase {
-        match self {
-            Self::Counter(_) => Timebase::Counter,
-            Self::Pv => Timebase::Pv,
-        }
-    }
-
-    /// The branch counter read, or `None` for PV.
-    pub fn counter(self) -> Option<CounterProfile> {
-        match self {
-            Self::Counter(profile) => Some(profile),
-            Self::Pv => None,
         }
     }
 }
@@ -234,8 +189,6 @@ pub struct HvfParameters {
     /// clipped to the network lookahead.
     pub launch_max_skew_ns: u64,
 }
-
-pub use seedbox_engine_core::launch::Timebase;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -418,9 +371,6 @@ pub struct FaultEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionReport {
-    /// Execution timebase; absent in older records or other backends.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timebase: Option<Timebase>,
     pub reason: StopReason,
     pub workload_exit: Option<WorkloadExit>,
     pub witness: Option<ContentDigest>,

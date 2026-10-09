@@ -18,15 +18,13 @@ nix develop -c bash crates/seedbox/tests/accept-runtime.sh \
 ```
 
 The command exited zero. `acceptance-review-2/acceptance.json` has
-`status: passed`, fifteen retained results and fifteen successful CPU/SMT
-restoration checks. CPU 14 and sibling 30 returned to their exact original MSR
-value, `0x4480000000000`, after every execution. Use a fresh output directory
+`status: passed` and fifteen retained results. Use a fresh output directory
 for another run.
 
 Seed 1009; three Python guests with 512 MiB each; 1 ms network latency, 200 us
 network jitter, 1 ms timer jitter, 2 ms stop tolerance; 7 ms control latency.
-The normal limit is 30 simulated seconds. Baseline margin is 98304; ordinary
-replays use undo 0, and the additional healthy replay uses margin 131072/undo 16.
+The normal limit is 30 simulated seconds. The additional healthy replay uses
+changed performance settings.
 The readiness build delays the server supervisor's readiness by four simulated
 seconds. The cutoff case has a three-second world limit.
 
@@ -35,8 +33,8 @@ seconds. The cutoff case has a three-second world limit.
 | Case | Expected and observed | Retained attempt |
 | --- | --- | --- |
 | Healthy | PASS | `3592c60bdee7247a-3gkTDU` |
-| Healthy replay, undo 0 | PASS / MATCH | `3592c60bdee7247a-iiPh11` |
-| Healthy replay, changed margin/undo | PASS / MATCH | `3592c60bdee7247a-rSWbNQ` |
+| Healthy replay | PASS / MATCH | `3592c60bdee7247a-iiPh11` |
+| Healthy replay, changed performance settings | PASS / MATCH | `3592c60bdee7247a-rSWbNQ` |
 | Memory-only variant | FAIL | `4003c775ff654970-7t6jMM` |
 | Memory-only replay | FAIL / MATCH | `4003c775ff654970-2xM5yN` |
 | Memory-only without faults | PASS | `4aae6a744e57c352-3S8JiP` |
@@ -53,7 +51,7 @@ seconds. The cutoff case has a three-second world limit.
 Healthy recovery retained all 128 independently acknowledged writes. The
 memory-only variant lost 96 acknowledged writes after restarts, reproduced that
 FAIL on replay, and passed without faults. Overlapping partitions blocked probe
-traffic until both handles were released. The changed-margin/undo replay matched
+traffic until both handles were released. The changed-settings replay matched
 the control history, sampled counters and execution witness.
 
 The early stop was requested at 481786881 ns, before management

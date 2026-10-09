@@ -912,7 +912,10 @@ fn transfer_is_bound_to_the_actual_machine_even_when_both_disks_have_the_same_ba
             request(
                 2,
                 fresh.clone(),
-                worker::Operation::Evidence { full_state: false },
+                worker::Operation::Evidence {
+                    full_state: false,
+                    ram_pages: None,
+                },
             ),
         ]);
         result.unwrap();
@@ -957,7 +960,10 @@ fn transfer_install_is_one_shot_and_commits_successor_identity_only_once() {
         request(
             3,
             successor.clone(),
-            worker::Operation::Evidence { full_state: false },
+            worker::Operation::Evidence {
+                full_state: false,
+                ram_pages: None,
+            },
         ),
     ]);
     result.unwrap();
@@ -1206,7 +1212,10 @@ fn ordinary_ack_cannot_invent_scheduler_irq_or_deadline_hints() {
                 request(
                     1,
                     identity("a", 1, 0),
-                    worker::Operation::Evidence { full_state: false },
+                    worker::Operation::Evidence {
+                        full_state: false,
+                        ram_pages: None,
+                    },
                 ),
             ]);
             result.unwrap();

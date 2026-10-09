@@ -2,7 +2,6 @@
 //! execution artifact generated from verified inputs, not the authoring format.
 
 use crate::{
-    counter::CounterProfile,
     execution::*,
     store::{ContentDigest, ContentStore},
     Error, Result,
@@ -30,7 +29,6 @@ pub(crate) fn page_hash_log(machine: &str) -> String {
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
     pub cpu: Option<u32>,
-    counter: CounterProfile,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
     admission: std::sync::Arc<std::sync::Mutex<Vec<Vec<crate::admission::CoreObservation>>>>,
@@ -39,7 +37,6 @@ pub struct VmmExecutor {
 /// Successful compatibility observation; it is not empirical replay qualification.
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
-    pub timebase: Timebase,
     pub cpu: u32,
     pub cpus: Vec<u32>,
     pub engine: ContentDigest,
@@ -55,15 +52,6 @@ struct AdmissionProbe {
     result: Result<()>,
 }
 
-/// Recorded performance parameters before `--margin`/`--undo` apply.
-fn default_performance() -> BTreeMap<String, String> {
-    use seedbox_engine_core::launch::{ADAPTIVE_MARGIN, DEFAULT_UNDO_MARGIN};
-    BTreeMap::from([
-        ("SEEDBOX_MARGIN".into(), ADAPTIVE_MARGIN.into()),
-        ("SEEDBOX_UNDO".into(), DEFAULT_UNDO_MARGIN.to_string()),
-    ])
-}
-
 impl VmmExecutor {
     /// Detect the launch contract of an explicitly supplied executable.
     pub fn new_detected(
@@ -72,9 +60,8 @@ impl VmmExecutor {
         cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
-        counter: CounterProfile,
     ) -> Result<Self> {
-        Self::new(engine, store, cpu, memory_mb, witness_mode, counter)?
+        Self::new(engine, store, cpu, memory_mb, witness_mode)?
             .with_detected_contract(store, engine)
     }
 
@@ -85,10 +72,8 @@ impl VmmExecutor {
         store: &ContentStore,
         profile: ExecutionProfile,
         cpu: Option<u32>,
-        counter: CounterProfile,
     ) -> Result<Self> {
-        Self::from_retained(engine, store, profile, cpu, counter)?
-            .with_detected_contract(store, engine)
+        Self::from_retained(engine, store, profile, cpu)?.with_detected_contract(store, engine)
     }
 
     /// Detect a retained executable after resolving other inputs.
@@ -117,10 +102,9 @@ impl VmmExecutor {
         cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
-        counter: CounterProfile,
     ) -> Result<Self> {
         let descriptor = crate::engine::internal_descriptor()?;
-        let mut executor = Self::new(engine, store, cpu, memory_mb, witness_mode, counter)?;
+        let mut executor = Self::new(engine, store, cpu, memory_mb, witness_mode)?;
         executor.profile.semantic_parameters.engine = Some(descriptor);
         Ok(executor)
     }
@@ -133,14 +117,12 @@ impl VmmExecutor {
         store: &ContentStore,
         mut profile: ExecutionProfile,
         cpu: Option<u32>,
-        counter: CounterProfile,
     ) -> Result<Self> {
         profile.engine = store.put_file(engine)?;
         Ok(Self {
             cpu,
-            counter,
             profile,
-            performance: default_performance(),
+            performance: BTreeMap::new(),
             admission: Default::default(),
         })
     }
@@ -151,20 +133,13 @@ impl VmmExecutor {
         cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
-        counter: CounterProfile,
     ) -> Result<Self> {
         if !(64..=65536).contains(&memory_mb) {
             return Err(Error::Execution(
                 "guest memory must be 64..65536 MiB".into(),
             ));
         }
-        Self::from_engine_digest(
-            store.put_file(engine)?,
-            cpu,
-            memory_mb,
-            witness_mode,
-            counter,
-        )
+        Self::from_engine_digest(store.put_file(engine)?, cpu, memory_mb, witness_mode)
     }
 
     fn from_engine_digest(
@@ -172,20 +147,15 @@ impl VmmExecutor {
         cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
-        counter: CounterProfile,
     ) -> Result<Self> {
         if !(64..=65536).contains(&memory_mb) {
             return Err(Error::Execution(
                 "guest memory must be 64..65536 MiB".into(),
             ));
         }
-        let semantic_parameters = SemanticParameters {
-            clock: Clock::Counter(counter),
-            ..SemanticParameters::new(memory_mb)
-        };
+        let semantic_parameters = SemanticParameters::new(memory_mb);
         Ok(Self {
             cpu,
-            counter,
             admission: Default::default(),
             profile: ExecutionProfile {
                 backend: Backend::Kvm,
@@ -193,7 +163,7 @@ impl VmmExecutor {
                 witness_mode,
                 semantic_parameters,
             },
-            performance: default_performance(),
+            performance: BTreeMap::new(),
         })
     }
 
@@ -203,106 +173,40 @@ impl VmmExecutor {
         self
     }
 
-    /// PV reads no branch counter, so its identity carries no counter profile.
-    pub fn with_timebase(mut self, timebase: Timebase) -> Self {
-        self.profile.semantic_parameters.clock = Clock::new(timebase, self.counter);
-        self
-    }
-
     /// Read guest timer deadlines from the time page (semantic, off by default).
     pub fn with_page_timer(mut self, enabled: bool) -> Self {
         self.profile.semantic_parameters.page_timer = enabled;
         self
     }
 
-    /// Whether the engine reads the host branch counter; PV does not.
-    fn counted(&self) -> bool {
-        self.profile.timebase() == Timebase::Counter
-    }
-
     /// Check the existing execution policy without storing inputs or starting guests.
     /// Host observations are the same bounded probe used by execution preflight.
     pub fn doctor(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
-        Self::doctor_with_timebase(engine, kernel, cpu, Timebase::Counter)
-    }
-
-    /// Check compatibility for the selected guest progress mode.
-    pub fn doctor_with_timebase(
-        engine: &Path,
-        kernel: &Path,
-        cpu: Option<u32>,
-        timebase: Timebase,
-    ) -> Result<DoctorReport> {
         let executor = Self::from_engine_digest(
             crate::admission::file_digest(engine)?,
             cpu,
             1024,
             WitnessMode::Exits,
-            CounterProfile::Zen,
         )?;
-        Self::doctor_executor(executor.with_timebase(timebase), kernel)
+        Self::doctor_executor(executor, kernel)
     }
 
     /// Inspect the built-in worker without storing bytes or invoking it.
     pub fn doctor_internal(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
-        Self::doctor_internal_with_timebase(engine, kernel, cpu, Timebase::Counter)
-    }
-
-    /// Check the built-in worker for the selected progress mode without starting it.
-    pub fn doctor_internal_with_timebase(
-        engine: &Path,
-        kernel: &Path,
-        cpu: Option<u32>,
-        timebase: Timebase,
-    ) -> Result<DoctorReport> {
         let descriptor = crate::engine::internal_descriptor()?;
         let mut executor = Self::from_engine_digest(
             crate::admission::file_digest(engine)?,
             cpu,
             1024,
             WitnessMode::Exits,
-            CounterProfile::Zen,
         )?;
         executor.profile.semantic_parameters.engine = Some(descriptor);
-        Self::doctor_executor(executor.with_timebase(timebase), kernel)
+        Self::doctor_executor(executor, kernel)
     }
 
     fn doctor_executor(executor: Self, kernel: &Path) -> Result<DoctorReport> {
         crate::admission::validate_profile(&executor.profile)?;
         let kernel = crate::admission::file_digest(kernel)?;
-        if !executor.counted() {
-            #[cfg(target_os = "linux")]
-            {
-                crate::host::check_kvm_access()?;
-                let mut report = None;
-                with_capacity(
-                    1,
-                    || crate::host::CpuReservation::acquire(executor.cpu),
-                    |reservations| {
-                        let reservation = reservations.first().ok_or_else(|| {
-                            Error::Integrity("doctor did not reserve a CPU".into())
-                        })?;
-                        report = Some(DoctorReport {
-                            timebase: Timebase::Pv,
-                            cpu: reservation.cpu,
-                            cpus: reservation.cpus.iter().copied().collect(),
-                            engine: executor.profile.engine.clone(),
-                            simulator_version: executor.simulator_version(),
-                            kernel: kernel.clone(),
-                            observations: Vec::new(),
-                        });
-                        Ok(())
-                    },
-                )?;
-                return report.ok_or_else(|| {
-                    Error::Integrity("doctor did not collect its reserved CPU".into())
-                });
-            }
-            #[cfg(not(target_os = "linux"))]
-            return Err(Error::Setup(
-                "PV compatibility checks require a Linux KVM host".into(),
-            ));
-        }
         let probe = executor.probe();
         executor.doctor_report(kernel, probe)
     }
@@ -314,7 +218,6 @@ impl VmmExecutor {
             crate::admission::validate_observation(observation)?;
         }
         Ok(DoctorReport {
-            timebase: self.profile.timebase(),
             cpu: probe
                 .cpu
                 .ok_or_else(|| Error::Execution("host probe did not select a CPU".into()))?,
@@ -340,6 +243,7 @@ impl VmmExecutor {
         let result = (|| -> Result<()> {
             #[cfg(target_os = "linux")]
             {
+                crate::host::check_kvm_access()?;
                 with_capacity(
                     workers,
                     || crate::host::CpuReservation::acquire(self.cpu),
@@ -349,17 +253,17 @@ impl VmmExecutor {
                             crate::admission::collect_admitted(
                                 reservation.cpus.iter().copied(),
                                 &mut observations,
-                                |cpu| crate::admission::observe_counter(cpu, self.counter),
+                                crate::admission::observe,
                             )?;
                         }
                         Ok(())
                     },
-                )?; // All reservations/perf/affinity close before publication or OCI work.
+                )?; // All reservations/affinity close before publication or OCI work.
             }
             #[cfg(not(target_os = "linux"))]
             {
                 let _ = (&mut selected, workers);
-                observations.push(crate::admission::observe_counter(0, self.counter)?);
+                observations.push(crate::admission::observe(0)?);
             }
             Ok(())
         })();
@@ -390,24 +294,13 @@ impl VmmExecutor {
             .map(|engine| engine.simulator_version.clone())
     }
 
-    pub fn with_margin(mut self, margin: &str) -> Result<Self> {
-        if margin != "adaptive" && margin.parse::<u64>().ok().is_none_or(|value| value == 0) {
-            return Err(Error::Execution(
-                "margin must be adaptive or a positive integer".into(),
-            ));
+    /// Host CPU interval between watchdog observations; does not change guest time.
+    pub fn with_watchdog_ms(mut self, milliseconds: u64) -> Result<Self> {
+        if !(1..=60000).contains(&milliseconds) {
+            return Err(Error::Setup("--watchdog-ms must be 1..60000".into()));
         }
         self.performance
-            .insert("SEEDBOX_MARGIN".into(), margin.into());
-        Ok(self)
-    }
-
-    /// Initial undo margin in branches; zero disables speculative stop recovery.
-    pub fn with_undo(mut self, branches: u64) -> Result<Self> {
-        if branches > (1 << 18) {
-            return Err(Error::Execution("undo margin must be 0..262144".into()));
-        }
-        self.performance
-            .insert("SEEDBOX_UNDO".into(), branches.to_string());
+            .insert("SEEDBOX_WATCHDOG_MS".into(), milliseconds.to_string());
         Ok(self)
     }
 }
@@ -416,9 +309,6 @@ impl VmmExecutor {
 impl VmmExecutor {
     fn preflight_capacity(&self, workers: u32, output: Option<&Path>) -> Result<()> {
         crate::admission::validate_profile(&self.profile)?;
-        if !self.counted() {
-            return self.uncounted_preflight(workers);
-        }
         let probe = self.probe_capacity(workers);
         let observations = probe.observations;
         let collection = probe.result;
@@ -443,26 +333,6 @@ impl VmmExecutor {
             drop(saved);
             Ok(())
         })
-    }
-
-    /// PV needs only KVM and free cores: no perf event or workaround MSR is opened.
-    fn uncounted_preflight(&self, workers: u32) -> Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            crate::host::check_kvm_access()?;
-            with_capacity(
-                workers,
-                || crate::host::CpuReservation::acquire(self.cpu),
-                |_| Ok(()),
-            )
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = workers;
-            Err(Error::Setup(
-                "PV execution requires a Linux KVM host".into(),
-            ))
-        }
     }
 }
 
@@ -511,7 +381,6 @@ pub(crate) fn recorded_features(
     profile: &ExecutionProfile,
 ) -> Result<seedbox_engine_core::launch::MachineFeatures> {
     Ok(seedbox_engine_core::launch::MachineFeatures {
-        timebase: recorded_timebase(profile)?,
         page_timer: recorded_page_timer(profile),
         deferred_tx: recorded_deferred_tx(profile)?,
     })
@@ -543,13 +412,7 @@ impl ExecutionBackend for VmmExecutor {
             .collect()
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
-        crate::admission::validate_profile(&inputs.profile)?;
-        if self.counted() && recorded_counter(&inputs.profile)? != self.counter {
-            return Err(Error::Integrity(
-                "recorded branch counter differs from executor".into(),
-            ));
-        }
-        Ok(())
+        crate::admission::validate_profile(&inputs.profile)
     }
 
     fn profile(&self) -> ExecutionProfile {

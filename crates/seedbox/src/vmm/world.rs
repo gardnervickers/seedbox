@@ -196,10 +196,7 @@ pub(super) fn checkpoint_metadata(
         world,
         request.seed,
         request.prepared.profile.engine.hex(),
-        &checkpoint::identity_timebase(
-            recorded_timebase(&request.prepared.profile)?.name(),
-            recorded_deferred_tx(&request.prepared.profile)?,
-        ),
+        recorded_deferred_tx(&request.prepared.profile)?,
         recorded_page_timer(&request.prepared.profile),
         |path| {
             request

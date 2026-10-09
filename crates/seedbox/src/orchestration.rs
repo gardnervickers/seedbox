@@ -327,7 +327,6 @@ impl Orchestrator {
             }
             if cancellation.is_cancelled() {
                 return Ok(ExecutionReport {
-                    timebase: None,
                     reason: StopReason::Cancelled,
                     workload_exit: None,
                     witness: None,
@@ -676,11 +675,6 @@ fn drift(recorded: &ExecutionProfile, requested: &ExecutionProfile) -> Result<()
         first
     };
     Err(Error::Integrity(match first {
-        "clock" if recorded.timebase() != requested.timebase() => format!(
-            "executor timebase {} does not match the recorded --timebase {}; use an executor with the recorded timebase",
-            requested.timebase().name(),
-            recorded.timebase().name()
-        ),
         "deferred_tx" => "executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into(),
         setting => format!(
             "executor {setting} does not match the recorded run; use an executor with the recorded settings"

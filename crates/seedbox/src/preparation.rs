@@ -18,6 +18,8 @@ pub struct OciPreparer {
     pub kernel: PathBuf,
     pub engine: PathBuf,
     pub init: PathBuf,
+    /// Architecture-specific automatic application instrumentation bundle.
+    pub progress: PathBuf,
     /// Static mke2fs, needed only when a service mounts a named volume: the
     /// guest formats its blank retained disk with it on first boot.
     pub mke2fs: Option<PathBuf>,
@@ -29,6 +31,10 @@ pub use crate::preparation_command::PreparationContext;
 
 impl PreparationBackend for OciPreparer {
     fn validate_runtime_inputs(&self) -> Result<()> {
+        crate::guest::validate_progress(
+            &self.progress,
+            crate::guest::Architecture::from_profile(&self.profile)?,
+        )?;
         if self.profile.backend == Backend::Kvm {
             crate::admission::validate_profile(&self.profile)?;
             if crate::admission::file_digest(&self.engine)? != self.profile.engine {
@@ -128,6 +134,7 @@ impl OciPreparer {
         }
         let volumes = simulation.services.values().any(|s| !s.volumes.is_empty());
         let mut auxiliary = BTreeMap::from([("guest-init".into(), store.put_file(&self.init)?)]);
+        auxiliary.insert("guest-progress".into(), store.put_file(&self.progress)?);
         if volumes {
             let mke2fs = self.mke2fs.as_ref().ok_or_else(|| {
                 Error::Setup(
@@ -166,6 +173,11 @@ impl OciPreparer {
         let temporary = tempfile::tempdir()?;
         let init = store.materialize(&auxiliary["guest-init"], &temporary.path().join("init"))?;
         architecture.validate_elf(&init)?;
+        let progress = store.materialize(
+            &auxiliary["guest-progress"],
+            &temporary.path().join("progress.tar"),
+        )?;
+        crate::guest::validate_progress(&progress, architecture)?;
         let mke2fs = auxiliary
             .get("guest-mke2fs")
             .map(|digest| store.materialize(digest, &temporary.path().join("mke2fs")))
@@ -246,10 +258,17 @@ impl OciPreparer {
             let mke2fs = mke2fs.as_deref().filter(|_| !service.volumes.is_empty());
             match &imported.rootfs {
                 crate::oci::RootFilesystem::Directory(root) => {
-                    build_initramfs_with(root, &init, mke2fs, &recipe, &archive)?
+                    build_initramfs_with(root, &init, mke2fs, Some(&progress), &recipe, &archive)?
                 }
                 crate::oci::RootFilesystem::Archive(root) => {
-                    crate::guest::build_initramfs_from_tar(root, &init, mke2fs, &recipe, &archive)?
+                    crate::guest::build_initramfs_from_tar(
+                        root,
+                        &init,
+                        mke2fs,
+                        Some(&progress),
+                        &recipe,
+                        &archive,
+                    )?
                 }
             }
             let memory_mb = self.profile.semantic_parameters.memory_mb;

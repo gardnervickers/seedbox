@@ -21,6 +21,22 @@ fn fixture(root: &Path) -> (OciPreparer, config::Simulation, ContentStore) {
     header[..6].copy_from_slice(b"\x7fELF\x02\x01");
     header[18] = 62;
     fs::write(&helper, header).unwrap();
+    let progress = root.join("progress.tar");
+    let mut archive = tar::Builder::new(fs::File::create(&progress).unwrap());
+    for name in [
+        "bin64/drrun",
+        "libseedbox_progress.so",
+        "lib64/release/libdynamorio.so",
+        "ext/lib64/release/libdrmgr.so",
+        "ext/lib64/release/libdrreg.so",
+    ] {
+        let mut entry = tar::Header::new_gnu();
+        entry.set_mode(0o755);
+        entry.set_size(header.len() as u64);
+        entry.set_cksum();
+        archive.append_data(&mut entry, name, &header[..]).unwrap();
+    }
+    archive.finish().unwrap();
     let store = ContentStore::new(root.join("store"));
     let profile = ExecutionProfile {
         backend: Backend::Other("test-only".into()),
@@ -32,6 +48,7 @@ fn fixture(root: &Path) -> (OciPreparer, config::Simulation, ContentStore) {
         kernel,
         engine,
         init: helper,
+        progress,
         mke2fs: None,
         profile,
         docker: bollard::Docker::connect_with_http(

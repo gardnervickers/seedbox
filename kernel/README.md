@@ -1,5 +1,23 @@
 # Guest kernel releases
 
+On x86 PV, kernel `cpu_relax()`/`rep_nop()` calls charge one bounded virtual
+clock read (100 ns) after PAUSE. This allows polling loops to reach virtual
+timer and scheduler boundaries with application locks held. The hook preserves
+interrupt masking and does not schedule or acquire locks. It is inactive before
+PV activation. The decompressor, setup code and userspace
+vDSO retain raw PAUSE. Handwritten assembly and userspace runtime internals are
+not covered; an uncovered loop can stall virtual time until the wall-time
+limit. The watchdog reports the stall without advancing time. This changes the new kernel's
+PV execution semantics; old runs continue using their retained kernel.
+
+Kernel task-state saves canonicalize the x86 YMM component: an absent component
+has its ignored payload zeroed, and a present all-zero component becomes absent.
+Both forms restore the same architectural values, but hardware can choose between
+them across host interruptions. Nonzero YMM contents and other components are
+unchanged. This removes a reproduced full-RAM replay mismatch without weakening
+state comparison. Signal-frame saves, direct application XSAVE and other
+components remain outside this repair; see [#242](https://github.com/gardnervickers/seedbox/issues/242).
+
 The `Guest assets` GitHub Actions workflow builds native ARM64 and x86-64 Linux
 kernels and publishes ordinary files in this repository's Releases. It runs on
 asset-related pull requests and pushes to `main`, and supports **Run workflow**
@@ -40,7 +58,7 @@ From an existing checkout on native Linux, use the same Nix recipe as CI:
 nix build .#guestKernel --out-link kernel-output
 
 # Linux x86-64:
-./target/release/seedbox run examples/etcd --timebase pv --kernel ./kernel-output/bzImage
+./target/release/seedbox run examples/etcd --kernel ./kernel-output/bzImage
 ```
 
 On ARM64 Linux the output is `kernel-output/Image`. To use it on an Apple

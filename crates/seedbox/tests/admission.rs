@@ -1,4 +1,4 @@
-//! Synthetic readiness tests; no KVM/perf/MSR activity.
+//! Synthetic readiness tests; no KVM activity.
 use seedbox::{admission::*, execution::*, store::ContentDigest};
 
 fn observed() -> CoreObservation {
@@ -15,10 +15,6 @@ fn observed() -> CoreObservation {
         immediate_exit: p.immediate_exit,
         guest_debug: p.guest_debug,
         sync_regs: 7,
-        perf_type: p.perf_type,
-        perf_disabled_open: true,
-        perf_error: None,
-        workaround_msr: 0,
         raw_cpuid: vec![CpuidEntry {
             function: 1,
             ..Default::default()
@@ -41,7 +37,6 @@ fn cpu_vendor_model_microcode_and_cpuid_are_not_pinned() {
     o.vendor = "GenuineIntel".into();
     o.family = 6;
     o.model = 0x55;
-    o.workaround_msr = 0;
     o.family += 1;
     o.model += 1;
     o.stepping += 1;
@@ -58,9 +53,6 @@ fn every_missing_engine_capability_is_rejected() {
         |o| o.immediate_exit = 0,
         |o| o.guest_debug = 0,
         |o| o.sync_regs = 1,
-        |o| o.perf_type = 9,
-        |o| o.perf_disabled_open = false,
-        |o| o.perf_error = Some("failed open".into()),
     ];
     for change in changes {
         let mut o = observed();

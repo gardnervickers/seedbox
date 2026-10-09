@@ -17,62 +17,43 @@ pub(super) fn execute(
     {
         return Err(Error::Execution("CPU exceeds affinity mask".into()));
     }
-    let timebase = recorded_timebase(&backend.profile)?;
     use crate::worker_process::{incomplete, WorkerLaunch};
     // Performance values travel in the launch request; the environment stays cleared.
     let mut launch = WorkerLaunch::prepare(&request)?;
 
     if request.cancellation.is_cancelled() {
-        return Ok(incomplete(
-            StopReason::Cancelled,
-            recorded_timebase(&backend.profile)?,
-        ));
+        return Ok(incomplete(StopReason::Cancelled));
     }
     let static_evidence = backend
         .admission
         .lock()
         .map_err(|_| Error::Execution("host admission evidence lock poisoned".into()))?
         .clone();
-    let counted = timebase == Timebase::Counter;
-    let workaround = backend.counter.workaround().filter(|_| counted);
-    if counted {
-        fs::write(
-            request.output.join("host-static.json"),
-            serde_json::to_vec_pretty(&static_evidence)?,
-        )?;
-    }
-    let (cpu, mut lease) =
-        HostLease::acquire_checked(backend.cpu, workaround, request.output, |reservation| {
-            if !counted {
-                return Ok(());
-            }
-            let mut observed = Vec::new();
-            let admission = crate::admission::collect_admitted(
-                reservation.cpus.iter().copied(),
-                &mut observed,
-                |cpu| crate::admission::observe_counter(cpu, backend.counter),
-            );
-            crate::admission::finish_admission(admission, |admission| {
+    fs::write(
+        request.output.join("host-static.json"),
+        serde_json::to_vec_pretty(&static_evidence)?,
+    )?;
+    let (cpu, lease) = HostLease::acquire_checked(backend.cpu, |reservation| {
+        let mut observed = Vec::new();
+        let admission = crate::admission::collect_admitted(
+            reservation.cpus.iter().copied(),
+            &mut observed,
+            crate::admission::observe,
+        );
+        crate::admission::finish_admission(admission, |admission| {
+            fs::write(
+                request.output.join("host-leased.json"),
+                serde_json::to_vec_pretty(&observed)?,
+            )?;
+            if let Err(error) = admission {
                 fs::write(
-                    request.output.join("host-leased.json"),
-                    serde_json::to_vec_pretty(&observed)?,
+                    request.output.join("host-leased-error.txt"),
+                    error.to_string(),
                 )?;
-                if let Err(error) = admission {
-                    fs::write(
-                        request.output.join("host-leased-error.txt"),
-                        error.to_string(),
-                    )?;
-                }
-                Ok(())
-            })
-        })?;
-    let originals = lease.original_registers();
-    if workaround.is_some() {
-        fs::write(
-            request.output.join("host-workaround.json"),
-            serde_json::to_vec_pretty(&lease.enabled_registers()?)?,
-        )?;
-    }
+            }
+            Ok(())
+        })
+    })?;
     unsafe {
         launch.command.pre_exec(move || {
             let mut set: libc::cpu_set_t = std::mem::zeroed();
@@ -85,17 +66,11 @@ pub(super) fn execute(
         });
     }
     // Declared after the lease: every error path finishes process cleanup
-    // before releasing the leased CPU or restoring MSRs.
+    // before releasing the leased CPU.
     let child = launch.spawn()?;
     let completion = child.wait(request.cancellation, request.limits.wall_time_ns, |bytes| {
         report(bytes, &request)
     });
-    lease.restore()?;
-    if workaround.is_some() {
-        fs::write(
-            request.output.join("host-restored.json"),
-            serde_json::to_vec_pretty(&originals)?,
-        )?;
-    }
+    drop(lease);
     completion
 }

@@ -1,4 +1,5 @@
-"""Lifecycle controls use real disposable processes, never hardware MSRs."""
+"""Lifecycle controls use real disposable processes, never hardware."""
+import contextlib
 import fcntl
 import importlib.util
 import os
@@ -39,7 +40,7 @@ class BatchTests(unittest.TestCase):
     def test_invalid_timeout_is_rejected_before_mutation(self):
         for timeout in (0, -1, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
-                batch.run_batch(Path("."),"world","control",[1],[],[14],timeout,"unused","adaptive")
+                batch.run_batch(Path("."),"world","control",[1],[],[14],timeout,"unused")
 
     def exercise_lifecycle(self, interrupt=False, count=1):
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,21 +54,23 @@ class BatchTests(unittest.TestCase):
                 if len(children) == count:
                     spawned.set()
                 return children[-1]
-            def set_msr(cpus, snapshot):
-                snapshot.write_text('{}')
-            restored = []
-            def restore(cpus, snapshot):
-                self.assertTrue(spawned.is_set())
-                self.assertTrue(all(child.returncode is not None for child in children))
-                for child in children:
-                    with self.assertRaises(ProcessLookupError):
-                        os.killpg(child.pid, 0)
-                for cpu in cpus:
-                    with self.assertRaises(RuntimeError):
-                        with batch.cpu_locks({cpu}, root):
-                            pass
-                restored.append(True)
-                snapshot.unlink()
+            released = []
+            real_locks = batch.cpu_locks
+            @contextlib.contextmanager
+            def locks(cpus, directory):
+                # The leases must outlive every owned child.
+                with real_locks(cpus, directory):
+                    yield
+                    self.assertTrue(spawned.is_set())
+                    self.assertTrue(all(child.returncode is not None for child in children))
+                    for child in children:
+                        with self.assertRaises(ProcessLookupError):
+                            os.killpg(child.pid, 0)
+                    for cpu in cpus:
+                        with self.assertRaises(RuntimeError):
+                            with real_locks({cpu}, root):
+                                pass
+                    released.append(True)
             sender = None
             if interrupt:
                 def signal_after_start():
@@ -77,15 +80,12 @@ class BatchTests(unittest.TestCase):
                 sender.start()
             with patch.object(batch, 'siblings', side_effect=lambda cpu:{cpu,cpu+16}), \
                  patch.object(batch.subprocess, 'Popen', side_effect=launch), \
-                 patch.object(batch.msr54, 'required', return_value=True), \
-                 patch.object(batch.msr54, 'show'), \
-                 patch.object(batch.msr54, 'set_workaround', side_effect=set_msr), \
-                 patch.object(batch.msr54, 'restore_snapshot', side_effect=restore):
+                 patch.object(batch, 'cpu_locks', side_effect=locks):
                 result = batch.run_batch(root,'world.json','control',list(range(count)),[],
-                                         list(range(14,14+count)),.08,'unused','adaptive',root)
+                                         list(range(14,14+count)),.08,'unused',root)
             if sender:
                 sender.join(2)
-            self.assertEqual(restored, [True])
+            self.assertEqual(released, [True])
             self.assertEqual(result,143 if interrupt else 0)
             for i in range(count):
                 self.assertEqual((root/f'runs/control-s{i}-r{i}.status').read_text().strip(),

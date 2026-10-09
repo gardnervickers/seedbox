@@ -1,11 +1,10 @@
-//! Linux system queries only: no VM creation, MSR write, event enable or signals.
+//! Linux system queries only: no VM creation or signals.
 use super::*;
 use std::collections::BTreeMap;
 use std::{
     fs::{self, File},
     io::Read,
-    os::fd::{AsRawFd, FromRawFd},
-    os::unix::fs::FileExt,
+    os::fd::AsRawFd,
 };
 
 struct Affinity {
@@ -17,9 +16,7 @@ impl Affinity {
         if cpu >= libc::CPU_SETSIZE as u32 {
             return Err(Error::Setup("CPU exceeds affinity mask".into()));
         }
-        // SAFETY: cpu_set_t is a plain bit array; all-zero is the empty set.
         let mut original = unsafe { std::mem::zeroed() };
-        // SAFETY: the size passed is the size of the writable mask.
         if unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&original), &mut original) }
             != 0
         {
@@ -28,14 +25,11 @@ impl Affinity {
                 std::io::Error::last_os_error()
             )));
         }
-        // SAFETY: as for `original`.
         let mut pinned = unsafe { std::mem::zeroed() };
-        // SAFETY: `cpu` was checked against CPU_SETSIZE above.
         unsafe {
             libc::CPU_ZERO(&mut pinned);
             libc::CPU_SET(cpu as usize, &mut pinned);
         }
-        // SAFETY: the size passed is the size of the mask.
         if unsafe { libc::sched_setaffinity(0, std::mem::size_of_val(&pinned), &pinned) } != 0 {
             return Err(Error::Setup(format!(
                 "CPU {cpu} temporary affinity: {}",
@@ -53,7 +47,6 @@ impl Affinity {
             checked_affinity_restore(
                 &expected,
                 || {
-                    // SAFETY: the size passed is the size of the saved mask.
                     if unsafe {
                         libc::sched_setaffinity(
                             0,
@@ -70,9 +63,7 @@ impl Affinity {
                     Ok(())
                 },
                 || {
-                    // SAFETY: as for `original` in `pin`.
                     let mut restored = unsafe { std::mem::zeroed() };
-                    // SAFETY: the size passed is the size of the writable mask.
                     if unsafe {
                         libc::sched_getaffinity(0, std::mem::size_of_val(&restored), &mut restored)
                     } != 0
@@ -92,7 +83,6 @@ impl Affinity {
 }
 fn affinity_bits(mask: &libc::cpu_set_t) -> Vec<u32> {
     (0..libc::CPU_SETSIZE as u32)
-        // SAFETY: every index is below CPU_SETSIZE.
         .filter(|cpu| unsafe { libc::CPU_ISSET(*cpu as usize, mask) })
         .collect()
 }
@@ -117,8 +107,6 @@ fn text(path: &str) -> Result<String> {
     Ok(data)
 }
 fn query(file: &File, command: libc::c_ulong, argument: libc::c_ulong) -> Result<i32> {
-    // SAFETY: callers pass only KVM_GET_API_VERSION and KVM_CHECK_EXTENSION,
-    // whose argument is an integer, never a pointer.
     let result = unsafe { libc::ioctl(file.as_raw_fd(), command, argument) };
     if result < 0 {
         return Err(Error::Setup(format!(
@@ -129,46 +117,7 @@ fn query(file: &File, command: libc::c_ulong, argument: libc::c_ulong) -> Result
     Ok(result)
 }
 
-// Matches the VMM counter.rs::PerfAttr; no enable/fcntl/mmap follows.
-#[repr(C)]
-#[derive(Default)]
-struct PerfAttr {
-    kind: u32,
-    size: u32,
-    config: u64,
-    period: u64,
-    sample_type: u64,
-    read_format: u64,
-    flags: u64,
-    rest: [u64; 10],
-}
-fn open_disabled_perf(spec: DisabledCounterSpec) -> Result<File> {
-    let attr = PerfAttr {
-        kind: spec.kind,
-        size: std::mem::size_of::<PerfAttr>() as u32,
-        config: spec.config,
-        period: spec.period,
-        read_format: spec.read_format,
-        flags: spec.flags,
-        ..Default::default()
-    };
-    // SAFETY: `attr` is a live perf_event_attr whose `size` field is its own
-    // size; the kernel only reads it.
-    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, spec.open_flags) }
-        as i32;
-    if fd < 0 {
-        return Err(Error::Setup(format!(
-            "disabled exact-event perf admission {:#x}: {}; run as root on a supported KVM host",
-            spec.config,
-            std::io::Error::last_os_error()
-        )));
-    }
-    // SAFETY: perf_event_open succeeded, so `fd` is a new descriptor nothing else owns.
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObservation> {
-    // SAFETY: sched_getcpu takes no arguments.
+fn collect(cpu: u32) -> Result<CoreObservation> {
     if unsafe { libc::sched_getcpu() } != cpu as i32 {
         return Err(Error::Execution("preflight CPU affinity changed".into()));
     }
@@ -196,28 +145,6 @@ fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObse
             .parse()
             .map_err(|_| Error::Setup(format!("CPU {cpu} invalid {name}")))
     };
-    let mut original = [0; 8];
-    if let Some(workaround) = counter.workaround() {
-        let msr_path = format!("/dev/cpu/{cpu}/msr");
-        let msr = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&msr_path)
-            .map_err(|e| {
-                Error::Setup(format!(
-                    "{msr_path}: {e}; run as root with the msr module loaded"
-                ))
-            })?;
-        if msr
-            .read_at(&mut original, workaround.register)
-            .map_err(|e| Error::Setup(format!("{msr_path}: {e}; restore admitted MSR access")))?
-            != 8
-        {
-            return Err(Error::Setup(format!(
-                "{msr_path}: short workaround MSR read"
-            )));
-        }
-    }
     let kvm = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -226,8 +153,6 @@ fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObse
     // KVM UAPI header plus at most 1024 complete 40-byte entries, aligned for ioctl.
     let mut words = vec![0u64; 1 + 1024 * 5];
     words[0] = 1024;
-    // SAFETY: KVM_GET_SUPPORTED_CPUID writes at most `words[0]` 40-byte
-    // entries after the 8-byte header, and `words` has room for exactly that.
     if unsafe {
         libc::ioctl(
             kvm.as_raw_fd(),
@@ -246,8 +171,6 @@ fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObse
         return Err(Error::Setup("KVM CPUID capacity exceeded".into()));
     }
     let raw_cpuid = (0..count)
-        // SAFETY: `index < count <= 1024`, so the entry lies inside `words`; the
-        // u64 buffer is suitably aligned and CpuidEntry is plain data.
         .map(|index| unsafe {
             words
                 .as_ptr()
@@ -270,36 +193,12 @@ fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObse
         immediate_exit: query(&kvm, 0xae03, 136)?,
         guest_debug: query(&kvm, 0xae03, 23)?,
         sync_regs: query(&kvm, 0xae03, 74)?,
-        perf_type: text("/sys/bus/event_source/devices/cpu/type")?
-            .trim()
-            .parse()
-            .map_err(|_| Error::Setup("invalid CPU PMU type".into()))?,
-        perf_disabled_open: false,
-        perf_error: None,
-        workaround_msr: u64::from_le_bytes(original),
         raw_cpuid,
     })
 }
 
-pub(super) fn observe(
-    cpu: u32,
-    counter: crate::counter::CounterProfile,
-) -> Result<CoreObservation> {
+pub(super) fn observe(cpu: u32) -> Result<CoreObservation> {
     let affinity = Affinity::pin(cpu)?;
-    scoped_probe(
-        affinity,
-        || {
-            // The shared check preserves static evidence and closes any disabled
-            // event descriptor before affinity restoration.
-            if crate::counter::host()? != counter {
-                return Err(Error::Setup(format!(
-                    "CPU {cpu}: branch counter differs from selected profile"
-                )));
-            }
-            Ok(probe_disabled_perf(collect(cpu, counter)?, || {
-                probe_selected_event(counter, open_disabled_perf)
-            }))
-        },
-        Affinity::restore,
-    )
+    // Every descriptor the probe opens closes before affinity restoration.
+    scoped_probe(affinity, || collect(cpu), Affinity::restore)
 }

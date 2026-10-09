@@ -141,7 +141,7 @@ rebuild handoff, full acceptance and the remaining cross-backend RAM difference.
 | --- | --- | --- |
 | `backend::Backend` | Create VM, retain/map/unmap RAM, create one vCPU, read/write architectural core and system registers, run to an owned `Stop`, complete that operation, set an SPI line, query dirty pages. All calls and destruction happen on the creating thread. | `Hvf` links Hypervisor.framework; `Kvm` uses kvm-ioctls. Host handles, file descriptors, exit structures and register IDs stay inside these modules. |
 | `machine::Machine<B>` | Own RAM, shared page, PL011, clockevent, PV clock and witness. Load Image/initrd/FDT; reconcile guest reads, perform device operations, judge timer expiry, inject while stopped, complete the exit, publish before re-entry. | Same loop for both backends. Backend selection exists only in CLI/tests. |
-| `timebase::Timebase` | `prepare` publishes time and bound; `read` reconciles guest progress; `judge` determines expiry/idle advance. The trait uses numbers and `Publication`, not a hypervisor or machine type. | `PvClock` only. A future counted timebase needs a progress-sampling/stop-planning extension; it must not silently charge host elapsed time through this interface. |
+| `timebase::Timebase` | `prepare` publishes time and bound; `read` reconciles guest progress; `judge` determines expiry/idle advance. The trait uses numbers and `Publication`, not a hypervisor or machine type. | `PvClock` only; it must not silently charge host elapsed time through this interface. |
 | `devices::MmioDevice` | Width-checked register reads/writes produce values and explicit effects. Device effects never call a host API. | PL011, shared time-page register view, and clockevent registers. Machine owns IRQ line transitions. |
 | `witness` | Canonical, versioned, little-endian semantic-exit encoding plus console and all guest RAM, including the shared page. | Host API raw structures, wall time, jitter and the two defined no-op debug completions are excluded. No RAM masks or comparison-time filtering. |
 
@@ -182,7 +182,7 @@ The shared machine accepts zero writes to OSDLR_EL1 (`S2_0_C1_C3_4`,
 the unlocked debug state. When exposed, they are **backend-internal completions**,
 not scheduling points: complete the instruction once without reconciling or
 publishing PV time, judging timers, injecting IRQs, or recording an exit. The
-raw-stop budget and timer/counter leak checks still apply. This rule is shared
+raw-stop budget and timer leak checks still apply. This rule is shared
 by both backends and is limited to these exact zero writes; other exposed debug
 operations (including reads, nonzero writes and other encodings) remain errors.
 KVM handles debug register accesses internally, so this is not a claim that the
@@ -272,7 +272,7 @@ UART accesses and firmware calls have no extra time charge. PL011 transmission
 is synchronous; its empty TX FIFO asserts a level IRQ when enabled, and guest
 mask writes deassert it. Receive stays empty.
 
-This milestone omits syscall charging, counted stops, and fixed-point
+This milestone omits syscall charging and fixed-point
 spin detection. A guest computing forever without exits can still hang; use an
 external operator timeout. A host timeout must fail, never advance virtual time.
 The 5,000,000 raw-stop limit catches exit-producing runaway guests, including

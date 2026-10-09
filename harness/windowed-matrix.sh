@@ -4,12 +4,10 @@
 #
 #   sudo -E env PATH="$PATH" bash harness/windowed-matrix.sh KERNEL VMM CPUS
 #
-# KERNEL is a PV-capable guest kernel (kernel/build.sh). VMM is this revision's
-# `cargo build-vmm` output. CPUS lists one CPU per machine thread, e.g.
-# 4,5,6,7; the Zen counter workaround is set on them and their SMT siblings
-# and restored on exit.
+# KERNEL is a guest kernel (kernel/build.sh). VMM is this revision's
+# `cargo build-vmm` output. CPUS lists one CPU per machine thread, e.g. 4,5,6,7.
 #
-# For each timebase and world (harness/worlds/window2.json, window4.json),
+# For each world (harness/worlds/window2.json, window4.json),
 # runs with 1..len(CPUS) threads, and with reversed completion order, must
 # agree with each other on world, network and full-state witnesses, machine
 # times and the committed end.
@@ -19,15 +17,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 kernel=$(realpath "$1"); vmm=$(realpath "$2"); cpus=$3
 seed=${SEED:-7}
 out=$(mktemp -d "${TMPDIR:-/tmp}/windowed-matrix.XXXXXX")
-# Every given CPU and its SMT siblings, expanded and deduplicated for msr54.py.
-siblings=$(cd "$here" && python3 -c 'import sys, batch; print(",".join(map(str, sorted(set().union(*(batch.siblings(int(c)) for c in sys.argv[1].split(",")))))))' "$cpus")
-msr_state="$out/msr54.json"
-SEEDBOX_MSR_STATE="$msr_state" python3 "$here/msr54.py" set "$siblings" >/dev/null
-cleanup() {
-    SEEDBOX_MSR_STATE="$msr_state" python3 "$here/msr54.py" restore "$siblings" >/dev/null || echo "msr54 restore failed: $siblings" >&2
-    rm -rf "$out"
-}
-trap cleanup EXIT
+trap 'rm -rf "$out"' EXIT
 bash "$here/../guest/build-initramfs.sh" "$out/window.cpio" "$here/../guest/window.init" >/dev/null
 IFS=, read -ra cpu_list <<< "$cpus"
 
@@ -48,20 +38,19 @@ for m in w["machines"]:
 json.dump(w, open(sys.argv[2], "w"))
 PY
     machines=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["machines"]))' "$out/world.json")
-    for tb in pv counter; do
-        names=()
-        for ((t = 1; t <= ${#cpu_list[@]} && t <= machines; t++)); do
-            set=$(IFS=,; echo "${cpu_list[*]:0:t}")
-            args=(--timebase "$tb")
-            if ((t > 1)); then args+=(--machine-workers "$t" --machine-cpus "$set"); fi
-            run "$world-$tb-w$t" "$vmm" "$set" "${args[@]}"
-            names+=("$world-$tb-w$t")
-            last=$t
-        done
-        # Reversed completion order: machine i waits (n - i) x 300 us per run.
-        SEEDBOX_WINDOWED_SKEW_US=300 run "$world-$tb-w${last}r" "$vmm" "$set" "${args[@]}"
-        names+=("$world-$tb-w${last}r")
-        python3 - "$out" "${names[@]}" <<'PY'
+    names=()
+    for ((t = 1; t <= ${#cpu_list[@]} && t <= machines; t++)); do
+        set=$(IFS=,; echo "${cpu_list[*]:0:t}")
+        args=()
+        if ((t > 1)); then args+=(--machine-workers "$t" --machine-cpus "$set"); fi
+        run "$world-w$t" "$vmm" "$set" "${args[@]}"
+        names+=("$world-w$t")
+        last=$t
+    done
+    # Reversed completion order: machine i waits (n - i) x 300 us per run.
+    SEEDBOX_WINDOWED_SKEW_US=300 run "$world-w${last}r" "$vmm" "$set" "${args[@]}"
+    names+=("$world-w${last}r")
+    python3 - "$out" "${names[@]}" <<'PY'
 import json, sys
 out, *windowed = sys.argv[1:]
 load = lambda n: json.load(open(f"{out}/{n}/vmm.json"))
@@ -81,6 +70,5 @@ for n in windowed:
         print(f"MISMATCH: {n} differs from {windowed[0]}"); ok = False
 sys.exit(0 if ok else 1)
 PY
-    done
 done
 echo "windowed matrix: all witnesses agree"

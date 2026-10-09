@@ -138,7 +138,6 @@ mod tests {
     fn divergence_diagnostics_name_the_interval_and_cannot_inject_status_lines() {
         let sample = |time_ns, records| seedbox::diff::WitnessSample {
             time_ns,
-            branches: 0,
             records,
             witness: "00".repeat(8),
         };

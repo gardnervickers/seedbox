@@ -63,6 +63,16 @@ out:
 	return value;
 }
 
+/* Charge syscall work through the existing bounded clock rendezvous. Keeping
+ * each read bounded also preserves pending IRQ delivery at an exact deadline.
+ */
+void seedbox_syscall_progress(void)
+{
+	unsigned int i;
+	for (i = 0; i < 1000; ++i)
+		(void)seedbox_read();
+}
+
 static u64 cs_read(struct clocksource *cs) { return seedbox_read(); }
 static struct clocksource cs = {
 	.name = "seedbox-pv", .rating = 500, .read = cs_read,

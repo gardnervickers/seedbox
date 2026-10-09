@@ -10,16 +10,12 @@ use seedbox_engine_core::faults;
 #[cfg(test)]
 use seedbox_engine_core::world::{replay_readiness, stop_progress};
 use seedbox_engine_core::{checkpoint, control, disk, links, network_counters, output_layout, rng};
-mod counter;
 #[cfg(test)]
 mod device_tests;
 mod devices;
 pub mod host_control;
 mod machine;
-mod profile;
-mod stepper;
-mod timebase;
-mod undo;
+mod shadow;
 mod virtio_blk;
 mod virtio_console;
 #[cfg(test)]
@@ -28,7 +24,6 @@ mod virtio_net;
 mod witness_log;
 mod world_adapter;
 
-use counter::Counter;
 use machine::pv::PvClock;
 use machine::{
     BootSpec, Machine, State, BLK_IRQ, BLK_MMIO, CHANNEL_IRQ, CHANNEL_MMIO, NET_IRQ, NET_MMIO,
@@ -49,13 +44,12 @@ thread_local! {
     static CONSOLE_TRACE: Cell<Option<ConsoleTraceCallback>> = const { Cell::new(None) };
 }
 
-pub use seedbox_engine_core::launch::{MachineFeatures, Performance, Timebase, WorkerRequest};
+pub use seedbox_engine_core::launch::{MachineFeatures, Performance, WorkerRequest};
 
 /// One console line observed at the host diagnostic boundary.
 pub struct ConsoleTrace<'a> {
     pub host_seconds: f64,
     pub guest_seconds: f64,
-    pub branches: u64,
     pub line: &'a [u8],
 }
 
@@ -63,10 +57,9 @@ impl std::fmt::Display for ConsoleTrace<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[host {:.3}s guest {:.6}s br {}] {}",
+            "[host {:.3}s guest {:.6}s] {}",
             self.host_seconds,
             self.guest_seconds,
-            self.branches,
             String::from_utf8_lossy(self.line)
         )
     }
@@ -82,8 +75,8 @@ pub fn print_console_trace(trace: ConsoleTrace<'_>) {
 /// Debug-only worker settings from the environment. They never change results.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DebugEnv {
-    /// `SEEDBOX_PV_WATCHDOG_MS`: the PV spin watchdog period.
-    pub pv_watchdog_ms: Option<u64>,
+    /// `SEEDBOX_WATCHDOG_MS`: the spin watchdog period.
+    pub watchdog_ms: Option<u64>,
     /// `SEEDBOX_WINDOWED_SKEW_US`: reversed-completion testing delay.
     pub windowed_skew_us: Option<u64>,
     /// `SEEDBOX_TRACE_CONSOLE`: print each guest console line with its times.
@@ -104,7 +97,7 @@ impl DebugEnv {
                 .transpose()
         };
         Ok(Self {
-            pv_watchdog_ms: number("SEEDBOX_PV_WATCHDOG_MS")?,
+            watchdog_ms: number("SEEDBOX_WATCHDOG_MS")?,
             windowed_skew_us: number("SEEDBOX_WINDOWED_SKEW_US")?,
             trace_console: get("SEEDBOX_TRACE_CONSOLE").is_some(),
         })
@@ -112,11 +105,11 @@ impl DebugEnv {
 
     /// Apply the settings to `request`; returns the console trace to install.
     pub fn apply(self, request: &mut WorkerRequest) -> Option<ConsoleTraceCallback> {
-        if let Some(ms) = self.pv_watchdog_ms {
-            request.performance.pv_watchdog_ms = ms;
+        if let Some(ms) = self.watchdog_ms {
+            request.performance.watchdog_ms = ms;
         }
         if let Some(us) = self.windowed_skew_us {
-            request.performance.windowed_skew_us = us;
+            request.windowed_skew_us = us;
         }
         self.trace_console
             .then_some(print_console_trace as ConsoleTraceCallback)
@@ -134,44 +127,25 @@ pub(crate) fn console_trace_enabled() -> bool {
     CONSOLE_TRACE.with(|trace| trace.get().is_some())
 }
 
-pub(crate) fn emit_console_trace(time: u64, branches: u64, line: &[u8]) {
+pub(crate) fn emit_console_trace(time: u64, line: &[u8]) {
     CONSOLE_TRACE.with(|trace| {
         if let Some(callback) = trace.get() {
             callback(ConsoleTrace {
                 host_seconds: START.with(|s| s.elapsed().as_secs_f64()),
                 guest_seconds: time as f64 / 1e9,
-                branches,
                 line,
             });
         }
     });
 }
 
-/// The world's timebase (see `timebase.rs`), one for all its machines.
-pub enum Clock {
-    Counter(Counter),
-    Pv(PvClock),
-}
+/// The world's clock (see `machine/pv.rs`), one per executing thread.
+pub type Clock = PvClock;
 
-impl Clock {
-    /// Open the clock for `timebase` on the calling thread: the counter
-    /// counts that thread's guest execution, and the PV watchdog that
-    /// thread's CPU time after `watchdog_ms` (performance only).
-    fn open(timebase: Timebase, watchdog_ms: u64) -> Result<Self, String> {
-        Ok(match timebase {
-            Timebase::Pv => Clock::Pv(PvClock::new(std::time::Duration::from_millis(
-                watchdog_ms.max(1),
-            ))?),
-            Timebase::Counter => Clock::Counter(Counter::new()?),
-        })
-    }
-
-    fn timebase(&self) -> Timebase {
-        match self {
-            Clock::Counter(_) => Timebase::Counter,
-            Clock::Pv(_) => Timebase::Pv,
-        }
-    }
+/// Open the clock on the calling thread: its watchdog measures that thread's
+/// CPU time after `watchdog_ms` (performance only).
+fn open_clock(watchdog_ms: u64) -> Result<Clock, String> {
+    PvClock::new(std::time::Duration::from_millis(watchdog_ms.max(1)))
 }
 
 /// Guest image bytes. Boot copies a mapped image into guest RAM straight
@@ -251,12 +225,9 @@ pub struct BootInputs {
     /// The disk as configured, with nothing written. Only the first
     /// incarnation boots from it; a reboot inherits its predecessor's.
     disk: Option<disk::Disk>,
-    undo_margin: u64,
     tolerance: u64,
     timer_jitter: u64,
     exact_timer_ppm: u64,
-    /// A fixed stepping margin; None adapts it.
-    margin: Option<u64>,
     console_limit: Option<usize>,
     features: MachineFeatures,
     log_chunk_limit: Option<usize>,
@@ -308,11 +279,13 @@ fn boot_machine(
         mac: b.mac,
         control_channel: b.control_channel,
         disk: b.disk.clone(),
-        undo_margin: b.undo_margin,
         barrier,
-        features: b.features,
+        page_timer: b.features.page_timer,
     };
     let mut mach = Machine::new(kvm, name, &spec)?;
+    if let Some(net) = mach.net.as_mut() {
+        net.set_deferred_tx(b.features.deferred_tx);
+    }
     mach.com1.output_limit = b.console_limit;
     mach.com2.output_limit = b.console_limit;
     mach.com1.chunks.limit = b.log_chunk_limit;
@@ -320,10 +293,6 @@ fn boot_machine(
     mach.tolerance = b.tolerance;
     mach.timer_jitter = b.timer_jitter;
     mach.exact_timer_ppm = b.exact_timer_ppm;
-    match b.margin {
-        None => mach.adaptive_margin = true,
-        Some(m) => mach.margin = m,
-    }
     Ok(mach)
 }
 
@@ -331,7 +300,7 @@ pub use seedbox_engine_core::report::RunReport;
 use seedbox_engine_core::report::{
     BootReport, BootSummary, ControlChannelReport, ControlRecord, DiskReport, EngineReport,
     FaultRecord, IoDirection, Kill, MachineOutcome, MachineReport, MachineState, PendingIo,
-    PvReport, SkewReport, SpinReport, TimerReport, UndoReport, WorldEvidence, REPORT_VERSION,
+    ShadowReport, SkewReport, TimerReport, WorldEvidence, REPORT_VERSION,
 };
 use seedbox_engine_core::world::{
     self as world_core, arm_seed, boot_faults, entropy_seed, Payload,
@@ -359,13 +328,13 @@ fn simulate_windowed(
         }
         Ok(())
     };
-    let skew = std::time::Duration::from_micros(request.performance.windowed_skew_us);
+    let skew = std::time::Duration::from_micros(request.windowed_skew_us);
     if request.machine_workers <= 1 {
         return world_windowed::simulate(world, run, skew, &mut boundary);
     }
-    // Each pool thread opens its own clock.
-    let timebase = world.clock.timebase();
-    let watchdog_ms = request.performance.pv_watchdog_ms;
+    // Each pool thread opens its own clock: the watchdog measures that
+    // thread's CPU time.
+    let watchdog_ms = request.performance.watchdog_ms;
     let cpus = &request.machine_cpus;
     let workers = world_windowed::Workers {
         count: request.machine_workers,
@@ -379,7 +348,7 @@ fn simulate_windowed(
             if let Some(&cpu) = cpus.get(w) {
                 pin(cpu)?;
             }
-            Clock::open(timebase, watchdog_ms)
+            open_clock(watchdog_ms)
         },
         &mut boundary,
     )
@@ -430,8 +399,6 @@ fn pin(cpu: usize) -> Result<(), String> {
     }
     Ok(())
 }
-#[cfg(test)]
-use world_core::drain_machine_messages;
 use world_core::reseed_checkpoint;
 
 fn release(
@@ -573,8 +540,6 @@ pub fn run(
     let out = options.out.to_string_lossy().into_owned();
     let digest = options.digest;
     let features = options.features;
-    // Undo-able precise stops (performance only): initial final margin, 0 = off.
-    let undo_margin = options.performance.undo_margin;
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let mut host_control = options
         .host_control
@@ -629,7 +594,6 @@ pub fn run(
     };
     let kvm = kvm_ioctls::Kvm::new().map_err(|e| format!("kvm: {e}"))?;
     let kernel: Rc<[u8]> = kernel.into();
-    let margin = options.performance.margin;
     let console_limit = options.console_limit;
     let barrier = forked && fork_at.is_none();
     let mut machines = Vec::new();
@@ -665,11 +629,9 @@ pub fn run(
             mac: networked.then_some(mac),
             control_channel,
             disk,
-            undo_margin,
             tolerance: cfg.stop_tolerance_ns,
             timer_jitter: cfg.timer_jitter_ns,
             exact_timer_ppm: cfg.exact_timer_ppm.unwrap_or(0),
-            margin,
             console_limit,
             features,
             log_chunk_limit: options.log_chunk_limit,
@@ -692,7 +654,9 @@ pub fn run(
     let net = cfg.network.clone().unwrap_or_default();
     let latency = net.latency_ns;
     let early = (latency / 2).min(cfg.stop_tolerance_ns);
-    let clock = Clock::open(features.timebase, options.performance.pv_watchdog_ms)?;
+    // Host CPU time a run may go without an exit before it is checked for a
+    // spin (performance only).
+    let clock = open_clock(options.performance.watchdog_ms)?;
     let mut world = World {
         failure: None,
         factory: kvm,
@@ -734,13 +698,11 @@ pub fn run(
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let engine =
                 seedbox_engine_core::sha256_hex(std::fs::read(exe).map_err(|e| e.to_string())?);
-            let identity_timebase =
-                checkpoint::identity_timebase(world.clock.timebase().name(), features.deferred_tx);
             let parent = checkpoint::parent_identity(
                 &cfg,
                 seed,
                 &engine,
-                &identity_timebase,
+                features.deferred_tx,
                 features.page_timer,
                 |p| {
                     std::fs::read(base.join(p))
@@ -1011,6 +973,18 @@ fn ms(ns: u128) -> f64 {
     ns as f64 / 1e6
 }
 
+/// The `kvm_ns` and `kvm_n` slot of port I/O exits.
+const EXIT_PIO: usize = 2;
+/// Reported exit kinds and their `kvm_ns` slots.
+const EXIT_NAMES: [(&str, usize); 6] = [
+    ("eintr", 0),
+    ("pio", EXIT_PIO),
+    ("mmio", 3),
+    ("hlt", 4),
+    ("window", 5),
+    ("other", 6),
+];
+
 /// One machine's report row: its outcome evidence and diagnostics. With
 /// `digest`, its page hashes are written to `out` too.
 fn machine_report(
@@ -1020,11 +994,10 @@ fn machine_report(
     digest: bool,
     out: &str,
 ) -> Result<MachineReport, String> {
-    let pv = matches!(world.clock, Clock::Pv(_));
     let incarnations = &world.incarnations[index];
     let mach = &mut world.machines[index];
     let (state_digest, state_digest_parts) = if digest {
-        let (d, parts) = mach.state_digest()?;
+        let (d, parts) = mach.state_digest();
         // The host supplies output/MACHINE_OUTPUT_DIR as --out; retention
         // preserves that directory prefix (see seedbox/src/vmm/mod.rs).
         std::fs::write(
@@ -1038,14 +1011,12 @@ fn machine_report(
         (None, None)
     };
     let s = &mach.stats;
-    let mut sk = s.skids.clone();
-    sk.sort();
     let crashed_incarnations = incarnations
         .iter()
         .map(|old| serde_json::from_value(old.clone()))
         .collect::<Result<_, _>>()
         .map_err(|e| format!("crashed incarnation summary: {e}"))?;
-    let pio_total = s.kvm_n[machine::ExitKind::Pio as usize]
+    let pio_total = s.kvm_n[EXIT_PIO]
         + incarnations
             .iter()
             .filter_map(|old| old["pio_total"].as_u64())
@@ -1061,7 +1032,6 @@ fn machine_report(
         witness,
         state_digest,
         state_digest_parts,
-        branches: Some(mach.branches),
         pending_io: mach.pending_io.as_ref().map(|p| PendingIo {
             remaining_ns: p.remaining_ns,
             direction: if p.write {
@@ -1096,22 +1066,6 @@ fn machine_report(
             })
             .collect(),
     };
-    let pv = pv.then(|| PvReport {
-        spin: SpinReport {
-            probes: s.spin_probes,
-            idles: s.spin_idles,
-            false_alarms: s.spin_false,
-            clock_progress: s.spin_clock_progress,
-            mismatch: s.spin_mismatch.clone(),
-        },
-        syscalls: mach.syscalls(),
-        syscall_ns: mach.syscall_ns,
-        time_ns_by_cause: machine::Cause::NAMES
-            .iter()
-            .zip(s.time_by)
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
-    });
     Ok(MachineReport {
         outcome,
         incarnation: mach.world.incarnation,
@@ -1124,29 +1078,17 @@ fn machine_report(
         irqs: s.irqs,
         window_exits: s.window_exits,
         eintr: s.eintr,
-        precise_stops: s.precise_stops,
-        steps: s.steps,
-        step_ms: ms(s.step_ns),
         run_ms: ms(s.run_ns),
-        skid_max: s.skid_max,
-        skid_count: s.skids.len(),
-        skid_p50: sk.get(sk.len() / 2).copied(),
-        skid_p99: sk.get(sk.len() * 99 / 100).copied(),
-        final_margin: mach.margin,
+        stalls: s.stalls,
         yields: s.yields,
         yield_stops: s.yield_stops,
-        undo: mach.undo.as_ref().map(|u| UndoReport {
-            checkpoints: u.stats.checkpoints,
-            rollbacks: u.stats.rollbacks,
-            synced_pages: u.stats.synced_pages,
-            restored_pages: u.stats.restored_pages,
-            checkpoint_ms: ms(u.stats.checkpoint_ns),
-            rollback_ms: ms(u.stats.rollback_ns),
-        }),
-        kvm_ms_by_exit: machine::ExitKind::NAMES
+        shadow: ShadowReport {
+            synced_pages: mach.shadow.stats.synced_pages,
+            restored_pages: mach.shadow.stats.restored_pages,
+        },
+        kvm_ms_by_exit: EXIT_NAMES
             .iter()
-            .zip(s.kvm_ns)
-            .map(|(k, ns)| (k.to_string(), ms(ns)))
+            .map(|&(k, i)| (k.to_string(), ms(s.kvm_ns[i])))
             .collect(),
         kvm_n_by_exit: s.kvm_n.to_vec(),
         control_channel: mach.channel.as_ref().map(|_| ControlChannelReport {
@@ -1174,7 +1116,13 @@ fn machine_report(
             }
         }),
         timer,
-        pv,
+        syscalls: mach.syscalls(),
+        syscall_ns: mach.syscall_ns,
+        time_ns_by_cause: machine::Cause::NAMES
+            .iter()
+            .zip(s.time_by)
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
     })
 }
 
@@ -1224,8 +1172,7 @@ fn report(
         }
         std::fs::write(
             format!("{out}/{}.witness-log", mach.world.name),
-            mach.witness_log
-                .encode(mach.world.time, mach.branches, &mach.witness),
+            mach.witness_log.encode(mach.world.time, &mach.witness),
         )
         .map_err(|e| e.to_string())?;
         std::fs::write(format!("{out}/{}.console", mach.world.name), &mach.com1.out)
@@ -1261,12 +1208,7 @@ fn report(
     Ok(EngineReport {
         report_version: REPORT_VERSION,
         seed,
-        timebase: world.clock.timebase(),
         deferred_tx: world.boot.iter().any(|b| b.features.deferred_tx),
-        counter_profile: match world.clock {
-            Clock::Counter(_) => Some(profile::host()?.name.to_string()),
-            Clock::Pv(_) => None,
-        },
         evidence: WorldEvidence {
             outcome,
             world_witness: format!("{:x}", world_witness.finalize()),
@@ -1377,57 +1319,6 @@ mod progress_tests {
     }
 }
 
-/// A test world of `names` booted from `boot`, before any traffic.
-#[cfg(test)]
-fn test_world(
-    names: Vec<String>,
-    boot: Vec<BootInputs>,
-    seed: u64,
-    latency: u64,
-    clock: Clock,
-    faults: faults::Faults,
-    control: control::Control,
-) -> World {
-    let kvm = kvm_ioctls::Kvm::new().unwrap();
-    let machines = names
-        .iter()
-        .zip(&boot)
-        .map(|(name, boot)| boot_machine(&kvm, name, boot, false, [0; 32]).unwrap())
-        .collect();
-    let n = names.len();
-    World {
-        failure: None,
-        machines,
-        factory: kvm,
-        boot,
-        barrier: false,
-        boot_seed: seed,
-        run_seed: seed,
-        branch_identity: None,
-        incarnations: vec![vec![]; n],
-        paused_ingress: vec![0; n],
-        clock,
-        events: vec![BTreeMap::new(); n],
-        strict_events: vec![BTreeMap::new(); n],
-        seq: 0,
-        lookahead: latency,
-        early: 0,
-        latency,
-        partitioned: BTreeMap::new(),
-        faults,
-        control,
-        macs: (1..=n as u8).map(|i| [0, 0, 0, 0, 0, i]).collect(),
-        dropped: 0,
-        delivered: 0,
-        link_counts: BTreeMap::new(),
-        semantic_counts: network_counters::NetworkCounters::default(),
-        slices: 0,
-    }
-}
-
-#[cfg(test)]
-mod trigger_world_tests;
-
 #[cfg(test)]
 mod worker_options_tests {
     use super::*;
@@ -1449,17 +1340,14 @@ mod worker_options_tests {
         assert!(none.apply(&mut request).is_none());
         assert_eq!(request.performance, Performance::default());
         let debug = DebugEnv::from_env(env(&[
-            ("SEEDBOX_PV_WATCHDOG_MS", "5"),
+            ("SEEDBOX_WATCHDOG_MS", "5"),
             ("SEEDBOX_WINDOWED_SKEW_US", "300"),
             ("SEEDBOX_TRACE_CONSOLE", ""),
         ]))
         .unwrap();
         assert!(debug.apply(&mut request).is_some());
         assert_eq!(
-            (
-                request.performance.pv_watchdog_ms,
-                request.performance.windowed_skew_us
-            ),
+            (request.performance.watchdog_ms, request.windowed_skew_us),
             (5, 300)
         );
         assert_eq!(
@@ -1473,13 +1361,9 @@ mod worker_options_tests {
         let trace = ConsoleTrace {
             host_seconds: 1.5,
             guest_seconds: 0.25,
-            branches: 7,
             line: b"hello",
         };
-        assert_eq!(
-            trace.to_string(),
-            "[host 1.500s guest 0.250000s br 7] hello"
-        );
+        assert_eq!(trace.to_string(), "[host 1.500s guest 0.250000s] hello");
     }
 
     #[test]
@@ -1490,7 +1374,7 @@ mod worker_options_tests {
             let _guard =
                 ConsoleTraceGuard(CONSOLE_TRACE.with(|trace| trace.replace(Some(callback))));
             assert!(console_trace_enabled());
-            emit_console_trace(1000, 2, b"line");
+            emit_console_trace(1000, b"line");
         }
         assert!(!console_trace_enabled());
     }
