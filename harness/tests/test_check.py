@@ -35,7 +35,8 @@ class SelectionTests(unittest.TestCase):
 
     def test_groups_and_implied_suites_expand_in_documented_order(self):
         self.assertEqual(check.expand(["linux"], "x86_64"),
-                         ["portable", "linux-kvm", "linux-counter", "linux-guests", "linux-oci", "linux-apps"])
+                         ["portable", "linux-kvm", "linux-counter", "linux-oci", "linux-apps"])
+        self.assertEqual(check.expand(["mac"], "arm64"), ["portable", "mac-hvf", "mac-apps"])
         self.assertEqual(check.expand(["linux-guests"], "x86_64"),
                          ["portable", "linux-kvm", "linux-counter", "linux-guests"])
         self.assertEqual(check.expand(["linux-guests"], "aarch64"), ["portable", "linux-kvm", "linux-guests"])

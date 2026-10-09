@@ -34,9 +34,11 @@ SUITES = {
     "mac-guests": "mac-hvf plus the ARM fixture kernel and initrd: real guest controls.",
     "mac-apps": "mac-hvf plus Docker or Podman: every acceptance workload on ARM PV.",
 }
+# Groups hold the suites a set-up host can run with no hand-built fixtures;
+# the guest and pause suites are always named explicitly.
 GROUPS = {
-    "linux": ["linux-kvm", "linux-counter", "linux-guests", "linux-oci", "linux-apps"],
-    "mac": ["mac-hvf", "mac-guests", "mac-apps"],
+    "linux": ["linux-kvm", "linux-counter", "linux-oci", "linux-apps"],
+    "mac": ["mac-hvf", "mac-apps"],
 }
 # A suite also runs the suites its Cargo features build on.
 IMPLIES = {

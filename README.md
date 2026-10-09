@@ -343,8 +343,9 @@ bash harness/check.sh --help                  # list suites and groups
 The runner never selects tests by probing the host. Every named suite runs, and
 a suite whose host requirements are missing fails with exit 2 before anything
 builds. The `linux` group covers generic KVM, counted x86 tests under CPU/SMT
-leases, guest fixtures, OCI and applications; `mac` covers signed native HVF
-tests, guest fixtures and applications. Application acceptance uses the release
+leases, OCI and applications; `mac` covers signed native HVF tests and
+applications. The guest-fixture suites need a hand-built kernel and initrd, so
+they are named explicitly (`linux-guests`, `mac-guests`). Application acceptance uses the release
 CLI, which downloads and caches guest assets itself.
 
 Portable checks must pass before hardware execution. Hardware-feature suites

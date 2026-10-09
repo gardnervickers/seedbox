@@ -38,9 +38,10 @@ copies, after their Cargo build has finished.
 | `mac-guests` | `mac-hvf` plus ARM fixture kernel/initrd | ARM `guest-tests`. Implies `mac-hvf` |
 | `mac-apps` | `mac-hvf` plus Docker or Podman | CLI `application-tests` on ARM PV. Implies `mac-hvf` |
 
-Groups: `linux` is `linux-kvm linux-counter linux-guests linux-oci linux-apps`;
-`mac` is `mac-hvf mac-guests mac-apps`. `linux-pause` needs a retained run and is
-never part of a group. `--cpu` applies to `linux-counter` and `linux-apps`.
+Groups: `linux` is `linux-kvm linux-counter linux-oci linux-apps`; `mac` is
+`mac-hvf mac-apps`. Groups hold only suites that need no hand-built fixtures, so
+the guest suites (fixture kernel and initrd, see `harness/worlds/README.md`) and
+`linux-pause` (a retained run) are always named explicitly. `--cpu` applies to `linux-counter` and `linux-apps`.
 Both apps suites need the guest kernel and runtime assets: `GH_TOKEN` or
 `GITHUB_TOKEN` for the private release download, a populated Seedbox cache, or
 `SEEDBOX_KERNEL` and `SEEDBOX_RUNTIME_ASSETS`. Otherwise they report unavailable.
