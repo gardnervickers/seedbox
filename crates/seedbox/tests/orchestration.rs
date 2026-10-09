@@ -584,6 +584,26 @@ fn concurrent_runs_share_content_but_never_output_directories() {
 }
 
 #[test]
+fn unsynced_put_replaces_an_object_a_host_crash_truncated() {
+    // Unsynced objects can survive a host crash renamed into place but empty
+    // or short. The same bytes put again must not fail on that object forever.
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path());
+    let bytes = b"{\"identity\":1}";
+    let digest = store.put_unsynced(bytes).unwrap();
+    let object = directory.path().join("sha256").join(digest.hex());
+    std::fs::write(&object, b"").unwrap();
+    assert!(store.verify(&digest).is_err());
+    assert_eq!(store.put_unsynced(bytes).unwrap(), digest);
+    store.verify(&digest).unwrap();
+    std::fs::write(&object, b"").unwrap();
+    let file = directory.path().join("log");
+    std::fs::write(&file, bytes).unwrap();
+    assert_eq!(store.put_file_unsynced(&file).unwrap(), digest);
+    store.verify(&digest).unwrap();
+}
+
+#[test]
 fn content_store_never_silently_repairs_corruption_or_accepts_path_digests() {
     let directory = tempfile::tempdir().unwrap();
     let store = ContentStore::new(directory.path());
