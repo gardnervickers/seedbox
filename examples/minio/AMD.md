@@ -14,7 +14,6 @@ SEEDBOX=/absolute/seedbox
 VMM=/absolute/seedbox-vmm
 KERNEL=/absolute/bzImage
 GUEST_INIT=/absolute/guest-init
-BUSYBOX=/absolute/static-linux-amd64/busybox
 BUILDER=/absolute/project-native/podman
 CPU=8  # Replace with the currently available admitted lane.
 EVIDENCE=/absolute/fresh-minio-evidence
@@ -32,7 +31,7 @@ python3 examples/minio/generate.py "$PROJECTS" --minio "$INPUTS/minio" --wheel-d
 "$SEEDBOX" validate "$PROJECTS/broken"
 "$SEEDBOX" validate "$PROJECTS/fixed"
 sudo -E env PATH="$PATH" "$SEEDBOX" doctor --cpu "$CPU" --kernel "$KERNEL" --vmm "$VMM" --json > "$EVIDENCE/doctor.json"
-RUNTIME=(--cpu "$CPU" --kernel "$KERNEL" --vmm "$VMM" --guest-init "$GUEST_INIT" --busybox "$BUSYBOX" --builder "$BUILDER" --memory-mb 2048)
+RUNTIME=(--cpu "$CPU" --kernel "$KERNEL" --vmm "$VMM" --guest-init "$GUEST_INIT" --memory-mb 2048)
 ```
 
 Expected: every checksum/control and all three validations succeed; doctor admits the profile and completes cleanup. MinIO packaging itself remains unqualified until the next step. Cap and record preparation/full-command wall time under the host's execution supervision; Compose caps only backend execution. The initial four worlds have at most 270 seconds summed execution caps, and the added offline replay raises that to 330 seconds across five worlds. These are caps, not measured runtimes or a total CLI wall-time promise. Abort further dispatch on exhaustion, ambiguity, nonexpected results or unverified native builder cleanup.

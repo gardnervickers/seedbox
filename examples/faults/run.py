@@ -193,7 +193,6 @@ def main():
     for flag in ("seedbox", "kernel", "vmm", "guest-init", "state", "output"):
         p.add_argument("--" + flag, required=True)
     p.add_argument("--cpu", type=int, required=True)
-    p.add_argument("--busybox")
     p.add_argument("--negative-guest-init", help="same supervisor compiled with -DSEEDBOX_DROP_EFFECTS for the missing-effect control")
     p.add_argument("--rejecting-guest-init", help="same supervisor compiled with -DSEEDBOX_REJECT_EFFECTS for the explicit rejection control")
     p.add_argument("--delayed-guest-init", help="supervisor compiled with -DSEEDBOX_TEST_READY_DELAY_NS=4000000000ULL for readiness and cutoff checks")
@@ -212,8 +211,6 @@ def main():
         focused_projects(projects)
     common = ["--kernel", a.kernel, "--vmm", a.vmm, "--guest-init", a.guest_init,
               "--cpu", str(a.cpu), "--state", a.state, "--memory-mb", "512", "--margin", a.margin]
-    if a.busybox:
-        common += ["--busybox", a.busybox]
     evidence = RUN_EVIDENCE
     for variant, status, faulted in (("fixed", "PASS", True), ("broken", "FAIL", True), ("broken-no-faults", "PASS", False)):
         run = execute([a.seedbox, "run", str(projects / variant / "compose.yaml"), *common], 0 if status == "PASS" else 1)
