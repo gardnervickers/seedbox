@@ -300,7 +300,7 @@ mod page_evidence_tests {
         let raw = serde_json::json!({
             "report_version": 1, "seed": 1009, "outcome": "end_machine_exited",
             "world_witness": ContentDigest::of(b"world"),
-            "machines": [{"name": "workload", "infrastructure_error": false,
+            "machines": [{"name": "workload", "state": "Exited(0)", "time_ns": 100, "infrastructure_error": false,
                 "guest_exit_code": 0, "witness": ContentDigest::of(b"machine"),
                 "state_digest": ContentDigest::of(b"state"),
                 "state_digest_parts": {"ram": ContentDigest::of(b"RAM"), "regs": ContentDigest::of(b"regs"), "events": "none"}}]

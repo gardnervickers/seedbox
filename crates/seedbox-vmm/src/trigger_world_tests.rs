@@ -95,7 +95,7 @@ fn committed_trigger_world_effects_follow_arm_order_across_reversed_machine_ties
                 .triggers
                 .arm("b".into(), vec![b'b'], 0, 5000, partition("second"))
                 .unwrap();
-            let outcome = simulate(&mut w, &json!({}), 2000, &None, None, &mut None).unwrap();
+            let outcome = simulate(&mut w, 2000, &None, None, &mut None).unwrap();
             assert_eq!(outcome, "quiescent");
             assert_eq!(w.faults.log.len(), 2);
             assert_eq!(w.faults.log[0].request["handle"], "first");
@@ -164,7 +164,7 @@ fn committed_trigger_world_retains_already_routed_response_and_lagging_peer() {
         .unwrap();
     assert!(!w.faults.blocked(0, 1));
     // Let the real scheduler catch every active machine up to the barrier.
-    simulate(&mut w, &json!({}), 52, &None, None, &mut None).unwrap();
+    simulate(&mut w, 52, &None, None, &mut None).unwrap();
     assert_eq!(w.machines[0].time, 52);
     assert_eq!(w.machines[1].time, 52);
     assert!(w.faults.blocked(0, 1));
@@ -227,11 +227,11 @@ fn committed_trigger_world_snapshot_keeps_partial_match_and_scheduled_effect() {
 #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
 fn committed_trigger_unused_surface_preserves_witness_and_report_bytes() {
     let mut w = world(256, false);
-    let outcome = simulate(&mut w, &json!({}), 2000, &None, None, &mut None).unwrap();
+    let outcome = simulate(&mut w, 2000, &None, None, &mut None).unwrap();
+    let outcome: RunOutcome = serde_json::from_value(Value::from(outcome)).unwrap();
     let out = std::env::temp_dir().join(format!("seedbox-trigger-unused-{}", std::process::id()));
     std::fs::create_dir(&out).unwrap();
     let run = world_windowed::Run {
-        cfg: &json!({}),
         duration: 2000,
         end_on: None,
         fork: None,
@@ -254,7 +254,7 @@ fn committed_trigger_unused_surface_preserves_witness_and_report_bytes() {
     w.control.triggers.reset_source("a");
     w.control.triggers.cut_off(2000);
     let after = report(&mut w, &run, true, finished()).unwrap();
-    assert!(after.get("triggers").is_none());
+    assert!(after.evidence.triggers.is_none());
     assert_eq!(
         serde_json::to_vec(&before).unwrap(),
         serde_json::to_vec(&after).unwrap()
@@ -280,7 +280,7 @@ fn committed_trigger_world_does_not_rescan_old_console_after_arm() {
         .triggers
         .arm("a".into(), vec![b'a'], 50, 5000, partition("p"))
         .unwrap();
-    simulate(&mut w, &json!({}), 2000, &None, None, &mut None).unwrap();
+    simulate(&mut w, 2000, &None, None, &mut None).unwrap();
     assert!(w.faults.log.is_empty());
     assert_eq!(w.control.triggers.records[0].prefix, 0);
     assert_eq!(w.control.triggers.records[0].seen, 0);

@@ -12,7 +12,7 @@ fn trace_console(trace: ConsoleTrace<'_>) {
     );
 }
 
-fn run() -> Result<serde_json::Value, String> {
+fn run() -> Result<seedbox_vmm::RunReport, String> {
     let args: Vec<String> = std::env::args().collect();
     let undo = std::env::var("SEEDBOX_UNDO").ok();
     let margin = std::env::var("SEEDBOX_MARGIN").ok();

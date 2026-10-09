@@ -1,7 +1,9 @@
 //! Directed, send-time link decisions. No host, device or scheduler dependencies.
 use crate::network_faults::{self, Counts, Streams};
 use crate::rng::Rng;
+use crate::world_config::NetworkConfig;
 use seedbox_control::{NetworkFaults, MAX_LINK_DELAY_NS, MAX_PPM};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -148,61 +150,47 @@ impl Links {
         links.reseed(seed, names);
         Ok(links)
     }
+    /// Build from a world document's `network` object held as JSON; `null`
+    /// takes every default.
     pub fn from_config(seed: u64, names: &[String], net: &Value) -> Result<Self, String> {
-        let latency_ns = net
-            .get("latency_ns")
-            .map(|v| v.as_u64().ok_or("invalid network.latency_ns"))
-            .transpose()?
-            .unwrap_or(DEFAULT_LATENCY_NS);
-        let jitter_ns = net
-            .get("jitter_ns")
-            .map(|v| v.as_u64().ok_or("invalid network.jitter_ns"))
-            .transpose()?
-            .unwrap_or(0);
+        let net = if net.is_null() {
+            NetworkConfig::default()
+        } else {
+            NetworkConfig::deserialize(net).map_err(|e| format!("network: {e}"))?
+        };
+        Self::from_network(seed, names, &net)
+    }
+    /// Build from a world's network policy and baseline link overrides.
+    pub fn from_network(seed: u64, names: &[String], net: &NetworkConfig) -> Result<Self, String> {
         let global = Policy {
-            latency_ns,
-            jitter_ns,
+            latency_ns: net.latency_ns,
+            jitter_ns: net.jitter_ns,
             loss_ppm: 0,
-            bandwidth_bps: optional_u64(net, "bandwidth_bps")?,
-            queue_bound_ns: optional_u64(net, "queue_bound_ns")?,
+            bandwidth_bps: net.bandwidth_bps,
+            queue_bound_ns: net.queue_bound_ns,
         };
         let mut baselines = BTreeMap::new();
-        if let Some(raw) = net.get("links") {
-            for (i, link) in raw
-                .as_array()
-                .ok_or("network.links must be a list")?
-                .iter()
-                .enumerate()
-            {
-                let parse = || -> Result<(Pair, Policy), String> {
-                    let index = |key| {
-                        names
-                            .iter()
-                            .position(|n| Some(n.as_str()) == link[key].as_str())
-                            .ok_or("unknown link machine")
-                    };
-                    let policy = Policy {
-                        latency_ns: link["latency_ns"].as_u64().ok_or("latency_ns required")?,
-                        jitter_ns: link
-                            .get("jitter_ns")
-                            .map(|v| v.as_u64().ok_or("invalid jitter_ns"))
-                            .transpose()?
-                            .unwrap_or(0),
-                        loss_ppm: link
-                            .get("loss_ppm")
-                            .map(|v| v.as_u64().ok_or("invalid loss_ppm"))
-                            .transpose()?
-                            .unwrap_or(0),
-                        bandwidth_bps: optional_u64(link, "bandwidth_bps")?,
-                        queue_bound_ns: optional_u64(link, "queue_bound_ns")?,
-                    };
-                    policy.validate(global.latency_ns)?;
-                    Ok(((index("from")?, index("to")?), policy))
+        for (i, link) in net.links.iter().enumerate() {
+            let parse = || -> Result<(Pair, Policy), String> {
+                let index = |name: &str| {
+                    names
+                        .iter()
+                        .position(|n| n == name)
+                        .ok_or("unknown link machine")
                 };
-                let (pair, policy) = parse().map_err(|e| format!("network.links[{i}]: {e}"))?;
-                if baselines.insert(pair, policy).is_some() {
-                    return Err(format!("network.links[{i}]: duplicate pair"));
-                }
+                let policy = Policy {
+                    latency_ns: link.latency_ns,
+                    jitter_ns: link.jitter_ns,
+                    loss_ppm: link.loss_ppm,
+                    bandwidth_bps: link.bandwidth_bps,
+                    queue_bound_ns: link.queue_bound_ns,
+                };
+                policy.validate(global.latency_ns)?;
+                Ok(((index(&link.from)?, index(&link.to)?), policy))
+            };
+            let (pair, policy) = parse().map_err(|e| format!("network.links[{i}]: {e}"))?;
+            if baselines.insert(pair, policy).is_some() {
+                return Err(format!("network.links[{i}]: duplicate pair"));
             }
         }
         Self::new(seed, names, global, baselines)
@@ -578,12 +566,6 @@ impl Links {
             }
         }
     }
-}
-fn optional_u64(value: &Value, key: &str) -> Result<Option<u64>, String> {
-    value
-        .get(key)
-        .map(|v| v.as_u64().ok_or_else(|| format!("invalid {key}")))
-        .transpose()
 }
 pub fn pair_hash(h: &mut Sha256, (a, b): Pair) {
     h.update((a as u64).to_le_bytes());

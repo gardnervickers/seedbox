@@ -53,8 +53,6 @@ impl Msg {
 
 /// One segment of a run: to its end, to a fork point, or to a checkpoint.
 pub struct Run<'a> {
-    /// The world's configuration, for runtime inspection results.
-    pub cfg: &'a Value,
     pub duration: u64,
     /// End the run when this machine exits.
     pub end_on: Option<&'a str>,
@@ -91,7 +89,8 @@ impl From<Option<u64>> for Fork {
 }
 
 /// How a segment ended. Reports carry its snake_case name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunOutcome {
     /// The run reached its duration, or only paused or down machines remain.
     Duration,
@@ -458,7 +457,7 @@ impl<M: WorldMachine> Coord<'_, M> {
     }
 
     fn counter_snapshot(&self) -> Value {
-        network_counters::snapshot(|m| &self.names[m], self.semantic.counts())
+        network_counters::snapshot_value(|m| &self.names[m], self.semantic.counts())
     }
 
     fn fault_failed(&self) -> bool {
@@ -762,8 +761,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 .map(|(i, g)| world::inspect_machine(&g.m.name, g.m.state, self.faults, i))
                 .collect();
             let counters = self.counter_snapshot();
-            let services = &self.run.cfg["control"]["placement"];
-            (self.control).answer_inspect(services, machines, self.faults, counters)?;
+            (self.control).answer_inspect(machines, self.faults, counters)?;
         }
         if let Some(bytes) = self.control.apply_boundary(self.faults, at)? {
             let target = self

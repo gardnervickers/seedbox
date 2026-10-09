@@ -1,6 +1,11 @@
 //! World JSON generated from verified execution inputs.
 
 use super::*;
+use seedbox_engine_core::disk::DiskFaultModel;
+use seedbox_engine_core::world_config::{
+    CheckpointConfig, ControlChannel, ControlConfig, DiskConfig, LinkConfig, MachineConfig,
+    NetworkConfig, WorldConfig,
+};
 
 pub(super) fn control_latency(request: &ExecutionRequest<'_>) -> Result<u64> {
     request
@@ -18,7 +23,7 @@ pub const VOLUME_DISK_MIB: u64 = 1024;
 
 /// Translate an execution request without consulting registry tags or source
 /// paths. Exposed for preparation tools and report inspection without KVM.
-pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
+pub fn world(request: &ExecutionRequest<'_>) -> Result<WorldConfig> {
     if request
         .control
         .is_some_and(|c| c.service != request.check.service)
@@ -38,12 +43,6 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         .ok_or_else(|| Error::Integrity("profile missing memory_mb".into()))?
         .parse()
         .map_err(|_| Error::Integrity("invalid memory_mb".into()))?;
-    let artifact = |digest: &ContentDigest| {
-        let path = request.artifacts.get(digest).ok_or_else(|| {
-            Error::Integrity(format!("missing verified artifact {}", digest.hex()))
-        })?;
-        Ok::<_, Error>(std::path::absolute(path)?)
-    };
     let workload_machine = request
         .prepared
         .placement
@@ -59,82 +58,139 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             "oci-init-v1 requires one service per machine".into(),
         ));
     }
-    let control = request.control.map(|c| -> Result<Value> {
-        let machine = request.prepared.placement.get(&c.service).ok_or_else(|| Error::Execution("controller placement missing".into()))?;
-        let latency_ns = control_latency(request)?;
-        Ok(json!({"machine":machine,"latency_ns":latency_ns,"placement":request.prepared.placement}))
-    }).transpose()?;
+    let control = request
+        .control
+        .map(|c| -> Result<ControlConfig> {
+            let machine = request
+                .prepared
+                .placement
+                .get(&c.service)
+                .ok_or_else(|| Error::Execution("controller placement missing".into()))?;
+            Ok(ControlConfig {
+                machine: machine.clone(),
+                latency_ns: control_latency(request)?,
+                placement: request.prepared.placement.clone(),
+            })
+        })
+        .transpose()?;
     let machines = request
         .prepared
         .guests
         .iter()
-        .map(|(name, digest)| {
-            let mut machine = json!({"name":name,"initrd":artifact(digest)?});
-            // A machine gets a disk when a service placed on it mounts a volume.
-            let volumes = request.prepared.placement.iter().any(|(service, machine)| {
-                machine == name
-                    && request
-                        .prepared
-                        .images
-                        .get(service)
-                        .is_some_and(|image| !image.launch.disk_volumes.is_empty())
-            });
-            if volumes {
-                machine["disk"] = json!({"size_mib": VOLUME_DISK_MIB});
-            }
-            Ok(machine)
-        })
+        .map(|(name, digest)| machine(request, name, digest))
         .collect::<Result<Vec<_>>>()?;
-    let links = request.network.links.iter().map(|link| {
-        let machine = |service: &str| request.prepared.placement.get(service).ok_or_else(||Error::Integrity(format!("missing link placement for {service}")));
-        let mut policy = json!({"from":machine(&link.from)?,"to":machine(&link.to)?,"latency_ns":link.latency_ns,"jitter_ns":link.jitter_ns,"loss_ppm":link.loss_ppm});
-        if let Some(rate) = link.bandwidth_bps { policy["bandwidth_bps"] = json!(rate); }
-        if let Some(bound) = link.queue_bound_ns { policy["queue_bound_ns"] = json!(bound); }
-        Ok(policy)
-    }).collect::<Result<Vec<_>>>()?;
-    let mut network =
-        json!({"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns});
-    if let Some(rate) = request.network.bandwidth_bps {
-        network["bandwidth_bps"] = json!(rate);
-    }
-    if let Some(bound) = request.network.queue_bound_ns {
-        network["queue_bound_ns"] = json!(bound);
-    }
-    // Absent unless used, so a world without link overrides is unchanged.
-    if !links.is_empty() {
-        network["links"] = json!(links);
-    }
-    let mut world = json!({
-        "kernel":artifact(&request.prepared.kernel)?, "mem_mb":memory,
-        "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
-        "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
-        "network":network,
-        "machines":machines,"control":control,
-        "control_channel":"virtio-console-v1",
-    });
+    let network = network(request)?;
+    let mut world = WorldConfig {
+        kernel: artifact(request, &request.prepared.kernel)?,
+        mem_mb: memory.into(),
+        duration_ns: request.limits.simulated_time_ns,
+        end_on_exit: Some(workload_machine.clone()),
+        timer_jitter_ns: request.schedule.timer_jitter_ns,
+        stop_tolerance_ns: request.schedule.stop_tolerance_ns,
+        exact_timer_ppm: None,
+        network: Some(network),
+        machines,
+        control,
+        control_channel: Some(ControlChannel::VirtioConsoleV1),
+        launch_skew_ns: None,
+        disk_loss: None,
+        checkpoint: None,
+        boot: None,
+        faults: Vec::new(),
+        scenario: Vec::new(),
+        kill_restart: None,
+    };
     let lookahead = request
         .network
         .latency_ns
         .saturating_sub(request.network.jitter_ns);
-    if let Some(skew) = crate::engine::arm_launch_skew(&request.prepared.profile, lookahead)? {
-        world["launch_skew_ns"] = json!(skew);
-    }
+    world.launch_skew_ns = crate::engine::arm_launch_skew(&request.prepared.profile, lookahead)?;
     if recorded_torn_writes(&request.prepared.profile)? {
-        world[DISK_LOSS] = match request.prepared.profile.semantic_parameters.get(DISK_LOSS) {
-            Some(model) => json!(model), // The retained historical worker owns its disk semantics.
-            None => json!({"sector_bytes": 512, "survival_probability": 0.5}),
-        };
+        world.disk_loss = Some(DiskFaultModel {
+            sector_bytes: 512,
+            survival_probability: 0.5,
+        });
     }
-    if let Some(checkpoint) = checkpoint_metadata(request, &world)? {
-        world["checkpoint"] = checkpoint;
-    }
+    world.checkpoint = checkpoint_metadata(request, &world)?;
     Ok(world)
 }
 
+/// The absolute path of a verified artifact.
+fn artifact(request: &ExecutionRequest<'_>, digest: &ContentDigest) -> Result<std::path::PathBuf> {
+    let path = request
+        .artifacts
+        .get(digest)
+        .ok_or_else(|| Error::Integrity(format!("missing verified artifact {}", digest.hex())))?;
+    Ok(std::path::absolute(path)?)
+}
+
+/// A machine booting `digest`; it gets a disk when a service placed on it
+/// mounts a volume.
+fn machine(
+    request: &ExecutionRequest<'_>,
+    name: &String,
+    digest: &ContentDigest,
+) -> Result<MachineConfig> {
+    let volumes = request.prepared.placement.iter().any(|(service, machine)| {
+        machine == name
+            && request
+                .prepared
+                .images
+                .get(service)
+                .is_some_and(|image| !image.launch.disk_volumes.is_empty())
+    });
+    Ok(MachineConfig {
+        name: name.clone(),
+        initrd: artifact(request, digest)?,
+        disk: volumes.then_some(DiskConfig {
+            size_mib: Some(VOLUME_DISK_MIB),
+            image: None,
+        }),
+        cmdline: None,
+    })
+}
+
+/// The network policy, with link overrides resolved from services to machines.
+fn network(request: &ExecutionRequest<'_>) -> Result<NetworkConfig> {
+    let machine = |service: &str| {
+        request
+            .prepared
+            .placement
+            .get(service)
+            .cloned()
+            .ok_or_else(|| Error::Integrity(format!("missing link placement for {service}")))
+    };
+    let links = request
+        .network
+        .links
+        .iter()
+        .map(|link| {
+            Ok(LinkConfig {
+                from: machine(&link.from)?,
+                to: machine(&link.to)?,
+                latency_ns: link.latency_ns,
+                jitter_ns: link.jitter_ns,
+                loss_ppm: link.loss_ppm,
+                bandwidth_bps: link.bandwidth_bps,
+                queue_bound_ns: link.queue_bound_ns,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(NetworkConfig {
+        latency_ns: request.network.latency_ns,
+        jitter_ns: request.network.jitter_ns,
+        bandwidth_bps: request.network.bandwidth_bps,
+        queue_bound_ns: request.network.queue_bound_ns,
+        links,
+    })
+}
+
+/// The recorded checkpoint of `world`, bound to its parent identity. The
+/// engine computes the same identity from the same typed document.
 pub(super) fn checkpoint_metadata(
     request: &ExecutionRequest<'_>,
-    world: &Value,
-) -> Result<Option<Value>> {
+    world: &WorldConfig,
+) -> Result<Option<CheckpointConfig>> {
     let Some((at, seed)) = recorded_checkpoint(&request.prepared.profile)? else {
         return Ok(None);
     };
@@ -159,15 +215,17 @@ pub(super) fn checkpoint_metadata(
                 .find_map(|(digest, artifact)| {
                     std::path::absolute(artifact)
                         .ok()
-                        .filter(|p| p == Path::new(path))
+                        .filter(|p| p == path)
                         .map(|_| digest.hex().to_owned())
                 })
-                .ok_or_else(|| format!("checkpoint artifact {path} is not verified"))
+                .ok_or_else(|| format!("checkpoint artifact {} is not verified", path.display()))
         },
     )
     .map_err(Error::Integrity)?;
-    Ok(Some(
-        json!({"at_ns":at,"branch_seed":seed,"parent_identity":parent,
-        "branch_identity":checkpoint::branch_identity(&parent,at,seed)}),
-    ))
+    Ok(Some(CheckpointConfig {
+        at_ns: at,
+        branch_seed: seed,
+        branch_identity: Some(checkpoint::branch_identity(&parent, at, seed)),
+        parent_identity: Some(parent),
+    }))
 }

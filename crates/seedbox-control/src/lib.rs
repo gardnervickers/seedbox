@@ -424,6 +424,13 @@ impl Action {
                 | Self::ResumeProcess { .. }
         )
     }
+    /// Whole-machine lifecycle effects, which the world applies at admission.
+    pub fn is_lifecycle(&self) -> bool {
+        matches!(
+            self,
+            Self::Pause { .. } | Self::Resume { .. } | Self::Crash { .. } | Self::Reboot { .. }
+        )
+    }
 }
 /// Exactly one of a fixed nonzero offset or a seeded positive bound, each
 /// within [`MAX_CLOCK_OFFSET_NS`].

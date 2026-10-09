@@ -18,7 +18,7 @@ pub enum Status {
     Unavailable(u64),
 }
 /// A fault row's status, serialized as its snake_case name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RowStatus {
     /// Planned; its time has not come.
@@ -184,7 +184,16 @@ impl Faults {
         )?;
         Self::with_links(plans, names, links)
     }
+    /// [`Faults::with_plans`] for plans held as JSON.
     pub fn with_links(plans: Vec<Value>, names: Vec<String>, links: Links) -> Result<Self, String> {
+        let plans = plans
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<Plan>, _>>()
+            .map_err(|e| format!("invalid fault plan: {e}"))?;
+        Self::with_plans(plans, names, links)
+    }
+    pub fn with_plans(plans: Vec<Plan>, names: Vec<String>, links: Links) -> Result<Self, String> {
         let count = names.len();
         let mut f = Self {
             log: vec![],
@@ -209,9 +218,7 @@ impl Faults {
             error: None,
             rejected_effects: vec![],
         };
-        for (i, value) in plans.into_iter().enumerate() {
-            let plan: Plan =
-                serde_json::from_value(value).map_err(|e| format!("invalid fault plan: {e}"))?;
+        for (i, plan) in plans.into_iter().enumerate() {
             if plan.id as usize != i + 1 {
                 return Err("invalid ordered fault identity/time".into());
             }

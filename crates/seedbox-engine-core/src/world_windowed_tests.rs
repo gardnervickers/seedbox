@@ -9,13 +9,11 @@ use seedbox_control::{Action, Plan};
 use sha2::Digest;
 
 fn run(w: &mut World<Mock>, duration: u64, end_on: Option<&str>) -> Result<&'static str, String> {
-    segment(w, &Value::Null, duration, end_on, None, None, true)
+    segment(w, duration, end_on, None, None, true)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn segment(
     w: &mut World<Mock>,
-    cfg: &Value,
     duration: u64,
     end_on: Option<&str>,
     fork: Option<Option<u64>>,
@@ -23,7 +21,6 @@ fn segment(
     require_barrier: bool,
 ) -> Result<&'static str, String> {
     let run = Run {
-        cfg,
         duration,
         end_on,
         fork: fork.map(Fork::from),
@@ -41,7 +38,6 @@ fn run_with(
     skew: Duration,
 ) -> Result<(&'static str, Value), String> {
     let run = Run {
-        cfg: &Value::Null,
         duration,
         end_on,
         fork: None,
@@ -181,7 +177,7 @@ fn bandwidth_tail_drop_and_nominal_counts_are_identical_across_worker_counts() {
         assert_eq!(w.delivered, 2);
         assert_eq!(w.dropped, 1);
         assert_eq!(
-            w.network_snapshot(),
+            serde_json::to_value(w.network_snapshot()).unwrap(),
             json!({"a->b":{"delivered":2,"partition_dropped":0,"receiver_dropped":0,"queue_dropped":1}})
         );
         assert!(machine_trace(&w, "b").contains(&"b:frame:27".into()));
@@ -281,16 +277,7 @@ fn control_then_trigger_then_fault_at_equal_time() {
         )
         .unwrap();
     assert_eq!(
-        segment(
-            &mut w,
-            &json!({"control":{"placement":{}}}),
-            120,
-            None,
-            None,
-            None,
-            true
-        )
-        .unwrap(),
+        segment(&mut w, 120, None, None, None, true).unwrap(),
         "duration"
     );
     // Inspect at t=50 sees neither effect; both faults then run at t=50.
@@ -404,7 +391,7 @@ fn time_fork_settles_owed_io_before_parking_and_snapshotting() {
     let mut w = world(&["a"]);
     w.machines[0].owed = Some(20);
     assert_eq!(
-        segment(&mut w, &Value::Null, 100, None, Some(Some(10)), None, true).unwrap(),
+        segment(&mut w, 100, None, Some(Some(10)), None, true).unwrap(),
         "barrier"
     );
     assert_eq!(w.machines[0].time, 20);
@@ -437,7 +424,7 @@ fn owed_io_is_split_at_strict_boundary_before_time_fork() {
     w.machines[0].owed = Some(20);
     w.strict_events[0].insert((7, 1), b"strict".to_vec());
     assert_eq!(
-        segment(&mut w, &Value::Null, 100, None, Some(Some(10)), None, true).unwrap(),
+        segment(&mut w, 100, None, Some(Some(10)), None, true).unwrap(),
         "barrier"
     );
     assert_eq!(
@@ -460,7 +447,7 @@ fn idle_machines_park_at_the_fork_time_without_waking() {
     w.machines[0].steps.push_back(Step::new(3, Stop::Halted));
     w.machines[0].timer = 500;
     assert_eq!(
-        segment(&mut w, &Value::Null, 100, None, Some(Some(10)), None, true).unwrap(),
+        segment(&mut w, 100, None, Some(Some(10)), None, true).unwrap(),
         "barrier"
     );
     assert_eq!(machine_trace(&w, "a"), ["a:advance:3", "a:park:3"]);
@@ -473,16 +460,7 @@ fn idle_machines_park_at_the_fork_time_without_waking() {
         .steps
         .push_back(Step::new(3, Stop::Exited));
     assert_eq!(
-        segment(
-            &mut exits,
-            &Value::Null,
-            100,
-            None,
-            Some(Some(10)),
-            None,
-            true
-        )
-        .unwrap_err(),
+        segment(&mut exits, 100, None, Some(Some(10)), None, true).unwrap_err(),
         "a exited before the fork point"
     );
 }
@@ -492,18 +470,16 @@ fn initial_launch_deadline_is_an_ordinary_outcome_but_fork_still_requires_barrie
     let mut w = world(&["a", "b"]);
     w.machines[0].steps.push_back(Step::new(2, Stop::Barrier));
     assert_eq!(
-        segment(&mut w, &Value::Null, 7, None, Some(None), None, false).unwrap(),
+        segment(&mut w, 7, None, Some(None), None, false).unwrap(),
         "duration"
     );
     assert!(w.machines[0].parked);
     assert_eq!(w.machines[1].time, 7);
     assert!(trace(&w).iter().all(|s| !s.contains(":release:")));
     let mut strict = world(&["a"]);
-    assert!(
-        segment(&mut strict, &Value::Null, 7, None, Some(None), None, true)
-            .unwrap_err()
-            .contains("launch barrier not reached: duration")
-    );
+    assert!(segment(&mut strict, 7, None, Some(None), None, true)
+        .unwrap_err()
+        .contains("launch barrier not reached: duration"));
 }
 
 #[test]
@@ -511,13 +487,12 @@ fn initial_launch_preserves_end_machine_exit_and_cancellation() {
     let mut w = world(&["a", "b"]);
     w.machines[0].steps.push_back(Step::new(3, Stop::Exited));
     assert_eq!(
-        segment(&mut w, &Value::Null, 20, Some("a"), Some(None), None, false).unwrap(),
+        segment(&mut w, 20, Some("a"), Some(None), None, false).unwrap(),
         "end_machine_exited"
     );
     assert_eq!(w.machines[0].state, State::Exited(0));
     let mut cancelled = world(&["a"]);
     let run = Run {
-        cfg: &Value::Null,
         duration: 20,
         end_on: None,
         fork: Some(Fork::Barrier),
@@ -547,7 +522,7 @@ fn initial_barrier_release_precedes_first_packet_rpc_and_trigger_effects() {
             w.machines[0].steps.push_back(Step::new(2, Stop::Barrier));
             w.machines[1].steps.push_back(Step::new(3, Stop::Barrier));
             assert_eq!(
-                segment(&mut w, &cfg, 100, None, Some(None), None, false).unwrap(),
+                segment(&mut w, 100, None, Some(None), None, false).unwrap(),
                 "barrier"
             );
             assert_eq!(w.slices, 1);
@@ -564,7 +539,7 @@ fn initial_barrier_release_precedes_first_packet_rpc_and_trigger_effects() {
             }
             // The released world runs on from where it stands.
             assert_eq!(
-                segment(&mut w, &cfg, 100, None, None, None, true).unwrap(),
+                segment(&mut w, 100, None, None, None, true).unwrap(),
                 "duration"
             );
             assert!(w.machines.iter().all(|m| m.time == 100));
@@ -611,7 +586,7 @@ fn a_crash_discards_management_and_a_reboot_drops_earlier_frames() {
     assert!(w.strict_events[0].is_empty());
     assert_eq!((w.dropped, w.delivered), (1, 1));
     assert_eq!(
-        w.network_snapshot(),
+        serde_json::to_value(w.network_snapshot()).unwrap(),
         json!({"b->a":{"delivered":1,"partition_dropped":0,"receiver_dropped":1}})
     );
     let a = machine_trace(&w, "a");
@@ -682,7 +657,7 @@ fn runtime_checkpoint_precedes_exact_time_fault_and_preserves_active_plan() {
     let mut w = world(&["a", "b"]);
     plan(&mut w, 10, partition("checkpoint-cut"));
     assert_eq!(
-        segment(&mut w, &Value::Null, 30, None, None, Some(10), true).unwrap(),
+        segment(&mut w, 30, None, None, Some(10), true).unwrap(),
         "checkpoint"
     );
     assert!(w.machines.iter().all(|m| m.time == 10));
@@ -692,7 +667,7 @@ fn runtime_checkpoint_precedes_exact_time_fault_and_preserves_active_plan() {
     for _ in 0..2 {
         saved.restore_checkpoint(&mut w).unwrap();
         assert_eq!(
-            segment(&mut w, &Value::Null, 30, None, None, Some(11), true).unwrap(),
+            segment(&mut w, 30, None, None, Some(11), true).unwrap(),
             "checkpoint"
         );
         assert!(w.faults.blocked(0, 1));
@@ -715,7 +690,7 @@ fn runtime_checkpoint_absorbs_committed_messages_before_selection_and_snapshot()
         matches!(WorldSnapshot::take_checkpoint(&mut w), Err(error) if error.contains("drained"))
     );
     assert_eq!(
-        segment(&mut w, &Value::Null, 30, None, None, Some(10), true).unwrap(),
+        segment(&mut w, 30, None, None, Some(10), true).unwrap(),
         "checkpoint"
     );
     assert!(w.machines[0].fault_effects.is_empty());
@@ -730,7 +705,7 @@ fn runtime_checkpoint_absorbs_committed_messages_before_selection_and_snapshot()
     let names = vec!["a".into()];
     reseed_checkpoint(&mut w, &names, 2, 3, "branch").unwrap();
     assert_eq!(
-        segment(&mut w, &Value::Null, 200, None, None, None, true).unwrap(),
+        segment(&mut w, 200, None, None, None, true).unwrap(),
         "duration"
     );
     assert_eq!(w.control.log[0]["delivered_at_ns"], 109);
@@ -752,7 +727,7 @@ fn trigger_partial_match_and_scheduled_effect_survive_snapshot_restore() {
         second.console = Some(b'B');
         w.machines[0].steps.push_back(second);
         assert_eq!(
-            segment(&mut w, &Value::Null, 150, None, Some(Some(4)), None, true).unwrap(),
+            segment(&mut w, 150, None, Some(Some(4)), None, true).unwrap(),
             "barrier"
         );
         assert_eq!(w.control.triggers.records[0].seen, 1);

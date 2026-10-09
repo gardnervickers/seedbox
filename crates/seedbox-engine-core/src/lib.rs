@@ -24,7 +24,9 @@ pub mod virtio_network;
 pub mod pv_progress;
 
 pub mod checkpoint;
+pub mod report;
 pub mod world;
+pub mod world_config;
 pub mod world_events;
 
 pub mod window;

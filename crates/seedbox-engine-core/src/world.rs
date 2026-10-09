@@ -4,6 +4,8 @@
 use crate::network_counters::{
     self, DELIVERED, LOSS_DROPPED, PARTITION_DROPPED, QUEUE_DROPPED, RECEIVER_DROPPED,
 };
+use crate::report::Kill;
+use crate::world_config::{SeedPlan, SeedPlanConfig};
 use crate::world_events as events;
 use crate::{control, faults, links, rng::Rng};
 use serde_json::{json, Value};
@@ -483,11 +485,12 @@ impl<M: WorldMachine> World<M> {
         self.link_counts.entry((from, to)).or_default()[outcome] += 1;
         self.semantic_counts.record(at, from, to, outcome);
     }
-    pub fn network_snapshot(&self) -> Value {
-        self.counter_snapshot(&self.link_counts)
+    /// Physical link counts, for the report and the world witness.
+    pub fn network_snapshot(&self) -> network_counters::Snapshot {
+        network_counters::snapshot(|m| &self.machines[m].name, &self.link_counts)
     }
     pub fn counter_snapshot(&self, counts: &network_counters::LinkCounts) -> Value {
-        network_counters::snapshot(|m| &self.machines[m].name, counts)
+        network_counters::snapshot_value(|m| &self.machines[m].name, counts)
     }
     pub fn schedule(&mut self, m: usize, t: u64, p: Payload) {
         self.seq += 1;
@@ -888,31 +891,9 @@ pub fn replay_readiness(
     Ok(())
 }
 
-/// Every timed part of the run seed's plan (faults, scenario events and the
-/// kill schedule) must start at or after `from`, when every machine of a
-/// forked world has been released. Earlier times have already passed.
+/// [`SeedPlan::check_after`] for a world document held as JSON.
 pub fn check_plan_after(cfg: &Value, from: u64) -> Result<(), String> {
-    let mut times = Vec::new();
-    for (key, field) in [("faults", "at_ns"), ("scenario", "at_ns")] {
-        for (i, ev) in cfg[key].as_array().into_iter().flatten().enumerate() {
-            times.push((format!("{key}[{i}].{field}"), ev[field].as_u64()));
-        }
-    }
-    if cfg["kill_restart"].is_object() {
-        times.push((
-            "kill_restart.start_ns".into(),
-            cfg["kill_restart"]["start_ns"].as_u64(),
-        ));
-    }
-    for (what, t) in times {
-        let t = t.ok_or(format!("{what} required"))?;
-        if t < from {
-            return Err(format!(
-                "{what} {t} is before the fork point {from}; in a forked world it must be at or after the release (boot.fork_at_ns or the launch barrier, plus boot.release_skew_ns)"
-            ));
-        }
-    }
-    Ok(())
+    SeedPlanConfig::from_value(cfg)?.plan().check_after(from)
 }
 
 /// Install everything the run seed decides apart from the machines: link
@@ -921,23 +902,23 @@ pub fn check_plan_after(cfg: &Value, from: u64) -> Result<(), String> {
 /// for the report.
 pub fn arm_seed<M: WorldMachine>(
     world: &mut World<M>,
-    cfg: &Value,
+    plan: SeedPlan<'_>,
     names: &[String],
     seed: u64,
     from: u64,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Kill>, String> {
     world.check_active()?;
-    check_plan_after(cfg, from)?;
+    plan.check_after(from)?;
     let booted = std::mem::take(&mut world.faults.readiness);
     let connections = world.faults.connections.clone();
-    world.faults = faults::Faults::with_links(
-        cfg["faults"].as_array().cloned().unwrap_or_default(),
+    world.faults = faults::Faults::with_plans(
+        plan.faults.to_vec(),
         names.to_vec(),
         world.faults.links.clone(),
     )?;
     world.faults.connections = connections;
     world.control =
-        control::Control::new(&cfg["control"], names.to_vec(), world.latency, world.early)?;
+        control::Control::from_config(plan.control, names.to_vec(), world.latency, world.early)?;
     world.faults.require_readiness();
     replay_readiness(&mut world.faults, names, &booted, world.latency)?;
     world.faults.links.reseed(seed, names);
@@ -948,41 +929,48 @@ pub fn arm_seed<M: WorldMachine>(
             .position(|x| x == name)
             .ok_or(format!("unknown machine {name}"))
     };
-    for ev in cfg["scenario"].as_array().cloned().unwrap_or_default() {
-        let t = ev["at_ns"].as_u64().ok_or("scenario at_ns")?;
-        if let Some(s) = ev["serial"].as_str() {
-            let m = index(ev["machine"].as_str().ok_or("scenario machine")?)?;
+    for ev in plan.scenario {
+        let t = ev.at_ns;
+        if let Some(s) = &ev.serial {
+            let m = index(ev.machine.as_deref().ok_or("scenario machine")?)?;
             world.schedule(m, t, Payload::Serial(s.as_bytes().to_vec()));
         }
-        if let Some(p) = ev["partition"].as_array() {
-            let side = |i: usize| p.get(i).and_then(Value::as_str).ok_or("scenario partition");
+        if let Some(p) = &ev.partition {
+            let side = |i: usize| p.get(i).ok_or("scenario partition");
             let (a, b) = (index(side(0)?)?, index(side(1)?)?);
-            let on = ev["on"].as_bool().unwrap_or(true);
             // Partition state is consulted when the sender routes; apply it at the sender.
-            world.schedule(a, t, Payload::Partition { from: a, to: b, on });
+            world.schedule(
+                a,
+                t,
+                Payload::Partition {
+                    from: a,
+                    to: b,
+                    on: ev.on,
+                },
+            );
         }
     }
 
     // Seeded unclean stop/restart schedule: one member down at a time.
     let mut kills = Vec::new();
-    let g = &cfg["kill_restart"];
-    if g.is_object() {
-        let members: Vec<usize> = g["members"]
-            .as_array()
-            .ok_or("kill_restart.members")?
+    if let Some(g) = plan.kill_restart {
+        let members: Vec<usize> = g
+            .members
             .iter()
-            .map(|v| index(v.as_str().ok_or("kill_restart.members")?))
+            .map(|name| index(name))
             .collect::<Result<_, _>>()?;
-        let field = |k: &str| g[k].as_u64().ok_or(format!("kill_restart.{k}"));
         // An inclusive [min, max] range, drawn from as min + below(max - min + 1).
-        let span = |k: &str| match (g[k][0].as_u64(), g[k][1].as_u64()) {
-            (Some(min), Some(max)) if min <= max => Ok((min, max)),
-            _ => Err(format!("kill_restart.{k}")),
+        let span = |k: &str, [min, max]: [u64; 2]| {
+            if min <= max {
+                Ok((min, max))
+            } else {
+                Err(format!("kill_restart.{k}"))
+            }
         };
-        let (gap, down) = (span("gap_ns")?, span("down_ns")?);
-        let end = field("end_ns")?;
+        let (gap, down) = (span("gap_ns", g.gap_ns)?, span("down_ns", g.down_ns)?);
+        let end = g.end_ns;
         let mut rng = Rng::new(seed, "scenario/kill_restart");
-        let mut t = field("start_ns")? + gap.0 + rng.below(gap.1 - gap.0 + 1);
+        let mut t = g.start_ns + gap.0 + rng.below(gap.1 - gap.0 + 1);
         while t < end {
             let m = *members
                 .get(rng.below(members.len() as u64) as usize)
@@ -990,7 +978,11 @@ pub fn arm_seed<M: WorldMachine>(
             let d = down.0 + rng.below(down.1 - down.0 + 1);
             world.schedule(m, t, Payload::Serial(b"stop\n".to_vec()));
             world.schedule(m, t + d, Payload::Serial(b"start\n".to_vec()));
-            kills.push(json!({"member": names[m], "stop_ns": t, "start_ns": t + d}));
+            kills.push(Kill {
+                member: names[m].clone(),
+                stop_ns: t,
+                start_ns: t + d,
+            });
             t += d + gap.0 + rng.below(gap.1 - gap.0 + 1);
         }
     }
@@ -1010,10 +1002,23 @@ pub fn release<M: WorldMachine>(
     seed: u64,
     skew: u64,
     diagnostic: &mut impl FnMut(&str, u64),
-) -> Result<(Vec<Value>, Value), String> {
+) -> Result<(Vec<Kill>, Value), String> {
+    let plan = SeedPlanConfig::from_value(cfg)?;
+    release_plan(world, plan.plan(), names, seed, skew, diagnostic)
+}
+
+/// [`release`] with a typed seed plan.
+pub fn release_plan<M: WorldMachine>(
+    world: &mut World<M>,
+    plan: SeedPlan<'_>,
+    names: &[String],
+    seed: u64,
+    skew: u64,
+    diagnostic: &mut impl FnMut(&str, u64),
+) -> Result<(Vec<Kill>, Value), String> {
     world.check_active()?;
     let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
-    check_plan_after(cfg, at.saturating_add(skew))?;
+    plan.check_after(at.saturating_add(skew))?;
     let mut reseed = serde_json::Map::new();
     for (i, mach) in world.machines.iter_mut().enumerate() {
         let mut rng = Rng::new(seed, &format!("fork-entropy/{}", names[i]));
@@ -1030,7 +1035,7 @@ pub fn release<M: WorldMachine>(
         }
     }
     Ok((
-        arm_seed(world, cfg, names, seed, at.saturating_add(skew))?,
+        arm_seed(world, plan, names, seed, at.saturating_add(skew))?,
         Value::Object(reseed),
     ))
 }
@@ -1297,20 +1302,22 @@ pub fn drain_machine_messages<M: WorldMachine>(
     Ok(())
 }
 
+/// `_cfg` is unused: inspection answers from the control placement. The
+/// parameter keeps the arm64 caller's signature.
 pub fn simulate<M: WorldMachine>(
     world: &mut World<M>,
-    cfg: &Value,
+    _cfg: &Value,
     duration: u64,
     end_on: &Option<String>,
     fork: Option<Option<u64>>,
     boundary: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<&'static str, String> {
-    simulate_to(world, cfg, duration, end_on, fork, None, boundary)
+    simulate_to(world, _cfg, duration, end_on, fork, None, boundary)
 }
 
 pub fn simulate_to<M: WorldMachine>(
     world: &mut World<M>,
-    cfg: &Value,
+    _cfg: &Value,
     duration: u64,
     end_on: &Option<String>,
     fork: Option<Option<u64>>,
@@ -1319,7 +1326,6 @@ pub fn simulate_to<M: WorldMachine>(
 ) -> Result<&'static str, String> {
     simulate_stopped(
         world,
-        cfg,
         duration,
         end_on,
         SimulationStop {
@@ -1335,14 +1341,13 @@ pub fn simulate_to<M: WorldMachine>(
 /// duration or end-machine exit into a failed fork. No snapshot is required.
 pub fn simulate_launch<M: WorldMachine>(
     world: &mut World<M>,
-    cfg: &Value,
+    _cfg: &Value,
     duration: u64,
     end_on: &Option<String>,
     boundary: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<&'static str, String> {
     simulate_stopped(
         world,
-        cfg,
         duration,
         end_on,
         SimulationStop {
@@ -1362,7 +1367,6 @@ struct SimulationStop {
 
 fn simulate_stopped<M: WorldMachine>(
     world: &mut World<M>,
-    cfg: &Value,
     duration: u64,
     end_on: &Option<String>,
     stop: SimulationStop,
@@ -1455,8 +1459,7 @@ fn simulate_stopped<M: WorldMachine>(
                     .map(|(i, m)| inspect_machine(&m.name, m.state, &world.faults, i))
                     .collect();
                 let counters = world.counter_snapshot(world.semantic_counts.counts());
-                let services = &cfg["control"]["placement"];
-                (world.control).answer_inspect(services, machines, &world.faults, counters)?;
+                (world.control).answer_inspect(machines, &world.faults, counters)?;
             }
             if let Some(bytes) = world
                 .control
