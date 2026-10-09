@@ -483,6 +483,9 @@ impl Machine {
         }
         let mem_size = spec.mem;
         let mem = map(mem_size)?;
+        // Fewer, larger host faults while the guest touches fresh RAM. The
+        // guest sees the same zeroed memory; only host paging changes.
+        unsafe { libc::madvise(mem.cast(), mem_size, libc::MADV_HUGEPAGE) };
         let page = map(4096)?;
         if spec.pv_clock {
             unsafe { std::ptr::write_volatile(page.cast::<u64>().add(PAGE_PV_CLOCK), 1) };
