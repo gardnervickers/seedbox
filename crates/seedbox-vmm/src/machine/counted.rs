@@ -51,26 +51,26 @@ impl Timebase for Counter {
             };
             let now = self.last();
             if wake >= crate::counter::NEVER {
-                self.disarm();
+                self.disarm()?;
                 m.armed_wake = 0;
             } else {
-                self.arm(now, now + wake);
+                self.arm(now, now + wake)?;
                 m.armed_wake = wake;
             }
         } else {
             if !m.stepping {
-                self.disarm();
+                self.disarm()?;
             }
             m.arm_step()?;
         }
         Ok(Prepared::Run)
     }
 
-    fn start(&mut self, _syscalls: u64) -> u64 {
-        self.last()
+    fn start(&mut self, _syscalls: u64) -> Result<u64, String> {
+        Ok(self.last())
     }
 
-    fn read(&mut self, _syscalls: u64) -> u64 {
+    fn read(&mut self, _syscalls: u64) -> Result<u64, String> {
         self.read_fast()
     }
 

@@ -7,6 +7,7 @@
 //! guest come from the KVM dirty log, pages written by the VMM (device DMA,
 //! boot loading) are marked explicitly.
 
+use crate::machine::Mapping;
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuFd, VmFd};
 use std::os::fd::AsRawFd;
@@ -140,6 +141,8 @@ impl VcpuState {
     pub fn restore(&self, vcpu: &VcpuFd, what: &str) -> Result<(kvm_regs, kvm_sregs), String> {
         let e = |part: &str, err: kvm_ioctls::Error| format!("{what} {part}: {err}");
         vcpu.set_regs(&self.regs).map_err(|x| e("regs", x))?;
+        // SAFETY: the region came from KVM_GET_XSAVE on this vCPU, so its
+        // size matches what KVM_SET_XSAVE reads.
         unsafe { vcpu.set_xsave(&self.xsave) }.map_err(|x| e("xsave", x))?;
         vcpu.set_xcrs(&self.xcrs).map_err(|x| e("xcrs", x))?;
         vcpu.set_sregs(&self.sregs).map_err(|x| e("sregs", x))?;
@@ -176,7 +179,8 @@ impl VcpuState {
 }
 
 pub struct Undo {
-    shadow: crate::machine::SendPtr<u8>,
+    /// Guest RAM as of the last save, sync or fork point.
+    shadow: Mapping,
     size: usize,
     /// Dirty bitmap buffer for KVM_GET_DIRTY_LOG.
     log: Vec<u64>,
@@ -217,10 +221,9 @@ fn is_tsc_or_pv(i: u32) -> bool {
 
 impl Undo {
     pub fn new(kvm: &Kvm, vcpu: &VcpuFd, size: usize) -> Result<Self, String> {
-        let shadow = crate::machine::map(size)?;
         let pages = size / PAGE;
         Ok(Self {
-            shadow: crate::machine::SendPtr(shadow),
+            shadow: Mapping::new(size)?,
             size,
             log: vec![0; pages.div_ceil(64)],
             vmm: vec![0; pages.div_ceil(64)],
@@ -270,28 +273,10 @@ impl Undo {
         Ok(())
     }
 
-    /// Copy every page in `log` from `from` to `to`; returns the page count.
-    fn copy_logged(&self, from: *const u8, to: *mut u8) -> u64 {
-        let mut n = 0;
-        for (w, &bits) in self.log.iter().enumerate() {
-            let mut b = bits;
-            while b != 0 {
-                let p = w * 64 + b.trailing_zeros() as usize;
-                b &= b - 1;
-                let off = p * PAGE;
-                if off + PAGE <= self.size {
-                    unsafe { std::ptr::copy_nonoverlapping(from.add(off), to.add(off), PAGE) };
-                    n += 1;
-                }
-            }
-        }
-        n
-    }
-
     /// Save guest state. The vCPU must have no I/O pending completion.
-    pub fn save(&mut self, vm: &VmFd, vcpu: &VcpuFd, mem: *mut u8) -> Result<(), String> {
+    pub fn save(&mut self, vm: &VmFd, vcpu: &VcpuFd, mem: &[u8]) -> Result<(), String> {
         self.fetch(vm)?;
-        self.stats.synced_pages += self.copy_logged(mem, self.shadow.0);
+        self.stats.synced_pages += copy_logged(&self.log, mem, self.shadow.as_mut_slice());
         self.cpu.save(vcpu, "checkpoint")?;
         self.valid = true;
         self.stats.checkpoints += 1;
@@ -304,20 +289,20 @@ impl Undo {
         &mut self,
         vm: &VmFd,
         vcpu: &VcpuFd,
-        mem: *mut u8,
+        mem: &mut [u8],
     ) -> Result<(kvm_regs, kvm_sregs), String> {
         self.fetch(vm)?;
-        self.stats.restored_pages += self.copy_logged(self.shadow.0, mem);
+        self.stats.restored_pages += copy_logged(&self.log, self.shadow.as_slice(), mem);
         let restored = self.cpu.restore(vcpu, "rollback")?;
         self.stats.rollbacks += 1;
         Ok(restored)
     }
 
     /// Bring the shadow up to RAM. A held checkpoint no longer describes RAM.
-    pub fn sync(&mut self, vm: &VmFd, mem: *mut u8) -> Result<(), String> {
+    pub fn sync(&mut self, vm: &VmFd, mem: &[u8]) -> Result<(), String> {
         self.valid = false;
         self.fetch(vm)?;
-        self.stats.synced_pages += self.copy_logged(mem, self.shadow.0);
+        self.stats.synced_pages += copy_logged(&self.log, mem, self.shadow.as_mut_slice());
         Ok(())
     }
 
@@ -330,7 +315,7 @@ impl Undo {
     pub fn unchanged_since_sync(
         &mut self,
         vm: &VmFd,
-        mem: *mut u8,
+        mem: &[u8],
         written: &mut Vec<u64>,
     ) -> Result<bool, String> {
         self.valid = false;
@@ -350,13 +335,8 @@ impl Undo {
                 let off = (i * 64 + b.trailing_zeros() as usize) * PAGE;
                 b &= b - 1;
                 if off + PAGE <= self.size {
-                    let (now, then) = unsafe {
-                        (
-                            std::slice::from_raw_parts(mem.add(off), PAGE),
-                            std::slice::from_raw_parts(self.shadow.0.add(off), PAGE),
-                        )
-                    };
-                    if now != then {
+                    let page = off..off + PAGE;
+                    if mem[page.clone()] != self.shadow.as_slice()[page] {
                         return Ok(false);
                     }
                 }
@@ -367,9 +347,9 @@ impl Undo {
 
     /// Bring the shadow up to RAM and start tracking every page written from
     /// here on, so a fork can later be put back by copying only those pages.
-    pub fn fork_point(&mut self, vm: &VmFd, mem: *mut u8) -> Result<(), String> {
+    pub fn fork_point(&mut self, vm: &VmFd, mem: &[u8]) -> Result<(), String> {
         self.fetch(vm)?;
-        self.stats.synced_pages += self.copy_logged(mem, self.shadow.0);
+        self.stats.synced_pages += copy_logged(&self.log, mem, self.shadow.as_mut_slice());
         self.since_fork = Some(vec![0; self.log.len()]);
         self.valid = false;
         Ok(())
@@ -384,8 +364,8 @@ impl Undo {
     pub fn return_to_fork(
         &mut self,
         vm: &VmFd,
-        mem: *mut u8,
-        image: *const u8,
+        mem: &mut [u8],
+        image: &[u8],
     ) -> Result<u64, String> {
         if self.since_fork.is_none() {
             return Err("no fork point held".into());
@@ -393,11 +373,30 @@ impl Undo {
         self.fetch(vm)?;
         let fork = self.since_fork.as_mut().unwrap();
         std::mem::swap(&mut self.log, fork);
-        let n = self.copy_logged(image, mem);
-        self.copy_logged(image, self.shadow.0);
+        let n = copy_logged(&self.log, image, mem);
+        copy_logged(&self.log, image, self.shadow.as_mut_slice());
         self.log.fill(0);
         self.since_fork.as_mut().unwrap().fill(0);
         self.valid = false;
         Ok(n)
     }
+}
+
+/// Copy every page in `log` from `from` to `to`, two images of guest RAM;
+/// returns the page count.
+fn copy_logged(log: &[u64], from: &[u8], to: &mut [u8]) -> u64 {
+    let mut n = 0;
+    for (w, &bits) in log.iter().enumerate() {
+        let mut b = bits;
+        while b != 0 {
+            let p = w * 64 + b.trailing_zeros() as usize;
+            b &= b - 1;
+            let page = p * PAGE..(p + 1) * PAGE;
+            if page.end <= to.len() {
+                to[page.clone()].copy_from_slice(&from[page]);
+                n += 1;
+            }
+        }
+    }
+    n
 }

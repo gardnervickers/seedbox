@@ -75,9 +75,9 @@ pub trait Timebase {
         legal: bool,
     ) -> Result<Prepared, String>;
     /// Progress so far, read before KVM_RUN; `syscalls` is the guest's count.
-    fn start(&mut self, syscalls: u64) -> u64;
+    fn start(&mut self, syscalls: u64) -> Result<u64, String>;
     /// Progress so far, read after KVM_RUN.
-    fn read(&mut self, syscalls: u64) -> u64;
+    fn read(&mut self, syscalls: u64) -> Result<u64, String>;
     /// Pending interrupts are injected only when the hard stop is further
     /// away than this. Part of the execution semantics.
     fn inject_guard(&self) -> u64;

@@ -38,11 +38,10 @@ fn world(undo: u64, reverse: bool) -> World {
     world_with_counter(undo, reverse, Counter::new().unwrap())
 }
 fn world_with_counter(undo: u64, reverse: bool, mut counter: Counter) -> World {
-    // main.rs reuses one counter across forks. Counter has process-lifetime
-    // ownership (no Drop); opening one per variant exhausts pinned PMU slots.
+    // main.rs reuses one counter across forks; so do these variants.
     // Disarm the previous world's overflow; counts are cumulative and each
     // KVM_RUN measures its own delta, so the counter needs no count reset.
-    counter.disarm();
+    counter.disarm().unwrap();
     let kvm = kvm_ioctls::Kvm::new().unwrap();
     let names: Vec<String> = if reverse {
         vec!["b".into(), "a".into()]
