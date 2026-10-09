@@ -17,11 +17,6 @@ fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<Str
         .stderr(log);
     if args.first() != Some(&"diff") {
         command.arg("--state").arg(directory.join("state"));
-        // Native timestamp control is Linux-only; Mac uses container preparation.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if args.first() == Some(&"run") {
-            command.args(["--build-epoch", "0"]);
-        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if let Some(cpu) = std::env::var_os("SEEDBOX_TEST_CPU") {
             command.arg("--cpu").arg(cpu);
@@ -88,8 +83,19 @@ fn every_application_runs_twice_and_replays() {
                     "--full-state",
                 ];
                 let first = invoke(Path::new(&cli), &directory, "first", &run)?;
-                let second = invoke(Path::new(&cli), &directory, "second", &run)?;
                 let first = run_directory(&first)?;
+                // Reuse the post-build clock so certificates stay valid while
+                // independent preparations start guests at the same epoch.
+                let epoch = seedbox::orchestration::inspect(Path::new(first))
+                    .map_err(|error| error.to_string())?
+                    .identity
+                    .inputs
+                    .wall_clock_epoch
+                    .ok_or_else(|| "first run did not retain a wall-clock epoch".to_string())?
+                    .to_string();
+                let mut second_args = run.to_vec();
+                second_args.extend(["--wall-clock-epoch", &epoch]);
+                let second = invoke(Path::new(&cli), &directory, "second", &second_args)?;
                 let second = run_directory(&second)?;
                 invoke(
                     Path::new(&cli),

@@ -20,8 +20,9 @@ tools/droplet/pv-run.sh --ref branch-a --ref branch-b \
   --world examples/redis --world examples/other --seeds "1 2 3"
 ```
 
-For each commit, world and seed it runs the world twice, compares the pair with
-`seedbox diff`, and replays the first run. It prints one summary and exits 0
+For each commit, world and seed it runs the world, replays its retained inputs,
+and compares the pair with `seedbox diff`. Replay preserves the sampled guest
+wall-clock epoch; separate fresh runs intentionally sample a new epoch. It prints one summary and exits 0
 only when every build succeeded, every run passed, every pair matched and every
 replay matched. Raw output, build logs, the summary and each run's `vmm.json`
 are kept under `target/droplet-pv/<time>/`, one directory per commit.
@@ -31,7 +32,7 @@ need to be pushed. The guest kernel is copied from `$SEEDBOX_KERNEL` or
 `~/seedbox-sim/artifacts/bzImage`, and every run on the droplet uses it through
 `SEEDBOX_KERNEL` rather than downloading a released kernel. Guest helpers are
 built on the droplet with `nix build .#runtimeArchive` for each commit and used
-through `SEEDBOX_RUNTIME_ASSETS`. Pass
+embedded in the release CLI through `SEEDBOX_BUILD_HELPERS`. Pass
 `--build-kernel` when a commit changes `kernel/`.
 
 ## Requirements
