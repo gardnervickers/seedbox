@@ -51,6 +51,54 @@ pub struct Call {
     pub error: Option<String>,
     pub error_code: Option<&'static str>,
     pub fatal: bool,
+    /// A planned `arm_trigger`, armed at admission.
+    pub trigger: Option<TriggerArm>,
+}
+/// An `arm_trigger` request resolved to its source machine and fault action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriggerArm {
+    pub source: String,
+    pub marker: Vec<u8>,
+    pub timeout_ns: u64,
+    pub action: Action,
+}
+impl TriggerArm {
+    /// The planned trigger as a cut-off call reports it.
+    fn evidence(&self) -> Value {
+        json!({
+            "trigger_source": self.source,
+            "trigger_marker": self.marker,
+            "trigger_timeout_ns": self.timeout_ns,
+            "trigger_action": self.action,
+        })
+    }
+}
+/// What planning an operation decided.
+struct Planned {
+    plan: Option<Plan>,
+    result: Value,
+    effect: u64,
+    trigger: Option<TriggerArm>,
+}
+/// Resolve both sides of a partition or shape in order, refusing any machine
+/// that appears twice on either side.
+pub(crate) fn disjoint_sides<T, N: Ord + Clone>(
+    sides: [&[T]; 2],
+    mut resolve: impl FnMut(&T) -> Result<N, String>,
+    overlap: &str,
+) -> Result<[Vec<N>; 2], String> {
+    let mut members = BTreeSet::new();
+    let mut resolved = [Vec::new(), Vec::new()];
+    for (side, out) in sides.into_iter().zip(&mut resolved) {
+        for item in side {
+            let n = resolve(item)?;
+            if !members.insert(n.clone()) {
+                return Err(overlap.into());
+            }
+            out.push(n);
+        }
+    }
+    Ok(resolved)
 }
 #[derive(Clone)]
 pub struct Control {
@@ -138,9 +186,17 @@ impl Control {
         }
         Ok(name)
     }
-    fn plan(&mut self, op: &Operation, at: u64) -> Result<(Option<Plan>, Value, u64), String> {
+    /// Allocate the next public fault handle and report it in `result`.
+    fn next_handle(&mut self, exhausted: &str, result: &mut Value) -> Result<String, String> {
+        self.handles = self.handles.checked_add(1).ok_or(exhausted)?;
+        let handle = format!("p{}", self.handles);
+        *result = json!({ "handle": handle });
+        Ok(handle)
+    }
+    fn plan(&mut self, op: &Operation, at: u64) -> Result<Planned, String> {
         let mut result = json!({});
         let mut effect = at;
+        let mut trigger = None;
         let action = match op {
             Operation::Stop { target } => Some(Action::Stop {
                 machine: self.target(target)?,
@@ -170,31 +226,16 @@ impl Control {
                 if left.is_empty() || right.is_empty() {
                     return Err("partition sides must be nonempty".into());
                 }
-                let mut members = BTreeSet::new();
-                let mut sides = Vec::new();
-                for side in [left, right] {
-                    let mut names = Vec::new();
-                    for target in side {
-                        let name = self.target(target)?;
-                        if !members.insert(name.clone()) {
-                            return Err(
-                                "partition sides must be disjoint with unique machines".into()
-                            );
-                        }
-                        names.push(name);
-                    }
-                    sides.push(names);
-                }
-                self.handles = self
-                    .handles
-                    .checked_add(1)
-                    .ok_or("partition handles exhausted")?;
-                let handle = format!("p{}", self.handles);
-                result = json!({"handle":handle});
+                let [left, right] = disjoint_sides(
+                    [left, right],
+                    |t| self.target(t),
+                    "partition sides must be disjoint with unique machines",
+                )?;
+                let handle = self.next_handle("partition handles exhausted", &mut result)?;
                 Some(Action::Partition {
                     handle,
-                    left: sides.remove(0),
-                    right: sides.remove(0),
+                    left,
+                    right,
                 })
             }
             Operation::Shape {
@@ -214,34 +255,20 @@ impl Control {
                     bandwidth_bps: *bandwidth_bps,
                     queue_bound_ns: *queue_bound_ns,
                 }
-                .validate(self.lookahead)?;
-                network_faults.validate(*latency_ns, *jitter_ns)?;
+                .validate_shape(self.lookahead, network_faults)?;
                 if from.is_empty() || to.is_empty() {
                     return Err("shape sides must be nonempty".into());
                 }
-                let mut members = BTreeSet::new();
-                let mut sides = Vec::new();
-                for side in [from, to] {
-                    let mut names = Vec::new();
-                    for target in side {
-                        let name = self.target(target)?;
-                        if !members.insert(name.clone()) {
-                            return Err("shape sides must be disjoint with unique machines".into());
-                        }
-                        names.push(name);
-                    }
-                    sides.push(names);
-                }
-                self.handles = self
-                    .handles
-                    .checked_add(1)
-                    .ok_or("fault handles exhausted")?;
-                let handle = format!("p{}", self.handles);
-                result = json!({"handle":handle});
+                let [from, to] = disjoint_sides(
+                    [from, to],
+                    |t| self.target(t),
+                    "shape sides must be disjoint with unique machines",
+                )?;
+                let handle = self.next_handle("fault handles exhausted", &mut result)?;
                 Some(Action::Shape {
                     handle,
-                    from: sides.remove(0),
-                    to: sides.remove(0),
+                    from,
+                    to,
                     latency_ns: *latency_ns,
                     jitter_ns: *jitter_ns,
                     loss_ppm: *loss_ppm,
@@ -266,12 +293,7 @@ impl Control {
                 {
                     return Err("invalid connection selector".into());
                 }
-                self.handles = self
-                    .handles
-                    .checked_add(1)
-                    .ok_or("fault handles exhausted")?;
-                let handle = format!("p{}", self.handles);
-                result = json!({"handle":handle});
+                let handle = self.next_handle("fault handles exhausted", &mut result)?;
                 Some(Action::DropConnection {
                     handle,
                     connection: connection.clone(),
@@ -284,12 +306,7 @@ impl Control {
             } => {
                 seedbox_control::validate_clock_skew(*offset_ns, *max_offset_ns)?;
                 let machine = self.target(target)?;
-                self.handles = self
-                    .handles
-                    .checked_add(1)
-                    .ok_or("fault handles exhausted")?;
-                let handle = format!("p{}", self.handles);
-                result = json!({"handle":handle});
+                let handle = self.next_handle("fault handles exhausted", &mut result)?;
                 Some(Action::ClockSkew {
                     handle,
                     machine,
@@ -301,16 +318,16 @@ impl Control {
                 target,
                 factor_permille,
             } => {
-                if !seedbox_control::THROTTLE_PERMILLE.contains(factor_permille) {
-                    return Err("factor_permille must be in [1000, 1000000]".into());
+                let range = seedbox_control::THROTTLE_PERMILLE;
+                if !range.contains(factor_permille) {
+                    return Err(format!(
+                        "factor_permille must be in [{}, {}]",
+                        range.start(),
+                        range.end()
+                    ));
                 }
                 let machine = self.target(target)?;
-                self.handles = self
-                    .handles
-                    .checked_add(1)
-                    .ok_or("fault handles exhausted")?;
-                let handle = format!("p{}", self.handles);
-                result = json!({"handle":handle});
+                let handle = self.next_handle("fault handles exhausted", &mut result)?;
                 Some(Action::Throttle {
                     handle,
                     machine,
@@ -330,7 +347,7 @@ impl Control {
                 None
             }
             Operation::Now {} => {
-                result = json!({"now_ns":at});
+                result = json!({ "now_ns": at });
                 None
             }
             Operation::Inspect {} => None,
@@ -340,34 +357,10 @@ impl Control {
                 match_timeout_ns,
                 fault,
             } => {
-                if marker.is_empty()
-                    || marker.len() > seedbox_control::MAX_TRIGGER_MARKER
-                    || *match_timeout_ns == 0
-                {
-                    return Err(
-                        "trigger requires 1..=256 marker bytes and positive match timeout".into(),
-                    );
-                }
-                at.checked_add(*match_timeout_ns)
-                    .and_then(|d| d.checked_add(self.latency))
-                    .and_then(|d| d.checked_add(seedbox_control::PROCESS_EFFECT_TIMEOUT_NS))
-                    .ok_or("trigger deadline overflow")?;
-                if self.triggers.records.len() >= seedbox_control::MAX_TRIGGERS {
-                    return Err("trigger budget exhausted (64 per run)".into());
-                }
-                let source = match source {
-                    Target::Service(s) => self
-                        .placement
-                        .get(s)
-                        .cloned()
-                        .ok_or("unknown trigger source service")?,
-                    Target::Machine(m) => m.clone(),
-                };
-                if !self.names.contains(&source) {
-                    return Err("unknown trigger source machine".into());
-                }
-                let (plan, _, _) = self.plan(&fault.operation(), at)?;
-                result = json!({"trigger_source":source,"trigger_marker":marker,"trigger_timeout_ns":match_timeout_ns,"trigger_action":plan.ok_or("missing trigger action")?.action});
+                let arm = self.plan_trigger(source, marker, *match_timeout_ns, fault, at)?;
+                // Until admission arms it, the call's evidence is the plan.
+                result = arm.evidence();
+                trigger = Some(arm);
                 None
             }
             Operation::CancelTrigger { .. } => None,
@@ -384,7 +377,54 @@ impl Control {
                 })
             })
             .transpose()?;
-        Ok((plan, result, effect))
+        Ok(Planned {
+            plan,
+            result,
+            effect,
+            trigger,
+        })
+    }
+    fn plan_trigger(
+        &mut self,
+        source: &Target,
+        marker: &[u8],
+        match_timeout_ns: u64,
+        fault: &seedbox_control::TriggerFault,
+        at: u64,
+    ) -> Result<TriggerArm, String> {
+        if !seedbox_control::valid_trigger_marker(marker) || match_timeout_ns == 0 {
+            return Err(format!(
+                "trigger requires 1..={} marker bytes and positive match timeout",
+                seedbox_control::MAX_TRIGGER_MARKER
+            ));
+        }
+        at.checked_add(match_timeout_ns)
+            .and_then(|d| d.checked_add(self.latency))
+            .and_then(|d| d.checked_add(seedbox_control::PROCESS_EFFECT_TIMEOUT_NS))
+            .ok_or("trigger deadline overflow")?;
+        seedbox_control::check_trigger_budget(self.triggers.records.len())?;
+        let source = match source {
+            Target::Service(s) => self
+                .placement
+                .get(s)
+                .cloned()
+                .ok_or("unknown trigger source service")?,
+            Target::Machine(m) => m.clone(),
+        };
+        if !self.names.contains(&source) {
+            return Err("unknown trigger source machine".into());
+        }
+        let action = self
+            .plan(&fault.operation(), at)?
+            .plan
+            .ok_or("missing trigger action")?
+            .action;
+        Ok(TriggerArm {
+            source,
+            marker: marker.to_vec(),
+            timeout_ns: match_timeout_ns,
+            action,
+        })
     }
     pub fn request(
         &mut self,
@@ -453,33 +493,37 @@ impl Control {
         self.last_relay = relay;
         let request: Result<Request, _> = serde_json::from_str(payload);
         let mut unsupported = false;
-        let (operation, plan, result, effect, error) = match request {
+        let refused = |error| {
+            let planned = Planned {
+                plan: None,
+                result: json!({}),
+                effect: admitted,
+                trigger: None,
+            };
+            (planned, Some(error))
+        };
+        let (operation, (planned, error)) = match request {
             Ok(request) => {
                 let operation = request.operation;
-                if !supports(&operation) {
+                let outcome = if !supports(&operation) {
                     unsupported = true;
-                    (
-                        Some(operation),
-                        None,
-                        json!({}),
-                        admitted,
-                        Some("operation is not supported by this backend".into()),
-                    )
+                    refused("operation is not supported by this backend".into())
                 } else {
                     match self.plan(&operation, admitted) {
-                        Ok((p, r, e)) => (Some(operation), p, r, e, None),
-                        Err(error) => (Some(operation), None, json!({}), admitted, Some(error)),
+                        Ok(planned) => (planned, None),
+                        Err(error) => refused(error),
                     }
-                }
+                };
+                (Some(operation), outcome)
             }
-            Err(error) => (
-                None,
-                None,
-                json!({}),
-                admitted,
-                Some(format!("invalid request arguments: {error}")),
-            ),
+            Err(error) => (None, refused(format!("invalid request arguments: {error}"))),
         };
+        let Planned {
+            plan,
+            result,
+            effect,
+            trigger,
+        } = planned;
         let r: Value = serde_json::from_str(payload).map_err(|_| "malformed control JSON")?;
         self.pending = Some(Call {
             relay,
@@ -497,6 +541,7 @@ impl Control {
             error,
             error_code: unsupported.then_some("unsupported"),
             fatal: false,
+            trigger,
         });
         Ok(())
     }
@@ -588,32 +633,27 @@ impl Control {
         if let Some((from, to, after)) = discovery {
             let connections = faults.connections(&from, &to, after);
             let next_after = connections.last().map(|c| c.incarnation).unwrap_or(after);
-            p.result = json!({"connections":connections,"next_after":next_after});
+            p.result = json!({ "connections": connections, "next_after": next_after });
         }
         if !p.admitted_done {
             p.admitted_done = true;
             let trigger_result = match &p.operation {
                 Some(Operation::ArmTrigger { .. }) if p.error.is_none() => {
-                    let source = p.result["trigger_source"]
-                        .as_str()
-                        .ok_or("trigger source")?
-                        .to_owned();
-                    let marker = serde_json::from_value(p.result["trigger_marker"].clone())
-                        .map_err(|_| "trigger marker")?;
-                    let timeout = p.result["trigger_timeout_ns"]
-                        .as_u64()
-                        .ok_or("trigger timeout")?;
-                    let action: Action = serde_json::from_value(p.result["trigger_action"].clone())
-                        .map_err(|_| "trigger action")?;
+                    let TriggerArm {
+                        source,
+                        marker,
+                        timeout_ns,
+                        action,
+                    } = p.trigger.take().ok_or("trigger action")?;
                     let handle = match &action {
                         Action::Partition { handle, .. } => Some(handle.clone()),
                         _ => None,
                     };
                     Some(
                         self.triggers
-                            .arm(source, marker, now, timeout, action)
+                            .arm(source, marker, now, timeout_ns, action)
                             .map(|id| {
-                                let mut result = json!({"trigger_id":id});
+                                let mut result = json!({ "trigger_id": id });
                                 if let Some(handle) = handle {
                                     result["handle"] = json!(handle);
                                 }
@@ -641,24 +681,25 @@ impl Control {
                     p.error = Some(error.into());
                     p.error_code = Some("invalid_state");
                     p.effect = Some(now);
-                } else if matches!(&plan.action,Action::Heal{handle} if !faults.active_handles().contains(handle))
-                {
+                } else if matches!(
+                    &plan.action,
+                    Action::Heal { handle } if !faults.active_handles().contains(handle)
+                ) {
                     p.error = Some("heal of inactive handle".into());
                     p.effect = Some(now);
                 } else {
                     if let Action::Heal { handle } = &plan.action {
                         if let Some(s) = faults.connections.selections.get(handle) {
-                            p.result = json!({"matched":s.matched,"dropped":s.dropped});
+                            p.result = json!({ "matched": s.matched, "dropped": s.dropped });
                         }
                     }
                     p.fault = Some(faults.append(plan)?);
                 }
             }
         }
-        if p.effect.is_some_and(|e| e <= now) {
+        if let Some(effect) = p.effect.filter(|&e| e <= now) {
             p.reply = Some(
-                p.effect
-                    .unwrap()
+                effect
                     .checked_add(self.latency)
                     .ok_or("control reply overflow")?,
             );
@@ -687,20 +728,18 @@ impl Control {
                         }
                         _ => None,
                     };
-                    if let Some(at) = at {
+                    if let (Some(at), Some(row)) = (at, faults.row(id)) {
                         if matches!(p.operation, Some(Operation::ClockSkew { .. })) {
-                            if let Some(offset) = faults.log[id as usize - 1].get("offset_ns") {
-                                p.result["offset_ns"] = offset.clone();
+                            if let Some(offset) = row.offset_ns {
+                                p.result["offset_ns"] = json!(offset);
                             }
                         }
                         if matches!(p.operation, Some(Operation::Heal { .. })) {
-                            if let Some(counts) = faults.log[id as usize - 1].get("queue_counts") {
-                                p.result["queue_counts"] = counts.clone();
+                            if let Some(counts) = &row.queue_counts {
+                                p.result["queue_counts"] = json!(counts);
                             }
-                            if let Some(counts) =
-                                faults.log[id as usize - 1].get("network_fault_counts")
-                            {
-                                p.result["network_fault_counts"] = counts.clone();
+                            if let Some(counts) = &row.network_fault_counts {
+                                p.result["network_fault_counts"] = json!(counts);
                             }
                         }
                         p.effect = Some(at);
@@ -717,15 +756,31 @@ impl Control {
     pub fn cut_off(&mut self, faults: &crate::faults::Faults, time: u64) {
         if let Some(p) = self.pending.take() {
             let plan = p.fault.and_then(|id| faults.plan(id)).cloned().or(p.plan);
-            self.log.push(json!({"relay_id":p.relay,"session_id":p.session,"request":p.request,"status":"cut_off","requested_at_ns":p.requested,"admitted_at_ns":p.admitted,"admitted_done":p.admitted_done,"effect_at_ns":p.effect,"replied_at_ns":p.reply,"cut_off_at_ns":time,"fault_id":p.fault,"plan":plan,"error":p.error,"fatal":p.fatal}));
+            let mut row = json!({
+                "relay_id": p.relay,
+                "session_id": p.session,
+                "request": p.request,
+                "status": "cut_off",
+                "requested_at_ns": p.requested,
+                "admitted_at_ns": p.admitted,
+                "admitted_done": p.admitted_done,
+                "effect_at_ns": p.effect,
+                "replied_at_ns": p.reply,
+                "cut_off_at_ns": time,
+                "fault_id": p.fault,
+                "plan": plan,
+                "error": p.error,
+                "fatal": p.fatal,
+            });
             if matches!(
                 p.operation,
                 Some(Operation::ArmTrigger { .. } | Operation::CancelTrigger { .. })
             ) {
-                self.log.last_mut().unwrap()["result"] = p.result;
+                row["result"] = p.result;
             }
+            self.log.push(row);
         }
-        for row in self.log.iter_mut().rev().take(1) {
+        if let Some(row) = self.log.last_mut() {
             if row["response"].is_object() && row["delivered_at_ns"].is_null() {
                 row["status"] = json!("cut_off");
                 row["cut_off_at_ns"] = json!(time);
@@ -747,12 +802,62 @@ impl Control {
     pub fn has_undelivered_reply(&self) -> bool {
         self.undelivered_reply
     }
-    pub fn response(&mut self, time: u64) -> Result<Vec<u8>, String> {
-        if self.pending.as_ref().is_none_or(|p| p.reply != Some(time)) {
-            return Err("RPC response at wrong virtual time".into());
+    /// A controller frame that could not be opened as a request: log it and
+    /// fail the run.
+    pub fn reject_request(&mut self, machine: &str, at: u64, line: &[u8], error: String) {
+        self.log.push(json!({
+            "status": "rejected",
+            "machine": machine,
+            "at_ns": at,
+            "frame": String::from_utf8_lossy(line),
+            "error": error,
+        }));
+        self.error = Some(error);
+    }
+    /// A pending `inspect` that its admission barrier has not answered yet.
+    pub fn wants_inspect(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| !p.admitted_done && matches!(p.operation, Some(Operation::Inspect {})))
+    }
+    /// Answer a pending `inspect` with the world as it stands: `services` from
+    /// the control placement, each machine's state, and
+    /// nominal network counters.
+    pub fn answer_inspect(
+        &mut self,
+        services: &Value,
+        machines: Vec<Value>,
+        faults: &crate::faults::Faults,
+        network_counters: Value,
+    ) -> Result<(), String> {
+        let mut result = json!({
+            "services": services,
+            "machines": machines,
+            "active_handles": faults.active_handles(),
+            "network_counters": network_counters,
+        });
+        if let Some(evidence) = self.triggers.evidence()? {
+            result["triggers"] = evidence;
         }
-        let mut p = self.pending.take().unwrap();
-        let mut reply = json!({"version":1,"id":p.request["id"],"ok":p.error.is_none(),"result":p.result,"requested_at_ns":p.requested,"admitted_at_ns":p.admitted,"effect_at_ns":p.effect,"replied_at_ns":time});
+        if let Some(p) = self.pending.as_mut() {
+            p.result = result;
+        }
+        Ok(())
+    }
+    pub fn response(&mut self, time: u64) -> Result<Vec<u8>, String> {
+        let Some(mut p) = self.pending.take_if(|p| p.reply == Some(time)) else {
+            return Err("RPC response at wrong virtual time".into());
+        };
+        let mut reply = json!({
+            "version": 1,
+            "id": p.request["id"],
+            "ok": p.error.is_none(),
+            "result": p.result,
+            "requested_at_ns": p.requested,
+            "admitted_at_ns": p.admitted,
+            "effect_at_ns": p.effect,
+            "replied_at_ns": time,
+        });
         if p.error.is_none()
             && serde_json::to_vec(&reply).map_err(|e| e.to_string())?.len() + 1 > MAX_FRAME
         {
@@ -760,13 +865,17 @@ impl Control {
             p.error_code = Some("result_too_large");
         }
         if let Some(error) = p.error {
-            let handle = reply
-                .as_object_mut()
-                .unwrap()
-                .remove("result")
-                .and_then(|r| r.get("handle").cloned());
+            let handle = reply["result"].get("handle").cloned();
+            if let Value::Object(fields) = &mut reply {
+                fields.remove("result");
+            }
+            let code = if p.fatal {
+                "effect_failed"
+            } else {
+                p.error_code.unwrap_or("invalid_request")
+            };
             reply["ok"] = json!(false);
-            reply["error"] = json!({"code":if p.fatal {"effect_failed"} else {p.error_code.unwrap_or("invalid_request")},"message":error});
+            reply["error"] = json!({ "code": code, "message": error });
             // An unavailable effect still allocated its handle; keep it so the
             // planned action can be reconstructed from the reply.
             if let (Some(handle), Some("target_unavailable")) = (handle, p.error_code) {
@@ -780,9 +889,13 @@ impl Control {
             return Err("control error response exceeds frame bound".into());
         }
         self.undelivered_reply = true;
-        self.log.push(
-            json!({"relay_id":p.relay,"session_id":p.session,"request":p.request,"response":reply,"fault_id":p.fault}),
-        );
+        self.log.push(json!({
+            "relay_id": p.relay,
+            "session_id": p.session,
+            "request": p.request,
+            "response": reply,
+            "fault_id": p.fault,
+        }));
         Ok(format!("SBX_REPLY1 {} {} {}\n", p.relay, p.session, reply).into_bytes())
     }
 }

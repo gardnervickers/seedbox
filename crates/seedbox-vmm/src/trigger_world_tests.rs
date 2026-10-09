@@ -122,8 +122,8 @@ fn committed_trigger_world_effects_follow_arm_order_across_reversed_machine_ties
             let outcome = simulate(&mut w, &json!({}), 2000, &None, None, &mut None).unwrap();
             assert_eq!(outcome, "quiescent");
             assert_eq!(w.faults.log.len(), 2);
-            assert_eq!(w.faults.log[0]["request"]["handle"], "first");
-            assert_eq!(w.faults.log[1]["request"]["handle"], "second");
+            assert_eq!(w.faults.log[0].request["handle"], "first");
+            assert_eq!(w.faults.log[1].request["handle"], "second");
             assert!(w
                 .control
                 .triggers

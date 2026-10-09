@@ -764,9 +764,9 @@ fn checkpoint_drain_preserves_trigger_target_exit_notification() {
     for _ in 0..2 {
         saved.restore_checkpoint(&mut w).unwrap();
         drain_machine_messages(&mut w, 1, false, true).unwrap();
-        assert_eq!(w.faults.log[0]["status"], "unavailable");
+        assert_eq!(w.faults.log[0].json()["status"], "unavailable");
         assert_eq!(
-            w.faults.log[0]["detail"],
+            w.faults.log[0].json()["detail"],
             "target VM exited before the process effect"
         );
     }

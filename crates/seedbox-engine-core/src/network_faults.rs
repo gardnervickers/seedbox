@@ -1,5 +1,6 @@
 //! Independent streams and evidence for opt-in directed network impairments.
 use crate::{links::Pair, rng::Rng};
+use seedbox_control::MAX_PPM;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -38,13 +39,19 @@ impl Streams {
             }
         }
     }
+    /// Every ordered pair of distinct machines has a stream of each kind
+    /// from the last reseed.
+    fn stream(&mut self, pair: Pair, kind: usize) -> &mut Rng {
+        self.0[kind]
+            .get_mut(&pair)
+            .expect("a network fault stream per machine pair")
+    }
     pub fn choose(&mut self, pair: Pair, kind: usize, ppm: u64) -> bool {
         ppm != 0
-            && (self.0[kind].get_mut(&pair).unwrap().next() as u128) * 1_000_000
-                < (ppm as u128) << 64
+            && (self.stream(pair, kind).next() as u128) * u128::from(MAX_PPM) < (ppm as u128) << 64
     }
     pub fn delay(&mut self, pair: Pair, maximum: u64) -> u64 {
-        self.0[REORDER].get_mut(&pair).unwrap().below(maximum) + 1
+        self.stream(pair, REORDER).below(maximum) + 1
     }
     pub fn witness(&self, h: &mut Sha256) {
         for streams in &self.0 {

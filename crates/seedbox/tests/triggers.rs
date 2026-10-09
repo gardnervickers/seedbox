@@ -38,7 +38,7 @@ fn split_overlapping_markers_duplicates_old_bytes_and_exactly_once() {
     t.apply_boundary(&mut f, 132).unwrap();
     bytes(&mut t, "a", 133, b"ababac");
     assert_eq!(f.log.len(), 1);
-    assert_eq!(f.log[0]["request"]["at_ns"], 132);
+    assert_eq!(f.log[0].json()["request"]["at_ns"], 132);
     f.apply_due(132);
     assert!(f.blocked(0, 1));
     assert_eq!(t.records[0].status, "fired");
@@ -90,8 +90,8 @@ fn reversed_source_ties_still_dispatch_by_arm_id_and_lagging_peer_has_no_past_ef
         t.apply_boundary(&mut f, 129).unwrap();
         assert!(f.log.is_empty()); // Nothing changes a peer before effect time.
         t.apply_boundary(&mut f, 130).unwrap();
-        assert_eq!(f.log[0]["request"]["handle"], "first");
-        assert_eq!(f.log[1]["request"]["handle"], "second");
+        assert_eq!(f.log[0].json()["request"]["handle"], "first");
+        assert_eq!(f.log[1].json()["request"]["handle"], "second");
         let evidence = (t.evidence().unwrap(), f.log);
         if let Some(expected) = &expected {
             assert_eq!(&evidence, expected)
@@ -173,15 +173,15 @@ fn fired_stop_uses_existing_effect_deadline_and_cutoff_does_not_fabricate_ack() 
     assert_eq!(f.apply_due(130), vec![(1, b"stop 1\n".to_vec())]);
     let snapshot = f.clone();
     t.cut_off(140);
-    assert_eq!(f.log[0]["applied_at_ns"], serde_json::Value::Null);
+    assert_eq!(f.log[0].json()["applied_at_ns"], serde_json::Value::Null);
     assert_eq!(t.records[0].status, "fired");
     f.apply_due(5_000_000_130);
     assert!(f.error.is_some());
-    assert_eq!(f.log[0]["status"], "failed");
+    assert_eq!(f.log[0].json()["status"], "failed");
     let mut restored = snapshot;
     restored.effect(1, 1, 140, true);
     assert!(restored.error.is_none());
-    assert_eq!(restored.log[0]["status"], "applied");
+    assert_eq!(restored.log[0].json()["status"], "applied");
 }
 
 #[test]

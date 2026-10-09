@@ -371,7 +371,8 @@ fn simulate_windowed(
     };
     let skew = std::time::Duration::from_micros(options.performance.windowed_skew_us);
     if options.machine_workers <= 1 {
-        return world_windowed::simulate(world, run, skew, &mut boundary);
+        return world_windowed::simulate(world, run, skew, &mut boundary)
+            .map(|(outcome, evidence)| (outcome.as_str(), evidence));
     }
     // Each pool thread opens its own clock: the counter counts that thread's
     // guest execution, and the PV watchdog that thread's CPU time.
@@ -398,6 +399,7 @@ fn simulate_windowed(
         },
         &mut boundary,
     )
+    .map(|(outcome, evidence)| (outcome.as_str(), evidence))
 }
 /// Run the world to its end, or with `fork` to its fork point, on one thread.
 #[cfg(test)]
@@ -425,8 +427,8 @@ fn simulate_to(
     let run = world_windowed::Run {
         cfg,
         duration,
-        end_on,
-        fork,
+        end_on: end_on.as_deref(),
+        fork: fork.map(Into::into),
         checkpoint,
         require_barrier: true,
     };
@@ -801,7 +803,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                 let run = world_windowed::Run {
                     cfg: &cfg,
                     duration,
-                    end_on: &end_on,
+                    end_on: end_on.as_deref(),
                     fork: None,
                     checkpoint: Some(at),
                     require_barrier: true,
@@ -831,7 +833,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                     let run = world_windowed::Run {
                         cfg: &cfg,
                         duration,
-                        end_on: &end_on,
+                        end_on: end_on.as_deref(),
                         fork: None,
                         checkpoint: None,
                         require_barrier: true,
@@ -867,7 +869,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         let run = world_windowed::Run {
             cfg: &cfg,
             duration,
-            end_on: &end_on,
+            end_on: end_on.as_deref(),
             fork: None,
             checkpoint: None,
             require_barrier: true,
@@ -893,8 +895,8 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     let boot_run = world_windowed::Run {
         cfg: &cfg,
         duration,
-        end_on: &end_on,
-        fork: Some(fork_at),
+        end_on: end_on.as_deref(),
+        fork: Some(fork_at.into()),
         checkpoint: None,
         require_barrier: true,
     };
@@ -967,7 +969,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         let run = world_windowed::Run {
             cfg: &cfg,
             duration,
-            end_on: &end_on,
+            end_on: end_on.as_deref(),
             fork: None,
             checkpoint: None,
             require_barrier: true,

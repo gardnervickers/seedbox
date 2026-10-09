@@ -100,7 +100,7 @@ fn two_simultaneous_flows_direction_retransmissions_overlap_and_tuple_reuse() {
         },
         5,
     );
-    assert_eq!(f.log[2]["selection_counts"]["dropped"], 4);
+    assert_eq!(f.log[2].json()["selection_counts"]["dropped"], 4);
     assert_eq!(
         f.route(1, 0, 6, &frame(4000, true, 51, 8, 0x18), false),
         Outcome::Lost
@@ -575,7 +575,7 @@ fn selected_drop_preserves_other_flow_jitter_and_does_not_advance_fifo() {
     assert_eq!(a.finalize(), b.finalize());
     for row in &selected.log[1..] {
         assert_eq!(
-            row["selection_counts"],
+            row.json()["selection_counts"],
             serde_json::json!({"matched": 1, "dropped": 1})
         );
     }
