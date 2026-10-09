@@ -91,6 +91,10 @@ fn every_application_runs_twice_and_replays() {
                 let second = invoke(Path::new(&cli), &directory, "second", &run)?;
                 let first = run_directory(&first)?;
                 let second = run_directory(&second)?;
+                // Each preparation records its own guest wall-clock epoch unless
+                // --build-epoch pins it, which only native Linux preparation
+                // accepts; Mac runs differ in that epoch, so each must replay.
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                 invoke(
                     Path::new(&cli),
                     &directory,
@@ -98,6 +102,13 @@ fn every_application_runs_twice_and_replays() {
                     &["diff", first, second],
                 )?;
                 invoke(Path::new(&cli), &directory, "replay", &["replay", first])?;
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                invoke(
+                    Path::new(&cli),
+                    &directory,
+                    "replay-second",
+                    &["replay", second],
+                )?;
                 Ok(())
             };
             if let Err(error) = check() {
