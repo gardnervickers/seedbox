@@ -1,7 +1,6 @@
 {
  "control_history": [],
  "control_latency_ns": 0,
- "counter_profile": "amd-zen",
  "fault_error": null,
  "faults": [
   {

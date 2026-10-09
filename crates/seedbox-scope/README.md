@@ -39,4 +39,4 @@ console output and machine names; faults and traffic appear when `vmm.json` is
 written at the end.
 
 `tests/fixtures/link60` is the L1 report from the #60 link-policy host run
-(machine details trimmed, host paths removed).
+(machine details and the removed counter-mode fields trimmed, host paths removed).
