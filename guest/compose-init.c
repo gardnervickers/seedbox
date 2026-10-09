@@ -32,6 +32,7 @@
 #include <sys/sysmacros.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/timex.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -555,6 +556,21 @@ static int stop(pid_t *child) {
     while (waitpid(-group, &status, 0) >= 0 || errno == EINTR) {}
     return errno == ECHILD ? 0 : -1;
 }
+/* Test builds replace the privileged clock adjustment. */
+#ifndef SEEDBOX_ADJTIMEX
+#define SEEDBOX_ADJTIMEX adjtimex
+#endif
+/* Step CLOCK_REALTIME by a signed offset in one kernel operation. The
+ * timekeeper moves only the wall-to-monotonic offset, so monotonic and boot
+ * time, the TSC and pending relative timers are unaffected; absolute
+ * CLOCK_REALTIME timers are re-evaluated by the kernel. */
+static int step_wall_clock(int64_t ns) {
+    struct timex adjustment = {.modes = ADJ_SETOFFSET | ADJ_NANO};
+    adjustment.time.tv_sec = ns / 1000000000;
+    adjustment.time.tv_usec = ns % 1000000000;
+    if (adjustment.time.tv_usec < 0) { adjustment.time.tv_usec += 1000000000; adjustment.time.tv_sec--; }
+    return SEEDBOX_ADJTIMEX(&adjustment) < 0 ? -1 : 0;
+}
 /* SIGSTOP the application's process group, as a debugger or GC pause would;
  * its kernel keeps ACKing and accepting connections. Confirm once the group
  * leader reports the stop, leaving any exit for supervise() to reap. */
@@ -582,10 +598,11 @@ static void control(char *command, pid_t *child) {
         send_all(control_client, end + 1, strlen(end + 1)); send_all(control_client, "\n", 1); waiting_relay = 0;
         return;
     }
-    char *action; uint32_t id;
-    if (control_parse(command, &action, &id)) { errno = EINVAL; die("invalid management command"); }
+    char *action; uint32_t id; int64_t step;
+    if (control_parse(command, &action, &id, &step)) { errno = EINVAL; die("invalid management command"); }
     int success = 0;
-    if (!strcmp(action, "stop")) success = stop(child) == 0;
+    if (!strcmp(action, "clock_step")) success = step_wall_clock(step) == 0;
+    else if (!strcmp(action, "stop")) success = stop(child) == 0;
     else if (!strcmp(action, "freeze")) success = freeze(child) == 0;
     else if (!strcmp(action, "thaw")) success = thaw(child) == 0;
     else if (*child < 0) { *child = start(); success = *child > 0; }

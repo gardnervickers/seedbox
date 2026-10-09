@@ -809,6 +809,17 @@ streams, ordering and feature-off witnesses are unchanged.
 and healing, checks actual packet receipts and socket effects, and reconnects
 after healing. Run and replay it through the public CLI on a Linux KVM host.
 
+Runtime control can also skew a machine's wall clock: `world.clock_skew(target,
+offset=..., max_offset=...)` steps that guest's `CLOCK_REALTIME` by a fixed
+offset, or by one drawn from `[-max_offset, max_offset]` on the seeded
+`clock/<machine>` stream, and returns a healable handle. The guest supervisor
+applies the step with `adjtimex(ADJ_SETOFFSET)` and acknowledges it like a
+process fault; monotonic time and the virtual TSC never move. The fault row
+records the applied `offset_ns`, so offsets are part of the world witness.
+Runs without clock skew draw nothing new and keep their witnesses. See
+[the protocol](../python/PROTOCOL.md#clock-skew). Clock rate (drift) is not yet
+modeled.
+
 The network seed-diversity audit still finds zero default jitter and loss.
 `link/<from>/<to>` and `link-loss/<from>/<to>` each advance once per non-cut
 candidate, but zero jitter/loss makes their decisions seed-independent for an

@@ -1043,6 +1043,7 @@ fn validate_control_history(
     let mut accepted = 0u64;
     let mut next_fault_id = 1u32;
     let mut down = BTreeSet::new();
+    let mut clocks = BTreeSet::new();
     for (i, row) in history.iter().enumerate() {
         if row["status"] == "rejected" && failed {
             continue;
@@ -1268,6 +1269,30 @@ fn validate_control_history(
                 }
                 continue;
             }
+            Operation::ClockSkew {
+                target,
+                offset_ns,
+                max_offset_ns,
+            } => {
+                // An unavailable reply keeps its allocated handle in the error.
+                let handle = match (response, unavailable) {
+                    (true, false) => &metadata["result"]["handle"],
+                    (true, true) => &metadata["error"]["handle"],
+                    (false, _) => &row["plan"]["handle"],
+                };
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty()
+                    || seedbox_control::validate_clock_skew(offset_ns, max_offset_ns).is_err()
+                {
+                    return Err(bad());
+                }
+                Action::ClockSkew {
+                    handle,
+                    machine: resolve(&target)?,
+                    offset_ns,
+                    max_offset_ns,
+                }
+            }
             Operation::Throttle {
                 target,
                 factor_permille,
@@ -1291,7 +1316,8 @@ fn validate_control_history(
                 }
             }
             Operation::Heal { handle } => {
-                if response && e != Some(a) {
+                // A clock heal waits for its guest effect; other heals apply at admission.
+                if response && e != Some(a) && !clocks.contains(&handle) {
                     return Err(bad());
                 }
                 Action::Heal { handle }
@@ -1342,8 +1368,14 @@ fn validate_control_history(
         {
             return Err(bad());
         }
+        if let Action::ClockSkew { handle, .. } = &plan.action {
+            clocks.insert(handle.clone());
+        }
         if unavailable {
-            if !plan.action.is_process() || e.is_none_or(|e| e > plan.deadline_ns) {
+            if !(plan.action.is_process()
+                || matches!(plan.action, Action::ClockSkew { .. } | Action::Heal { .. }))
+                || e.is_none_or(|e| e > plan.deadline_ns)
+            {
                 return Err(bad());
             }
             expected.unavailable.insert(plan.id, e.ok_or_else(bad)?);

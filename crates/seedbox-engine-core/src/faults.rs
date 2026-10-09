@@ -22,6 +22,23 @@ struct Entry {
     status: Status,
     dispatched: bool,
     dispatch_at: Option<u64>,
+    /// The wall-clock step this entry asks its target guest to make.
+    clock_step: Option<i64>,
+}
+/// A clock skew handle: the guest has been asked to step its wall clock by
+/// `offset`, has done so, is stepping it back, or lost the skew in a crash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClockState {
+    Pending,
+    Active,
+    Healing,
+    Lost,
+}
+#[derive(Clone, Copy, Debug)]
+struct Clock {
+    machine: usize,
+    offset: i64,
+    state: ClockState,
 }
 /// Whole-machine lifecycle. A paused machine keeps its VM and executes
 /// nothing; a down machine has no VM until it reboots.
@@ -67,6 +84,7 @@ pub struct Faults {
     lifecycle: Vec<(usize, Lifecycle)>,
     pub readiness: Vec<Value>,
     handles: BTreeMap<String, BTreeSet<(usize, usize)>>,
+    clocks: BTreeMap<String, Clock>,
     /// Active throttle handles: machine and factor in thousandths.
     throttles: BTreeMap<String, (usize, u64)>,
     cuts: BTreeMap<(usize, usize), usize>,
@@ -108,6 +126,7 @@ impl Faults {
             lifecycle: vec![],
             readiness: vec![],
             handles: BTreeMap::new(),
+            clocks: BTreeMap::new(),
             throttles: BTreeMap::new(),
             cuts: BTreeMap::new(),
             names,
@@ -258,6 +277,23 @@ impl Faults {
                     return Err("empty fault handle".into());
                 }
             }
+            Action::ClockSkew {
+                handle,
+                machine,
+                offset_ns,
+                max_offset_ns,
+            } => {
+                seedbox_control::validate_clock_skew(*offset_ns, *max_offset_ns)?;
+                if handle.is_empty() {
+                    return Err("empty fault handle".into());
+                }
+                target = Some(
+                    self.names
+                        .iter()
+                        .position(|n| n == machine)
+                        .ok_or("unknown fault machine")?,
+                );
+            }
         }
         Ok(Entry {
             plan,
@@ -266,6 +302,7 @@ impl Faults {
             status: Status::Scheduled,
             dispatched: false,
             dispatch_at: None,
+            clock_step: None,
         })
     }
     pub fn append(&mut self, mut plan: Plan) -> Result<u32, String> {
@@ -333,6 +370,7 @@ impl Faults {
             .chain(self.links.layers.values().map(|l| l.handle.clone()))
             .collect();
         handles.extend(self.connections.selections.keys().cloned());
+        handles.extend(self.clocks.keys().cloned());
         handles.extend(self.throttles.keys().cloned());
         handles.sort();
         handles
@@ -355,6 +393,16 @@ impl Faults {
         }
     }
     pub fn admission_error(&self, action: &Action) -> Option<&'static str> {
+        if let Action::Heal { handle } = action {
+            let clock = self.clocks.get(handle)?;
+            return match clock.state {
+                ClockState::Pending | ClockState::Healing => Some("clock skew is not settled"),
+                ClockState::Active if self.life[clock.machine] == Life::Paused => {
+                    Some("target machine is paused")
+                }
+                _ => None,
+            };
+        }
         if let Action::DropConnection { connection, .. } = action {
             if self.connections.selections.len() == crate::connections::CAPACITY {
                 return Some("connection selector capacity exhausted");
@@ -393,6 +441,12 @@ impl Faults {
             }
             Action::Reboot { .. } if self.life[index] != Life::Down => {
                 Some("target machine is not down")
+            }
+            Action::ClockSkew { .. } if self.life[index] == Life::Down => {
+                Some("target machine is down")
+            }
+            Action::ClockSkew { .. } if self.life[index] == Life::Paused => {
+                Some("target machine is paused")
             }
             Action::Throttle { .. } if self.throttle(index).is_some() => {
                 Some("target machine is already throttled")
@@ -529,6 +583,7 @@ impl Faults {
         self.log[i]["status"] = json!("unavailable");
         self.log[i]["applied_at_ns"] = Value::Null;
         self.log[i]["detail"] = json!("target VM exited before the process effect");
+        self.forget_clocks(machine);
     }
     fn unavailable(&mut self, i: usize, time: u64, detail: &str) {
         self.clear_pending(i);
@@ -550,9 +605,46 @@ impl Faults {
                 self.unavailable(i, time, "target machine crashed before the process effect");
             }
         }
+        self.forget_clocks(m);
         self.ready[m] = false;
         self.stopped[m] = false;
         self.frozen[m] = false;
+    }
+    /// A new incarnation boots from the recorded wall clock, so no skew survives
+    /// on machine `m`. Settled handles stay until healed; unsettled ones were
+    /// resolved as unavailable with their entries.
+    fn forget_clocks(&mut self, m: usize) {
+        self.clocks.retain(|_, c| {
+            c.machine != m || c.state == ClockState::Active || c.state == ClockState::Lost
+        });
+        for c in self.clocks.values_mut().filter(|c| c.machine == m) {
+            c.state = ClockState::Lost;
+        }
+    }
+    /// The management command that asks entry `i`'s target guest for its effect.
+    fn management_command(&self, i: usize) -> Vec<u8> {
+        let e = &self.entries[i];
+        let id = e.plan.id;
+        match e.clock_step {
+            Some(step) => format!("clock_step {id} {step}\n"),
+            None => format!("{} {id}\n", command(&e.plan.action)),
+        }
+        .into_bytes()
+    }
+    /// Wait for entry `i`'s guest effect: arm its deadline and dispatch it now
+    /// if the target is ready, or at readiness otherwise.
+    fn request_effect(&mut self, i: usize, commands: &mut Vec<(usize, Vec<u8>)>) {
+        let id = self.entries[i].plan.id;
+        self.boundaries
+            .insert((self.entries[i].plan.deadline_ns, id, Event::Deadline));
+        if let Some(m) = self.entries[i].target {
+            if self.ready[m] {
+                self.entries[i].dispatched = true;
+                commands.push((m, self.management_command(i)));
+            } else {
+                self.waiting_ready[m].insert(id);
+            }
+        }
     }
     /// Readiness is the reserved success id0; process commands wait for it.
     pub fn management_ready(&mut self, m: usize, time: u64, latency: u64) -> Result<(), String> {
@@ -590,9 +682,8 @@ impl Faults {
                 Event::Dispatch => {
                     if self.entries[i].status == Status::Waiting {
                         if let Some(m) = self.entries[i].target {
-                            let action = command(&self.entries[i].plan.action);
                             self.entries[i].dispatched = true;
-                            commands.push((m, format!("{action} {id}\n").into_bytes()));
+                            commands.push((m, self.management_command(i)));
                         }
                     }
                 }
@@ -612,20 +703,45 @@ impl Faults {
                         | Action::Restart { .. }
                         | Action::PauseProcess { .. }
                         | Action::ResumeProcess { .. } => {
-                            self.boundaries.insert((
-                                self.entries[i].plan.deadline_ns,
-                                id,
-                                Event::Deadline,
-                            ));
-                            if let Some(m) = self.entries[i].target {
-                                if self.ready[m] {
-                                    let action = command(&self.entries[i].plan.action);
-                                    self.entries[i].dispatched = true;
-                                    commands.push((m, format!("{action} {id}\n").into_bytes()));
-                                } else {
-                                    self.waiting_ready[m].insert(id);
-                                }
+                            self.request_effect(i, &mut commands);
+                        }
+                        Action::ClockSkew {
+                            handle,
+                            offset_ns,
+                            max_offset_ns,
+                            ..
+                        } => {
+                            if self.active_handles().contains(&handle) {
+                                self.fail(i, "duplicate active handle".into());
+                                continue;
                             }
+                            let m = self.entries[i].target.unwrap();
+                            if self.life[m] == Life::Down {
+                                self.fail(i, "clock_skew of a down machine".into());
+                                continue;
+                            }
+                            // Draw only for a seeded skew, at this boundary.
+                            let offset = match (offset_ns, max_offset_ns) {
+                                (Some(offset), _) => offset,
+                                (None, max) => match self.links.clock_offset(m, max.unwrap_or(0)) {
+                                    Ok(offset) => offset,
+                                    Err(error) => {
+                                        self.fail(i, error);
+                                        continue;
+                                    }
+                                },
+                            };
+                            self.log[i]["offset_ns"] = json!(offset);
+                            self.clocks.insert(
+                                handle,
+                                Clock {
+                                    machine: m,
+                                    offset,
+                                    state: ClockState::Pending,
+                                },
+                            );
+                            self.entries[i].clock_step = Some(offset);
+                            self.request_effect(i, &mut commands);
                         }
                         Action::Partition { handle, .. } => {
                             if self.active_handles().contains(&handle) {
@@ -707,6 +823,30 @@ impl Faults {
                                 now,
                                 format!("handle={handle}; armed; in-flight frames retained"),
                             );
+                        }
+                        Action::Heal { handle } if self.clocks.contains_key(&handle) => {
+                            let clock = self.clocks[&handle];
+                            match clock.state {
+                                ClockState::Pending | ClockState::Healing => {
+                                    self.fail(i, "clock skew is not settled".into());
+                                }
+                                ClockState::Lost => {
+                                    self.clocks.remove(&handle);
+                                    self.applied(
+                                        i,
+                                        now,
+                                        format!("handle={handle}; skew ended with its machine incarnation"),
+                                    );
+                                }
+                                ClockState::Active => {
+                                    self.clocks.get_mut(&handle).unwrap().state =
+                                        ClockState::Healing;
+                                    self.log[i]["offset_ns"] = json!(-clock.offset);
+                                    self.entries[i].target = Some(clock.machine);
+                                    self.entries[i].clock_step = Some(-clock.offset);
+                                    self.request_effect(i, &mut commands);
+                                }
+                            }
                         }
                         Action::Throttle {
                             handle,
@@ -858,6 +998,36 @@ impl Faults {
                 i,
                 format!("stale/duplicate/miscorrelated fault effect {id}"),
             );
+            return;
+        }
+        let clock_handle = match &self.entries[i].plan.action {
+            Action::ClockSkew { handle, .. } | Action::Heal { handle } => Some(handle.clone()),
+            _ => None,
+        };
+        if let Some(handle) = clock_handle {
+            let healing = matches!(self.entries[i].plan.action, Action::Heal { .. });
+            if success {
+                let step = self.entries[i].clock_step.unwrap_or(0);
+                if healing {
+                    self.clocks.remove(&handle);
+                } else if let Some(clock) = self.clocks.get_mut(&handle) {
+                    clock.state = ClockState::Active;
+                }
+                self.applied(
+                    i,
+                    time,
+                    format!("handle={handle}; guest wall clock stepped by {step} ns"),
+                );
+            } else {
+                if healing {
+                    if let Some(clock) = self.clocks.get_mut(&handle) {
+                        clock.state = ClockState::Active;
+                    }
+                } else {
+                    self.clocks.remove(&handle);
+                }
+                self.fail(i, format!("guest rejected fault {id}"));
+            }
             return;
         }
         if success {
@@ -1017,3 +1187,7 @@ mod link_tests {
         assert!(f.error.is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "clock_skew_tests.rs"]
+mod clock_skew_tests;

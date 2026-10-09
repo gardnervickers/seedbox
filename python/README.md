@@ -70,6 +70,10 @@ Each fault uses an independent seeded stream and healing returns
 `network_fault_counts`. See [parameters and draw order](PROTOCOL.md#dynamic-network-impairments)
 and `harness/acceptance/workloads/network-faults.yaml` for packet and socket checks.
 It changes only the directed pairs, with the highest live fault ID taking precedence.
+`clock_skew(target, offset=...)` or `clock_skew(target, max_offset=...)` steps
+that machine's wall clock by a fixed or seeded nanosecond offset and returns a
+`ClockSkew` (`handle`, `offset_ns`) accepted by `heal`; monotonic time is
+unchanged. See [clock skew](PROTOCOL.md#clock-skew).
 A partition dominates a shape, and in-flight decisions remain fixed. `Controller`
 is also exported as an alias for `World`. `now_ns()` reads simulated time; `inspect()` returns
 topology, machine state, active handles and packet counters. Strings name services;

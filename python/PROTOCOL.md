@@ -101,6 +101,7 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers; optional `bandwidth_bps`, `queue_bound_ns`, `network_faults` below | `{"handle":"opaque value"}` |
 | `connections` | `from`, `to`: distinct typed targets; `after`: optional unsigned incarnation cursor (default 0) | `connections`: up to 32 directional records; `next_after`: last returned incarnation (or input cursor) |
 | `drop_connection` | `connection`: one exact discovery record | `{"handle":"opaque value"}` after arming selected loss |
+| `clock_skew` | `target`: a typed target; exactly one of `offset_ns` (nonzero signed integer) or `max_offset_ns` (positive integer), each at most one year | `{"handle":"opaque value","offset_ns":N}` after the guest steps its wall clock |
 | `throttle` | `target`: a typed target; `factor_permille`: integer in `[1000, 1000000]` | `{"handle":"opaque value"}` |
 | `heal` | `handle`: a previously returned handle | `{}` for a plain link or partition; `queue_counts` for bandwidth; `network_fault_counts` for impairments; `{"matched": N, "dropped": N}` for a connection handle |
 | `inspect` | None | `services`, `machines`, `active_handles`, `network_counters`; `triggers` only after an arm |
@@ -189,6 +190,22 @@ delay includes proposed departures of tail-dropped frames. The shape and heal
 fault rows retain the same evidence, including explicit zeros for an unused
 shape. The Python API returns the result object for bandwidth shapes and the
 existing effect timestamp for unlimited shapes.
+
+### Clock skew
+
+`clock_skew` steps one machine's `CLOCK_REALTIME` by a signed offset. The
+supervisor applies it with one `adjtimex(ADJ_SETOFFSET)`, so monotonic and boot
+time, the TSC and relative timers are unchanged; absolute realtime timers are
+re-evaluated by the guest kernel. With `max_offset_ns` the offset is drawn
+uniformly from `[-max, max]` on the machine's `clock/<machine>` stream at the
+admission boundary, and only then; a fixed `offset_ns` draws nothing. The effect
+time is the guest's acknowledgement, like `stop`. `heal` steps the clock back by
+the same offset and also waits for the guest. A crash ends the skew (the new
+incarnation boots from the recorded wall clock), so a later heal applies at
+admission without contacting the guest. Targets must be running: a paused or
+down machine is an `invalid_state` admission error, and healing a skew that is
+not yet acknowledged is too. Python: `world.clock_skew(target, offset=None,
+max_offset=None)` returns a `ClockSkew` with `handle` and `offset_ns`.
 
 ### Dynamic network impairments
 

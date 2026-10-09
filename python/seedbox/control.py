@@ -6,6 +6,7 @@ import socket
 from typing import Optional
 
 MAX_FRAME = 16_384
+MAX_CLOCK_OFFSET_NS = 365 * 86_400 * 1_000_000_000
 DEFAULT_SOCKET = "/run/seedbox/control.sock"
 
 
@@ -63,6 +64,13 @@ class Throttle:
 @dataclass(frozen=True)
 class ConnectionDrop:
     handle: str
+    effect: Effect
+
+
+@dataclass(frozen=True)
+class ClockSkew:
+    handle: str
+    offset_ns: int
     effect: Effect
 
 
@@ -289,6 +297,28 @@ class World:
             raise ProtocolError("drop_connection response lacks an opaque handle")
         return ConnectionDrop(result["handle"], effect)
 
+    def clock_skew(self, target, *, offset=None, max_offset=None):
+        """Step the target machine's wall clock (CLOCK_REALTIME); monotonic time is untouched.
+
+        Pass exactly one of a fixed nonzero signed ``offset`` or a positive
+        ``max_offset``, both nanoseconds. With ``max_offset`` the simulator
+        draws the offset uniformly from [-max_offset, max_offset] on the
+        machine's seeded clock stream. Returns after the guest has stepped its
+        clock; heal() steps it back by the same offset.
+        """
+        if (offset is None) == (max_offset is None):
+            raise ValueError("clock_skew needs exactly one of offset or max_offset")
+        value = offset if offset is not None else max_offset
+        if type(value) is not int or value == 0 or abs(value) > MAX_CLOCK_OFFSET_NS or (max_offset is not None and value < 0):
+            raise ValueError(f"offset must be a nonzero integer and max_offset positive, each at most {MAX_CLOCK_OFFSET_NS} ns")
+        arguments = {"target": _target(target)}
+        arguments["offset_ns" if offset is not None else "max_offset_ns"] = value
+        result, effect = self._call("clock_skew", **arguments)
+        if not isinstance(result.get("handle"), str) or not result["handle"] or type(result.get("offset_ns")) is not int:
+            self.close()
+            raise ProtocolError("clock_skew response lacks an opaque handle or offset")
+        return ClockSkew(result["handle"], result["offset_ns"], effect)
+
     def throttle(self, target, factor):
         """Make the target's machine `factor` times slower until healed (x86 pv timebase).
 
@@ -311,7 +341,7 @@ class World:
 
     def heal(self, partition):
         """Release this handle only; prior shape layers or overlapping cuts remain."""
-        if not isinstance(partition, (Partition, Shape, ConnectionDrop, Throttle)):
+        if not isinstance(partition, (Partition, Shape, ConnectionDrop, ClockSkew, Throttle)):
             raise TypeError("heal expects a fault handle returned by this API")
         result, effect = self._call("heal", handle=partition.handle)
         return result if isinstance(partition, ConnectionDrop) or "queue_counts" in result or "network_fault_counts" in result else effect
