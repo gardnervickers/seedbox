@@ -150,7 +150,8 @@ do not stamp Git revisions or checkout cleanliness in the runner.
 
 The CLI lives in `crates/seedbox/src/cli/`:
 
-- `mod.rs`: argument definitions, dispatch and output.
+- `mod.rs`: argument definitions and one function per command.
+- `output.rs`: status lines, `key: value` fields and their value formats.
 - `defaults.rs`: how each runtime input is found when no flag is given.
 - `backends.rs`: platform backend selection and guest-asset lookup.
 - `diagnostics.rs`: excerpts of local execution diagnostics for text output.
@@ -223,9 +224,11 @@ deliberately change one.
   `WORD: detail`, where `WORD` is the SCREAMING_SNAKE_CASE serde name
   produced by `word()` (`PASS`, `MATCH`, `VALID`, `CREATED`, ...). Any
   further lines are lowercase `key: value` (`replay: MATCH`, `error: ...`).
+  Print both through `cli::output` rather than `println!`.
 - `logs` without `--json` writes only the selected raw bytes to stdout, with no
   decoration or added newlines. Its lowercase `logs:` status and `omission:`
-  diagnostics go to stderr; `--json` includes chunk metadata and `bytes_hex`.
+  diagnostics go to stderr; `--json` includes chunk metadata and `bytes_hex`,
+  and the library's `logs::Reader::write_json` writes that document.
 - Scripts find the run directory with `sed -n 's/^[A-Z]*: //p'` over both
   output streams of `run` and `replay`. Exactly one line may match
   `^[A-Z]*: `, and it must be `OUTCOME: run-directory`.
