@@ -21,4 +21,4 @@ See the [etcd quick start](../../README.md#quick-start).
 
 Guest memory is 64..3072 MiB per service. Exploration currently supports one
 worker; arbitrary ARM snapshot/fork reuse remains unsupported. Mac uses the PV
-timebase. `--cpu`, `--vmm`, `--page-timer` and `--deferred-tx` are Linux-only.
+timebase. `--cpu`, `--vmm` and the `x-seedbox.machine` `page_timer` and `deferred_tx` options are Linux-only.

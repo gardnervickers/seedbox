@@ -83,6 +83,64 @@ fn seed_diversity_defaults_and_explicit_zeros() {
 }
 
 #[test]
+fn machine_and_disk_options_default_to_the_former_flag_defaults() {
+    let sim = parse(BASE).unwrap();
+    assert_eq!(sim.machine, config::MachineOptions::default());
+    assert_eq!(sim.machine.memory_mb, 1024);
+    assert!(!sim.machine.page_timer && !sim.machine.deferred_tx);
+    assert!(!sim.disk.torn_writes);
+    // Worlds without the options keep their resolved JSON unchanged.
+    let json = serde_json::to_value(&sim).unwrap();
+    assert!(json.get("machine").is_none() && json.get("disk").is_none());
+    let yaml = BASE.replace(
+        "  version: 1",
+        "  version: 1\n  machine: {memory_mb: 2048, page_timer: true, deferred_tx: true}\n  disk: {torn_writes: true}",
+    );
+    let sim = parse(&yaml).unwrap();
+    assert_eq!(
+        sim.machine,
+        config::MachineOptions {
+            memory_mb: 2048,
+            page_timer: true,
+            deferred_tx: true,
+        }
+    );
+    assert!(sim.disk.torn_writes);
+    for (from, to, path) in [
+        (
+            "memory_mb: 2048",
+            "memory_mb: 63",
+            "$.x-seedbox.machine.memory_mb",
+        ),
+        (
+            "memory_mb: 2048",
+            "memory_mb: 65537",
+            "$.x-seedbox.machine.memory_mb",
+        ),
+        (
+            "page_timer: true",
+            "page_timer: 1",
+            "$.x-seedbox.machine.page_timer",
+        ),
+        (
+            "deferred_tx: true",
+            "deferred_tx: yes",
+            "$.x-seedbox.machine.deferred_tx",
+        ),
+        (
+            "torn_writes: true",
+            "torn_writes: on",
+            "$.x-seedbox.disk.torn_writes",
+        ),
+        ("page_timer:", "unknown:", "$.x-seedbox.machine.unknown"),
+        ("torn_writes:", "unknown:", "$.x-seedbox.disk.unknown"),
+    ] {
+        let error = parse(&yaml.replace(from, to)).unwrap_err().to_string();
+        assert!(error.contains(path), "{to}: {error}");
+    }
+}
+
+#[test]
 fn image_metadata_accepts_absent_or_null_optional_collections() {
     let defaults: ImageDefaults =
         serde_json::from_str(r#"{"Cmd":["app"],"Env":null,"Volumes":null}"#).unwrap();
