@@ -17,11 +17,6 @@ fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<Str
         .stderr(log);
     if args.first() != Some(&"diff") {
         command.arg("--state").arg(directory.join("state"));
-        // Native timestamp control is Linux-only; Mac uses container preparation.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if args.first() == Some(&"run") {
-            command.args(["--build-epoch", "0"]);
-        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if let Some(cpu) = std::env::var_os("SEEDBOX_TEST_CPU") {
             command.arg("--cpu").arg(cpu);
@@ -77,8 +72,14 @@ fn every_application_runs_twice_and_replays() {
                 .join(workload.file_stem().unwrap())
                 .join(timebase);
             fs::create_dir_all(&directory).unwrap();
+            // Each preparation records its own guest wall-clock epoch unless
+            // --build-epoch pins it, which only native Linux preparation accepts.
+            // runtime-tls checks a certificate minted during preparation against
+            // that recorded epoch, so a pinned past epoch would predate it.
+            let pinned = cfg!(all(target_os = "linux", target_arch = "x86_64"))
+                && workload.file_stem().unwrap() != "runtime-tls";
             let check = || -> Result<(), String> {
-                let run = [
+                let mut run = vec![
                     "run",
                     workload.to_str().unwrap(),
                     "--timebase",
@@ -87,28 +88,31 @@ fn every_application_runs_twice_and_replays() {
                     "2048",
                     "--full-state",
                 ];
+                if pinned {
+                    run.extend(["--build-epoch", "0"]);
+                }
                 let first = invoke(Path::new(&cli), &directory, "first", &run)?;
                 let second = invoke(Path::new(&cli), &directory, "second", &run)?;
                 let first = run_directory(&first)?;
                 let second = run_directory(&second)?;
-                // Each preparation records its own guest wall-clock epoch unless
-                // --build-epoch pins it, which only native Linux preparation
-                // accepts; Mac runs differ in that epoch, so each must replay.
-                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-                invoke(
-                    Path::new(&cli),
-                    &directory,
-                    "diff",
-                    &["diff", first, second],
-                )?;
+                // Runs with different epochs differ, so each must replay instead.
+                if pinned {
+                    invoke(
+                        Path::new(&cli),
+                        &directory,
+                        "diff",
+                        &["diff", first, second],
+                    )?;
+                }
                 invoke(Path::new(&cli), &directory, "replay", &["replay", first])?;
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                invoke(
-                    Path::new(&cli),
-                    &directory,
-                    "replay-second",
-                    &["replay", second],
-                )?;
+                if !pinned {
+                    invoke(
+                        Path::new(&cli),
+                        &directory,
+                        "replay-second",
+                        &["replay", second],
+                    )?;
+                }
                 Ok(())
             };
             if let Err(error) = check() {
