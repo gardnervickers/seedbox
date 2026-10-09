@@ -40,7 +40,8 @@ static int application_execv(const char *path, char *const argv[]) {
 }
 static int application_setrlimit(int resource, const struct rlimit *limit) {
     assert(resource == RLIMIT_NOFILE && launch_error_fd >= 0);
-    assert(limit->rlim_cur == 1048576 && limit->rlim_max == 1048576);
+    assert(limit->rlim_cur == APPLICATION_NOFILE + INSTRUMENTATION_FDS);
+    assert(limit->rlim_max == APPLICATION_NOFILE + INSTRUMENTATION_FDS);
     /* An unprivileged host test cannot raise its inherited hard ceiling.
      * Check the requested default, then exercise inheritance within it. */
     struct rlimit allowed; assert(!getrlimit(resource, &allowed));
@@ -98,7 +99,7 @@ int main(int argc, char **argv) {
     if (argc > 1) {
         /* Every exec, including a restart, inherits the runtime limit. */
         struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE, &limit));
-        assert(limit.rlim_cur == limit.rlim_max && limit.rlim_max <= 1048576);
+        assert(limit.rlim_cur == limit.rlim_max && limit.rlim_max <= APPLICATION_NOFILE + INSTRUMENTATION_FDS);
     }
     if (argc > 1 && !strcmp(argv[1], "exit-now")) _exit(1);
     if (argc > 1 && !strcmp(argv[1], "exit-later")) {

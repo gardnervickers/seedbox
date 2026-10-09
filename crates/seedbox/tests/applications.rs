@@ -26,6 +26,21 @@ fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<Str
         .status()
         .map_err(|error| format!("{}: {error}", cli.display()))?;
     if !status.success() {
+        // CI keeps only the console, so show the end of the failing log there.
+        let text = fs::read(&logfile).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        if let Ok(text) = &text {
+            let lines: Vec<_> = text.lines().collect();
+            let tail = &lines[lines.len().saturating_sub(80)..];
+            eprintln!(
+                "--- {name} failed; last {} lines of {}:",
+                tail.len(),
+                logfile.display()
+            );
+            for line in tail {
+                eprintln!("{line}");
+            }
+            eprintln!("--- end of {name}");
+        }
         return Err(format!("{name}: {status}; see {}", logfile.display()));
     }
     Ok(

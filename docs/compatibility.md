@@ -69,8 +69,10 @@ named volumes before installing this layout.
 
 The hostname and `/etc/hostname` are the Compose service name, and `/etc/hosts`
 contains the service's assigned address alongside its peers. Before every exec,
-including process restart, the supervisor sets both `RLIMIT_NOFILE` limits to
-1048576 before dropping image credentials. `vm.max_map_count` defaults to
+including process restart, the supervisor sets both `RLIMIT_NOFILE` limits so
+that the application sees 1048576, before dropping image credentials. The real
+limit is 96 higher, with `fs.nr_open` raised to match: DynamoRIO reserves that
+many descriptors at the top of the range for itself and reports the rest. `vm.max_map_count` defaults to
 262144 and is recorded alongside the hostname in the retained `SBXLAUNCH3`
 launch recipe. Compose `hostname:`, `ulimits:`, and `sysctls:` overrides remain
 unsupported. `memlock` keeps its kernel default.

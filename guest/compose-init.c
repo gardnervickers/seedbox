@@ -321,19 +321,30 @@ static void application_hostname(const char *hostname, const char *hosts) {
     /* Preparation already includes this service's address and name. */
     write_file("/etc/hosts", hosts, strlen(hosts), 0644);
 }
-static void application_sysctls(uint32_t max_map_count) {
-    char value[16];
-    int size = snprintf(value, sizeof(value), "%u\n", max_map_count);
-    int fd = open("/proc/sys/vm/max_map_count", O_WRONLY|O_CLOEXEC);
-    if (fd < 0) die("open vm.max_map_count");
+/* Docker's default nofile limit, which applications see unchanged. */
+#define APPLICATION_NOFILE 1048576
+/* DynamoRIO reserves this many descriptors at the top of the range for itself
+ * (its -steal_fds default) and reports the limit minus them to the
+ * application, so the real limit sits that much higher. */
+#define INSTRUMENTATION_FDS 96
+static void write_sysctl(const char *path, unsigned long value) {
+    char text[32];
+    int size = snprintf(text, sizeof(text), "%lu\n", value);
+    int fd = open(path, O_WRONLY|O_CLOEXEC);
+    if (fd < 0) die(path);
     /* proc sysctls are kernel interfaces, not config files: no chmod/chown. */
     ssize_t written;
-    do { written = write(fd, value, (size_t)size); } while (written < 0 && errno == EINTR);
-    if (written != size) { if (written >= 0) errno = EIO; die("write vm.max_map_count"); }
-    if (close(fd)) die("close vm.max_map_count");
+    do { written = write(fd, text, (size_t)size); } while (written < 0 && errno == EINTR);
+    if (written != size) { if (written >= 0) errno = EIO; die(path); }
+    if (close(fd)) die(path);
+}
+static void application_sysctls(uint32_t max_map_count) {
+    write_sysctl("/proc/sys/vm/max_map_count", max_map_count);
+    write_sysctl("/proc/sys/fs/nr_open", APPLICATION_NOFILE + INSTRUMENTATION_FDS);
 }
 static void application_limits(void) {
-    struct rlimit limit = {.rlim_cur = 1048576, .rlim_max = 1048576};
+    struct rlimit limit = {.rlim_cur = APPLICATION_NOFILE + INSTRUMENTATION_FDS,
+                           .rlim_max = APPLICATION_NOFILE + INSTRUMENTATION_FDS};
     if (setrlimit(RLIMIT_NOFILE, &limit)) die("application nofile limit");
 }
 static void interface_up(int fd, const char *name) {
