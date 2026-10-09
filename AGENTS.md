@@ -71,10 +71,9 @@ profiles and partial-error semantics in `docs/virtio-block.md`. Use explicit dis
 and statistics accessors in platform callers.
 The shared network model owns packet DMA, backlogs and counters; preserve the
 profile-specific admission, partial-error and IRQ order in `docs/virtio-network.md`.
-The core PV progress engine owns watchdog policy and cycle proof; architecture
-adapters supply stepping and complete comparison primitives. Preserve the
-proof/diagnostic boundary in `docs/progress-proof.md`; ARM support must not treat
-an unsupported dirty log as proof that RAM is unchanged.
+The x86 PV watchdog (`machine/pv.rs`) is a diagnostic: it interrupts a run
+with no exit to report where the guest is and resumes it, and must never
+publish a plan, inject an interrupt or adopt guest time at that landing.
 The shared world coordinator owns scheduling, routing, control/trigger/fault
 ordering, lifecycle policy and world snapshots. Machine adapters embed its single
 `MachineState` and supply stopped execution and physical lifecycle operations.

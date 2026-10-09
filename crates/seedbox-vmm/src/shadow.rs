@@ -1,10 +1,8 @@
 //! Saved vCPU state, and a shadow copy of guest RAM with a dirty log.
 //!
 //! A world fork puts a machine back by copying only the pages written since
-//! the fork point, and a spin probe compares only the pages written since it
-//! took its reference: pages written by the guest come from the KVM dirty
-//! log, pages written by the VMM (device DMA, boot loading) are marked
-//! explicitly.
+//! the fork point: pages written by the guest come from the KVM dirty log,
+//! pages written by the VMM (device DMA, boot loading) are marked explicitly.
 
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuFd, VmFd};
@@ -93,43 +91,6 @@ impl VcpuState {
         Ok(())
     }
 
-    /// The first part, if any, in which two saved states differ, among those
-    /// a fork restores that the guest can change by running: registers,
-    /// FPU/XSAVE, XCRs, MSRs other than free-running counters, and pending
-    /// events (not KVM's bookkeeping flags).
-    pub fn differs(&self, o: &Self) -> Option<String> {
-        let (e, f) = (&self.events, &o.events);
-        let events = e.exception == f.exception
-            && e.interrupt == f.interrupt
-            && e.nmi == f.nmi
-            && e.smi == f.smi
-            && e.triple_fault == f.triple_fault
-            && e.exception_has_payload == f.exception_has_payload
-            && e.exception_payload == f.exception_payload;
-        let part = if self.regs != o.regs {
-            "regs"
-        } else if self.sregs != o.sregs {
-            "sregs"
-        } else if self.xsave.region != o.xsave.region {
-            "xsave"
-        } else if self.xcrs != o.xcrs {
-            "xcrs"
-        } else if !events {
-            "events"
-        } else {
-            let msr = self
-                .msrs
-                .as_slice()
-                .iter()
-                .zip(o.msrs.as_slice())
-                .find(|(a, b)| {
-                    (a.index != b.index || a.data != b.data) && !is_free_running(a.index)
-                });
-            return msr.map(|(a, _)| format!("msr {:#x}", a.index));
-        };
-        Some(part.into())
-    }
-
     /// Write the state back. The vCPU must have no I/O pending completion.
     /// Returns the restored registers.
     pub fn restore(&self, vcpu: &VcpuFd, what: &str) -> Result<(kvm_regs, kvm_sregs), String> {
@@ -175,24 +136,11 @@ pub struct Shadow {
     size: usize,
     /// Dirty bitmap buffer for KVM_GET_DIRTY_LOG.
     log: Vec<u64>,
-    /// Pages written by the VMM since the last sync.
+    /// Pages written by the VMM since the last fetch.
     vmm: Vec<u64>,
     /// Pages written by anyone since the world's fork point, when one is held.
     since_fork: Option<Vec<u64>>,
     pub stats: ShadowStats,
-}
-
-/// Counters that move while the guest runs whatever it does: APERF/MPERF,
-/// AMD's read-only copies and IRPERF, the legacy and core perf counters, and
-/// the Hyper-V synthetic MSRs.
-fn is_free_running(i: u32) -> bool {
-    matches!(
-        i,
-        0xe7 | 0xe8 | 0xc000_00e7..=0xc000_00e9 | 0xc001_0004..=0xc001_0007 | 0xc001_0200..=0xc001_020b
-            // Hyper-V synthetic MSRs, time counters among them. KVM lists them,
-            // but the guest sees no Hyper-V CPUID and so cannot use them.
-            | 0x4000_0000..=0x4000_ffff
-    )
 }
 
 fn is_tsc_or_pv(i: u32) -> bool {
@@ -265,56 +213,6 @@ impl Shadow {
             }
         }
         n
-    }
-
-    /// Bring the shadow up to RAM.
-    pub fn sync(&mut self, vm: &VmFd, mem: *mut u8) -> Result<(), String> {
-        self.fetch(vm)?;
-        self.stats.synced_pages += self.copy_logged(mem, self.shadow.0);
-        Ok(())
-    }
-
-    /// Whether every page written since the last sync still holds what it
-    /// held then. `written` accumulates those pages across calls (start it
-    /// empty after each sync), so every call compares with the sync itself.
-    /// The shadow keeps the sync's contents; the pages stay marked, so the
-    /// next sync or fork point brings them up to RAM. Meaningful only when
-    /// nothing was restored since that sync.
-    pub fn unchanged_since_sync(
-        &mut self,
-        vm: &VmFd,
-        mem: *mut u8,
-        written: &mut Vec<u64>,
-    ) -> Result<bool, String> {
-        self.fetch(vm)?;
-        written.resize(self.log.len(), 0);
-        for ((w, &l), v) in written
-            .iter_mut()
-            .zip(self.log.iter())
-            .zip(self.vmm.iter_mut())
-        {
-            *w |= l;
-            *v |= l;
-        }
-        for (i, &bits) in written.iter().enumerate() {
-            let mut b = bits;
-            while b != 0 {
-                let off = (i * 64 + b.trailing_zeros() as usize) * PAGE;
-                b &= b - 1;
-                if off + PAGE <= self.size {
-                    let (now, then) = unsafe {
-                        (
-                            std::slice::from_raw_parts(mem.add(off), PAGE),
-                            std::slice::from_raw_parts(self.shadow.0.add(off), PAGE),
-                        )
-                    };
-                    if now != then {
-                        return Ok(false);
-                    }
-                }
-            }
-        }
-        Ok(true)
     }
 
     /// Bring the shadow up to RAM and start tracking every page written from

@@ -15,7 +15,6 @@ mod devices;
 mod host_control;
 mod machine;
 mod shadow;
-mod stepper;
 mod virtio_blk;
 mod virtio_console;
 mod virtio_net;
@@ -45,17 +44,11 @@ thread_local! {
 pub struct PerformanceOptions {
     /// Host CPU milliseconds between watchdog observations of a run with no exit.
     pub watchdog_ms: u64,
-    /// Windowed scheduler testing only: delay machine i's runs by
-    /// (machines - i) times this many microseconds, so later machines finish first.
-    pub windowed_skew_us: u64,
 }
 
 impl Default for PerformanceOptions {
     fn default() -> Self {
-        Self {
-            watchdog_ms: 20,
-            windowed_skew_us: 0,
-        }
+        Self { watchdog_ms: 20 }
     }
 }
 
@@ -88,6 +81,10 @@ pub struct WorkerOptions {
     pub stream_console: bool,
     pub trace: bool,
     pub performance: PerformanceOptions,
+    /// Test hook for the windowed scheduler, never a performance setting:
+    /// delay machine i's runs by (machines - i) times this duration, so later
+    /// machines finish first and the result must not depend on it.
+    pub windowed_skew: std::time::Duration,
     pub console_trace: Option<ConsoleTraceCallback>,
     /// Machine threads for the windowed scheduler (performance only;
     /// docs/windowed-scheduler.md).
@@ -161,6 +158,7 @@ impl WorkerOptions {
             stream_console: args.iter().any(|a| a == "--stream-console"),
             trace: args.iter().any(|a| a == "--trace"),
             performance,
+            windowed_skew: std::time::Duration::ZERO,
             console_trace: None,
         })
     }
@@ -376,7 +374,7 @@ fn simulate_windowed(
         }
         Ok(())
     };
-    let skew = std::time::Duration::from_micros(options.performance.windowed_skew_us);
+    let skew = options.windowed_skew;
     if options.machine_workers <= 1 {
         return world_windowed::simulate(world, run, skew, &mut boundary);
     }
@@ -447,6 +445,7 @@ fn simulate_to(
         stream_console: false,
         trace: false,
         performance: PerformanceOptions::default(),
+        windowed_skew: std::time::Duration::ZERO,
         console_trace: None,
         machine_workers: 1,
         machine_cpus: vec![],
@@ -1113,11 +1112,10 @@ fn report(
             "state_digest_parts": state_parts,
             "exits": s.exits, "pio": s.pio, "mmio": s.mmio, "halts": s.halts, "irqs": s.irqs,
             "window_exits": s.window_exits, "eintr": s.eintr,
-            "precise_stops": s.precise_stops, "steps": s.steps,
-            "step_ms": s.step_ns as f64 / 1e6, "run_ms": s.run_ns as f64 / 1e6,
+            "run_ms": s.run_ns as f64 / 1e6, "stalls": s.stalls,
             "yields": s.yields, "yield_stops": s.yield_stops,
             "shadow": {"synced_pages": mach.shadow.stats.synced_pages, "restored_pages": mach.shadow.stats.restored_pages},
-            "kvm_ms_by_exit": {"eintr": s.kvm_ns[0] as f64/1e6, "debug": s.kvm_ns[1] as f64/1e6, "pio": s.kvm_ns[2] as f64/1e6, "mmio": s.kvm_ns[3] as f64/1e6, "hlt": s.kvm_ns[4] as f64/1e6, "window": s.kvm_ns[5] as f64/1e6, "other": s.kvm_ns[6] as f64/1e6},
+            "kvm_ms_by_exit": {"eintr": s.kvm_ns[0] as f64/1e6, "pio": s.kvm_ns[2] as f64/1e6, "mmio": s.kvm_ns[3] as f64/1e6, "hlt": s.kvm_ns[4] as f64/1e6, "window": s.kvm_ns[5] as f64/1e6, "other": s.kvm_ns[6] as f64/1e6},
             "kvm_n_by_exit": s.kvm_n,
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| n.report()),
@@ -1145,7 +1143,6 @@ fn report(
             .map(|(k, v)| (k.to_string(), json!({"n": v.n, "ahead": v.ahead, "ahead_max_ns": v.ahead_max_ns, "behind": v.behind, "behind_max_ns": v.behind_max_ns})))
             .collect();
         row["timer"] = json!({"writes": s.timer_writes, "overdue": s.timer_overdue, "overdue_max_ns": s.timer_overdue_max_ns, "overdue_syscalls_max": s.timer_write_syscalls_max, "guest_clock_skew": skew});
-        row["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "clock_progress": s.spin_clock_progress, "mismatch": s.spin_mismatch});
         row["syscalls"] = json!(mach.syscalls());
         row["syscall_ns"] = json!(mach.syscall_ns);
         let by: serde_json::Map<String, Value> = machine::Cause::NAMES
@@ -1262,10 +1259,7 @@ mod worker_options_tests {
 
     #[test]
     fn worker_flags_preserve_the_standalone_protocol() {
-        let performance = PerformanceOptions {
-            watchdog_ms: 7,
-            windowed_skew_us: 0,
-        };
+        let performance = PerformanceOptions { watchdog_ms: 7 };
         let options = WorkerOptions::from_args(
             &args(&[
                 "seedbox-vmm",

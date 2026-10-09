@@ -16,36 +16,20 @@
 //! hooks.
 //!
 //! A loop with no exit at all would never end and never let time move. A
-//! watchdog (host CPU time, a performance setting) catches a run with no exit
-//! for a while and steps it branch by branch. If the whole machine state
-//! repeats, the loop provably never ends by itself: the machine steps to a
-//! canonical point of the cycle and is idle there, like HLT, until an
-//! interrupt. A change to the time page's `last` since the probe started
-//! proves clock progress, so the probe gives up immediately. Any other long
-//! run resumes untouched (probing changes no guest-visible state; giving up
-//! only resumes the run), so the watchdog changes how fast a spin is noticed,
-//! never where it lands. Not every endless loop is caught: one whose state
-//! changes on every pass (`while (!flag) n++;`), a cycle longer than
-//! about a third of `PROBE_STEPS` landings, or one with a run of straight-line
-//! code longer than the planner's cap
-//! never goes idle, so virtual time stops and the world stalls until its
-//! wall-time limit. That follows from the model: such a loop waits on
-//! something only virtual time could bring.
+//! watchdog (host CPU time, a performance setting) interrupts a run with no
+//! exit for a while, so the VMM can report where the guest is stuck; the run
+//! then resumes untouched. A watchdog landing is not a deterministic point:
+//! it publishes no plan, injects nothing and adopts no guest clock progress,
+//! so it changes how a stall is reported, never where the guest lands. A
+//! guest that never exits stalls virtual time until the world's wall-time
+//! limit, which follows from the model: such a loop waits on something only
+//! virtual time could bring.
 
 use super::pv_plan::clock_plan;
 #[cfg(test)]
 use super::PAGE_TIMER_DEADLINE;
 use super::{Machine, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
-use crate::shadow::VcpuState;
 use std::time::Duration;
-
-/// What `PvClock::prepare` decided for the next entry.
-pub enum Prepared {
-    /// Enter the guest.
-    Run,
-    /// Don't: the guest is spinning in a state cycle and is idle, like HLT.
-    Idle,
-}
 
 /// Nominal virtual time one syscall costs. Part of the PV clock's semantics.
 pub const SYSCALL_NS: u64 = 1000;
@@ -71,57 +55,57 @@ pub fn syscall_ns(rng: &mut crate::rng::Rng) -> u64 {
 pub fn throttled_ns(syscall_ns: u64, factor_permille: u64) -> u64 {
     syscall_ns.saturating_mul(factor_permille).div_ceil(1000)
 }
-use seedbox_engine_core::pv_progress::{
-    Accounting, Comparison, Decision, Exit as ProgressExit, LandingPlan, ProbeMachine,
-    ProgressContext, PvProgress,
-};
 
 /// Per-thread PV execution context: the watchdog timer and per-run scratch.
-/// Progress state belongs to each machine (`Machine::pv_progress`), so a
-/// clock may serve any machine without carrying one machine's watchdog or
-/// probe decisions into another's run.
+/// A clock may serve any machine; nothing in it is specific to one.
 pub struct PvClock {
     _watchdog: Watchdog,
+    period: Duration,
     syscalls0: u64,
     remaining: u64,
     syscall_ns: u64,
-    pub max_false_alarms: u64,
 }
-pub(crate) type Key = (u64, [u64; 17]);
-/// A machine's spin-watchdog and probe state.
-pub(crate) type Progress = PvProgress<Key, Saved>;
+
 impl PvClock {
     pub fn new(watchdog: Duration) -> Result<Self, String> {
         Ok(Self {
             _watchdog: Watchdog::new(watchdog)?,
+            period: watchdog,
             syscalls0: 0,
             remaining: 0,
             syscall_ns: SYSCALL_NS,
-            max_false_alarms: u64::MAX,
         })
     }
 
-    /// Probes are per machine: `Machine::snapshot` refuses one inside a probe.
+    /// The watchdog period: host CPU time between interruptions of a run
+    /// with no exit.
+    pub fn period(&self) -> Duration {
+        self.period
+    }
+
+    /// Nothing host-only outlives a committed checkpoint boundary.
     pub fn checkpoint_boundary(&self) -> Result<(), String> {
         Ok(())
     }
 
-    /// Recreate host-only watchdog scratch after restoring a machine;
-    /// `Machine::restore` resets the machine's own progress state.
+    /// Start the per-run scratch over after restoring a machine.
     pub fn restore_boundary(&mut self) -> Result<(), String> {
         self.syscalls0 = 0;
         self.remaining = 0;
         self.syscall_ns = SYSCALL_NS;
-        self._watchdog.hold(false)
+        Ok(())
     }
 
-    fn plan(
+    /// Before KVM_RUN, with `remaining` progress before the hard stop and the
+    /// soft stop's virtual time: arrange for the run to end in time. `legal`
+    /// permits publishing guest-visible plans; a watchdog resume does not.
+    pub(crate) fn prepare(
         &mut self,
         m: &mut Machine,
         remaining: u64,
         soft: u64,
         legal: bool,
-    ) -> Result<Prepared, String> {
+    ) -> Result<(), String> {
         self.remaining = remaining;
         self.syscall_ns = match m.throttle_permille {
             None => m.syscall_ns,
@@ -134,19 +118,10 @@ impl PvClock {
             }
             Some(factor) => throttled_ns(m.syscall_ns, factor),
         };
-        let mut progress = std::mem::take(&mut m.pv_progress);
-        let decision = progress.prepare(m, self.max_false_alarms);
-        m.pv_progress = progress;
-        match decision? {
-            Decision::Idle => return Ok(Prepared::Idle),
-            Decision::Step => return Ok(Prepared::Run),
-            Decision::Resume => (),
-        }
-        m.set_stepping(false)?;
         // An ABI-4 arm is a sequence of guest loads/stores, not an atomic
-        // transaction. Never rewrite any of its inputs at a watchdog/probe
-        // landing: even a mathematically equivalent replan can tear those
-        // loads, relax a previous re-arm's bound, or move an overdue target.
+        // transaction. Never rewrite any of its inputs at a watchdog landing:
+        // even a mathematically equivalent replan can tear those loads, relax
+        // a previous re-arm's bound, or move an overdue target.
         if let Some((bound, target)) = clock_plan(
             m.time,
             m.page_get(PAGE_SYSCALLS),
@@ -163,98 +138,9 @@ impl PvClock {
                 m.page_set(super::PAGE_PLAN_TIME, m.time);
             }
         }
-        Ok(Prepared::Run)
+        Ok(())
     }
-}
-fn accounting(stats: &mut super::Stats) -> Accounting<'_> {
-    Accounting {
-        probes: &mut stats.spin_probes,
-        false_alarms: &mut stats.spin_false,
-        clock_progress: &mut stats.spin_clock_progress,
-        mismatches: &mut stats.spin_mismatch,
-    }
-}
-impl ProgressContext for Machine {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn accounting(&mut self) -> Accounting<'_> {
-        accounting(&mut self.stats)
-    }
-}
-impl ProbeMachine for Machine {
-    type Key = Key;
-    type Saved = Saved;
-    const PC_NAME: &'static str = "rip";
-    fn pc(key: &Key) -> u64 {
-        key.0
-    }
-    fn key(&mut self) -> Result<Key, String> {
-        Ok(key(&unsafe { self.vcpu.get_kvm_run().s.regs.regs }))
-    }
-    fn clock_marker(&self) -> u64 {
-        self.page_get(1)
-    }
-    fn save(&mut self) -> Result<Saved, String> {
-        Saved::take(self)
-    }
-    fn compare(&mut self, saved: &mut Saved) -> Result<Comparison, String> {
-        saved.difference(self)
-    }
-    fn arm_next_landing(&mut self) -> Result<LandingPlan, String> {
-        Ok(if self.arm_step()? {
-            LandingPlan::PlannerCap
-        } else {
-            LandingPlan::Exact
-        })
-    }
-    fn clear_debugger(&mut self) -> Result<(), String> {
-        self.set_stepping(false)
-    }
-}
-struct JudgeContext<'a> {
-    name: &'a str,
-    stats: &'a mut super::Stats,
-}
-impl ProgressContext for JudgeContext<'_> {
-    fn name(&self) -> &str {
-        self.name
-    }
-    fn accounting(&mut self) -> Accounting<'_> {
-        accounting(self.stats)
-    }
-}
 
-fn key(r: &kvm_bindings::kvm_regs) -> Key {
-    let rflags = r.rflags & !(1 << 16); // RF is ours
-    (
-        r.rip,
-        [
-            r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rsp, r.rbp, r.r8, r.r9, r.r10, r.r11,
-            r.r12, r.r13, r.r14, r.r15, rflags,
-        ],
-    )
-}
-
-impl PvClock {
-    /// Before KVM_RUN, with `remaining` progress before the hard stop and the
-    /// soft stop's virtual time: arrange for the run to end in time. `legal`
-    /// permits publishing guest-visible plans; watchdog/probe splits do not.
-    pub(crate) fn prepare(
-        &mut self,
-        m: &mut Machine,
-        remaining: u64,
-        soft: u64,
-        legal: bool,
-    ) -> Result<Prepared, String> {
-        let prepared = self.plan(m, remaining, soft, legal);
-        // No tick may interrupt a probe step: an interrupt is taken before a
-        // code breakpoint at the same instruction, so a tick there stops the
-        // vCPU on a landing without reporting it, and stepping on past it
-        // would miscount the cycle. Ticks wait until the check ends.
-        self._watchdog.hold(m.pv_progress.hold_watchdog())?;
-        prepared
-    }
     /// The guest's syscall count before KVM_RUN.
     pub(crate) fn start(&mut self, syscalls: u64) {
         self.syscalls0 = syscalls;
@@ -266,79 +152,6 @@ impl PvClock {
             .saturating_mul(self.syscall_ns)
             .min(self.remaining)
     }
-
-    /// Judge a finished run: whether its end is a deterministic point.
-    /// `interrupted`: KVM_RUN returned EINTR (a watchdog tick); `debug`: the
-    /// exit was a breakpoint landing.
-    pub(crate) fn judge(
-        &mut self,
-        progress: &mut Progress,
-        name: &str,
-        stats: &mut super::Stats,
-        interrupted: bool,
-        debug: bool,
-    ) -> Result<bool, String> {
-        let exit = if interrupted {
-            ProgressExit::Watchdog
-        } else if debug {
-            ProgressExit::Landing
-        } else {
-            ProgressExit::Natural
-        };
-        progress.judge(exit, &mut JudgeContext { name, stats })
-    }
-}
-
-/// The machine state a cycle check compares. RAM is compared through the
-/// machine's shadow: only the pages written since this state was taken.
-pub struct Saved {
-    cpu: VcpuState,
-    page: Box<[u8; 4096]>,
-    /// The pages written since this state was taken.
-    written: Vec<u64>,
-}
-
-impl Saved {
-    fn take(m: &mut Machine) -> Result<Self, String> {
-        let mut cpu = VcpuState::new(m.msrs.clone());
-        cpu.save(&m.vcpu, "spin check")?;
-        m.shadow.sync(&m._vm, m.mem.0)?;
-        Ok(Self {
-            cpu,
-            page: page_copy(m),
-            written: Vec::new(),
-        })
-    }
-
-    /// Compare the stopped architectural state. Shared proof policy records
-    /// the first mismatch in this machine's accounting.
-    fn difference(&mut self, m: &mut Machine) -> Result<Comparison, String> {
-        let mut cpu = VcpuState::new(m.msrs.clone());
-        cpu.save(&m.vcpu, "spin check")?;
-        let page = page_copy(m);
-        let part = match self.cpu.differs(&cpu) {
-            Some(part) => Some(part),
-            None => match self.page.iter().zip(page.iter()).position(|(a, b)| a != b) {
-                Some(at) => Some(format!("time page word {}", at / 8)),
-                None => {
-                    let ram = m
-                        .shadow
-                        .unchanged_since_sync(&m._vm, m.mem.0, &mut self.written)?;
-                    (!ram).then(|| "ram".to_string())
-                }
-            },
-        };
-        Ok(match part {
-            None => Comparison::Equal,
-            Some(part) => Comparison::Different(part),
-        })
-    }
-}
-
-fn page_copy(m: &Machine) -> Box<[u8; 4096]> {
-    let mut page = Box::new([0u8; 4096]);
-    unsafe { std::ptr::copy_nonoverlapping(m.page.0 as *const u8, page.as_mut_ptr(), 4096) };
-    page
 }
 
 /// A periodic signal to this thread, every `period` of its CPU time, so a
@@ -382,33 +195,9 @@ impl Watchdog {
     }
 }
 
-impl Watchdog {
-    /// Hold back ticks on this thread (they stay pending), or let them in.
-    fn hold(&self, on: bool) -> Result<(), String> {
-        unsafe {
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
-            libc::sigaddset(&mut set, libc::SIGUSR2);
-            let how = if on {
-                libc::SIG_BLOCK
-            } else {
-                libc::SIG_UNBLOCK
-            };
-            match libc::pthread_sigmask(how, &set, std::ptr::null_mut()) {
-                0 => Ok(()),
-                e => Err(format!(
-                    "pv watchdog mask: {}",
-                    std::io::Error::from_raw_os_error(e)
-                )),
-            }
-        }
-    }
-}
-
 impl Drop for Watchdog {
     fn drop(&mut self) {
         unsafe { libc::timer_delete(self.0) };
-        let _ = self.hold(false);
     }
 }
 
@@ -572,10 +361,7 @@ mod tests {
             m.page_set(PAGE_SYSCALLS, 24);
             for word in [5000, 20000, super::super::TIMER_DISARMED] {
                 m.page_set(PAGE_TIMER_DEADLINE, word);
-                assert!(matches!(
-                    clock.prepare(&mut m, 100000, 100000, false).unwrap(),
-                    Prepared::Run
-                ));
+                clock.prepare(&mut m, 100000, 100000, false).unwrap();
                 assert_eq!(
                     fields.map(|i| m.page_get(i)),
                     plan,
@@ -598,12 +384,11 @@ mod tests {
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn store_deadline_then_halt_has_the_same_wake_irq_and_witness_across_watchdogs() {
         let kvm = Kvm::new().unwrap();
-        for (spin, old, word) in [
-            (false, None, 900000u64),
-            (false, Some(20000), 900000),
-            (false, None, 20000),
-            (false, Some(20000), super::super::TIMER_DISARMED),
-            (true, None, 900000),
+        for (old, word) in [
+            (None, 900000u64),
+            (Some(20000), 900000),
+            (None, 20000),
+            (Some(20000), super::super::TIMER_DISARMED),
         ] {
             let mut code = Vec::new();
             // Clock reads have advanced last to 30 us. Store the deadline,
@@ -618,18 +403,10 @@ mod tests {
                 code.extend_from_slice(&address.to_le_bytes());
                 code.extend_from_slice(&value.to_le_bytes());
             }
-            if spin {
-                code.extend_from_slice(&[0xeb, 0xfe]); // Canonical spin idle is also a legal adoption point.
-            } else {
-                code.extend_from_slice(&[0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd, 0xf4]);
-            }
+            code.extend_from_slice(&[0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd, 0xf4]);
             let mut want = None;
             for watchdog in [
-                if spin {
-                    Duration::from_millis(2)
-                } else {
-                    Duration::from_secs(10)
-                },
+                Duration::from_secs(10),
                 Duration::from_micros(100),
                 Duration::from_micros(200),
             ] {
@@ -652,7 +429,6 @@ mod tests {
                     Stop::Halted
                 );
                 assert_eq!(m.time, 30000, "idle must include page-clock progress");
-                assert_eq!(m.stats.spin_idles, u64::from(spin));
                 if watchdog < Duration::from_secs(1) {
                     assert!(
                         m.stats.eintr > 0,
@@ -802,18 +578,14 @@ mod tests {
         }
     }
 
-    /// Run to the first stop under several watchdog periods; all must agree. Returns the stop, rip, rcx and the machine.
-    /// `idle`: the guest should go idle, so fail after a few checks that
-    /// find no cycle rather than spin until the test times out.
-    fn run(code: &[u8], idle: bool) -> (Stop, u64, u64, Machine) {
+    /// Run to the first stop under several watchdog periods; all must agree.
+    /// Returns the stop, rip, rcx and the machine of the last run.
+    fn run(code: &[u8]) -> (Stop, u64, u64, Machine) {
         let kvm = Kvm::new().unwrap();
         let mut first: Option<(u64, u64, u64, String)> = None;
         let mut last = None;
         for ms in [2, 7, 3] {
             let mut clock = PvClock::new(Duration::from_millis(ms)).unwrap();
-            if idle {
-                clock.max_false_alarms = 10;
-            }
             let mut m = machine(&kvm, code);
             let stop = m
                 .run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new())
@@ -832,76 +604,12 @@ mod tests {
 
     #[test]
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
-    fn a_jump_to_itself_is_idle_at_the_jump() {
-        let (stop, rip, _, m) = run(&[0xeb, 0xfe], true); // jmp $
-        assert_eq!(stop, Stop::Halted);
-        assert_eq!(rip, 0x100000);
-        assert_eq!(m.time, 0, "compute costs no virtual time");
-        assert_eq!(m.stats.spin_idles, 1);
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
-    fn a_cycle_with_an_inner_loop_is_idle_at_its_canonical_point() {
-        // outer: mov ecx,5; inner: dec ecx; jnz inner; jmp outer
-        let (stop, rip, rcx, m) = run(&[0xb9, 5, 0, 0, 0, 0x49, 0x75, 0xfd, 0xeb, 0xf6], true);
-        assert_eq!(stop, Stop::Halted);
-        // The least landing: inner head, with ecx at its least there.
-        assert_eq!((rip, rcx as u32), (0x100005, 1));
-        assert_eq!(m.stats.spin_idles, 1);
-    }
-
-    #[test]
-    fn ticks_wait_while_held() {
-        let pending = || unsafe {
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            libc::sigpending(&mut set);
-            libc::sigismember(&set, libc::SIGUSR2) == 1
-        };
-        let w = Watchdog::new(Duration::from_millis(1)).unwrap();
-        w.hold(true).unwrap();
-        let t = std::time::Instant::now();
-        while !pending() {
-            assert!(t.elapsed() < Duration::from_secs(5), "no tick arrived");
-        }
-        w.hold(false).unwrap();
-        assert!(!pending(), "the held tick is delivered once let in");
-    }
-
-    /// Ticks far more often than a check lasts: every check still counts
-    /// each landing, so all runs idle at the same point after one check.
-    #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
-    fn frequent_ticks_do_not_disturb_a_spin_check() {
-        let kvm = Kvm::new().unwrap();
-        let code = [0xb9, 5, 0, 0, 0, 0x49, 0x75, 0xfd, 0xeb, 0xf6];
-        for _ in 0..20 {
-            let mut clock = PvClock::new(Duration::from_micros(200)).unwrap();
-            clock.max_false_alarms = 10;
-            let mut m = machine(&kvm, &code);
-            assert_eq!(
-                m.run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new())
-                    .unwrap(),
-                Stop::Halted
-            );
-            let r = m.vcpu.get_regs().unwrap();
-            assert_eq!((r.rip, r.rcx as u32, m.time), (0x100005, 1, 0));
-            assert_eq!(m.stats.spin_idles, 1);
-        }
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
-    fn a_long_finite_loop_is_left_alone() {
+    fn a_long_finite_loop_is_interrupted_and_left_alone() {
         // mov ecx,0x20000000; l: dec ecx; jnz l; hlt
-        let (stop, rip, rcx, m) = run(&[0xb9, 0, 0, 0, 0x20, 0x49, 0x75, 0xfd, 0xf4], false);
+        let (stop, rip, rcx, m) = run(&[0xb9, 0, 0, 0, 0x20, 0x49, 0x75, 0xfd, 0xf4]);
         assert_eq!(stop, Stop::Halted);
         assert_eq!((rip, rcx as u32), (0x100009, 0));
-        assert_eq!(m.stats.spin_idles, 0);
-        assert!(
-            m.stats.spin_probes > 0,
-            "the loop should outlast the watchdog"
-        );
-        assert_eq!(m.stats.spin_probes, m.stats.spin_false);
+        assert_eq!(m.time, 0, "compute costs no virtual time");
+        assert!(m.stats.eintr > 0, "the loop should outlast the watchdog");
     }
 }

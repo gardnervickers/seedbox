@@ -46,7 +46,6 @@ counters and witnesses; such changes require explicit native evidence, not a
 blanket baseline-mismatch acceptance. The worker IPC contract is version 2; old
 runs continue to launch their own retained executable and its own dispatch.
 
-General asynchronous ARM watchdog/cycle proof stays disabled. The known
-exclusive-monitor/debugger transparency limitation is unchanged. Portable tests
+Portable tests
 check policy and IPC behavior; they do not qualify native HVF execution,
 arbitrary CPU/device snapshots, or cross-engine witness equality.

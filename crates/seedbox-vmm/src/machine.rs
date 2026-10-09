@@ -6,7 +6,6 @@ use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo};
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::disk::Disk;
 use crate::shadow::{Shadow, ShadowStats, VcpuState};
-use crate::stepper::Planner;
 use crate::virtio_blk::VirtioBlk;
 use crate::virtio_console::VirtioConsole;
 use crate::virtio_net::{ReceiveOutcome, VirtioNet};
@@ -19,7 +18,7 @@ use std::time::Instant;
 
 pub mod pv;
 mod pv_plan;
-use pv::{Prepared, PvClock};
+use pv::PvClock;
 
 pub const TIME_PAGE: u64 = 0xd000_0000;
 pub const NET_MMIO: u64 = 0xd000_1000;
@@ -220,23 +219,14 @@ pub struct Stats {
     pub irqs: u64,
     pub window_exits: u64,
     pub eintr: u64,
-    pub precise_stops: u64,
-    pub steps: u64,
-    pub step_ns: u128,
     pub run_ns: u128,
     pub yields: u64,
     pub yield_stops: u64,
     pub kvm_ns: [u128; 8],
     pub kvm_n: [u64; 8],
-    /// Watchdog checks of a run with no exit, those that proved a
-    /// spin (a state cycle, then treated as idle), and the rest.
-    pub spin_probes: u64,
-    pub spin_idles: u64,
-    pub spin_false: u64,
-    /// Of the false alarms, probes abandoned as soon as the guest clock moved.
-    pub spin_clock_progress: u64,
-    /// Per state part, cycle checks that failed first on it.
-    pub spin_mismatch: std::collections::BTreeMap<String, u64>,
+    /// Stalls reported: runs with no exit for long enough that the watchdog
+    /// printed where the guest was.
+    pub stalls: u64,
     /// Virtual time advanced, by cause (see `Cause`).
     pub time_by: [u64; 5],
     /// Report-only timer diagnostics. Writes to the PIT or port 0x530, and
@@ -316,10 +306,6 @@ pub struct Machine {
     pub blk: Option<VirtioBlk>,
     pub control_dma_bytes: u64,
     pub control_tx_bytes: u64,
-    stepping: bool,
-    /// Seeded from authoritative ioctls or a successful synchronized KVM exit.
-    sync_regs_ready: bool,
-    planner: Option<Planner>,
     exit_req: bool,
     /// The guest uses the shared page for interrupt masks and status (ABI 2).
     pv: bool,
@@ -336,13 +322,11 @@ pub struct Machine {
     /// A throttle fault's factor on `syscall_ns`, in thousandths. `None`
     /// until the first throttle, so unthrottled runs charge exactly as before.
     pub throttle_permille: Option<u64>,
-    /// PV watchdog and spin-probe state. It belongs to the machine, not the
-    /// thread's clock, so it never carries between machines.
-    pub(crate) pv_progress: pv::Progress,
+    /// Consecutive watchdog interruptions since the last natural exit.
+    stall_ticks: u64,
     pub timer_rng: Option<crate::rng::Rng>,
-    step_started: Option<Instant>,
-    /// Shadow RAM with a dirty log: fork restores and spin probes copy or
-    /// compare only the pages written since they last synchronized it.
+    /// Shadow RAM with a dirty log: a fork restore copies back only the
+    /// pages written since the fork point.
     pub shadow: Box<Shadow>,
     /// The initial guest uses the launch-barrier boot protocol.
     barrier: bool,
@@ -432,6 +416,33 @@ fn guest_cpuid(kvm: &Kvm) -> Result<CpuId, String> {
         }
     }
     Ok(c)
+}
+
+/// Count consecutive watchdog interruptions of a run with no exit and, at
+/// each doubling past the first few, say where the guest is. A diagnostic
+/// only: it changes nothing the guest or the witness sees.
+#[allow(clippy::too_many_arguments)]
+fn note_watchdog(
+    stall_ticks: &mut u64,
+    stats: &mut Stats,
+    name: &str,
+    time: u64,
+    rip: u64,
+    interrupted: bool,
+    period: std::time::Duration,
+) {
+    if !interrupted {
+        *stall_ticks = 0;
+        return;
+    }
+    *stall_ticks += 1;
+    if *stall_ticks >= 32 && stall_ticks.is_power_of_two() {
+        stats.stalls += 1;
+        eprintln!(
+            "{name}: no guest exit for {} ms of host CPU time at rip {rip:#x} (virtual time {time} ns)",
+            (period * *stall_ticks as u32).as_millis(),
+        );
+    }
 }
 
 impl Machine {
@@ -569,9 +580,6 @@ impl Machine {
             blk: spec.disk.clone().map(VirtioBlk::new),
             control_dma_bytes: 0,
             control_tx_bytes: 0,
-            stepping: false,
-            sync_regs_ready: false,
-            planner: None,
             exit_req: false,
             pv: false,
             abi: 0,
@@ -582,9 +590,8 @@ impl Machine {
             timer_jitter: 0,
             syscall_ns: pv::SYSCALL_NS,
             throttle_permille: None,
-            pv_progress: pv::Progress::new(),
+            stall_ticks: 0,
             timer_rng: None,
-            step_started: None,
             shadow: Box::new(shadow),
             barrier: spec.barrier,
             entropy: [0; ENTROPY_WORDS],
@@ -754,7 +761,6 @@ impl Machine {
     /// rather than one the guest announced. It must owe no I/O cost.
     pub fn park(&mut self) -> Result<(), String> {
         self.world.check_park(self.pending_io.is_some())?;
-        self.set_stepping(false)?;
         // As at the launch barrier: finish any exit KVM still owes, so a cold
         // run and a restored fork resume from identical vCPU state.
         self.complete_io()?;
@@ -765,16 +771,11 @@ impl Machine {
 
     /// Capture at a committed scheduler boundary, including unpaid I/O cost.
     pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
-        if self.stepping
-            || !self.world.fault_effects.is_empty()
+        if !self.world.fault_effects.is_empty()
             || !self.world.control_requests.is_empty()
             || self.world.committed_console.is_some()
         {
             return Err(format!("{}: not at a fork point", self.world.name));
-        }
-        // No architecture probe may survive a committed checkpoint boundary.
-        if self.pv_progress.hold_watchdog() {
-            return Err("PV checkpoint inside a spin probe".into());
         }
         self.complete_io()?;
         let mut cpu = VcpuState::new(self.msrs.clone());
@@ -833,9 +834,7 @@ impl Machine {
         // overwritten below, and a vCPU that cannot run any more (shutdown)
         // is overwritten just the same.
         let _ = self.complete_io();
-        self.set_stepping(false)?;
-        // Host-only watchdog and probe scratch starts over at the fork point.
-        self.pv_progress = pv::Progress::new();
+        self.stall_ticks = 0;
         let pages = if !self.shadow.holds_fork_point() {
             // A machine rebuilt for this restore (the run rebooted it) has
             // held no fork point yet: copy everything, then hold one here.
@@ -859,7 +858,6 @@ impl Machine {
         run.request_interrupt_window = 0;
         run.s.regs.regs = regs;
         run.s.regs.sregs = sregs;
-        self.sync_regs_ready = true;
         self.world = s.world.clone();
         self.tsc_latch = s.tsc_latch;
         self.pending_io = s.pending_io.clone();
@@ -1168,90 +1166,6 @@ impl Machine {
         unsafe { std::ptr::write_volatile(self.page.0, self.world.time) };
     }
 
-    fn set_stepping(&mut self, on: bool) -> Result<(), String> {
-        if on == self.stepping {
-            return Ok(());
-        }
-        if on {
-            // The mmap starts with zeroed synchronization fields, even after
-            // KVM_SET_REGS/SREGS configured the actual guest. A first short
-            // slice must not RF-resume those zeroes as the boot state.
-            if !self.sync_regs_ready {
-                let regs = self
-                    .vcpu
-                    .get_regs()
-                    .map_err(|e| format!("initial step registers: {e}"))?;
-                let sregs = self
-                    .vcpu
-                    .get_sregs()
-                    .map_err(|e| format!("initial step system registers: {e}"))?;
-                let run = self.vcpu.get_kvm_run();
-                run.s.regs.regs = regs;
-                run.s.regs.sregs = sregs;
-                self.sync_regs_ready = true;
-            }
-            let mem = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
-            self.planner = Some(Planner::load(&self.vcpu, mem)?);
-        } else {
-            self.vcpu
-                .set_guest_debug(&kvm_guest_debug::default())
-                .map_err(|e| format!("guest debug: {e}"))?;
-            self.planner = None;
-        }
-        self.stepping = on;
-        if on {
-            self.stats.precise_stops += 1;
-            self.step_started = Some(Instant::now());
-        } else if let Some(t) = self.step_started.take() {
-            self.stats.step_ns += t.elapsed().as_nanos();
-        }
-        Ok(())
-    }
-
-    /// Arm breakpoints for one step: the next landing point the planner
-    /// finds from the current registers. Returns whether that landing is
-    /// only a cap on straight-line code, so depends on where stepping began.
-    fn arm_step(&mut self) -> Result<bool, String> {
-        self.set_stepping(true)?;
-        let (r, sr) = {
-            let run = self.vcpu.get_kvm_run();
-            unsafe { (run.s.regs.regs, run.s.regs.sregs) }
-        };
-        let mem = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
-        let planner = self.planner.as_mut().unwrap();
-        planner.refresh_from(&sr);
-        let (targets, capped) = planner
-            .plan_capped(mem, &r)
-            .map_err(|e| format!("{}: step plan: {e}", self.world.name))?;
-        Planner::arm(&self.vcpu, &targets)?;
-        if targets.contains(&r.rip) {
-            let mut resumed = r;
-            resumed.rflags |= 1 << 16; // RF: do not re-trigger at the current instruction
-            self.vcpu.set_regs(&resumed).map_err(|e| e.to_string())?;
-        }
-        Ok(capped)
-    }
-
-    /// The guest is in a state cycle (see `pv.rs`), at its canonical point:
-    /// idle, like HLT, until an interrupt.
-    fn spin_idle(&mut self) -> Result<Stop, String> {
-        let (rip, if_flag) = {
-            let run = self.vcpu.get_kvm_run();
-            (unsafe { run.s.regs.regs.rip }, run.if_flag)
-        };
-        self.set_stepping(false)?;
-        self.stats.spin_idles += 1;
-        self.record(b'S', rip);
-        if if_flag == 0 {
-            return Err(format!(
-                "{}: the guest spins with interrupts off at rip {rip:#x}; nothing can end the loop",
-                self.world.name
-            ));
-        }
-        self.world.state = State::Halted;
-        Ok(Stop::Halted)
-    }
-
     fn inject(&mut self) {
         let run = self.vcpu.get_kvm_run();
         match self.pic.pending() {
@@ -1326,7 +1240,6 @@ impl Machine {
         let mut legal = true;
         loop {
             if self.pending_io.is_some() && !self.drain_io(limit)? {
-                self.set_stepping(false)?;
                 // Charged I/O can split at an exact slice boundary too.
                 if self.poll_net(frames, true)? {
                     self.note_skew(Site::Sent);
@@ -1352,11 +1265,9 @@ impl Machine {
                 // at watchdog landings or intermediate probe steps.
                 if self.poll_net(frames, self.world.time >= slice_end)? {
                     self.note_skew(Site::Sent);
-                    self.set_stepping(false)?;
                     return Ok(Stop::Sent);
                 }
                 if self.world.time >= slice_end {
-                    self.set_stepping(false)?;
                     return Ok(Stop::Reached);
                 }
                 self.publish();
@@ -1386,52 +1297,16 @@ impl Machine {
                 self.exit_req = false;
             }
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
-            if let Prepared::Idle = clock.prepare(self, remaining, soft, legal)? {
-                if self.page_timer.enabled {
-                    // A proven cycle's canonical landing is deterministic, unlike the
-                    // watchdog and intermediate probe steps that found it.
-                    self.sync_from_page(hard)?;
-                    self.sync_page_timer()?;
-                    self.expire_timers()?;
-                }
-                // A proven PV cycle is deterministic; watchdog landings are not.
-                // Complete pending TX before declaring a completion waiter idle,
-                // including with interrupts disabled or suppressed by the guest.
-                if deferred {
-                    self.set_stepping(false)?;
-                    let memory = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
-                    let pending = self
-                        .net
-                        .as_ref()
-                        .map(|n| n.pending_tx(memory))
-                        .transpose()?
-                        .unwrap_or(false);
-                    if self.poll_net(frames, true)? {
-                        self.note_skew(Site::Sent);
-                        return Ok(Stop::Sent);
-                    }
-                    if pending {
-                        legal = true;
-                        continue;
-                    }
-                }
-                return self.spin_idle();
-            }
+            clock.prepare(self, remaining, soft, legal)?;
             self.vcpu.get_kvm_run().kvm_valid_regs =
                 (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
             clock.start(syscalls0);
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;
             let exit = self.vcpu.run();
-            // Requested validity bits alone are not initialized output. A
-            // successful run with both bits set provides the synchronized state.
-            if exit.is_ok() {
-                self.sync_regs_ready = true;
-            }
             let run_ns = t_run.elapsed().as_nanos();
             let kind = match &exit {
                 Err(_) => 0,
-                Ok(VcpuExit::Debug(_)) => 1,
                 Ok(VcpuExit::IoOut(..)) | Ok(VcpuExit::IoIn(..)) => 2,
                 Ok(VcpuExit::MmioRead(..)) | Ok(VcpuExit::MmioWrite(..)) => 3,
                 Ok(VcpuExit::Hlt) => 4,
@@ -1444,14 +1319,18 @@ impl Machine {
             let delta = clock.read(syscalls1);
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
             let run_syscalls = syscalls1.wrapping_sub(syscalls0);
-            let debug = matches!(exit, Ok(VcpuExit::Debug(_)));
-            legal = clock.judge(
-                &mut self.pv_progress,
-                &self.world.name,
+            // A watchdog interruption is not a deterministic point: the run
+            // resumes without publishing, injecting or adopting anything.
+            legal = !interrupted;
+            note_watchdog(
+                &mut self.stall_ticks,
                 &mut self.stats,
+                &self.world.name,
+                self.world.time,
+                unsafe { (*run_ptr).s.regs.regs.rip },
                 interrupted,
-                debug,
-            )?;
+                clock.period(),
+            );
             self.stats.time_by[Cause::Progress as usize] += delta;
             self.world.time += delta;
             if legal {
@@ -1490,15 +1369,11 @@ impl Machine {
                 }
             }
             self.stats.exits += 1;
-            if self.stepping {
-                self.stats.steps += 1;
-            }
             let now = self.world.time;
             match exit {
                 Err(e) if e.errno() == libc::EINTR => {
                     self.stats.eintr += 1;
                 }
-                Ok(VcpuExit::Debug(_)) => {}
                 Ok(VcpuExit::IoOut(0x52c, data)) => {
                     // Requested yield: a stop if we reached the soft target,
                     // otherwise transparent (nothing observable happens).
@@ -1655,7 +1530,6 @@ impl Machine {
                             self.guest_exit_code = Some(v);
                             self.world.state = State::Exited(v);
                             self.record(b'X', v as u64);
-                            self.set_stepping(false)?;
                             return Ok(Stop::Exited);
                         }
                         BARRIER_PORT if self.barrier => {
@@ -1667,7 +1541,6 @@ impl Machine {
                             }
                             self.world.parked = true;
                             self.record(b'B', 0);
-                            self.set_stepping(false)?;
                             // Finish the port write now, so the machine is
                             // parked in a state a fork can save and restore.
                             self.complete_io()?;
@@ -1677,7 +1550,6 @@ impl Machine {
                             self.guest_init_error = Some(v);
                             self.world.state = State::Exited(v);
                             self.record(b'E', v as u64);
-                            self.set_stepping(false)?;
                             return Ok(Stop::Exited);
                         }
                         _ => {}
@@ -1693,7 +1565,6 @@ impl Machine {
                     self.serial_edges();
                     self.pending_io = pending;
                     if control_stop {
-                        self.set_stepping(false)?;
                         return Ok(Stop::Control);
                     }
                 }
@@ -1789,7 +1660,6 @@ impl Machine {
                                 self.pic.raise(CHANNEL_IRQ);
                             }
                             if self.channel_output(&output.bytes)? {
-                                self.set_stepping(false)?;
                                 return Ok(Stop::Control);
                             }
                         }
@@ -1833,7 +1703,6 @@ impl Machine {
                             if !out.frames.is_empty() {
                                 frames.extend(out.frames);
                                 self.note_skew(Site::Sent);
-                                self.set_stepping(false)?;
                                 return Ok(Stop::Sent);
                             }
                         }
@@ -1845,7 +1714,6 @@ impl Machine {
                     self.record(b'H', 0);
                     // The world checks pending interrupts while halted.
                     self.sync_pic();
-                    self.set_stepping(false)?;
                     if deferred && self.poll_net(frames, true)? {
                         self.note_skew(Site::Sent);
                         return Ok(Stop::Sent);
@@ -1867,7 +1735,6 @@ impl Machine {
                 }
                 Ok(VcpuExit::Shutdown) => {
                     self.world.state = State::Exited(0xff);
-                    self.set_stepping(false)?;
                     return Ok(Stop::Exited);
                 }
                 Ok(other) => return Err(format!("{}: unexpected exit {other:?}", self.world.name)),
@@ -2218,106 +2085,6 @@ mod net_poll_tests {
                 "arm={arm} {:?}",
                 m.pit.deadline
             );
-        }
-    }
-    #[test]
-    #[cfg_attr(
-        not(feature = "kvm-tests"),
-        ignore = "requires KVM on a Linux x86-64 host"
-    )]
-    fn deferred_tx_completes_a_pv_spin_without_halt_kick_or_interrupts() {
-        use super::pv::PvClock;
-        use std::time::Duration;
-        let kvm = Kvm::new().unwrap();
-        for (event_idx, page_timer) in [(false, false), (true, false), (false, true), (true, true)]
-        {
-            let mut first = None;
-            for ms in [2, 7] {
-                let case = format!("site=pv_spin event_idx={event_idx} page_timer={page_timer} deferred=true watchdog_ms={ms}");
-                // Publish TX, then busy-wait for used->idx with interrupts off.
-                // The stable cycle is serviced at its canonical point; never
-                // service at the host-time watchdog or a probe landing.
-                let mut code = vec![
-                    0xc7, 0x05, 0x02, 0x20, 0x08, 0x00, 1, 0, 0, 0, 0x66, 0x83, 0x3d, 0x02, 0x30,
-                    0x08, 0, 0, 0x74, 0xf6, 0xf4,
-                ];
-                if page_timer {
-                    // Store clock progress and an arm before publishing TX.
-                    let mut stores = Vec::new();
-                    for (address, value) in [
-                        (0xd0000008u32, 12300u32),
-                        (0xd0000070, 40000),
-                        (0xd0000074, 0),
-                    ] {
-                        stores.extend_from_slice(&[0xc7, 0x05]);
-                        stores.extend_from_slice(&address.to_le_bytes());
-                        stores.extend_from_slice(&value.to_le_bytes());
-                    }
-                    stores.extend(code);
-                    code = stores;
-                }
-                let mut kernel = vec![0; 1024];
-                kernel[0x1f1] = 1;
-                kernel.extend(code);
-                let spec = BootSpec {
-                    kernel: &kernel,
-                    initrd: &[],
-                    cmdline: String::new(),
-                    mem: INITRD_ADDR + 0x100000,
-                    rng_seed: [0; 32],
-                    mac: Some([2, 0, 0, 0, 0, 1]),
-                    control_channel: false,
-                    disk: None,
-                    barrier: false,
-                    page_timer,
-                };
-                let mut m = Machine::new(&kvm, "tx-spin", &spec).unwrap();
-                m.abi = ABI_PAGE_TIMER;
-                m.enable_page_timer();
-                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem.0, m.mem_size) };
-                let net = m.net.as_mut().unwrap();
-                net.set_deferred_tx(true);
-                for (off, v) in [
-                    (0x020, if event_idx { 1 << 29 } else { 0 }),
-                    (0x070, 15),
-                    (0x030, 1),
-                    (0x038, 1),
-                    (0x080, 0x81000),
-                    (0x090, 0x82000),
-                    (0x0a0, 0x83000),
-                    (0x044, 1),
-                ] {
-                    net.write(memory, off, v).unwrap();
-                }
-                memory[0x81000..0x81008].copy_from_slice(&0x84000u64.to_le_bytes());
-                memory[0x81008..0x8100c].copy_from_slice(&17u32.to_le_bytes());
-                memory[0x8400c..0x84011].copy_from_slice(b"frame");
-                memory[0x82000..0x82002].copy_from_slice(&1u16.to_le_bytes()); // NO_INTERRUPT
-                memory[0x82006..0x82008].copy_from_slice(&1u16.to_le_bytes()); // used_event
-                let mut tb = PvClock::new(Duration::from_millis(ms)).unwrap();
-                tb.max_false_alarms = 10;
-                let mut frames = Vec::new();
-                assert_eq!(
-                    m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(),
-                    Stop::Sent,
-                    "{case}"
-                );
-                assert_eq!(frames, [b"frame".to_vec()], "{case}");
-                assert_eq!(m.time, if page_timer { 12300 } else { 0 }, "{case}");
-                assert_eq!(m.pit.deadline, page_timer.then_some(40000), "{case}");
-                assert_eq!(m.net.as_ref().unwrap().stats().doorbell_exits, 0, "{case}");
-                assert_eq!(
-                    m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(),
-                    Stop::Exited,
-                    "{case}"
-                );
-                let evidence = (m.time, m.exit_witness(), m.state_digest());
-                if let Some(want) = &first {
-                    assert_eq!(&evidence, want, "{case}");
-                } else {
-                    first = Some(evidence);
-                }
-            }
         }
     }
 }

@@ -213,8 +213,8 @@ remain runtime qualification gates.
 
 - **Progress and time.** Guest progress is charged at guest exits, syscalls
   and clock reads; idle machines jump to their next event. A host watchdog
-  (`--watchdog-ms`) observes a guest that makes no exits and proves it idle or
-  spinning without advancing its time.
+  (`--watchdog-ms`) interrupts a guest that makes no exits to report where it
+  is stuck, then resumes it without advancing its time.
 - **Stops.** Events (timer deadlines, frames, scenario commands) are delivered
   at deterministic points only: natural VM exits. A timer interrupt fires at the
   first exit at or after its deadline, at most `stop_tolerance_ns` late.

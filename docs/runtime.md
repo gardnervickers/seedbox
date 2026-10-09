@@ -368,8 +368,9 @@ to unpack at 512 MiB and passed at 1024 MiB.
 `--watchdog-ms` sets the Linux watchdog interval in host CPU milliseconds
 (default 20; range 1..60000). It is passed explicitly to the worker and
 recorded per attempt, outside semantic identity. The public CLI does not
-inherit `SEEDBOX_WATCHDOG_MS`. Longer intervals reduce probe overhead but delay
-recognition of idle loops; they never advance guest time. Mac ignores this
+inherit `SEEDBOX_WATCHDOG_MS`. The watchdog only interrupts a run that makes
+no exit, so the engine can report on stderr where the guest is stuck; longer
+intervals delay that report, and they never advance guest time. Mac ignores this
 Linux setting. Stops land only at natural VM exits; the engine requests no
 syscall yield exits.
 
@@ -598,13 +599,11 @@ Linux 6.12 virtnet's `free_old_xmit` stops when `virtqueue_get_buf` returns no
 completed buffer; TX callback recheck loops drain already completed work. Ring
 exhaustion and BQL stop the queue, and completion/NAPI wakes it rather than
 spinning for a new used entry. Clock/timer progress therefore reaches the bounded
-poll, and halt is polled before parking. A PV completion spin that makes no
-exits is serviced at the existing proven state cycle's canonical idle point,
-even if interrupts are disabled or suppressed; it resumes after completion.
-Host watchdog interrupts and intermediate cycle-search steps never service TX.
-As in the existing PV model, arbitrary non-repeating, clock-free loops are not
-bounded by simulated time; this option does not promise to terminate such guest
-programs. No control virtqueue is advertised.
+poll, and halt is polled before parking. Host watchdog interrupts never
+service TX. A completion spin that makes no exits at all is not bounded by
+simulated time; the kernel's own polling loops exit through its clock-read
+hooks, and this option does not promise to terminate a guest program that
+never exits. No control virtqueue is advertised.
 
 The per-machine `net` diagnostics additionally report `tx_polled` (packets
 picked up by polls), `tx_polled_at_boundary` (slice/charged-I/O/halt/proven-idle

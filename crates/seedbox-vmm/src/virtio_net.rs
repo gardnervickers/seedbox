@@ -41,6 +41,7 @@ impl VirtioNet {
     pub fn report(&self) -> serde_json::Value {
         self.model.report(&self.transport)
     }
+    #[cfg(test)]
     pub fn pending_tx(&self, m: &[u8]) -> Result<bool, String> {
         self.model.pending_tx(&self.transport, m, 0)
     }

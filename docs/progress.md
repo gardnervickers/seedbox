@@ -27,9 +27,10 @@ resolves ordinary ELF and script entrypoints and runs them under `drrun` with
 The guest kernel covers what the client cannot: the existing syscall hook
 charges each syscall, the x86 `cpu_relax` hook charges bounded clock reads in
 kernel polling loops, and the arm64 kernel charges 1,000 bounded clock reads at
-syscall entry. The PV watchdog and cycle proof (`docs/progress-proof.md`)
-remain as the backstop for loops none of these cover; `--watchdog-ms` changes
-only how often the host looks, never a result.
+syscall entry. A loop none of these cover never exits and stalls virtual time
+until the world's wall-time limit; the host watchdog (`--watchdog-ms`)
+interrupts such a run to report on stderr where the guest is stuck, then
+resumes it, so it changes only how soon the report appears, never a result.
 
 ## ARM exclusive sequences
 

@@ -213,12 +213,9 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
   - `Machine` is `Send`, and the disk's shared base image is now an `Arc`.
   - Each pool thread opens its own `PvClock` and pins itself to its
     `--machine-cpus` entry.
-  - PV watchdog and spin-probe state (`PvProgress`) belongs to each
-    `Machine`, not to the thread's `PvClock`. The clock keeps only the
-    watchdog timer and per-run scratch, so no machine's watchdog or probe
-    decisions carry into another's run on the same thread. A checkpoint
-    inside a probe is refused by `Machine::snapshot`, and `Machine::restore`
-    resets the state.
+  - The thread's `PvClock` keeps only the watchdog timer and per-run
+    scratch; the stall counter the watchdog reports from belongs to each
+    `Machine`, and `Machine::restore` resets it.
   - Only the owning raw pointers (guest RAM, time page, snapshot mappings)
     are `Send`, through the `SendPtr` newtype, so `Machine`
     is `Send` by derivation. A future non-`Send` field still fails to

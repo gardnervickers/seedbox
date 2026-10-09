@@ -20,9 +20,11 @@ fn run() -> Result<serde_json::Value, String> {
             .map_err(|e| format!("SEEDBOX_WATCHDOG_MS: {e}"))?;
     }
     if let Ok(value) = std::env::var("SEEDBOX_WINDOWED_SKEW_US") {
-        options.performance.windowed_skew_us = value
-            .parse()
-            .map_err(|e| format!("SEEDBOX_WINDOWED_SKEW_US: {e}"))?;
+        options.windowed_skew = std::time::Duration::from_micros(
+            value
+                .parse()
+                .map_err(|e| format!("SEEDBOX_WINDOWED_SKEW_US: {e}"))?,
+        );
     }
     if std::env::var("SEEDBOX_TRACE_CONSOLE").is_ok() {
         options.console_trace = Some(trace_console);

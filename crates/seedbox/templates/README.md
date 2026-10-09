@@ -23,8 +23,8 @@ original guest clock.
 
 ## Linux performance
 
-`seedbox run --watchdog-ms 200` increases the host CPU interval
-between spin-detection observations (default 20 ms, range 1..60000). It can reduce
-probing overhead but delays idle-loop detection. The option also works with
+`seedbox run --watchdog-ms 200` raises the host CPU interval (default 20 ms,
+range 1..60000) after which a guest that makes no exits is interrupted so the
+engine can report where it is stuck. The option also works with
 `replay` and `explore`, changes no simulation results, and is ignored by Mac. Set it explicitly; the CLI does not inherit watchdog environment
 variables.
