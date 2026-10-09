@@ -31,7 +31,7 @@ copies, after their Cargo build has finished.
 | `linux-kvm` | Linux x86-64 or ARM64, usable `/dev/kvm` | Native backend `kvm-tests`; no PMU or root required |
 | `linux-counter` | Linux x86-64 KVM, guest PMU, root | VMM `counter-tests`; exact stops, checkpoints, forks, committed logs and triggers on a leased core. Implies `linux-kvm` |
 | `linux-guests` | Linux KVM plus fixture kernel/initrd | Backend `guest-tests`; real guest determinism/checkpoint controls. Implies `linux-counter` on x86-64, `linux-kvm` on ARM64 |
-| `linux-oci` | Linux x86-64, running Docker-compatible engine, registry access | CLI `oci-tests`; real image import and Dockerfile behavior. No KVM required; runs under sudo only when the engine socket is root-only |
+| `linux-oci` | Linux x86-64, running Docker-compatible engine, registry access | CLI `oci-tests`; real image import and Dockerfile behavior. No KVM required; runs under sudo when available, as the CLI does for application runs |
 | `linux-apps` | Linux x86-64 KVM, root, Docker-compatible engine, built guest assets | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state. PV always; counter too when `linux-counter` is selected |
 | `linux-pause` | Linux x86-64 KVM, root, supplied retained run/store | CLI `retained-run-tests`; pause/resume replay |
 | `mac-hvf` | Apple Silicon, macOS 15+, HVF and codesign | ARM `hvf-tests`; native CPU/state and cancellation primitives |

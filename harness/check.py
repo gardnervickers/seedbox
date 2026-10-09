@@ -335,9 +335,8 @@ class Checks:
                 command = [binary, "--test-threads=1"]
                 if target == "applications":
                     command.append("--nocapture")
-                needs_root = package == "seedbox" and (
-                    target in ("applications", "host_pause")
-                    or target == "oci" and engine_needs_root(environment))
+                # oci uses the engine the way the root CLI does in applications.
+                needs_root = package == "seedbox" and target in ("applications", "host_pause", "oci")
                 if counter:
                     command = [sys.executable, str(ROOT / "harness/check-counter.py"),
                                *(["--cpu", environment["SEEDBOX_TEST_CPU"]] if environment.get("SEEDBOX_TEST_CPU") else []),
