@@ -70,7 +70,8 @@ def privileged(prefix, command, environment):
     # test/runtime inputs, not the user's general environment or credentials.
     inputs = [f"{key}={value}" for key, value in environment.items()
               if key.startswith(("SEEDBOX_TEST_", "SEEDBOX_ARM64_", "SEEDBOX_HOST_PAUSE_"))
-              or key in ("SEEDBOX_KERNEL", "SEEDBOX_BUSYBOX", "SEEDBOX_MKE2FS", "SEEDBOX_STATIC_CC")]
+              or key in ("SEEDBOX_KERNEL", "SEEDBOX_RUNTIME_ASSETS", "SEEDBOX_BUSYBOX",
+                         "SEEDBOX_MKE2FS", "SEEDBOX_STATIC_CC")]
     return [*prefix, *inputs, *command]
 
 
@@ -112,14 +113,11 @@ def discover(system, machine, environment, privileged_probe=None, can_root=False
         found["guests"] = (native or "set SEEDBOX_ARM64_KERNEL and SEEDBOX_ARM64_INITRD"
                            if not kernel or not initrd else native)
     if linux and machine == "x86_64":
-        kernel = available_file(environment, "SEEDBOX_KERNEL", ROOT / "artifacts/bzImage")
-        bundle = available_file(environment, "SEEDBOX_LINUX_RUNTIME_BUNDLE", ROOT / "artifacts/linux-runtime/runtime.tar.gz")
-        found["applications"] = (found["kvm"] or found["oci"] or
-                                 ("set SEEDBOX_KERNEL or SEEDBOX_LINUX_RUNTIME_BUNDLE" if not kernel and not bundle else ""))
+        found["applications"] = found["kvm"] or found["oci"]
     elif system == "Darwin" and machine in ("arm64", "aarch64"):
-        bundle = available_file(environment, "SEEDBOX_MAC_RUNTIME_BUNDLE", ROOT / "artifacts/mac-runtime/runtime.tar.gz")
-        found["applications"] = (found["hvf"] or ("lima is required" if not shutil.which("limactl") else "") or
-                                 ("build tools/mac-runtime/build-cli.sh or set SEEDBOX_MAC_RUNTIME_BUNDLE" if not bundle else ""))
+        found["applications"] = (found["hvf"] or
+                                 ("Docker or Podman is required" if not any(
+                                     shutil.which(tool) for tool in ("docker", "podman")) else ""))
     if linux and machine == "x86_64" and not found["kvm"]:
         found["retained-run"] = ("set SEEDBOX_HOST_PAUSE_RUN and SEEDBOX_HOST_PAUSE_STATE"
                                  if not all(environment.get(k) for k in ("SEEDBOX_HOST_PAUSE_RUN", "SEEDBOX_HOST_PAUSE_STATE"))
@@ -268,10 +266,7 @@ def main(argv=None):
     for key, default in (("SEEDBOX_TEST_KERNEL", "artifacts/bzImage"),
                          ("SEEDBOX_TEST_INITRD", "artifacts/entropy-fork.cpio"),
                          ("SEEDBOX_ARM64_KERNEL", "artifacts/arm64-hres/Image"),
-                         ("SEEDBOX_ARM64_INITRD", "artifacts/arm64-hres/init.cpio"),
-                         ("SEEDBOX_KERNEL", "artifacts/bzImage"),
-                         ("SEEDBOX_MAC_RUNTIME_BUNDLE", "artifacts/mac-runtime/runtime.tar.gz"),
-                         ("SEEDBOX_LINUX_RUNTIME_BUNDLE", "artifacts/linux-runtime/runtime.tar.gz")):
+                         ("SEEDBOX_ARM64_INITRD", "artifacts/arm64-hres/init.cpio")):
         if (path := available_file(environment, key, ROOT / default)) is not None:
             environment[key] = str(path)
     environment["SEEDBOX_ARM64_REPORT_DIR"] = str(reports / "arm64")
@@ -280,8 +275,6 @@ def main(argv=None):
         if output is not None:
             binaries = [json.loads(line) for line in output.splitlines() if line.strip()]
             binary = next(item["executable"] for item in binaries if item.get("executable") and item.get("target", {}).get("name") == "seedbox")
-            if system == "Darwin":
-                checks.run("sign-cli", ["bash", "crates/seedbox-arm64/codesign.sh", binary])
             environment["SEEDBOX_TEST_CLI"] = binary
             environment["SEEDBOX_TEST_COUNTER"] = "0" if found["counter"] else "1"
         else:

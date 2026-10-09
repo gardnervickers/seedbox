@@ -11,21 +11,21 @@ cd "$(dirname "$0")/.."
 while IFS= read -r script; do
   [[ -f $script ]] || continue
   bash -n "$script"
-done < <(git ls-files '*.sh' ':!:research/**')
-tests=(test_msr54 test_scenarios test_mac_check test_linux_runtime test_runtime_build test_runtime_linker test_runtime_package)
-if [[ $(uname -s) == Linux ]]; then tests+=(test_batch); fi
-(cd harness/tests && python3 -m unittest -q "${tests[@]}")
+done < <(git ls-files --cached --others --exclude-standard '*.sh' ':!:research/**' | sort -u)
+# Discover new Python tests without maintaining per-module lists.
+(cd harness/tests && python3 -m unittest discover -s . -q)
 (cd python && python3 -m unittest discover -s tests -q)
-# The portable pre-check may share a workspace cache. Keep the standalone VMM
-# in its prescribed crates/seedbox-vmm/target directory.
-if [[ $(uname -s) == Linux ]]; then
-  if [[ -r /dev/kvm && -w /dev/kvm ]]; then
-    env -u CARGO_TARGET_DIR cargo test-vmm --features kvm-tests
-  else
-    echo 'acceptance: /dev/kvm is not usable; skipping the KVM-only VMM tests' >&2
-    env -u CARGO_TARGET_DIR cargo test-vmm
-  fi
+# Compile hardware-feature tests without opening KVM or HVF. Default execution
+# keeps hardware tests ignored, while their bodies remain type-checked.
+if [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]]; then
+  env -u CARGO_TARGET_DIR cargo test-vmm --all-features --no-run
+  env -u CARGO_TARGET_DIR cargo test-vmm
 fi
+env -u CARGO_TARGET_DIR cargo test-arm64 --all-features --no-run
+env -u CARGO_TARGET_DIR cargo test-arm64
+python3 kernel-arm64/test_inputs.py -q
+python3 crates/seedbox-arm64/test_compare.py -q
+cargo test --workspace --locked --all-features --no-run
 cargo test --workspace --locked
 for scenario in harness/acceptance/workloads/*.yaml; do
   cargo run --quiet --locked -p seedbox -- validate "$scenario"

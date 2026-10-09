@@ -10,7 +10,7 @@ The runner reports the host and every selected or unavailable capability. It
 builds as the current user, discovers Cargo test executables, and runs them.
 Linux tests that need root use existing passwordless sudo; the runner never
 prompts or runs Cargo as root. Mac native tests run from signed disposable
-copies, after all builds have finished.
+copies, after their Cargo build has finished.
 
 ```sh
 bash harness/check.sh portable                  # No virtualization or root
@@ -35,7 +35,7 @@ that fails stays failed; there are no retries or fallback passes.
 | `hvf` | Apple Silicon, macOS 15+, HVF and codesign | ARM `hvf-tests`; native CPU/state and cancellation primitives |
 | `oci` | Linux x86-64, root, Skopeo, umoci, Podman, registry access | CLI `oci-tests`; real image import and Dockerfile behavior |
 | `guests` | Native backend plus fixture kernel/initrd | Backend `guest-tests`; real guest determinism/checkpoint controls |
-| `applications` | Linux x86 KVM plus OCI/kernel inputs, or a packaged Mac runtime | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state |
+| `applications` | Linux x86 KVM plus OCI tools, or Mac HVF plus Docker/Podman | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state |
 | `retained-run` | Linux x86-64 KVM, root, supplied retained run/store | CLI `retained-run-tests`; pause/resume replay |
 
 AMD and Intel run the same counted-execution tests. The engine selects its
@@ -45,13 +45,15 @@ values after reaping every owned process. Intel uses no AMD MSR writes. This
 test selection makes no claim about untested Intel hardware or cross-host replay.
 
 Platform dependencies remain selected by Cargo target OS/architecture. Features
-add test capabilities; they do not switch the production CPU backend or pin a
+enable test execution; they do not switch the production CPU backend or pin a
 host. `counter-tests` includes `kvm-tests`. Root and standalone backend workspaces
-are invoked separately, using the existing aliases and build identities.
+are invoked separately, using their existing aliases, lockfiles and target directories.
 
 ## Guest and application inputs
 
-The default command includes these suites when their inputs are present. Use
+Application coverage needs no local kernel or runtime bundle: the release CLI
+downloads and caches current guest assets. The low-level guest and retained-run
+suites join the default command when their fixture inputs are present. Use
 `--require guests`, `--require applications`, or `--require retained-run` when
 their absence should fail the job. Every run prints a fresh report directory
 under `target/check-reports/`, which survives development-shell cleanup.
@@ -60,32 +62,35 @@ under `target/check-reports/`, which survives development-shell cleanup.
 | --- | --- | --- |
 | x86 entropy checkpoint | `SEEDBOX_TEST_KERNEL`, `SEEDBOX_TEST_INITRD` | `artifacts/bzImage`, `artifacts/entropy-fork.cpio` |
 | ARM guest fixture | `SEEDBOX_ARM64_KERNEL`, `SEEDBOX_ARM64_INITRD` | `artifacts/arm64-hres/Image`, `artifacts/arm64-hres/init.cpio` |
-| Linux applications | `SEEDBOX_KERNEL` or `SEEDBOX_LINUX_RUNTIME_BUNDLE` | `artifacts/bzImage` or `artifacts/linux-runtime/runtime.tar.gz` |
-| Mac applications | `SEEDBOX_MAC_RUNTIME_BUNDLE` and installed Lima | `artifacts/mac-runtime/runtime.tar.gz` from `tools/mac-runtime/build-cli.sh` |
+| Applications | No guest-asset inputs required; optional CLI overrides remain supported | Release CLI downloads/cache, native container tools |
 | Pause/resume | `SEEDBOX_HOST_PAUSE_RUN`, `SEEDBOX_HOST_PAUSE_STATE` | No default retained run |
 
 Applications use a release CLI built from the current checkout. Linux runs PV
 and, where the PMU is available, counter scenarios. Mac runs ARM PV scenarios.
-Dockerfile builds use `--build-epoch 0` so repeat runs compare identical build
-timestamps. Each CLI step streams to its report log and prints its progress.
+Linux Dockerfile builds use `--build-epoch 0` for repeatable build timestamps.
+Mac uses its container builder's ordinary timestamp policy; that CLI option is
+Linux-only. Each CLI step streams to its report log and prints its progress.
 Application guests use 2048 MiB, including space for the JVM image's boot archive.
 Image pulls, application builds and guest execution can be substantially slower
 than native unit tests. Their assertions belong to the guest workload and public
 CLI; the test runner does not interpret application protocols.
 
-Rebuild runtime inputs after changes to guest code, kernel configuration, or the
-Linux preparation worker. `tools/linux-runtime/build-cli.sh` and
-`tools/mac-runtime/build-cli.sh` package inputs from the current checkout. An
-older kernel or bundle can boot successfully while missing new guest features.
+Portable checks compile all Cargo features with `--no-run`, then run default
+portable tests without hardware. VMM checkpoint, trigger and machine tests stay
+compiled by default; `cfg_attr(..., ignore)` enables execution only when the
+matching capability is selected. Neither path needs virtualization to compile.
+The runner does not check or stamp Git revisions or checkout cleanliness.
 
 ## Adding a test
 
 1. Add ordinary Rust `#[test]` functions to the appropriate crate. They run by
    default when no special host capability is required.
-2. Gate a hardware test or test module with its existing feature, for example
-   `#[cfg(feature = "kvm-tests")]`. Retain target OS/architecture guards for
-   platform APIs. Gate helpers with the same feature. Use `required-features`
-   in `Cargo.toml` when a complete integration target needs a capability.
+2. Keep VMM engine test bodies compiled by default and use conditional
+   `ignore` attributes for hardware execution. Other suites may gate hardware
+   modules with their existing feature, for example `kvm-tests`; the portable
+   suite must compile those features with `--no-run`. Retain target OS/architecture
+   guards for platform APIs. Use `required-features` in `Cargo.toml` when a
+   complete integration target needs a capability.
 3. Put Python tests in `harness/tests/test_*.py` or `python/tests/test_*.py`.
    Standard unittest discovery finds new files. Declare genuine platform
    requirements with `unittest.skipUnless` in the tests themselves.
@@ -94,9 +99,11 @@ older kernel or bundle can boot successfully while missing new guest features.
 
 These additions need no runner edits. A new capability needs one feature and
 one capability selection rule. Do not register individual test names or change
-scopes from a PR's changed-file list. Hardware tests use compilation guards;
-`#[ignore]` is reserved for diagnostics outside the maintained suite.
+scopes from a PR's changed-file list. Features control hardware execution while
+portable builds retain type checking.
+Unconditional `#[ignore]` remains appropriate for existing diagnostics outside
+the maintained suite.
 
 To check a different revision, check it out in a Git worktree and run the same
-command there. Low-level standalone world campaigns and reproducibility checks
-remain separate diagnostic tools, documented in `harness/worlds/README.md`.
+command there. Low-level standalone world campaigns remain separate diagnostic
+tools, documented in `harness/worlds/README.md`.

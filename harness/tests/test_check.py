@@ -34,6 +34,10 @@ class SelectionTests(unittest.TestCase):
         found = self.linux({"kvm": "", "counter": "guest PMU unavailable"})
         self.assertEqual(check.features_for("seedbox-vmm", "Linux", "x86_64", found), ["kvm-tests"])
         self.assertIn("oci-tests", check.features_for("seedbox", "Linux", "x86_64", found))
+        # The release CLI resolves/downloads assets; empty artifacts cannot
+        # suppress application coverage on an otherwise capable host.
+        self.assertFalse(found["applications"])
+        self.assertIn("application-tests", check.features_for("seedbox", "Linux", "x86_64", found))
         self.assertEqual(check.features_for("seedbox-arm64", "Linux", "x86_64", found), [])
 
     def test_amd_and_intel_use_the_same_counter_contract(self):
@@ -45,6 +49,7 @@ class SelectionTests(unittest.TestCase):
         found = self.linux({"kvm": "", "counter": ""}, root=False)
         self.assertTrue(found["counter"])
         self.assertTrue(found["oci"])
+        self.assertTrue(found["applications"])
         self.assertEqual(check.features_for("seedbox-vmm", "Linux", "x86_64", found), ["kvm-tests"])
 
     def test_guest_inputs_add_coverage_without_a_new_test_list(self):
@@ -72,6 +77,15 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(check.features_for("seedbox-arm64", "Darwin", "arm64", found), ["hvf-tests"])
         self.assertTrue(found["guests"])
         self.assertTrue(found["counter"])
+        self.assertFalse(found["applications"])
+
+    def test_mac_container_client_is_required_but_lima_and_assets_are_not(self):
+        with patch.object(check.platform, "mac_ver", return_value=("15.0", (), "")), \
+             patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/tool" if tool == "codesign" else None), \
+             patch.object(check.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1\n", "")):
+            found = check.discover("Darwin", "arm64", {})
+        self.assertFalse(found["hvf"])
+        self.assertEqual(found["applications"], "Docker or Podman is required")
 
     def test_explicit_required_capability_cannot_silently_skip(self):
         unavailable = {name: "no fixture capability" for name in check.CAPABILITIES}

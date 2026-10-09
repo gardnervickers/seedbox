@@ -2620,7 +2620,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn runtime_checkpoint_keeps_unpaid_io_without_repeating_its_effect() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -2758,7 +2758,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn charged_io_completes_once_after_debt_with_no_guest_progress() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -2887,7 +2887,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn an_overdue_arm_replaced_by_a_page_store_does_not_depend_on_undo() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -2943,7 +2943,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn refined_counter_approaches_preserve_ram_and_exact_stops() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -2992,7 +2992,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn stops_at_natural_exits_or_exact_hard_counts_without_yields() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -3100,7 +3100,7 @@ mod io_boundary_tests {
     /// paused nothing runs and nothing is paid. Resumed later, the missed
     /// ticks fire once, late, in phase, and the debt is paid from the resume.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn a_pause_keeps_owed_io_cost_and_resumes_in_timer_phase() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -3159,7 +3159,7 @@ mod io_boundary_tests {
     /// Pause once the debt is paid but before the guest runs on: resuming
     /// later runs exactly what an unpaused machine runs, just later.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn a_pause_with_no_debt_runs_on_unchanged_after_resume() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -3455,7 +3455,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn a_restored_fork_matches_a_cold_run_and_seeds_differ() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -3497,7 +3497,7 @@ mod fork_tests {
     /// fires late at the release instead of leaving the next slice a hard
     /// stop behind its clock.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn a_release_past_an_armed_timer_fires_it_and_runs_on() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -3527,7 +3527,7 @@ mod fork_tests {
     /// Fork at a simulated time inside the spin loop instead of at the guest's
     /// barrier (the port write and read are then ordinary unknown ports).
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn a_fork_at_a_simulated_time_matches_a_cold_run() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -3579,7 +3579,7 @@ mod fork_tests {
     /// fork point: a full copy, after which it holds one and later restores
     /// take the cheap path again. Every restore must match the cold run.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn a_fork_restores_into_a_freshly_built_machine() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -3638,7 +3638,7 @@ mod fork_tests {
     /// fresh RAM, the program runs again from its first instruction at the
     /// reboot time, and the logs and witness carry across.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn a_crashed_machine_reboots_fresh_from_its_boot_inputs() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -3691,7 +3691,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn a_reboot_applies_seeded_sector_survival_and_keeps_the_default_witness() {
         let kvm = Kvm::new().unwrap();
         for fault_model in [
@@ -3756,7 +3756,7 @@ mod fork_tests {
     /// boots with the stable layer, a fresh virtio-blk transport, and none of
     /// the volatile writes. A fork restore puts the whole disk back.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn a_reboot_keeps_flushed_disk_writes_only() {
         let kvm = Kvm::new().unwrap();
         let with_disk =
@@ -3907,7 +3907,7 @@ mod timed_log_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn timed_logs_commit_order_and_observation_controls() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -3964,7 +3964,7 @@ mod timed_log_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn timed_logs_survive_machine_incarnations() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -3999,7 +3999,7 @@ mod timed_log_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn runtime_checkpoint_restores_timed_log_cursor_and_order() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -4083,7 +4083,7 @@ mod timed_log_tests {
         }
     }
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn timed_logs_commit_gate_rejection_and_rollback() {
         let kvm = Kvm::new().unwrap();
         for rollback in [false, true] {

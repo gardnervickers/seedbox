@@ -17,14 +17,14 @@ fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<Str
         .stderr(log);
     if args.first() != Some(&"diff") {
         command.arg("--state").arg(directory.join("state"));
+        // Native timestamp control is Linux-only; Mac uses container preparation.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if args.first() == Some(&"run") {
+            command.args(["--build-epoch", "0"]);
+        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if let Some(cpu) = std::env::var_os("SEEDBOX_TEST_CPU") {
             command.arg("--cpu").arg(cpu);
-        }
-        // Counter contracts also run on Intel's experimental counter profile.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if std::env::var("SEEDBOX_TEST_COUNTER").as_deref() == Ok("1") {
-            command.arg("--allow-unqualified-cpu");
         }
     }
     let status = command
@@ -83,8 +83,6 @@ fn every_application_runs_twice_and_replays() {
                     workload.to_str().unwrap(),
                     "--timebase",
                     timebase,
-                    "--build-epoch",
-                    "0",
                     "--memory-mb",
                     "2048",
                     "--full-state",

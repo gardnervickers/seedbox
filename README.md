@@ -329,47 +329,35 @@ are older. Run Cargo from the checkout root (including standalone aliases) for c
 Portable tests import the core crate directly; UART register admission remains in
 the KVM adapter.
 
-Portable checks must pass at the PR or merge-train head before spending AMD
-host time. Use the fast pre-check on a Mac or any other non-KVM machine:
+Run every suite available on the current platform from the project Nix shell:
 
 ```sh
-bash harness/mac-check.sh main     # any local revision or branch
-bash harness/mac-check.sh          # current checkout, including local changes
+nix develop --command bash harness/check.sh
 ```
 
-Run from within the checkout on any host inside the project's Nix dev shell.
-With a revision, the script creates a detached worktree under `$TMPDIR` (or `/tmp` if unset) and
-deletes it on a pass; on failure it keeps the worktree and prints its path.
-Without a revision, it checks the existing checkout, including local changes.
-Its first stdout line is `revision: FULL_SHA`. It uses the caller's development
-shell to run, in order:
+The runner discovers host capabilities and Cargo test executables, enabling the
+applicable features. It includes generic KVM without a PMU, counted x86 tests
+under CPU/SMT leases, and signed native HVF tests. Application acceptance uses
+the release CLI, which downloads and caches guest assets itself. Low-level guest
+fixtures join the suite when their kernel/initrd inputs are present.
 
-- `cargo fmt -p seedbox --check`
-- `cargo clippy -p seedbox --all-targets --locked -- -D warnings`
-- `bash harness/acceptance.sh portable`
+```sh
+bash harness/check.sh portable                  # Compile all tests; run portable ones
+bash harness/check.sh --list                    # Show capabilities
+bash harness/check.sh --require hvf             # Require native Mac coverage
+bash harness/check.sh --require kvm --require counter
+```
 
-The portable suite includes workspace tests, both Python unittest suites and
-YAML validation. Workspace builds share a persistent target directory at
-`$XDG_CACHE_HOME/seedbox/precheck-target` when set, otherwise
-`~/Library/Caches/seedbox/precheck-target` on macOS or
-`~/.cache/seedbox/precheck-target` elsewhere. `SEEDBOX_PRECHECK_TARGET` overrides
-that path; an existing `CARGO_TARGET_DIR` is respected when the override is unset.
-Relative overrides resolve from the invoking directory, before entering a
-revision worktree. Cargo fingerprints determine which build outputs can be reused.
+Portable checks must pass before hardware execution. Hardware-feature suites
+are compiled with `--no-run` during portable checks, even without virtualization.
+VMM checkpoint and trigger tests also compile by default, with conditional
+`ignore` attributes controlling execution. Missing capabilities are reported;
+repeatable `--require` arguments make missing required coverage fail.
 
-All steps run even if an earlier step fails. Command output goes to stderr;
-stdout ends with timed step/phase lines in this format:
-`printf '%-8s %s %4ss\n' STEP pass|FAIL SECONDS`, with `phase ` lines preserved.
-The gate exits 0 only if every step passes, and 1 if any step fails; setup errors
-also exit nonzero. The runner comes from the invoking checkout, so it can check
-revisions that predate the script.
-
-On macOS, the pre-check skips the Linux-only VMM tests and batch supervisor
-lifecycle tests. On Linux, the portable suite includes those tests; VMM tests
-keep their standalone target directory instead of using the workspace cache.
-The pre-check does not execute guests. VMM builds and KVM acceptance remain
-Linux host checks. A pre-check with local changes only verifies those local
-bytes and does not establish a pass for the committed SHA.
+See [running and adding tests](docs/testing.md) for the matrix and fixture inputs.
+Rust and Python tests are discovered automatically; adding tests to an existing
+capability requires no runner edits. Check a different revision in a Git worktree
+with the same entrypoint. The runner does not stamp revisions or checkout state.
 
 ## How execution is controlled
 
