@@ -100,15 +100,29 @@ fn write_fixture(
     raw: Option<&serde_json::Value>,
     trace: Option<&[u8]>,
 ) {
+    write_fixture_logs(path, record, raw, &[("machines/workload.trace", trace)]);
+}
+
+/// Encode engine witness-log entries (time_ns, branches, records, witness prefix).
+#[allow(dead_code)]
+fn witness_log_bytes(entries: &[[u64; 4]]) -> Vec<u8> {
+    entries.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+fn write_fixture_logs(
+    path: &std::path::Path,
+    record: &mut sb::orchestration::RunRecord,
+    raw: Option<&serde_json::Value>,
+    logs: &[(&str, Option<&[u8]>)],
+) {
     use sb::store::ContentDigest;
     std::fs::create_dir_all(path.join("output/machines")).unwrap();
-    for (name, bytes) in [
-        ("vmm.json", raw.map(|v| serde_json::to_vec(v).unwrap())),
-        ("machines/workload.trace", trace.map(|b| b.to_vec())),
-    ] {
+    let raw = raw.map(|v| serde_json::to_vec(v).unwrap());
+    let logs = std::iter::once(("vmm.json", raw.as_deref())).chain(logs.iter().copied());
+    for (name, bytes) in logs {
         if let Some(bytes) = bytes {
-            std::fs::write(path.join("output").join(name), &bytes).unwrap();
-            record.logs.insert(name.into(), ContentDigest::of(&bytes));
+            std::fs::write(path.join("output").join(name), bytes).unwrap();
+            record.logs.insert(name.into(), ContentDigest::of(bytes));
         }
     }
     record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());

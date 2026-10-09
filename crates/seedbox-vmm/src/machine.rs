@@ -15,6 +15,7 @@ use crate::undo::{Undo, UndoStats, VcpuState};
 use crate::virtio_blk::VirtioBlk;
 use crate::virtio_console::VirtioConsole;
 use crate::virtio_net::{ReceiveOutcome, VirtioNet};
+use crate::witness_log::WitnessLog;
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use sha2::{Digest, Sha256};
@@ -195,6 +196,7 @@ pub struct MachineSnapshot {
     fm: u64,
     stats: Stats,
     witness: Sha256,
+    witness_log: WitnessLog,
     undo_stats: Option<UndoStats>,
 }
 
@@ -391,6 +393,8 @@ pub struct Machine {
     msrs: Msrs,
     pub stats: Stats,
     pub witness: Sha256,
+    /// Periodic witness samples; diagnostic only, never hashed.
+    pub witness_log: WitnessLog,
     pub trace: Option<std::io::BufWriter<std::fs::File>>,
 }
 
@@ -658,6 +662,7 @@ impl Machine {
             } else {
                 Sha256::new()
             },
+            witness_log: WitnessLog::default(),
             trace: None,
         })
     }
@@ -685,6 +690,8 @@ impl Machine {
         self.witness.update(self.branches.to_le_bytes());
         self.witness.update(self.world.time.to_le_bytes());
         self.witness.update(extra.to_le_bytes());
+        self.witness_log
+            .record(self.world.time, self.branches, &self.witness);
     }
 
     /// Earliest internal event (timer) for a halted machine.
@@ -795,6 +802,7 @@ impl Machine {
         }
         self.log_order = old.log_order;
         self.trace = old.trace.take();
+        self.witness_log = std::mem::take(&mut old.witness_log);
         // The same machine: under the PV clock it keeps its speed, or members
         // restarted together would run in lockstep again.
         self.syscall_ns = old.syscall_ns;
@@ -890,6 +898,7 @@ impl Machine {
             fm: self.fm,
             stats: self.stats.clone(),
             witness: self.witness.clone(),
+            witness_log: self.witness_log.clone(),
             undo_stats,
         })
     }
@@ -971,6 +980,7 @@ impl Machine {
         self.entropy_read = s.entropy_read;
         self.stats = s.stats.clone();
         self.witness = s.witness.clone();
+        self.witness_log = s.witness_log.clone();
         Ok(pages)
     }
 
@@ -2648,7 +2658,13 @@ mod io_boundary_tests {
                         m.run_until(counter, 10_000, 0, &mut frames).unwrap(),
                         Stop::Halted | Stop::Exited
                     ) {}
-                    (m.exit_witness(), m.state_digest().0, m.time, m.branches)
+                    (
+                        m.exit_witness(),
+                        m.state_digest().0,
+                        m.time,
+                        m.branches,
+                        m.witness_log.clone(),
+                    )
                 };
                 let want = finish(&mut m, &mut counter);
                 let mut fresh = probe(&kvm, port, write, undo);

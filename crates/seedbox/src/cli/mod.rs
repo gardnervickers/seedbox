@@ -1107,6 +1107,13 @@ fn run(cli: Cli) -> Result<u8> {
                     }
                 }
                 println!(
+                    "divergence: {}",
+                    serde_json::to_string(&comparison.divergence)?
+                );
+                if let Some(divergence) = &comparison.divergence {
+                    diagnostics::divergence(divergence);
+                }
+                println!(
                     "first record: {}",
                     serde_json::to_string(&comparison.first_record)?
                 );
@@ -1246,6 +1253,7 @@ fn report(run: &orchestration::Run) -> u8 {
     if let Some(replay) = &run.record.replay {
         println!("replay: {}", word(&replay.status));
         diagnostics::replay_pages(replay);
+        diagnostics::replay_divergence(replay);
         return match replay.status {
             ReplayStatus::Match => 0,
             ReplayStatus::Mismatch => 1,

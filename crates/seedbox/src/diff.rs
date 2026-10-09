@@ -85,11 +85,45 @@ pub struct FirstRecord {
     pub b: Option<Record>,
 }
 
+/// One periodic sample of a machine's running exit witness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WitnessSample {
+    pub time_ns: u64,
+    pub branches: u64,
+    /// Witness records hashed so far; one per trace line.
+    pub records: u64,
+    /// First eight witness bytes, as 16 hex digits.
+    pub witness: String,
+}
+
+/// The first interval in which two runs' witness logs disagree. The first
+/// differing exit lies after `last_match` and at or before the earlier of
+/// the two differing samples.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Divergence {
+    pub machine: String,
+    /// One-based sample number of `a`/`b`.
+    pub sample: u64,
+    /// None when the first samples already differ.
+    pub last_match: Option<WitnessSample>,
+    /// None when that run's log ended first.
+    pub a: Option<WitnessSample>,
+    pub b: Option<WitnessSample>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceReport {
+    pub divergence: Option<Divergence>,
+    pub limitations: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct DiffReport {
     pub status: Status,
     pub world_witness: Witness,
     pub machines: Vec<MachineDiff>,
+    /// Earliest witness-log divergence across machines.
+    pub divergence: Option<Divergence>,
     pub first_record: Option<FirstRecord>,
     pub identity_differences: Vec<Difference>,
     pub result_differences: Vec<Difference>,
@@ -308,6 +342,15 @@ pub fn diff(a: &Path, b: &Path) -> Result<DiffReport> {
     for machine in &mut result.machines {
         machine.ram_pages = pages.machines.get(&machine.machine).cloned();
     }
+    let logs = divergence(a, &left, b, &right)?;
+    result.limitations.extend(logs.limitations);
+    result
+        .evidence_differences
+        .extend(logs.evidence_differences);
+    if logs.divergence.is_some() {
+        result.divergence = logs.divergence;
+        result.status = Status::Different;
+    }
     let mut traces = Vec::new();
     for machine in &result.machines {
         let name = format!("machines/{}.trace", machine.machine);
@@ -441,11 +484,145 @@ fn compare(a: &Evidence, b: &Evidence) -> Result<DiffReport> {
         },
         world_witness,
         machines,
+        divergence: None,
         first_record: earliest(terminals),
         identity_differences,
         result_differences,
         evidence_differences,
         limitations,
+    })
+}
+
+/// Manifest-relative witness log, beside the VMM's per-machine traces.
+pub(crate) fn witness_log(machine: &str) -> String {
+    format!("{}/{machine}.witness-log", crate::vmm::MACHINE_OUTPUT_DIR)
+}
+
+/// Engine witness-log entry: little-endian u64 time_ns, branches, records, witness prefix.
+const SAMPLE_BYTES: usize = 32;
+
+fn next_sample(reader: &mut impl Read) -> std::io::Result<Option<WitnessSample>> {
+    let mut entry = [0; SAMPLE_BYTES];
+    let mut filled = 0;
+    while filled < SAMPLE_BYTES {
+        match reader.read(&mut entry[filled..])? {
+            0 if filled == 0 => return Ok(None),
+            0 => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("witness log length is not a multiple of {SAMPLE_BYTES} bytes"),
+                ))
+            }
+            n => filled += n,
+        }
+    }
+    let field = |i: usize| u64::from_le_bytes(entry[i * 8..i * 8 + 8].try_into().unwrap());
+    Ok(Some(WitnessSample {
+        time_ns: field(0),
+        branches: field(1),
+        records: field(2),
+        witness: format!("{:016x}", field(3)),
+    }))
+}
+
+/// Compare two witness logs in lockstep. Logs are fully read so a corrupt
+/// tail is reported even after the first difference.
+fn compare_logs(machine: &str, a: impl Read, b: impl Read) -> Result<Option<Divergence>> {
+    let mut a = BufReader::new(a);
+    let mut b = BufReader::new(b);
+    let mut last = None;
+    let mut first = None;
+    let mut sample = 0;
+    loop {
+        let x = next_sample(&mut a)?;
+        let y = next_sample(&mut b)?;
+        if x.is_none() && y.is_none() {
+            return Ok(first);
+        }
+        sample += 1;
+        if first.is_some() {
+            continue;
+        }
+        if x == y {
+            last = x;
+        } else {
+            first = Some(Divergence {
+                machine: machine.into(),
+                sample,
+                last_match: last.take(),
+                a: x,
+                b: y,
+            });
+        }
+    }
+}
+
+fn start(d: &Divergence) -> (u64, u64) {
+    let end = d.a.iter().chain(d.b.iter()).map(|s| s.time_ns).min();
+    (
+        d.last_match.as_ref().map_or(0, |s| s.time_ns),
+        end.unwrap_or(u64::MAX),
+    )
+}
+
+struct Logs {
+    divergence: Option<Divergence>,
+    evidence_differences: Vec<Difference>,
+    limitations: Vec<String>,
+}
+
+fn divergence(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<Logs> {
+    let mut found = Vec::new();
+    let mut evidence_differences = Vec::new();
+    let mut limitations = Vec::new();
+    let names: BTreeSet<_> = left.machines.keys().chain(right.machines.keys()).collect();
+    for machine in names {
+        let name = witness_log(machine);
+        match (log(a, &left.record, &name)?, log(b, &right.record, &name)?) {
+            (Some(x), Some(y)) => {
+                if let Some(d) = compare_logs(machine, x, y)
+                    .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?
+                {
+                    found.push(d);
+                }
+            }
+            (None, None) => {
+                limitations.push(format!("{machine}: no retained witness log on either side"))
+            }
+            _ => {
+                let digest = |e: &Evidence| {
+                    e.record
+                        .logs
+                        .get(&name)
+                        .map(|d| Value::String(d.hex().into()))
+                };
+                evidence_differences.push(Difference {
+                    field: format!("/logs/{}", name.replace('~', "~0").replace('/', "~1")),
+                    a: digest(left),
+                    b: digest(right),
+                });
+                limitations.push(format!(
+                    "{machine}: witness log missing on one side; no divergence interval available"
+                ));
+            }
+        }
+    }
+    let divergence = found
+        .into_iter()
+        .min_by(|x, y| (start(x), &x.machine).cmp(&(start(y), &y.machine)));
+    Ok(Logs {
+        divergence,
+        evidence_differences,
+        limitations,
+    })
+}
+
+/// Witness-log divergence between a run and its replay; diagnostic only.
+pub(crate) fn replay_divergence(a: &Path, b: &Path) -> Result<DivergenceReport> {
+    let logs = divergence(a, &load(a)?, b, &load(b)?)?;
+    Ok(DivergenceReport {
+        divergence: logs.divergence,
+        limitations: logs.limitations,
     })
 }
 
@@ -1023,6 +1200,115 @@ mod tests {
         assert!(first.b.is_none());
         assert!(trace_diff("m", &a[..], &b"P 1 2 3 4\nbad\n"[..]).is_err());
         assert!(trace_diff("m", &a[..], &a[..]).unwrap().is_none());
+    }
+
+    fn sample(time_ns: u64, records: u64, witness: u64) -> WitnessSample {
+        WitnessSample {
+            time_ns,
+            branches: time_ns / 2,
+            records,
+            witness: format!("{witness:016x}"),
+        }
+    }
+
+    #[test]
+    fn witness_logs_report_first_differing_sample_and_validate_remainder() {
+        let a = witness_log_bytes(&[
+            [0, 0, 1, 7],
+            [1_000_050, 500_025, 9, 8],
+            [2_000_000, 1_000_000, 20, 9],
+        ]);
+        let b = witness_log_bytes(&[
+            [0, 0, 1, 7],
+            [1_000_050, 500_025, 9, 8],
+            [2_000_000, 1_000_000, 20, 10],
+        ]);
+        assert!(compare_logs("m", &a[..], &a[..]).unwrap().is_none());
+        let d = compare_logs("m", &a[..], &b[..]).unwrap().unwrap();
+        assert_eq!(d.sample, 3);
+        assert_eq!(d.last_match, Some(sample(1_000_050, 9, 8)));
+        assert_eq!(d.a, Some(sample(2_000_000, 20, 9)));
+        assert_eq!(d.b.unwrap().witness, "000000000000000a");
+        // A log that ends early differs at its end; a first sample can differ.
+        let d = compare_logs("m", &a[..], &b[..64]).unwrap().unwrap();
+        assert_eq!((d.sample, d.b), (3, None));
+        let d = compare_logs("m", &b[32..], &a[..]).unwrap().unwrap();
+        assert_eq!((d.sample, d.last_match), (1, None));
+        // A torn entry is an error even after the first difference.
+        assert!(compare_logs("m", &a[..], &b[..95]).is_err());
+        assert!(compare_logs("m", &b[..], &a[..95]).is_err());
+    }
+
+    #[test]
+    fn earliest_divergence_is_chosen_by_interval_then_machine() {
+        let make = |machine: &str, last: Option<u64>, end: u64| Divergence {
+            machine: machine.into(),
+            sample: 2,
+            last_match: last.map(|t| sample(t, 1, 0)),
+            a: Some(sample(end, 2, 1)),
+            b: Some(sample(end + 5, 2, 2)),
+        };
+        let pick = |all: Vec<Divergence>| {
+            all.into_iter()
+                .min_by(|x, y| (start(x), &x.machine).cmp(&(start(y), &y.machine)))
+                .unwrap()
+                .machine
+        };
+        assert_eq!(
+            pick(vec![make("a", Some(20), 30), make("z", Some(10), 40)]),
+            "z"
+        );
+        assert_eq!(
+            pick(vec![make("z", Some(10), 40), make("a", None, 50)]),
+            "a"
+        );
+        assert_eq!(
+            pick(vec![make("z", Some(10), 30), make("a", Some(10), 40)]),
+            "z"
+        );
+        assert_eq!(
+            pick(vec![make("z", Some(10), 30), make("a", Some(10), 30)]),
+            "a"
+        );
+    }
+
+    #[test]
+    fn diff_reports_witness_log_divergence_and_one_sided_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "machines/workload.witness-log";
+        let x = witness_log_bytes(&[[0, 0, 1, 7], [1_000_000, 9, 4, 8]]);
+        let y = witness_log_bytes(&[[0, 0, 1, 7], [1_000_000, 9, 4, 6]]);
+        for (side, log) in [("a", Some(&x[..])), ("b", Some(&y[..])), ("c", None)] {
+            write_fixture_logs(
+                &dir.path().join(side),
+                &mut fixture(),
+                Some(&raw_report()),
+                &[(name, log)],
+            );
+        }
+        let result = diff(&dir.path().join("a"), &dir.path().join("a")).unwrap();
+        assert_eq!(result.status, Status::Match);
+        assert!(result.divergence.is_none());
+        let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
+        assert_eq!(result.status, Status::Different);
+        let d = result.divergence.unwrap();
+        assert_eq!((d.machine.as_str(), d.sample), ("workload", 2));
+        assert_eq!(d.last_match.unwrap().time_ns, 0);
+        let report = replay_divergence(&dir.path().join("a"), &dir.path().join("b")).unwrap();
+        assert_eq!(report.divergence.unwrap().sample, 2);
+        let result = diff(&dir.path().join("a"), &dir.path().join("c")).unwrap();
+        assert_eq!(result.status, Status::Different);
+        assert!(result.divergence.is_none());
+        assert!(result
+            .evidence_differences
+            .iter()
+            .any(|d| d.field == "/logs/machines~1workload.witness-log"));
+        let result = diff(&dir.path().join("c"), &dir.path().join("c")).unwrap();
+        assert_eq!(result.status, Status::Match);
+        assert!(result
+            .limitations
+            .iter()
+            .any(|l| l == "workload: no retained witness log on either side"));
     }
 
     #[test]

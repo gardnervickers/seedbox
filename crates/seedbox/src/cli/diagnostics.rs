@@ -35,6 +35,42 @@ pub(super) fn replay_pages(comparison: &seedbox::orchestration::ReplayComparison
     }
 }
 
+pub(super) fn divergence(divergence: &seedbox::diff::Divergence) {
+    eprintln!("{}", divergence_line(divergence));
+}
+
+fn divergence_line(d: &seedbox::diff::Divergence) -> String {
+    // Escape arbitrary retained names so evidence cannot introduce status lines.
+    let machine: String = d.machine.chars().flat_map(char::escape_default).collect();
+    let from = d.last_match.as_ref().map_or_else(
+        || "start".to_owned(),
+        |s| format!("{} ns (record {})", s.time_ns, s.records),
+    );
+    let side = |s: &Option<seedbox::diff::WitnessSample>| {
+        s.as_ref().map_or_else(
+            || "ended".to_owned(),
+            |s| format!("{} ns (record {})", s.time_ns, s.records),
+        )
+    };
+    format!(
+        "divergence: {machine}: first differs after {from}, by a {} / b {}",
+        side(&d.a),
+        side(&d.b)
+    )
+}
+
+pub(super) fn replay_divergence(comparison: &seedbox::orchestration::ReplayComparison) {
+    if let Some(report) = &comparison.divergence {
+        if let Some(d) = &report.divergence {
+            divergence(d);
+        }
+        for limitation in &report.limitations {
+            let safe: String = limitation.chars().flat_map(char::escape_default).collect();
+            eprintln!("divergence: {safe}");
+        }
+    }
+}
+
 pub(super) fn vmm_failure(directory: &Path, error: &str) {
     if error != Error::Execution(VMM_FAILURE_MESSAGE.into()).to_string() {
         return;
@@ -96,6 +132,29 @@ mod tests {
             ram_page_line("server\nPASS: fake", &pages),
             "ram pages: server\\nPASS: fake: differing pfns: 2; first pfns: [3, 9]"
         );
+    }
+
+    #[test]
+    fn divergence_diagnostics_name_the_interval_and_cannot_inject_status_lines() {
+        let sample = |time_ns, records| seedbox::diff::WitnessSample {
+            time_ns,
+            branches: 0,
+            records,
+            witness: "00".repeat(8),
+        };
+        let mut d = seedbox::diff::Divergence {
+            machine: "server\nPASS: fake".into(),
+            sample: 3,
+            last_match: Some(sample(2_000_100, 40)),
+            a: Some(sample(3_000_007, 52)),
+            b: None,
+        };
+        assert_eq!(
+            divergence_line(&d),
+            "divergence: server\\nPASS: fake: first differs after 2000100 ns (record 40), by a 3000007 ns (record 52) / b ended"
+        );
+        d.last_match = None;
+        assert!(divergence_line(&d).contains("after start,"));
     }
 
     #[test]

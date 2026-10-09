@@ -22,6 +22,7 @@ mod undo;
 mod virtio_blk;
 mod virtio_console;
 mod virtio_net;
+mod witness_log;
 mod world_adapter;
 
 use counter::Counter;
@@ -1111,6 +1112,12 @@ fn report(
         if let Some(b) = &mach.blk {
             world_witness.update(b.disk().digest().as_bytes());
         }
+        std::fs::write(
+            format!("{out}/{}.witness-log", mach.world.name),
+            mach.witness_log
+                .encode(mach.world.time, mach.branches, &mach.witness),
+        )
+        .map_err(|e| e.to_string())?;
         std::fs::write(format!("{out}/{}.console", mach.world.name), &mach.com1.out)
             .map_err(|e| e.to_string())?;
         std::fs::write(format!("{out}/{}.mgmt", mach.world.name), &mach.com2.out)

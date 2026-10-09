@@ -75,6 +75,9 @@ pub struct ReplayComparison {
     pub fault_history_matches: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ram_pages: Option<crate::diff::RamPageReport>,
+    /// Where the witness logs first disagree; diagnostic only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub divergence: Option<crate::diff::DivergenceReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,18 +269,26 @@ impl Orchestrator {
             options.allow_engine_change,
         )?;
         if let Some(comparison) = &mut run.record.replay {
-            if comparison.status == ReplayStatus::Mismatch
-                && comparison.full_state_matches == Some(false)
-            {
+            if comparison.status == ReplayStatus::Mismatch {
                 // Optional evidence must never replace the execution verdict.
-                comparison.ram_pages = Some(
-                    crate::diff::replay_ram_pages(directory, &run.directory).unwrap_or_else(
-                        |error| crate::diff::RamPageReport {
-                            machines: BTreeMap::new(),
+                comparison.divergence = Some(
+                    crate::diff::replay_divergence(directory, &run.directory).unwrap_or_else(
+                        |error| crate::diff::DivergenceReport {
+                            divergence: None,
                             limitations: vec![error.to_string()],
                         },
                     ),
                 );
+                if comparison.full_state_matches == Some(false) {
+                    comparison.ram_pages = Some(
+                        crate::diff::replay_ram_pages(directory, &run.directory).unwrap_or_else(
+                            |error| crate::diff::RamPageReport {
+                                machines: BTreeMap::new(),
+                                limitations: vec![error.to_string()],
+                            },
+                        ),
+                    );
+                }
                 write_record(&run.directory, &run.record)?;
             }
         }
@@ -573,6 +584,7 @@ fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
         full_state_matches,
         fault_history_matches,
         ram_pages: None,
+        divergence: None,
     }
 }
 

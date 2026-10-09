@@ -482,6 +482,27 @@ Execution outcome, report, errors and omission metadata are also compared.
 Attempt names, replay ancestry, performance parameters, engine performance counters,
 host timings and arbitrary console/log contents do not determine MATCH.
 
+Every x86 run writes `output/machines/NAME.witness-log`: periodic samples of the
+machine's running exit witness. The first witness record at or after each 1 ms
+boundary of the machine's simulated time is sampled, plus a final sample at the
+end, so idle intervals add nothing. Each entry is 32 bytes of little-endian `u64`:
+`time_ns`, `branches`, `records` (witness records so far, one per trace line) and
+the first eight bytes of the running witness. Sampling reads the witness without
+feeding it, so witnesses, state digests and replay verdicts are unchanged.
+Snapshots, forks, checkpoints and crash restarts carry the log with the witness.
+The log follows the ordinary retention policy and is excluded from run identity.
+
+When both runs retain witness logs, diff compares them entry by entry and reports
+the earliest differing interval across machines as `divergence`: the machine,
+the one-based `sample`, the `last_match` sample (null when the first differs) and
+each side's sample (null when that log ended first). The first differing exit
+lies after `last_match` and at or before the earlier differing sample, by records
+and simulated time. A differing log makes the comparison DIFFERENT. A log on only
+one side is an evidence difference; none on either side (older engines, ARM) is a
+limitation. Plain diff prints `divergence: <json>` and a readable summary on
+stderr. A MISMATCH replay records the same evidence under `replay.divergence`
+and prints the summary on stderr; it never changes the replay verdict.
+
 When both runs retain `machines/NAME.trace`, diff compares the existing engine
 records (`kind branches time_ns extra(hex) rip(hex)`) in order for each machine.
 An inserted/deleted record is reported at the first positional mismatch, including
