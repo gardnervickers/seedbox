@@ -795,6 +795,99 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
 }
 
 #[test]
+fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
+    fixture(|base| {
+        let mut prepared = base.prepared.clone();
+        let hash = prepared.kernel.clone();
+        prepared
+            .placement
+            .insert("scenario".into(), "scenario-machine".into());
+        prepared
+            .guests
+            .insert("scenario-machine".into(), hash.clone());
+        let check = Check {
+            service: "scenario".into(),
+            exit_code: 0,
+        };
+        let control = seedbox::config::Control {
+            service: "scenario".into(),
+        };
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            check: &check,
+            control: Some(&control),
+            ..*base
+        };
+        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let t = 10_000_000;
+        let a = t + latency;
+        // The guest acknowledges after admission; the heal waits for it too.
+        let e = a + 1_000;
+        let t2 = e + latency + 1;
+        let a2 = t2 + latency;
+        let e2 = a2 + 2_000;
+        let mut raw = report();
+        raw["machines"].as_array_mut().unwrap().push(json!({"name":"scenario-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}));
+        raw["control_latency_ns"] = json!(latency);
+        let call = json!({"version":1,"id":1,"op":"clock_skew","target":{"service":"server"},"max_offset_ns":1_000_000_000});
+        let heal = json!({"version":1,"id":2,"op":"heal","handle":"p1"});
+        let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000u64,"action":"clock_skew","handle":"p1","machine":"server-machine","max_offset_ns":1_000_000_000});
+        let heal_plan = json!({"id":2,"at_ns":a2,"deadline_ns":a2+5_000_000_000u64,"action":"heal","handle":"p1"});
+        raw["control_history"] = json!([
+            {"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1","offset_ns":-12345},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":e+latency},"delivered_at_ns":e+latency},
+            {"relay_id":2,"request":heal,"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":t2,"admitted_at_ns":a2,"effect_at_ns":e2,"replied_at_ns":e2+latency},"delivered_at_ns":e2+latency}
+        ]);
+        raw["faults"] = json!([
+            {"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":e,"action":"clock_skew","machine":"server-machine","status":"applied","detail":"handle=p1; guest wall clock stepped by -12345 ns","offset_ns":-12345},
+            {"id":2,"request":heal_plan,"requested_at_ns":a2,"applied_at_ns":e2,"action":"heal","machine":null,"status":"applied","detail":"handle=p1; guest wall clock stepped by 12345 ns","offset_ns":12345}
+        ]);
+        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        assert_eq!(result.faults[0].action, "clock_skew");
+        assert_eq!(result.faults[0].service, "server");
+        assert_eq!(result.faults[0].applied_at_ns, e);
+        assert_eq!(result.faults[1].applied_at_ns, e2);
+        for (key, value) in [
+            ("max_offset_ns", json!(0)),
+            ("offset_ns", json!(5)),
+            ("target", json!({"service":"scenario"})),
+        ] {
+            let mut bad = raw.clone();
+            bad["control_history"][0]["request"][key] = value;
+            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        }
+        for handle in [json!(""), json!(null), json!("p2")] {
+            let mut bad = raw.clone();
+            bad["control_history"][0]["response"]["result"]["handle"] = handle;
+            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        }
+        // A heal of a handle that is not a clock skew still applies at admission.
+        let mut bad = raw.clone();
+        bad["control_history"][1]["request"]["handle"] = json!("p9");
+        bad["faults"][1]["request"]["handle"] = json!("p9");
+        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        // An unavailable skew keeps its allocated handle in the error reply.
+        let mut gone = raw.clone();
+        gone["control_history"].as_array_mut().unwrap().pop();
+        gone["faults"].as_array_mut().unwrap().pop();
+        gone["control_history"][0]["response"] = json!({"version":1,"id":1,"ok":false,"error":{"code":"target_unavailable","message":"target machine crashed before the process effect","handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":e+latency});
+        gone["control_history"][0]["fault_id"] = json!(1);
+        gone["faults"][0]["status"] = json!("unavailable");
+        gone["faults"][0]["applied_at_ns"] = json!(null);
+        gone["machines"][1]["crashed_incarnations"] = json!([{"crashed_at_ns":e}]);
+        let checked = vmm::report(&serde_json::to_vec(&gone).unwrap(), &request);
+        let mut missing = gone.clone();
+        missing["control_history"][0]["response"]["error"]
+            .as_object_mut()
+            .unwrap()
+            .remove("handle");
+        assert!(vmm::report(&serde_json::to_vec(&missing).unwrap(), &request).is_err());
+        checked.unwrap();
+    });
+}
+
+#[test]
 fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time() {
     fixture(|base| {
         let mut prepared = base.prepared.clone();

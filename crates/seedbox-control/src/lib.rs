@@ -1,5 +1,7 @@
 //! Version-one language-neutral guest control schema. No transport or scheduler.
 pub const PROCESS_EFFECT_TIMEOUT_NS: u64 = 5_000_000_000;
+/// Largest wall-clock skew, fixed or seeded, in either direction: one year.
+pub const MAX_CLOCK_OFFSET_NS: u64 = 365 * 86_400 * 1_000_000_000;
 
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, num::NonZeroU32};
@@ -144,6 +146,14 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "NetworkFaults::is_off")]
         network_faults: NetworkFaults,
     },
+    /// Step one machine's CLOCK_REALTIME by a fixed or seeded signed offset.
+    ClockSkew {
+        target: Target,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ns: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_offset_ns: Option<u64>,
+    },
     Heal {
         handle: String,
     },
@@ -260,6 +270,18 @@ pub enum Action {
     Heal {
         handle: String,
     },
+    /// Step the machine's wall clock (CLOCK_REALTIME) by `offset_ns`, or by an
+    /// offset drawn uniformly from [-max_offset_ns, max_offset_ns] on the
+    /// machine's `clock/<machine>` stream. Monotonic time is untouched; heal
+    /// steps the clock back by the same offset.
+    ClockSkew {
+        handle: String,
+        machine: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ns: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_offset_ns: Option<u64>,
+    },
     /// Freeze the machine's CPU and devices; the world goes on.
     Pause {
         machine: String,
@@ -286,6 +308,7 @@ impl Action {
             Self::Partition { .. } => "partition",
             Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
+            Self::ClockSkew { .. } => "clock_skew",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
@@ -299,9 +322,24 @@ impl Action {
             | Self::Pause { machine }
             | Self::Resume { machine }
             | Self::Crash { machine }
-            | Self::Reboot { machine } => Some(machine),
+            | Self::Reboot { machine }
+            | Self::ClockSkew { machine, .. } => Some(machine),
             _ => None,
         }
+    }
+}
+/// Exactly one of a fixed nonzero offset or a seeded positive bound, each
+/// within [`MAX_CLOCK_OFFSET_NS`].
+pub fn validate_clock_skew(
+    offset_ns: Option<i64>,
+    max_offset_ns: Option<u64>,
+) -> Result<(), String> {
+    match (offset_ns, max_offset_ns) {
+        (Some(o), None) if o != 0 && o.unsigned_abs() <= MAX_CLOCK_OFFSET_NS => Ok(()),
+        (None, Some(m)) if m != 0 && m <= MAX_CLOCK_OFFSET_NS => Ok(()),
+        _ => Err(format!(
+            "clock_skew needs exactly one of a nonzero offset_ns or a positive max_offset_ns, each at most {MAX_CLOCK_OFFSET_NS}"
+        )),
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

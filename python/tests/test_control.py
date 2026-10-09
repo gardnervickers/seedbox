@@ -9,7 +9,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from seedbox import Controller, FaultError, Machine, Partition, ProtocolError, Shape, World
+from seedbox import ClockSkew, Controller, FaultError, Machine, Partition, ProtocolError, Shape, World
 
 
 def reply(request_id=1, result=None, **changes):
@@ -119,6 +119,29 @@ class ControlTests(unittest.TestCase):
             world.heal(shaped)
         self.assertEqual(peer.requests[0], {"version": 1, "id": 1, "op": "shape", "from": [{"service": "client"}], "to": [{"machine": "server-vm"}], "latency_ns": 20_000_000, "jitter_ns": 1_000_000, "loss_ppm": 500_000})
         self.assertEqual(peer.requests[1]["handle"], "p1")
+
+    def test_clock_skew_sends_one_offset_kind_and_returns_healable_handle(self):
+        peer = Peer(reply(result={"handle": "p1", "offset_ns": -7}) + reply(2, {"handle": "p2", "offset_ns": 5}) + reply(3))
+        with World(peer) as world:
+            seeded = world.clock_skew("server", max_offset=1_000)
+            self.assertEqual(seeded, ClockSkew("p1", -7, seeded.effect))
+            fixed = world.clock_skew(Machine("db-vm"), offset=5)
+            self.assertEqual(fixed.offset_ns, 5)
+            world.heal(seeded)
+        self.assertEqual(peer.requests, [
+            {"version": 1, "id": 1, "op": "clock_skew", "target": {"service": "server"}, "max_offset_ns": 1_000},
+            {"version": 1, "id": 2, "op": "clock_skew", "target": {"machine": "db-vm"}, "offset_ns": 5},
+            {"version": 1, "id": 3, "op": "heal", "handle": "p1"},
+        ])
+
+    def test_clock_skew_rejects_invalid_local_values(self):
+        peer = Peer(b"")
+        with World(peer) as world:
+            for kwargs in [{}, {"offset": 1, "max_offset": 1}, {"offset": 0}, {"max_offset": 0}, {"max_offset": -1},
+                           {"offset": 1.5}, {"offset": True}, {"offset": 365 * 86_400 * 10**9 + 1}]:
+                with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                    world.clock_skew("server", **kwargs)
+        self.assertEqual(peer.requests, [])
 
     def test_connection_discovery_drop_and_heal_preserve_explicit_zero_evidence(self):
         connection = {"from": "server-vm", "to": "client-vm", "src_addr": "10.0.0.2",

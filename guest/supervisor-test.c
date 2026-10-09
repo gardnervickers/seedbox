@@ -5,6 +5,9 @@ static int application_setrlimit(int resource, const struct rlimit *limit);
 #define setrlimit application_setrlimit
 static int readiness_ioperm(unsigned long first, unsigned long count, int enabled);
 static void readiness_outl(uint32_t id, unsigned short port);
+#include <sys/timex.h>
+static int test_adjtimex(struct timex *adjustment);
+#define SEEDBOX_ADJTIMEX test_adjtimex
 #define SEEDBOX_READY_IOPERM readiness_ioperm
 #define SEEDBOX_READY_OUTL readiness_outl
 #define SEEDBOX_TEST_READY_DELAY_NS 10000000ULL
@@ -45,6 +48,14 @@ static void readiness_outl(uint32_t id, unsigned short port) {
     assert(readiness_permissions && !readiness_writes);
     assert(id == SEEDBOX_READY_ID && port == SEEDBOX_EFFECT_PORT);
     readiness_writes = 1;
+}
+static struct timex last_adjustment;
+static int adjustments;
+static int test_adjtimex(struct timex *adjustment) {
+    last_adjustment = *adjustment; adjustments++;
+    /* Model the kernel's refusal of a wall clock before boot. */
+    if (adjustment->time.tv_sec < -1000000) { errno = EINVAL; return -1; }
+    return TIME_OK;
 }
 static void test_cmdline(const char *path, const char *text) {
     int fd = open(path, O_WRONLY|O_CREAT|O_TRUNC, 0600); assert(fd >= 0);
@@ -120,6 +131,22 @@ int main(int argc, char **argv) {
     char failed[]="start 4"; control(failed,&child); assert(child<0);
     n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0; assert(strstr(buffer,"SEEDBOX_FAILURE id=4"));
     assert(waitpid(-1,&status,WNOHANG)==-1 && errno==ECHILD);
+    /* A clock step is one ADJ_SETOFFSET with a normalized nanosecond field,
+     * acknowledged like a process effect; it leaves the process alone. */
+    struct { const char *command; long long sec, nsec; } clock_steps[] = {
+        {"clock_step 5 1500000001", 1, 500000001}, {"clock_step 6 -1", -1, 999999999},
+        {"clock_step 7 -2000000000", -2, 0}, {"clock_step 8 0", 0, 0}};
+    for (unsigned i = 0; i < sizeof(clock_steps)/sizeof(*clock_steps); i++) {
+        char command[64]; strcpy(command, clock_steps[i].command);
+        control(command, &child); assert(child < 0 && adjustments == (int)i + 1);
+        assert(last_adjustment.modes == (ADJ_SETOFFSET | ADJ_NANO));
+        assert(last_adjustment.time.tv_sec == clock_steps[i].sec && last_adjustment.time.tv_usec == clock_steps[i].nsec);
+        n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0;
+        char expected[64]; snprintf(expected, sizeof(expected), "SEEDBOX_EFFECT id=%u action=clock_step", 5 + i);
+        assert(strstr(buffer, expected));
+    }
+    char rejected[] = "clock_step 9 -9000000000000000"; control(rejected, &child);
+    n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0; assert(strstr(buffer,"SEEDBOX_FAILURE id=9 action=clock_step"));
     /* The public RPC socket is created only from an exact authoritative boot
      * token; image environment entries cannot enable it on other guests. */
     char directory[] = "/tmp/seedbox-relay-XXXXXX"; assert(mkdtemp(directory));

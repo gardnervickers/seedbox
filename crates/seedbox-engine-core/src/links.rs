@@ -91,6 +91,9 @@ pub struct Links {
     jitter: BTreeMap<Pair, Rng>,
     network_streams: Streams,
     network_used: bool,
+    /// Per-machine `clock/<machine>` streams for seeded clock skew; drawn
+    /// only when a seeded skew is applied.
+    clock: BTreeMap<usize, Rng>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -133,6 +136,7 @@ impl Links {
             jitter: BTreeMap::new(),
             network_streams: Streams::default(),
             network_used: false,
+            clock: BTreeMap::new(),
         };
         links.reseed(seed, names);
         Ok(links)
@@ -204,6 +208,14 @@ impl Links {
         self.network_streams.reseed(seed, identity, names);
         self.loss.clear();
         self.jitter.clear();
+        self.clock = (0..names.len())
+            .map(|m| {
+                (
+                    m,
+                    Rng::branch(seed, identity, &format!("clock/{}", names[m])),
+                )
+            })
+            .collect();
         for a in 0..names.len() {
             for b in 0..names.len() {
                 if a != b {
@@ -222,6 +234,16 @@ impl Links {
                 }
             }
         }
+    }
+    /// A wall-clock offset drawn uniformly from [-max, max] on machine `m`'s stream.
+    pub fn clock_offset(&mut self, m: usize, max: u64) -> Result<i64, String> {
+        let span = max
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(1))
+            .filter(|_| i64::try_from(max).is_ok())
+            .ok_or("clock skew bound overflow")?;
+        let rng = self.clock.get_mut(&m).ok_or("unknown clock machine")?;
+        Ok(rng.below(span) as i64 - max as i64)
     }
     /// Advance both named streams for deterministic diagnostics and acceptance.
     #[doc(hidden)]
