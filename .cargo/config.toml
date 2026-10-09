@@ -3,8 +3,8 @@
 [alias]
 # Apply the wrapper to these invocations and their dependencies only.
 # Do not move it (or target-dir) into [build]: other engines have separate identities.
-build-vmm = "build --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target --config build.rustc-wrapper='harness/vmm-rustc.py'"
-test-vmm = "test --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target --config build.rustc-wrapper='harness/vmm-rustc.py'"
+build-vmm = "build --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target"
+test-vmm = "test --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target"
 build-arm64 = "build --release --locked --manifest-path crates/seedbox-arm64/Cargo.toml --target-dir crates/seedbox-arm64/target"
 test-arm64 = "test --release --locked --manifest-path crates/seedbox-arm64/Cargo.toml --target-dir crates/seedbox-arm64/target"
 

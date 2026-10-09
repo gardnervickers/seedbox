@@ -1,5 +1,5 @@
 {
- "_comment": "EXPERIMENT ONLY (#60 link-policy controls). KERNEL/INITRD replaced by run-links.sh.",
+ "_comment": "EXPERIMENT ONLY (#60 link-policy controls). KERNEL/INITRD are replaced by the caller.",
  "kernel": "KERNEL",
  "mem_mb": 256,
  "duration_ns": 9000000000,

@@ -1,5 +1,4 @@
 // Exercise the actual portable device implementation without requiring KVM.
-#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/virtio_console.rs"]
 mod virtio_console;
 use virtio_console::VirtioConsole;

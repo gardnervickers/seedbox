@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::io::{Read, Write};
+use std::sync::Arc;
 
 pub const SECTOR: usize = 512;
 
@@ -61,12 +61,22 @@ fn update_fault_model_digest(model: DiskFaultModel, h: &mut Sha256) {
     h.update(model.survival_probability.to_bits().to_le_bytes());
 }
 
-fn seeded_survival_branch(model: DiskFaultModel, seed: u64, identity: Option<&str>, machine: &str, incarnation: u32) -> Option<Rng> {
+fn seeded_survival_branch(
+    model: DiskFaultModel,
+    seed: u64,
+    identity: Option<&str>,
+    machine: &str,
+    incarnation: u32,
+) -> Option<Rng> {
     if model.survival_probability == 0.0 {
         None
     } else {
         debug_assert_eq!(model.sector_bytes, SECTOR);
-        Some(Rng::branch(seed, identity, &format!("disk-loss/{machine}/{incarnation}")))
+        Some(Rng::branch(
+            seed,
+            identity,
+            &format!("disk-loss/{machine}/{incarnation}"),
+        ))
     }
 }
 
@@ -104,18 +114,26 @@ impl Disk {
         let (base, capacity) = match (image, capacity) {
             (Some(bytes), want) => {
                 if bytes.len() % SECTOR != 0 || bytes.is_empty() {
-                    return Err(format!("disk image of {} bytes is not a whole number of {SECTOR}-byte sectors", bytes.len()));
+                    return Err(format!(
+                        "disk image of {} bytes is not a whole number of {SECTOR}-byte sectors",
+                        bytes.len()
+                    ));
                 }
                 let sectors = (bytes.len() / SECTOR) as u64;
                 if want.is_some_and(|w| w != sectors) {
-                    return Err(format!("disk image has {sectors} sectors, config says {}", want.unwrap()));
+                    return Err(format!(
+                        "disk image has {sectors} sectors, config says {}",
+                        want.unwrap()
+                    ));
                 }
                 (Some(Arc::<[u8]>::from(bytes)), sectors)
             }
             (None, Some(sectors)) if sectors > 0 => (None, sectors),
             (None, _) => return Err("disk needs an image or a size".into()),
         };
-        let base_sha256 = base.as_ref().map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+        let base_sha256 = base
+            .as_ref()
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
         Ok(Self {
             base,
             capacity,
@@ -148,11 +166,21 @@ impl Disk {
     /// A runtime branch keys future loss on its full identity. Continuations
     /// retain the ordinary seedbox-v1 stream. Selection is atomic at crash;
     /// there is no partially consumed survival RNG to capture.
-    pub fn crashed_branch(&self, seed: u64, identity: Option<&str>, machine: &str, incarnation: u32) -> (Disk, u64) {
-        let Some(mut rng) = seeded_survival_branch(self.fault_model, seed, identity, machine, incarnation) else {
+    pub fn crashed_branch(
+        &self,
+        seed: u64,
+        identity: Option<&str>,
+        machine: &str,
+        incarnation: u32,
+    ) -> (Disk, u64) {
+        let Some(mut rng) =
+            seeded_survival_branch(self.fault_model, seed, identity, machine, incarnation)
+        else {
             return self.crashed();
         };
-        self.crashed_keeping(|sector, data| sector_survives(self.fault_model, &mut rng, sector, data))
+        self.crashed_keeping(|sector, data| {
+            sector_survives(self.fault_model, &mut rng, sector, data)
+        })
     }
 
     /// Stream a crash survivor overlay without rebasing its immutable image.
@@ -162,20 +190,34 @@ impl Disk {
             return Err("crash transfer contains volatile sectors".into());
         }
         validate_disk_fault_model(self.fault_model).map_err(str::to_owned)?;
-        let mut write = |bytes: &[u8]| out.write_all(bytes)
-            .map_err(|e| format!("write crash transfer: {e}"));
+        let mut write = |bytes: &[u8]| {
+            out.write_all(bytes)
+                .map_err(|e| format!("write crash transfer: {e}"))
+        };
         write(b"SBXDISK1")?;
         write(&self.capacity.to_le_bytes())?;
-        write(&self.fault_model.survival_probability.to_bits().to_le_bytes())?;
+        write(
+            &self
+                .fault_model
+                .survival_probability
+                .to_bits()
+                .to_le_bytes(),
+        )?;
         write(&[u8::from(self.base_sha256.is_some())])?;
-        write(self.base_sha256.as_deref().unwrap_or(&"0".repeat(64)).as_bytes())?;
+        write(
+            self.base_sha256
+                .as_deref()
+                .unwrap_or(&"0".repeat(64))
+                .as_bytes(),
+        )?;
         write(&(self.stable.len() as u64).to_le_bytes())?;
         for (sector, data) in &self.stable {
             write(&sector.to_le_bytes())?;
             write(&data[..])?;
         }
         write(self.digest().as_bytes())?;
-        out.flush().map_err(|e| format!("flush crash transfer: {e}"))
+        out.flush()
+            .map_err(|e| format!("flush crash transfer: {e}"))
     }
 
     /// Validate a survivor overlay against an unmodified configured base.
@@ -184,7 +226,9 @@ impl Disk {
     pub fn read_crash_transfer(mut base: Disk, mut input: impl Read) -> Result<Disk, String> {
         fn read<const N: usize>(input: &mut impl Read) -> Result<[u8; N], String> {
             let mut bytes = [0; N];
-            input.read_exact(&mut bytes).map_err(|e| format!("read crash transfer: {e}"))?;
+            input
+                .read_exact(&mut bytes)
+                .map_err(|e| format!("read crash transfer: {e}"))?;
             Ok(bytes)
         }
         if !base.stable.is_empty() || !base.volatile.is_empty() {
@@ -200,7 +244,12 @@ impl Disk {
         if capacity != base.capacity
             || survival != base.fault_model.survival_probability.to_bits()
             || has_base != u8::from(base.base_sha256.is_some())
-            || base_hash.as_slice() != base.base_sha256.as_deref().unwrap_or(&"0".repeat(64)).as_bytes()
+            || base_hash.as_slice()
+                != base
+                    .base_sha256
+                    .as_deref()
+                    .unwrap_or(&"0".repeat(64))
+                    .as_bytes()
         {
             return Err("crash transfer base, capacity or fault model mismatch".into());
         }
@@ -215,7 +264,8 @@ impl Disk {
             if sector >= capacity || previous.is_some_and(|p| sector <= p) {
                 return Err("crash transfer sectors are unordered or out of range".into());
             }
-            base.stable.insert(sector, Box::new(read::<SECTOR>(&mut input)?));
+            base.stable
+                .insert(sector, Box::new(read::<SECTOR>(&mut input)?));
             previous = Some(sector);
         }
         let digest = read::<64>(&mut input)?;
@@ -223,7 +273,11 @@ impl Disk {
             return Err("crash transfer digest mismatch".into());
         }
         let mut trailing = [0];
-        if input.read(&mut trailing).map_err(|e| format!("read crash transfer trailer: {e}"))? != 0 {
+        if input
+            .read(&mut trailing)
+            .map_err(|e| format!("read crash transfer trailer: {e}"))?
+            != 0
+        {
             return Err("crash transfer has trailing data".into());
         }
         Ok(base)
@@ -272,7 +326,8 @@ impl Disk {
     pub fn write(&mut self, sector: u64, data: &[u8]) -> Result<(), DiskError> {
         self.check(sector, data.len())?;
         for (i, chunk) in data.chunks(SECTOR).enumerate() {
-            self.volatile.insert(sector + i as u64, Box::new(chunk.try_into().unwrap()));
+            self.volatile
+                .insert(sector + i as u64, Box::new(chunk.try_into().unwrap()));
         }
         Ok(())
     }
@@ -297,7 +352,10 @@ impl Disk {
     /// The seeded policy decides here, from its own RNG domain. Returns the
     /// next incarnation's disk and the number of volatile sectors lost.
     pub fn crashed_keeping(&self, mut survives: impl FnMut(u64, &[u8]) -> bool) -> (Disk, u64) {
-        let mut next = Disk { volatile: BTreeMap::new(), ..self.clone() };
+        let mut next = Disk {
+            volatile: BTreeMap::new(),
+            ..self.clone()
+        };
         let mut lost = 0;
         for (&s, data) in &self.volatile {
             if survives(s, &data[..]) {
@@ -387,9 +445,16 @@ mod tests {
         d.write(5, &fill(b'C', 1)).unwrap();
         let (after, lost) = d.crashed_keeping(|s, data| s == 1 && data[0] == b'B');
         assert_eq!(lost, 2);
-        assert_eq!([0, 1, 5].map(|s| at(&after, s)), [b'A', b'B', 0], "sector 1 kept, 0 and 5 lost");
+        assert_eq!(
+            [0, 1, 5].map(|s| at(&after, s)),
+            [b'A', b'B', 0],
+            "sector 1 kept, 0 and 5 lost"
+        );
         assert_eq!(after.volatile_sectors(), 0);
-        assert_eq!(d.crashed_keeping(|_, _| false).0.digest(), d.crashed().0.digest());
+        assert_eq!(
+            d.crashed_keeping(|_, _| false).0.digest(),
+            d.crashed().0.digest()
+        );
     }
 
     #[test]
@@ -403,58 +468,114 @@ mod tests {
         for seed in [0, 1009, 1010, u64::MAX] {
             let (after, lost) = d
                 .clone()
-                .with_fault_model(DiskFaultModel { sector_bytes: SECTOR, survival_probability: 0.0 })
+                .with_fault_model(DiskFaultModel {
+                    sector_bytes: SECTOR,
+                    survival_probability: 0.0,
+                })
                 .crashed_seeded(seed, "server", 7);
             assert_eq!(after.digest(), baseline.0.digest());
             assert_eq!(lost, baseline.1);
-            assert_eq!(after.fault_model(), DiskFaultModel { sector_bytes: SECTOR, survival_probability: 0.0 });
-            assert_eq!((0..8).map(|s| at(&after, s)).collect::<Vec<_>>(), vec![b'A', b'A', 0, 0, 0, 0, 0, 0]);
+            assert_eq!(
+                after.fault_model(),
+                DiskFaultModel {
+                    sector_bytes: SECTOR,
+                    survival_probability: 0.0
+                }
+            );
+            assert_eq!(
+                (0..8).map(|s| at(&after, s)).collect::<Vec<_>>(),
+                vec![b'A', b'A', 0, 0, 0, 0, 0, 0]
+            );
         }
-        assert_eq!(d.digest(), before, "crash selection leaves the source intact");
+        assert_eq!(
+            d.digest(),
+            before,
+            "crash selection leaves the source intact"
+        );
     }
 
     #[test]
     fn seeded_survival_is_per_sector_repeatable_and_domain_separated() {
         let mut d = Disk::new(None, Some(32))
             .unwrap()
-            .with_fault_model(DiskFaultModel { sector_bytes: SECTOR, survival_probability: 0.5 });
+            .with_fault_model(DiskFaultModel {
+                sector_bytes: SECTOR,
+                survival_probability: 0.5,
+            });
         // One write spanning 32 sectors must be able to tear within the write.
         d.write(0, &fill(b'V', 32)).unwrap();
         let before = d.digest();
         let crash = |seed, name, incarnation| d.crashed_seeded(seed, name, incarnation);
         let (after, lost) = crash(1009, "server", 0);
         let survivors: Vec<_> = (0..32).filter(|&s| at(&after, s) == b'V').collect();
-        assert_eq!(survivors, vec![0, 3, 4, 5, 11, 13, 14, 15, 23, 25, 26, 29, 30]);
+        assert_eq!(
+            survivors,
+            vec![0, 3, 4, 5, 11, 13, 14, 15, 23, 25, 26, 29, 30]
+        );
         assert_eq!(lost, 32 - survivors.len() as u64);
         assert_eq!(after.volatile_sectors(), 0);
-        assert_eq!(after.fault_model(), DiskFaultModel { sector_bytes: SECTOR, survival_probability: 0.5 });
+        assert_eq!(
+            after.fault_model(),
+            DiskFaultModel {
+                sector_bytes: SECTOR,
+                survival_probability: 0.5
+            }
+        );
         assert_eq!(after.digest(), crash(1009, "server", 0).0.digest());
         assert_ne!(after.digest(), crash(1010, "server", 0).0.digest());
         assert_ne!(after.digest(), crash(1009, "other", 0).0.digest());
         assert_ne!(after.digest(), crash(1009, "server", 1).0.digest());
         assert_eq!(d.digest(), before);
-        assert_eq!(after.crashed_seeded(1010, "server", 1).0.digest(), after.digest(), "survivors are stable across later crashes");
-        assert_eq!(d.clone().crashed_seeded(1009, "server", 0).0.digest(), after.digest(), "a fork retains the policy and layers");
+        assert_eq!(
+            after.crashed_seeded(1010, "server", 1).0.digest(),
+            after.digest(),
+            "survivors are stable across later crashes"
+        );
+        assert_eq!(
+            d.clone().crashed_seeded(1009, "server", 0).0.digest(),
+            after.digest(),
+            "a fork retains the policy and layers"
+        );
     }
 
     #[test]
     fn checkpoint_restore_keeps_survival_inputs_and_branches_future_loss() {
-        let mut d = Disk::new(None, Some(64)).unwrap().with_fault_model(DiskFaultModel {sector_bytes:512,survival_probability:0.5});
+        let mut d = Disk::new(None, Some(64))
+            .unwrap()
+            .with_fault_model(DiskFaultModel {
+                sector_bytes: 512,
+                survival_probability: 0.5,
+            });
         d.write(0, &fill(b'A', 64)).unwrap();
         d.flush();
         d.write(0, &fill(b'B', 64)).unwrap();
         let saved = d.clone();
         let parent = d.crashed_seeded(7, "server", 3);
-        let identities = [crate::checkpoint::branch_identity("parent", 100, 42),
-            crate::checkpoint::branch_identity("parent", 200, 42)];
+        let identities = [
+            crate::checkpoint::branch_identity("parent", 100, 42),
+            crate::checkpoint::branch_identity("parent", 200, 42),
+        ];
         let mut branches = Vec::new();
         for id in [&identities[0], &identities[1], &identities[0]] {
             d = saved.clone();
-            assert_eq!(d.fault_model(), DiskFaultModel {sector_bytes:512,survival_probability:0.5});
+            assert_eq!(
+                d.fault_model(),
+                DiskFaultModel {
+                    sector_bytes: 512,
+                    survival_probability: 0.5
+                }
+            );
             let (after, lost) = d.crashed_branch(42, Some(id), "server", 3);
             let mut rng = Rng::branch(42, Some(id), "disk-loss/server/3");
             for sector in 0..64 {
-                assert_eq!(at(&after, sector), if sector_survives(d.fault_model, &mut rng, sector, &[b'B';512]) { b'B' } else { b'A' });
+                assert_eq!(
+                    at(&after, sector),
+                    if sector_survives(d.fault_model, &mut rng, sector, &[b'B'; 512]) {
+                        b'B'
+                    } else {
+                        b'A'
+                    }
+                );
             }
             assert!(lost > 0 && lost < 64);
             assert_eq!(after.volatile_sectors(), 0);
@@ -464,17 +585,30 @@ mod tests {
         assert_ne!(branches[0].0, branches[1].0);
         assert_ne!(branches[0].0, parent.0.digest());
         let restored = saved.crashed_branch(7, None, "server", 3);
-        assert_eq!((restored.0.digest(), restored.1), (parent.0.digest(), parent.1));
+        assert_eq!(
+            (restored.0.digest(), restored.1),
+            (parent.0.digest(), parent.1)
+        );
         // A down snapshot has already sampled survival: later branches cannot
         // change those stable survivors without another write.
-        assert_eq!(parent.0.crashed_branch(42, Some(&identities[0]), "server", 4).0.digest(), parent.0.digest());
+        assert_eq!(
+            parent
+                .0
+                .crashed_branch(42, Some(&identities[0]), "server", 4)
+                .0
+                .digest(),
+            parent.0.digest()
+        );
     }
 
     #[test]
     fn seeded_loss_only_considers_unflushed_latest_versions() {
         let mut d = Disk::new(Some(fill(b'.', 64)), None)
             .unwrap()
-            .with_fault_model(DiskFaultModel { sector_bytes: SECTOR, survival_probability: 0.5 });
+            .with_fault_model(DiskFaultModel {
+                sector_bytes: SECTOR,
+                survival_probability: 0.5,
+            });
         d.write(0, &fill(b'A', 48)).unwrap();
         d.flush();
         d.write(16, &fill(b'B', 32)).unwrap();
@@ -490,33 +624,62 @@ mod tests {
         }
         let mut shifted = Disk::new(None, Some(32))
             .unwrap()
-            .with_fault_model(DiskFaultModel { sector_bytes: SECTOR, survival_probability: 0.5 });
+            .with_fault_model(DiskFaultModel {
+                sector_bytes: SECTOR,
+                survival_probability: 0.5,
+            });
         shifted.write(0, &fill(b'C', 32)).unwrap();
         let shifted = shifted.crashed_seeded(1009, "server", 0).0;
         for s in 0..32 {
-            assert_eq!(at(&after, s + 16) == b'C', at(&shifted, s) == b'C', "stable sectors consume no draws");
+            assert_eq!(
+                at(&after, s + 16) == b'C',
+                at(&shifted, s) == b'C',
+                "stable sectors consume no draws"
+            );
         }
         d.flush();
         for seed in [0, 1009, 1010] {
             let (after, lost) = d.crashed_seeded(seed, "server", 0);
             assert_eq!(lost, 0);
-            assert_eq!(after.digest(), d.digest(), "completed FLUSH covers every earlier write");
+            assert_eq!(
+                after.digest(),
+                d.digest(),
+                "completed FLUSH covers every earlier write"
+            );
         }
     }
 
     #[test]
     fn every_survivor_subset_satisfies_the_crash_contract() {
         use Op::*;
-        let history = [W(0, 1), W(1, 2), W(2, 3), F, W(0, 4), W(2, 5), W(2, 6), W(5, 7)];
+        let history = [
+            W(0, 1),
+            W(1, 2),
+            W(2, 3),
+            F,
+            W(0, 4),
+            W(2, 5),
+            W(2, 6),
+            W(5, 7),
+        ];
         let stable = oracle(&history);
         let mut latest = BTreeMap::new();
         let mut d = Disk::new(None, Some(8))
             .unwrap()
-            .with_fault_model(DiskFaultModel { sector_bytes: SECTOR, survival_probability: 0.5 });
+            .with_fault_model(DiskFaultModel {
+                sector_bytes: SECTOR,
+                survival_probability: 0.5,
+            });
         for op in history {
             match op {
-                W(s, b) => { d.write(s, &fill(b, 1)).unwrap(); latest.insert(s, b); }
-                F => { d.flush(); latest.clear(); }
+                W(s, b) => {
+                    d.write(s, &fill(b, 1)).unwrap();
+                    latest.insert(s, b);
+                }
+                F => {
+                    d.flush();
+                    latest.clear();
+                }
             }
         }
         let sectors: Vec<_> = latest.keys().copied().collect();
@@ -526,7 +689,9 @@ mod tests {
             let (after, lost) = d.crashed_keeping(|s, _| keep(s));
             let mut want = stable.clone();
             for (&s, &b) in &latest {
-                if keep(s) { want[s as usize] = b; }
+                if keep(s) {
+                    want[s as usize] = b;
+                }
             }
             assert_eq!((0..8).map(|s| at(&after, s)).collect::<Vec<_>>(), want);
             assert_eq!(lost, sectors.len() as u64 - mask.count_ones() as u64);
@@ -543,7 +708,10 @@ mod tests {
             d.write(7, &fill(b'x', 1)).unwrap();
             d = d.crashed().0;
         }
-        assert_eq!([0, 1, 2, 3, 7].map(|s| at(&d, s)), [b'a', b'b', b'c', b'.', b'.']);
+        assert_eq!(
+            [0, 1, 2, 3, 7].map(|s| at(&d, s)),
+            [b'a', b'b', b'c', b'.', b'.']
+        );
     }
 
     #[test]
@@ -561,12 +729,18 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    enum Op { W(u64, u8), F }
+    enum Op {
+        W(u64, u8),
+        F,
+    }
 
     /// What a crash after `history` must leave: each sector's last write
     /// before the last completed flush, and nothing written after it.
     fn oracle(history: &[Op]) -> Vec<u8> {
-        let last_flush = history.iter().rposition(|op| matches!(op, Op::F)).map_or(0, |i| i + 1);
+        let last_flush = history
+            .iter()
+            .rposition(|op| matches!(op, Op::F))
+            .map_or(0, |i| i + 1);
         let mut want = vec![0u8; 8];
         for op in &history[..last_flush] {
             if let Op::W(s, b) = *op {
@@ -577,7 +751,12 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
-    enum Model { Real, EarlyFlushAck, VolatileAsWritethrough, StableErasure }
+    enum Model {
+        Real,
+        EarlyFlushAck,
+        VolatileAsWritethrough,
+        StableErasure,
+    }
 
     fn crash_after(model: Model, history: &[Op]) -> Vec<u8> {
         let mut d = Disk::new(None, Some(8)).unwrap();
@@ -590,7 +769,10 @@ mod tests {
         }
         let after = match model {
             Model::VolatileAsWritethrough => d.clone(),
-            Model::StableErasure => Disk { stable: BTreeMap::new(), ..d.crashed().0 },
+            Model::StableErasure => Disk {
+                stable: BTreeMap::new(),
+                ..d.crashed().0
+            },
             _ => d.crashed().0,
         };
         (0..8).map(|s| at(&after, s)).collect()
@@ -609,8 +791,15 @@ mod tests {
         for h in histories {
             assert_eq!(crash_after(Model::Real, h), oracle(h), "{:?}", Model::Real);
         }
-        for model in [Model::EarlyFlushAck, Model::VolatileAsWritethrough, Model::StableErasure] {
-            assert!(histories.iter().any(|h| crash_after(model, h) != oracle(h)), "{model:?} went undetected");
+        for model in [
+            Model::EarlyFlushAck,
+            Model::VolatileAsWritethrough,
+            Model::StableErasure,
+        ] {
+            assert!(
+                histories.iter().any(|h| crash_after(model, h) != oracle(h)),
+                "{model:?} went undetected"
+            );
         }
     }
 
@@ -627,10 +816,18 @@ mod tests {
             d
         };
         assert_eq!(run(1).digest(), run(1).digest());
-        assert_ne!(run(1).digest(), run(2).digest(), "same bytes, different durability");
+        assert_ne!(
+            run(1).digest(),
+            run(2).digest(),
+            "same bytes, different durability"
+        );
         assert_eq!(run(1).crashed().0.digest(), run(1).crashed().0.digest());
         let zeros = Disk::new(None, Some(8)).unwrap();
         assert_eq!(zeros.base_sha256(), None);
-        assert_ne!(zeros.digest(), Disk::new(Some(vec![0; 8 * SECTOR]), None).unwrap().digest(), "an image is not the zero base");
+        assert_ne!(
+            zeros.digest(),
+            Disk::new(Some(vec![0; 8 * SECTOR]), None).unwrap().digest(),
+            "an image is not the zero base"
+        );
     }
 }

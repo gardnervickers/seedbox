@@ -4,16 +4,15 @@
 #![recursion_limit = "256"]
 
 mod boundary;
-mod output_layout;
 mod management_uart;
-use seedbox_engine_core::{rng,disk,links,control,network_counters,checkpoint};
+mod output_layout;
 #[cfg(test)]
 use seedbox_engine_core::faults;
 #[cfg(test)]
-use seedbox_engine_core::world::{replay_readiness,stop_progress};
+use seedbox_engine_core::world::{replay_readiness, stop_progress};
+use seedbox_engine_core::{checkpoint, control, disk, links, network_counters, rng};
 mod counter;
 mod devices;
-mod world_adapter;
 mod host_control;
 mod machine;
 mod profile;
@@ -21,12 +20,15 @@ mod stepper;
 mod timebase;
 mod undo;
 mod virtio_blk;
-mod virtio_net;
 mod virtio_console;
+mod virtio_net;
+mod world_adapter;
 
 use counter::Counter;
 use machine::pv::PvClock;
-use machine::{BootSpec, Machine, State, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO, BLK_IRQ, BLK_MMIO};
+use machine::{
+    BootSpec, Machine, State, BLK_IRQ, BLK_MMIO, CHANNEL_IRQ, CHANNEL_MMIO, NET_IRQ, NET_MMIO,
+};
 use rng::Rng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -55,7 +57,12 @@ pub struct PerformanceOptions {
 
 impl Default for PerformanceOptions {
     fn default() -> Self {
-        Self { undo_margin: 256, margin: None, pv_watchdog_ms: 20, windowed_skew_us: 0 }
+        Self {
+            undo_margin: 256,
+            margin: None,
+            pv_watchdog_ms: 20,
+            windowed_skew_us: 0,
+        }
     }
 }
 
@@ -70,7 +77,11 @@ impl PerformanceOptions {
             Some("adaptive") | None => None,
             Some(m) => Some(m.parse().map_err(|e| format!("margin: {e}"))?),
         };
-        Ok(Self { undo_margin, margin, ..Self::default() })
+        Ok(Self {
+            undo_margin,
+            margin,
+            ..Self::default()
+        })
     }
 }
 
@@ -115,8 +126,10 @@ impl WorkerOptions {
     /// Parse the standalone worker's existing flag protocol from caller-supplied arguments.
     pub fn from_args(args: &[String], performance: PerformanceOptions) -> Result<Self, String> {
         let config = arg(args, "--config").ok_or("--config required")?.into();
-        let seed = arg(args, "--seed").ok_or("--seed required")?
-            .parse().map_err(|e| format!("seed: {e}"))?;
+        let seed = arg(args, "--seed")
+            .ok_or("--seed required")?
+            .parse()
+            .map_err(|e| format!("seed: {e}"))?;
         let mut fork_seeds = Vec::new();
         if let Some(list) = arg(args, "--fork-seeds") {
             for s in list.split(',') {
@@ -125,31 +138,53 @@ impl WorkerOptions {
         }
         let out = arg(args, "--out").ok_or("--out required")?.into();
         let console_limit = arg(args, "--console-limit")
-            .map(|limit| limit.parse::<usize>().map_err(|error| format!("console limit: {error}")))
+            .map(|limit| {
+                limit
+                    .parse::<usize>()
+                    .map_err(|error| format!("console limit: {error}"))
+            })
             .transpose()?;
         let pv_clock = match arg(args, "--timebase").as_deref() {
             None | Some("counter") => false,
             Some("pv") => true,
             Some(other) => return Err(format!("--timebase {other}: expected counter or pv")),
         };
-        let log_chunk_limit = arg(args,"--log-chunk-limit").map(|v|v.parse::<usize>()).transpose().map_err(|e|e.to_string())?;
+        let log_chunk_limit = arg(args, "--log-chunk-limit")
+            .map(|v| v.parse::<usize>())
+            .transpose()
+            .map_err(|e| e.to_string())?;
         let checkpoint_at_ns = arg(args, "--checkpoint-at-ns");
         if args.iter().any(|a| a == "--checkpoint-at-ns") && checkpoint_at_ns.is_none() {
             return Err("--checkpoint-at-ns requires comma-separated unsigned nanoseconds".into());
         }
         let machine_workers = match arg(args, "--machine-workers") {
             None => 1,
-            Some(n) => n.parse().ok().filter(|n| (1..=64).contains(n)).ok_or("--machine-workers: use 1..64")?,
+            Some(n) => n
+                .parse()
+                .ok()
+                .filter(|n| (1..=64).contains(n))
+                .ok_or("--machine-workers: use 1..64")?,
         };
         let machine_cpus: Vec<usize> = match arg(args, "--machine-cpus") {
             None => Vec::new(),
-            Some(list) => list.split(',').map(|c| c.parse().map_err(|e| format!("--machine-cpus: {e}"))).collect::<Result<_, _>>()?,
+            Some(list) => list
+                .split(',')
+                .map(|c| c.parse().map_err(|e| format!("--machine-cpus: {e}")))
+                .collect::<Result<_, _>>()?,
         };
         if !machine_cpus.is_empty() && machine_cpus.len() != machine_workers {
             return Err("--machine-cpus: give one CPU per machine worker".into());
         }
         Ok(Self {
-            config, seed, fork_seeds, out, pv_clock, log_chunk_limit, checkpoint_at_ns, machine_workers, machine_cpus,
+            config,
+            seed,
+            fork_seeds,
+            out,
+            pv_clock,
+            log_chunk_limit,
+            checkpoint_at_ns,
+            machine_workers,
+            machine_cpus,
             page_timer: args.iter().any(|a| a == "--page-timer"),
             deferred_tx: args.iter().any(|a| a == "--deferred-tx"),
             digest: args.iter().any(|a| a == "--digest"),
@@ -232,17 +267,28 @@ pub struct BootInputs {
 
 /// A machine's `disk`: `{"size_mib": N}` for a zeroed disk, or
 /// `{"image": PATH}` for a raw image (with `size_mib`, it must be that size).
-fn machine_disk(cfg: &Value, path: &dyn Fn(&Value) -> std::path::PathBuf) -> Result<Option<disk::Disk>, String> {
+fn machine_disk(
+    cfg: &Value,
+    path: &dyn Fn(&Value) -> std::path::PathBuf,
+) -> Result<Option<disk::Disk>, String> {
     if cfg.is_null() {
         return Ok(None);
     }
     let fields = cfg.as_object().ok_or("disk must be an object")?;
-    if let Some(key) = fields.keys().find(|k| !matches!(k.as_str(), "size_mib" | "image")) {
+    if let Some(key) = fields
+        .keys()
+        .find(|k| !matches!(k.as_str(), "size_mib" | "image"))
+    {
         return Err(format!("disk: unknown field {key}"));
     }
     let sectors = match &cfg["size_mib"] {
         Value::Null => None,
-        v => Some(v.as_u64().filter(|&m| m > 0 && m <= 1 << 20).ok_or("disk.size_mib must be 1..=1048576")? * 2048),
+        v => Some(
+            v.as_u64()
+                .filter(|&m| m > 0 && m <= 1 << 20)
+                .ok_or("disk.size_mib must be 1..=1048576")?
+                * 2048,
+        ),
     };
     let image = match &cfg["image"] {
         Value::Null => None,
@@ -255,7 +301,13 @@ fn machine_disk(cfg: &Value, path: &dyn Fn(&Value) -> std::path::PathBuf) -> Res
     disk::Disk::new(image, sectors).map(Some)
 }
 
-fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool, rng_seed: [u8; 32]) -> Result<Machine, String> {
+fn boot_machine(
+    kvm: &kvm_ioctls::Kvm,
+    name: &str,
+    b: &BootInputs,
+    barrier: bool,
+    rng_seed: [u8; 32],
+) -> Result<Machine, String> {
     let mut cmdline = b.cmdline.0.clone();
     if barrier {
         cmdline += " seedbox.barrier=1";
@@ -276,7 +328,9 @@ fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool
         page_timer: b.page_timer,
     };
     let mut mach = Machine::new(kvm, name, &spec)?;
-    if let Some(net) = mach.net.as_mut() { net.set_deferred_tx(b.deferred_tx); }
+    if let Some(net) = mach.net.as_mut() {
+        net.set_deferred_tx(b.deferred_tx);
+    }
     mach.com1.output_limit = b.console_limit;
     mach.com2.output_limit = b.console_limit;
     mach.com1.chunks.limit = b.log_chunk_limit;
@@ -291,66 +345,140 @@ fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool
     Ok(mach)
 }
 
-
+use seedbox_engine_core::world::{
+    self as world_core, arm_seed, boot_faults, check_plan_after, entropy_seed, Payload,
+};
 use seedbox_engine_core::world_windowed;
-use seedbox_engine_core::world::{self as world_core, Payload, entropy_seed, boot_faults, check_plan_after, arm_seed};
 type World = world_core::World<Machine>;
 type WorldSnapshot = world_core::WorldSnapshot<Machine>;
 
 /// One segment of the run under the windowed scheduler, on one thread or
 /// the machine worker pool. Returns the outcome word and the scheduler's
 /// report section.
-fn simulate_windowed(world:&mut World,run:&world_windowed::Run,options:&WorkerOptions,host_control:&mut Option<host_control::HostControl>)->Result<(&'static str,Value),String> {
-    let mut boundary=|| {
-        if let Some(control)=host_control.as_mut() {control.boundary().map_err(|e|format!("host control: {e}"))?;}
+fn simulate_windowed(
+    world: &mut World,
+    run: &world_windowed::Run,
+    options: &WorkerOptions,
+    host_control: &mut Option<host_control::HostControl>,
+) -> Result<(&'static str, Value), String> {
+    let mut boundary = || {
+        if let Some(control) = host_control.as_mut() {
+            control
+                .boundary()
+                .map_err(|e| format!("host control: {e}"))?;
+        }
         Ok(())
     };
-    let skew=std::time::Duration::from_micros(options.performance.windowed_skew_us);
-    if options.machine_workers<=1 {
-        return world_windowed::simulate(world,run,skew,&mut boundary);
+    let skew = std::time::Duration::from_micros(options.performance.windowed_skew_us);
+    if options.machine_workers <= 1 {
+        return world_windowed::simulate(world, run, skew, &mut boundary);
     }
     // Each pool thread opens its own clock: the counter counts that thread's
     // guest execution, and the PV watchdog that thread's CPU time.
-    let pv=matches!(world.clock,Clock::Pv(_));
-    let watchdog=std::time::Duration::from_millis(options.performance.pv_watchdog_ms.max(1));
-    let cpus=&options.machine_cpus;
-    let workers=world_windowed::Workers{count:options.machine_workers,skew};
-    world_windowed::simulate_parallel(world,run,workers,|w| {
-        if let Some(&cpu)=cpus.get(w) {pin(cpu)?;}
-        Ok(if pv {Clock::Pv(PvClock::new(watchdog)?)} else {Clock::Counter(Counter::new()?)})
-    },&mut boundary)
+    let pv = matches!(world.clock, Clock::Pv(_));
+    let watchdog = std::time::Duration::from_millis(options.performance.pv_watchdog_ms.max(1));
+    let cpus = &options.machine_cpus;
+    let workers = world_windowed::Workers {
+        count: options.machine_workers,
+        skew,
+    };
+    world_windowed::simulate_parallel(
+        world,
+        run,
+        workers,
+        |w| {
+            if let Some(&cpu) = cpus.get(w) {
+                pin(cpu)?;
+            }
+            Ok(if pv {
+                Clock::Pv(PvClock::new(watchdog)?)
+            } else {
+                Clock::Counter(Counter::new()?)
+            })
+        },
+        &mut boundary,
+    )
 }
 /// Run the world to its end, or with `fork` to its fork point, on one thread.
 #[cfg(test)]
-fn simulate(world:&mut World,cfg:&Value,duration:u64,end_on:&Option<String>,fork:Option<Option<u64>>,host_control:&mut Option<host_control::HostControl>)->Result<&'static str,String> {
-    simulate_to(world,cfg,duration,end_on,fork,None,host_control)
+fn simulate(
+    world: &mut World,
+    cfg: &Value,
+    duration: u64,
+    end_on: &Option<String>,
+    fork: Option<Option<u64>>,
+    host_control: &mut Option<host_control::HostControl>,
+) -> Result<&'static str, String> {
+    simulate_to(world, cfg, duration, end_on, fork, None, host_control)
 }
 /// As [`simulate`], stopping at `checkpoint`.
 #[cfg(test)]
-fn simulate_to(world:&mut World,cfg:&Value,duration:u64,end_on:&Option<String>,fork:Option<Option<u64>>,checkpoint:Option<u64>,host_control:&mut Option<host_control::HostControl>)->Result<&'static str,String> {
-    let run=world_windowed::Run {cfg,duration,end_on,fork,checkpoint,require_barrier:true};
-    let options=WorkerOptions {config:PathBuf::new(),seed:0,fork_seeds:vec![],out:PathBuf::new(),digest:false,host_control:None,console_limit:None,log_chunk_limit:None,
-        pv_clock:false,page_timer:false,deferred_tx:false,checkpoint_at_ns:None,stream_console:false,trace:false,performance:PerformanceOptions::default(),console_trace:None,machine_workers:1,machine_cpus:vec![]};
-    simulate_windowed(world,&run,&options,host_control).map(|(word,_)|word)
+fn simulate_to(
+    world: &mut World,
+    cfg: &Value,
+    duration: u64,
+    end_on: &Option<String>,
+    fork: Option<Option<u64>>,
+    checkpoint: Option<u64>,
+    host_control: &mut Option<host_control::HostControl>,
+) -> Result<&'static str, String> {
+    let run = world_windowed::Run {
+        cfg,
+        duration,
+        end_on,
+        fork,
+        checkpoint,
+        require_barrier: true,
+    };
+    let options = WorkerOptions {
+        config: PathBuf::new(),
+        seed: 0,
+        fork_seeds: vec![],
+        out: PathBuf::new(),
+        digest: false,
+        host_control: None,
+        console_limit: None,
+        log_chunk_limit: None,
+        pv_clock: false,
+        page_timer: false,
+        deferred_tx: false,
+        checkpoint_at_ns: None,
+        stream_console: false,
+        trace: false,
+        performance: PerformanceOptions::default(),
+        console_trace: None,
+        machine_workers: 1,
+        machine_cpus: vec![],
+    };
+    simulate_windowed(world, &run, &options, host_control).map(|(word, _)| word)
 }
 
 /// Pin the calling thread to one CPU.
-fn pin(cpu:usize)->Result<(),String> {
+fn pin(cpu: usize) -> Result<(), String> {
     unsafe {
-        let mut set:libc::cpu_set_t=std::mem::zeroed();
-        libc::CPU_SET(cpu,&mut set);
-        if libc::sched_setaffinity(0,std::mem::size_of_val(&set),&set)!=0 {
-            return Err(format!("pin machine worker to CPU {cpu}: {}",std::io::Error::last_os_error()));
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(cpu, &mut set);
+        if libc::sched_setaffinity(0, std::mem::size_of_val(&set), &set) != 0 {
+            return Err(format!(
+                "pin machine worker to CPU {cpu}: {}",
+                std::io::Error::last_os_error()
+            ));
         }
     }
     Ok(())
 }
-use world_core::reseed_checkpoint;
 #[cfg(test)]
 use world_core::drain_machine_messages;
+use world_core::reseed_checkpoint;
 
-fn release(world:&mut World,cfg:&Value,names:&[String],seed:u64,skew:u64)->Result<(Vec<Value>,Value),String> {
-    world_core::release(world,cfg,names,seed,skew,&mut |name,abi| {
+fn release(
+    world: &mut World,
+    cfg: &Value,
+    names: &[String],
+    seed: u64,
+    skew: u64,
+) -> Result<(Vec<Value>, Value), String> {
+    world_core::release(world, cfg, names, seed, skew, &mut |name, abi| {
         eprintln!("{}: guest ABI {} predates time-page reseeding; its CRNG is not reseeded at this time fork",name,abi);
     })
 }
@@ -364,7 +492,8 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 /// Execute a world and return its engine report; the caller owns stdout, stderr and exit status.
 pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     START.with(|_| ());
-    let _console_trace = ConsoleTraceGuard(CONSOLE_TRACE.with(|trace| trace.replace(options.console_trace)));
+    let _console_trace =
+        ConsoleTraceGuard(CONSOLE_TRACE.with(|trace| trace.replace(options.console_trace)));
     let config_path = &options.config;
     let seed = options.seed;
     let mut seeds = vec![seed];
@@ -377,37 +506,53 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     // Undo-able precise stops (performance only): initial final margin, 0 = off.
     let undo_margin = options.performance.undo_margin;
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    let mut host_control=options.host_control.as_deref()
+    let mut host_control = options
+        .host_control
+        .as_deref()
         .map(host_control::HostControl::bind)
-        .transpose().map_err(|e|format!("host control: {e}"))?;
+        .transpose()
+        .map_err(|e| format!("host control: {e}"))?;
     let cfg: Value = serde_json::from_slice(
         &std::fs::read(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?,
     )
     .map_err(|e| format!("config: {e}"))?;
     let disk_fault_model = disk::parse_disk_fault_model(&cfg["disk_loss"])?;
-    let base = config_path
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let base = config_path.parent().unwrap().to_path_buf();
     let path = |v: &Value| base.join(v.as_str().unwrap());
     let kernel = std::fs::read(path(&cfg["kernel"])).map_err(|e| format!("kernel: {e}"))?;
     let mem = cfg["mem_mb"].as_u64().unwrap_or(512) as usize * 1024 * 1024;
     let duration = cfg["duration_ns"].as_u64().unwrap_or(60_000_000_000);
     let checkpoint_list = &options.checkpoint_at_ns;
     let checkpoint_times = if let Some(list) = checkpoint_list.as_deref() {
-        if !cfg["checkpoint"].is_null() {return Err("--checkpoint-at-ns cannot override config.checkpoint".into());}
+        if !cfg["checkpoint"].is_null() {
+            return Err("--checkpoint-at-ns cannot override config.checkpoint".into());
+        }
         checkpoint::times(list, duration)?
     } else if !cfg["checkpoint"].is_null() {
-        let t = cfg["checkpoint"]["at_ns"].as_u64().ok_or("checkpoint.at_ns required")?;
-        seeds = vec![cfg["checkpoint"]["branch_seed"].as_u64().ok_or("checkpoint.branch_seed required")?];
-        if !options.fork_seeds.is_empty() {return Err("--fork-seeds cannot override config.checkpoint".into());}
+        let t = cfg["checkpoint"]["at_ns"]
+            .as_u64()
+            .ok_or("checkpoint.at_ns required")?;
+        seeds = vec![cfg["checkpoint"]["branch_seed"]
+            .as_u64()
+            .ok_or("checkpoint.branch_seed required")?];
+        if !options.fork_seeds.is_empty() {
+            return Err("--fork-seeds cannot override config.checkpoint".into());
+        }
         checkpoint::times(&t.to_string(), duration)?
-    } else {Vec::new()};
+    } else {
+        Vec::new()
+    };
     if !checkpoint_times.is_empty() {
-        if cfg["boot"].is_object() {return Err("runtime checkpoints cannot mix with boot forks".into());}
-        if options.trace {return Err("--trace cannot be combined with runtime checkpoints".into());}
+        if cfg["boot"].is_object() {
+            return Err("runtime checkpoints cannot mix with boot forks".into());
+        }
+        if options.trace {
+            return Err("--trace cannot be combined with runtime checkpoints".into());
+        }
         let unique: std::collections::BTreeSet<_> = seeds.iter().collect();
-        if unique.len() != seeds.len() {return Err("runtime checkpoint branch seeds must be distinct".into());}
+        if unique.len() != seeds.len() {
+            return Err("runtime checkpoint branch seeds must be distinct".into());
+        }
     }
     let end_on: Option<String> = cfg["end_on_exit"].as_str().map(String::from);
     let names: Vec<String> = cfg["machines"]
@@ -417,16 +562,24 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         .map(|m| m["name"].as_str().unwrap().to_string())
         .collect();
     let networked = cfg["network"].is_object();
-    let control_channel=cfg["control_channel"]=="virtio-console-v1";
-    if !cfg["control"].is_null() && !control_channel {return Err("runtime control requires virtio-console-v1 channel".into());}
-    if !cfg["control_channel"].is_null() && !control_channel {return Err("unknown runtime control channel".into());}
+    let control_channel = cfg["control_channel"] == "virtio-console-v1";
+    if !cfg["control"].is_null() && !control_channel {
+        return Err("runtime control requires virtio-console-v1 channel".into());
+    }
+    if !cfg["control_channel"].is_null() && !control_channel {
+        return Err("unknown runtime control channel".into());
+    }
 
     // Boot once under a fixed boot seed and park every machine at its launch
     // barrier; the run seed applies from the release onwards. The world at
     // the barrier is the same for every run seed, so it can be forked.
     let boot = &cfg["boot"];
     let forked = boot.is_object();
-    let boot_seed = if forked { boot["seed"].as_u64().ok_or("boot.seed required")? } else { seed };
+    let boot_seed = if forked {
+        boot["seed"].as_u64().ok_or("boot.seed required")?
+    } else {
+        seed
+    };
     let release_skew = boot["release_skew_ns"].as_u64().unwrap_or(0);
     // Fork at a simulated time instead of the guests' launch barrier: every
     // machine parks at its first deterministic point at or after it.
@@ -459,7 +612,9 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         if !initrds.contains_key(&ipath) {
             initrds.insert(
                 ipath.clone(),
-                std::fs::read(&ipath).map_err(|e| format!("{ipath}: {e}"))?.into(),
+                std::fs::read(&ipath)
+                    .map_err(|e| format!("{ipath}: {e}"))?
+                    .into(),
             );
         }
         let mac = [0x52, 0x54, 0x00, 0x00, 0x00, i as u8 + 1];
@@ -473,13 +628,20 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         if networked {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
-        if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
+        if control_channel {
+            cmdline += &format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");
+        }
         let disk = machine_disk(&mc["disk"], &path)?.map(|d| d.with_fault_model(disk_fault_model));
         if disk.is_some() {
             cmdline += &format!(" virtio_mmio.device=4K@{BLK_MMIO:#x}:{BLK_IRQ}");
         }
         let mut after = String::new();
-        if names.get(i).is_some_and(|name|cfg["control"]["machine"].as_str()==Some(name.as_str())) {after+=" seedbox.control=1";}
+        if names
+            .get(i)
+            .is_some_and(|name| cfg["control"]["machine"].as_str() == Some(name.as_str()))
+        {
+            after += " seedbox.control=1";
+        }
         if let Some(extra) = mc["cmdline"].as_str() {
             after += " ";
             after += extra;
@@ -516,10 +678,21 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                     .map_err(|error| error.to_string())?,
             );
         }
-        mach.com1.chunks.open(&devices::log_index::index_name(&format!("{out}/{}.console",names[i])));
-        mach.com2.chunks.open(&devices::log_index::index_name(&format!("{out}/{}.mgmt",names[i])));
+        mach.com1
+            .chunks
+            .open(&devices::log_index::index_name(&format!(
+                "{out}/{}.console",
+                names[i]
+            )));
+        mach.com2
+            .chunks
+            .open(&devices::log_index::index_name(&format!(
+                "{out}/{}.mgmt",
+                names[i]
+            )));
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
-        mach.syscall_ns = machine::pv::syscall_ns(&mut Rng::new(boot_seed, &format!("pv-speed/{}", names[i])));
+        mach.syscall_ns =
+            machine::pv::syscall_ns(&mut Rng::new(boot_seed, &format!("pv-speed/{}", names[i])));
         if options.trace {
             let f = std::fs::File::create(format!("{out}/{}.trace", names[i]))
                 .map_err(|e| e.to_string())?;
@@ -568,14 +741,19 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         partitioned: BTreeMap::new(),
         // Faults, control and scenarios belong to the run seed: armed below,
         // or at the release of a booted world.
-        faults: boot_faults(&names, &[], latency, links::Links::from_config(boot_seed, &names, net)?)?,
+        faults: boot_faults(
+            &names,
+            &[],
+            latency,
+            links::Links::from_config(boot_seed, &names, net)?,
+        )?,
         control: control::Control::new(&Value::Null, names.clone(), latency, early)?,
         strict_events: (0..n).map(|_| BTreeMap::new()).collect(),
         macs,
         dropped: 0,
         delivered: 0,
         link_counts: BTreeMap::new(),
-        semantic_counts:network_counters::NetworkCounters::default(),
+        semantic_counts: network_counters::NetworkCounters::default(),
         slices: 0,
         machines,
     };
@@ -583,40 +761,96 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         let kills = arm_seed(&mut world, &cfg, &names, seed, 0)?;
         if !checkpoint_times.is_empty() {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let engine = format!("{:x}", Sha256::digest(std::fs::read(exe).map_err(|e| e.to_string())?));
+            let engine = format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(exe).map_err(|e| e.to_string())?)
+            );
             let identity_timebase = checkpoint::identity_timebase(world.clock.name(), deferred_tx);
-            let parent = checkpoint::parent_identity(&cfg, seed, &engine, &identity_timebase, page_timer, |p| {
-                std::fs::read(base.join(p)).map(|bytes|format!("{:x}",Sha256::digest(bytes))).map_err(|e|format!("{p}: {e}"))
-            })?;
+            let parent = checkpoint::parent_identity(
+                &cfg,
+                seed,
+                &engine,
+                &identity_timebase,
+                page_timer,
+                |p| {
+                    std::fs::read(base.join(p))
+                        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+                        .map_err(|e| format!("{p}: {e}"))
+                },
+            )?;
             if let Some(expected) = cfg["checkpoint"]["parent_identity"].as_str() {
-                if expected != parent {return Err("checkpoint parent identity does not match retained world inputs".into());}
+                if expected != parent {
+                    return Err(
+                        "checkpoint parent identity does not match retained world inputs".into(),
+                    );
+                }
             }
             // Reconstruct each prefix from the same origin: an extra hard
             // stop for an earlier checkpoint must not change a later one's
             // identity or execution. The held snapshots remain independent.
-            let origin = if checkpoint_times.len()>1 {Some(WorldSnapshot::take_checkpoint(&mut world)?)} else {None};
+            let origin = if checkpoint_times.len() > 1 {
+                Some(WorldSnapshot::take_checkpoint(&mut world)?)
+            } else {
+                None
+            };
             let mut held = Vec::new();
             for (i, &at) in checkpoint_times.iter().enumerate() {
-                if i>0 {origin.as_ref().unwrap().restore_checkpoint(&mut world)?;}
-                let run = world_windowed::Run {cfg:&cfg,duration,end_on:&end_on,fork:None,checkpoint:Some(at),require_barrier:true};
+                if i > 0 {
+                    origin.as_ref().unwrap().restore_checkpoint(&mut world)?;
+                }
+                let run = world_windowed::Run {
+                    cfg: &cfg,
+                    duration,
+                    end_on: &end_on,
+                    fork: None,
+                    checkpoint: Some(at),
+                    require_barrier: true,
+                };
                 let (outcome, _) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
-                if outcome != "checkpoint" {return Err(format!("checkpoint at {at} ns not reached: {outcome}"));}
+                if outcome != "checkpoint" {
+                    return Err(format!("checkpoint at {at} ns not reached: {outcome}"));
+                }
                 held.push((at, WorldSnapshot::take_checkpoint(&mut world)?));
             }
             let mut reports = Vec::new();
             for (at, snapshot) in &held {
                 for &branch_seed in &seeds {
                     snapshot.restore_checkpoint(&mut world)?;
-                    let identity = checkpoint::branch_identity(&parent,*at,branch_seed);
-                    let reseed = reseed_checkpoint(&mut world, &names, seed, branch_seed, &identity)?;
-                    let dir = output_layout::checkpoint_directory(&out, held.len(), seeds.len(), *at, branch_seed);
+                    let identity = checkpoint::branch_identity(&parent, *at, branch_seed);
+                    let reseed =
+                        reseed_checkpoint(&mut world, &names, seed, branch_seed, &identity)?;
+                    let dir = output_layout::checkpoint_directory(
+                        &out,
+                        held.len(),
+                        seeds.len(),
+                        *at,
+                        branch_seed,
+                    );
                     checkpoint_output(&mut world, &dir, options.stream_console)?;
                     let started = Instant::now();
-                    let run = world_windowed::Run {cfg:&cfg,duration,end_on:&end_on,fork:None,checkpoint:None,require_barrier:true};
-                    let (outcome, evidence) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
+                    let run = world_windowed::Run {
+                        cfg: &cfg,
+                        duration,
+                        end_on: &end_on,
+                        fork: None,
+                        checkpoint: None,
+                        require_barrier: true,
+                    };
+                    let (outcome, evidence) =
+                        simulate_windowed(&mut world, &run, options, &mut host_control)?;
                     // The public report's seed remains the parent seed; the
                     // semantic branch seed and identity have explicit fields.
-                    let mut r = report(&mut world, outcome, seed, &kills, started.elapsed().as_secs_f64(), digest, &dir, duration, &end_on)?;
+                    let mut r = report(
+                        &mut world,
+                        outcome,
+                        seed,
+                        &kills,
+                        started.elapsed().as_secs_f64(),
+                        digest,
+                        &dir,
+                        duration,
+                        &end_on,
+                    )?;
                     r["scheduler"] = evidence;
                     r["checkpoint"] = json!({"at_ns":at,"branch_seed":branch_seed,"parent_identity":parent,
                         "branch_identity":identity});
@@ -624,25 +858,60 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                     reports.push(r);
                 }
             }
-            if reports.len()==1 {return Ok(reports.pop().unwrap());}
+            if reports.len() == 1 {
+                return Ok(reports.pop().unwrap());
+            }
             return Ok(json!({"report_version":1,"parent_identity":parent,"checkpoints":reports}));
         }
         let started = Instant::now();
-        let run = world_windowed::Run {cfg:&cfg,duration,end_on:&end_on,fork:None,checkpoint:None,require_barrier:true};
+        let run = world_windowed::Run {
+            cfg: &cfg,
+            duration,
+            end_on: &end_on,
+            fork: None,
+            checkpoint: None,
+            require_barrier: true,
+        };
         let (outcome, evidence) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
         let host_seconds = started.elapsed().as_secs_f64();
-        let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, &out, duration, &end_on)?;
+        let mut r = report(
+            &mut world,
+            outcome,
+            seed,
+            &kills,
+            host_seconds,
+            digest,
+            &out,
+            duration,
+            &end_on,
+        )?;
         r["scheduler"] = evidence;
         return Ok(r);
     }
 
     let started = Instant::now();
-    let boot_run = world_windowed::Run {cfg:&cfg,duration,end_on:&end_on,fork:Some(fork_at),checkpoint:None,require_barrier:true};
+    let boot_run = world_windowed::Run {
+        cfg: &cfg,
+        duration,
+        end_on: &end_on,
+        fork: Some(fork_at),
+        checkpoint: None,
+        require_barrier: true,
+    };
     simulate_windowed(&mut world, &boot_run, options, &mut host_control)?;
-    let barrier_ns = world.machines.iter().map(|m| m.world.time).max().unwrap_or(0);
+    let barrier_ns = world
+        .machines
+        .iter()
+        .map(|m| m.world.time)
+        .max()
+        .unwrap_or(0);
     let boot_host_seconds = started.elapsed().as_secs_f64();
     let started = Instant::now();
-    let snapshot = if seeds.len() > 1 { Some(WorldSnapshot::take(&mut world)?) } else { None };
+    let snapshot = if seeds.len() > 1 {
+        Some(WorldSnapshot::take(&mut world)?)
+    } else {
+        None
+    };
     let snapshot_host_seconds = started.elapsed().as_secs_f64();
     let stream = options.stream_console;
     let mut reports = Vec::new();
@@ -653,34 +922,69 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
             (_, Some(snapshot)) => snapshot.restore(&mut world)?,
         };
         let restore_host_seconds = started.elapsed().as_secs_f64();
-        let dir = if seeds.len() > 1 { format!("{out}/seed-{seed}") } else { out.clone() };
+        let dir = if seeds.len() > 1 {
+            format!("{out}/seed-{seed}")
+        } else {
+            out.clone()
+        };
         if seeds.len() > 1 {
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             if !stream {
                 for mach in &mut world.machines {
-                    mach.com1.chunks.open(&devices::log_index::index_name(&format!("{dir}/{}.console",mach.world.name)));
-                    mach.com2.chunks.open(&devices::log_index::index_name(&format!("{dir}/{}.mgmt",mach.world.name)));
+                    mach.com1
+                        .chunks
+                        .open(&devices::log_index::index_name(&format!(
+                            "{dir}/{}.console",
+                            mach.world.name
+                        )));
+                    mach.com2
+                        .chunks
+                        .open(&devices::log_index::index_name(&format!(
+                            "{dir}/{}.mgmt",
+                            mach.world.name
+                        )));
                 }
             }
             if stream {
                 for mach in world.machines.iter_mut() {
                     for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
                         use std::io::Write;
-                        let mut file = std::fs::File::create(format!("{dir}/{}.{ext}", mach.world.name))
-                            .map_err(|e| e.to_string())?;
+                        let mut file =
+                            std::fs::File::create(format!("{dir}/{}.{ext}", mach.world.name))
+                                .map_err(|e| e.to_string())?;
                         file.write_all(&uart.out).map_err(|e| e.to_string())?;
                         uart.output_file = Some(file);
-                        uart.chunks.open(&devices::log_index::index_name(&format!("{dir}/{}.{ext}",mach.world.name)));
+                        uart.chunks.open(&devices::log_index::index_name(&format!(
+                            "{dir}/{}.{ext}",
+                            mach.world.name
+                        )));
                     }
                 }
             }
         }
         let started = Instant::now();
         let (kills, reseed) = release(&mut world, &cfg, &names, seed, release_skew)?;
-        let run = world_windowed::Run {cfg:&cfg,duration,end_on:&end_on,fork:None,checkpoint:None,require_barrier:true};
+        let run = world_windowed::Run {
+            cfg: &cfg,
+            duration,
+            end_on: &end_on,
+            fork: None,
+            checkpoint: None,
+            require_barrier: true,
+        };
         let (outcome, evidence) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
         let host_seconds = started.elapsed().as_secs_f64();
-        let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, &dir, duration, &end_on)?;
+        let mut r = report(
+            &mut world,
+            outcome,
+            seed,
+            &kills,
+            host_seconds,
+            digest,
+            &dir,
+            duration,
+            &end_on,
+        )?;
         r["scheduler"] = evidence;
         r["boot"] = json!({
             "seed": boot_seed, "barrier_ns": barrier_ns, "fork_at_ns": fork_at, "release_skew_ns": release_skew,
@@ -705,7 +1009,11 @@ fn checkpoint_output(world: &mut World, out: &str, stream: bool) -> Result<(), S
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     for mach in &mut world.machines {
         for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
-            uart.output_file = uart.chunks.reopen_stream(&format!("{out}/{}.{ext}",mach.world.name), &uart.out, stream)?;
+            uart.output_file = uart.chunks.reopen_stream(
+                &format!("{out}/{}.{ext}", mach.world.name),
+                &uart.out,
+                stream,
+            )?;
         }
     }
     Ok(())
@@ -725,27 +1033,33 @@ fn report(
     end_on: &Option<String>,
 ) -> Result<Value, String> {
     let slices = world.slices;
-    world.finish(outcome,duration,end_on)?;
-    let trigger_evidence=world.control.triggers.evidence()?;
-    let fault_error=world.faults.error.clone().or(world.control.error.clone());
+    world.finish(outcome, duration, end_on)?;
+    let trigger_evidence = world.control.triggers.evidence()?;
+    let fault_error = world.faults.error.clone().or(world.control.error.clone());
     let mut network_hash = Sha256::new();
     network_hash.update(b"seedbox-network-v1");
     let mut frames = Vec::new();
-    for (to,events) in world.events.iter().enumerate() {
-        for (&(at,seq),payload) in events {
-            if let Payload::Frame {from,bytes} = payload { frames.push((at,seq,*from,to,Sha256::digest(bytes))); }
+    for (to, events) in world.events.iter().enumerate() {
+        for (&(at, seq), payload) in events {
+            if let Payload::Frame { from, bytes } = payload {
+                frames.push((at, seq, *from, to, Sha256::digest(bytes)));
+            }
         }
     }
-    frames.sort_by_key(|f|(f.0,f.1,f.2,f.3));
+    frames.sort_by_key(|f| (f.0, f.1, f.2, f.3));
     network_hash.update((frames.len() as u64).to_le_bytes());
-    for (at,seq,from,to,bytes_hash) in frames {
-        network_hash.update(at.to_le_bytes()); network_hash.update(seq.to_le_bytes());
-        links::pair_hash(&mut network_hash,(from,to)); network_hash.update(bytes_hash);
+    for (at, seq, from, to, bytes_hash) in frames {
+        network_hash.update(at.to_le_bytes());
+        network_hash.update(seq.to_le_bytes());
+        links::pair_hash(&mut network_hash, (from, to));
+        network_hash.update(bytes_hash);
     }
     world.faults.network_witness(&mut network_hash);
-    let legacy_cuts: Vec<_> = world.partitioned.iter().filter(|(_,on)|**on).collect();
+    let legacy_cuts: Vec<_> = world.partitioned.iter().filter(|(_, on)| **on).collect();
     network_hash.update((legacy_cuts.len() as u64).to_le_bytes());
-    for (&pair,_) in legacy_cuts { links::pair_hash(&mut network_hash,pair); }
+    for (&pair, _) in legacy_cuts {
+        links::pair_hash(&mut network_hash, pair);
+    }
     let network_witness = network_hash.finalize();
     let mut world_witness = Sha256::new();
     world.control.triggers.hash_into(&mut world_witness)?;
@@ -761,7 +1075,8 @@ fn report(
         world_witness.update(serde_json::to_vec(&world.faults.log).map_err(|e| e.to_string())?);
         world_witness.update(world.delivered.to_le_bytes());
         world_witness.update(world.dropped.to_le_bytes());
-        world_witness.update(serde_json::to_vec(&world.network_snapshot()).map_err(|e| e.to_string())?);
+        world_witness
+            .update(serde_json::to_vec(&world.network_snapshot()).map_err(|e| e.to_string())?);
     }
     let mut report = Vec::new();
     for (index, mach) in world.machines.iter_mut().enumerate() {
@@ -775,8 +1090,11 @@ fn report(
             let (d, parts) = mach.state_digest();
             // The host supplies output/MACHINE_OUTPUT_DIR as --out; retention
             // preserves that directory prefix (see seedbox/src/vmm.rs).
-            std::fs::write(format!("{out}/{}.pages", mach.world.name), mach.page_hashes())
-                .map_err(|e| e.to_string())?;
+            std::fs::write(
+                format!("{out}/{}.pages", mach.world.name),
+                mach.page_hashes(),
+            )
+            .map_err(|e| e.to_string())?;
             let parts: serde_json::Map<String, Value> = parts
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), json!(v)))
@@ -832,8 +1150,13 @@ fn report(
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| n.report()),
         });
-        row["pio_total"] = json!(s.kvm_n[2] + world.incarnations[index].iter()
-            .filter_map(|old| old["pio_total"].as_u64()).sum::<u64>());
+        row["pio_total"] = json!(
+            s.kvm_n[2]
+                + world.incarnations[index]
+                    .iter()
+                    .filter_map(|old| old["pio_total"].as_u64())
+                    .sum::<u64>()
+        );
         row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
                 "fault_model": disk::disk_fault_model_report(b.disk().fault_model()), "capacity_sectors": b.disk().capacity(), "base_sha256": b.disk().base_sha256(),
                 "digest": b.disk().digest(), "stable_sectors": b.disk().stable_sectors(), "volatile_sectors": b.disk().volatile_sectors(),
@@ -863,8 +1186,13 @@ fn report(
         }
         report.push(row);
     }
-    let sim_ns = world.machines.iter().map(|m| m.world.time).max().unwrap_or(0);
-    let mut result=json!({
+    let sim_ns = world
+        .machines
+        .iter()
+        .map(|m| m.world.time)
+        .max()
+        .unwrap_or(0);
+    let mut result = json!({
         "report_version": 1,
         "seed": seed,
         "timebase": world.clock.name(),
@@ -886,7 +1214,9 @@ fn report(
         "in_flight_policy":"retain_send_time_decisions; cuts_dominate_shapes",
         "machines": report,
     });
-    if let Some(evidence)=trigger_evidence {result["triggers"]=evidence;}
+    if let Some(evidence) = trigger_evidence {
+        result["triggers"] = evidence;
+    }
     Ok(result)
 }
 
@@ -896,19 +1226,27 @@ mod progress_tests {
 
     #[test]
     fn a_forked_world_rejects_plan_times_before_the_release() {
-        let cfg=json!({
+        let cfg = json!({
             "faults":[{"id":1,"at_ns":1_000_000_000}],
             "scenario":[{"at_ns":1_500_000_000,"serial":"x\n","machine":"a"}],
             "kill_restart":{"start_ns":2_000_000_000},
         });
         assert_eq!(check_plan_after(&cfg,1_400_000_000).unwrap_err(),
             "faults[0].at_ns 1000000000 is before the fork point 1400000000; in a forked world it must be at or after the release (boot.fork_at_ns or the launch barrier, plus boot.release_skew_ns)");
-        assert!(check_plan_after(&cfg,1_000_000_000).is_ok());
-        let later=|key:&str| {let mut c=cfg.clone();c.as_object_mut().unwrap().remove(key);c};
-        assert!(check_plan_after(&later("faults"),1_600_000_000).unwrap_err().starts_with("scenario[0].at_ns 1500000000 "));
-        let kills=json!({"kill_restart":cfg["kill_restart"]});
-        assert!(check_plan_after(&kills,2_000_000_001).unwrap_err().starts_with("kill_restart.start_ns 2000000000 "));
-        assert!(check_plan_after(&json!({}),u64::MAX).is_ok());
+        assert!(check_plan_after(&cfg, 1_000_000_000).is_ok());
+        let later = |key: &str| {
+            let mut c = cfg.clone();
+            c.as_object_mut().unwrap().remove(key);
+            c
+        };
+        assert!(check_plan_after(&later("faults"), 1_600_000_000)
+            .unwrap_err()
+            .starts_with("scenario[0].at_ns 1500000000 "));
+        let kills = json!({"kill_restart":cfg["kill_restart"]});
+        assert!(check_plan_after(&kills, 2_000_000_001)
+            .unwrap_err()
+            .starts_with("kill_restart.start_ns 2000000000 "));
+        assert!(check_plan_after(&json!({}), u64::MAX).is_ok());
     }
 
     /// A Compose guest reports management readiness while it boots; with a
@@ -916,30 +1254,33 @@ mod progress_tests {
     /// the seed's plan starts with that machine already ready.
     #[test]
     fn readiness_signalled_before_the_fork_carries_over_to_the_seed() {
-        let names=vec!["a".to_string(),"b".to_string()];
-        let links=links::Links::from_config(0,&names,&json!({"latency_ns":1000})).unwrap();
-        let mut boot=boot_faults(&names,&[],1000,links).unwrap();
-        boot.management_ready(1,700,1000).unwrap();
-        let restored=boot_faults(&names,&boot.readiness,1000,boot.links.clone()).unwrap();
-        assert_eq!(restored.readiness,boot.readiness);
-        let mut seed=faults::Faults::new(Vec::new(),names.clone()).unwrap();
+        let names = vec!["a".to_string(), "b".to_string()];
+        let links = links::Links::from_config(0, &names, &json!({"latency_ns":1000})).unwrap();
+        let mut boot = boot_faults(&names, &[], 1000, links).unwrap();
+        boot.management_ready(1, 700, 1000).unwrap();
+        let restored = boot_faults(&names, &boot.readiness, 1000, boot.links.clone()).unwrap();
+        assert_eq!(restored.readiness, boot.readiness);
+        let mut seed = faults::Faults::new(Vec::new(), names.clone()).unwrap();
         seed.require_readiness();
-        replay_readiness(&mut seed,&names,&restored.readiness,1000).unwrap();
-        assert_eq!(seed.readiness,vec![json!({"machine":"b","at_ns":700})]);
-        assert!(seed.management_ready(1,2000,1000).is_err(),"b is already ready");
-        assert!(seed.management_ready(0,2000,1000).is_ok());
+        replay_readiness(&mut seed, &names, &restored.readiness, 1000).unwrap();
+        assert_eq!(seed.readiness, vec![json!({"machine":"b","at_ns":700})]);
+        assert!(
+            seed.management_ready(1, 2000, 1000).is_err(),
+            "b is already ready"
+        );
+        assert!(seed.management_ready(0, 2000, 1000).is_ok());
     }
     #[test]
     fn equal_time_delivery_can_replan_but_an_unchanged_plan_cannot_loop() {
-        let mut previous=None;
-        let plan=(0,1000,1000,1000,1000,1000,1000,2000,500,1);
-        assert!(stop_progress(&mut previous,plan,false).is_ok());
-        let delivered=(0,1000,1000,1000,2000,2000,2000,2000,500,2);
-        assert!(stop_progress(&mut previous,delivered,false).is_ok());
-        assert!(stop_progress(&mut previous,delivered,false).is_err());
-        assert!(stop_progress(&mut previous,delivered,true).is_ok());
-        assert_eq!(previous,None);
-        assert!(stop_progress(&mut previous,delivered,false).is_ok());
+        let mut previous = None;
+        let plan = (0, 1000, 1000, 1000, 1000, 1000, 1000, 2000, 500, 1);
+        assert!(stop_progress(&mut previous, plan, false).is_ok());
+        let delivered = (0, 1000, 1000, 1000, 2000, 2000, 2000, 2000, 500, 2);
+        assert!(stop_progress(&mut previous, delivered, false).is_ok());
+        assert!(stop_progress(&mut previous, delivered, false).is_err());
+        assert!(stop_progress(&mut previous, delivered, true).is_ok());
+        assert_eq!(previous, None);
+        assert!(stop_progress(&mut previous, delivered, false).is_ok());
     }
 }
 
@@ -957,11 +1298,36 @@ mod worker_options_tests {
     #[test]
     fn worker_flags_preserve_the_standalone_protocol() {
         let performance = PerformanceOptions::parse(Some("0"), Some("64")).unwrap();
-        let options = WorkerOptions::from_args(&args(&[
-            "seedbox-vmm", "--config", "world.json", "--seed", "7", "--out", "output",
-            "--fork-seeds", "8,9", "--digest", "--host-control", "control.sock",
-            "--console-limit", "123", "--log-chunk-limit", "456", "--timebase", "pv", "--stream-console", "--trace", "--page-timer", "--deferred-tx", "--checkpoint-at-ns", "100,200",
-        ]), performance).unwrap();
+        let options = WorkerOptions::from_args(
+            &args(&[
+                "seedbox-vmm",
+                "--config",
+                "world.json",
+                "--seed",
+                "7",
+                "--out",
+                "output",
+                "--fork-seeds",
+                "8,9",
+                "--digest",
+                "--host-control",
+                "control.sock",
+                "--console-limit",
+                "123",
+                "--log-chunk-limit",
+                "456",
+                "--timebase",
+                "pv",
+                "--stream-console",
+                "--trace",
+                "--page-timer",
+                "--deferred-tx",
+                "--checkpoint-at-ns",
+                "100,200",
+            ]),
+            performance,
+        )
+        .unwrap();
         assert_eq!(options.config, PathBuf::from("world.json"));
         assert_eq!(options.seed, 7);
         assert_eq!(options.fork_seeds, vec![8, 9]);
@@ -978,49 +1344,143 @@ mod worker_options_tests {
 
     #[test]
     fn performance_values_are_explicit_and_keep_their_defaults() {
-        assert_eq!(PerformanceOptions::parse(None, None).unwrap(), PerformanceOptions::default());
-        assert_eq!(PerformanceOptions::parse(Some("256"), Some("adaptive")).unwrap(), PerformanceOptions::default());
-        assert!(PerformanceOptions::parse(Some("invalid"), None).unwrap_err().starts_with("SEEDBOX_UNDO: "));
-        assert!(PerformanceOptions::parse(None, Some("invalid")).unwrap_err().starts_with("margin: "));
+        assert_eq!(
+            PerformanceOptions::parse(None, None).unwrap(),
+            PerformanceOptions::default()
+        );
+        assert_eq!(
+            PerformanceOptions::parse(Some("256"), Some("adaptive")).unwrap(),
+            PerformanceOptions::default()
+        );
+        assert!(PerformanceOptions::parse(Some("invalid"), None)
+            .unwrap_err()
+            .starts_with("SEEDBOX_UNDO: "));
+        assert!(PerformanceOptions::parse(None, Some("invalid"))
+            .unwrap_err()
+            .starts_with("margin: "));
     }
 
     #[test]
     fn worker_flag_errors_keep_their_existing_wording() {
         let performance = PerformanceOptions::default();
-        assert_eq!(WorkerOptions::from_args(&[], performance).unwrap_err(), "--config required");
-        assert_eq!(WorkerOptions::from_args(&args(&["--config", "world.json", "--seed", "7", "--out", "output", "--checkpoint-at-ns"]), performance).unwrap_err(), "--checkpoint-at-ns requires comma-separated unsigned nanoseconds");
-        assert_eq!(WorkerOptions::from_args(&args(&["--config", "world.json"]), performance).unwrap_err(), "--seed required");
-        assert!(WorkerOptions::from_args(&args(&["--config", "world.json", "--seed", "invalid"]), performance).unwrap_err().starts_with("seed: "));
-        assert_eq!(WorkerOptions::from_args(&args(&["--config", "world.json", "--seed", "7"]), performance).unwrap_err(), "--out required");
-        assert!(WorkerOptions::from_args(&args(&["--config", "world.json", "--seed", "7", "--out", "output", "--fork-seeds", "8,invalid"]), performance).unwrap_err().starts_with("--fork-seeds: "));
-        assert!(WorkerOptions::from_args(&args(&["--config", "world.json", "--seed", "7", "--out", "output", "--console-limit", "invalid"]), performance).unwrap_err().starts_with("console limit: "));
+        assert_eq!(
+            WorkerOptions::from_args(&[], performance).unwrap_err(),
+            "--config required"
+        );
+        assert_eq!(
+            WorkerOptions::from_args(
+                &args(&[
+                    "--config",
+                    "world.json",
+                    "--seed",
+                    "7",
+                    "--out",
+                    "output",
+                    "--checkpoint-at-ns"
+                ]),
+                performance
+            )
+            .unwrap_err(),
+            "--checkpoint-at-ns requires comma-separated unsigned nanoseconds"
+        );
+        assert_eq!(
+            WorkerOptions::from_args(&args(&["--config", "world.json"]), performance).unwrap_err(),
+            "--seed required"
+        );
+        assert!(WorkerOptions::from_args(
+            &args(&["--config", "world.json", "--seed", "invalid"]),
+            performance
+        )
+        .unwrap_err()
+        .starts_with("seed: "));
+        assert_eq!(
+            WorkerOptions::from_args(
+                &args(&["--config", "world.json", "--seed", "7"]),
+                performance
+            )
+            .unwrap_err(),
+            "--out required"
+        );
+        assert!(WorkerOptions::from_args(
+            &args(&[
+                "--config",
+                "world.json",
+                "--seed",
+                "7",
+                "--out",
+                "output",
+                "--fork-seeds",
+                "8,invalid"
+            ]),
+            performance
+        )
+        .unwrap_err()
+        .starts_with("--fork-seeds: "));
+        assert!(WorkerOptions::from_args(
+            &args(&[
+                "--config",
+                "world.json",
+                "--seed",
+                "7",
+                "--out",
+                "output",
+                "--console-limit",
+                "invalid"
+            ]),
+            performance
+        )
+        .unwrap_err()
+        .starts_with("console limit: "));
     }
 
     #[test]
     fn machine_workers_are_performance_settings() {
         let performance = PerformanceOptions::default();
         let base = ["--config", "world.json", "--seed", "7", "--out", "output"];
-        let with = |extra: &[&str]| WorkerOptions::from_args(&args(&[&base[..], extra].concat()), performance);
+        let with = |extra: &[&str]| {
+            WorkerOptions::from_args(&args(&[&base[..], extra].concat()), performance)
+        };
         let o = with(&[]).unwrap();
         assert_eq!((o.machine_workers, o.machine_cpus.as_slice()), (1, &[][..]));
         let o = with(&["--machine-workers", "4", "--machine-cpus", "4,5,6,7"]).unwrap();
-        assert_eq!((o.machine_workers, o.machine_cpus.as_slice()), (4, &[4, 5, 6, 7][..]));
-        assert_eq!(with(&["--machine-workers", "0"]).unwrap_err(), "--machine-workers: use 1..64");
-        assert_eq!(with(&["--machine-workers", "2", "--machine-cpus", "4,5,6"]).unwrap_err(), "--machine-cpus: give one CPU per machine worker");
+        assert_eq!(
+            (o.machine_workers, o.machine_cpus.as_slice()),
+            (4, &[4, 5, 6, 7][..])
+        );
+        assert_eq!(
+            with(&["--machine-workers", "0"]).unwrap_err(),
+            "--machine-workers: use 1..64"
+        );
+        assert_eq!(
+            with(&["--machine-workers", "2", "--machine-cpus", "4,5,6"]).unwrap_err(),
+            "--machine-cpus: give one CPU per machine worker"
+        );
     }
 
     #[test]
     fn worker_timebase_defaults_to_counter_and_accepts_pv() {
         let base = args(&["--config", "world.json", "--seed", "7", "--out", "output"]);
-        assert!(!WorkerOptions::from_args(&base, PerformanceOptions::default()).unwrap().pv_clock);
+        assert!(
+            !WorkerOptions::from_args(&base, PerformanceOptions::default())
+                .unwrap()
+                .pv_clock
+        );
         for (value, pv) in [("counter", false), ("pv", true)] {
             let mut argv = base.clone();
             argv.extend(args(&["--timebase", value]));
-            assert_eq!(WorkerOptions::from_args(&argv, PerformanceOptions::default()).unwrap().pv_clock, pv);
+            assert_eq!(
+                WorkerOptions::from_args(&argv, PerformanceOptions::default())
+                    .unwrap()
+                    .pv_clock,
+                pv
+            );
         }
         let mut argv = base;
         argv.extend(args(&["--timebase", "bad"]));
-        assert_eq!(WorkerOptions::from_args(&argv, PerformanceOptions::default()).unwrap_err(), "--timebase bad: expected counter or pv");
+        assert_eq!(
+            WorkerOptions::from_args(&argv, PerformanceOptions::default()).unwrap_err(),
+            "--timebase bad: expected counter or pv"
+        );
     }
 
     #[test]
@@ -1028,7 +1488,8 @@ mod worker_options_tests {
         fn callback(_: ConsoleTrace<'_>) {}
         assert!(!console_trace_enabled());
         {
-            let _guard = ConsoleTraceGuard(CONSOLE_TRACE.with(|trace| trace.replace(Some(callback))));
+            let _guard =
+                ConsoleTraceGuard(CONSOLE_TRACE.with(|trace| trace.replace(Some(callback))));
             assert!(console_trace_enabled());
             emit_console_trace(1000, 2, b"line");
         }
