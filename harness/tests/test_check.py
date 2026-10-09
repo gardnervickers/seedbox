@@ -28,7 +28,9 @@ class SelectionTests(unittest.TestCase):
         self.addCleanup(root.stop)
 
     def linux(self, suite, probe, root=True, inputs=None, machine="x86_64"):
-        with patch.object(check.shutil, "which", return_value="/fixture/tool"):
+        # Never consult the host's real engine sockets.
+        with patch.object(check.shutil, "which", return_value="/fixture/tool"), \
+                patch.object(check, "engine_sockets", return_value=[]):
             return check.requirements(suite, "Linux", machine, inputs or {}, probe, root)
 
     def test_default_is_portable_only(self):

@@ -87,9 +87,19 @@ mod engine {
         guest::Architecture,
         oci::{ImageTransport, ImportedImage, RootFilesystem},
     };
+    /// Connect the way the CLI does: DOCKER_HOST when set, otherwise Podman's
+    /// rootless and system sockets before Docker's.
+    fn engine() -> bollard::Docker {
+        if std::env::var_os("DOCKER_HOST").is_some() {
+            bollard::Docker::connect_with_defaults()
+        } else {
+            bollard::Docker::connect_with_podman_defaults()
+        }
+        .unwrap()
+    }
     fn import(service: &config::Service, directory: &Path, store: &ContentStore) -> ImportedImage {
         ContainerTransport {
-            docker: bollard::Docker::connect_with_defaults().unwrap(),
+            docker: engine(),
             cancellation: CancellationToken::default(),
             progress: |line| eprintln!("{line}"),
         }
