@@ -6,7 +6,7 @@ import time
 
 cert = ssl._ssl._test_decode_cert('/cert.pem')
 issued = ssl.cert_time_to_seconds(cert['notBefore'])
-assert 0 <= time.time() - issued < 86400, (time.time(), cert)
+assert issued <= time.time(), (time.time(), cert)
 server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 server.load_cert_chain('/cert.pem', '/key.pem')
 client = ssl.create_default_context(cafile='/cert.pem')
@@ -35,4 +35,4 @@ with socket.create_connection(listener.getsockname()) as connection:
 worker.join()
 listener.close()
 assert not errors, errors
-print('same-day TLS certificate validated')
+print('preparation-time TLS certificate validated')

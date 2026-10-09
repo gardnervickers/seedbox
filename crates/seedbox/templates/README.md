@@ -201,7 +201,9 @@ schedules remain unsupported until their guest effect timing is verified.
 Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
 prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
 the time after all image builds/imports finish; explicit `--build-epoch` also
-sets this value. The shared supervisor sets `CLOCK_REALTIME` before the launch
+sets this value and must be at least 86400, because Linux cannot set a wall
+clock earlier than the guest's uptime. A build epoch earlier than a
+certificate minted during the build makes that certificate not yet valid. The shared supervisor sets `CLOCK_REALTIME` before the launch
 barrier on x86 and arm64. Replay uses retained bytes and never samples the host
 clock. New preparations can change witnesses; replay of recorded inputs is
 unchanged. Both application kernels support unprivileged user namespaces,

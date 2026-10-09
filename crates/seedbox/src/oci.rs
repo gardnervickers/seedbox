@@ -677,7 +677,7 @@ mod context_tests {
         fs::write(&builder, "custom bytes").unwrap();
         let tools = OciTools {
             docker: builder,
-            build_epoch: Some(0),
+            build_epoch: Some(86400),
             ..OciTools::default()
         };
         let directory = root.path().join("must-not-exist");

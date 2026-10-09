@@ -87,6 +87,10 @@ pub fn minimum_memory_mb(archive_bytes: u64) -> Result<u32> {
         .map_err(|_| Error::Execution("guest memory estimate exceeds supported range".into()))
 }
 
+/// Linux rejects a CLOCK_REALTIME earlier than the guest's uptime, so an epoch
+/// below this would stop every guest at the launch barrier.
+pub const MIN_WALL_CLOCK_EPOCH: u32 = 86400;
+
 /// This binary recipe is consumed by the small static Linux guest init. Length
 /// prefixes avoid shell evaluation of command, environment or config contents.
 pub fn launch_recipe(
@@ -97,6 +101,11 @@ pub fn launch_recipe(
     configs: &BTreeMap<String, Vec<u8>>,
     wall_clock_epoch: u32,
 ) -> Result<Vec<u8>> {
+    if wall_clock_epoch < MIN_WALL_CLOCK_EPOCH {
+        return Err(Error::Setup(format!(
+            "wall-clock epoch {wall_clock_epoch} is below {MIN_WALL_CLOCK_EPOCH}; the guest kernel cannot set a time earlier than its uptime"
+        )));
+    }
     let mut bytes = b"SBXLAUNCH4".to_vec();
     for value in [ip, hosts, hostname, &launch.user, &launch.working_dir] {
         field(&mut bytes, value.as_bytes())?;
