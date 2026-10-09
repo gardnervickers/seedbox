@@ -328,6 +328,8 @@ pub struct Machine {
     /// Shadow RAM with a dirty log: a fork restore copies back only the
     /// pages written since the fork point.
     pub shadow: Box<Shadow>,
+    /// Whether slot 0 carries KVM's dirty log, which only forks need.
+    dirty_log: bool,
     /// The initial guest uses the launch-barrier boot protocol.
     barrier: bool,
     /// Per-seed words the guest reads after its release.
@@ -494,7 +496,9 @@ impl Machine {
         unsafe {
             vm.set_user_memory_region(kvm_userspace_memory_region {
                 slot: 0,
-                flags: KVM_MEM_LOG_DIRTY_PAGES,
+                // The dirty log starts at the first fork point. Until then
+                // KVM can map guest RAM with huge pages.
+                flags: 0,
                 guest_phys_addr: 0,
                 memory_size: mem_size as u64,
                 userspace_addr: mem as u64,
@@ -593,6 +597,7 @@ impl Machine {
             stall_ticks: 0,
             timer_rng: None,
             shadow: Box::new(shadow),
+            dirty_log: false,
             barrier: spec.barrier,
             entropy: [0; ENTROPY_WORDS],
             entropy_read: 0,
@@ -785,7 +790,7 @@ impl Machine {
             size: self.mem_size,
         };
         unsafe { std::ptr::copy_nonoverlapping(self.mem.0, ram.ptr.0, self.mem_size) };
-        self.shadow.fork_point(&self._vm, self.mem.0)?;
+        self.hold_fork_point()?;
         let mut page = Box::new([0u8; 4096]);
         unsafe { std::ptr::copy_nonoverlapping(self.page.0 as *const u8, page.as_mut_ptr(), 4096) };
         Ok(MachineSnapshot {
@@ -826,6 +831,28 @@ impl Machine {
         })
     }
 
+    /// Hold a fork point in the shadow, starting KVM's dirty log first if
+    /// this machine has not forked before. Nothing was logged until then, so
+    /// every page is copied once.
+    fn hold_fork_point(&mut self) -> Result<(), String> {
+        if !self.dirty_log {
+            unsafe {
+                self._vm
+                    .set_user_memory_region(kvm_userspace_memory_region {
+                        slot: 0,
+                        flags: KVM_MEM_LOG_DIRTY_PAGES,
+                        guest_phys_addr: 0,
+                        memory_size: self.mem_size as u64,
+                        userspace_addr: self.mem.0 as u64,
+                    })
+                    .map_err(|e| format!("ram slot dirty log: {e}"))?;
+            }
+            self.dirty_log = true;
+            self.shadow.mark(0, self.mem_size);
+        }
+        self.shadow.fork_point(&self._vm, self.mem.0)
+    }
+
     /// Put the machine back to a snapshot taken by `snapshot`, from wherever
     /// the last run left it. Returns the number of RAM pages copied back.
     pub fn restore(&mut self, s: &MachineSnapshot) -> Result<u64, String> {
@@ -840,7 +867,7 @@ impl Machine {
             // held no fork point yet: copy everything, then hold one here.
             unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr.0, self.mem.0, self.mem_size) };
             self.shadow.mark(0, self.mem_size);
-            self.shadow.fork_point(&self._vm, self.mem.0)?;
+            self.hold_fork_point()?;
             (self.mem_size / 4096) as u64
         } else {
             self.shadow
