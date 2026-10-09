@@ -115,6 +115,12 @@ pub enum Operation {
     Restart {
         target: Target,
     },
+    PauseProcess {
+        target: Target,
+    },
+    ResumeProcess {
+        target: Target,
+    },
     Pause {
         target: Target,
     },
@@ -238,6 +244,14 @@ pub enum Action {
     Restart {
         machine: String,
     },
+    /// SIGSTOP the application's process group; its kernel keeps running.
+    PauseProcess {
+        machine: String,
+    },
+    /// SIGCONT a process group frozen by `PauseProcess`.
+    ResumeProcess {
+        machine: String,
+    },
     Partition {
         handle: String,
         left: Vec<String>,
@@ -283,6 +297,8 @@ impl Action {
             Self::DropConnection { .. } => "drop_connection",
             Self::Stop { .. } => "stop",
             Self::Restart { .. } => "restart",
+            Self::PauseProcess { .. } => "pause_process",
+            Self::ResumeProcess { .. } => "resume_process",
             Self::Partition { .. } => "partition",
             Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
@@ -296,12 +312,24 @@ impl Action {
         match self {
             Self::Stop { machine }
             | Self::Restart { machine }
+            | Self::PauseProcess { machine }
+            | Self::ResumeProcess { machine }
             | Self::Pause { machine }
             | Self::Resume { machine }
             | Self::Crash { machine }
             | Self::Reboot { machine } => Some(machine),
             _ => None,
         }
+    }
+    /// Effects the target's supervisor carries out and acknowledges.
+    pub fn is_process(&self) -> bool {
+        matches!(
+            self,
+            Self::Stop { .. }
+                | Self::Restart { .. }
+                | Self::PauseProcess { .. }
+                | Self::ResumeProcess { .. }
+        )
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,7 +358,14 @@ mod tests {
         }
         let r:Request=serde_json::from_str(r#"{"version":1,"id":1,"op":"partition","left":[{"service":"c"}],"right":[{"machine":"s"}]}"#).unwrap();
         assert!(matches!(r.operation, Operation::Partition { .. }));
-        for op in ["pause", "resume", "crash", "reboot"] {
+        for op in [
+            "pause",
+            "resume",
+            "crash",
+            "reboot",
+            "pause_process",
+            "resume_process",
+        ] {
             for target in [Target::Service("s".into()), Target::Machine("m".into())] {
                 let wire = serde_json::json!({"version":1,"id":1,"op":op,"target":target});
                 let request: Request = serde_json::from_value(wire.clone()).unwrap();
