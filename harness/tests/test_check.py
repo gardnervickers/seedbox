@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import socket
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -74,11 +75,33 @@ class SelectionTests(unittest.TestCase):
 
     def test_oci_suite_needs_an_engine_but_no_kvm_or_root(self):
         self.assertEqual(self.linux("linux-oci", {"kvm": "no such device", "counter": "no KVM"}, root=False), [])
-        with patch.object(check.shutil, "which", return_value=None):
+        with patch.object(check.shutil, "which", return_value=None), \
+                patch.object(check, "engine_sockets", return_value=[]):
             self.assertEqual(check.requirements("linux-oci", "Linux", "x86_64", {"DOCKER_HOST": "unix:///fixture"}), [])
             missing = check.requirements("linux-oci", "Linux", "x86_64", {})
         self.assertEqual(len(missing), 1)
         self.assertIn("no Docker-compatible engine", missing[0])
+
+    def test_embedded_helper_archive_counts_as_runtime_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            kernel, helpers = Path(directory) / "kernel", Path(directory) / "helpers.tar.gz"
+            kernel.touch()
+            helpers.touch()
+            self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs={
+                "SEEDBOX_ASSET_DIR": directory, "SEEDBOX_KERNEL": str(kernel),
+                "SEEDBOX_BUILD_HELPERS": str(helpers)}), [])
+
+    def test_an_engine_socket_counts_without_binaries(self):
+        # The CLI connects to known sockets itself, e.g. a Mac Podman machine.
+        with tempfile.TemporaryDirectory() as directory, socket.socket(socket.AF_UNIX) as listener:
+            path = Path(directory) / "machine-api.sock"
+            listener.bind(str(path))
+            with patch.object(check.shutil, "which", return_value=None), \
+                    patch.object(check, "engine_sockets", return_value=[path]):
+                self.assertTrue(check.container_engine({}))
+        home = {"HOME": "/home/fixture", "XDG_RUNTIME_DIR": "/run/user/1000"}
+        self.assertIn(Path("/home/fixture/.docker/run/docker.sock"), check.engine_sockets(home))
+        self.assertIn(Path("/run/user/1000/podman/podman.sock"), check.engine_sockets(home))
 
     def test_x86_only_suites_refuse_arm_linux(self):
         self.assertIn("requires Linux x86-64", self.linux("linux-oci", {"kvm": ""}, machine="aarch64"))
@@ -117,7 +140,8 @@ class SelectionTests(unittest.TestCase):
                 for name in ("kernel", "runtime.tar.gz"):
                     (Path(directory) / architecture / name).touch()
             self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs=slot), [])
-            with patch.object(check.shutil, "which", side_effect=lambda tool: None):
+            with patch.object(check.shutil, "which", side_effect=lambda tool: None), \
+                    patch.object(check, "engine_sockets", return_value=[]):
                 missing = check.requirements("mac-apps", "Darwin", "arm64", slot)
                 self.assertEqual(len(missing), 1)
                 self.assertIn("no Docker-compatible engine", missing[0])

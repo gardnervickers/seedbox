@@ -112,8 +112,11 @@ def guest_assets(environment, machine):
     """Unmet guest kernel and helper inputs for the release CLI; it never downloads them."""
     slot = asset_directory(environment, machine)
     missing = []
-    for key, name in (("SEEDBOX_KERNEL", "kernel"), ("SEEDBOX_RUNTIME_ASSETS", "runtime.tar.gz")):
-        path = Path(environment[key]) if environment.get(key) else slot / name
+    # The release CLI embeds helpers from SEEDBOX_BUILD_HELPERS or the slot (build-runtime.rs).
+    helpers = environment.get("SEEDBOX_RUNTIME_ASSETS") or environment.get("SEEDBOX_BUILD_HELPERS")
+    for key, name, explicit in (("SEEDBOX_KERNEL", "kernel", environment.get("SEEDBOX_KERNEL")),
+                                ("SEEDBOX_RUNTIME_ASSETS", "runtime.tar.gz", helpers)):
+        path = Path(explicit) if explicit else slot / name
         if not path.is_file():
             missing.append(f"{key} or {path}")
     if missing:
@@ -122,8 +125,26 @@ def guest_assets(environment, machine):
     return []
 
 
+def engine_sockets(environment):
+    """Sockets the CLI may connect to without DOCKER_HOST (cli/backends.rs)."""
+    home = Path(environment.get("HOME", "~")).expanduser()
+    runtime = environment.get("XDG_RUNTIME_DIR")
+    sockets = [Path("/var/run/docker.sock"), home / ".docker/run/docker.sock",
+               Path("/run/podman/podman.sock")]
+    if runtime:
+        sockets.append(Path(runtime) / "podman/podman.sock")
+    if platform.system() == "Darwin":
+        temporary = subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True,
+                                   text=True, check=False).stdout.strip()
+        if temporary:
+            sockets += sorted(Path(temporary, "podman").glob("*-api.sock"))
+    return sockets
+
+
 def container_engine(environment):
-    return bool(environment.get("DOCKER_HOST")) or any(shutil.which(tool) for tool in ("docker", "podman"))
+    return (bool(environment.get("DOCKER_HOST"))
+            or any(shutil.which(tool) for tool in ("docker", "podman"))
+            or any(path.is_socket() for path in engine_sockets(environment)))
 
 
 def available_file(environment, key, default):
