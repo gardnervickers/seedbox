@@ -31,7 +31,7 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   downloader, a compiler or container engine. Release runs ignore legacy kernel
   artifact-directory searches; those remain for unbundled development builds.
   Explicit `--build-epoch` retains native project-Nix preparation with released
-  guest assets. Linux package execution/reproducibility needs the final merge train.
+  guest assets.
 - Runtime preparation uses a Docker/Podman endpoint and a Linux filesystem-tools
   container, with no second Seedbox executable. Native Mac application profiles
   use `arm64-world-v1` with their actual guest inputs and diagnostic HVF host
