@@ -310,4 +310,4 @@ images or executes guests. Compatibility readiness is not replay qualification.
 - `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers
   none of it. A VMM change needs `cargo build-vmm` and
   `cargo test-vmm --features kvm-tests` on a Linux KVM host. Without the
-  feature, the KVM tests are skipped, not failed.
+  feature, the KVM tests are excluded from compilation.
