@@ -2,8 +2,8 @@ name: guest-tls
 services:
   tls:
     build:
-      context: ../../../guest
-      dockerfile: acceptance-tls.Dockerfile
+      context: .
+      dockerfile: Dockerfile
 x-seedbox:
   version: 1
   machine: {memory_mb: 2048}

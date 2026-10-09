@@ -6,7 +6,7 @@ services:
     configs:
       - {source: driver, target: /runtime.sh}
 configs:
-  driver: {file: ../driver/runtime_nginx.sh}
+  driver: {file: ./runtime_nginx.sh}
 x-seedbox:
   version: 1
   machine: {memory_mb: 2048}

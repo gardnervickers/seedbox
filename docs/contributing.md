@@ -81,14 +81,12 @@ repository root on the qualified Linux host, after setting up the CLI runtime
 inputs described above:
 
 ```sh
-seedbox run harness/acceptance/workloads/short-kill-3.5.2.yaml
-seedbox run harness/acceptance/workloads/sanity.yaml
+seedbox run harness/acceptance/workloads/key-value.yaml
 seedbox run harness/acceptance/workloads/race.yaml
-seedbox run harness/acceptance/workloads/kill-3.5.3.yaml
 seedbox run harness/acceptance/workloads/volume-crash.yaml
 ```
 
-The YAML references the existing Go/C workload build contexts and loads the
+The YAML references the existing Python TCP key/value fixture and C race workload and loads the
 Python drivers and control API through Compose `configs`. No preparation script,
 generated project, or host scenario runner is required. Paths resolve relative
 to each YAML file, so these commands also work from another directory with an
@@ -118,7 +116,7 @@ seedbox replay /path/to/retained/run --undo 0
 seedbox replay /path/to/retained/run --undo 16
 seedbox replay /path/to/retained/run --margin 32768
 
-seedbox explore harness/acceptance/workloads/kill-3.5.3.yaml --seed 4000 --count 11
+seedbox explore harness/acceptance/workloads/key-value.yaml --seed 4000 --count 11
 ```
 
 The CLI owns image preparation, CPU leases, restoration, retained evidence and
