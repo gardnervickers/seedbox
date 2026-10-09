@@ -7,7 +7,7 @@ fn observed() -> CoreObservation {
     CoreObservation {
         cpu: 8,
         architecture: p.architecture,
-        vendor: p.vendor,
+        vendor: "AuthenticAMD".into(),
         family: 25,
         model: 33,
         stepping: 0,

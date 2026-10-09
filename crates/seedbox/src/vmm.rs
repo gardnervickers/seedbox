@@ -2454,7 +2454,7 @@ mod doctor_tests {
         CoreObservation {
             cpu,
             architecture: p.architecture,
-            vendor: p.vendor,
+            vendor: "AuthenticAMD".into(),
             family: 25,
             model: 33,
             stepping: 0,

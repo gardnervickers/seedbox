@@ -54,7 +54,6 @@ pub struct CpuidEntry {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequiredPolicy {
     pub architecture: String,
-    pub vendor: String,
     pub guest_abi: String,
     pub control_channel: String,
     pub kvm_api: i32,
@@ -67,7 +66,6 @@ pub struct RequiredPolicy {
 pub fn required_policy() -> RequiredPolicy {
     RequiredPolicy {
         architecture: "x86_64".into(),
-        vendor: "AuthenticAMD".into(),
         guest_abi: "oci-init-v1".into(),
         control_channel: "virtio-console-v1".into(),
         kvm_api: 12,
@@ -331,7 +329,7 @@ mod cleanup_tests {
         CoreObservation {
             cpu: 8,
             architecture: p.architecture,
-            vendor: p.vendor,
+            vendor: "AuthenticAMD".into(),
             family: 25,
             model: 33,
             stepping: 0,
