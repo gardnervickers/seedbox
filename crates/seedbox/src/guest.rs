@@ -288,7 +288,7 @@ impl<W: Write> Newc<W> {
             let relative = item
                 .path()
                 .strip_prefix(root)
-                .unwrap()
+                .map_err(|_| Error::Execution("image path outside its root".into()))?
                 .to_str()
                 .ok_or_else(|| Error::Execution("non-UTF-8 image filename".into()))?;
             let name = if relative.is_empty() {
