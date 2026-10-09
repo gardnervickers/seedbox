@@ -140,6 +140,7 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         data
     }
     assert_eq!(&recipe[..10], b"SBXLAUNCH4");
+    assert!(launch_recipe(&launch, "10.0.0.1/24", "", "app", &BTreeMap::new(), 86399).is_err());
     for expected in ["10.0.0.1/24", "10.0.0.1 app\n", "app", "123:456", "/"] {
         assert_eq!(field(&recipe, &mut cursor), expected.as_bytes());
     }

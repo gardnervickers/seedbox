@@ -407,7 +407,7 @@ fn bad_values_are_usage_errors() {
 #[test]
 fn build_epoch_is_bounded_and_only_available_for_preparation_commands() {
     let directory = tempfile::tempdir().unwrap();
-    for value in ["-1", "0", "86399", "4294967296", "not-a-number"] {
+    for value in ["-1", "4294967296", "not-a-number"] {
         let output = seedbox(
             &["prepare", "--output", "out.json", "--build-epoch", value],
             directory.path(),
@@ -430,7 +430,7 @@ fn build_epoch_is_bounded_and_only_available_for_preparation_commands() {
         assert!(output.status.success());
         assert!(!String::from_utf8_lossy(&output.stdout).contains("--build-epoch"));
     }
-    for value in ["86400", "4294967295"] {
+    for value in ["0", "4294967295"] {
         let output = seedbox(
             &["prepare", "--output", "out.json", "--build-epoch", value],
             directory.path(),
@@ -772,7 +772,7 @@ fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation(
     )
     .unwrap();
     for command in ["run", "explore", "prepare"] {
-        let mut args = vec![command, "--build-epoch", "86400", "--builder", "./builder"];
+        let mut args = vec![command, "--build-epoch", "0", "--builder", "./builder"];
         if command == "prepare" {
             args.extend(["--output", "prepared.json"]);
         }
@@ -2246,13 +2246,7 @@ fn build_epoch_native_permissions_fail_before_state_creation() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("compose.yaml"), "name: epoch\nservices:\n  app: {image: alpine}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
     let output = seedbox(
-        &[
-            "prepare",
-            "--build-epoch",
-            "86400",
-            "--output",
-            "prepared.json",
-        ],
+        &["prepare", "--build-epoch", "0", "--output", "prepared.json"],
         root.path(),
     );
     assert_eq!(output.status.code(), Some(2));

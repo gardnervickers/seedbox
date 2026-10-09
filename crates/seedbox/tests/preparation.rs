@@ -353,10 +353,6 @@ fn preparation_records_one_epoch_after_import_and_retains_explicit_epoch() {
         );
     }
     preparer.tools.build_epoch = Some(0);
-    assert!(preparer
-        .prepare_with_transport(&simulation, &store, &context, &Transport)
-        .is_err());
-    preparer.tools.build_epoch = Some(86400);
     let explicit = preparer
         .prepare_with_transport(&simulation, &store, &context, &Transport)
         .unwrap();

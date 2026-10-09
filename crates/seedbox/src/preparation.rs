@@ -296,8 +296,10 @@ impl OciPreparer {
         }
         // Sample once after image builds: certificates minted during preparation
         // must already be valid when applications start. Replay retains this value.
+        // A build epoch below guest uptime (such as 0) still clamps layers;
+        // the guest clock starts at the earliest time Linux accepts instead.
         let wall_clock_epoch = match self.tools.build_epoch {
-            Some(epoch) => epoch,
+            Some(epoch) => epoch.max(crate::guest::MIN_WALL_CLOCK_EPOCH),
             None => u32::try_from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

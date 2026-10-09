@@ -182,7 +182,7 @@ impl Fixture {
 
 #[test]
 fn run_retains_inputs_result_logs_and_replay_does_not_prepare_again() {
-    for epoch in [None, Some(86400), Some(1791500000)] {
+    for epoch in [None, Some(0), Some(1791500000)] {
         let mut fixture = Fixture::new();
         fixture.preparer.inputs.wall_clock_epoch = epoch;
         let first = fixture.run();

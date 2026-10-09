@@ -661,8 +661,8 @@ impl RuntimeInputs {
 #[derive(Args, Clone, Copy)]
 #[command(next_help_heading = "Preparation")]
 struct BuildOptions {
-    /// Set the guest wall-clock epoch (at least 86400) and clamp new build-layer timestamps (native Podman only) [default: preparation time for guest clock].
-    #[arg(long, allow_hyphen_values = true, value_parser = clap::value_parser!(u32).range(i64::from(seedbox::guest::MIN_WALL_CLOCK_EPOCH)..))]
+    /// Set the guest wall-clock epoch and clamp new build-layer timestamps (native Podman only) [default: preparation time for guest clock].
+    #[arg(long, allow_hyphen_values = true, value_parser = clap::value_parser!(u32))]
     build_epoch: Option<u32>,
 }
 
