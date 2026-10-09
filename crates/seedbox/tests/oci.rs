@@ -1,5 +1,3 @@
-#[cfg(all(target_os = "linux", feature = "oci-tests"))]
-use seedbox::oci::OciTools;
 use seedbox::{
     config,
     oci::import_metadata,
@@ -24,7 +22,7 @@ fn metadata_verifies_platform_descriptors_and_retains_original_manifest() {
     let raw = directory.path();
     let config = blob(
         raw,
-        br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/bin/app"],"Env":["KEEP=1"]}}"#,
+        br#"{"os":"linux","architecture":"amd64","config":{"ArgsEscaped":true,"Cmd":["/bin/app"],"Env":["KEEP=1"]}}"#,
         "application/vnd.oci.image.config.v1+json",
     );
     let layer = blob(
@@ -56,6 +54,7 @@ fn metadata_verifies_platform_descriptors_and_retains_original_manifest() {
 fn foreign_platform_and_image_lifecycle_hooks_fail_before_execution() {
     for metadata in [
         json!({"os":"linux","architecture":"arm64","config":{}}),
+        json!({"os":"windows","architecture":"amd64","config":{"ArgsEscaped":true}}),
         json!({"os":"linux","architecture":"amd64","config":{"Healthcheck":{"Test":["CMD","false"]}}}),
     ] {
         let directory = tempfile::tempdir().unwrap();
@@ -79,86 +78,121 @@ fn foreign_platform_and_image_lifecycle_hooks_fail_before_execution() {
     }
 }
 
-#[test]
-#[cfg(all(target_os = "linux", feature = "oci-tests"))]
-fn real_registry_images_use_the_verified_import_path() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = ContentStore::new(directory.path().join("store"));
-    for (name, reference, binary) in [
-        (
-            "redis",
-            "docker.io/library/redis:7.2",
-            "usr/local/bin/redis-server",
-        ),
-        ("etcd", "quay.io/coreos/etcd:v3.5.2", "usr/local/bin/etcd"),
-    ] {
-        let imported = OciTools::default()
-            .import(
+#[cfg(feature = "oci-tests")]
+mod engine {
+    use super::*;
+    use seedbox::{
+        container_images::ContainerTransport,
+        execution::CancellationToken,
+        guest::Architecture,
+        oci::{ImageTransport, ImportedImage, RootFilesystem},
+    };
+    fn import(service: &config::Service, directory: &Path, store: &ContentStore) -> ImportedImage {
+        ContainerTransport {
+            docker: bollard::Docker::connect_with_defaults().unwrap(),
+            cancellation: CancellationToken::default(),
+            progress: |line| eprintln!("{line}"),
+        }
+        .import(
+            service,
+            directory,
+            store,
+            None,
+            if cfg!(target_arch = "aarch64") {
+                Architecture::Arm64
+            } else {
+                Architecture::Amd64
+            },
+        )
+        .unwrap()
+    }
+    fn entries(image: &ImportedImage) -> BTreeMap<std::path::PathBuf, (tar::EntryType, Vec<u8>)> {
+        use std::io::Read;
+        let RootFilesystem::Archive(path) = &image.rootfs else {
+            panic!("expected export archive")
+        };
+        tar::Archive::new(fs::File::open(path).unwrap())
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let path = entry.path().unwrap().into_owned();
+                let kind = entry.header().entry_type();
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data).unwrap();
+                (path, (kind, data))
+            })
+            .collect()
+    }
+    #[test]
+    fn registry_images_export_the_expected_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(directory.path().join("store"));
+        for (name, reference, binary) in [
+            (
+                "redis",
+                "docker.io/library/redis:7.2",
+                "rootfs/usr/local/bin/redis-server",
+            ),
+            (
+                "etcd",
+                "quay.io/coreos/etcd:v3.5.2",
+                "rootfs/usr/local/bin/etcd",
+            ),
+        ] {
+            let image = import(
                 &simulation(reference).services["app"],
                 &directory.path().join(name),
                 &store,
-            )
-            .unwrap();
-        assert!(match &imported.rootfs {
-            seedbox::oci::RootFilesystem::Directory(path) => path,
-            _ => panic!("native import returned an archive"),
-        }
-        .join(binary)
-        .is_file());
-        assert!(!imported.image.layers.is_empty());
-        for hash in imported.image.layers {
-            store.verify(&hash).unwrap();
-        }
-        println!("{name}: sha256:{}", imported.image.manifest.hex());
-    }
-}
-
-#[test]
-#[cfg(all(target_os = "linux", feature = "oci-tests"))]
-fn dockerfile_layers_apply_whiteouts_and_preserve_launch_metadata() {
-    let directory = tempfile::tempdir().unwrap();
-    let context = directory.path().join("context");
-    fs::create_dir(&context).unwrap();
-    fs::write(context.join("Dockerfile"), "FROM docker.io/library/busybox:1.37\nCOPY . /source\nRUN test ! -e /source/ignored && mkdir /data && echo old >/data/remove && echo keep >/data/keep\nRUN rm /data/remove && ln -s keep /data/link\nENV MESSAGE=hello\nWORKDIR /data\nUSER 123:456\nENTRYPOINT [\"/bin/echo\"]\nCMD [\"default\"]\n").unwrap();
-    fs::write(context.join(".dockerignore"), "ignored\n").unwrap();
-    fs::write(context.join("ignored"), "must not reach COPY").unwrap();
-    let mut service = simulation("unused:test").services.remove("app").unwrap();
-    service.source = config::ImageSource::Build {
-        context: context.clone(),
-        dockerfile: context.join("Dockerfile"),
-    };
-    service.entrypoint = None;
-    service.command = None;
-    let store = ContentStore::new(directory.path().join("store"));
-    let imported = OciTools::default()
-        .import(&service, &directory.path().join("image"), &store)
-        .unwrap();
-    assert!(!match &imported.rootfs {
-        seedbox::oci::RootFilesystem::Directory(path) => path,
-        _ => panic!("native import returned an archive"),
-    }
-    .join("data/remove")
-    .exists());
-    assert!(!match &imported.rootfs {
-        seedbox::oci::RootFilesystem::Directory(path) => path,
-        _ => panic!("native import returned an archive"),
-    }
-    .join("source/ignored")
-    .exists());
-    assert_eq!(
-        fs::read_to_string(
-            match &imported.rootfs {
-                seedbox::oci::RootFilesystem::Directory(path) => path,
-                _ => panic!("native import returned an archive"),
+            );
+            assert!(entries(&image).contains_key(Path::new(binary)));
+            for digest in image.image.layers {
+                store.verify(&digest).unwrap();
             }
-            .join("data/link")
-        )
-        .unwrap(),
-        "keep\n"
-    );
-    assert_eq!(imported.image.launch.argv, ["/bin/echo", "default"]);
-    assert_eq!(imported.image.launch.user, "123:456");
-    assert_eq!(imported.image.launch.working_dir, "/data");
-    assert_eq!(imported.image.launch.environment["MESSAGE"], "hello");
-    assert!(imported.auxiliary.contains_key("build-context"));
+        }
+    }
+    #[test]
+    fn build_honors_ignore_whiteouts_and_launch_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = directory.path().join("context");
+        fs::create_dir(&context).unwrap();
+        fs::write(context.join("Dockerfile"), "FROM docker.io/library/alpine:3.22\nCOPY . /source\nCOPY resolver /etc/resolv.conf\nRUN test ! -e /source/ignored && mkdir /data && echo old >/data/remove && echo keep >/data/keep\nRUN rm /data/remove && ln -s keep /data/link\nENV MESSAGE=hello\nWORKDIR /data\nUSER 123:456\nENTRYPOINT [\"/bin/echo\"]\nCMD [\"default\"]\n").unwrap();
+        fs::write(context.join(".dockerignore"), "ignored\n").unwrap();
+        fs::write(context.join("ignored"), "must not upload").unwrap();
+        fs::write(context.join("resolver"), "image-owned resolver\n").unwrap();
+        let mut service = simulation("unused:test").services.remove("app").unwrap();
+        service.source = config::ImageSource::Build {
+            context: context.clone(),
+            dockerfile: context.join("Dockerfile"),
+        };
+        service.entrypoint = None;
+        service.command = None;
+        let store = ContentStore::new(directory.path().join("store"));
+        let image = import(&service, &directory.path().join("image"), &store);
+        let files = entries(&image);
+        assert!(!files.contains_key(Path::new("rootfs/.dockerenv")));
+        let again = import(&service, &directory.path().join("again"), &store);
+        let (RootFilesystem::Archive(first), RootFilesystem::Archive(second)) =
+            (&image.rootfs, &again.rootfs)
+        else {
+            panic!("expected archives")
+        };
+        assert_eq!(
+            fs::read(first).unwrap(),
+            fs::read(second).unwrap(),
+            "same image must produce identical rootfs bytes"
+        );
+        assert!(!files.contains_key(Path::new("rootfs/data/remove")));
+        assert!(!files.contains_key(Path::new("rootfs/source/ignored")));
+        assert_eq!(files[Path::new("rootfs/data/keep")].1, b"keep\n");
+        assert_eq!(
+            files[Path::new("rootfs/etc/resolv.conf")].1,
+            b"image-owned resolver\n"
+        );
+        assert!(files[Path::new("rootfs/data/link")].0.is_symlink());
+        assert_eq!(image.image.launch.argv, ["/bin/echo", "default"]);
+        assert_eq!(image.image.launch.user, "123:456");
+        assert_eq!(image.image.launch.working_dir, "/data");
+        assert_eq!(image.image.launch.environment["MESSAGE"], "hello");
+    }
 }

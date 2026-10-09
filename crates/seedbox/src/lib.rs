@@ -7,19 +7,22 @@
 #![doc = include_str!("../README.md")]
 
 pub mod admission;
+mod build_context;
 pub mod bundle;
 pub mod config;
-pub mod container_runtime;
+pub mod container_images;
 pub mod counter;
 pub mod diff;
 pub mod engine;
 pub mod execution;
 pub mod exploration;
 pub mod guest;
+pub mod guest_assets;
 #[cfg(any(target_os = "linux", test))]
 mod host;
 pub mod host_control;
 pub mod image;
+mod image_archive;
 pub mod logs;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod mac;
@@ -27,9 +30,7 @@ pub mod oci;
 pub mod orchestration;
 pub mod preparation;
 mod preparation_command;
-pub mod release_download;
 mod retained;
-pub mod runtime_assets;
 pub mod store;
 pub mod templates;
 pub mod vmm;
@@ -48,7 +49,7 @@ pub enum Error {
     Yaml(#[from] serde_yaml_ng::Error),
     #[error("input integrity: {0}")]
     Integrity(String),
-    #[error("preparation cancelled after owned process cleanup")]
+    #[error("preparation cancelled")]
     PreparationCancelled,
     #[error("preparation cleanup-unverified: {0}")]
     PreparationCleanupUnverified(String),
