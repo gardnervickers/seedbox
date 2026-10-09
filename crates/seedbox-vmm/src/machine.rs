@@ -3,7 +3,7 @@
 //! virtual time: retired conditional branches with exact counted stops
 //! (precise preemption), or the PV clock, where time moves only at exits.
 
-use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo};
+use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo, PORT_TIMER};
 #[cfg(test)]
 use crate::counter::Counter;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
@@ -168,12 +168,14 @@ const PORT_TIME_LO: u16 = 0x520;
 const PORT_TIME_HI: u16 = 0x524;
 const PORT_TIME_READY: u16 = 0x528;
 const PORT_YIELD: u16 = 0x52c;
-pub(crate) const PORT_TIMER: u16 = 0x530;
 /// Supervisor ports the guest init writes (guest/io.h, guest/control.h).
 const PORT_EXIT: u16 = 0xf4;
 const PORT_INIT_ERROR: u16 = 0xf5;
 const PORT_EFFECT: u16 = 0xf6;
 const PORT_FAILURE: u16 = 0xf7;
+/// A machine state digest and the named hashes of its parts.
+pub type StateDigest = (String, Vec<(&'static str, String)>);
+
 /// Port of the launch barrier, see guest/barrier.h.
 const BARRIER_PORT: u16 = 0xf8;
 /// Bochs-style debug console, an alias for COM1 output.
@@ -2470,7 +2472,7 @@ impl Machine {
     /// pending exception/interrupt/NMI state, syscall/TLS MSRs, the shared time
     /// page, RAM and any retained disk. The digest is the hash of the parts.
     /// Not covered: other MSRs, debug registers and other VMM device models.
-    pub fn state_digest(&mut self) -> Result<(String, Vec<(&'static str, String)>), String> {
+    pub fn state_digest(&mut self) -> Result<StateDigest, String> {
         let hex = |h: Sha256| format!("{:x}", h.finalize());
         let e = |part: &str, err: kvm_ioctls::Error| format!("state digest {part}: {err}");
         let mut parts = Vec::new();

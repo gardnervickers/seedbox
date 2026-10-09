@@ -419,10 +419,16 @@ pub fn rtc_read(reg: u8) -> u8 {
     }
 }
 
+// crates/seedbox/tests/control.rs includes this file by path, where no
+// crate::boundary exists, so the tests compile their own copy.
+#[cfg(test)]
+#[path = "boundary.rs"]
+mod delay_boundary;
+
 #[cfg(test)]
 mod delay_tests {
+    use super::delay_boundary::PendingIo;
     use super::*;
-    use crate::boundary::PendingIo;
 
     #[test]
     fn delay_samples_latched_read_once_and_asserts_each_periodic_expiry() {
@@ -500,7 +506,7 @@ mod delay_tests {
     /// precedes its start.
     #[test]
     fn a_clock_jump_past_timer_deadlines_fires_them_before_the_next_slice() {
-        use crate::boundary::{advance_time, hard_limit};
+        use super::delay_boundary::{advance_time, hard_limit};
         let tolerance = 2_000_151;
         let mut pit = Pit {
             deadline: Some(810_000_000),

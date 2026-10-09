@@ -1,6 +1,10 @@
 //! Stop-boundary rules independent of KVM and the host PMU.
+//!
+//! Self-contained: crates/seedbox/tests/control.rs compiles it through
+//! devices.rs by path.
 
-use crate::machine::PORT_TIMER;
+/// The guest kernel's one-shot timer port (kernel/seedbox.h).
+pub const PORT_TIMER: u16 = 0x530;
 
 pub fn hard_limit(limit: u64, deadline: Option<u64>, exact: bool, tolerance: u64) -> u64 {
     let pit = deadline.unwrap_or(u64::MAX);
