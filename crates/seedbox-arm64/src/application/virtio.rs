@@ -157,9 +157,9 @@ impl Virtio {
     }
     pub fn receive(&mut self, memory: &mut [u8], bytes: &[u8]) -> Result<bool> {
         match &mut self.model {
-            Model::Net(net) => {
-                Ok(net.receive(&mut self.transport, memory, RAM_BASE, bytes, |_, _| {})?.accepted)
-            }
+            Model::Net(net) => Ok(net
+                .receive(&mut self.transport, memory, RAM_BASE, bytes, |_, _| {})?
+                .accepted),
             Model::Console(console) => {
                 console.receive(&mut self.transport, memory, RAM_BASE, bytes, |_, _| {})?;
                 Ok(true)

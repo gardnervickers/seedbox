@@ -17,7 +17,6 @@ pub mod witness;
 pub use seedbox_engine_core::disk;
 pub(crate) use seedbox_engine_core::{control, faults, links, network_counters, rng};
 
-#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/host_control.rs"]
 pub(crate) mod host_control;
 

@@ -473,7 +473,11 @@ mod tests {
             lstar: 0,
             idt_base: 0,
             bitness,
-            paging: Paging { pg: false, long: false, cr3: 0 },
+            paging: Paging {
+                pg: false,
+                long: false,
+                cr3: 0,
+            },
             fs_base: 0,
             gs_base: 0,
         }
@@ -485,7 +489,11 @@ mod tests {
         mem[0x1000..0x1002].copy_from_slice(&[0x48, 0xcb]); // lretq
         mem[0x2000..0x2008].copy_from_slice(&0x3000u64.to_le_bytes());
         mem[0x2008..0x2010].copy_from_slice(&0x10u64.to_le_bytes());
-        let r = kvm_regs { rip: 0x1000, rsp: 0x2000, ..Default::default() };
+        let r = kvm_regs {
+            rip: 0x1000,
+            rsp: 0x2000,
+            ..Default::default()
+        };
         let targets = planner(64).plan(&mem, &r).unwrap();
         assert_eq!(targets[0], 0x3000);
     }
@@ -497,7 +505,12 @@ mod tests {
         mem[0x1100..0x1102].copy_from_slice(&[0xff, 0x20]); // jmp [rax], table not present
         mem[0x1200..0x1202].copy_from_slice(&[0x48, 0xcf]); // iretq, frame not present
         for rip in [0x1000, 0x1100, 0x1200] {
-            let r = kvm_regs { rip, rsp: 0x10_0000, rax: 0x20_0000, ..Default::default() };
+            let r = kvm_regs {
+                rip,
+                rsp: 0x10_0000,
+                rax: 0x20_0000,
+                ..Default::default()
+            };
             let targets = planner(64).plan(&mem, &r).unwrap();
             assert_eq!(targets, [0xf000, 0xf100, 0xf200], "rip {rip:#x}");
         }
@@ -514,7 +527,10 @@ mod tests {
         mem[0x2000..0x2003].copy_from_slice(&[0x90, 0x74, 0x00]);
         let p = planner(32);
         for (rip, capped) in [(0x1000, true), (0x1000 + 100, true), (0x2000, false)] {
-            let r = kvm_regs { rip, ..Default::default() };
+            let r = kvm_regs {
+                rip,
+                ..Default::default()
+            };
             assert_eq!(p.plan_capped(&mem, &r).unwrap().1, capped, "rip {rip:#x}");
         }
     }
@@ -524,7 +540,10 @@ mod tests {
         let mut mem = vec![0u8; 0x4000];
         // nop; ljmp $0x10, $0x2000 (32-bit)
         mem[0x1000..0x1008].copy_from_slice(&[0x90, 0xea, 0x00, 0x20, 0x00, 0x00, 0x10, 0x00]);
-        let r = kvm_regs { rip: 0x1000, ..Default::default() };
+        let r = kvm_regs {
+            rip: 0x1000,
+            ..Default::default()
+        };
         let targets = planner(32).plan(&mem, &r).unwrap();
         assert_eq!(targets[0], 0x2000);
     }

@@ -16,8 +16,8 @@ train: one branch, one host job, then ordinary merges with no further host time.
 2. **Check it before host time.** On the train head: `cargo fmt -p seedbox --check`,
    strict clippy, `cargo test --workspace --locked` and
    `bash harness/acceptance.sh portable` (which runs `cargo test-vmm`).
-3. **Run one host job.** `harness/host-check.sh` on the train head, plus the
-   union of each PR's own host checks as its reviewer listed them, written as
+3. **Run one host job.** On the train head, run the union of each PR's own
+   host checks as its reviewer listed them, written as
    one script that runs independent checks at once on separate SMT pairs
    (never CPU 0 or its sibling). Each PR's host list covers only what its
    diff can affect, plus one witness-equality core, with no unrelated flag
@@ -76,7 +76,7 @@ train: one branch, one host job, then ordinary merges with no further host time.
    keeps its evidence only if its checks ran on main's engine (no engine PR
    ahead of it in the train), or the train showed feature-off witness
    equality for the worlds its checks ran. Otherwise rerun just its scoped
-   checks (`host-check.sh --plan`) on main plus the PR. Its engine equals
+   checks on main plus the PR. Its engine equals
    main's, so `cluster-fixed` is skipped and this is usually one core tier
    on a side core. For example, #97 deliberately changes worlds with network
    jitter, so when it left train/3 the MinIO runs of #104 and the faults

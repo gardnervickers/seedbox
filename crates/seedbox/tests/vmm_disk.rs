@@ -28,6 +28,5 @@ fn committed_torn_disk_world_uses_disk_loss_object() {
 }
 
 #[allow(dead_code)]
-#[rustfmt::skip]
 #[path = "../../seedbox-engine-core/src/checkpoint.rs"]
 mod checkpoint;

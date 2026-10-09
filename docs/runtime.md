@@ -110,9 +110,7 @@ boot guard, message/committed-byte draining, matcher/selector state, scheduled
 trigger effects, PV page/speed, timed-log cursor/order, lifecycle calls, disk
 survivors, branch streams and getrandom/urandom divergence. Portable tests
 check shared identity, ABI layout, replay settings and feature-off link/disk/RNG
-results and witness traces generated from main. Actual restored execution and
-whole-guest feature-off equality remain unverified on this Mac. See
-[the AMD host procedure](checkpoint-amd.md) for the exact remaining commands.
+results and witness traces generated from main.
 
 ## Disk crash policy
 
@@ -1112,8 +1110,7 @@ witness even after healing. Without selector use, tracking contributes no witnes
 bytes or report fields and leaves legacy RNG, frame decisions and results intact.
 This changes the engine identity. Portable tests exercise the production modules;
 AMD execution, replay and observation/performance qualification remain separate.
-The finite [AMD procedure](connection-selectors-amd.md) uses the guest-owned
-`harness/acceptance/workloads/connections.yaml` fixture.
+The guest-owned fixture is `harness/acceptance/workloads/connections.yaml`.
 
 ## Bundles
 
@@ -1206,8 +1203,7 @@ streaming byte access. Only manifest-declared, checksum-verified evidence is
 used. An absent index never causes host receipt order or application timestamps
 to be substituted. Filtering cannot change execution or witness identity.
 Indexes share the existing retention limits and bundle transfer path; missing
-raw streams and indexes stay explicit after import. See [timed logs](timed-logs.md)
-for format bounds, a portable demo and the pending AMD validation commands.
+raw streams and indexes stay explicit after import.
 
 ## Committed console triggers
 

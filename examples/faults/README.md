@@ -36,8 +36,7 @@ recover 32 records on its second start and 96 on its third. The broken case lose
 96 acknowledged values. A broken-server control runs the same 128 acknowledgements
 without faults and must PASS, demonstrating that the failure depends on restart.
 
-The per-PR [AMD smoke tier](../../harness/smoke/README.md#work-per-host-check)
-uses `batch=4`; this example and its full acceptance matrix keep `batch=32`.
+This example and its full acceptance matrix use `batch=32`.
 
 Generate the self-contained projects before using the Compose files:
 

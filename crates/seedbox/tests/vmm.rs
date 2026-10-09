@@ -1578,7 +1578,6 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
 }
 
 // Run the engine's pure protocol tests on Darwin as well as Linux.
-#[rustfmt::skip]
 #[path = "../../seedbox-engine-core/src/checkpoint.rs"]
 mod checkpoint_protocol;
 
