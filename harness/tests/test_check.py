@@ -103,6 +103,20 @@ class SelectionTests(unittest.TestCase):
         self.assertIn(Path("/home/fixture/.docker/run/docker.sock"), check.engine_sockets(home))
         self.assertIn(Path("/run/user/1000/podman/podman.sock"), check.engine_sockets(home))
 
+    def test_a_root_only_engine_socket_needs_root_for_oci(self):
+        with tempfile.TemporaryDirectory() as directory, socket.socket(socket.AF_UNIX) as listener:
+            path = Path(directory) / "podman.sock"
+            listener.bind(str(path))
+            environment = {"DOCKER_HOST": f"unix://{path}"}
+            self.assertFalse(check.engine_needs_root(environment))
+            with patch.object(check.os, "access", return_value=False):
+                self.assertTrue(check.engine_needs_root(environment))
+                self.assertEqual(check.requirements("linux-oci", "Linux", "x86_64", environment, can_root=True), [])
+                missing = check.requirements("linux-oci", "Linux", "x86_64", environment)
+        self.assertEqual(len(missing), 1)
+        self.assertIn("not writable by this user", missing[0])
+        self.assertFalse(check.engine_needs_root({"DOCKER_HOST": "tcp://127.0.0.1:2375"}))
+
     def test_x86_only_suites_refuse_arm_linux(self):
         self.assertIn("requires Linux x86-64", self.linux("linux-oci", {"kvm": ""}, machine="aarch64"))
         self.assertEqual(self.linux("linux-kvm", {"kvm": ""}, machine="aarch64"), [])

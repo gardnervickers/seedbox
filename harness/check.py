@@ -147,6 +147,17 @@ def container_engine(environment):
             or any(path.is_socket() for path in engine_sockets(environment)))
 
 
+def engine_needs_root(environment):
+    """Whether only root can open the engine socket, e.g. a root:podman 0660 system socket."""
+    host = environment.get("DOCKER_HOST", "")
+    if host:
+        sockets = [Path(host.removeprefix("unix://"))] if host.startswith("unix://") else []
+    else:
+        sockets = engine_sockets(environment)
+    sockets = [path for path in sockets if path.is_socket()]
+    return bool(sockets) and not any(os.access(path, os.R_OK | os.W_OK) for path in sockets)
+
+
 def available_file(environment, key, default):
     path = Path(environment.get(key, default)).resolve()
     return path if path.is_file() else None
@@ -212,6 +223,8 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
                      ("SEEDBOX_ARM64_KERNEL", "SEEDBOX_ARM64_INITRD")))
         elif suite == "linux-oci":
             engine()
+            need(can_root or not engine_needs_root(environment),
+                 "the engine socket is not writable by this user; join its group, or allow passwordless sudo")
         elif suite == "linux-apps":
             engine()
             missing.extend(guest_assets(environment, machine))
@@ -322,7 +335,9 @@ class Checks:
                 command = [binary, "--test-threads=1"]
                 if target == "applications":
                     command.append("--nocapture")
-                needs_root = package == "seedbox" and target in ("applications", "host_pause")
+                needs_root = package == "seedbox" and (
+                    target in ("applications", "host_pause")
+                    or target == "oci" and engine_needs_root(environment))
                 if counter:
                     command = [sys.executable, str(ROOT / "harness/check-counter.py"),
                                *(["--cpu", environment["SEEDBOX_TEST_CPU"]] if environment.get("SEEDBOX_TEST_CPU") else []),
