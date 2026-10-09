@@ -254,6 +254,35 @@ impl Reader {
     }
 }
 
+impl Reader {
+    /// Copy every selected chunk's exact bytes in report order.
+    pub fn write_raw(&mut self, output: &mut impl Write) -> Result<()> {
+        for index in 0..self.report.chunks.len() {
+            self.copy_chunk(index, output)?;
+        }
+        Ok(())
+    }
+
+    /// Write the one `logs --json` document: status, omissions, then every
+    /// selected chunk with its streamed `bytes_hex`.
+    pub fn write_json(&mut self, output: &mut impl Write) -> Result<()> {
+        writeln!(
+            output,
+            "{{\n  \"status\": {},\n  \"omissions\": {},\n  \"chunks\": [",
+            serde_json::to_string(&self.report.status)?,
+            serde_json::to_string_pretty(&self.report.omissions)?
+        )?;
+        let count = self.report.chunks.len();
+        for index in 0..count {
+            output.write_all(b"    ")?;
+            self.write_chunk_json(index, output)?;
+            output.write_all(if index + 1 < count { b",\n" } else { b"\n" })?;
+        }
+        writeln!(output, "  ]\n}}")?;
+        Ok(())
+    }
+}
+
 /// A chunk's JSON representation adds `bytes_hex` to its metadata. This writer
 /// streams arbitrary payload sizes without accumulating raw bytes or hex strings.
 impl Reader {

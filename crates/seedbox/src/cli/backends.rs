@@ -26,9 +26,7 @@ impl Executor {
         match self {
             Self::Linux(executor) => Ok(Self::Linux(executor.with_checkpoint(at_ns, branch_seed))),
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(_) => Err(seedbox::Error::Setup(
-                "--checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac".into(),
-            )),
+            Self::Mac(_) => Err(seedbox::Error::Setup(super::CHECKPOINT_REQUIRES_KVM.into())),
         }
     }
     pub fn performance(self, margin: &str, undo: u64) -> Result<Self> {
