@@ -2,7 +2,6 @@
 mod management_uart;
 use seedbox_engine_core::{control, faults, links};
 #[allow(dead_code)]
-#[allow(clippy::manual_div_ceil)]
 #[path = "../../seedbox-vmm/src/devices.rs"]
 mod devices;
 use serde_json::json;

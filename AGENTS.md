@@ -144,9 +144,6 @@ builds as the current user, signs disposable HVF test copies, and uses scoped
 CPU/SMT/MSR cleanup for counted tests. Check other revisions in a Git worktree;
 do not stamp Git revisions or checkout cleanliness in the runner.
 
-The `seedbox-vmm` crate has existing clippy findings. Don't fix them in an
-unrelated change (see above).
-
 ## CLI
 
 The CLI lives in `crates/seedbox/src/cli/`:

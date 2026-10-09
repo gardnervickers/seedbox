@@ -403,8 +403,7 @@ strict hard-stop check.
 
 Engines and guest kernels are not pinned: run, explore, replay and doctor admit
 any built VMM and guest kernel, and each run records their hashes in its
-identity. An older
-record's `engine_qualification` parameter is kept as data and does not block replay.
+identity.
 
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY`
 permits a fresh identity and witness comparison with it.

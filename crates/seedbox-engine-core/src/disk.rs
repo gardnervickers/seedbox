@@ -292,7 +292,7 @@ impl Disk {
     }
 
     fn check(&self, sector: u64, len: usize) -> Result<u64, DiskError> {
-        if len % SECTOR != 0 {
+        if !len.is_multiple_of(SECTOR) {
             return Err(DiskError::Partial);
         }
         let n = (len / SECTOR) as u64;

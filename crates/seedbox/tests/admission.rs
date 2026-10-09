@@ -83,7 +83,6 @@ fn any_engine_is_admitted_and_older_records_keep_their_extra_parameters() {
         "host_policy",
         "host_policy_fingerprint",
         "host_policy_fields",
-        ENGINE_QUALIFICATION,
     ] {
         older
             .semantic_parameters
