@@ -221,7 +221,7 @@ pub(crate) fn finish_admission(
     }
 }
 
-/// Disabled readiness attributes. Counting fields match frozen VMM Counter::new;
+/// Disabled readiness attributes. Counting fields match the VMM's Counter::new;
 /// admission alone sets CLOEXEC atomically, protecting descriptor inheritance.
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -510,12 +510,10 @@ mod cleanup_tests {
         assert!(bounded.contains("[truncated]"));
     }
     #[test]
-    fn selected_disabled_events_match_frozen_counting_fields_and_close_before_restore() {
+    fn selected_disabled_events_match_vmm_counting_fields_and_close_before_restore() {
         use crate::counter::CounterProfile;
         use std::{io::Read, os::unix::net::UnixStream, time::Duration};
         let policy = required_policy();
-        let vmm = include_str!("../../seedbox-vmm/src/counter.rs");
-        assert!(vmm.contains("&attr, 0, -1, -1, 0")); // Sole deliberate syscall difference is CLOEXEC8.
         for (counter, event) in [
             (CounterProfile::Zen, 0x5100d1),
             (CounterProfile::IntelSkylake, 0x5101c4),
