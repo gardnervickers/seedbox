@@ -133,7 +133,7 @@ fn is_zero(value: &u64) -> bool {
 pub const DEFAULT_TIMER_JITTER_NS: u64 = 20_000;
 /// Default `x-seedbox.schedule.start_stagger`, or half of
 /// `limits.simulated_time` when that is shorter.
-pub const DEFAULT_START_STAGGER_NS: u64 = 200_000_000;
+pub const DEFAULT_START_STAGGER_NS: u64 = 20_000_000;
 /// Default `x-seedbox.network.jitter`, as a fraction of global latency.
 pub const DEFAULT_NETWORK_JITTER_DIVISOR: u64 = 10;
 

@@ -10,7 +10,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Network jitter | 10% of `x-seedbox.network.latency` (100 µs at the default 1 ms) | `x-seedbox.network.jitter` (`0ns` turns it off) |
 | Timer jitter | 20 µs | `x-seedbox.schedule.timer_jitter` (`0ns` turns it off) |
-| Start stagger (Linux KVM) | 200 ms, or half the simulated time limit if shorter: each machine starts its application at a seeded offset after the last one reaches its launch barrier | `x-seedbox.schedule.start_stagger` (`0ns` starts every machine at once, unparked) |
+| Start stagger (Linux KVM) | 20 ms, or half the simulated time limit if shorter: each machine starts its application at a seeded offset after the last one reaches its launch barrier | `x-seedbox.schedule.start_stagger` (`0ns` starts every machine at once, unparked) |
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Link bandwidth and queue | infinite bandwidth, unbounded queue | `x-seedbox.network.bandwidth_bps`, `queue_bound`, or the same keys in `links` |
 | Runtime network impairments | off | `world.shape`: reorder, duplicate, burst loss, latency spike and TCP reset parameters |

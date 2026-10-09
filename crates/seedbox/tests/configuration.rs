@@ -52,7 +52,7 @@ fn seed_diversity_defaults_and_explicit_zeros() {
     let sim = parse(&unset).unwrap();
     assert_eq!(sim.network.jitter_ns, 100_000);
     assert_eq!(sim.schedule.timer_jitter_ns, 20_000);
-    assert_eq!(sim.schedule.start_stagger_ns, 200_000_000);
+    assert_eq!(sim.schedule.start_stagger_ns, 20_000_000);
     let latency = unset.replace("  version: 1", "  version: 1\n  network: {latency: 5ms}");
     assert_eq!(parse(&latency).unwrap().network.jitter_ns, 500_000);
     let zeros = unset.replace(
