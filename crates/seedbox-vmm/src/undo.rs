@@ -39,21 +39,29 @@ pub struct VcpuState {
 /// MSRs the guest may change, minus the TSC and paravirt ones; keep those KVM
 /// lets the VMM read.
 pub fn msr_list(kvm: &Kvm, vcpu: &VcpuFd) -> Result<Msrs, String> {
-    let list = kvm.get_msr_index_list().map_err(|e| format!("msr list: {e}"))?;
+    let list = kvm
+        .get_msr_index_list()
+        .map_err(|e| format!("msr list: {e}"))?;
     let mut msr_index = Vec::new();
     for &i in list.as_slice() {
         if is_tsc_or_pv(i) {
             continue;
         }
-        let mut one = Msrs::from_entries(&[kvm_msr_entry { index: i, ..Default::default() }])
-            .map_err(|e| format!("msrs: {e:?}"))?;
+        let mut one = Msrs::from_entries(&[kvm_msr_entry {
+            index: i,
+            ..Default::default()
+        }])
+        .map_err(|e| format!("msrs: {e:?}"))?;
         if matches!(vcpu.get_msrs(&mut one), Ok(1)) {
             msr_index.push(i);
         }
     }
     let entries: Vec<kvm_msr_entry> = msr_index
         .iter()
-        .map(|&index| kvm_msr_entry { index, ..Default::default() })
+        .map(|&index| kvm_msr_entry {
+            index,
+            ..Default::default()
+        })
         .collect();
     Msrs::from_entries(&entries).map_err(|e| format!("msrs: {e:?}"))
 }
@@ -114,9 +122,14 @@ impl VcpuState {
         } else if !events {
             "events"
         } else {
-            let msr = self.msrs.as_slice().iter().zip(o.msrs.as_slice()).find(|(a, b)| {
-                (a.index != b.index || a.data != b.data) && !is_free_running(a.index)
-            });
+            let msr = self
+                .msrs
+                .as_slice()
+                .iter()
+                .zip(o.msrs.as_slice())
+                .find(|(a, b)| {
+                    (a.index != b.index || a.data != b.data) && !is_free_running(a.index)
+                });
             return msr.map(|(a, _)| format!("msr {:#x}", a.index));
         };
         Some(part.into())
@@ -156,7 +169,8 @@ impl VcpuState {
         ev.flags |= KVM_VCPUEVENT_VALID_NMI_PENDING;
         vcpu.set_vcpu_events(&ev).map_err(|x| e("events", x))?;
         vcpu.set_mp_state(self.mp).map_err(|x| e("mp_state", x))?;
-        vcpu.set_debug_regs(&self.debugregs).map_err(|x| e("debugregs", x))?;
+        vcpu.set_debug_regs(&self.debugregs)
+            .map_err(|x| e("debugregs", x))?;
         Ok((self.regs, self.sregs))
     }
 }
@@ -198,7 +212,8 @@ fn is_free_running(i: u32) -> bool {
 }
 
 fn is_tsc_or_pv(i: u32) -> bool {
-    matches!(i, 0x10 | 0x11 | 0x12 | 0x1b | 0x3b | 0x6e0) || (0x4b56_4d00..=0x4b56_4dff).contains(&i)
+    matches!(i, 0x10 | 0x11 | 0x12 | 0x1b | 0x3b | 0x6e0)
+        || (0x4b56_4d00..=0x4b56_4dff).contains(&i)
 }
 
 impl Undo {
@@ -314,11 +329,20 @@ impl Undo {
     /// The shadow keeps the sync's contents; the pages stay marked, so the
     /// next save, sync or fork point brings them up to RAM. Meaningful only
     /// when nothing was restored or checkpointed since that sync.
-    pub fn unchanged_since_sync(&mut self, vm: &VmFd, mem: *mut u8, written: &mut Vec<u64>) -> Result<bool, String> {
+    pub fn unchanged_since_sync(
+        &mut self,
+        vm: &VmFd,
+        mem: *mut u8,
+        written: &mut Vec<u64>,
+    ) -> Result<bool, String> {
         self.valid = false;
         self.fetch(vm)?;
         written.resize(self.log.len(), 0);
-        for ((w, &l), v) in written.iter_mut().zip(self.log.iter()).zip(self.vmm.iter_mut()) {
+        for ((w, &l), v) in written
+            .iter_mut()
+            .zip(self.log.iter())
+            .zip(self.vmm.iter_mut())
+        {
             *w |= l;
             *v |= l;
         }
@@ -359,7 +383,12 @@ impl Undo {
 
     /// Put RAM and the shadow back to `image`, the RAM saved at the fork point,
     /// on every page written since. Returns the page count.
-    pub fn return_to_fork(&mut self, vm: &VmFd, mem: *mut u8, image: *const u8) -> Result<u64, String> {
+    pub fn return_to_fork(
+        &mut self,
+        vm: &VmFd,
+        mem: *mut u8,
+        image: *const u8,
+    ) -> Result<u64, String> {
         if self.since_fork.is_none() {
             return Err("no fork point held".into());
         }

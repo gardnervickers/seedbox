@@ -26,7 +26,6 @@ mod fixtures {
     }
 }
 #[allow(dead_code)]
-#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/log_index.rs"]
 mod producer;
 

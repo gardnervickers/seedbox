@@ -2,7 +2,6 @@
 // output-retention checks also run on Darwin without pretending to run KVM.
 #[allow(dead_code)]
 #[allow(clippy::manual_div_ceil)] // Existing PIT arithmetic is outside these UART tests.
-#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/devices.rs"]
 mod devices;
 
@@ -36,7 +35,6 @@ fn uart_baud_register_writes_do_not_enter_console_output() {
 
 #[allow(dead_code)]
 #[allow(clippy::manual_clamp)] // Existing queue-size arithmetic is outside receive coverage.
-#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/virtio_net.rs"]
 mod virtio_net;
 

@@ -1729,13 +1729,11 @@ mod timed_logs {
 }
 
 #[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/log_index.rs"]
-mod checkpoint_log_producer;
-#[allow(dead_code)]
-#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/output_layout.rs"]
 mod checkpoint_layout;
+#[allow(dead_code)]
+#[path = "../../seedbox-vmm/src/log_index.rs"]
+mod checkpoint_log_producer;
 
 #[allow(dead_code)]
 mod checkpoint_evidence {

@@ -5,8 +5,8 @@ fn main() {
     let manifest = std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo package directory");
     let expected = std::fs::canonicalize(std::path::Path::new(&manifest).join("../../.."))
         .expect("shared source checkout");
-    let configured = std::env::var_os("SEEDBOX_BUILD_ROOT")
-        .and_then(|path| std::fs::canonicalize(path).ok());
+    let configured =
+        std::env::var_os("SEEDBOX_BUILD_ROOT").and_then(|path| std::fs::canonicalize(path).ok());
     if configured.as_ref() != Some(&expected) {
         // An older checkout can reuse this build-script executable without our
         // config input. A missing watched file forces a fresh source check on
