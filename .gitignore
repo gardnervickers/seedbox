@@ -14,3 +14,7 @@ target/
 **/.seedbox/
 **/__pycache__/
 .claude/
+
+**/*.oci.tar
+
+**/image.oci.tar.*

@@ -27,7 +27,7 @@ run_case() {
   set +e
   "$cli" run "$compose" --seed 1009 --cpu "$cpu" --state "$state" \
     --vmm "$vmm" --kernel "$kernel" --guest-init "$output/compose-init" \
-    --busybox "$SEEDBOX_BUSYBOX" "$@" > "$output/$name.log" 2>&1
+    "$@" > "$output/$name.log" 2>&1
   status=$?
   set -e
   cat "$output/$name.log"
@@ -82,7 +82,7 @@ if test "${6:-}" = lifecycle; then
   set +e
   "$cli" run "$output/redis/wall.yaml" --seed 1009 --cpu "$cpu" --state "$state" \
     --vmm "$vmm" --kernel "$kernel" --guest-init "$output/compose-init" \
-    --busybox "$SEEDBOX_BUSYBOX" > "$output/wall.log" 2>&1
+    > "$output/wall.log" 2>&1
   status=$?
   set -e
   cat "$output/wall.log"

@@ -7,8 +7,6 @@ mod signals;
 use backends::{Executor, Preparer};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-#[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
-use seedbox::execution::ExecutionProfile;
 use seedbox::{
     bundle, config,
     counter::CounterProfile,
@@ -16,7 +14,6 @@ use seedbox::{
     execution::{CancellationToken, ExecutionBackend, PreparationBackend, Timebase, WitnessMode},
     exploration::{self, ExploreOptions},
     logs,
-    oci::OciTools,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
     store::ContentStore,
@@ -53,6 +50,8 @@ const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty li
 #[derive(Parser)]
 #[command(
     version = seedbox::engine::SIMULATOR_VERSION,
+    override_usage = "seedbox [RUN OPTIONS] [COMPOSE]\n       seedbox <COMMAND>",
+    after_help = "Run is the default: seedbox --kernel PATH compose.yaml. See `seedbox help run` for run options.",
     about = "Deterministic simulation of Compose applications on real Linux machines",
     long_about = "Deterministic simulation of Compose applications on real Linux machines.\n\n\
                   A seed plus the retained inputs regenerate the same execution. \
@@ -84,7 +83,7 @@ enum Command {
     },
     /// Check execution-profile compatibility without images or guests (Linux KVM host; or Apple Silicon Mac).
     #[command(
-        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run a project first or pass --kernel."
+        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run `bash tools/build-assets.sh` or pass --kernel."
     )]
     Doctor {
         #[command(flatten)]
@@ -382,7 +381,7 @@ impl StateArg {
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
 struct KvmInputs {
-    /// Guest kernel Image on Mac, or bzImage on Linux [default: download once and cache; unbundled Linux development builds search artifact directories].
+    /// Guest kernel Image on Mac, or bzImage on Linux [default: local assets in the OS temporary directory].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
     /// Override with a legacy standalone VMM [default: the engine built into seedbox].
@@ -395,21 +394,18 @@ struct KvmInputs {
 struct RuntimeInputs {
     #[command(flatten)]
     kvm: KvmInputs,
-    /// Guest helper archive [default: download the latest release once and cache].
+    /// Guest helper archive override [default: embedded in release builds].
     #[arg(long, env = "SEEDBOX_RUNTIME_ASSETS")]
     runtime_assets: Option<PathBuf>,
-    /// Static guest supervisor [default: released helper, then the copy built into this binary].
+    /// Static guest supervisor [default: embedded guest helper].
     #[arg(long, env = "SEEDBOX_GUEST_INIT")]
     guest_init: Option<PathBuf>,
-    /// Static Linux BusyBox for the guest architecture [default: released helper, then busybox on PATH on Linux, if static].
-    #[arg(long, env = "SEEDBOX_BUSYBOX")]
-    busybox: Option<PathBuf>,
-    /// Static Linux mke2fs for named volumes [default: released helper, then mke2fs on PATH on Linux, if static].
+    /// Static Linux mke2fs for named volumes [default: embedded guest helper].
     #[arg(long, env = "SEEDBOX_MKE2FS")]
     mke2fs: Option<PathBuf>,
-    /// Container client for image preparation [default: discover a running Docker or Podman engine].
-    #[arg(long, env = "SEEDBOX_BUILDER", default_value = "auto")]
-    builder: PathBuf,
+    /// Guest Unix time in seconds, clamped to the minimum supported epoch [default: host time after image preparation].
+    #[arg(long)]
+    wall_clock_epoch: Option<u32>,
     /// Guest RAM per service, in MiB.
     #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(64..=65536))]
     memory_mb: u32,
@@ -427,8 +423,6 @@ struct RuntimeInputs {
     /// Keep a seeded subset of unflushed disk sectors on crash (512-byte atomicity; off by default).
     #[arg(long)]
     torn_writes: bool,
-    #[command(flatten)]
-    build: BuildOptions,
 }
 
 impl RuntimeInputs {
@@ -471,250 +465,88 @@ impl RuntimeInputs {
             ("--kernel", &self.kvm.kernel),
             ("--runtime-assets", &self.runtime_assets),
             ("--guest-init", &self.guest_init),
-            ("--busybox", &self.busybox),
             ("--mke2fs", &self.mke2fs),
         ] {
             if let Some(path) = path {
                 defaults::existing(flag, path.clone())?;
             }
         }
+        let _ = (scratch, simulation);
         let witness = if self.full_state {
             WitnessMode::FullState
         } else {
             WitnessMode::Exits
         };
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let kernel = backends::guest_kernel(self.kvm.kernel.clone())?;
+        let runtime = if self.runtime_assets.is_some()
+            || self.guest_init.is_none()
+            || self.mke2fs.is_none()
         {
+            Some(backends::guest_assets(self.runtime_assets.clone())?)
+        } else {
+            None
+        };
+        let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
+            Some(path) => defaults::existing(flag, path.clone()),
+            None => runtime
+                .as_ref()
+                .map(|assets| assets.input(name))
+                .ok_or_else(|| {
+                    Error::Setup(format!(
+                        "{flag}: missing guest helper; run `bash tools/build-assets.sh`"
+                    ))
+                }),
+        };
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let executor = {
+            let _ = counter;
             if cpu.is_some() {
                 return Err(Error::Setup(
-                    "--cpu requires Linux KVM; use automatic HVF scheduling on Mac".into(),
+                    "--cpu requires Linux KVM; omit it on Mac".into(),
                 ));
             }
-            let _ = (counter, scratch, simulation);
-            let runtime = backends::container_runtime(
-                self.runtime_assets.clone(),
-                self.guest_init.is_some(),
-                cancellation,
-            )?;
-            let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
-                Some(path) => defaults::existing(flag, path.clone()),
-                None => Ok(runtime.input(name)),
-            };
-            let kernel = backends::guest_kernel(self.kvm.kernel.clone(), cancellation, true)?;
-            let executor = seedbox::mac::MacExecutor::new(
+            Executor::Mac(seedbox::mac::MacExecutor::new(
                 &engine,
                 &kernel,
                 store,
                 self.memory_mb,
                 witness,
                 self.torn_writes,
-            )?;
-            let inputs = OciPreparer {
-                tools: OciTools {
-                    docker: self.builder.clone(),
-                    ..OciTools::default()
-                },
-                kernel,
-                engine,
-                init: resolve("--guest-init", &self.guest_init, "compose-init")?,
-                busybox: resolve("--busybox", &self.busybox, "busybox")?,
-                mke2fs: Some(resolve("--mke2fs", &self.mke2fs, "mke2fs")?),
-                profile: executor.profile(),
-            };
-            Ok((
-                Preparer::Container(Box::new(seedbox::container_runtime::ContainerPreparer {
-                    inputs,
-                    runtime,
-                    client: backends::container_client(&self.builder, cancellation)?,
-                    cancellation: cancellation.clone(),
-                    progress: backends::preparation_progress,
-                })),
-                Executor::Mac(executor),
-            ))
-        }
+            )?)
+        };
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        {
+        let executor = {
             let executor = if self.kvm.vmm.is_some() {
                 VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
+                    .with_detected_contract(store, &engine)?
             } else {
                 VmmExecutor::new_internal(&engine, store, cpu, self.memory_mb, witness, counter)?
-            }
-            .with_torn_writes(self.torn_writes)
-            .with_timebase(self.clock.timebase.unwrap_or(TimebaseArg::Counter).into())
-            .with_page_timer(self.page_timer)
-            .with_deferred_tx(self.deferred_tx);
-            if backends::released_assets() || self.runtime_assets.is_some() {
-                let runtime = backends::container_runtime(
-                    self.runtime_assets.clone(),
-                    self.guest_init.is_some(),
-                    cancellation,
-                )?;
-                let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
-                    Some(path) => defaults::existing(flag, path.clone()),
-                    None => Ok(runtime.input(name)),
-                };
-                let mut executor = executor;
-                if self.kvm.vmm.is_some() {
-                    executor = executor.with_detected_contract(store, &engine)?;
-                }
-                let mut inputs = OciPreparer {
-                    tools: OciTools {
-                        docker: self.builder.clone(),
-                        build_epoch: self.build.build_epoch,
-                        ..OciTools::default()
-                    },
-                    kernel: backends::guest_kernel(self.kvm.kernel.clone(), cancellation, true)?,
-                    init: resolve("--guest-init", &self.guest_init, "compose-init")?,
-                    busybox: resolve("--busybox", &self.busybox, "busybox")?,
-                    mke2fs: Some(resolve("--mke2fs", &self.mke2fs, "mke2fs")?),
-                    engine,
-                    profile: executor.profile(),
-                };
-                let preparer = if self.build.build_epoch.is_some() {
-                    // Explicit timestamp control retains its native Podman contract.
-                    inputs.tools.skopeo = defaults::preparation_tool(&inputs.tools.skopeo)?;
-                    inputs.tools.umoci = defaults::preparation_tool(&inputs.tools.umoci)?;
-                    Preparer::Linux(Box::new(backends::LinuxPreparer {
-                        inputs,
-                        _assets: None,
-                    }))
-                } else {
-                    Preparer::Container(Box::new(seedbox::container_runtime::ContainerPreparer {
-                        inputs,
-                        runtime,
-                        client: backends::container_client(&self.builder, cancellation)?,
-                        cancellation: cancellation.clone(),
-                        progress: backends::preparation_progress,
-                    }))
-                };
-                return Ok((preparer, Executor::Linux(executor)));
-            }
-            let mut preparer = self.preparer(
-                engine.clone(),
-                store,
-                scratch,
-                executor.profile(),
-                cancellation,
-            )?;
-            preparer.inputs.tools.skopeo =
-                defaults::preparation_tool(&preparer.inputs.tools.skopeo)?;
-            preparer.inputs.tools.umoci = defaults::preparation_tool(&preparer.inputs.tools.umoci)?;
-            if simulation
-                .services
-                .values()
-                .any(|service| matches!(service.source, config::ImageSource::Build { .. }))
-            {
-                preparer.inputs.tools.docker =
-                    defaults::preparation_tool(&preparer.inputs.tools.docker)?;
-            }
-            let executor = if self.kvm.vmm.is_some() {
-                executor.with_detected_contract(store, &engine)?
-            } else {
-                executor
             };
-            preparer.inputs.profile = executor.profile();
-            Ok((
-                Preparer::Linux(Box::new(preparer)),
-                Executor::Linux(executor),
-            ))
-        }
-    }
-
-    #[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
-    fn preparer(
-        &self,
-        engine: PathBuf,
-        store: &ContentStore,
-        scratch: &Path,
-        profile: ExecutionProfile,
-        cancellation: &CancellationToken,
-    ) -> Result<backends::LinuxPreparer> {
-        let resolved = defaults::linux_runtime(
-            defaults::LinuxOverrides {
-                kernel: self.kvm.kernel.clone(),
-                init: self.guest_init.clone(),
-                busybox: self.busybox.clone(),
-                mke2fs: self.mke2fs.clone(),
-            },
-            scratch,
-            seedbox::runtime_assets::AssetSelection::All,
-            Some(store),
-            cancellation,
-        )?;
-        let mut tools = OciTools {
-            docker: self.builder.clone(),
-            ..OciTools::default()
+            Executor::Linux(
+                executor
+                    .with_torn_writes(self.torn_writes)
+                    .with_timebase(self.clock.timebase.unwrap_or(TimebaseArg::Counter).into())
+                    .with_page_timer(self.page_timer)
+                    .with_deferred_tx(self.deferred_tx),
+            )
         };
-        for tool in [&mut tools.skopeo, &mut tools.umoci] {
-            if let Ok(resolved) = defaults::preparation_tool(tool) {
-                *tool = resolved;
-            }
-        }
-        Ok(backends::LinuxPreparer {
-            inputs: OciPreparer {
-                tools,
-                kernel: resolved.kernel,
-                engine,
-                init: resolved
-                    .init
-                    .ok_or_else(|| Error::Integrity("missing resolved Linux supervisor".into()))?,
-                busybox: resolved
-                    .busybox
-                    .ok_or_else(|| Error::Integrity("missing resolved Linux BusyBox".into()))?,
-                mke2fs: resolved.mke2fs,
-                profile,
+        let inputs = OciPreparer {
+            wall_clock_epoch: self.wall_clock_epoch,
+            docker: backends::container_engine()?,
+            kernel,
+            engine,
+            init: resolve("--guest-init", &self.guest_init, "compose-init")?,
+            mke2fs: Some(resolve("--mke2fs", &self.mke2fs, "mke2fs")?),
+            profile: executor.profile(),
+        };
+        Ok((
+            Preparer {
+                inputs,
+                _helpers: runtime,
+                cancellation: cancellation.clone(),
             },
-            _assets: resolved.assets,
-        })
-    }
-}
-
-#[derive(Args, Clone, Copy)]
-#[command(next_help_heading = "Preparation")]
-struct BuildOptions {
-    /// Set the guest wall-clock epoch and clamp new build-layer timestamps (Podman) [default: preparation time for guest clock].
-    #[arg(long, allow_hyphen_values = true, value_parser = clap::value_parser!(u32))]
-    build_epoch: Option<u32>,
-}
-
-impl BuildOptions {
-    fn configure(&self, simulation: &config::Simulation, inputs: &mut RuntimeInputs) -> Result<()> {
-        if (backends::released_assets() || inputs.runtime_assets.is_some())
-            && self.build_epoch.is_none()
-        {
-            return Ok(());
-        }
-        if inputs.builder == Path::new("auto") {
-            inputs.builder = PathBuf::from("podman");
-        }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            let _ = simulation;
-            if self.build_epoch.is_some() {
-                return Err(Error::Setup(
-                    "--build-epoch requires native Linux preparation; omit it on Mac".into(),
-                ));
-            }
-            Ok(())
-        }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        {
-            if simulation
-                .services
-                .values()
-                .any(|service| matches!(service.source, config::ImageSource::Build { .. }))
-            {
-                match defaults::preparation_tool(&inputs.builder) {
-                Ok(builder) => inputs.builder = builder,
-                Err(error) if self.build_epoch.is_some() => return Err(Error::Setup(format!("--build-epoch: {error}; install Podman or specify --builder or omit --build-epoch"))),
-                Err(_) => (), // Preserve ordinary custom-builder discovery at execution.
-            }
-            }
-            if self.build_epoch.is_some() && unsafe { libc::geteuid() } != 0 {
-                return Err(Error::Setup("--build-epoch native extraction requires image ownership permissions; run prepare inside `podman unshare`, or omit --build-epoch to use container preparation".into()));
-            }
-            Ok(())
-        }
+            executor,
+        ))
     }
 }
 
@@ -758,7 +590,18 @@ impl Performance {
 }
 
 pub fn main() -> ExitCode {
-    match run(Cli::parse()) {
+    let mut arguments: Vec<_> = std::env::args_os().collect();
+    let first = arguments.get(1).and_then(|argument| argument.to_str());
+    use clap::CommandFactory;
+    let root = Cli::command();
+    let explicit_command = first.is_some_and(|name| {
+        root.find_subcommand(name).is_some()
+            || matches!(name, "help" | "--help" | "-h" | "--version" | "-V")
+    });
+    if !explicit_command {
+        arguments.insert(1, "run".into());
+    }
+    match run(Cli::parse_from(arguments)) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("error: {error}");
@@ -832,7 +675,7 @@ fn run(cli: Cli) -> Result<u8> {
                 let engine = defaults::engine(None)?;
                 let kernel = match inputs.kernel {
                     Some(path) => defaults::existing("--kernel", path)?,
-                    None => backends::guest_kernel(None, &cancellation, false)?,
+                    None => backends::guest_kernel(None)?,
                 };
                 if cancellation.is_cancelled() {
                     return Err(Error::Setup("doctor cancelled".into()));
@@ -852,21 +695,8 @@ fn run(cli: Cli) -> Result<u8> {
             {
                 let internal = inputs.vmm.is_none();
                 let engine = defaults::engine(inputs.vmm)?;
-                let scratch = tempfile::tempdir()?;
-                let runtime = defaults::linux_runtime(
-                    defaults::LinuxOverrides {
-                        kernel: inputs.kernel,
-                        ..Default::default()
-                    },
-                    scratch.path(),
-                    seedbox::runtime_assets::AssetSelection::Kernel,
-                    None,
-                    &cancellation,
-                )?;
-                if cancellation.is_cancelled() {
-                    return Err(Error::Setup("doctor cancelled".into()));
-                }
-                let kernel = &runtime.kernel;
+                let kernel_path = backends::guest_kernel(inputs.kernel)?;
+                let kernel = &kernel_path;
                 let report = if internal {
                     VmmExecutor::doctor_internal_with_timebase(
                         &engine,
@@ -910,7 +740,7 @@ fn run(cli: Cli) -> Result<u8> {
             compose,
             output,
             state,
-            mut inputs,
+            inputs,
         } => {
             inputs.validate_platform()?;
             if output.exists() {
@@ -920,14 +750,12 @@ fn run(cli: Cli) -> Result<u8> {
                 )));
             }
             let simulation = compose.load()?;
-            let build = inputs.build;
-            build.configure(&simulation, &mut inputs)?;
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
-            let (mut preparer, _) = inputs.backends(
+            let (preparer, _) = inputs.backends(
                 &store,
                 None,
                 counter,
@@ -938,7 +766,6 @@ fn run(cli: Cli) -> Result<u8> {
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
-            preparer.tools.build_epoch = build.build_epoch;
             let prepared = preparer.prepare(&simulation, &store)?;
             let file = std::fs::OpenOptions::new()
                 .write(true)
@@ -955,7 +782,7 @@ fn run(cli: Cli) -> Result<u8> {
             branch_seed,
             cpu,
             state,
-            mut inputs,
+            inputs,
             performance,
         } => {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -972,8 +799,6 @@ fn run(cli: Cli) -> Result<u8> {
             if checkpoint_at_ns.is_some_and(|t| t >= simulation.limits.simulated_time_ns) {
                 return Err(Error::Setup("--checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint".into()));
             }
-            let build = inputs.build;
-            build.configure(&simulation, &mut inputs)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let detected = execution_counter();
@@ -1004,7 +829,6 @@ fn run(cli: Cli) -> Result<u8> {
                 _ => executor,
             };
             preparer.profile = executor.profile();
-            preparer.tools.build_epoch = build.build_epoch;
             let executor = performance.apply(executor)?;
             // Backend admission checks the selected core before preparation.
             let result = orchestrator.run(
@@ -1024,14 +848,12 @@ fn run(cli: Cli) -> Result<u8> {
             json,
             cpu,
             state,
-            mut inputs,
+            inputs,
             performance,
         } => {
             inputs.validate_platform()?;
             let resources = Resources::start();
             let simulation = compose.load()?;
-            let build = inputs.build;
-            build.configure(&simulation, &mut inputs)?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let options = ExploreOptions {
@@ -1075,7 +897,6 @@ fn run(cli: Cli) -> Result<u8> {
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
-            preparer.tools.build_epoch = build.build_epoch;
             cpu.admit(
                 detected,
                 inputs
@@ -1560,51 +1381,6 @@ fn print_omissions(record: &orchestration::RunRecord) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn linux_preparer_wiring_preserves_explicit_inputs_without_execution() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut args = vec![
-            "seedbox".into(),
-            "prepare".into(),
-            "--output".into(),
-            directory.path().join("prepared.json").into_os_string(),
-        ];
-        for flag in ["kernel", "guest-init", "busybox", "mke2fs"] {
-            let path = directory.path().join(flag);
-            std::fs::write(&path, b"synthetic input; never executed").unwrap();
-            args.extend([format!("--{flag}").into(), path.into_os_string()]);
-        }
-        let Command::Prepare { inputs, .. } = Cli::try_parse_from(args).unwrap().command else {
-            panic!("expected prepare arguments");
-        };
-        let store = ContentStore::new(directory.path().join("objects"));
-        let profile = ExecutionProfile {
-            backend: "portable-fixture".into(),
-            engine: seedbox::store::ContentDigest::of(b"engine"),
-            witness_mode: WitnessMode::Exits,
-            semantic_parameters: Default::default(),
-        };
-        let preparer = inputs
-            .preparer(
-                directory.path().join("engine"),
-                &store,
-                directory.path(),
-                profile.clone(),
-                &CancellationToken::default(),
-            )
-            .unwrap();
-        assert!(preparer._assets.is_none());
-        let preparer = Preparer::Linux(Box::new(preparer));
-        assert_eq!(preparer.kernel, directory.path().join("kernel"));
-        assert_eq!(preparer.init, directory.path().join("guest-init"));
-        assert_eq!(preparer.busybox, directory.path().join("busybox"));
-        assert_eq!(preparer.mke2fs, Some(directory.path().join("mke2fs")));
-        assert_eq!(preparer.engine, directory.path().join("engine"));
-        assert_eq!(preparer.profile, profile);
-        assert!(!directory.path().join("objects").exists());
-        assert!(!directory.path().join("prepared.json").exists());
-    }
 
     #[test]
     fn replay_on_another_vendor_names_both_counters() {

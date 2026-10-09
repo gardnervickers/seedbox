@@ -1,24 +1,10 @@
 # OCI preparation and execution
 
-On Apple Silicon or Linux x86-64, build Seedbox once with `nix develop` followed
-by `cargo build --release`. Cargo compiles the native CLI; Mac signing is
-automatic. On first preparation, Seedbox announces and caches downloads of the
-guest kernel and helper archive built by native Linux CI. Private releases need
-`GH_TOKEN` or `GITHUB_TOKEN` with repository read access. Start Docker/Podman to
-prepare application images, then run the release executable with the Compose
-directory as its positional argument. On Linux use `--timebase pv` for KVM
-without performance-counter requirements and give your user read/write access
-to `/dev/kvm`. No Lima or manual packaging script is needed. Replay uses retained
-inputs and needs no container engine or downloads. See
-[guest assets](../tools/runtime/README.md) for the manual source-build fallback.
+See the [quick start](../README.md#quick-start) for asset builds and the etcd example.
+Seedbox prepares images through a running Docker or Podman engine, including local
+Dockerfile builds. It never starts the engine daemon or builds guest assets at
+runtime. Replay uses retained inputs and does not contact the engine.
 
-The etcd and Redis Compose examples have passed real guest runs, failure controls
-and replay on the Linux workstation. See [the acceptance record](acceptance.md)
-for the tested engine, kernel, image digests and lifecycle checks.
-
-These are version-bound results, not qualification of arbitrary OCI runtimes or
-the latest changed example inputs. See [draft formats and runtime scope](compatibility.md)
-for current readers/writers, exit meanings and remaining release gates.
 
 ## Runtime checkpoint design (experimental)
 
@@ -166,140 +152,42 @@ Compose named volumes. Unmounted application paths remain RAM-backed. Low-level
 disk fixtures, including the ext4 fsync ledger, are documented in
 [`harness/worlds/README.md`](../harness/worlds/README.md#retained-disk).
 
-## Build on a Linux KVM host
-
-From the repository root:
+## Build Seedbox and guest assets
 
 ```sh
 nix develop
-cargo build --release --locked
+bash tools/build-assets.sh
+cargo build --release
 ```
 
-The normal release build prepares and embeds static helpers and Linux filesystem
-tools through Nix directly on Linux, or through Docker/Podman on Mac. The guest
-kernel downloads on first use. The resulting CLI needs no extra build script or
-runtime compiler. Preparation uses the
-container endpoint; use `--timebase pv` and KVM device permissions to run as your
-ordinary user. See [Linux setup](../tools/linux-runtime/README.md).
+The explicit asset build uses Nix on Linux and a Docker-compatible Linux build
+container on Mac. It builds the patched kernel and static guest helpers into
+the OS temporary directory. See [asset builds](../tools/runtime/README.md).
+Cargo builds the native CLI, embeds the prebuilt helper archive in release builds,
+and signs it on Mac. It never builds Linux helpers or starts a container.
+With helpers embedded, the kernel is the only separate guest asset needed by
+a release executable. If the default helper archive is missing at build time,
+Cargo warns and builds without embedding; runtime then requires a local archive
+and reports the asset-build command when it cannot find one.
 
-The platform VMM is linked into `seedbox`; ordinary runtime commands do not
-compile or find a separate executable. `cargo build-vmm` and `cargo test-vmm`
-remain isolated standalone aliases for low-level fixtures. Their compiler
-wrapper remaps build paths and removes the shell's synthetic checkout RPATH.
-The linked executable uses the workspace lockfile and has its own engine identity.
+Preparation uses Bollard and the Docker-compatible engine API for registry/local
+images and Compose `build:` contexts. The engine owns build caching.
+Seedbox exports the image layers and merges them locally with
+`ocirender`, retaining the resolved filesystem and launch configuration. No
+container is created, so engine-injected files never enter the guest filesystem.
+The retained image
+manifest describes this flattened filesystem snapshot, not the original registry
+layers. Replay uses the snapshot and never contacts the engine.
 
-New profiles record simulator version, host and guest architectures, backend,
-`engine_timebase = "counter-pv-v1"` (the worker clock capability) and an explicit
-internal-worker contract. The separate `timebase` parameter selects PV; counter
-remains represented by omission, as for standalone engines. The content store retains
-the complete executable, including its signature on macOS. Replay launches that
-retained executable with the saved contract and metadata, without replacing its
-version with the installed CLI's version. No manifest or bundle format changes
-are needed. Historical profiles with no descriptor still invoke their retained
-standalone VMM directly. Unknown executable kinds fail before execution;
-recorded platform and version metadata do not restrict development replay. Every built engine and guest kernel is admitted, with
-exact bytes retained for replay.
-Native execution and witness equivalence still need host evidence. Apple Silicon
-also supports the native development ARM Compose backend described below.
-
-The simulator version is the package version. Replay uses its retained inputs.
-
-Release builds fetch the guest supervisor with the helper archive on first use.
-Unbundled Linux development builds embed `guest/compose-init.c` using the shell's
-musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`). Without one they require
-`--guest-init`, for example the output of `bash guest/build-compose.sh FILE`.
-
-Preparation requires `skopeo`, `umoci`, and a Docker-compatible builder (the shell
-supplies Podman). Rootful unpacking preserves image ownership and modes. Run on
-the supported Linux amd64 host; container-backed preparation does not support this option.
-
-`skopeo` selects Linux amd64 and copies the original platform-specific manifest
-and blobs with preserved digests. Seedbox verifies descriptor hashes and sizes,
-retains their exact bytes, resolves launch defaults, and delegates OCI whiteouts
-and extraction to `umoci`. Dockerfile builds use a retained, frozen local context;
-the builder applies `.dockerignore`. The unique build tag is removed afterward,
-but the builder's layer cache is kept between runs: a step such as
-`RUN go mod download` re-runs only when the frozen context or Dockerfile changes.
-To force fresh fetches, change the context or run `podman image prune`, which
-also reclaims the cache; seedbox never prunes it.
-Registry TLS verification remains enabled; signature policy is not enforced by
-this importer. Build progress logs are not semantic identity inputs.
-Use fully qualified Dockerfile `FROM` references such as
-`docker.io/library/busybox:1.37`; the supported Podman host has no default
-unqualified registry search list. `--builder docker` selects a Docker client
-instead when the host provides one.
-
-On Linux, explicit `--build-epoch` selects native preparation with the
-Podman, Skopeo and umoci tools, using the same released guest assets.
-Ordinary runs use container-backed preparation. Mac does not support this option.
-Native extraction needs image ownership permissions; rootless users can run
-`prepare` inside `podman unshare`.
-
-`prepare`, `run` and `explore` accept optional `--build-epoch SECONDS`
-(0..=4294967295; no environment backing). It uses the selected Podman executable without checking builder binary hashes.
-Seedbox passes
-`--source-date-epoch=SECONDS --rewrite-timestamp` to that native executable.
-The selected epoch and policy are retained in built-image provenance. Without
-the option, the builder's existing timestamp behavior remains unchanged.
-Inherited `SOURCE_DATE_EPOCH` alone controls image creation/history metadata;
-it does not make generated layer directories reproducible.
-
-This explicit policy clamps all newly committed file and directory timestamps
-later than the epoch, including otherwise stable copied-file timestamps. It
-preserves base and registry image metadata. It does not guarantee reproducible
-arbitrary builds: pin base resolution and control external build inputs yourself.
-Every original manifest, config and layer remains retained; changing a merged
-rootfs in a later layer cannot remove earlier varying input bytes.
-
-Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
-prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
-the time after all image builds/imports finish; explicit `--build-epoch` also
-sets this value. Linux cannot set a wall clock earlier than the guest's uptime,
-so an explicit epoch below 86400 (such as 0) still clamps build timestamps but
-records a guest epoch of 86400. A build epoch earlier than a
-certificate minted during the build makes that certificate not yet valid. The shared supervisor sets `CLOCK_REALTIME` before the launch
-barrier on x86 and arm64. Replay uses retained bytes and never samples the host
-clock. New preparations can change witnesses; replay of recorded inputs is
-unchanged. Both application kernels support unprivileged user namespaces,
-including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.
-The supervisor recursively mounts the image at the namespace root before
-entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
-
-Within one preparation call, services declaring the same frozen build source
-on the admitted native Podman path share build/import/unpack work. Each service
-still resolves its own launch overrides and packages its own guest recipe.
-Contexts include retained bytes, modes, symlinks, Dockerfile selection and ignore
-rules. There is no cross-call cache; custom builders and registry imports keep
-their existing preparation behavior. Failed, cancelled or cleanup-unverified
-sources are never reused as successful preparation.
-
-The shared application supervisor installs a private container-style `/dev`
-(including 64 MiB `/dev/shm`, devpts and stdio links), sets the hostname to the
-service name, raises soft/hard `nofile` to 1048576 before each exec, and sets
-`vm.max_map_count=262144`. The service hostname and sysctl default travel in
-the retained binary launch recipe; replay uses that recipe and its retained
-supervisor rather than preparing it again. See
-[guest runtime facilities](compatibility.md#guest-runtime-facilities) for
-kernel features and remaining gaps. The recorded wall-clock epoch is described below.
-
-Each prepared application release is a captured input closure. Same-version
-deterministic execution and replay use its exact retained bytes, seed and
-compatible profile; they do not rebuild the application. Independently rebuilding
-an OCI image need not produce identical bytes for V0. The optional timestamp
-policy is user-selected metadata control, not a prerequisite for this execution
-guarantee or an image reproducibility guarantee.
+Exported Linux ownership, modes, links and case-sensitive paths are processed as
+archive metadata without extracting guest paths on the host. Unsupported extended
+attributes, special files and metadata outside the boot format fail explicitly.
 
 ## Preparation, execution, and replay
 
-Apple Silicon uses the native development HVF application backend. Enter
-`nix develop` and run `cargo build --release` to produce the signed
-CLI with static helpers and Linux preparation tools embedded. The first run
-downloads and caches the ARM guest kernel from its matching GitHub Release.
-Use `target/release/seedbox run PROJECT` and
-`target/release/seedbox replay RUN`, without host root or
-separate binary paths. Docker/Podman handles image preparation through filesystem
-tools containers; replay needs no container engine. Runtime commands never invoke Rust. See
-[the full Mac workflow](../tools/mac-runtime/README.md).
+Apple Silicon uses the native HVF application backend. Linux x86-64 uses KVM.
+Both consume embedded guest helpers, a supplied kernel and engine-prepared images. Replay uses
+retained bytes without an image registry, build tools or container engine.
 
 Mac profiles retain their own executable descriptor, ARM boot placement,
 PV entropy/timer policy, guest-kernel hash and HVF CPU/OS observations.
@@ -341,44 +229,15 @@ seedbox=./target/release/seedbox
 
 Every input has a default; `seedbox help run` lists them with their overrides.
 On Linux, explicit flags and their `SEEDBOX_*` path overrides take precedence.
-Release runs download their default kernel once and cache it;
-`SEEDBOX_ARTIFACTS` and `SEEDBOX_WORK` do not override it. Unbundled Linux development builds retain searches of those
-configured directories, `./artifacts`, and `~/seedbox-sim/artifacts` (also in the
-invoking user's home under sudo). An explicit missing `--kernel` fails immediately. For the supervisor, BusyBox and mke2fs,
-released helpers precede the existing compiled-in supervisor or static tools on
-PATH. Unbundled development builds keep those existing fallbacks. A package
-integrity error is reported instead of silently selecting unrelated files.
+Guest assets are looked up under `/tmp/seedbox-UID/ARCH` on both platforms. `SEEDBOX_ASSET_DIR` overrides the parent directory. The default files are `kernel` and `runtime.tar.gz`. Explicit
+`--kernel` / `SEEDBOX_KERNEL` and `--runtime-assets` / `SEEDBOX_RUNTIME_ASSETS`
+paths override them. Missing assets report the local build command. Runtime
+commands never download them automatically. CI release publishing remains
+available for future public distribution.
 
-Guest kernels are published by the [Guest assets workflow](../.github/workflows/kernels.yml)
-when the inputs listed in `kernel/inputs.json` change. The release tag is a
-content-based address, not runtime admission policy: explicit kernels remain
-supported. `run`, `explore` and `prepare` report first-use downloads on stderr.
-The private repository requires `GH_TOKEN` or `GITHUB_TOKEN` with read access.
-Downloads use GitHub's release-asset SHA-256, bounded streaming and an atomic
-cache install. Concurrent invocations share the download. Interrupted downloads
-never become usable cache entries. Every reuse verifies cached bytes locally;
-there is no network request on a cache hit. Without private release access,
-build with `nix build .#guestKernel` and `nix build .#runtimeArchive` on Linux,
-then select their outputs with `--kernel` and `--runtime-assets`. See
-[the guest asset workflow](../tools/runtime/README.md#build-without-private-release-access)
-and [the kernel contract](../kernel/README.md#build-without-private-release-access)
-for both architecture outputs and Mac usage. Helpers use an independent
-release identified by `tools/runtime/inputs.json`; kernel-only changes reuse it.
-
-Caches live under `~/Library/Caches/seedbox/kernels/sbxlaunch4` on Mac and
-`~/.cache/seedbox/kernels/sbxlaunch4` on Linux, or under `$XDG_CACHE_HOME/seedbox`
-when set. Helper archives use `assets/sbxlaunch4` and extracted tools use `runtime`.
-The last directory is the boot-recipe format this build writes: a build with a new
-format downloads again rather than reusing older guest assets. If the latest helper
-release's supervisor predates that format, the run stops with an error and drops the
-downloaded helper and kernel, so a later run retries once newer assets are published.
-An explicit `--runtime-assets` or `SEEDBOX_RUNTIME_ASSETS` bypasses helper downloads.
-`doctor` looks up the cached or explicit kernel without downloading, creating
-cache/run state or performing OCI preparation. If the cache is empty, its error
-explains how to download through a run or select `--kernel PATH`. Random cache
-paths do not enter run identity: retained bytes do. Replay uses only the recorded
-executable, kernel and initramfs; missing or corrupt retained inputs never fall
-back to the cache or a fresh download.
+`doctor` uses only the selected kernel, without extracting helpers or creating
+run state. Replay uses the retained executable, kernel and boot archives; it
+never substitutes files from the temporary asset directory.
 
 The VMM defaults to the engine linked into `seedbox`; `--vmm` explicitly selects
 the legacy standalone contract. A missing input fails before preparation starts
@@ -386,7 +245,7 @@ and names every location searched.
 
 Zen execution performs host admission before OCI work: an AMD x86-64 CPU with the
 KVM and perf capabilities the engine needs (see
-[host requirements](../README.md#host-requirements)). CPU model, microcode, CPUID,
+[host requirements](cli-reference.md#host-requirements)). CPU model, microcode, CPUID,
 engine, guest-kernel and host-kernel bytes are not pinned. Temporary core
 reservations, affinity and disabled exact-event perf descriptors are released
 before preparation on success/error; cleanup failure refuses admission. The actual
@@ -826,7 +685,7 @@ bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FAULT_OUTPUT_DIRECTORY fa
 ```
 
 The OCI suite builds/tests as the current user and invokes only its final import
-executable with `sudo -n`. It verifies the registry images and Dockerfile metadata,
+executable with `sudo -n`. It verifies the prebuilt image metadata,
 whiteouts, symlinks and build-context filtering. It does not start guests.
 The default runtime suite runs both application examples and their intentional
 failure controls, then replays each. The lifecycle suite checks full-state and
@@ -1090,32 +949,10 @@ kernel CRNG at its release. A batch shares one wall-time budget of
 `limits.wall_time` times its seed count, and an engine failure in a batch
 fails all of its seeds. Without `--fork`, explore is unchanged.
 
-Preparation diagnostics belong to the caller, surviving preparer/scratch destruction.
-Raw phase output is capped at 4 MiB per file and 64 MiB total. Bounded prefixes are retained
-while the rest is drained, with exact observed omission counts/reasons. An output
-stream still open after owned cleanup is incomplete evidence with an explicitly
-unknown further byte count and cleanup-unverified ERROR. Compact command/cleanup
-receipts have a separate 4 MiB budget; version text is capped at 8 KiB. Required evidence
-write failure is ERROR. Receipts record program/hash/arguments/cwd, local mode,
-private tag and build-input digests, process status, cancellation/escalation/reap,
-elapsed time, deadline expiry and cleanup disposition. Application stdout is never parsed for verdicts.
 
-Exploration inspects the selected builder and invokes it with `--remote=false`
-to check local Podman operation and retain storage/runtime information. Builder
-binary hashes are observations, not admission checks. Registry projects do not
-acquire a builder requirement.
-
-Cancellation signals only an owned process group, preserving the unreaped leader
-identity until final group signalling, then reaps it. Graceful termination escalates
-after 250 ms; an unconfirmed exit after 5 s is cleanup-unverified ERROR. This cannot
-promise cleanup for a process blocked indefinitely in the kernel or delegated
-builder work. Cancelled builds remain cleanup-unverified and keep their unique tag;
-no image-rm races a potentially running build. After a completed build, private-tag and helper-container
-cleanup have a 30-second daemon-operation deadline. Expiry starts the same
-250-ms termination grace and five-second reap bound; the receipt records the
-timeout, and daemon removal must still be verified. Slow filesystem removal is
-not treated as hung after only five seconds; cleanup failure outranks clean cancellation. No
-shared daemon, unrelated image/container, host service or cache is changed.
+Preparation retains setup-input evidence in its caller-owned directory.
+Cancellation stops native HTTP work and is checked between archive entries.
+Image preparation launches no subprocesses and owns no daemon-side work.
 
 CLI resource fields report self/reaped-child user/system CPU deltas and separate
 self/child RSS high-water readings in bytes, including preparation. They are not
@@ -1131,11 +968,6 @@ is added. Worker count and core selection are operational choices, absent from
 semantic run identity. Synthetic serial/parallel lifecycle controls do not qualify
 real per-core/witness invariance; that and staggered hardware cancellation remain
 required runtime gates.
-
-Required tool-version provenance uses stdout only, independently of diagnostic
-truncation. Its raw `.stdout` evidence is bounded to 8192 bytes per value and
-4 MiB per preparation; an oversized or incomplete value fails preparation.
-Version stderr remains quota-limited `.log` diagnostics with omission receipts.
 
 ## Connection selectors
 
@@ -1302,3 +1134,17 @@ through the guest control API. Arm/cancel admission, match deadlines, future
 causal effect barriers, snapshot state and witness evidence are specified in
 [the trigger contract](triggers.md). No trigger ever armed adds no report fields,
 witness bytes or console stopping points. This changes the engine.
+
+## Guest wall clock and user namespaces
+
+Preparation records one wall_clock_epoch after image builds/imports finish.
+The SBXLAUNCH4 recipe carries it to the supervisor, which sets CLOCK_REALTIME
+before the launch barrier on x86 and ARM64. Replay uses the retained value.
+New preparations may have different wall-clock epochs and witnesses. Use
+`--wall-clock-epoch SECS` on prepare, run, or explore to give independent runs
+the same guest Unix time. Values below 86400 (the minimum supported Unix epoch) are clamped to
+86400. This changes guest results, has no environment override,
+and does not alter image-layer timestamps. Replay always uses the retained epoch.
+Both application kernels support unprivileged user namespaces. The supervisor
+recursively mounts the image at the namespace root before entering it, preserving
+named volumes and allowing CLONE_NEWUSER.

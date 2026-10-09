@@ -100,47 +100,34 @@ impl ExecutionBackend for Executor {
     }
 }
 
-pub enum Preparer {
-    #[cfg_attr(all(target_os = "macos", target_arch = "aarch64"), allow(dead_code))]
-    Linux(Box<LinuxPreparer>),
-    Container(Box<seedbox::container_runtime::ContainerPreparer>),
-}
-pub struct LinuxPreparer {
+pub struct Preparer {
     pub inputs: OciPreparer,
     // Package extraction must outlive preparation and retention of its bytes.
-    pub _assets: Option<seedbox::runtime_assets::RuntimeAssets>,
-}
-impl Preparer {
-    fn backend(&self) -> &dyn PreparationBackend {
-        match self {
-            Self::Linux(e) => &e.inputs,
-            Self::Container(e) => e.as_ref(),
-        }
-    }
+    pub _helpers: Option<seedbox::guest_assets::Runtime>,
+    pub cancellation: CancellationToken,
 }
 impl Deref for Preparer {
     type Target = OciPreparer;
     fn deref(&self) -> &OciPreparer {
-        match self {
-            Self::Linux(e) => &e.inputs,
-            Self::Container(e) => &e.inputs,
-        }
+        &self.inputs
     }
 }
 impl DerefMut for Preparer {
     fn deref_mut(&mut self) -> &mut OciPreparer {
-        match self {
-            Self::Linux(e) => &mut e.inputs,
-            Self::Container(e) => &mut e.inputs,
-        }
+        &mut self.inputs
     }
 }
 impl PreparationBackend for Preparer {
     fn validate_runtime_inputs(&self) -> Result<()> {
-        self.backend().validate_runtime_inputs()
+        self.inputs.validate_runtime_inputs()
     }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs> {
-        self.backend().prepare(simulation, store)
+        let directory = tempfile::tempdir()?;
+        let context = PreparationContext::new(
+            directory.path().join("preparation"),
+            self.cancellation.clone(),
+        )?;
+        self.prepare_cancellable(simulation, store, &context)
     }
     fn prepare_cancellable(
         &self,
@@ -148,334 +135,118 @@ impl PreparationBackend for Preparer {
         store: &ContentStore,
         context: &PreparationContext,
     ) -> Result<PreparedInputs> {
-        self.backend()
-            .prepare_cancellable(simulation, store, context)
+        self.validate_runtime_inputs()?;
+        self.prepare_with_transport(
+            simulation,
+            store,
+            context,
+            &seedbox::container_images::ContainerTransport {
+                docker: self.inputs.docker.clone(),
+                cancellation: context.cancellation.clone(),
+                progress: preparation_progress,
+            },
+        )
     }
 }
 
-fn cache_home() -> Result<std::path::PathBuf> {
-    let cache = match std::env::var_os("XDG_CACHE_HOME").filter(|s| !s.is_empty()) {
-        Some(path) => std::path::PathBuf::from(path),
-        None => {
-            let home = std::env::var_os("HOME").ok_or_else(|| {
-                seedbox::Error::Setup(
-                    "HOME is unset; set it or set XDG_CACHE_HOME to a writable cache directory"
-                        .into(),
-                )
-            })?;
-            std::path::PathBuf::from(home).join(if cfg!(target_os = "macos") {
-                "Library/Caches"
-            } else {
-                ".cache"
-            })
-        }
-    };
-    Ok(cache.join("seedbox"))
-}
-
-/// `explicit_init` skips the supervisor check: the archive's copy is unused.
-pub fn container_runtime(
-    explicit: Option<std::path::PathBuf>,
-    explicit_init: bool,
-    cancellation: &CancellationToken,
-) -> Result<seedbox::container_runtime::Runtime> {
-    use seedbox::release_download::ReleaseAsset;
-    let explicit_assets = explicit.is_some();
-    let _hand_over = CacheHandOver::for_sudo_user();
-    let path = match explicit {
-        Some(path) => super::defaults::existing("--runtime-assets", path)?,
-        None => release_asset(
-            seedbox::release_download::ReleaseAsset::Runtime,
-            "assets",
-            cancellation,
-            true,
-        )?,
-    };
-    let runtime =
-        seedbox::container_runtime::Runtime::from_archive(&path, &cache_home()?.join("runtime"))
-            .map_err(|error| match error {
-                seedbox::Error::Io(error) => seedbox::Error::Setup(format!(
-                    "runtime assets {}: {error}; check archive and cache permissions",
-                    path.display()
-                )),
-                other => other,
-            })?;
-    if !explicit_init && !speaks_launch_format(&runtime.input("compose-init"))? {
-        let magic = String::from_utf8_lossy(seedbox::guest::LAUNCH_MAGIC);
-        if explicit_assets {
-            return Err(seedbox::Error::Setup(format!(
-                "--runtime-assets {}: its guest supervisor predates {magic}; rebuild the assets from this checkout",
-                path.display()
-            )));
-        }
-        // The latest release predates this build. Drop it and its kernel so
-        // the next run downloads again once newer assets are published.
-        let architecture = std::env::consts::ARCH;
-        for asset in [ReleaseAsset::Runtime, ReleaseAsset::Kernel] {
-            let ready = release_cache(asset)?.join(architecture).join("ready");
-            match std::fs::remove_dir_all(&ready) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(seedbox::Error::Setup(format!(
-                        "remove stale cache {}: {error}; delete it and retry",
-                        ready.display()
-                    )))
-                }
-                _ => (),
-            }
-        }
-        return Err(seedbox::Error::Setup(format!(
-            "the latest published guest assets predate {magic}; wait for the Guest assets workflow on main, or pass --runtime-assets, --guest-init and --kernel built from this checkout"
-        )));
-    }
-    Ok(runtime)
-}
-
-fn speaks_launch_format(init: &Path) -> Result<bool> {
-    let bytes = std::fs::read(init)?;
-    let magic = seedbox::guest::LAUNCH_MAGIC;
-    Ok(bytes.windows(magic.len()).any(|window| window == magic))
-}
-
-/// Caches are keyed by the boot recipe format, so a build that writes a new
-/// format never reuses guest assets downloaded for an older one.
-fn release_cache(asset: seedbox::release_download::ReleaseAsset) -> Result<std::path::PathBuf> {
-    use seedbox::release_download::ReleaseAsset;
-    Ok(cache_home()?
-        .join(match asset {
-            ReleaseAsset::Kernel => "kernels",
-            ReleaseAsset::Runtime => "assets",
+/// Shared with tools/build-assets.sh. The OS may reclaim this directory.
+pub fn asset_directory() -> std::path::PathBuf {
+    std::env::var_os("SEEDBOX_ASSET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(format!("/tmp/seedbox-{}", unsafe { libc::geteuid() }))
         })
-        .join(String::from_utf8_lossy(seedbox::guest::LAUNCH_MAGIC).to_lowercase()))
+        .join(std::env::consts::ARCH)
 }
-
-/// Under sudo, the cache lives in the invoking user's home; leave nothing there
-/// that only root can remove, whether the download or extraction succeeded,
-/// failed or was cancelled. Best effort: a failure only affects cleanup.
-struct CacheHandOver {
-    home: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    uid: u32,
-    gid: u32,
-}
-
-impl CacheHandOver {
-    fn for_sudo_user() -> Option<Self> {
-        if unsafe { libc::geteuid() } != 0 {
-            return None;
-        }
-        let ids = |name| std::env::var(name).ok()?.parse::<u32>().ok();
-        Some(Self {
-            uid: ids("SUDO_UID")?,
-            gid: ids("SUDO_GID")?,
-            home: super::defaults::sudo_home()?,
-            cache: cache_home().ok()?,
-        })
-    }
-}
-
-impl Drop for CacheHandOver {
-    fn drop(&mut self) {
-        hand_over(&self.home, &self.cache, self.uid, self.gid);
-    }
-}
-
-fn hand_over(home: &Path, cache: &Path, uid: u32, gid: u32) {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(relative) = cache.strip_prefix(home) else {
-        return;
-    };
-    // Directories root created between the home and the cache, then the cache.
-    let mut path = home.to_path_buf();
-    let mut paths = Vec::new();
-    for component in relative.components() {
-        path.push(component);
-        paths.push(path.clone());
-    }
-    paths.extend(
-        walkdir::WalkDir::new(cache)
-            .min_depth(1)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.into_path()),
-    );
-    for path in paths {
-        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.uid() == 0) {
-            let _ = std::os::unix::fs::lchown(&path, Some(uid), Some(gid));
-        }
-    }
-}
-
-pub fn guest_kernel(
+pub fn guest_assets(
     explicit: Option<std::path::PathBuf>,
-    cancellation: &CancellationToken,
-    download: bool,
-) -> Result<std::path::PathBuf> {
+) -> Result<seedbox::guest_assets::Runtime> {
+    if explicit.is_none() {
+        if let Some(bytes) = seedbox::guest_assets::EMBEDDED {
+            return seedbox::guest_assets::Runtime::from_bytes(bytes);
+        }
+    }
+    let path = explicit.unwrap_or_else(|| asset_directory().join("runtime.tar.gz"));
+    let path = local_asset("--runtime-assets", path)?;
+    seedbox::guest_assets::Runtime::from_archive(&path).map_err(|error| seedbox::Error::Setup(format!("runtime assets {}: {error}; rebuild with `bash tools/build-assets.sh` or select a valid --runtime-assets archive", path.display())))
+}
+fn local_asset(flag: &str, path: std::path::PathBuf) -> Result<std::path::PathBuf> {
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(seedbox::Error::Setup(format!("{flag} {}: not found; from the Seedbox checkout run `bash tools/build-assets.sh`, or pass {flag} PATH", path.display())))
+    }
+}
+pub fn guest_kernel(explicit: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
     if let Some(path) = explicit {
         return super::defaults::existing("--kernel", path);
     }
-    release_asset(
-        seedbox::release_download::ReleaseAsset::Kernel,
-        "kernel",
-        cancellation,
-        download,
-    )
-}
-
-fn release_asset(
-    asset: seedbox::release_download::ReleaseAsset,
-    prefix: &str,
-    cancellation: &CancellationToken,
-    download: bool,
-) -> Result<std::path::PathBuf> {
-    use seedbox::release_download::ReleaseDownload;
-    let _hand_over = CacheHandOver::for_sudo_user();
-    let cache = release_cache(asset)?;
-    let architecture = std::env::consts::ARCH;
-    if !download {
-        return ReleaseDownload::cached(asset, &cache, architecture);
-    }
-    if let Some(path) = ReleaseDownload::lookup(asset, &cache, architecture)? {
-        eprintln!(
-            "{prefix}: using cached {} {}",
-            asset.description(),
-            path.display()
-        );
-        return Ok(path);
-    }
-    #[cfg(target_os = "linux")]
-    seedbox::admission::check_kvm_access()?;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    seedbox::mac::check_host_access()?;
-    let token = std::env::var("GH_TOKEN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()));
-    // All process-global HTTP configuration stays at this CLI boundary.
-    let agent = ureq::Agent::config_builder()
-        .https_only(true)
-        .user_agent(concat!("seedbox/", env!("CARGO_PKG_VERSION")))
-        .timeout_global(Some(std::time::Duration::from_secs(600)))
-        .timeout_connect(Some(std::time::Duration::from_secs(10)))
-        .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
-        .build()
-        .new_agent();
-    ReleaseDownload::new(asset, agent, token.as_deref())?.ensure(
-        &cache,
-        architecture,
-        cancellation,
-        |message| eprintln!("{prefix}: {message}"),
-    )
-}
-
-pub fn container_client(
-    requested: &Path,
-    cancellation: &CancellationToken,
-) -> Result<std::path::PathBuf> {
-    if requested != Path::new("auto") {
-        return super::defaults::preparation_tool(requested);
-    }
-    let mut found = Vec::new();
-    for name in ["docker", "podman"] {
-        if let Ok(client) = super::defaults::preparation_tool(Path::new(name)) {
-            match seedbox::container_runtime::ContainerPreparer::check_client(
-                &client,
-                cancellation.clone(),
-            ) {
-                Ok(()) => return Ok(client),
-                Err(seedbox::Error::PreparationCancelled) => {
-                    return Err(seedbox::Error::PreparationCancelled)
-                }
-                Err(_) => (),
-            }
-            found.push(name);
-        }
-    }
-    Err(seedbox::Error::Setup(if found.is_empty() {
-        "no Docker/Podman client found; install Docker or Podman (or enter nix develop), then start its Linux engine".into()
-    } else {
-        format!("container engine unavailable; start Docker Desktop or your Podman machine (Linux: start its service), and check DOCKER_HOST or CONTAINER_HOST; tried {}", found.join(", "))
-    }))
+    local_asset("--kernel", asset_directory().join("kernel"))
 }
 
 pub fn preparation_progress(message: &str) {
-    eprintln!("preparing: {}", message.replace('-', " "));
+    eprintln!("preparing: {message}");
 }
 
-pub fn released_assets() -> bool {
-    env!("SEEDBOX_RELEASE_ASSETS") == "1"
-}
-
-#[cfg(test)]
-mod launch_format_tests {
-    #[test]
-    fn supervisor_must_carry_the_current_launch_magic() {
-        let directory = tempfile::tempdir().unwrap();
-        let init = directory.path().join("compose-init");
-        std::fs::write(&init, b"\x7fELF..SBXLAUNCH3..").unwrap();
-        assert!(!super::speaks_launch_format(&init).unwrap());
-        let mut current = b"\x7fELF..".to_vec();
-        current.extend_from_slice(seedbox::guest::LAUNCH_MAGIC);
-        std::fs::write(&init, current).unwrap();
-        assert!(super::speaks_launch_format(&init).unwrap());
-    }
-}
-
-#[cfg(test)]
-mod sudo_cache_tests {
-    use std::os::unix::fs::MetadataExt;
-
-    #[test]
-    fn root_created_cache_entries_go_to_the_sudo_user() {
-        if unsafe { libc::geteuid() } != 0 {
-            return; // Changing ownership needs root.
+/// Resolve the user-owned engine at the CLI boundary; library code reads no environment.
+pub fn container_engine() -> Result<bollard::Docker> {
+    let connect = || -> std::result::Result<bollard::Docker, bollard::errors::Error> {
+        if std::env::var_os("DOCKER_HOST").is_some() {
+            return bollard::Docker::connect_with_defaults();
         }
-        let home = tempfile::tempdir().unwrap();
-        let cache = home.path().join(".cache/seedbox");
-        std::fs::create_dir_all(cache.join("kernels/x86_64/ready")).unwrap();
-        std::fs::write(cache.join("kernels/x86_64/ready/kernel"), b"k").unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        super::hand_over(home.path(), &cache, 4242, 4343);
-        for path in [
-            home.path().join(".cache"),
-            cache.clone(),
-            cache.join("kernels/x86_64/ready/kernel"),
-        ] {
-            let metadata = std::fs::metadata(&path).unwrap();
-            assert_eq!((metadata.uid(), metadata.gid()), (4242, 4343), "{path:?}");
-        }
-        assert_eq!(std::fs::metadata(home.path()).unwrap().uid(), 0);
-        super::hand_over(home.path(), outside.path(), 4242, 4343);
-        assert_eq!(std::fs::metadata(outside.path()).unwrap().uid(), 0);
-    }
-
-    #[test]
-    fn a_failed_download_still_returns_the_cache() {
-        if unsafe { libc::geteuid() } != 0 {
-            return; // Changing ownership needs root.
-        }
-        let home = tempfile::tempdir().unwrap();
-        let cache = home.path().join(".cache/seedbox");
-        let failed_download = || -> seedbox::Result<()> {
-            let _hand_over = super::CacheHandOver {
-                home: home.path().to_path_buf(),
-                cache: cache.clone(),
-                uid: 4242,
-                gid: 4343,
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            let mut sockets = vec![std::path::PathBuf::from("/var/run/docker.sock")];
+            if let Some(home) = std::env::var_os("HOME") {
+                sockets.push(std::path::PathBuf::from(home).join(".docker/run/docker.sock"));
+            }
+            for socket in sockets {
+                if std::fs::metadata(&socket).is_ok_and(|m| m.file_type().is_socket()) {
+                    return bollard::Docker::connect_with_socket(
+                        &socket.to_string_lossy(),
+                        120,
+                        bollard::API_DEFAULT_VERSION,
+                    );
+                }
+            }
+            // Use macOS's user temporary directory even inside a Nix shell,
+            // which gives TMPDIR a different, per-shell value.
+            let mut buffer = vec![0u8; 4096];
+            let length = unsafe {
+                libc::confstr(
+                    libc::_CS_DARWIN_USER_TEMP_DIR,
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
             };
-            std::fs::create_dir_all(cache.join("assets/x86_64")).unwrap();
-            std::fs::write(cache.join("assets/x86_64/.lock"), b"").unwrap();
-            Err(seedbox::Error::Setup("HTTP 404".into()))
-        };
-        assert!(failed_download().is_err());
-        for path in [
-            home.path().join(".cache"),
-            cache.clone(),
-            cache.join("assets/x86_64"),
-            cache.join("assets/x86_64/.lock"),
-        ] {
-            let metadata = std::fs::metadata(&path).unwrap();
-            assert_eq!((metadata.uid(), metadata.gid()), (4242, 4343), "{path:?}");
+            if length > 0 && length <= buffer.len() {
+                buffer.truncate(length - 1);
+                use std::os::unix::ffi::OsStringExt;
+                let path =
+                    std::path::PathBuf::from(std::ffi::OsString::from_vec(buffer)).join("podman");
+                let mut sockets: Vec<_> = std::fs::read_dir(path)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.to_string_lossy().ends_with("-api.sock")
+                            && std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket())
+                    })
+                    .collect();
+                sockets.sort();
+                if sockets.len() == 1 {
+                    return bollard::Docker::connect_with_socket(
+                        &sockets[0].to_string_lossy(),
+                        120,
+                        bollard::API_DEFAULT_VERSION,
+                    );
+                }
+            }
         }
-    }
+        bollard::Docker::connect_with_podman_defaults()
+    };
+    connect().map_err(|error| seedbox::Error::Setup(format!(
+        "cannot configure a Docker-compatible engine: {error}; start Docker or Podman and set DOCKER_HOST to its socket")))
 }

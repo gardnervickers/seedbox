@@ -33,7 +33,7 @@ that fails stays failed; there are no retries or fallback passes.
 | `kvm` | Linux x86-64 or ARM64, usable `/dev/kvm` | Native backend `kvm-tests`; no PMU required |
 | `counter` | Linux x86-64 KVM, usable guest PMU, root | VMM `counter-tests`; exact stops, checkpoints, forks, committed logs and triggers |
 | `hvf` | Apple Silicon, macOS 15+, HVF and codesign | ARM `hvf-tests`; native CPU/state and cancellation primitives |
-| `oci` | Linux x86-64, root, Skopeo, umoci, Podman, registry access | CLI `oci-tests`; real image import and Dockerfile behavior |
+| `oci` | Linux x86-64, running Docker-compatible engine, registry access | CLI `oci-tests`; real image import and Dockerfile behavior |
 | `guests` | Native backend plus fixture kernel/initrd | Backend `guest-tests`; real guest determinism/checkpoint controls |
 | `applications` | Linux x86 KVM plus OCI tools, or Mac HVF plus Docker/Podman | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state |
 | `retained-run` | Linux x86-64 KVM, root, supplied retained run/store | CLI `retained-run-tests`; pause/resume replay |
@@ -52,7 +52,7 @@ are invoked separately, using their existing aliases, lockfiles and target direc
 ## Guest and application inputs
 
 Application coverage needs no local kernel or runtime bundle: the release CLI
-downloads and caches current guest assets. The low-level guest and retained-run
+embeds locally built helpers; run `bash tools/build-assets.sh` before building it. The low-level guest and retained-run
 suites join the default command when their fixture inputs are present. Use
 `--require guests`, `--require applications`, or `--require retained-run` when
 their absence should fail the job. Every run prints a fresh report directory
@@ -62,14 +62,13 @@ under `target/check-reports/`, which survives development-shell cleanup.
 | --- | --- | --- |
 | x86 entropy checkpoint | `SEEDBOX_TEST_KERNEL`, `SEEDBOX_TEST_INITRD` | `artifacts/bzImage`, `artifacts/entropy-fork.cpio` |
 | ARM guest fixture | `SEEDBOX_ARM64_KERNEL`, `SEEDBOX_ARM64_INITRD` | `artifacts/arm64-hres/Image`, `artifacts/arm64-hres/init.cpio` |
-| Applications | No guest-asset inputs required; optional CLI overrides remain supported | Release CLI downloads/cache, native container tools |
+| Applications | Build guest assets first; optional CLI overrides remain supported | Release CLI, Docker-compatible API |
 | Pause/resume | `SEEDBOX_HOST_PAUSE_RUN`, `SEEDBOX_HOST_PAUSE_STATE` | No default retained run |
 
 Applications use a release CLI built from the current checkout. Linux runs PV
 and, where the PMU is available, counter scenarios. Mac runs ARM PV scenarios.
-Linux Dockerfile builds use `--build-epoch 0` for repeatable build timestamps.
-Mac uses its container builder's ordinary timestamp policy; that CLI option is
-Linux-only. Each CLI step streams to its report log and prints its progress.
+Image builds use the engine's normal layer cache on both platforms. Each CLI
+step streams to its report log and prints its progress.
 Application guests use 2048 MiB, including space for the JVM image's boot archive.
 Image pulls, application builds and guest execution can be substantially slower
 than native unit tests. Their assertions belong to the guest workload and public
