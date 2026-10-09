@@ -1091,7 +1091,11 @@ witness bytes or console stopping points. This changes the engine.
 Preparation records one wall_clock_epoch after image builds/imports finish.
 The SBXLAUNCH4 recipe carries it to the supervisor, which sets CLOCK_REALTIME
 before the launch barrier on x86 and ARM64. Replay uses the retained value.
-New preparations may have different wall-clock epochs and witnesses.
+New preparations may have different wall-clock epochs and witnesses. Use
+`--wall-clock-epoch SECS` on prepare, run, or explore to give independent runs
+the same guest Unix time. Values below 86400 (the minimum supported Unix epoch) are clamped to
+86400. This changes guest results, has no environment override,
+and does not alter image-layer timestamps. Replay always uses the retained epoch.
 Both application kernels support unprivileged user namespaces. The supervisor
 recursively mounts the image at the namespace root before entering it, preserving
 named volumes and allowing CLONE_NEWUSER.

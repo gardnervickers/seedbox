@@ -14,3 +14,7 @@ no helper archive or private GitHub download is needed at runtime.
 Run output names the retained directory. Use `seedbox replay RUN` to reproduce
 it, `seedbox inspect RUN` for a summary, or `seedbox logs RUN` for guest output.
 Replay needs neither the engine nor the original source files or kernel.
+
+To compare independent fresh runs, pass the same `--wall-clock-epoch SECS`
+(Unix seconds) to each run. Otherwise guest time starts at host time after image
+preparation. Replay always retains the original guest clock.

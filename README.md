@@ -46,6 +46,11 @@ its supervisor and filesystem tool. No private GitHub access or runtime guest
 build is needed. Locally built kernels live under `/tmp/seedbox-UID/ARCH`; rebuild
 if the OS removes them. Seedbox never downloads kernels automatically.
 
+
+To compare independent fresh runs, pass the same `--wall-clock-epoch SECS`
+(Unix seconds) to each run. Otherwise guest time starts at host time after image
+preparation. Replay always retains the original guest clock.
+
 ### Your application
 
 Compose can reference an existing image or a Dockerfile build context:

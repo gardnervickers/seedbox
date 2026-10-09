@@ -83,8 +83,19 @@ fn every_application_runs_twice_and_replays() {
                     "--full-state",
                 ];
                 let first = invoke(Path::new(&cli), &directory, "first", &run)?;
-                let second = invoke(Path::new(&cli), &directory, "second", &run)?;
                 let first = run_directory(&first)?;
+                // Reuse the post-build clock so certificates stay valid while
+                // independent preparations start guests at the same epoch.
+                let epoch = seedbox::orchestration::inspect(Path::new(first))
+                    .map_err(|error| error.to_string())?
+                    .identity
+                    .inputs
+                    .wall_clock_epoch
+                    .ok_or_else(|| "first run did not retain a wall-clock epoch".to_string())?
+                    .to_string();
+                let mut second_args = run.to_vec();
+                second_args.extend(["--wall-clock-epoch", &epoch]);
+                let second = invoke(Path::new(&cli), &directory, "second", &second_args)?;
                 let second = run_directory(&second)?;
                 invoke(
                     Path::new(&cli),

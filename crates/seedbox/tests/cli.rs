@@ -2201,3 +2201,38 @@ fn omitted_run_subcommand_accepts_the_same_kernel_and_compose_arguments() {
     assert_eq!(stderr(&explicit), stderr(&shorthand));
     assert_eq!(stderr(&shorthand), "error: --kernel missing: not found\n");
 }
+
+#[test]
+fn wall_clock_epoch_is_a_preparation_only_result_parameter() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(seedbox(&["init", "demo"], directory.path())
+        .status
+        .success());
+    let project = directory.path().join("demo");
+    for command in ["prepare", "run", "explore"] {
+        let help = seedbox(&["help", command], directory.path());
+        let help = String::from_utf8_lossy(&help.stdout);
+        assert!(help.contains("--wall-clock-epoch"), "{help}");
+        assert!(!help.contains("SEEDBOX_WALL_CLOCK_EPOCH"));
+        for value in ["-1", "4294967296", "tomorrow"] {
+            let output = seedbox(&[command, "--wall-clock-epoch", value], directory.path());
+            assert_eq!(output.status.code(), Some(2));
+            assert!(
+                stderr(&output).contains("--wall-clock-epoch")
+                    || stderr(&output).contains("unexpected argument '-1'")
+            );
+        }
+        for value in ["0", "1800000000", "4294967295"] {
+            let mut args = vec![command, "--wall-clock-epoch", value, "--kernel", "missing"];
+            if command == "prepare" {
+                args.extend(["--output", "prepared.json"]);
+            }
+            let output = seedbox(&args, &project);
+            assert_eq!(stderr(&output), "error: --kernel missing: not found\n");
+        }
+    }
+    for command in ["doctor", "replay"] {
+        let help = seedbox(&["help", command], directory.path());
+        assert!(!String::from_utf8_lossy(&help.stdout).contains("--wall-clock-epoch"));
+    }
+}

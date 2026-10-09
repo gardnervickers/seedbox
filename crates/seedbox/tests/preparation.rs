@@ -26,6 +26,7 @@ fn fixture(root: &Path) -> (OciPreparer, config::Simulation, ContentStore) {
         semantic_parameters: BTreeMap::from([("memory_mb".into(), "1024".into())]),
     };
     let preparer = OciPreparer {
+        wall_clock_epoch: None,
         kernel,
         engine,
         init: helper,
@@ -156,7 +157,7 @@ fn preparation_records_one_epoch_after_import_and_retains_it() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    let (preparer, mut simulation, store) = fixture(root.path());
+    let (mut preparer, mut simulation, store) = fixture(root.path());
     simulation
         .services
         .insert("other".into(), simulation.services["app"].clone());
@@ -191,21 +192,44 @@ fn preparation_records_one_epoch_after_import_and_retains_it() {
         .as_object()
         .unwrap()
         .contains_key("wall_clock_epoch"));
-    for digest in prepared.guests.values() {
-        let archive = store.read(digest).unwrap();
-        let start = archive
-            .windows(10)
-            .position(|bytes| bytes == b"SBXLAUNCH4")
+    for requested in [0, 1_800_000_000, u32::MAX] {
+        preparer.wall_clock_epoch = Some(requested);
+        let context = PreparationContext::new(
+            root.path().join(format!("epoch-{requested}")),
+            Default::default(),
+        )
+        .unwrap();
+        let prepared = preparer
+            .prepare_with_transport(&simulation, &store, &context, &Transport)
             .unwrap();
-        let mut cursor = start + 10;
-        for _ in 0..5 {
-            let size = u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4 + size;
+        let epoch = u64::from(requested.max(seedbox::guest::MIN_WALL_CLOCK_EPOCH));
+        assert_eq!(prepared.wall_clock_epoch, Some(epoch as u32));
+        let second_context = PreparationContext::new(
+            root.path().join(format!("epoch-{requested}-second")),
+            Default::default(),
+        )
+        .unwrap();
+        let second = preparer
+            .prepare_with_transport(&simulation, &store, &second_context, &Transport)
+            .unwrap();
+        assert_eq!(prepared, second);
+        for digest in prepared.guests.values() {
+            let archive = store.read(digest).unwrap();
+            let start = archive
+                .windows(10)
+                .position(|bytes| bytes == b"SBXLAUNCH4")
+                .unwrap();
+            let mut cursor = start + 10;
+            for _ in 0..5 {
+                let size =
+                    u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()) as usize;
+                cursor += 4 + size;
+            }
+            cursor += 4; // max_map_count
+            assert_eq!(
+                u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()) as u64,
+                epoch
+            );
         }
-        cursor += 4; // max_map_count
-        assert_eq!(
-            u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()) as u64,
-            epoch
-        );
     }
 }

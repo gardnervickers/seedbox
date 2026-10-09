@@ -20,6 +20,8 @@ pub struct OciPreparer {
     pub mke2fs: Option<PathBuf>,
     pub profile: ExecutionProfile,
     pub docker: bollard::Docker,
+    /// Explicit guest Unix time; None samples host time after image preparation.
+    pub wall_clock_epoch: Option<u32>,
 }
 
 pub use crate::preparation_command::PreparationContext;
@@ -207,13 +209,16 @@ impl OciPreparer {
         }
         // Sample once after image builds: certificates minted during preparation
         // must already be valid when applications start. Replay retains this value.
-        let wall_clock_epoch = u32::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| Error::Setup(format!("prepare wall clock: {error}")))?
-                .as_secs(),
-        )
-        .map_err(|_| Error::Setup("prepare wall clock exceeds supported Unix epoch".into()))?;
+        let wall_clock_epoch = match self.wall_clock_epoch {
+            Some(epoch) => epoch.max(crate::guest::MIN_WALL_CLOCK_EPOCH),
+            None => u32::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| Error::Setup(format!("prepare wall clock: {error}")))?
+                    .as_secs(),
+            )
+            .map_err(|_| Error::Setup("prepare wall clock exceeds supported Unix epoch".into()))?,
+        };
         for (name, service, mounts, imported) in launches {
             let recipe = launch_recipe(
                 &imported.image.launch,

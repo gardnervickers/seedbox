@@ -65,20 +65,26 @@ for sha in $SHAS; do
           "$sb" run "$world" --timebase pv --seed "$seed" > "$p-a.out" 2>&1
         rc_a=$?
         a=$(rundir "$p-a.out")
+        "$sb" inspect "$a" --json > "$p-a.json"
+        epoch=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[\"identity\"][\"inputs\"][\"wall_clock_epoch\"])" "$p-a.json")
+        /usr/bin/time -f %e -o "$p-b.wall" \
+          "$sb" run "$world" --timebase pv --seed "$seed" --wall-clock-epoch "$epoch" > "$p-b.out" 2>&1
+        rc_b=$?
+        b=$(rundir "$p-b.out")
         /usr/bin/time -f %e -o "$p-replay.wall" "$sb" replay "$a" > "$p-replay.out" 2>&1
         replay_rc=$?
-        b=$(rundir "$p-replay.out")
         "$sb" diff "$a" "$b" > "$p-diff.out" 2>&1
         diff_rc=$?
         set -e
-        [ "$rc_a" = 0 ] && [ "$replay_rc" = 0 ] && [ "$diff_rc" = 0 ] || ok=0
+        [ "$rc_a" = 0 ] && [ "$rc_b" = 0 ] && [ "$replay_rc" = 0 ] && [ "$diff_rc" = 0 ] || ok=0
         for run in "$a" "$b"; do [ -n "$run" ] && cp "$run/output/vmm.json" "$out/$(basename "$run").vmm.json" 2>/dev/null || true; done
         {
           echo "    seed $seed:"
           echo "      run a: $(status "$p-a.out") exit $rc_a, wall $(cat "$p-a.wall")s, vmm host $(field "$a" host_seconds)s"
+          echo "      run b: $(status "$p-b.out") exit $rc_b, wall $(cat "$p-b.wall")s"
           echo "      witness a: $(field "$a" world_witness)"
-          echo "      replay witness: $(field "$b" world_witness)"
-          echo "      diff run replay: $(status "$p-diff.out") exit $diff_rc"
+          echo "      witness b: $(field "$b" world_witness)"
+          echo "      diff fresh runs: $(status "$p-diff.out") exit $diff_rc"
           echo "      replay a: $(grep -m1 "^replay:" "$p-replay.out" || status "$p-replay.out") exit $replay_rc, wall $(cat "$p-replay.wall")s"
         } >> "$summary"
       done
