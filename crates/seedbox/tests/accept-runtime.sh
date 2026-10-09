@@ -2,7 +2,6 @@
 # Linux KVM acceptance. This DOES start guests and temporarily set the scoped
 # MSR workaround through the Rust executor. Run only after OCI acceptance.
 # Usage (Nix shell): bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU OUTPUT [lifecycle|faults]
-# Set SEEDBOX_ACCEPT_DEV=1 to run an unpinned engine or kernel with --allow-dev-engine.
 set -euo pipefail
 test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
@@ -37,8 +36,7 @@ if test "${4:-}" = faults; then
     --state "$output/state" --output "$output" \
     --negative-guest-init "$output/compose-init-missing" \
     --rejecting-guest-init "$output/compose-init-rejecting" \
-    --delayed-guest-init "$output/compose-init-delayed" \
-    ${SEEDBOX_ACCEPT_DEV:+--allow-dev-engine}
+    --delayed-guest-init "$output/compose-init-delayed"
 fi
 "$cli" init "$output/redis" --template redis
 "$cli" init "$output/etcd" --template etcd
