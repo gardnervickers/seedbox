@@ -1,5 +1,6 @@
 //! Hardware acceptance using exact retained inputs, with the ordinary CLI owning
 //! admission, CPU/SMT leases, wall limits, cancellation and MSR restoration.
+#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use std::{
     fs,
@@ -44,7 +45,6 @@ impl Drop for Running {
 }
 
 #[test]
-#[ignore = "requires Linux root, compatible retained full-state run, exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn paused_and_resumed_replay_has_identical_witness_and_full_state() {
     assert_eq!(std::env::consts::OS, "linux");
     let source = PathBuf::from(

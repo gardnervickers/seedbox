@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sign the exact binary that will run, including an ignored integration-test binary.
+# Sign the exact CLI or discovered native test binary that will run.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 if [ "$#" -eq 0 ]; then set -- "$here/target/release/seedbox-arm64"; fi

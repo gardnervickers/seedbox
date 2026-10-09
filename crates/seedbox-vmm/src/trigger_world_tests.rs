@@ -104,7 +104,7 @@ fn partition(handle: &str) -> Action {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+#[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
 fn committed_trigger_world_effects_follow_arm_order_across_reversed_machine_ties() {
     let mut want = None;
     let mut counter = Counter::new().unwrap();
@@ -147,7 +147,7 @@ fn committed_trigger_world_effects_follow_arm_order_across_reversed_machine_ties
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+#[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
 fn committed_trigger_world_retains_already_routed_response_and_lagging_peer() {
     let mut w = world(256, false);
     // The peer begins a charged timer-port read. Its sampled response is
@@ -193,12 +193,14 @@ fn committed_trigger_world_retains_already_routed_response_and_lagging_peer() {
     assert_eq!(w.machines[1].time, 52);
     assert!(w.faults.blocked(0, 1));
     assert_eq!(w.machines[1].pending_io.as_ref().unwrap().remaining_ns, 948);
+    // Projection from the windowed scheduler rekeys the queue sequence.
+    // Preserve the packet's arrival, sender and bytes across that projection.
     assert_eq!(
-        w.events[1].keys().collect::<Vec<_>>(),
-        queued.keys().collect::<Vec<_>>()
+        w.events[1].keys().map(|(at, _)| *at).collect::<Vec<_>>(),
+        queued.keys().map(|(at, _)| *at).collect::<Vec<_>>()
     );
     assert!(
-        matches!(w.events[1].values().next(),Some(Payload::Frame{bytes,..}) if bytes==&response)
+        matches!(w.events[1].values().next(),Some(Payload::Frame{from:0,bytes}) if bytes==&response)
     );
     w.route(0, 52, response);
     assert_eq!(w.dropped, 1);
@@ -206,7 +208,7 @@ fn committed_trigger_world_retains_already_routed_response_and_lagging_peer() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+#[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
 fn committed_trigger_world_snapshot_keeps_partial_match_and_scheduled_effect() {
     let mut counter = Counter::new().unwrap();
     for pending in [false, true] {
@@ -246,7 +248,7 @@ fn committed_trigger_world_snapshot_keeps_partial_match_and_scheduled_effect() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+#[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
 fn committed_trigger_unused_surface_preserves_witness_and_report_bytes() {
     let mut w = world(256, false);
     let outcome = simulate(&mut w, &json!({}), 2000, &None, None, &mut None).unwrap();
@@ -291,7 +293,7 @@ fn committed_trigger_unused_surface_preserves_witness_and_report_bytes() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+#[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
 fn committed_trigger_world_does_not_rescan_old_console_after_arm() {
     let mut w = world(256, false);
     let mut frames = Vec::new();

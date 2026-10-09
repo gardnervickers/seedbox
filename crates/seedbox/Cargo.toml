@@ -30,3 +30,16 @@ seedbox-vmm = { path = "../seedbox-vmm" }
 
 [target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))'.dependencies]
 seedbox-arm64 = { path = "../seedbox-arm64" }
+
+[features]
+oci-tests = []
+application-tests = []
+retained-run-tests = []
+
+[[test]]
+name = "applications"
+required-features = ["application-tests"]
+
+[[test]]
+name = "host_pause"
+required-features = ["retained-run-tests"]
