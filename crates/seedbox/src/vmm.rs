@@ -1268,6 +1268,28 @@ fn validate_control_history(
                 }
                 continue;
             }
+            Operation::Throttle {
+                target,
+                factor_permille,
+            } => {
+                let handle = if response {
+                    &metadata["result"]["handle"]
+                } else {
+                    &row["plan"]["handle"]
+                };
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty()
+                    || (response && e != Some(a))
+                    || !seedbox_control::THROTTLE_PERMILLE.contains(&factor_permille)
+                {
+                    return Err(bad());
+                }
+                Action::Throttle {
+                    handle,
+                    machine: resolve(&target)?,
+                    factor_permille,
+                }
+            }
             Operation::Heal { handle } => {
                 if response && e != Some(a) {
                     return Err(bad());

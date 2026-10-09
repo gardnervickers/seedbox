@@ -232,6 +232,15 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
 
     fn supports_speed_reseed(&self) -> bool;
     fn seed_speed(&mut self, seed: u64, domain: &str) -> Result<(), String>;
+    /// Whether `throttle` can scale this machine's CPU cost.
+    fn supports_throttle(&self) -> bool {
+        false
+    }
+    /// Charge CPU work at `factor_permille / 1000` times the seeded speed;
+    /// 1000 restores it. Takes effect from the machine's next slice.
+    fn throttle(&mut self, _factor_permille: u64) -> Result<(), String> {
+        Err("throttle is unsupported by this backend".into())
+    }
     fn branches(&self) -> u64;
     fn exits(&self) -> u64;
     fn exit_witness(&mut self) -> Result<String, String>;
@@ -634,6 +643,7 @@ impl<M: WorldMachine> World<M> {
             faults::Lifecycle::Resume => self.machines[m].resume(t),
             faults::Lifecycle::Crash => self.crash(m, t),
             faults::Lifecycle::Reboot => self.reboot(m, t),
+            faults::Lifecycle::Throttle(factor) => self.machines[m].throttle(factor),
         }
     }
 
@@ -664,6 +674,9 @@ impl<M: WorldMachine> World<M> {
             }
             self.failure = Some(error.clone());
             return Err(error);
+        }
+        if let Some(factor) = self.faults.throttle(m) {
+            self.machines[m].throttle(factor)?;
         }
         Ok(())
     }
@@ -1369,6 +1382,13 @@ fn simulate_stopped<M: WorldMachine>(
                 .map(|m| m.name.clone())
                 .collect::<Vec<_>>();
             world.control.reject_unavailable(&exited);
+            let unthrottleable: Vec<String> = world
+                .machines
+                .iter()
+                .filter(|m| !m.supports_throttle())
+                .map(|m| m.name.clone())
+                .collect();
+            world.control.reject_unthrottleable(&unthrottleable);
             if world.control.pending.as_ref().is_some_and(|p| {
                 !p.admitted_done
                     && matches!(p.operation, Some(seedbox_control::Operation::Inspect {}))

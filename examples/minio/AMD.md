@@ -31,7 +31,7 @@ python3 examples/minio/generate.py "$PROJECTS" --minio "$INPUTS/minio" --wheel-d
 "$SEEDBOX" validate "$PROJECTS/broken"
 "$SEEDBOX" validate "$PROJECTS/fixed"
 sudo -E env PATH="$PATH" "$SEEDBOX" doctor --cpu "$CPU" --kernel "$KERNEL" --vmm "$VMM" --json > "$EVIDENCE/doctor.json"
-RUNTIME=(--cpu "$CPU" --kernel "$KERNEL" --vmm "$VMM" --guest-init "$GUEST_INIT" --memory-mb 2048)
+RUNTIME=(--cpu "$CPU" --kernel "$KERNEL" --vmm "$VMM" --guest-init "$GUEST_INIT")
 ```
 
 Expected: every checksum/control and all three validations succeed; doctor admits the profile and completes cleanup. MinIO packaging itself remains unqualified until the next step. Cap and record preparation/full-command wall time under the host's execution supervision; Compose caps only backend execution. The initial four worlds have at most 270 seconds summed execution caps, and the added offline replay raises that to 330 seconds across five worlds. These are caps, not measured runtimes or a total CLI wall-time promise. Abort further dispatch on exhaustion, ambiguity, nonexpected results or unverified native builder cleanup.
@@ -65,7 +65,7 @@ REPLAY=$(sed -n 's/^[A-Z]*: //p' "$EVIDENCE/replay.log")
 "$SEEDBOX" inspect "$REPLAY" --json > "$EVIDENCE/replay-record.json"
 python3 examples/minio/verify.py "$REPLAY" --mode broken --replay
 # Required: replay MATCH / exit 0; retained application outcome remains FAIL.
-# Memory is inherited from the original profile, checked as 2048; no replay memory flag.
+# Memory comes from x-seedbox.machine.memory_mb (2048) and is inherited from the original profile on replay.
 
 sudo -E env PATH="$PATH" "$SEEDBOX" run "$PROJECTS/fixed" --seed 0 "${RUNTIME[@]}" \
   --state "$EVIDENCE/state" > "$EVIDENCE/fixed.log" 2>&1

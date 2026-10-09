@@ -185,6 +185,7 @@ pub struct MachineSnapshot {
     control_tx_bytes: u64,
     pv: bool,
     syscall_ns: u64,
+    throttle_permille: Option<u64>,
     abi: u64,
     page_timer: PageTimer,
     armed_wake: u64,
@@ -362,6 +363,9 @@ pub struct Machine {
     pub timer_jitter: u64,
     /// PV clock: virtual time one syscall costs on this machine.
     pub syscall_ns: u64,
+    /// A throttle fault's factor on `syscall_ns`, in thousandths. `None`
+    /// until the first throttle, so unthrottled runs charge exactly as before.
+    pub throttle_permille: Option<u64>,
     /// PV watchdog and spin-probe state. It belongs to the machine, not the
     /// thread's clock, so it never carries between machines.
     pub(crate) pv_progress: pv::Progress,
@@ -381,7 +385,7 @@ pub struct Machine {
     /// Per-seed words the guest reads after its release.
     entropy: [u32; ENTROPY_WORDS],
     entropy_read: usize,
-    pv_clock: bool,
+    pub(crate) pv_clock: bool,
     page_timer_requested: bool,
     /// The MSR list a fork snapshot saves.
     msrs: Msrs,
@@ -632,6 +636,7 @@ impl Machine {
             tolerance: 0,
             timer_jitter: 0,
             syscall_ns: pv::SYSCALL_NS,
+            throttle_permille: None,
             pv_progress: pv::Progress::new(),
             timer_rng: None,
             margin: profile.margin,
@@ -875,6 +880,7 @@ impl Machine {
             control_tx_bytes: self.control_tx_bytes,
             pv: self.pv,
             syscall_ns: self.syscall_ns,
+            throttle_permille: self.throttle_permille,
             abi: self.abi,
             page_timer: self.page_timer,
             armed_wake: self.armed_wake,
@@ -953,6 +959,7 @@ impl Machine {
         self.control_tx_bytes = s.control_tx_bytes;
         self.pv = s.pv;
         self.syscall_ns = s.syscall_ns;
+        self.throttle_permille = s.throttle_permille;
         self.abi = s.abi;
         self.page_timer = s.page_timer;
         self.armed_wake = s.armed_wake;
