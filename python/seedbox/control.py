@@ -55,6 +55,12 @@ class Shape:
 
 
 @dataclass(frozen=True)
+class Throttle:
+    handle: str
+    effect: Effect
+
+
+@dataclass(frozen=True)
 class ConnectionDrop:
     handle: str
     effect: Effect
@@ -283,9 +289,29 @@ class World:
             raise ProtocolError("drop_connection response lacks an opaque handle")
         return ConnectionDrop(result["handle"], effect)
 
+    def throttle(self, target, factor):
+        """Make the target's machine `factor` times slower until healed (x86 pv timebase).
+
+        Simulated CPU work (each syscall's charge) costs `factor` times the
+        machine's seeded speed; factors run from 1 to 1000 in steps of 0.001.
+        """
+        if isinstance(factor, bool):
+            raise ValueError("throttle factor must be a number from 1 to 1000")
+        try:
+            permille = Decimal(str(factor)) * 1000
+        except InvalidOperation as error:
+            raise ValueError("invalid throttle factor") from error
+        if not permille.is_finite() or permille != permille.to_integral_value() or not 1000 <= permille <= 1_000_000:
+            raise ValueError("throttle factor must be from 1 to 1000 in steps of 0.001")
+        result, effect = self._call("throttle", target=_target(target), factor_permille=int(permille))
+        if not isinstance(result.get("handle"), str) or not result["handle"]:
+            self.close()
+            raise ProtocolError("throttle response lacks an opaque handle")
+        return Throttle(result["handle"], effect)
+
     def heal(self, partition):
         """Release this handle only; prior shape layers or overlapping cuts remain."""
-        if not isinstance(partition, (Partition, Shape, ConnectionDrop)):
+        if not isinstance(partition, (Partition, Shape, ConnectionDrop, Throttle)):
             raise TypeError("heal expects a fault handle returned by this API")
         result, effect = self._call("heal", handle=partition.handle)
         return result if isinstance(partition, ConnectionDrop) or "queue_counts" in result or "network_fault_counts" in result else effect

@@ -145,7 +145,6 @@ impl Fixture {
                 full_state: None,
                 faults: vec![],
                 detail: None,
-                engine_qualification: None,
             },
             calls: AtomicUsize::new(0),
             fail: false,

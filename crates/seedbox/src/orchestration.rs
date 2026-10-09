@@ -427,14 +427,7 @@ impl Orchestrator {
             ..
         } = pending;
         match execution {
-            Ok(mut report) => {
-                report.engine_qualification = record
-                    .identity
-                    .inputs
-                    .profile
-                    .semantic_parameters
-                    .get(crate::admission::ENGINE_QUALIFICATION)
-                    .cloned();
+            Ok(report) => {
                 match classify(&record.identity, &report) {
                     Ok(outcome) => record.outcome = outcome,
                     Err(error) => {
@@ -506,7 +499,6 @@ impl Pending {
                 full_state: None,
                 faults: vec![],
                 detail: Some("cancelled before execution".into()),
-                engine_qualification: None,
             }));
         }
         Ok(None)

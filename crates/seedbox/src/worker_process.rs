@@ -110,7 +110,6 @@ pub(crate) fn incomplete(reason: StopReason, timebase: Timebase) -> ExecutionRep
         full_state: None,
         faults: Vec::new(),
         detail: None,
-        engine_qualification: None,
     }
 }
 

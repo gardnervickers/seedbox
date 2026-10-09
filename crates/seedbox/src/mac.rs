@@ -564,7 +564,6 @@ mod process_tests {
             "arm_boot_policy",
             "arm_entropy_policy",
             "arm_device_policy",
-            "engine_qualification",
         ] {
             let mut descriptive = complete.clone();
             descriptive
