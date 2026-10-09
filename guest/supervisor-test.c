@@ -115,6 +115,23 @@ int main(int argc, char **argv) {
     relay_management(&child); assert(child > 0 && !command_used);
     n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0;
     assert(strstr(buffer,"SEEDBOX_FAILURE id=2") && strstr(buffer,"SEEDBOX_EFFECT id=3 action=start"));
+    /* Process pause: the acknowledgement follows the group stop; resume
+     * continues it, and a later stop still kills and reaps a frozen group. */
+    const char *pauses[] = {"freeze 5\n", "thaw 6\n", "freeze 7\n"};
+    const char *effects[] = {"SEEDBOX_EFFECT id=5 action=freeze ", "SEEDBOX_EFFECT id=6 action=thaw ",
+                             "SEEDBOX_EFFECT id=7 action=freeze "};
+    for (unsigned i = 0; i < 3; i++) {
+        assert(write(sockets[1], pauses[i], strlen(pauses[i])) == (ssize_t)strlen(pauses[i]));
+        relay_management(&child); assert(child > 0 && !command_used);
+        n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0;
+        assert(strstr(buffer, effects[i]));
+        char path[64], stat[256]; snprintf(path, sizeof(path), "/proc/%d/stat", (int)child);
+        int fd = open(path, O_RDONLY); assert(fd >= 0);
+        ssize_t got = read(fd, stat, sizeof(stat)-1); assert(got > 0); stat[got] = 0; close(fd);
+        char state = strrchr(stat, ')')[2];
+        assert(i == 1 ? state != 'T' : state == 'T');
+    }
+    assert(waitpid(child,&status,WNOHANG) == 0);
     assert(!stop(&child));
     arguments=(char *[]){"/definitely/no/such/executable",NULL};
     char failed[]="start 4"; control(failed,&child); assert(child<0);

@@ -519,6 +519,22 @@ static int stop(pid_t *child) {
     while (waitpid(-group, &status, 0) >= 0 || errno == EINTR) {}
     return errno == ECHILD ? 0 : -1;
 }
+/* SIGSTOP the application's process group, as a debugger or GC pause would;
+ * its kernel keeps ACKing and accepting connections. Confirm once the group
+ * leader reports the stop, leaving any exit for supervise() to reap. */
+static int freeze(pid_t *child) {
+    if (*child <= 0) { errno = EINVAL; return -1; }
+    if (kill(-*child, SIGSTOP)) return -1;
+    siginfo_t info = {0};
+    while (waitid(P_PID, *child, &info, WSTOPPED|WEXITED|WNOWAIT) < 0) { if (errno != EINTR) return -1; }
+    if (info.si_code != CLD_STOPPED) { errno = ESRCH; return -1; }
+    return 0;
+}
+/* SIGCONT resumes the stopped group as it is sent; there is nothing to wait for. */
+static int thaw(pid_t *child) {
+    if (*child <= 0) { errno = EINVAL; return -1; }
+    return kill(-*child, SIGCONT);
+}
 static void control(char *command, pid_t *child) {
     if (!strncmp(command, "SBX_REPLY1 ", 11)) {
         char *payload = command + 11, *end; errno = 0;
@@ -534,6 +550,8 @@ static void control(char *command, pid_t *child) {
     if (control_parse(command, &action, &id)) { errno = EINVAL; die("invalid management command"); }
     int success = 0;
     if (!strcmp(action, "stop")) success = stop(child) == 0;
+    else if (!strcmp(action, "freeze")) success = freeze(child) == 0;
+    else if (!strcmp(action, "thaw")) success = thaw(child) == 0;
     else if (*child < 0) { *child = start(); success = *child > 0; }
     if (!id && !success) { errno = EINVAL; die("invalid legacy management action/state"); }
     acknowledge(action, id, success);

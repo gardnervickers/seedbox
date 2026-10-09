@@ -1,4 +1,4 @@
-"""Whole-machine pause, crash and reboot of a real guest kernel."""
+"""Process pause, then whole-machine pause, crash and reboot of a real guest kernel."""
 import json
 import socket
 import time
@@ -81,6 +81,26 @@ def run(address, no_faults=False):
         rejected(world.resume, "invalid_state")
         rejected(world.reboot, "invalid_state")
 
+        # A frozen process's kernel keeps the connection up and still accepts
+        # new ones; the request hangs and completes after SIGCONT.
+        frozen = Session()
+        frozen.send("PING")
+        assert frozen.line(2) == "READY socket_absent"
+        world.pause_process("server")
+        assert state(world) == "Frozen"
+        rejected(world.pause_process, "invalid_state")
+        frozen.send("PING")
+        assert frozen.silent(0.5)
+        queued = Session()
+        queued.send("PING")
+        assert queued.silent(0.5)
+        world.resume_process("server")
+        assert frozen.line(2) == "READY socket_absent"
+        assert queued.line(2) == "READY socket_absent"
+        frozen.close()
+        queued.close()
+        assert state(world) == "Running"
+
         held = Session()
         held.send("PING")
         assert held.line(2) == "READY socket_absent"
@@ -113,7 +133,7 @@ def run(address, no_faults=False):
         second_boot, marked = boot()
         assert second_boot != first_boot and not marked
         assert state(world) == "Running"
-    result = {"errors": errors, "held_until_resume": True, "silent_while_down": True,
+    result = {"errors": errors, "hung_while_frozen": True, "held_until_resume": True, "silent_while_down": True,
               "fresh_boot": True}
     print("LIFECYCLE_CASES_RESULT " + json.dumps(result, sort_keys=True), flush=True)
     return 0
