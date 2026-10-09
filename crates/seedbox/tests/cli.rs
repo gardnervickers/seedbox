@@ -1606,17 +1606,10 @@ mod timed_logs {
 }
 
 #[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/output_layout.rs"]
-mod checkpoint_layout;
-#[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/log_index.rs"]
-mod checkpoint_log_producer;
-
-#[allow(dead_code)]
 mod checkpoint_evidence {
     use super::*;
-    use super::{checkpoint_layout as checkpoint, checkpoint_log_producer as producer};
     use seedbox as sb;
+    use seedbox_engine_core::{log_index as producer, output_layout as checkpoint};
     use std::io::Write;
     include!("support/diff_fixture.rs");
 

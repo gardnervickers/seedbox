@@ -1,13 +1,9 @@
-// The PC-device model is portable. Exercise the actual VMM source here so these
-// output-retention checks also run on Darwin without pretending to run KVM.
-#[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/devices.rs"]
-mod devices;
+//! PC-device output retention and virtio-net receive checks, without KVM.
+use crate::{devices, virtio_net};
 
 #[test]
 fn uart_output_is_persisted_before_completion_and_limited_without_truncation() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("console");
+    let path = std::env::temp_dir().join(format!("seedbox-uart-retention-{}", std::process::id()));
     let mut uart = devices::Uart::default();
     uart.output_file = Some(std::fs::File::create(&path).unwrap());
     uart.output_limit = Some(2);
@@ -19,6 +15,7 @@ fn uart_output_is_persisted_before_completion_and_limited_without_truncation() {
     assert_eq!(uart.out, b"OK");
     drop(uart);
     assert_eq!(std::fs::read(&path).unwrap(), b"OK");
+    std::fs::remove_file(&path).unwrap();
 }
 
 #[test]
@@ -31,10 +28,6 @@ fn uart_baud_register_writes_do_not_enter_console_output() {
     uart.write(0, b'A').unwrap();
     assert_eq!(uart.out, b"A");
 }
-
-#[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/virtio_net.rs"]
-mod virtio_net;
 
 fn rx_device(available: bool) -> (virtio_net::VirtioNet, Vec<u8>) {
     let mut net = virtio_net::VirtioNet::new([2, 0, 0, 0, 0, 1]);

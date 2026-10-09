@@ -1,6 +1,6 @@
 """Scoped Zen counter workaround; exclusive snapshots survive failed restoration.
 
-Only the Zen counter profile needs it (crates/seedbox/src/counter.rs).
+Only the Zen counter profile needs it (crates/seedbox-engine-core/src/branch_counter.rs).
 """
 import json
 import os

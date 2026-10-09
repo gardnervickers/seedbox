@@ -246,7 +246,7 @@ remain runtime qualification gates.
 
 - x86-64 AMD Zen host with KVM, run as root (guest-only perf counting).
   Seedbox picks a branch counter profile from CPUID at startup
-  (`crates/seedbox/src/counter.rs`, `crates/seedbox-vmm/src/profile.rs`) and
+  (`crates/seedbox-engine-core/src/branch_counter.rs`) and
   records it in each run's identity, so a run replays only with the counter
   that made it. Only Zen is qualified. Non-hybrid Intel cores have profiles
   (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that

@@ -5,9 +5,13 @@ pub mod connections;
 pub mod control;
 pub mod disk;
 pub mod faults;
+pub mod host_control;
 pub mod links;
+pub mod log_index;
 pub mod network_counters;
+pub mod output_layout;
 pub mod rng;
+pub mod trace;
 pub mod triggers;
 
 pub mod network_faults;

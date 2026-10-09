@@ -5,15 +5,16 @@
 
 mod boundary;
 mod management_uart;
-mod output_layout;
 #[cfg(test)]
 use seedbox_engine_core::faults;
 #[cfg(test)]
 use seedbox_engine_core::world::{replay_readiness, stop_progress};
-use seedbox_engine_core::{checkpoint, control, disk, links, network_counters, rng};
+use seedbox_engine_core::{checkpoint, control, disk, links, network_counters, output_layout, rng};
 mod counter;
+#[cfg(test)]
+mod device_tests;
 mod devices;
-mod host_control;
+pub mod host_control;
 mod machine;
 mod profile;
 mod stepper;
@@ -21,6 +22,8 @@ mod timebase;
 mod undo;
 mod virtio_blk;
 mod virtio_console;
+#[cfg(test)]
+mod virtio_console_tests;
 mod virtio_net;
 mod world_adapter;
 

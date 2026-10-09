@@ -8,6 +8,7 @@ use crate::{
     vmm::{page_hash_log, MachineReport, StateDigestParts, VmmReport},
     Error, Result,
 };
+use seedbox_engine_core::trace::{InvalidTraceRecord, TraceRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -538,7 +539,6 @@ fn compare_pages(a: impl Read, b: impl Read) -> Result<PageHashDiff> {
     Ok(result)
 }
 
-// Existing engine trace format: kind branches time_ns extra(hex) rip(hex).
 fn next_trace(reader: &mut impl BufRead) -> Result<Option<Record>> {
     let mut line = String::new();
     if reader.take(TRACE_LINE_LIMIT + 1).read_line(&mut line)? == 0 {
@@ -547,23 +547,20 @@ fn next_trace(reader: &mut impl BufRead) -> Result<Option<Record>> {
     if line.len() as u64 > TRACE_LINE_LIMIT {
         return Err(Error::Integrity(exceeds("trace record", TRACE_LINE_LIMIT)));
     }
-    let fields: Vec<_> = line.split_whitespace().collect();
-    let invalid = || {
-        Error::Integrity(
-            "invalid trace record: expected kind branches time_ns extra(hex) rip(hex)".into(),
-        )
-    };
-    if fields.len() != 5 || fields[0].len() != 1 {
-        return Err(invalid());
-    }
-    let branches = fields[1].parse::<u64>().map_err(|_| invalid())?;
-    let time_ns = fields[2].parse::<u64>().map_err(|_| invalid())?;
-    let extra = u64::from_str_radix(fields[3], 16).map_err(|_| invalid())?;
-    let rip = u64::from_str_radix(fields[4], 16).map_err(|_| invalid())?;
+    let TraceRecord {
+        kind,
+        branches,
+        time_ns,
+        extra,
+        rip,
+    } = line
+        .parse()
+        .map_err(|e: InvalidTraceRecord| Error::Integrity(e.to_string()))?;
+    let kind = char::from(kind).to_string();
     Ok(Some(Record {
         time_ns: Some(time_ns),
-        kind: fields[0].into(),
-        value: serde_json::json!({"kind":fields[0], "branches":branches, "time_ns":time_ns, "extra":extra, "rip":rip}),
+        value: serde_json::json!({"kind":kind, "branches":branches, "time_ns":time_ns, "extra":extra, "rip":rip}),
+        kind,
     }))
 }
 fn trace_diff(machine: &str, a: impl Read, b: impl Read) -> Result<Option<FirstRecord>> {

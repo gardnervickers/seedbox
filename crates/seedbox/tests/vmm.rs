@@ -204,7 +204,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
             ..*request
         })
         .unwrap();
-        let parent = checkpoint_protocol::parent_identity(
+        let parent = seedbox_engine_core::checkpoint::parent_identity(
             &checkpoint_world,
             request.seed,
             prepared.profile.engine.hex(),
@@ -1651,7 +1651,7 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
         assert_eq!(checkpoint["branch_seed"], 42);
         assert_eq!(
             checkpoint["branch_identity"],
-            checkpoint_protocol::branch_identity(
+            seedbox_engine_core::checkpoint::branch_identity(
                 checkpoint["parent_identity"].as_str().unwrap(),
                 500,
                 42
@@ -1670,10 +1670,6 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
         assert!(vmm::recorded_checkpoint(&inputs.profile).is_err());
     });
 }
-
-// Run the engine's pure protocol tests on Darwin as well as Linux.
-#[path = "../../seedbox-engine-core/src/checkpoint.rs"]
-mod checkpoint_protocol;
 
 #[test]
 fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
@@ -1703,11 +1699,11 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
                     ..*base
                 })
                 .unwrap();
-                let engine_parent = checkpoint_protocol::parent_identity(
+                let engine_parent = seedbox_engine_core::checkpoint::parent_identity(
                     &world,
                     base.seed,
                     prepared.profile.engine.hex(),
-                    &checkpoint_protocol::identity_timebase(timebase, deferred_tx),
+                    &seedbox_engine_core::checkpoint::identity_timebase(timebase, deferred_tx),
                     page_timer,
                     |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
                 )
@@ -1805,7 +1801,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             cfg["checkpoint"]["parent_identity"],
             ordinary["checkpoint"]["parent_identity"]
         );
-        let parent = checkpoint_protocol::parent_identity(
+        let parent = seedbox_engine_core::checkpoint::parent_identity(
             &cfg,
             base.seed,
             inputs.profile.engine.hex(),
@@ -1830,7 +1826,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             ..*base
         })
         .unwrap();
-        let pv_parent = checkpoint_protocol::parent_identity(
+        let pv_parent = seedbox_engine_core::checkpoint::parent_identity(
             &pv_world,
             base.seed,
             inputs.profile.engine.hex(),
@@ -1862,7 +1858,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
                 ..*base
             })
             .unwrap();
-            let deferred_parent = checkpoint_protocol::parent_identity(
+            let deferred_parent = seedbox_engine_core::checkpoint::parent_identity(
                 &deferred_world,
                 base.seed,
                 inputs.profile.engine.hex(),
