@@ -62,6 +62,12 @@ impl ExecutionBackend for Executor {
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         self.backend().validate_retained(inputs)
     }
+    fn runtime_inputs<'a>(
+        &self,
+        inputs: &'a PreparedInputs,
+    ) -> Vec<&'a seedbox::store::ContentDigest> {
+        self.backend().runtime_inputs(inputs)
+    }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
         eprintln!(
             "running: starting {} machines through {}",
