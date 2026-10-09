@@ -1315,6 +1315,85 @@ fn unsupported_operations_reply_without_planning_handles_or_faults() {
     }
 }
 
+/// One RPC at `id * 100` with no supervisor effect; returns the response and
+/// the lifecycle transitions its admission applied.
+fn throttle_call(
+    c: &mut control::Control,
+    f: &mut faults::Faults,
+    id: u32,
+    mut body: serde_json::Value,
+) -> (serde_json::Value, Vec<(usize, faults::Lifecycle)>) {
+    let t = u64::from(id) * 100;
+    body["version"] = json!(1);
+    body["id"] = json!(id);
+    request(c, id, t, body).unwrap();
+    c.apply_boundary(f, t + 20).unwrap();
+    f.apply_due(t + 20);
+    c.observe_faults(f, t + 20).unwrap();
+    c.apply_boundary(f, t + 40).unwrap();
+    c.mark_delivered(t + 40).unwrap();
+    (
+        c.log.last().unwrap()["response"].clone(),
+        f.take_lifecycle(),
+    )
+}
+
+#[test]
+fn throttle_is_a_healable_admission_effect_with_one_handle_per_machine() {
+    let mut c = control();
+    let mut f = faults::Faults::new(vec![], names()).unwrap();
+    for factor in [999, 1_000_001] {
+        let (response, _) = throttle_call(
+            &mut c,
+            &mut f,
+            1 + u32::from(factor > 1000),
+            json!({"op":"throttle","target":{"service":"server"},"factor_permille":factor}),
+        );
+        assert_eq!(response["error"]["code"], "invalid_request");
+    }
+    let (response, lifecycle) = throttle_call(
+        &mut c,
+        &mut f,
+        3,
+        json!({"op":"throttle","target":{"service":"server"},"factor_permille":4000}),
+    );
+    assert_eq!(response["result"]["handle"], "p1");
+    assert_eq!(response["effect_at_ns"], response["admitted_at_ns"]);
+    assert_eq!(lifecycle, vec![(2, faults::Lifecycle::Throttle(4000))]);
+    assert_eq!(f.throttle(2), Some(4000));
+    assert_eq!(f.active_handles(), vec!["p1"]);
+    assert_eq!(f.log[0]["action"], "throttle");
+    let (response, lifecycle) = throttle_call(
+        &mut c,
+        &mut f,
+        4,
+        json!({"op":"throttle","target":{"machine":"server"},"factor_permille":2000}),
+    );
+    assert_eq!(response["error"]["code"], "invalid_state");
+    assert_eq!(
+        response["error"]["message"],
+        "target machine is already throttled"
+    );
+    assert!(lifecycle.is_empty());
+    let (response, lifecycle) =
+        throttle_call(&mut c, &mut f, 5, json!({"op":"heal","handle":"p1"}));
+    assert_eq!(response["ok"], true);
+    assert_eq!(lifecycle, vec![(2, faults::Lifecycle::Throttle(1000))]);
+    assert_eq!(f.throttle(2), None);
+    assert!(f.active_handles().is_empty());
+    let (response, _) = throttle_call(
+        &mut c,
+        &mut f,
+        6,
+        json!({"op":"throttle","target":{"service":"scenario"},"factor_permille":2000}),
+    );
+    assert_eq!(
+        response["error"]["message"],
+        "controller is outside failure model"
+    );
+    assert!(c.error.is_none() && f.error.is_none());
+}
+
 /// One process-fault RPC on `server`. `ack` answers the dispatched supervisor
 /// command; `None` expects an admission error and no fault.
 fn process_call(
