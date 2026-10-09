@@ -31,7 +31,7 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   state or prepares images. Replay uses retained bytes and never calls the
   downloader, a compiler or container engine. Release runs ignore legacy kernel
   artifact-directory searches; those remain for unbundled development builds.
-  Explicit `--build-epoch` retains native project-Nix preparation with released
+  Explicit `--build-epoch` retains native Podman preparation with released
   guest assets.
 - Runtime preparation uses a Docker/Podman endpoint and a Linux filesystem-tools
   container, with no second Seedbox executable. Native Mac application profiles

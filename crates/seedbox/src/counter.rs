@@ -15,14 +15,13 @@ pub struct MsrWorkaround {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CounterProfile {
-    /// AMD Zen (families 17h-1Ah); the only qualified profile.
+    /// AMD Zen (families 17h-1Ah).
     Zen,
     /// Intel Nehalem through Comet Lake: BR_INST_RETIRED.CONDITIONAL
-    /// (0x5101c4). Unqualified.
+    /// (0x5101c4).
     IntelSkylake,
     /// Intel Ice Lake and later non-hybrid cores, where umask 0x01 became
     /// COND_TAKEN and all conditional branches are umask 0x11 (0x5111c4).
-    /// Unqualified.
     IntelIceLake,
 }
 
@@ -70,7 +69,7 @@ impl CounterProfile {
         Self::for_cpu(&cpu).ok_or_else(|| {
             Error::Setup(format!(
                 "no branch counter profile for {} family {:#x} model {:#x}{}; \
-                 run on an AMD Zen host",
+                 use a host with a supported branch event or --timebase pv",
                 cpu.vendor,
                 cpu.family,
                 cpu.model,
@@ -101,12 +100,6 @@ impl CounterProfile {
 
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|profile| profile.name() == name)
-    }
-
-    /// Whether a host with this profile has passed qualification. Results
-    /// from an unqualified profile are unverified.
-    pub const fn qualified(self) -> bool {
-        matches!(self, Self::Zen)
     }
 
     /// Raw event mirrored from the VMM counter profile.
@@ -169,7 +162,7 @@ fn cpu() -> Result<Cpu> {
 #[cfg(not(target_arch = "x86_64"))]
 fn cpu() -> Result<Cpu> {
     Err(Error::Setup(
-        "run and replay require the qualified Linux KVM host".into(),
+        "branch counter detection requires an x86-64 host".into(),
     ))
 }
 
@@ -217,10 +210,9 @@ mod tests {
     }
 
     #[test]
-    fn names_round_trip_and_only_zen_is_qualified_or_needs_a_workaround() {
+    fn names_round_trip_and_only_zen_needs_a_workaround() {
         for profile in CounterProfile::ALL {
             assert_eq!(CounterProfile::from_name(profile.name()), Some(profile));
-            assert_eq!(profile.qualified(), profile == CounterProfile::Zen);
         }
         assert_eq!(
             CounterProfile::Zen.workaround(),

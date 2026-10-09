@@ -215,9 +215,9 @@ logs do not change the outcome. Retained records and `--json` output are unchang
 `inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 [Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
-and transfer from qualified execution. Same software versions, seed and exact
-retained inputs must replay on a qualified compatible profile; changing versions
-may change execution. Release compatibility remains a V0 qualification gate.
+and transfer from execution compatibility. Same software versions, seed and exact
+retained inputs replay on a capable host with a compatible profile; changing
+versions may change execution.
 
 Experimental runtime forks use `seedbox run examples/redis --checkpoint-at-ns
 1000000000 --branch-seed 42` with the newly built VMM. The
@@ -273,27 +273,25 @@ An unfinished checkpoint omits still-running/uncheckpointed intervals and is not
 a complete cumulative charge. CLI process-family CPU totals include
 preparation and reaped children. Parallel scheduling and chosen cores are performance
 choices excluded from run identity; actual serial/parallel and per-core equality
-remain runtime qualification gates.
+require hardware evidence.
 
-Exploration `build:` admission currently accepts only the inspected immutable
-project-Nix Linux Podman launcher/native closure in explicit local mode. Unknown
-wrappers and daemon/remote delegation are rejected. Cancelled builds produce
+Exploration checks local Podman operation with `--remote=false` and retains
+builder and local storage/runtime observations. Cancelled builds produce
 ERROR / cleanup-unverified and retain their unique private tag; process-group
-cleanup alone does not prove builder cessation. Ordinary run/prepare continue
-supporting custom builders; the optional native timestamp policy below has a
-narrower admission requirement. See [preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
+cleanup alone does not prove builder cessation. See
+[preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
 
 On Linux, explicit `--build-epoch` selects native preparation with the
-project-Nix Podman, Skopeo and umoci tools, using the same released guest assets.
+Podman, Skopeo and umoci tools, using the same released guest assets.
 Ordinary runs use container-backed preparation. Mac does not support this option.
 Native extraction needs image ownership permissions; rootless users can run
 `prepare` inside `podman unshare`.
 
-For optional build timestamp control, `--build-epoch 0` selects the admitted
-project-Nix native Podman's creation-time and new-layer timestamp policy.
+For optional build timestamp control, `--build-epoch 0` selects Podman's
+creation-time and new-layer timestamp policy.
 It changes guest-visible new-layer file and directory timestamps, so it is
 optional and never applied to registry or base layers. The range is
-0..=4294967295 Unix seconds; custom builders are unsupported with this option.
+0..=4294967295 Unix seconds; the builder must support Podman's timestamp options.
 Moving base tags, network downloads and arbitrary build programs can still
 change inputs. Replay uses the complete retained application release closure
 without this option; deterministic execution does not require independently
@@ -407,19 +405,19 @@ with the same entrypoint. The runner does not stamp revisions or checkout state.
 
 ## Host requirements
 
-- x86-64 AMD Zen host with KVM, run as root (guest-only perf counting).
+- x86-64 host with KVM and a supported guest branch event, run as root.
   Seedbox picks a branch counter profile from CPUID at startup
   (`crates/seedbox/src/counter.rs`, `crates/seedbox-vmm/src/profile.rs`) and
   records it in each run's identity, so a run replays only with the counter
-  that made it. Only Zen is qualified. Non-hybrid Intel cores have profiles
+  that made it. Non-hybrid Intel cores have profiles
   (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
-  have never run on hardware; `run`, `explore` and `replay` use them with a
-  warning that results are unverified.
+  use the same KVM and selected-event readiness checks as Zen. Intel hardware
+  run/replay acceptance remains untested.
 - `--timebase pv` reads no host perf counter, so it needs only KVM and a free
   core: it skips the counter profile, the perf event
   checks and the workaround MSR, and its identity records no counter profile.
   It runs on any x86-64 KVM host, including cloud VMs with nested KVM and no
-  guest PMU. Hosts other than the workstation are not qualified for PV.
+  guest PMU.
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
   counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor
@@ -533,8 +531,8 @@ seedbox replay IMPORTED_RUN --state imported
 Use the run directory printed by `import` as `IMPORTED_RUN`. Import executes
 nothing. Replay uses the bundled engine and inputs without image preparation,
 registry access or the original checkout, and requires a compatible installed
-Seedbox release and qualified AMD Linux host. Transfer does not qualify a new
-host. A reproduced application FAIL is replay MATCH.
+Seedbox release and Linux KVM host with the capabilities required by the recorded
+timebase. A reproduced application FAIL is replay MATCH.
 
 Bundles include only retained logs. Any capture omissions remain visible and
 are printed as `omitted files: N`; omitted local output is not transferred.
@@ -602,7 +600,7 @@ that error.
 ## Acceptance scenarios
 
 Acceptance tests are ordinary YAML projects with guest Python drivers. From the
-repository root on the qualified Linux host, after setting up the CLI runtime
+repository root on a Linux KVM host, after setting up the CLI runtime
 inputs described above:
 
 ```sh

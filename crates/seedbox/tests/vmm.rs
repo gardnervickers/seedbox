@@ -1468,7 +1468,7 @@ fn timebase_reports_validate_recorded_semantics_and_accept_legacy_counter_report
 }
 
 #[test]
-fn pv_reports_may_omit_unqualified_counter_profile_but_counter_reports_must_not() {
+fn pv_reports_may_omit_counter_profile_but_counter_reports_must_not() {
     use seedbox::counter::CounterProfile;
     fixture(|base| {
         let mut prepared = base.prepared.clone();
@@ -1493,7 +1493,7 @@ fn pv_reports_may_omit_unqualified_counter_profile_but_counter_reports_must_not(
                 assert!(parsed
                     .unwrap_err()
                     .to_string()
-                    .contains("unqualified VMM report is missing its counter profile"));
+                    .contains("VMM report is missing its counter profile"));
             } else {
                 assert_eq!(parsed.unwrap().timebase, Some(Timebase::Pv));
             }

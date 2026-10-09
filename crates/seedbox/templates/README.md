@@ -171,7 +171,7 @@ the wall limit. CPU leases remain held until execution ends. This requires a
 host-control-capable engine; see the repository's `docs/runtime.md` for details.
 
 On Linux, explicit `--build-epoch` selects native preparation with the
-project-Nix Podman, Skopeo and umoci tools, using the same released guest assets.
+Podman, Skopeo and umoci tools, using the same released guest assets.
 Ordinary runs use container-backed preparation. Mac does not support this option.
 Native extraction needs image ownership permissions; rootless users can run
 `prepare` inside `podman unshare`.
@@ -179,7 +179,7 @@ Native extraction needs image ownership permissions; rootless users can run
 For optional build timestamp control, `prepare`, `run` and `explore` accept
 `--build-epoch SECONDS` (0..=4294967295; default absent, no environment backing).
 This explicitly changes new build-layer file and directory timestamps and
-requires the admitted project-Nix native Podman, including for exploration.
+uses Podman's timestamp options, including for exploration.
 Registry and base image metadata is preserved. Pin/control other build inputs;
 an epoch alone cannot make arbitrary builds reproducible. Services sharing one
 frozen native build source reuse preparation work in that call, while retaining
@@ -229,9 +229,9 @@ uncertainty stops new dispatch, cancels only owned work and waits for cleanup.
 Reports separate measured process-family CPU, elapsed wall, peak active attempts
 and summed completed-attempt wall (a conservative guest-core charge once all
 owned attempts return, not exact lease time). Partial sums omit running intervals.
-Real serial/parallel and core invariance still require runtime qualification.
-Build exploration requires
-the inspected local project-Nix Podman closure; cancelled builds remain
+Real serial/parallel and core invariance still require hardware evidence.
+Build exploration checks local Podman operation with `--remote=false`;
+cancelled builds remain
 cleanup-unverified ERROR with their private tag retained until cessation is verified.
 See the repository's `docs/runtime.md` for bounded preparation evidence and limits.
 
@@ -299,11 +299,10 @@ cached (or pass `--kernel PATH`). It uses the normal CPU/runtime defaults withou
 preparing images or starting guests. `VALID` means execution-profile compatibility,
 not cross-host replay qualification; `--json` shows the admitted observations.
 
-Known non-Zen counters run with a warning for run, explore and replay and
-remain unverified. They retain exact release/counter/input
-checks and SMT ownership but carry no qualified AMD proof or AMD MSR writes.
-Disabled selected-event readiness precedes preparation and
-is rechecked under leases; it never enables a guest counter. Intel is not qualified.
+All supported counter profiles use the same KVM and disabled selected-event
+readiness checks before preparation and under leases. Replay requires the recorded
+counter profile. Only Zen accesses the AMD workaround MSR; Intel hardware
+run/replay acceptance remains untested.
 
 Engines and guest kernels are not pinned: any built engine and kernel are
 admitted, and each run records their hashes.

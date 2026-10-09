@@ -60,7 +60,6 @@ impl PreparationBackend for OciPreparer {
             .values()
             .any(|s| matches!(s.source, crate::config::ImageSource::Build { .. }))
         {
-            self.tools.validate_build_epoch()?;
             context.admit_builder(&self.tools.docker)?;
         }
         self.prepare_inner(simulation, store, Some(context), &self.tools)
@@ -113,9 +112,6 @@ impl OciPreparer {
             .services
             .values()
             .any(|service| matches!(service.source, crate::config::ImageSource::Build { .. }));
-        if has_builds {
-            self.tools.validate_build_epoch()?;
-        }
         let closure = if has_builds {
             reuse_closure(&self.tools)?
         } else {
@@ -419,9 +415,6 @@ fn reuse_closure(tools: &OciTools) -> Result<Option<ContentDigest>> {
     let Ok(proof) = crate::preparation_command::inspect_native_builder(&tools.docker) else {
         return Ok(None);
     };
-    if !proof.admitted {
-        return Ok(None);
-    }
     // These explicit tool paths are resolved by the CLI, never by library env reads.
     let mut transports = Vec::new();
     for path in [&tools.skopeo, &tools.umoci] {

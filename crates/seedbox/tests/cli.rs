@@ -761,8 +761,9 @@ fn validate_cli_resolves_directed_baselines_and_reports_each_policy_error() {
     }
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
-fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation() {
+fn build_epoch_requires_native_linux_preparation() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
     fs::write(root.path().join("compose.yaml"), "name: epoch\nservices:\n  app: {build: .}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
@@ -783,8 +784,6 @@ fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation(
             stderr(&output),
             "error: --build-epoch requires native Linux preparation; omit it on Mac\n"
         );
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        assert_eq!(stderr(&output), "error: --build-epoch: builder ./builder is unsupported; use the qualified project-Nix local Podman or omit --build-epoch\n");
         assert!(output.stdout.is_empty());
         assert!(!root.path().join(".seedbox").exists());
         assert!(!root.path().join("prepared.json").exists());
@@ -1084,7 +1083,7 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         assert_eq!(
             stderr(&output),
-            "error: run and replay require the qualified Linux KVM host\n"
+            "error: branch counter detection requires an x86-64 host\n"
         );
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         assert_eq!(
