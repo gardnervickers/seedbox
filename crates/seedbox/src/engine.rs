@@ -4,7 +4,7 @@ use crate::{execution::ExecutionProfile, Error, Result};
 use std::collections::BTreeMap;
 
 pub const INTERNAL_WORKER_V1: &str = "seedbox-internal-worker-v1";
-pub const SIMULATOR_VERSION: &str = env!("SEEDBOX_SIMULATOR_VERSION");
+pub const SIMULATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) const ARM_LAUNCH_MAX_SKEW_NS: u64 = 1_000_000;
 const KIND: &str = "engine_executable_kind";

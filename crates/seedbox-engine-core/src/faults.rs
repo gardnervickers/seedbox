@@ -1,9 +1,9 @@
 //! Typed portable fault state. Only outstanding boundaries enter the scheduler;
 //! completed history is retained as evidence but never searched to find work.
 use crate::links::{Links, Policy};
-use sha2::{Digest, Sha256};
 use seedbox_control::{Action, Plan};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,7 +71,18 @@ pub struct Faults {
 }
 impl Faults {
     pub fn new(plans: Vec<Value>, names: Vec<String>) -> Result<Self, String> {
-        let links = Links::new(0, &names, Policy { latency_ns: 1, jitter_ns: 0, loss_ppm: 0, bandwidth_bps:None, queue_bound_ns:None }, BTreeMap::new())?;
+        let links = Links::new(
+            0,
+            &names,
+            Policy {
+                latency_ns: 1,
+                jitter_ns: 0,
+                loss_ppm: 0,
+                bandwidth_bps: None,
+                queue_bound_ns: None,
+            },
+            BTreeMap::new(),
+        )?;
         Self::with_links(plans, names, links)
     }
     pub fn with_links(plans: Vec<Value>, names: Vec<String>, links: Links) -> Result<Self, String> {
@@ -161,25 +172,63 @@ impl Faults {
                     }
                 }
             }
-            Action::Shape {handle, from, to, latency_ns, jitter_ns, loss_ppm, bandwidth_bps, queue_bound_ns, network_faults} => {
-                Policy {latency_ns:*latency_ns, jitter_ns:*jitter_ns, loss_ppm:*loss_ppm, bandwidth_bps:*bandwidth_bps, queue_bound_ns:*queue_bound_ns}.validate(self.links.global.latency_ns)?;
-                network_faults.validate(*latency_ns,*jitter_ns)?;
-                if handle.is_empty() || from.is_empty() || to.is_empty() { return Err("empty fault handle/shape side".into()); }
+            Action::Shape {
+                handle,
+                from,
+                to,
+                latency_ns,
+                jitter_ns,
+                loss_ppm,
+                bandwidth_bps,
+                queue_bound_ns,
+                network_faults,
+            } => {
+                Policy {
+                    latency_ns: *latency_ns,
+                    jitter_ns: *jitter_ns,
+                    loss_ppm: *loss_ppm,
+                    bandwidth_bps: *bandwidth_bps,
+                    queue_bound_ns: *queue_bound_ns,
+                }
+                .validate(self.links.global.latency_ns)?;
+                network_faults.validate(*latency_ns, *jitter_ns)?;
+                if handle.is_empty() || from.is_empty() || to.is_empty() {
+                    return Err("empty fault handle/shape side".into());
+                }
                 let mut members = BTreeSet::new();
                 let mut sides = Vec::new();
-                for side in [from,to] {
+                for side in [from, to] {
                     let mut indices = Vec::new();
                     for name in side {
-                        let m = self.names.iter().position(|n|n==name).ok_or("unknown shape machine")?;
-                        if !members.insert(m) { return Err("shape sides must be disjoint with unique machines".into()); }
+                        let m = self
+                            .names
+                            .iter()
+                            .position(|n| n == name)
+                            .ok_or("unknown shape machine")?;
+                        if !members.insert(m) {
+                            return Err("shape sides must be disjoint with unique machines".into());
+                        }
                         indices.push(m);
                     }
                     sides.push(indices);
                 }
-                for &a in &sides[0] { for &b in &sides[1] { pairs.insert((a,b)); } }
+                for &a in &sides[0] {
+                    for &b in &sides[1] {
+                        pairs.insert((a, b));
+                    }
+                }
             }
-            Action::DropConnection {handle,connection} => {
-                if handle.is_empty() || connection.incarnation==0 || connection.src_port==0 || connection.dst_port==0 || connection.from==connection.to || !self.names.contains(&connection.from) || !self.names.contains(&connection.to) { return Err("invalid connection selector".into()); }
+            Action::DropConnection { handle, connection } => {
+                if handle.is_empty()
+                    || connection.incarnation == 0
+                    || connection.src_port == 0
+                    || connection.dst_port == 0
+                    || connection.from == connection.to
+                    || !self.names.contains(&connection.from)
+                    || !self.names.contains(&connection.to)
+                {
+                    return Err("invalid connection selector".into());
+                }
             }
             Action::Heal { handle } => {
                 if handle.is_empty() {
@@ -220,7 +269,10 @@ impl Faults {
     }
     /// The earliest outstanding lifecycle request for machine `m`.
     pub fn next_lifecycle(&self, m: usize) -> u64 {
-        self.lifecycle_at[m].first().map(|e| e.0).unwrap_or(u64::MAX)
+        self.lifecycle_at[m]
+            .first()
+            .map(|e| e.0)
+            .unwrap_or(u64::MAX)
     }
     #[allow(dead_code)] // The world reads Machine::paused/down; tests read this.
     pub fn life(&self, m: usize) -> Life {
@@ -251,9 +303,15 @@ impl Faults {
             })
     }
     pub fn active_handles(&self) -> Vec<String> {
-        let mut handles: Vec<_> = self.handles.keys().cloned().chain(self.links.layers.values().map(|l|l.handle.clone())).collect();
+        let mut handles: Vec<_> = self
+            .handles
+            .keys()
+            .cloned()
+            .chain(self.links.layers.values().map(|l| l.handle.clone()))
+            .collect();
         handles.extend(self.connections.selections.keys().cloned());
-        handles.sort(); handles
+        handles.sort();
+        handles
     }
     pub fn process_state(&self, machine: usize) -> &'static str {
         match self.life[machine] {
@@ -264,23 +322,38 @@ impl Faults {
         }
     }
     pub fn admission_error(&self, action: &Action) -> Option<&'static str> {
-        if let Action::DropConnection {connection,..}=action {
-            if self.connections.selections.len()==crate::connections::CAPACITY { return Some("connection selector capacity exhausted"); }
-            return (!self.connections.available(connection,&self.names)).then_some("connection incarnation unavailable");
+        if let Action::DropConnection { connection, .. } = action {
+            if self.connections.selections.len() == crate::connections::CAPACITY {
+                return Some("connection selector capacity exhausted");
+            }
+            return (!self.connections.available(connection, &self.names))
+                .then_some("connection incarnation unavailable");
         }
         let machine = action.machine()?;
-        let index = self.names.iter().position(|name|name==machine)?;
+        let index = self.names.iter().position(|name| name == machine)?;
         match action {
             // Down targets are admitted so process faults resolve as unavailable.
-            Action::Stop{..} | Action::Restart{..} if self.life[index]==Life::Down => None,
+            Action::Stop { .. } | Action::Restart { .. } if self.life[index] == Life::Down => None,
             // A paused guest cannot acknowledge; its deadline would fail the run.
-            Action::Stop{..} | Action::Restart{..} if self.life[index]==Life::Paused => Some("target machine is paused"),
-            Action::Stop{..} if self.stopped[index] => Some("target process is already stopped"),
-            Action::Restart{..} if !self.stopped[index] => Some("restart requires a stopped target process"),
-            Action::Pause{..} if self.life[index]!=Life::Up => Some("target machine is not running"),
-            Action::Resume{..} if self.life[index]!=Life::Paused => Some("target machine is not paused"),
-            Action::Crash{..} if self.life[index]==Life::Down => Some("target machine is already down"),
-            Action::Reboot{..} if self.life[index]!=Life::Down => Some("target machine is not down"),
+            Action::Stop { .. } | Action::Restart { .. } if self.life[index] == Life::Paused => {
+                Some("target machine is paused")
+            }
+            Action::Stop { .. } if self.stopped[index] => Some("target process is already stopped"),
+            Action::Restart { .. } if !self.stopped[index] => {
+                Some("restart requires a stopped target process")
+            }
+            Action::Pause { .. } if self.life[index] != Life::Up => {
+                Some("target machine is not running")
+            }
+            Action::Resume { .. } if self.life[index] != Life::Paused => {
+                Some("target machine is not paused")
+            }
+            Action::Crash { .. } if self.life[index] == Life::Down => {
+                Some("target machine is already down")
+            }
+            Action::Reboot { .. } if self.life[index] != Life::Down => {
+                Some("target machine is not down")
+            }
             _ => None,
         }
     }
@@ -288,42 +361,72 @@ impl Faults {
         self.links.witness(h);
         self.connections.witness(h);
         h.update((self.handles.len() as u64).to_le_bytes());
-        for (handle,pairs) in &self.handles {
-            crate::links::string_hash(h,handle);
+        for (handle, pairs) in &self.handles {
+            crate::links::string_hash(h, handle);
             h.update((pairs.len() as u64).to_le_bytes());
-            for &pair in pairs { crate::links::pair_hash(h,pair); }
+            for &pair in pairs {
+                crate::links::pair_hash(h, pair);
+            }
         }
     }
-    pub fn connections(&self, from: &str, to: &str, after: u64) -> Vec<seedbox_control::Connection> {
-        self.connections.list(from,to,after,&self.names)
+    pub fn connections(
+        &self,
+        from: &str,
+        to: &str,
+        after: u64,
+    ) -> Vec<seedbox_control::Connection> {
+        self.connections.list(from, to, after, &self.names)
     }
-    pub fn route(&mut self, src: usize, dst: usize, send: u64, frame: &[u8], legacy_cut: bool) -> crate::links::Outcome {
-        let c=self.connections.observe(src,dst,frame);
-        let cut=legacy_cut || self.blocked(src,dst);
+    pub fn route(
+        &mut self,
+        src: usize,
+        dst: usize,
+        send: u64,
+        frame: &[u8],
+        legacy_cut: bool,
+    ) -> crate::links::Outcome {
+        let c = self.connections.observe(src, dst, frame);
+        let cut = legacy_cut || self.blocked(src, dst);
         // Only selector rows grow selection evidence; legacy logs stay identical.
-        let drop=self.connections.drops(c,cut,|s| {
-            self.log[s.fault_id as usize-1]["selection_counts"]=json!({"matched":s.matched,"dropped":s.dropped});
+        let drop = self.connections.drops(c, cut, |s| {
+            self.log[s.fault_id as usize - 1]["selection_counts"] =
+                json!({"matched":s.matched,"dropped":s.dropped});
         });
-        if drop {self.links.selected_drop(src,dst);return crate::links::Outcome::Lost;}
-        let outcome = self.links.decide(src,dst,send,frame.len(),cut);
-        self.record_link_counts(src,dst);
+        if drop {
+            self.links.selected_drop(src, dst);
+            return crate::links::Outcome::Lost;
+        }
+        let outcome = self.links.decide(src, dst, send, frame.len(), cut);
+        self.record_link_counts(src, dst);
         outcome
     }
-    pub fn deliveries(&mut self, src: usize, dst: usize, at: u64, frame: &[u8]) -> Vec<(u64,Vec<u8>)> {
-        let deliveries = self.links.deliveries((src,dst),at,frame);
+    pub fn deliveries(
+        &mut self,
+        src: usize,
+        dst: usize,
+        at: u64,
+        frame: &[u8],
+    ) -> Vec<(u64, Vec<u8>)> {
+        let deliveries = self.links.deliveries((src, dst), at, frame);
         if deliveries[0].1 != frame && deliveries[0].1.get(47) == Some(&0x14) {
-            self.connections.observe(src,dst,&deliveries[0].1);
+            self.connections.observe(src, dst, &deliveries[0].1);
         }
-        self.record_link_counts(src,dst);
+        self.record_link_counts(src, dst);
         deliveries
     }
     fn record_link_counts(&mut self, src: usize, dst: usize) {
-        if let Some((&id, layer)) = self.links.layers.iter().rev().find(|(_,l)|l.pairs.contains(&(src,dst))) {
+        if let Some((&id, layer)) = self
+            .links
+            .layers
+            .iter()
+            .rev()
+            .find(|(_, l)| l.pairs.contains(&(src, dst)))
+        {
             if layer.policy.bandwidth_bps.is_some() {
-                self.log[id as usize-1]["queue_counts"] = json!(layer.queue_counts);
+                self.log[id as usize - 1]["queue_counts"] = json!(layer.queue_counts);
             }
             if !layer.network_faults.is_off() {
-                self.log[id as usize-1]["network_fault_counts"] = json!(layer.network_counts);
+                self.log[id as usize - 1]["network_fault_counts"] = json!(layer.network_counts);
             }
         }
     }
@@ -364,10 +467,25 @@ impl Faults {
     }
     /// A target VM that exits before acknowledging leaves its process fault unavailable, not failed.
     pub fn target_exited(&mut self, id: u32, machine: usize, time: u64) {
-        let Some(i)=id.checked_sub(1).map(|n|n as usize).filter(|i|*i<self.entries.len()) else {return};
-        if self.entries[i].status!=Status::Waiting || self.entries[i].target!=Some(machine) || time<self.entries[i].plan.at_ns || time>self.entries[i].plan.deadline_ns {return}
-        self.clear_pending(i);self.entries[i].status=Status::Unavailable(time);
-        self.log[i]["status"]=json!("unavailable");self.log[i]["applied_at_ns"]=Value::Null;self.log[i]["detail"]=json!("target VM exited before the process effect");
+        let Some(i) = id
+            .checked_sub(1)
+            .map(|n| n as usize)
+            .filter(|i| *i < self.entries.len())
+        else {
+            return;
+        };
+        if self.entries[i].status != Status::Waiting
+            || self.entries[i].target != Some(machine)
+            || time < self.entries[i].plan.at_ns
+            || time > self.entries[i].plan.deadline_ns
+        {
+            return;
+        }
+        self.clear_pending(i);
+        self.entries[i].status = Status::Unavailable(time);
+        self.log[i]["status"] = json!("unavailable");
+        self.log[i]["applied_at_ns"] = Value::Null;
+        self.log[i]["detail"] = json!("target VM exited before the process effect");
     }
     fn unavailable(&mut self, i: usize, time: u64, detail: &str) {
         self.clear_pending(i);
@@ -444,7 +562,9 @@ impl Faults {
                     self.log[i]["status"] = json!("requested");
                     match self.entries[i].plan.action.clone() {
                         Action::Stop { .. } | Action::Restart { .. }
-                            if self.entries[i].target.is_some_and(|m| self.life[m] == Life::Down) =>
+                            if self.entries[i]
+                                .target
+                                .is_some_and(|m| self.life[m] == Life::Down) =>
                         {
                             self.unavailable(i, now, "target machine is down");
                         }
@@ -488,32 +608,107 @@ impl Faults {
                             );
                             self.changed_network.push(i);
                         }
-                        Action::Shape {handle, latency_ns, jitter_ns, loss_ppm, bandwidth_bps, queue_bound_ns, network_faults, ..} => {
-                            if self.active_handles().contains(&handle) { self.fail(i,"duplicate active handle".into()); continue; }
-                            if let Err(error) = self.links.shape_with_faults(id, handle.clone(), self.entries[i].pairs.clone(), Policy {latency_ns,jitter_ns,loss_ppm,bandwidth_bps,queue_bound_ns}, network_faults) { self.fail(i,error); continue; }
-                            if bandwidth_bps.is_some() { self.log[i]["queue_counts"] = json!(crate::links::QueueCounts::default()); }
-                            if !network_faults.is_off() { self.log[i]["network_fault_counts"] = json!(crate::network_faults::Counts::default()); }
-                            self.applied(i,now,format!("handle={handle}; in-flight frames retained"));
-                            self.changed_network.push(i);
-                        }
-                        Action::DropConnection {handle,connection} => {
-                            if self.active_handles().contains(&handle) { self.fail(i,"duplicate active handle".into()); continue; }
-                            if let Err(error)=self.connections.select(id,handle.clone(),connection,&self.names) {self.fail(i,error);continue;}
-                            self.log[i]["selection_counts"]=json!({"matched":0,"dropped":0});
-                            self.applied(i,now,format!("handle={handle}; armed; in-flight frames retained"));
-                        }
-                        Action::Heal { handle } => {
-                            if let Some(selection)=self.connections.selections.remove(&handle) {
-                                self.log[i]["selection_counts"]=json!({"matched":selection.matched,"dropped":selection.dropped});
-                                self.applied(i,now,format!("handle={handle}; selected packets dropped={}",selection.dropped));
+                        Action::Shape {
+                            handle,
+                            latency_ns,
+                            jitter_ns,
+                            loss_ppm,
+                            bandwidth_bps,
+                            queue_bound_ns,
+                            network_faults,
+                            ..
+                        } => {
+                            if self.active_handles().contains(&handle) {
+                                self.fail(i, "duplicate active handle".into());
                                 continue;
                             }
-                            let queue_counts = self.links.layers.values().find(|l|l.handle==handle && l.policy.bandwidth_bps.is_some()).map(|l|l.queue_counts);
-                            let network_counts = self.links.layers.values().find(|l|l.handle==handle && !l.network_faults.is_off()).map(|l|l.network_counts);
+                            if let Err(error) = self.links.shape_with_faults(
+                                id,
+                                handle.clone(),
+                                self.entries[i].pairs.clone(),
+                                Policy {
+                                    latency_ns,
+                                    jitter_ns,
+                                    loss_ppm,
+                                    bandwidth_bps,
+                                    queue_bound_ns,
+                                },
+                                network_faults,
+                            ) {
+                                self.fail(i, error);
+                                continue;
+                            }
+                            if bandwidth_bps.is_some() {
+                                self.log[i]["queue_counts"] =
+                                    json!(crate::links::QueueCounts::default());
+                            }
+                            if !network_faults.is_off() {
+                                self.log[i]["network_fault_counts"] =
+                                    json!(crate::network_faults::Counts::default());
+                            }
+                            self.applied(
+                                i,
+                                now,
+                                format!("handle={handle}; in-flight frames retained"),
+                            );
+                            self.changed_network.push(i);
+                        }
+                        Action::DropConnection { handle, connection } => {
+                            if self.active_handles().contains(&handle) {
+                                self.fail(i, "duplicate active handle".into());
+                                continue;
+                            }
+                            if let Err(error) =
+                                self.connections
+                                    .select(id, handle.clone(), connection, &self.names)
+                            {
+                                self.fail(i, error);
+                                continue;
+                            }
+                            self.log[i]["selection_counts"] = json!({"matched":0,"dropped":0});
+                            self.applied(
+                                i,
+                                now,
+                                format!("handle={handle}; armed; in-flight frames retained"),
+                            );
+                        }
+                        Action::Heal { handle } => {
+                            if let Some(selection) = self.connections.selections.remove(&handle) {
+                                self.log[i]["selection_counts"] = json!({"matched":selection.matched,"dropped":selection.dropped});
+                                self.applied(
+                                    i,
+                                    now,
+                                    format!(
+                                        "handle={handle}; selected packets dropped={}",
+                                        selection.dropped
+                                    ),
+                                );
+                                continue;
+                            }
+                            let queue_counts = self
+                                .links
+                                .layers
+                                .values()
+                                .find(|l| l.handle == handle && l.policy.bandwidth_bps.is_some())
+                                .map(|l| l.queue_counts);
+                            let network_counts = self
+                                .links
+                                .layers
+                                .values()
+                                .find(|l| l.handle == handle && !l.network_faults.is_off())
+                                .map(|l| l.network_counts);
                             if self.links.heal(&handle) {
-                                if let Some(counts) = queue_counts { self.log[i]["queue_counts"] = json!(counts); }
-                                if let Some(counts) = network_counts { self.log[i]["network_fault_counts"] = json!(counts); }
-                                self.applied(i,now,format!("handle={handle}; prior policy revealed"));
+                                if let Some(counts) = queue_counts {
+                                    self.log[i]["queue_counts"] = json!(counts);
+                                }
+                                if let Some(counts) = network_counts {
+                                    self.log[i]["network_fault_counts"] = json!(counts);
+                                }
+                                self.applied(
+                                    i,
+                                    now,
+                                    format!("handle={handle}; prior policy revealed"),
+                                );
                                 self.changed_network.push(i);
                                 continue;
                             }
@@ -549,7 +744,14 @@ impl Faults {
                                 (Lifecycle::Crash, Life::Up | Life::Paused) => Life::Down,
                                 (Lifecycle::Reboot, Life::Down) => Life::Up,
                                 _ => {
-                                    self.fail(i, format!("{} of a {} machine", action.name(), life_name(life)));
+                                    self.fail(
+                                        i,
+                                        format!(
+                                            "{} of a {} machine",
+                                            action.name(),
+                                            life_name(life)
+                                        ),
+                                    );
                                     continue;
                                 }
                             };
@@ -591,7 +793,7 @@ impl Faults {
             return;
         }
         if success {
-            self.stopped[machine]=matches!(self.entries[i].plan.action,Action::Stop{..});
+            self.stopped[machine] = matches!(self.entries[i].plan.action, Action::Stop { .. });
             self.applied(
                 i,
                 time,
@@ -624,48 +826,108 @@ fn life_name(life: Life) -> &'static str {
 #[cfg(test)]
 mod link_tests {
     use super::*;
-    fn shape(id:u32, handle:&str, latency:u64) -> Value {
+    fn shape(id: u32, handle: &str, latency: u64) -> Value {
         json!({"id":id,"at_ns":id as u64*10,"deadline_ns":id as u64*10+1,"action":"shape","handle":handle,"from":["a"],"to":["b"],"latency_ns":latency,"jitter_ns":0,"loss_ppm":0})
     }
-    fn heal(id:u32,handle:&str)->Value { json!({"id":id,"at_ns":id as u64*10,"deadline_ns":id as u64*10+1,"action":"heal","handle":handle}) }
-    fn fixture(plans:Vec<Value>) -> Faults {
-        let names = vec!["a".into(),"b".into(),"c".into()];
-        let links = Links::new(1009,&names,Policy {latency_ns:10,jitter_ns:0,loss_ppm:0, bandwidth_bps: None, queue_bound_ns: None },BTreeMap::from([((0,1),Policy {latency_ns:20,jitter_ns:0,loss_ppm:0, bandwidth_bps: None, queue_bound_ns: None })])).unwrap();
-        Faults::with_links(plans,names,links).unwrap()
+    fn heal(id: u32, handle: &str) -> Value {
+        json!({"id":id,"at_ns":id as u64*10,"deadline_ns":id as u64*10+1,"action":"heal","handle":handle})
+    }
+    fn fixture(plans: Vec<Value>) -> Faults {
+        let names = vec!["a".into(), "b".into(), "c".into()];
+        let links = Links::new(
+            1009,
+            &names,
+            Policy {
+                latency_ns: 10,
+                jitter_ns: 0,
+                loss_ppm: 0,
+                bandwidth_bps: None,
+                queue_bound_ns: None,
+            },
+            BTreeMap::from([(
+                (0, 1),
+                Policy {
+                    latency_ns: 20,
+                    jitter_ns: 0,
+                    loss_ppm: 0,
+                    bandwidth_bps: None,
+                    queue_bound_ns: None,
+                },
+            )]),
+        )
+        .unwrap();
+        Faults::with_links(plans, names, links).unwrap()
     }
     #[test]
     fn overlapping_layers_heal_in_either_order_and_reveal_baseline_and_global() {
-        for order in [["old","new"],["new","old"]] {
-            let mut f=fixture(vec![shape(1,"old",30),shape(2,"new",40),heal(3,order[0]),heal(4,order[1])]);
-            f.apply_due(9); assert_eq!(f.links.policy((0,1)).latency_ns,20);
-            f.apply_due(10); assert_eq!(f.links.policy((0,1)).latency_ns,30);
-            f.apply_due(20); assert_eq!(f.links.policy((0,1)).latency_ns,40);
-            assert_eq!(f.active_handles(),vec!["new","old"]);
-            f.apply_due(30); assert_eq!(f.links.policy((0,1)).latency_ns,if order[0]=="old" {40} else {30});
-            f.apply_due(40); assert_eq!(f.links.policy((0,1)).latency_ns,20);
-            assert_eq!(f.links.policy((1,0)).latency_ns,10);
-            assert!(f.active_handles().is_empty()); assert!(f.error.is_none());
-            assert_eq!(f.log[0]["status"],"applied"); assert!(f.log[0]["detail"].as_str().unwrap().contains("handle=old"));
+        for order in [["old", "new"], ["new", "old"]] {
+            let mut f = fixture(vec![
+                shape(1, "old", 30),
+                shape(2, "new", 40),
+                heal(3, order[0]),
+                heal(4, order[1]),
+            ]);
+            f.apply_due(9);
+            assert_eq!(f.links.policy((0, 1)).latency_ns, 20);
+            f.apply_due(10);
+            assert_eq!(f.links.policy((0, 1)).latency_ns, 30);
+            f.apply_due(20);
+            assert_eq!(f.links.policy((0, 1)).latency_ns, 40);
+            assert_eq!(f.active_handles(), vec!["new", "old"]);
+            f.apply_due(30);
+            assert_eq!(
+                f.links.policy((0, 1)).latency_ns,
+                if order[0] == "old" { 40 } else { 30 }
+            );
+            f.apply_due(40);
+            assert_eq!(f.links.policy((0, 1)).latency_ns, 20);
+            assert_eq!(f.links.policy((1, 0)).latency_ns, 10);
+            assert!(f.active_handles().is_empty());
+            assert!(f.error.is_none());
+            assert_eq!(f.log[0]["status"], "applied");
+            assert!(f.log[0]["detail"].as_str().unwrap().contains("handle=old"));
         }
     }
     #[test]
     fn cut_dominates_live_shape_then_heal_resumes_identical_stream_position() {
-        let mut f=fixture(vec![shape(1,"s",30),json!({"id":2,"at_ns":20,"deadline_ns":21,"action":"partition","handle":"p","left":["a"],"right":["b"]}),heal(3,"p"),heal(4,"s")]);
-        f.apply_due(10); let mut reference = f.links.clone();
+        let mut f = fixture(vec![
+            shape(1, "s", 30),
+            json!({"id":2,"at_ns":20,"deadline_ns":21,"action":"partition","handle":"p","left":["a"],"right":["b"]}),
+            heal(3, "p"),
+            heal(4, "s"),
+        ]);
+        f.apply_due(10);
+        let mut reference = f.links.clone();
         f.apply_due(20);
-        assert_eq!(f.links.decide(0,1,20, 1500,f.blocked(0,1)),crate::links::Outcome::Cut);
-        assert_eq!(f.links.last,reference.last);
+        assert_eq!(
+            f.links.decide(0, 1, 20, 1500, f.blocked(0, 1)),
+            crate::links::Outcome::Cut
+        );
+        assert_eq!(f.links.last, reference.last);
         f.apply_due(30);
-        assert_eq!(f.links.decide(0,1,30, 1500,f.blocked(0,1)),reference.decide(0,1,30, 1500,false));
-        let mut h=Sha256::new(); f.links.witness(&mut h); let mut r=Sha256::new(); reference.witness(&mut r);
-        assert_eq!(h.finalize(),r.finalize());
-        f.apply_due(40); assert_eq!(f.links.policy((0,1)).latency_ns,20);
+        assert_eq!(
+            f.links.decide(0, 1, 30, 1500, f.blocked(0, 1)),
+            reference.decide(0, 1, 30, 1500, false)
+        );
+        let mut h = Sha256::new();
+        f.links.witness(&mut h);
+        let mut r = Sha256::new();
+        reference.witness(&mut r);
+        assert_eq!(h.finalize(), r.finalize());
+        f.apply_due(40);
+        assert_eq!(f.links.policy((0, 1)).latency_ns, 20);
     }
     #[test]
     fn invalid_shape_plans_and_inactive_heal_fail() {
-        for invalid in [shape(1,"s",9), json!({"id":1,"at_ns":10,"deadline_ns":11,"action":"shape","handle":"s","from":["a"],"to":["a"],"latency_ns":10,"jitter_ns":0,"loss_ppm":0})] {
-            let mut f=fixture(vec![]); assert!(f.append(serde_json::from_value(invalid).unwrap()).is_err());
+        for invalid in [
+            shape(1, "s", 9),
+            json!({"id":1,"at_ns":10,"deadline_ns":11,"action":"shape","handle":"s","from":["a"],"to":["a"],"latency_ns":10,"jitter_ns":0,"loss_ppm":0}),
+        ] {
+            let mut f = fixture(vec![]);
+            assert!(f.append(serde_json::from_value(invalid).unwrap()).is_err());
         }
-        let mut f=fixture(vec![heal(1,"missing")]); f.apply_due(10); assert!(f.error.is_some());
+        let mut f = fixture(vec![heal(1, "missing")]);
+        f.apply_due(10);
+        assert!(f.error.is_some());
     }
 }

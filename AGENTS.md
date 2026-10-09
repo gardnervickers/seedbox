@@ -37,12 +37,6 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
   so it would also move standalone crate builds and break their scripts.
-  These two aliases select `harness/vmm-rustc.py` for path remapping and removal
-  of the Nix dev shell's synthetic checkout RPATH; keep that wrapper isolated
-  from other builds. Keep release debug info enabled. On Linux, verify committed
-  inputs with `bash harness/check-vmm-reproducible.sh [REV]` in the dev shell.
-  The wrapper includes its content hash in Cargo's compiler fingerprint to
-  invalidate older unremapped builds and later wrapper revisions.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
@@ -109,33 +103,24 @@ scripts track the automatic build-only `SEEDBOX_BUILD_ROOT` from `.cargo/config.
 to invalidate a reused target when switching checkouts, even if source timestamps
 predate the cache. Run Cargo from the checkout root for caching; missing or unrelated
 config safely forces a source rebuild on every invocation, including older checkouts.
-The CLI `build-runtime.rs` uses the same invalidation and resolves Git and guest
-inputs from the runtime package directory. Keep this input out of library sources
-and runtime identity.
-Keep inherited package and
-dependency keys aligned across workspaces. These inputs change engine bytes and
-require final Linux reproducibility/merge-train validation. Portable tests import
+The CLI `build-runtime.rs` uses the same invalidation and resolves guest
+inputs from the runtime package directory. Keep inherited package and
+dependency keys aligned across workspaces. Portable tests import
 the canonical crate; do not restore sibling source inclusion for these policies.
 
-## Identity and determinism
+## Determinism
 
-- The VMM binary's hash, the guest kernel, the guest supervisor
-  (`guest/compose-init.c`, embedded by `crates/seedbox/build-runtime.rs`) and the
-  semantic parameters together make up a run's identity. Any change to
-  `crates/seedbox-vmm` produces a new engine: its source, its `Cargo.toml` or
-  lockfile, its `[profile.release]`, or even reformatting (which moves panic
-  line numbers; `crates/seedbox-vmm/rustfmt.toml` disables formatting). Build
-  standalone fixtures only with `cargo build-vmm`. The linked CLI uses the
-  root lockfile and records an explicit internal-worker contract and simulator
-  version; historical profiles without it retain the standalone launch contract.
-  Platform/version/qualification metadata never gates development replay.
-  Don't tidy the VMM as a side effect of other
-  work. `crates/seedbox-control/**`, `harness/vmm-rustc.py` and the VMM alias
-  flags in `.cargo/config.toml` also determine engine bytes and identity. The
-  VMM reaches the shared control source through its in-workspace control package so
-  Cargo's crate metadata does not hash an absolute checkout path; its inherited
-  workspace package and dependency keys must match the root workspace.
-- Performance settings (`--margin`, `--undo`) must never change results.
+- A run's witness and a `seedbox replay` MATCH are how determinism is checked.
+  Performance settings (`--margin`, `--undo`) must never change results.
+- Determinism is about results, not source or build bytes. Don't hash or
+  stamp the source tree, Git revision, build flags or compiled binaries, and
+  don't add compiler wrappers, reproducible-build checks, or formatting
+  exceptions (`#[rustfmt::skip]`, `rustfmt.toml`) to keep engine bytes stable.
+  Reformatting, moving code and changing build flags are ordinary changes;
+  run `cargo fmt` on the VMM like any other crate.
+- The linked CLI uses the root lockfile and records an explicit internal-worker
+  contract; historical profiles without it retain the standalone launch
+  contract. Platform/version metadata never gates development replay.
 
 ## Checks
 
@@ -154,10 +139,6 @@ timed step/phase summary format. Workspace builds use a persistent cache under
 override it with `SEEDBOX_PRECHECK_TARGET` or `CARGO_TARGET_DIR`. A revision uses
 a temporary detached worktree under `$TMPDIR`, deleted on a pass; a failure keeps it and prints
 its path. Any failed step makes the gate exit nonzero; all steps still run.
-After a Linux pre-check pass, `bash harness/host-check.sh --skip-portable REV CPU` skips fmt,
-clippy and the portable suite (including workspace tests), while retaining VMM
-build/tests and host-specific checks. A Mac pass alone does not justify the skip.
-Match the full SHA printed by both gates.
 See [contributor checks](README.md#contributor-checks).
 
 Run these before committing:
@@ -304,9 +285,9 @@ images or executes guests. Compatibility readiness is not replay qualification.
   gates; #142 and #143 removed the engine, kernel, CPU and host-policy pins.
   When a test depends on such a check, change or drop the test. Text elsewhere
   about qualification or re-pinning is historical.
-- An engine change (see above) gives every later run a new engine hash. Old
-  runs still replay on their retained engine, but can't be replayed on the new
-  one: to compare, make a fresh run and check its witness against the old run's.
+- Old runs replay on the engine executable retained in the run directory. To
+  compare across engine changes, make a fresh run and check its witness against
+  the old run's.
 - The default `counter` timebase needs an AMD Zen KVM host with guest perf
   counting. `--timebase pv` needs only KVM, so it also runs on cloud VMs with
   nested KVM and no PMU; `tools/droplet/pv-run.sh` runs batched PV checks on a

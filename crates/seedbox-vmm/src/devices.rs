@@ -303,9 +303,19 @@ impl Uart {
     /// Device state without the host-side output sink, for a world fork.
     pub fn snapshot(&self) -> Uart {
         Uart {
-            ier: self.ier, lcr: self.lcr, mcr: self.mcr, scr: self.scr, dll: self.dll, dlm: self.dlm,
-            rx: self.rx.clone(), thre: self.thre, level: self.level, out: self.out.clone(),
-            output_file: None, output_limit: None, chunks: self.chunks.snapshot(),
+            ier: self.ier,
+            lcr: self.lcr,
+            mcr: self.mcr,
+            scr: self.scr,
+            dll: self.dll,
+            dlm: self.dlm,
+            rx: self.rx.clone(),
+            thre: self.thre,
+            level: self.level,
+            out: self.out.clone(),
+            output_file: None,
+            output_limit: None,
+            chunks: self.chunks.snapshot(),
         }
     }
     /// Put device state back from a snapshot, keeping this run's output sink.
@@ -409,71 +419,82 @@ pub fn rtc_read(reg: u8) -> u8 {
     }
 }
 
-
 #[cfg(test)]
 #[path = "boundary.rs"]
 mod delay_boundary;
 
 #[cfg(test)]
 mod delay_tests {
-    use super::*;
     use super::delay_boundary::PendingIo;
+    use super::*;
 
     #[test]
     fn delay_samples_latched_read_once_and_asserts_each_periodic_expiry() {
-        let mut pit=Pit::default();
-        pit.write(0x43,0x34,0);
-        pit.program(1,0);
-        let first=pit.deadline.unwrap();
-        let mut pic=Pic::new();
+        let mut pit = Pit::default();
+        pit.write(0x43, 0x34, 0);
+        pit.program(1, 0);
+        let first = pit.deadline.unwrap();
+        let mut pic = Pic::new();
         pic.set_masks(0);
-        let mut delay=PendingIo::new(0,0x40,false,1,1,vec![pit.read(0x40,0)]).unwrap();
-        let sampled=delay.bytes.clone();
-        let mut now=0;
-        let mut expired=0;
-        while delay.remaining_ns>0 {
-            now=delay.advance(now,1000,pit.deadline).unwrap();
-            while pit.expire(now).unwrap() {pic.raise(0);expired+=1;}
+        let mut delay = PendingIo::new(0, 0x40, false, 1, 1, vec![pit.read(0x40, 0)]).unwrap();
+        let sampled = delay.bytes.clone();
+        let mut now = 0;
+        let mut expired = 0;
+        while delay.remaining_ns > 0 {
+            now = delay.advance(now, 1000, pit.deadline).unwrap();
+            while pit.expire(now).unwrap() {
+                pic.raise(0);
+                expired += 1;
+            }
         }
-        assert_eq!(first,839);
-        assert_eq!(expired,1);
-        assert_eq!(pit.deadline,Some(1678));
-        assert_eq!(pic.pending(),Some(0));
-        assert_eq!(delay.bytes,sampled);
+        assert_eq!(first, 839);
+        assert_eq!(expired, 1);
+        assert_eq!(pit.deadline, Some(1678));
+        assert_eq!(pic.pending(), Some(0));
+        assert_eq!(delay.bytes, sampled);
         // Periodic assertion coalesces in the PIC without guest service.
-        pit.period_ns=Some(100);
-        pit.deadline=Some(1000);
-        let mut periodic=PendingIo::new(1000,0x530,true,2,1,vec![1,0]).unwrap();
-        while pit.expire(now).unwrap() {pic.raise(0);expired+=1;}
-        while periodic.remaining_ns>0 {
-            now=periodic.advance(now,2000,pit.deadline).unwrap();
-            while pit.expire(now).unwrap() {pic.raise(0);expired+=1;}
+        pit.period_ns = Some(100);
+        pit.deadline = Some(1000);
+        let mut periodic = PendingIo::new(1000, 0x530, true, 2, 1, vec![1, 0]).unwrap();
+        while pit.expire(now).unwrap() {
+            pic.raise(0);
+            expired += 1;
         }
-        assert_eq!(expired,12);
-        assert_eq!(pic.pending(),Some(0));
-        assert_eq!(pic.take(0),0x30);
-        assert_eq!(pic.pending(),None);
+        while periodic.remaining_ns > 0 {
+            now = periodic.advance(now, 2000, pit.deadline).unwrap();
+            while pit.expire(now).unwrap() {
+                pic.raise(0);
+                expired += 1;
+            }
+        }
+        assert_eq!(expired, 12);
+        assert_eq!(pic.pending(), Some(0));
+        assert_eq!(pic.take(0), 0x30);
+        assert_eq!(pic.pending(), None);
     }
 
     #[test]
     fn read_phase_and_timer_world_equality_survive_partial_debt() {
-        let mut pit=Pit::default();
-        pit.write(0x43,0x34,0);
-        pit.program(0x1234,0);
-        pit.write(0x43,0,0);
-        let sample=pit.read(0x40,0);
-        let mut delay=PendingIo::new(0,0x40,false,1,1,vec![sample]).unwrap();
-        assert_eq!(delay.advance(0,500,None).unwrap(),500);
-        assert_eq!(delay.advance(500,1000,None).unwrap(),1000);
-        assert_eq!(delay.bytes,vec![0x34]);
-        assert_eq!(pit.read(0x40,1000),0x12);
-        assert_eq!(pit.ch[0].latch,None);
-        pit.deadline=Some(1000);pit.period_ns=None;
+        let mut pit = Pit::default();
+        pit.write(0x43, 0x34, 0);
+        pit.program(0x1234, 0);
+        pit.write(0x43, 0, 0);
+        let sample = pit.read(0x40, 0);
+        let mut delay = PendingIo::new(0, 0x40, false, 1, 1, vec![sample]).unwrap();
+        assert_eq!(delay.advance(0, 500, None).unwrap(), 500);
+        assert_eq!(delay.advance(500, 1000, None).unwrap(), 1000);
+        assert_eq!(delay.bytes, vec![0x34]);
+        assert_eq!(pit.read(0x40, 1000), 0x12);
+        assert_eq!(pit.ch[0].latch, None);
+        pit.deadline = Some(1000);
+        pit.period_ns = None;
         assert!(pit.expire(1000).unwrap());
-        assert_eq!(pit.deadline,None);
-        pit.deadline=Some(u64::MAX);pit.period_ns=Some(1);
+        assert_eq!(pit.deadline, None);
+        pit.deadline = Some(u64::MAX);
+        pit.period_ns = Some(1);
         assert!(pit.expire(u64::MAX).is_err());
-        pit.deadline=Some(0);pit.period_ns=Some(0);
+        pit.deadline = Some(0);
+        pit.period_ns = Some(0);
         assert!(pit.expire(0).is_err());
     }
 
@@ -483,19 +504,38 @@ mod delay_tests {
     /// precedes its start.
     #[test]
     fn a_clock_jump_past_timer_deadlines_fires_them_before_the_next_slice() {
-        use super::delay_boundary::{advance_time,hard_limit};
-        let tolerance=2_000_151;
-        let mut pit=Pit {deadline:Some(810_000_000),period_ns:Some(10_000_000),..Default::default()};
-        let released=820_000_000;
-        assert_eq!(advance_time(released,0,hard_limit(u64::MAX,pit.deadline,false,tolerance)).unwrap_err(),
-            "clock bound exceeded: time 820000000 + 0 exceeds hard stop 812000151");
-        assert_eq!(pit.expire_through(released).unwrap(),2);
-        assert_eq!(pit.deadline,Some(830_000_000));
-        assert_eq!(advance_time(released,0,hard_limit(u64::MAX,pit.deadline,true,tolerance)),Ok(released));
-        assert_eq!(pit.expire_through(released).unwrap(),0);
+        use super::delay_boundary::{advance_time, hard_limit};
+        let tolerance = 2_000_151;
+        let mut pit = Pit {
+            deadline: Some(810_000_000),
+            period_ns: Some(10_000_000),
+            ..Default::default()
+        };
+        let released = 820_000_000;
+        assert_eq!(
+            advance_time(
+                released,
+                0,
+                hard_limit(u64::MAX, pit.deadline, false, tolerance)
+            )
+            .unwrap_err(),
+            "clock bound exceeded: time 820000000 + 0 exceeds hard stop 812000151"
+        );
+        assert_eq!(pit.expire_through(released).unwrap(), 2);
+        assert_eq!(pit.deadline, Some(830_000_000));
+        assert_eq!(
+            advance_time(
+                released,
+                0,
+                hard_limit(u64::MAX, pit.deadline, true, tolerance)
+            ),
+            Ok(released)
+        );
+        assert_eq!(pit.expire_through(released).unwrap(), 0);
         // A one-shot timer fires once and disarms.
-        pit.deadline=Some(810_000_000);pit.period_ns=None;
-        assert_eq!(pit.expire_through(released).unwrap(),1);
-        assert_eq!(pit.deadline,None);
+        pit.deadline = Some(810_000_000);
+        pit.period_ns = None;
+        assert_eq!(pit.expire_through(released).unwrap(), 1);
+        assert_eq!(pit.deadline, None);
     }
 }
