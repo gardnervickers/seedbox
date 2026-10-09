@@ -7,12 +7,14 @@
       shell = system:
         let
           pkgs = import nixpkgs { inherit system; };
+          filesystemTools = (import ./nix/runtime.nix { inherit pkgs; }).filesystemTools;
           linuxEnvironment = {
             SEEDBOX_STATIC_CC = "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc";
             SEEDBOX_IP = "${pkgs.iproute2}/bin/ip";
             SEEDBOX_TC = "${pkgs.iproute2}/bin/tc";
+            # Only the low-level guest/build-initramfs.sh fixture uses BusyBox.
             SEEDBOX_BUSYBOX = "${pkgs.pkgsStatic.busybox}/bin/busybox";
-            SEEDBOX_MKE2FS = "${pkgs.pkgsStatic.e2fsprogs.bin}/bin/mke2fs";
+            SEEDBOX_MKE2FS = "${filesystemTools.bin}/bin/mke2fs";
             SEEDBOX_E2FSPROGS_SOURCE = "${pkgs.pkgsStatic.e2fsprogs.src}";
             SEEDBOX_MUSL_SOURCE = "${pkgs.pkgsStatic.stdenv.cc.libc.src}";
           };

@@ -9,11 +9,8 @@ use crate::{
     Error, Result,
 };
 use bollard::{
-    models::{BuildInfoAux, ContainerCreateBody},
-    query_parameters::{
-        BuildImageOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
-        RemoveContainerOptionsBuilder,
-    },
+    models::BuildInfoAux,
+    query_parameters::{BuildImageOptionsBuilder, CreateImageOptionsBuilder},
     Docker,
 };
 use futures_util::{Stream, StreamExt};
@@ -27,6 +24,16 @@ pub struct ContainerTransport {
 }
 fn setup(error: impl std::fmt::Display) -> Error {
     Error::Setup(format!("container image preparation: {error}"))
+}
+fn immutable_reference(info: bollard::models::ImageInspect) -> Result<String> {
+    // Docker's containerd store may return a platform manifest ID that cannot
+    // be looked up on its own. A repository digest is an immutable lookup key.
+    info.repo_digests
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .or(info.id)
+        .ok_or_else(|| setup("image has no immutable reference"))
 }
 impl ContainerTransport {
     fn check(&self) -> Result<()> {
@@ -60,6 +67,26 @@ impl ContainerTransport {
             .unwrap_or_default()
             .iter()
             .any(|component| component.name == "Podman Engine");
+        // Bollard's image helpers do not yet expose Docker's platform query.
+        // Select the requested platform explicitly for multi-platform image stores.
+        let docker = if podman {
+            docker
+        } else {
+            let platform = format!(
+                "%7B%22os%22:%22linux%22,%22architecture%22:%22{}%22%7D",
+                architecture.oci_name()
+            );
+            docker.with_request_modifier(move |mut request| {
+                let path = request.uri().path();
+                if path.contains("/images/") && (path.ends_with("/json") || path.ends_with("/get"))
+                {
+                    *request.uri_mut() = format!("{}?platform={platform}", request.uri())
+                        .parse()
+                        .expect("valid image URI with percent-encoded platform");
+                }
+                request
+            })
+        };
         let image = match &service.source {
             ImageSource::Registry { reference } => match docker.inspect_image(reference).await {
                 Ok(info)
@@ -67,9 +94,12 @@ impl ContainerTransport {
                         && info.architecture.as_deref() == Some(architecture.oci_name()) =>
                 {
                     (self.progress)(&format!("using local image {reference}"));
-                    info.id.ok_or_else(|| setup("image has no immutable ID"))?
+                    immutable_reference(info)?
                 }
+                // Docker's containerd store can return an incomplete inspect
+                // record for a platform that has not been pulled yet.
                 Ok(_)
+                | Err(bollard::errors::Error::JsonDataError { .. })
                 | Err(bollard::errors::Error::DockerResponseServerError {
                     status_code: 404, ..
                 }) => {
@@ -98,12 +128,7 @@ impl ContainerTransport {
                             (self.progress)(&status);
                         }
                     }
-                    docker
-                        .inspect_image(reference)
-                        .await
-                        .map_err(setup)?
-                        .id
-                        .ok_or_else(|| setup("pulled image has no immutable ID"))?
+                    immutable_reference(docker.inspect_image(reference).await.map_err(setup)?)?
                 }
                 Err(error) => return Err(setup(error)),
             },
@@ -196,53 +221,27 @@ impl ContainerTransport {
         {
             return Err(setup(format!("image must be {}", architecture.platform())));
         }
-        (self.progress)("exporting image filesystem");
-        // Never start this container. It only gives the engine an owned, immutable
-        // image filesystem to export. Remove its anonymous volumes on every exit.
-        let container = docker
-            .create_container(
-                Some(
-                    CreateContainerOptionsBuilder::default()
-                        .platform(architecture.platform())
-                        .build(),
-                ),
-                ContainerCreateBody {
-                    image: Some(image),
-                    entrypoint: Some(vec!["/seedbox-export-only".into()]),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(setup)?;
-        let export = async {
-            let mut stream = docker.export_container(&container.id);
-            let mut file = tokio::fs::File::create(directory.join("filesystem.tar")).await?;
-            let mut size = 0u64;
-            while let Some(bytes) = self.next(&mut stream).await? {
-                let bytes = bytes.map_err(setup)?;
-                size = size
-                    .checked_add(bytes.len() as u64)
-                    .filter(|size| *size <= 4 << 30)
-                    .ok_or_else(|| setup("exported filesystem exceeds 4 GiB"))?;
-                file.write_all(&bytes).await?;
-            }
-            file.flush().await?;
-            Ok::<_, Error>(())
+        (self.progress)("exporting image layers");
+        let mut stream = docker.export_image(&image);
+        let archive = directory.join("image.tar");
+        let mut file = tokio::fs::File::create(&archive).await?;
+        let mut size = 0u64;
+        while let Some(bytes) = self.next(&mut stream).await? {
+            let bytes = bytes.map_err(setup)?;
+            size = size
+                .checked_add(bytes.len() as u64)
+                .filter(|n| *n <= 4 << 30)
+                .ok_or_else(|| setup("exported image exceeds 4 GiB"))?;
+            file.write_all(&bytes).await?;
         }
-        .await;
-        let cleanup = docker
-            .remove_container(
-                &container.id,
-                Some(RemoveContainerOptionsBuilder::default().v(true).build()),
-            )
-            .await;
-        if let Err(error) = cleanup {
-            return Err(setup(format!("{previous}could not remove owned export container {}: {error}; remove it with your container engine", container.id,
-                previous=export.err().map(|error| format!("{error}; ")).unwrap_or_default())));
-        }
-        export?;
-        Ok(
-            serde_json::json!({"os": info.os, "architecture": info.architecture, "config": info.config}),
+        file.flush().await?;
+        drop(file);
+        (self.progress)("merging image layers");
+        crate::image_archive::merge(
+            &archive,
+            &directory.join("layers"),
+            &directory.join("filesystem.tar"),
+            &self.cancellation,
         )
     }
 }
@@ -310,14 +309,6 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
         }
         Ok(result)
     }
-    let mut input = tar::Archive::new(fs::File::open(input)?);
-    let mut entries = input.entries()?;
-    let first = entries.next().transpose()?;
-    let first_is_root = first
-        .as_ref()
-        .map(|entry| relative(&entry.path()?))
-        .transpose()?
-        .is_some_and(|path| path.as_os_str().is_empty());
     let mut root = tar::Header::new_gnu();
     root.set_entry_type(tar::EntryType::Directory);
     root.set_mode(0o755);
@@ -325,69 +316,30 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
     root.set_gid(0);
     root.set_mtime(0);
     root.set_size(0);
-    if first_is_root {
-        root = first
-            .as_ref()
-            .ok_or_else(|| setup("missing export root"))?
-            .header()
-            .clone();
-        if !root.entry_type().is_dir() {
-            return Err(setup("export root is not a directory"));
+    let mut scan = tar::Archive::new(fs::File::open(input)?);
+    let mut found_root = false;
+    for entry in scan.entries_with_seek()? {
+        check()?;
+        let mut entry = entry?;
+        if relative(&entry.path()?)?.as_os_str().is_empty() {
+            if found_root || !entry.header().entry_type().is_dir() {
+                return Err(setup("invalid or duplicate export root"));
+            }
+            root = export_header(&mut entry, Path::new("."))?;
+            found_root = true;
         }
     }
     let mut result = tar::Builder::new(fs::File::create(output)?);
     result.append_data(&mut root, "rootfs", std::io::empty())?;
-    for entry in first
-        .into_iter()
-        .filter(|_| !first_is_root)
-        .map(Ok)
-        .chain(entries)
-    {
+    let mut input = tar::Archive::new(fs::File::open(input)?);
+    for entry in input.entries()? {
         check()?;
         let mut entry = entry?;
         let path = relative(&entry.path()?)?;
         if path.as_os_str().is_empty() {
-            return Err(setup("duplicate export root"));
+            continue;
         }
-        let mut header = entry.header().clone();
-        header.set_size(entry.size());
-        if let Some(extensions) = entry.pax_extensions()? {
-            for extension in extensions {
-                let extension = extension?;
-                let field = extension.key().map_err(setup)?;
-                match field {
-                    "uid" | "gid" | "mtime" => {
-                        let value = extension.value().map_err(setup)?;
-                        // Newc stores whole seconds. Fractional timestamps have
-                        // the same truncation as the existing filesystem writer.
-                        let value = if field == "mtime" {
-                            if let Some((whole, fraction)) = value.split_once('.') {
-                                if !fraction.bytes().all(|b| b.is_ascii_digit()) {
-                                    return Err(setup("invalid export timestamp"));
-                                }
-                                whole
-                            } else {
-                                value
-                            }
-                        } else {
-                            value
-                        };
-                        let value = value.parse::<u32>().map_err(setup)? as u64;
-                        match field {
-                            "uid" => header.set_uid(value),
-                            "gid" => header.set_gid(value),
-                            _ => header.set_mtime(value),
-                        }
-                    }
-                    "path" | "linkpath" | "size" | "atime" | "ctime" | "uname" | "gname" => (),
-                    _ => {
-                        return Err(setup(
-                            "exported filesystem contains unsupported extended metadata",
-                        ))
-                    }
-                }
-            }
-        }
+        let mut header = export_header(&mut entry, &path)?;
         let name = Path::new("rootfs").join(path);
         if let Some(link) = entry.link_name()?.map(|path| path.into_owned()) {
             let target = if header.entry_type().is_hard_link() {
@@ -404,12 +356,82 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
     Ok(())
 }
 
+pub(crate) fn export_header<R: std::io::Read>(
+    entry: &mut tar::Entry<'_, R>,
+    path: &Path,
+) -> Result<tar::Header> {
+    let mut header = entry.header().clone();
+    header.set_size(entry.size());
+    if let Some(extensions) = entry.pax_extensions()? {
+        for extension in extensions {
+            let extension = extension?;
+            let field = extension.key().map_err(setup)?;
+            match field {
+                "uid" | "gid" | "mtime" => {
+                    let value = extension.value().map_err(setup)?;
+                    // Newc stores whole seconds. Fractional timestamps have
+                    // the same truncation as the existing filesystem writer.
+                    let value = if field == "mtime" {
+                        if let Some((whole, fraction)) = value.split_once('.') {
+                            if !fraction.bytes().all(|b| b.is_ascii_digit()) {
+                                return Err(setup("invalid export timestamp"));
+                            }
+                            whole
+                        } else {
+                            value
+                        }
+                    } else {
+                        value
+                    };
+                    let value = value.parse::<u32>().map_err(setup)? as u64;
+                    match field {
+                        "uid" => header.set_uid(value),
+                        "gid" => header.set_gid(value),
+                        _ => header.set_mtime(value),
+                    }
+                }
+                "path" | "linkpath" | "size" | "atime" | "ctime" | "uname" | "gname" => (),
+                _ => {
+                    return Err(setup(format!(
+                        "exported filesystem {}: unsupported extended metadata {field}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+    }
+    Ok(header)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{BufRead, Read, Write};
     #[test]
-    fn exported_files_are_retained_and_owned_container_is_removed_even_on_cancel() {
+    fn unsupported_xattr_names_the_image_path_and_key() {
+        let mut tar = tar::Builder::new(Vec::new());
+        tar.append_pax_extensions([("SCHILY.xattr.security.capability", &b"value"[..])])
+            .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o755);
+        header.set_size(0);
+        tar.append_data(&mut header, "bin/app", std::io::empty())
+            .unwrap();
+        let bytes = tar.into_inner().unwrap();
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        let mut entry = archive.entries().unwrap().next().unwrap().unwrap();
+        let error = export_header(&mut entry, Path::new("bin/app"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bin/app"), "{error}");
+        assert!(
+            error.contains("SCHILY.xattr.security.capability"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn image_export_is_read_only_and_cancellable() {
         for cancel in [false, true] {
             let token = CancellationToken::default();
             let server_token = token.clone();
@@ -423,7 +445,21 @@ mod tests {
             header.set_mtime(0);
             header.set_size(3);
             tar.append_data(&mut header, "app", &b"app"[..]).unwrap();
-            let filesystem = tar.into_inner().unwrap();
+            let layer = tar.into_inner().unwrap();
+            let config = br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/app"]}}"#;
+            let manifest = br#"[{"Config":"config.json","Layers":["layer.tar"]}]"#;
+            let mut image = tar::Builder::new(Vec::new());
+            for (name, bytes) in [
+                ("manifest.json", &manifest[..]),
+                ("config.json", &config[..]),
+                ("layer.tar", &layer[..]),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(0o644);
+                header.set_size(bytes.len() as u64);
+                image.append_data(&mut header, name, bytes).unwrap();
+            }
+            let filesystem = image.into_inner().unwrap();
             let server = std::thread::spawn(move || {
                 let mut requests = Vec::new();
                 loop {
@@ -451,27 +487,21 @@ mod tests {
                     reader.read_exact(&mut vec![0; length]).unwrap();
                     let body = if request.contains("/version ") {
                         br#"{"ApiVersion":"1.44","Version":"test"}"#.to_vec()
-                    } else if request.contains("/images/") {
-                        br#"{"Id":"sha256:test","Os":"linux","Architecture":"amd64","Config":{"Cmd":["/app"],"User":"","WorkingDir":""}}"#.to_vec()
-                    } else if request.contains("/containers/create") {
-                        br#"{"Id":"owned-export","Warnings":[]}"#.to_vec()
-                    } else if request.contains("/export ") {
+                    } else if request.contains("/get?") {
                         if cancel {
                             server_token.cancel();
                         }
                         filesystem.clone()
                     } else {
                         assert!(
-                            request.starts_with("DELETE ")
-                                && request.contains("owned-export")
-                                && request.contains("v=true"),
+                            request.contains("/images/") && request.contains("/json?"),
                             "{request}"
                         );
-                        Vec::new()
+                        br#"{"Id":"sha256:test","Os":"linux","Architecture":"amd64"}"#.to_vec()
                     };
-                    let done = request.starts_with("DELETE ");
+                    let done = request.contains("/get?");
                     requests.push(request);
-                    let status = if done { "204 No Content" } else { "200 OK" };
+                    let status = "200 OK";
                     let _ = write!(
                         connection,
                         "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -520,7 +550,7 @@ mod tests {
                 );
             }
             let requests = server.join().unwrap();
-            assert!(!requests.iter().any(|request| request.contains("/start")));
+            assert!(requests.iter().all(|request| request.starts_with("GET ")));
         }
     }
 }

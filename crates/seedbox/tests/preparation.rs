@@ -119,14 +119,14 @@ fn preparation_retains_kernel_before_transport_changes_source() {
 }
 
 #[test]
-fn preparation_records_one_epoch_after_import_and_retains_explicit_epoch() {
+fn preparation_records_one_epoch_after_import_and_retains_it() {
     struct Transport;
     impl seedbox::oci::ImageTransport for Transport {
         fn import(
             &self,
             _service: &seedbox::config::Service,
             directory: &Path,
-            _store: &ContentStore,
+            store: &ContentStore,
             _context: Option<(&PreparationContext, &str)>,
             _architecture: seedbox::guest::Architecture,
         ) -> seedbox::Result<seedbox::oci::ImportedImage> {
@@ -135,8 +135,10 @@ fn preparation_records_one_epoch_after_import_and_retains_explicit_epoch() {
                 .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))?;
             Ok(seedbox::oci::ImportedImage {
                 image: seedbox::execution::PreparedImage {
-                    manifest: ContentDigest::of(b"manifest"),
-                    config: ContentDigest::of(b"config"),
+                    manifest: store.put(b"manifest")?,
+                    config: store.put(
+                        br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/app"]}}"#,
+                    )?,
                     layers: vec![],
                     launch: seedbox::image::Launch {
                         argv: vec!["/app".into()],

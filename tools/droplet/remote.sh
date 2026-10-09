@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Droplet side of pv-run.sh: install tools once, then for each commit build it
-# and, for each world and seed, run twice, diff the pair and replay the first
-# run. Writes /root/results/summary.txt.
+# and, for each world and seed, run, replay and diff their retained outputs.
+# Writes /root/results/summary.txt.
 # Inputs come from the environment: SHAS, WORLDS, SEEDS, BUILD_KERNEL. Each
 # commit is unpacked in /root/seedbox/<sha>.
 set -euo pipefail
@@ -25,13 +25,16 @@ fi
   echo "setup_seconds: $(( $(date +%s) - start ))"
 } > "$results/summary.txt"
 
+podman system service --time=0 unix:///run/seedbox-podman.sock > "$results/podman-api.log" 2>&1 &
+engine_pid=$!
+trap 'kill "$engine_pid" 2>/dev/null || true' EXIT
+export DOCKER_HOST=unix:///run/seedbox-podman.sock
 ok=1
 for sha in $SHAS; do
   short=${sha:0:12}
   mkdir -p "$results/$short"
   export WORLDS SEEDS BUILD_KERNEL sha out="$results/$short" summary="$results/summary.txt"
-  # Release builds otherwise download the published kernel; use the shipped
-  # (or --build-kernel) bzImage, which kernel/build.sh also writes here.
+  # Use the shipped or locally built kernel; runtime does not download assets.
   export SEEDBOX_KERNEL=/root/seedbox-sim/artifacts/bzImage
   (cd "/root/seedbox/$sha" && nix develop --command bash -euo pipefail -c '
     start=$(date +%s)
@@ -40,15 +43,14 @@ for sha in $SHAS; do
       echo "commit: $sha"
     } >> "$summary"
     if ! { if [ "$BUILD_KERNEL" = 1 ]; then bash kernel/build.sh; fi \
-        && cargo build --release --locked -p seedbox && cargo build-vmm \
-        && nix build .#runtimeArchive --out-link "$out/runtime-assets"; } > "$out/build.log" 2>&1; then
+        && nix build .#runtimeArchive --out-link "$out/runtime-assets" \
+        && SEEDBOX_BUILD_HELPERS="$out/runtime-assets" cargo build --release --locked -p seedbox && cargo build-vmm; } > "$out/build.log" 2>&1; then
       echo "  build: FAILED (see $out/build.log)" >> "$summary"
       exit 1
     fi
     echo "  build_seconds: $(( $(date +%s) - start ))" >> "$summary"
     sb="$PWD/target/release/seedbox"
-    # Helpers built from this commit; droplets have no token for the release download.
-    export SEEDBOX_RUNTIME_ASSETS="$out/runtime-assets"
+    # The CLI embeds helpers built from this commit.
     rundir() { sed -n "s/^[A-Z_]*: //p" "$1" | head -n1; }
     status() { grep -m1 "^[A-Z_]*: " "$1" | cut -d: -f1 || echo "no status"; }
     field() { python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]))" "$1/output/vmm.json" "$2" 2>/dev/null || echo "?"; }
@@ -58,30 +60,25 @@ for sha in $SHAS; do
       echo "  world: $world (--timebase pv)" >> "$summary"
       for seed in $SEEDS; do
         p="$out/$slug-seed$seed"
-        for n in a b; do
-          set +e
-          /usr/bin/time -f %e -o "$p-$n.wall" \
-            "$sb" run "$world" --timebase pv --seed "$seed" > "$p-$n.out" 2>&1
-          echo $? > "$p-$n.rc"
-          set -e
-        done
-        a=$(rundir "$p-a.out"); b=$(rundir "$p-b.out")
         set +e
+        /usr/bin/time -f %e -o "$p-a.wall" \
+          "$sb" run "$world" --timebase pv --seed "$seed" > "$p-a.out" 2>&1
+        rc_a=$?
+        a=$(rundir "$p-a.out")
         /usr/bin/time -f %e -o "$p-replay.wall" "$sb" replay "$a" > "$p-replay.out" 2>&1
         replay_rc=$?
+        b=$(rundir "$p-replay.out")
         "$sb" diff "$a" "$b" > "$p-diff.out" 2>&1
         diff_rc=$?
         set -e
-        rc_a=$(cat "$p-a.rc"); rc_b=$(cat "$p-b.rc")
-        [ "$rc_a" = 0 ] && [ "$rc_b" = 0 ] && [ "$replay_rc" = 0 ] && [ "$diff_rc" = 0 ] || ok=0
+        [ "$rc_a" = 0 ] && [ "$replay_rc" = 0 ] && [ "$diff_rc" = 0 ] || ok=0
         for run in "$a" "$b"; do [ -n "$run" ] && cp "$run/output/vmm.json" "$out/$(basename "$run").vmm.json" 2>/dev/null || true; done
         {
           echo "    seed $seed:"
           echo "      run a: $(status "$p-a.out") exit $rc_a, wall $(cat "$p-a.wall")s, vmm host $(field "$a" host_seconds)s"
-          echo "      run b: $(status "$p-b.out") exit $rc_b, wall $(cat "$p-b.wall")s, vmm host $(field "$b" host_seconds)s"
           echo "      witness a: $(field "$a" world_witness)"
-          echo "      witness b: $(field "$b" world_witness)"
-          echo "      diff a b: $(status "$p-diff.out") exit $diff_rc"
+          echo "      replay witness: $(field "$b" world_witness)"
+          echo "      diff run replay: $(status "$p-diff.out") exit $diff_rc"
           echo "      replay a: $(grep -m1 "^replay:" "$p-replay.out" || status "$p-replay.out") exit $replay_rc, wall $(cat "$p-replay.wall")s"
         } >> "$summary"
       done

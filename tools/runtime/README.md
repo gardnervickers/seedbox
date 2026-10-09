@@ -45,6 +45,9 @@ until public distribution is available; they are not part of the quick start.
 Replay uses its retained inputs and needs neither temporary assets nor a builder.
 
 Set `SEEDBOX_BUILD_HELPERS=/path/to/runtime.tar.gz` to embed an explicit archive
-at build time. Release builds fail with the asset-build command if it is absent.
+at build time. An explicitly selected missing archive is a build error. If the
+default archive is absent, release builds warn and omit embedding; runtime
+commands then need locally built helpers and report the asset-build command
+when those are missing.
 Debug builds omit embedding for portable checks and can use the local helper
 archive or an explicit `--runtime-assets` override.

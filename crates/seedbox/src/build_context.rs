@@ -5,6 +5,7 @@ use std::{fs, path::Path};
 struct Rule {
     matcher: globset::GlobMatcher,
     exclude: bool,
+    include_prefix: std::path::PathBuf,
 }
 fn rules(text: &str) -> Result<Vec<Rule>> {
     let mut result = Vec::new();
@@ -47,7 +48,15 @@ fn rules(text: &str) -> Result<Vec<Rule>> {
             .build()
             .map_err(|error| Error::Setup(format!(".dockerignore pattern {pattern}: {error}")))?
             .compile_matcher();
-        result.push(Rule { matcher, exclude });
+        let include_prefix = pattern
+            .split('/')
+            .take_while(|part| !part.contains(['*', '?', '[', '\\']))
+            .collect::<std::path::PathBuf>();
+        result.push(Rule {
+            matcher,
+            exclude,
+            include_prefix,
+        });
     }
     Ok(result)
 }
@@ -92,6 +101,21 @@ pub(crate) fn archive(
     for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            let Ok(name) = entry.path().strip_prefix(root) else {
+                return true;
+            };
+            !entry.file_type().is_dir()
+                || !excluded(name, &patterns)
+                || relative.starts_with(name)
+                || ignore.starts_with(entry.path())
+                || patterns.iter().any(|rule| {
+                    !rule.exclude
+                        && (rule.include_prefix.starts_with(name)
+                            || name.starts_with(&rule.include_prefix))
+                })
+        })
     {
         check()?;
         let entry = entry
@@ -147,6 +171,29 @@ mod tests {
         for path in ["sub/target/file", "cache/keep", "src/main.rs"] {
             assert!(!excluded(Path::new(path), &patterns), "{path}");
         }
+    }
+    #[test]
+    fn ignored_unreadable_directories_are_pruned_but_exceptions_are_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("source");
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::create_dir_all(root.join("cache")).unwrap();
+        fs::write(root.join("Dockerfile"), "FROM scratch").unwrap();
+        fs::write(root.join(".dockerignore"), "data\ncache\n!cache/keep\n").unwrap();
+        fs::write(root.join("cache/keep"), "keep").unwrap();
+        fs::set_permissions(root.join("data"), fs::Permissions::from_mode(0o0)).unwrap();
+        let output = dir.path().join("context.tar");
+        let result = archive(&root, &root.join("Dockerfile"), &output, &|| Ok(()));
+        fs::set_permissions(root.join("data"), fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+        let paths = tar::Archive::new(fs::File::open(output).unwrap())
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().into_owned())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"cache/keep".into()));
+        assert!(!paths.contains(&"data".into()));
     }
     #[test]
     fn context_excludes_secrets_and_keeps_symlinks_without_following_them() {

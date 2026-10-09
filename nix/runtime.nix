@@ -6,10 +6,22 @@ let
     root = ../.;
     fileset = lib.fileset.unions (map (name: ../. + "/${name}") inputs.common);
   };
+  # mke2fs needs UUID/block probing libraries, not util-linux's login tools.
+  # Use e2fsprogs' bundled implementations for this static guest helper.
+  filesystemTools = (pkgs.pkgsStatic.e2fsprogs.override {
+    libuuid = null;
+    withFuse = false;
+  }).overrideAttrs (old: {
+    configureFlags = map (flag:
+      if flag == "--disable-libuuid" then "--enable-libuuid"
+      else if flag == "--disable-libblkid" then "--enable-libblkid"
+      else flag
+    ) old.configureFlags;
+  });
   runtimeAssets = pkgs.runCommand "seedbox-guest-assets" {
     nativeBuildInputs = with pkgs; [ pkgsStatic.stdenv.cc binutils python3 ];
     SEEDBOX_STATIC_CC = "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc";
-    SEEDBOX_MKE2FS = "${pkgs.pkgsStatic.e2fsprogs.bin}/bin/mke2fs";
+    SEEDBOX_MKE2FS = "${filesystemTools.bin}/bin/mke2fs";
     SEEDBOX_E2FSPROGS_SOURCE = pkgs.pkgsStatic.e2fsprogs.src;
     SEEDBOX_MUSL_SOURCE = pkgs.pkgsStatic.stdenv.cc.libc.src;
   } ''
@@ -45,5 +57,5 @@ let
       --mode='u=rwX,go=rX' -cf - -C ${sourceDirectory} . | gzip -n > "$out"
   '';
 in {
-  inherit runtimeAssets runtimeArchive runtimeSources;
+  inherit filesystemTools runtimeAssets runtimeArchive runtimeSources;
 }

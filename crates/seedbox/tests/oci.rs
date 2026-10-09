@@ -22,7 +22,7 @@ fn metadata_verifies_platform_descriptors_and_retains_original_manifest() {
     let raw = directory.path();
     let config = blob(
         raw,
-        br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/bin/app"],"Env":["KEEP=1"]}}"#,
+        br#"{"os":"linux","architecture":"amd64","config":{"ArgsEscaped":true,"Cmd":["/bin/app"],"Env":["KEEP=1"]}}"#,
         "application/vnd.oci.image.config.v1+json",
     );
     let layer = blob(
@@ -54,6 +54,7 @@ fn metadata_verifies_platform_descriptors_and_retains_original_manifest() {
 fn foreign_platform_and_image_lifecycle_hooks_fail_before_execution() {
     for metadata in [
         json!({"os":"linux","architecture":"arm64","config":{}}),
+        json!({"os":"windows","architecture":"amd64","config":{"ArgsEscaped":true}}),
         json!({"os":"linux","architecture":"amd64","config":{"Healthcheck":{"Test":["CMD","false"]}}}),
     ] {
         let directory = tempfile::tempdir().unwrap();
@@ -77,7 +78,7 @@ fn foreign_platform_and_image_lifecycle_hooks_fail_before_execution() {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "oci-tests"))]
+#[cfg(feature = "oci-tests")]
 mod engine {
     use super::*;
     use seedbox::{
@@ -92,7 +93,17 @@ mod engine {
             cancellation: CancellationToken::default(),
             progress: |line| eprintln!("{line}"),
         }
-        .import(service, directory, store, None, Architecture::Amd64)
+        .import(
+            service,
+            directory,
+            store,
+            None,
+            if cfg!(target_arch = "aarch64") {
+                Architecture::Arm64
+            } else {
+                Architecture::Amd64
+            },
+        )
         .unwrap()
     }
     fn entries(image: &ImportedImage) -> BTreeMap<std::path::PathBuf, (tar::EntryType, Vec<u8>)> {
@@ -145,9 +156,10 @@ mod engine {
         let directory = tempfile::tempdir().unwrap();
         let context = directory.path().join("context");
         fs::create_dir(&context).unwrap();
-        fs::write(context.join("Dockerfile"), "FROM docker.io/library/alpine:3.22\nCOPY . /source\nRUN test ! -e /source/ignored && mkdir /data && echo old >/data/remove && echo keep >/data/keep\nRUN rm /data/remove && ln -s keep /data/link\nENV MESSAGE=hello\nWORKDIR /data\nUSER 123:456\nENTRYPOINT [\"/bin/echo\"]\nCMD [\"default\"]\n").unwrap();
+        fs::write(context.join("Dockerfile"), "FROM docker.io/library/alpine:3.22\nCOPY . /source\nCOPY resolver /etc/resolv.conf\nRUN test ! -e /source/ignored && mkdir /data && echo old >/data/remove && echo keep >/data/keep\nRUN rm /data/remove && ln -s keep /data/link\nENV MESSAGE=hello\nWORKDIR /data\nUSER 123:456\nENTRYPOINT [\"/bin/echo\"]\nCMD [\"default\"]\n").unwrap();
         fs::write(context.join(".dockerignore"), "ignored\n").unwrap();
         fs::write(context.join("ignored"), "must not upload").unwrap();
+        fs::write(context.join("resolver"), "image-owned resolver\n").unwrap();
         let mut service = simulation("unused:test").services.remove("app").unwrap();
         service.source = config::ImageSource::Build {
             context: context.clone(),
@@ -158,9 +170,25 @@ mod engine {
         let store = ContentStore::new(directory.path().join("store"));
         let image = import(&service, &directory.path().join("image"), &store);
         let files = entries(&image);
+        assert!(!files.contains_key(Path::new("rootfs/.dockerenv")));
+        let again = import(&service, &directory.path().join("again"), &store);
+        let (RootFilesystem::Archive(first), RootFilesystem::Archive(second)) =
+            (&image.rootfs, &again.rootfs)
+        else {
+            panic!("expected archives")
+        };
+        assert_eq!(
+            fs::read(first).unwrap(),
+            fs::read(second).unwrap(),
+            "same image must produce identical rootfs bytes"
+        );
         assert!(!files.contains_key(Path::new("rootfs/data/remove")));
         assert!(!files.contains_key(Path::new("rootfs/source/ignored")));
         assert_eq!(files[Path::new("rootfs/data/keep")].1, b"keep\n");
+        assert_eq!(
+            files[Path::new("rootfs/etc/resolv.conf")].1,
+            b"image-owned resolver\n"
+        );
         assert!(files[Path::new("rootfs/data/link")].0.is_symlink());
         assert_eq!(image.image.launch.argv, ["/bin/echo", "default"]);
         assert_eq!(image.image.launch.user, "123:456");

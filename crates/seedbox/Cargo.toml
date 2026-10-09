@@ -28,6 +28,7 @@ globset = "0.4"
 tokio = { version = "1", features = ["rt", "time", "fs", "macros"] }
 libc.workspace = true
 signal-hook = "0.3"
+ocirender = "0.2.2"
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 seedbox-vmm = { path = "../seedbox-vmm" }

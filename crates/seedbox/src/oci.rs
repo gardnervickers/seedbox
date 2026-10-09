@@ -121,11 +121,7 @@ pub fn import_metadata_for_arch(
             }
         }
     }
-    if config.config.get("ArgsEscaped").and_then(|v| v.as_bool()) == Some(true) {
-        return Err(Error::Integrity(
-            "image config ArgsEscaped is unsupported".into(),
-        ));
-    }
+    // ArgsEscaped only affects Windows command-line quoting; Linux argv is unchanged.
     let defaults: ImageDefaults = serde_json::from_value(config.config)?;
     let launch = resolve_launch(service, &defaults)?;
     let mut layers = Vec::new();

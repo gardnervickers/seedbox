@@ -165,13 +165,17 @@ container on Mac. It builds the patched kernel and static guest helpers into
 the OS temporary directory. See [asset builds](../tools/runtime/README.md).
 Cargo builds the native CLI, embeds the prebuilt helper archive in release builds,
 and signs it on Mac. It never builds Linux helpers or starts a container.
-The kernel is the only separate guest asset needed by a release executable.
+With helpers embedded, the kernel is the only separate guest asset needed by
+a release executable. If the default helper archive is missing at build time,
+Cargo warns and builds without embedding; runtime then requires a local archive
+and reports the asset-build command when it cannot find one.
 
 Preparation uses Bollard and the Docker-compatible engine API for registry/local
-images and Compose `build:` contexts. The engine owns build caching and layer
-application. Seedbox exports a stopped container, removes it and its anonymous
-volumes, and retains the resolved filesystem and launch configuration. No
-application process is started by the container engine. The retained image
+images and Compose `build:` contexts. The engine owns build caching.
+Seedbox exports the image layers and merges them locally with
+`ocirender`, retaining the resolved filesystem and launch configuration. No
+container is created, so engine-injected files never enter the guest filesystem.
+The retained image
 manifest describes this flattened filesystem snapshot, not the original registry
 layers. Replay uses the snapshot and never contacts the engine.
 

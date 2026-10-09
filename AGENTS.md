@@ -12,12 +12,14 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 - Build the native CLI with `cargo build --release`; guest assets are built
   explicitly with `bash tools/build-assets.sh`. Linux uses Nix; Mac uses a
   Docker-compatible Linux build container. Assets occupy one slot per architecture
-  in the OS temporary directory. Release builds embed the static guest helpers.
+  in the OS temporary directory. Release builds embed available static guest helpers;
+  without them, they warn and leave helper resolution to runtime.
   Seedbox never starts an engine daemon or automatically downloads guest assets. CLI lookup owns environment access;
   library callers supply paths and cancellation explicitly.
 - Application images are built/pulled/exported using Bollard through the user's
   Docker-compatible engine socket. The CLI resolves connections; library callers
-  supply an explicit client. The engine owns build caching and layer application.
+  supply an explicit client. The engine owns build caching; `ocirender` merges
+  exported image layers as archives without extracting guest paths on the host.
   Preparation never starts application containers. Replay never contacts the engine.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
