@@ -16,7 +16,7 @@ fn boot(marker: u8, undo: u64) -> BootInputs {
     // RAM must cover the fixed 128 MiB initrd address even with an empty initrd.
     BootInputs {
         kernel: kernel.into(),
-        initrd: Rc::from([]),
+        initrd: Rc::new(Vec::new().into()),
         cmdline: (String::new(), String::new()),
         mem: 0x0900_0000,
         mac: None,

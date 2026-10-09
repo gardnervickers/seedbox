@@ -237,27 +237,24 @@ impl Clock {
     }
 }
 
-/// A read-only private mapping of a guest image. Boot copies it into guest
-/// RAM straight from the page cache instead of reading it into the heap first.
-pub(crate) struct MappedFile {
-    ptr: *const u8,
-    len: usize,
+/// Guest image bytes. Boot copies a mapped image into guest RAM straight
+/// from the page cache instead of reading it into the heap first.
+pub(crate) enum GuestImage {
+    Mapped { ptr: *const u8, len: usize },
+    Owned(Vec<u8>),
 }
 
-impl MappedFile {
+impl GuestImage {
     fn open(path: &str) -> std::io::Result<Self> {
         use std::os::fd::AsRawFd;
         let file = std::fs::File::open(path)?;
         let len = usize::try_from(file.metadata()?.len())
             .map_err(|_| std::io::Error::other("file too large"))?;
         if len == 0 {
-            return Ok(Self {
-                ptr: std::ptr::NonNull::dangling().as_ptr(),
-                len,
-            });
+            return Ok(Self::Owned(Vec::new()));
         }
-        // SAFETY: a fresh private read-only mapping of an open file; the
-        // retained inputs are read-only and never written while a run executes.
+        // SAFETY: a fresh private read-only mapping of an open file; retained
+        // inputs are read-only and nothing writes them while a run executes.
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -271,25 +268,34 @@ impl MappedFile {
         if ptr == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(Self {
+        Ok(Self::Mapped {
             ptr: ptr.cast(),
             len,
         })
     }
 }
 
-impl std::ops::Deref for MappedFile {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        // SAFETY: `ptr` maps `len` readable bytes until drop (or is dangling with len 0).
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+impl From<Vec<u8>> for GuestImage {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Owned(bytes)
     }
 }
 
-impl Drop for MappedFile {
+impl std::ops::Deref for GuestImage {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            // SAFETY: `ptr` maps `len` readable bytes until drop.
+            Self::Mapped { ptr, len } => unsafe { std::slice::from_raw_parts(*ptr, *len) },
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
+impl Drop for GuestImage {
     fn drop(&mut self) {
-        if self.len != 0 {
-            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
+        if let Self::Mapped { ptr, len } = self {
+            unsafe { libc::munmap(*ptr as *mut libc::c_void, *len) };
         }
     }
 }
@@ -299,7 +305,7 @@ impl Drop for MappedFile {
 #[derive(Clone)]
 pub struct BootInputs {
     kernel: Rc<[u8]>,
-    initrd: Rc<MappedFile>,
+    initrd: Rc<GuestImage>,
     /// The command line before and after the launch barrier flag.
     cmdline: (String, String),
     mem: usize,
@@ -663,13 +669,13 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     let mut machines = Vec::new();
     let mut macs = Vec::new();
     let mut boots = Vec::new();
-    let mut initrds: BTreeMap<String, Rc<MappedFile>> = BTreeMap::new();
+    let mut initrds: BTreeMap<String, Rc<GuestImage>> = BTreeMap::new();
     for (i, mc) in cfg["machines"].as_array().unwrap().iter().enumerate() {
         let ipath = path(&mc["initrd"]).to_string_lossy().to_string();
         if !initrds.contains_key(&ipath) {
             initrds.insert(
                 ipath.clone(),
-                Rc::new(MappedFile::open(&ipath).map_err(|e| format!("{ipath}: {e}"))?),
+                Rc::new(GuestImage::open(&ipath).map_err(|e| format!("{ipath}: {e}"))?),
             );
         }
         let mac = [0x52, 0x54, 0x00, 0x00, 0x00, i as u8 + 1];
