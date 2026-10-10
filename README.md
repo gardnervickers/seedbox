@@ -14,26 +14,22 @@ You need **Nix** for the build tools and a running **Docker-compatible engine**
 (such as Docker or Podman) for application images. Apple Silicon Macs also need
 Apple's Command Line Tools. Linux x86-64 needs read/write access to `/dev/kvm`.
 
-Build the guest assets and Seedbox once:
+Build Seedbox and its current guest inputs together:
 
 ```sh
 nix develop
-bash tools/build-assets.sh
-cargo build --release
+python3 tools/build.py
 ```
 
-Then run the etcd example:
+Then run the etcd example directly, without Nix:
 
 ```sh
-./target/release/seedbox --kernel /path/to/kernel examples/etcd/compose.yaml
+./build/current/seedbox examples/etcd
 ```
 
-The asset command prints the directory containing `kernel`. You can also omit
-`--kernel` to use that locally built kernel automatically:
-
-```sh
-./target/release/seedbox examples/etcd
-```
+The command publishes a complete build only after the guest inputs and native
+CLI succeed. The CLI finds its kernel beside the executable. Separate worktrees
+have independent builds; Nix reuses unchanged guest dependencies.
 
 Seedbox finds your Docker or Podman socket, builds the example's workload oracle
 with the engine's normal cache, prepares the images, and runs the Linux guests.
@@ -46,11 +42,10 @@ after which a guest that makes no exits is interrupted so the engine can
 report where it is stuck. It changes performance only and can also be set on
 `replay` or `explore`.
 
-**The kernel is the only separate guest asset.** The release executable embeds
-its supervisor and filesystem tool. No private GitHub access or runtime guest
-build is needed. Locally built kernels live under `/tmp/seedbox-UID/ARCH` (the invoking user's UID, even under `sudo`); rebuild
-if the OS removes them. Seedbox never downloads kernels automatically.
-
+**The kernel is the only separate guest asset.** The complete build embeds
+its supervisor, filesystem tool and progress runtime in the executable. Copy
+`seedbox` and `kernel` together to run elsewhere. Running or replaying Seedbox
+never invokes Nix, Cargo, or an asset builder.
 
 Guest time starts at the latest build time recorded in the prepared images, so
 independent fresh runs of the same images start at the same time and can be
@@ -86,13 +81,13 @@ A run prints its result and directory. Replay needs neither the container engine
 nor the original kernel, source files or image registry:
 
 ```sh
-./target/release/seedbox replay .seedbox/runs/ATTEMPT
-./target/release/seedbox logs .seedbox/runs/ATTEMPT
-./target/release/seedbox inspect .seedbox/runs/ATTEMPT
+./build/current/seedbox replay .seedbox/runs/ATTEMPT
+./build/current/seedbox logs .seedbox/runs/ATTEMPT
+./build/current/seedbox inspect .seedbox/runs/ATTEMPT
 ```
 
 Retained runs keep their own inputs. Delete run directories when you no longer
-need them; clearing temporary build assets does not remove run data.
+need them; removing build outputs does not remove run data.
 
 ## Learn more
 

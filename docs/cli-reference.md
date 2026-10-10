@@ -22,9 +22,9 @@ directory. Every runtime input has a default, so no flags are required:
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; Linux reserves one physical core per worker, Mac lets HVF schedule) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `x-seedbox.disk.torn_writes: true` |
 | CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
-| Guest kernel | built locally in the OS temporary directory | `--kernel`, `SEEDBOX_KERNEL` |
+| Guest kernel | `kernel` beside the executable | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
-| Guest helper archive | embedded in release builds; local temporary archive for debug builds | `--runtime-assets`, `SEEDBOX_RUNTIME_ASSETS` |
+| Guest helper archive | embedded by the complete build; explicit archive for plain Cargo builds | `--runtime-assets`, `SEEDBOX_RUNTIME_ASSETS` |
 | Guest supervisor | from the helper archive | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | mke2fs (only for named volumes) | from the helper archive | `--mke2fs`, `SEEDBOX_MKE2FS` |
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |

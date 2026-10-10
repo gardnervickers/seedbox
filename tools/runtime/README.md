@@ -1,56 +1,54 @@
-# Build guest assets
+# Build Seedbox and guest inputs
 
-From the repository root:
+From the checkout's development shell:
 
 ```sh
-bash tools/build-assets.sh
+python3 tools/build.py
+./build/current/seedbox examples/etcd
 ```
 
-On Linux, this uses Nix directly. On Apple Silicon macOS, start a
-Docker-compatible Linux engine such as Podman first. The script runs Nix in a
-throwaway Linux build container. Seedbox uses the engine API for application images; Cargo never invokes it.
-Use `SEEDBOX_ASSET_BUILDER=podman` or `docker` to choose one explicitly.
+The build resolves the current guest kernel and runtime through Nix, then passes
+that exact helper archive to Cargo. Linux builds the guest inputs directly;
+Apple Silicon uses a Docker-compatible Linux container. Start Podman or Docker
+Desktop first; `SEEDBOX_ASSET_BUILDER` can select either explicitly. Mac builders
+retain Nix's store in an engine volume, scoped to the builder image, so subsequent
+builds reuse dependencies. Nix tracks the guest sources and recipes; there are no
+Git revision stamps or runtime qualification checks.
 
-The command builds the patched kernel, static supervisor and mke2fs.
-It installs `kernel` and `runtime.tar.gz` under
-`/tmp/seedbox-UID/ARCH` (override the parent directory with `SEEDBOX_ASSET_DIR`).
-The directory is private to your user. Rebuilds replace these two files rather
-than retaining a version history. `cargo build --release` embeds the helper
-archive in Seedbox; the archive is no longer needed to run that executable.
-Seedbox extracts its embedded helpers into a private per-invocation temporary
-directory and removes that extraction when finished. Only the kernel remains
-a separate runtime file.
-Helper archives contain only `compose-init`, `mke2fs`, and upstream `NOTICE.txt`.
-No helper hash manifest or provenance metadata is required. Archive extraction
-still checks member names, types, duplicates, required files, and size limits.
-Nix and the container engine retain their own ordinary build/image storage.
+Each successful invocation prints a completed directory under `build/`, containing
+`seedbox`, `kernel`, and `runtime.tar.gz`. `build/current` points to the latest
+complete CLI build. Publication is atomic; a failed build leaves the previous
+one available. Concurrent invocations in one checkout serialize; separate
+worktrees have separate outputs and Cargo caches. Existing completed directories
+remain usable until explicitly removed. The native Cargo cache is `build/cargo`.
 
-The first build needs public source downloads, but no private GitHub credentials.
-If the OS clears the temporary assets, rerun the command. Runtime commands never
-build or download missing guest assets.
+The CLI embeds the helpers and finds `kernel` beside its executable. Copy those
+two files together to run elsewhere. Runtime commands never invoke Nix, Cargo,
+a build container, or asset downloads. Application image preparation still uses
+the user's Docker-compatible engine. Replay uses retained inputs and needs
+neither the builder nor the original build directory.
 
-## Build outputs separately
+Hardware application checks invoke this same complete build and use its returned
+directory explicitly. They cannot inherit a stale global asset slot. Portable
+checks build ordinary unbundled Cargo executables and require no guest build.
+A plain `cargo build --release` also remains unbundled unless
+`SEEDBOX_BUILD_HELPERS=/path/to/runtime.tar.gz` explicitly selects an archive;
+Cargo never builds guest inputs itself.
 
-On a native Linux builder, these are the same recipes used by the script and CI:
+## Explicit inputs
+
+`python3 tools/build.py --assets-only` builds a separate kernel/runtime pair and
+prints its directory without changing `build/current`. On Linux the individual
+Nix outputs are also available:
 
 ```sh
 nix build .#guestKernel --out-link kernel-output
 nix build .#runtimeArchive --out-link runtime-assets.tar.gz
 ```
 
-Select your own outputs with `--kernel PATH` and `--runtime-assets PATH`, or
-`SEEDBOX_KERNEL` and `SEEDBOX_RUNTIME_ASSETS`. The kernel is `kernel-output/Image`
-on ARM64 and `kernel-output/bzImage` on x86-64. Match the guest architecture.
-These overrides accept locally built files without release/version admission.
-
-CI can still publish guest artifacts. Automatic runtime downloads are deferred
-until public distribution is available; they are not part of the quick start.
-Replay uses its retained inputs and needs neither temporary assets nor a builder.
-
-Set `SEEDBOX_BUILD_HELPERS=/path/to/runtime.tar.gz` to embed an explicit archive
-at build time. An explicitly selected missing archive is a build error. If the
-default archive is absent, release builds warn and omit embedding; runtime
-commands then need locally built helpers and report the asset-build command
-when those are missing.
-Debug builds omit embedding for portable checks and can use the local helper
-archive or an explicit `--runtime-assets` override.
+Use `--kernel PATH` and `--runtime-assets PATH` (or `SEEDBOX_KERNEL` and
+`SEEDBOX_RUNTIME_ASSETS`) to run intentionally selected historical or experimental
+inputs. `SEEDBOX_ASSET_DIR` still explicitly selects the legacy `ARCH/kernel`
+and `ARCH/runtime.tar.gz` directory layout. It is never read by the complete
+build or used implicitly by Cargo. Archive extraction validates names, types,
+duplicates, required files, and size limits; no provenance manifest is needed.

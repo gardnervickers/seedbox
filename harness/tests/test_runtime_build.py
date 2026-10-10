@@ -52,17 +52,19 @@ class RuntimeBuildTests(unittest.TestCase):
                                SEEDBOX_BUILD_HELPERS=str(root / 'missing.tar.gz'))
             result = subprocess.run([str(script)], env=environment, text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn('bash tools/build-assets.sh', result.stderr)
+            self.assertIn('python3 tools/build.py', result.stderr)
             self.assertIn('missing.tar.gz', result.stderr)
 
-    def test_missing_default_helpers_produce_an_unbundled_release(self):
+    def test_ambient_cached_helpers_are_never_embedded(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             script = root / 'build-script'
             subprocess.run(['rustc', str(ROOT / 'crates/seedbox/build-runtime.rs'), '-o', str(script)], check=True, capture_output=True)
             environment = dict(os.environ, CARGO_MANIFEST_DIR=str(ROOT / 'crates/seedbox'), OUT_DIR=str(root), PROFILE='release', CARGO_CFG_TARGET_ARCH='aarch64', SEEDBOX_ASSET_DIR=str(root / 'missing'))
+            stale = root / 'missing/aarch64/runtime.tar.gz'
+            stale.parent.mkdir(parents=True)
+            stale.write_bytes(b'stale archive')
             environment.pop('SEEDBOX_BUILD_HELPERS', None)
             result = subprocess.run([str(script)], env=environment, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('guest helpers not embedded', result.stdout)
             self.assertIn('None', (root / 'guest-helpers.rs').read_text())

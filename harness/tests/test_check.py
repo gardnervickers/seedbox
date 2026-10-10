@@ -94,15 +94,6 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(missing), 1)
         self.assertIn("no Docker-compatible engine", missing[0])
 
-    def test_embedded_helper_archive_counts_as_runtime_assets(self):
-        with tempfile.TemporaryDirectory() as directory:
-            kernel, helpers = Path(directory) / "kernel", Path(directory) / "helpers.tar.gz"
-            kernel.touch()
-            helpers.touch()
-            self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs={
-                "SEEDBOX_ASSET_DIR": directory, "SEEDBOX_KERNEL": str(kernel),
-                "SEEDBOX_BUILD_HELPERS": str(helpers)}), [])
-
     def test_an_engine_socket_counts_without_binaries(self):
         # The CLI connects to known sockets itself, e.g. a Mac Podman machine.
         with tempfile.TemporaryDirectory() as directory, socket.socket(socket.AF_UNIX) as listener:
@@ -148,42 +139,22 @@ class SelectionTests(unittest.TestCase):
              patch.object(check.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1\n", "")):
             self.assertEqual(check.requirements("mac-hvf", "Darwin", "arm64", {}), ["requires macOS 15+"])
 
-    def test_apps_need_built_or_explicit_guest_assets(self):
-        with tempfile.TemporaryDirectory() as directory:
-            slot = {"SEEDBOX_ASSET_DIR": directory}
-            missing = self.linux("linux-apps", {"kvm": ""}, inputs=slot)
-            self.assertEqual(len(missing), 1)
-            self.assertIn("run bash tools/build-assets.sh", missing[0])
-            self.assertIn(f"{directory}/x86_64/kernel", missing[0])
-            self.assertIn(f"{directory}/x86_64/runtime.tar.gz", missing[0])
-            self.assertIn("requires root or passwordless sudo",
-                          self.linux("linux-apps", {"kvm": ""}, root=False, inputs=slot))
-            # The slot tools/build-assets.sh fills, keyed like the CLI's architecture name.
-            with patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/podman"):
-                self.assertTrue(check.requirements("mac-apps", "Darwin", "arm64", slot))
-            for architecture in ("x86_64", "aarch64"):
-                (Path(directory) / architecture).mkdir()
-                for name in ("kernel", "runtime.tar.gz"):
-                    (Path(directory) / architecture / name).touch()
-            self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs=slot), [])
-            with patch.object(check.shutil, "which", side_effect=lambda tool: None), \
-                    patch.object(check, "engine_sockets", return_value=[]):
-                missing = check.requirements("mac-apps", "Darwin", "arm64", slot)
-                self.assertEqual(len(missing), 1)
-                self.assertIn("no Docker-compatible engine", missing[0])
-            with patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/podman" if tool == "podman" else None):
-                self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", slot), [])
-        with tempfile.TemporaryDirectory() as directory:
-            kernel, assets = Path(directory) / "kernel", Path(directory) / "assets"
-            kernel.touch()
-            assets.touch()
-            self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs={
-                "SEEDBOX_ASSET_DIR": directory + "/empty",
-                "SEEDBOX_KERNEL": str(kernel), "SEEDBOX_RUNTIME_ASSETS": str(assets)}), [])
+    def test_build_admission_needs_tools_not_cached_assets(self):
+        with patch.object(check.shutil, "which", return_value="/tools/nix"):
+            self.assertEqual(check.build_requirements({}, "Linux"), [])
+            self.assertEqual(check.build_requirements({}, "Darwin"), [])
+        with patch.object(check.shutil, "which", return_value=None):
+            self.assertIn("nix", check.build_requirements({"SEEDBOX_ASSET_DIR": "/stale"}, "Linux")[0])
+            self.assertIn("CLI", check.build_requirements({}, "Darwin")[0])
 
-    def test_default_asset_slot_matches_the_cli(self):
-        self.assertEqual(check.asset_directory({}, "x86_64"), Path(f"/tmp/seedbox-{os.geteuid()}/x86_64"))
-        self.assertEqual(check.asset_directory({"SEEDBOX_ASSET_DIR": "/assets"}, "arm64"), Path("/assets/aarch64"))
+    def test_complete_build_replaces_ambient_runtime_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {key: "/stale" for key in ("SEEDBOX_ASSET_DIR", "SEEDBOX_BUILD_HELPERS", "SEEDBOX_GUEST_INIT", "SEEDBOX_MKE2FS", "SEEDBOX_VMM", "SEEDBOX_KERNEL", "SEEDBOX_RUNTIME_ASSETS")}
+            with self.assertRaises(ValueError): check.select_build(environment, root)
+            for name in ("seedbox", "kernel", "runtime.tar.gz"): (root / name).touch()
+            check.select_build(environment, root)
+            self.assertEqual(environment, {"SEEDBOX_TEST_CLI": str(root / "seedbox"), "SEEDBOX_KERNEL": str(root / "kernel"), "SEEDBOX_RUNTIME_ASSETS": str(root / "runtime.tar.gz")})
 
     def test_privileged_execution_forwards_asset_directory_and_engine(self):
         command = check.privileged(["sudo", "-n", "env"], ["/test"], {
