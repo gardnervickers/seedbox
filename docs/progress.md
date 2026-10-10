@@ -1,5 +1,8 @@
 # Automatic application progress
 
+The [determinism catalogue](determinism-catalogue.md) places application progress
+and ARM reservations alongside the other guest and VMM mechanisms.
+
 Seedbox has one engine mode. Guest time is a PV clock: compute between exits
 costs no virtual time, and time advances at guest exits, syscalls and clock
 reads. Application code that computes without exiting would never advance the
