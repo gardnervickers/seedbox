@@ -19,6 +19,9 @@
 #include "drreg.h"
 
 #define BLOCK_BUDGET 10000
+/* Experiment branch: the first client argument overrides the budget; 0 makes
+ * the client empty (no instrumentation, no charges). */
+static reg_t block_budget = BLOCK_BUDGET;
 static reg_id_t budget_segment;
 static uint budget_offset;
 
@@ -29,7 +32,7 @@ static reg_t *budget(void)
 
 static void checkpoint(void)
 {
-    *budget() = BLOCK_BUDGET;
+    *budget() = block_budget;
 #ifdef X86_64
     long result;
     __asm__ volatile("syscall" : "=a"(result) : "a"(39L)
@@ -47,7 +50,7 @@ static void checkpoint(void)
 static void thread_init(void *context)
 {
     (void)context;
-    *budget() = BLOCK_BUDGET;
+    *budget() = block_budget;
 }
 
 /* Insert the budget decrement and checkpoint call before `where`. */
@@ -121,6 +124,12 @@ static void finished(void)
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
 {
     drreg_options_t options = {sizeof(options), 3, false};
+    if (argc > 1) {
+        reg_t value = 0;
+        for (const char *c = argv[1]; *c >= '0' && *c <= '9'; c++) value = value * 10 + (reg_t)(*c - '0');
+        block_budget = value;
+    }
+    if (block_budget == 0) return; /* empty client: translation only */
     DR_ASSERT(drmgr_init());
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);
     DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 1, 0));

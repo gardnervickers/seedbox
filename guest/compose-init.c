@@ -481,6 +481,13 @@ static void credentials(void) {
     if (setgid(gid) || setuid(uid)) die("set image user");
     free(copy);
 }
+/* Experiment branch: look up a debug knob in the service environment. */
+static char *debug_env(const char *name) {
+    size_t n = strlen(name);
+    for (char **entry = environment; *entry; entry++)
+        if (!strncmp(*entry, name, n) && (*entry)[n] == '=') return strdup(*entry + n + 1);
+    return NULL;
+}
 static pid_t start(void) {
     int launch_error[2];
     if (pipe2(launch_error, O_CLOEXEC)) die("launch error pipe");
@@ -503,8 +510,22 @@ static pid_t start(void) {
         size_t count = 0;
         while (arguments[count]) ++count;
         /* Translator arguments, the application's own, and execv's NULL. */
-        enum { PREFIX_MAX = 8 };
-        char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
+        /* Experiment branch (never merged): per-service debug knobs from the
+         * service environment. SEEDBOX_DEBUG_TRANSLATOR=native runs the
+         * application without DynamoRIO; SEEDBOX_DEBUG_BUDGET=N passes a block
+         * budget to the client (0 = empty client); SEEDBOX_DEBUG_DROPTS adds
+         * space-separated drrun options such as "-persist -persist_dir /tmp/drc". */
+        const char *debug_translator = debug_env("SEEDBOX_DEBUG_TRANSLATOR");
+        const char *debug_budget = debug_env("SEEDBOX_DEBUG_BUDGET");
+        char *debug_dropts = debug_env("SEEDBOX_DEBUG_DROPTS");
+        if (debug_translator && !strcmp(debug_translator, "native")) {
+            execv(arguments[0], arguments);
+            die("exec application (native)");
+        }
+        size_t extra = 0;
+        if (debug_dropts) { extra = 1; for (char *c = debug_dropts; *c; c++) if (*c == ' ') extra++; }
+        enum { PREFIX_MAX = 9 };
+        char **instrumented = calloc(PREFIX_MAX + extra + count + 1, sizeof(*instrumented));
         if (!instrumented) die("instrumentation arguments");
         size_t prefix = 0;
         instrumented[prefix++] = "/seedbox/progress/bin64/drrun";
@@ -515,10 +536,15 @@ static pid_t start(void) {
          * hides host-only exclusive-store retries from application execution. */
         instrumented[prefix++] = "-ldstex2cas";
 #endif
+        if (debug_dropts) {
+            for (char *token = strtok(debug_dropts, " "); token; token = strtok(NULL, " "))
+                instrumented[prefix++] = token;
+        }
         instrumented[prefix++] = "-c";
         instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
+        if (debug_budget) instrumented[prefix++] = (char *)debug_budget;
         instrumented[prefix++] = "--";
-        if (prefix > PREFIX_MAX) die("instrumentation prefix");
+        if (prefix > PREFIX_MAX + extra) die("instrumentation prefix");
         for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
         instrumented[prefix + count] = NULL;
         execv(instrumented[0], instrumented);

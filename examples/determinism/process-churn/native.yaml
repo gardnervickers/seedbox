@@ -1,0 +1,11 @@
+# Experiment variant of compose.yaml (branch claude/pv-profile-exp).
+name: determinism-process-churn-native
+services:
+  churn:
+    build: .
+    environment: {SEEDBOX_DEBUG_TRANSLATOR: native}
+x-seedbox:
+  version: 1
+  seed: 1105
+  limits: {simulated_time: 30s, wall_time: 15m}
+  check: {service: churn, exit_code: 0}
