@@ -17,8 +17,7 @@ fn explicit_combined_cli_is_retained_with_its_actual_version() {
         .unwrap();
     assert!(expected.status.success());
     let version = String::from_utf8(expected.stdout).unwrap();
-    let executor =
-        vmm::VmmExecutor::new_detected(binary, &store, None, 512, WitnessMode::Exits).unwrap();
+    let executor = vmm::VmmExecutor::new_detected(binary, &store, 512, WitnessMode::Exits).unwrap();
     let profile = executor.profile();
     let descriptor = profile.semantic_parameters.engine.as_ref().unwrap();
     assert_eq!(

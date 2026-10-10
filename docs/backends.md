@@ -96,7 +96,7 @@ verify the executable it actually invokes against that digest. Merely returning
 the requested digest from `profile()` is not sufficient.
 
 `execute` blocks until all owned guests/processes have stopped and their outputs
-are closed. It owns CPU selection, process lifecycle, timeout enforcement, and
+are closed. It owns process lifecycle, timeout enforcement, and
 cancellation. It writes only under the supplied output directory and returns a
 typed `ExecutionReport`. The orchestrator's elapsed-wall-time check prevents a
 late success but cannot interrupt a blocked backend. Wall-time expiry and
@@ -104,21 +104,11 @@ cancellation are infrastructure INCOMPLETE results, excluded from replay compari
 only the simulated-time limit yields semantic TIMEOUT. Therefore a backend must
 actively enforce the deadline and observe the cancellation token.
 
-For hardware, reuse the lease protocol already implemented by `harness/batch.py`
-(`cpu_locks` and `run_batch`, merged on main). Acquire exclusive nonblocking `flock`
-locks on `/tmp/seedbox-msr-cpu-<N>.lock` for every selected core and its SMT siblings,
-in ascending CPU order, before starting any guest. Open without following symlinks,
-keep file descriptors open through cleanup, and do not unlink the lock files. A
-Rust executor uses these same files and advisory locks; a separate
-`/run` namespace would not coordinate with the existing supervisor.
-
-The current supervisor owns and reaps its VMM process groups while holding the
-CPU lease. Keep the lease until all owned processes have stopped; honor normal
-errors and catchable signals. `host.rs` implements the same lock protocol for
-the Rust executor. PV execution does not modify host MSRs or acquire a perf
-counter. The historical `seedbox-msr-cpu-<N>.lock` names remain so older and newer
-supervisors still coordinate. All hardware entrypoints must use these locks
-before sharing cores.
+Hardware execution uses normal host scheduling. Seedbox does not select CPUs,
+change affinity, or acquire core leases. Operators can use external tools such
+as Linux `taskset` when affinity is useful. The supervisor owns and reaps its
+VMM process groups on normal errors and catchable signals. PV execution does
+not modify host MSRs or acquire a perf counter.
 
 The versioned VMM report provides `guest_exit_code`, `guest_init_error`, and
 `infrastructure_error`. The OCI supervisor reports application completion through

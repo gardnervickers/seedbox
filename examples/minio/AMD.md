@@ -1,99 +1,50 @@
-# AMD KVM acceptance checklist
+# AMD KVM example checks
 
-Run from this committed checkout in the project development shell, on an AMD Zen KVM host as an authorized operator. Select an available physical core/SMT pair under the normal shared lease; `CPU` below is the chosen logical CPU, not a reservation of any historical lane. Preserve other workloads. Use one CLI, VMM, kernel, supervisor, static BusyBox and project-native Podman for every step. Do not increase memory/deadlines or silently retry failed worlds.
+Run from the checkout inside `nix develop` on a Linux x86-64 KVM host with a
+running Docker-compatible engine. Build matching CLI and guest inputs with
+`python3 tools/build.py`; workers use normal host scheduling without CPU leases or pinning.
 
-If a Linux source build is needed, the existing aliases are `python3 tools/build.py`, `cargo build-vmm` and `cargo test-vmm`; build the revision under test. The checklist passes the artifacts explicitly. `doctor` checks host compatibility only; replay MATCH is the determinism check.
+Acquire and generate the projects into fresh directories:
 
-## Stage and validate
-
-Bind these paths and the selected CPU to the artifacts under test; use fresh writable evidence/input/project directories. Record revision, artifact hashes, host/profile observations, full command logs and elapsed times, and verify CPU/lease cleanup after each guest job. Stop on uncertain cleanup. Preparation happens in each `run`; there is no standalone prepared-input adapter. Retain each run's complete OCI/config/layers/archives/provenance, even if variants rebuild differently.
-
-```bash
-set -euo pipefail
-SEEDBOX=/absolute/seedbox
-VMM=/absolute/seedbox-vmm
-KERNEL=/absolute/bzImage
-GUEST_INIT=/absolute/guest-init
-BUILDER=/absolute/project-native/podman
-CPU=8  # Replace with the currently available admitted lane.
-EVIDENCE=/absolute/fresh-minio-evidence
-INPUTS=/absolute/fresh-minio-inputs
-PROJECTS=/absolute/fresh-minio-projects
-mkdir "$EVIDENCE"
-
-git rev-parse HEAD > "$EVIDENCE/revision.txt"
-sha256sum "$SEEDBOX" "$VMM" "$KERNEL" "$GUEST_INIT" "$BUSYBOX" > "$EVIDENCE/artifacts.sha256"
-python3 examples/minio/fetch_inputs.py "$INPUTS" > "$EVIDENCE/acquisition.log"
-# Alternatively reuse previously acquired #48 inputs; generation verifies them.
-python3 examples/minio/portable.py --wheel-directory "$INPUTS/wheels" > "$EVIDENCE/portable.log" 2>&1
-python3 examples/minio/generate.py "$PROJECTS" --minio "$INPUTS/minio" --wheel-directory "$INPUTS/wheels"
-"$SEEDBOX" validate "$PROJECTS/qualification"
-"$SEEDBOX" validate "$PROJECTS/broken"
-"$SEEDBOX" validate "$PROJECTS/fixed"
-sudo -E env PATH="$PATH" "$SEEDBOX" doctor --cpu "$CPU" --kernel "$KERNEL" --vmm "$VMM" --json > "$EVIDENCE/doctor.json"
-RUNTIME=(--cpu "$CPU" --kernel "$KERNEL" --vmm "$VMM" --guest-init "$GUEST_INIT")
+```sh
+python3 examples/minio/fetch_inputs.py /absolute/minio-inputs
+python3 examples/minio/portable.py --wheel-directory /absolute/minio-inputs/wheels
+python3 examples/minio/generate.py /absolute/minio-projects \
+  --minio /absolute/minio-inputs/minio --wheel-directory /absolute/minio-inputs/wheels
+build/current/seedbox doctor --json
+build/current/seedbox validate /absolute/minio-projects/qualification
+build/current/seedbox validate /absolute/minio-projects/broken
+build/current/seedbox validate /absolute/minio-projects/fixed
 ```
 
-Expected: every checksum/control and all three validations succeed; doctor admits the profile and completes cleanup. MinIO packaging itself remains unqualified until the next step. Cap and record preparation/full-command wall time under the host's execution supervision; Compose caps only backend execution. The initial four worlds have at most 270 seconds summed execution caps, and the added offline replay raises that to 330 seconds across five worlds. These are caps, not measured runtimes or a total CLI wall-time promise. Abort further dispatch on exhaustion, ambiguity, nonexpected results or unverified native builder cleanup.
+Run each project and save its printed simulation ID:
 
-## Qualification, broken, replay, fixed
-
-These are public CLI invocations, with guest-owned assertions. Preserve logs on any refusal. The shell checks exit status and `verify.py` rejects setup failures masquerading as the intended FAIL.
-
-```bash
-sudo -E env PATH="$PATH" "$SEEDBOX" run "$PROJECTS/qualification" --seed 0 "${RUNTIME[@]}" \
-  --state "$EVIDENCE/state" > "$EVIDENCE/qualification.log" 2>&1
-QUALIFICATION=$(sed -n 's/^[A-Z]*: //p' "$EVIDENCE/qualification.log")
-"$SEEDBOX" inspect "$QUALIFICATION" --json > "$EVIDENCE/qualification-record.json"
-python3 examples/minio/verify.py "$QUALIFICATION" --mode qualification
-# Required: PASS / exit 0, all six real CAS cases. Stop otherwise.
-
-set +e
-sudo -E env PATH="$PATH" "$SEEDBOX" run "$PROJECTS/broken" --seed 0 "${RUNTIME[@]}" \
-  --state "$EVIDENCE/state" > "$EVIDENCE/broken.log" 2>&1
-BROKEN_CODE=$?
-set -e
-test "$BROKEN_CODE" = 1
-BROKEN=$(sed -n 's/^[A-Z]*: //p' "$EVIDENCE/broken.log")
-"$SEEDBOX" inspect "$BROKEN" --json > "$EVIDENCE/broken-record.json"
-python3 examples/minio/verify.py "$BROKEN" --mode broken
-# Required: FAIL / exit 1, 200(A), 412(B), unconditional 200(B), GET B != ack A.
-
-sudo -E env PATH="$PATH" "$SEEDBOX" replay "$BROKEN" --cpu "$CPU" --state "$EVIDENCE/state" \
-  > "$EVIDENCE/replay.log" 2>&1
-REPLAY=$(sed -n 's/^[A-Z]*: //p' "$EVIDENCE/replay.log")
-"$SEEDBOX" inspect "$REPLAY" --json > "$EVIDENCE/replay-record.json"
-python3 examples/minio/verify.py "$REPLAY" --mode broken --replay
-# Required: replay MATCH / exit 0; retained application outcome remains FAIL.
-# Memory comes from x-seedbox.machine.memory_mb (2048) and is inherited from the original profile on replay.
-
-sudo -E env PATH="$PATH" "$SEEDBOX" run "$PROJECTS/fixed" --seed 0 "${RUNTIME[@]}" \
-  --state "$EVIDENCE/state" > "$EVIDENCE/fixed.log" 2>&1
-FIXED=$(sed -n 's/^[A-Z]*: //p' "$EVIDENCE/fixed.log")
-"$SEEDBOX" inspect "$FIXED" --json > "$EVIDENCE/fixed-record.json"
-python3 examples/minio/verify.py "$FIXED" --mode fixed
-# Required: PASS / exit 0; conflict retained, GET A == ack A; no unconditional retry.
+```sh
+build/current/seedbox run /absolute/minio-projects/qualification --seed 0
+build/current/seedbox run /absolute/minio-projects/broken --seed 0
+build/current/seedbox replay BROKEN_SIMULATION_ID
+build/current/seedbox run /absolute/minio-projects/fixed --seed 0
+build/current/seedbox describe simulation BROKEN_SIMULATION_ID --json
 ```
 
-Any ERROR, INCOMPLETE, TIMEOUT, MISMATCH, setup exit 2 or protocol discrepancy blocks continuation. Record actual cold preparation time, warm demo time and startup/memory observations; 2048 MiB is not a qualified minimum until measured.
+The expected oracle results are PASS, FAIL and PASS, with a MATCH for replay of
+the broken simulation. Guest assertions own those results. Attach
+`seedbox logs ID [MACHINE]` and `seedbox events ID` while a run is active to
+collect client-owned diagnostic evidence. New simulations use exact stop
+boundaries; removing the previous 2 ms tolerance changes those worlds' results.
+Do not silently retry failures or change memory/deadlines to obtain a pass.
 
-## Offline bundle replay
+Runtime input overrides belong to `seedbox serve`, not run/replay. Start a
+private foreground server with `SEEDBOX_STATE=/absolute/private-state` and any
+needed `serve --kernel`, `--vmm` or `--guest-init` overrides, then use the same
+`SEEDBOX_STATE` for its clients. Full-state capture is `serve --full-state`.
 
-Export the original FAIL, import into a fresh object store with host networking disabled, and replay in that network namespace. Guest networking remains the VMM's internal fabric. This tests the retained closure without registry/PyPI access; neither input acquisition nor image building belongs in replay. Preserve the original evidence/state.
+The former `verify.py` workflow reads historical offline manifests and archived
+console output; live server simulations do not create those stream archives.
+Offline bundle import does not register simulations in the server catalogue,
+so imported run directories cannot be submitted to `replay ID`. Historical
+export/import readers remain available, with `SEEDBOX_ARTIFACT_STATE` selecting
+their store independently from the server.
 
-```bash
-"$SEEDBOX" export "$BROKEN" --state "$EVIDENCE/state" -o "$EVIDENCE/broken.seedbox.tar"
-sudo -E unshare --net env PATH="$PATH" "$SEEDBOX" import "$EVIDENCE/broken.seedbox.tar" \
-  --state "$EVIDENCE/offline-state" > "$EVIDENCE/import.log" 2>&1
-IMPORTED=$(sed -n 's/^IMPORTED: //p' "$EVIDENCE/import.log")
-"$SEEDBOX" inspect "$IMPORTED" --json > "$EVIDENCE/imported-record.json"
-python3 examples/minio/verify.py "$IMPORTED" --mode broken
-sudo -E unshare --net env PATH="$PATH" "$SEEDBOX" replay "$IMPORTED" --cpu "$CPU" \
-  --state "$EVIDENCE/offline-state" > "$EVIDENCE/offline-replay.log" 2>&1
-OFFLINE_REPLAY=$(sed -n 's/^[A-Z]*: //p' "$EVIDENCE/offline-replay.log")
-"$SEEDBOX" inspect "$OFFLINE_REPLAY" --json > "$EVIDENCE/offline-replay-record.json"
-python3 examples/minio/verify.py "$OFFLINE_REPLAY" --mode broken --replay
-# Required: export/import exit 0; offline replay MATCH / exit 0, application FAIL.
-```
-
-Real CAS results, guest compatibility/memory, retained witnesses and both replay comparisons are still pending. Attach actual receipts and cleanup evidence to the acceptance record only after running these commands; portable fake-transport controls do not establish any of them.
+Native MinIO acceptance of this current workflow remains pending. Record actual
+receipts and cleanup evidence before claiming compatibility or determinism.

@@ -39,17 +39,16 @@ copies, after their Cargo build has finished.
 
 Groups: `linux` is `linux-kvm linux-oci linux-apps`; `mac` is
 `mac-hvf mac-apps`. Guest suites (fixture kernel and initrd, see `harness/worlds/README.md`) and
-`linux-pause` are always named explicitly. Application test servers allocate
-CPUs automatically.
+`linux-pause` are always named explicitly. Application tests use normal host scheduling.
 The application and pause/resume suites require a running Docker-compatible
 engine and guest build tools (Nix on Linux, a Podman or Docker CLI on Mac). After portable checks,
 they call `python3 tools/build.py` and select that exact completed directory.
 Ambient kernel, helper, and legacy VMM overrides cannot replace those inputs.
 The runtime itself never invokes this build command.
 
-The test supervisor leases a free core and its SMT siblings for application
-runs and releases them after reaping every owned process. This test selection
-makes no claim about cross-host replay.
+The test supervisor owns and reaps its processes without reserving CPUs or
+changing affinity. Operators can use external Linux `taskset` if desired.
+This test selection makes no claim about cross-host replay.
 
 Platform dependencies remain selected by Cargo target OS/architecture. Features
 enable test execution; they do not switch the production CPU backend or pin a

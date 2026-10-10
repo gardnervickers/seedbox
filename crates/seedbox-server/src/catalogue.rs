@@ -320,6 +320,7 @@ impl Catalogue {
     /// Returns (resource, newly_created). Retrying after an uncertain response
     /// returns the existing ID, including after server restart.
     pub fn submit(&mut self, request: SubmitRequest) -> Result<(Simulation, bool)> {
+        validate_submission_request_id(&request.request_id)?;
         self.submit_inner(request, None)
     }
 
@@ -409,6 +410,13 @@ impl Catalogue {
                 if original.status.phase != Phase::Completed {
                     return Err(Error::Invalid(
                         "rerun requires a completed simulation".into(),
+                    ));
+                }
+                if matches!(spec.inputs, InputSource::Retained { .. })
+                    && original.spec.seed != spec.seed
+                {
+                    return Err(Error::Invalid(
+                        "retained execution requires its source seed; use prepared inputs to vary the seed".into(),
                     ));
                 }
                 if original.spec.configuration != spec.configuration {
@@ -822,6 +830,16 @@ fn validate_request_id(id: &str) -> Result<()> {
     {
         return Err(Error::Invalid(
             "request ID must be 1-128 ASCII letters, digits, hyphens or underscores".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_submission_request_id(id: &str) -> Result<()> {
+    validate_request_id(id)?;
+    if id.starts_with("seeds-") {
+        return Err(Error::Invalid(
+            "request ID prefix seeds- is reserved for seed range members".into(),
         ));
     }
     Ok(())

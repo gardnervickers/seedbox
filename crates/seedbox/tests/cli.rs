@@ -8,6 +8,7 @@ use std::{
 /// `SUDO_USER` variables, `HOME` and scratch storage at `cwd`, and `PATH` set to
 /// `path` (empty if `None`), so no default can come from the developer's machine.
 fn seedbox_with(args: &[&str], cwd: &Path, path: Option<&Path>) -> Output {
+    let _server_cleanup = ServerCleanup(cwd.join(".local/state/seedbox/server.sock"));
     Command::new(env!("CARGO_BIN_EXE_seedbox"))
         .args(args)
         .current_dir(cwd)
@@ -18,6 +19,40 @@ fn seedbox_with(args: &[&str], cwd: &Path, path: Option<&Path>) -> Output {
         .env("PATH", path.map(Path::as_os_str).unwrap_or_default())
         .output()
         .unwrap()
+}
+
+/// A command may automatically start a daemon in this test's private HOME.
+struct ServerCleanup(std::path::PathBuf);
+impl Drop for ServerCleanup {
+    fn drop(&mut self) {
+        if !self.0.exists() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        let Ok(client) = seedbox_client::Client::connect_to(&self.0) else {
+            return;
+        };
+        let Ok(Ok(info)) = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.info()).await
+        }) else {
+            return;
+        };
+        // SAFETY: this server answered on the socket inside this test's private HOME.
+        unsafe {
+            libc::kill(info.process_id as i32, libc::SIGTERM);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline
+            && std::os::unix::net::UnixStream::connect(&self.0).is_ok()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
 
 fn seedbox(args: &[&str], cwd: &Path) -> Output {
@@ -63,26 +98,6 @@ fn relocated_cli_looks_for_kernel_beside_itself_without_build_tools() {
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --kernel PATH\n", root.join("kernel").display()));
     assert!(!root.join(".seedbox").exists());
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[test]
-fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::write(directory.path().join("compose.yaml"), "name: mac-options\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
-    {
-        let command = "doctor";
-        let args = [command, "--cpu", "1"];
-        let output = seedbox(&args, directory.path());
-        assert_eq!(output.status.code(), Some(2), "{args:?}");
-        assert!(output.stdout.is_empty(), "{args:?}");
-        assert_eq!(
-            stderr(&output),
-            "error: --cpu requires Linux KVM; omit it on Mac\n",
-            "{args:?}"
-        );
-        assert!(!directory.path().join(".seedbox").exists(), "{args:?}");
-    }
 }
 
 #[test]
@@ -400,26 +415,9 @@ fn setup_errors_name_the_missing_input_and_the_fix() {
 #[test]
 fn bad_values_are_usage_errors() {
     let directory = tempfile::tempdir().unwrap();
-    for (args, expected) in [
-        (&["run", "--watchdog-ms", "0"][..], "--watchdog-ms"),
-        (
-            &["replay", "abcd2345", "--watchdog-ms", "60001"],
-            "--watchdog-ms",
-        ),
-        (&["doctor", "--cpu", "5000"], "not in 0..1024"),
-        (
-            &["init", "x", "--template", "bogus"],
-            "possible values: etcd, redis",
-        ),
-    ] {
-        let output = seedbox(args, directory.path());
-        assert_eq!(output.status.code(), Some(2), "{args:?}");
-        assert!(
-            stderr(&output).contains(expected),
-            "{args:?}: {}",
-            stderr(&output)
-        );
-    }
+    let output = seedbox(&["init", "x", "--template", "bogus"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("possible values: etcd, redis"));
 }
 
 #[test]
@@ -794,10 +792,11 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("Linux KVM host"));
-    for flag in ["--cpu", "--kernel", "--vmm", "--json"] {
+    for flag in ["--kernel", "--vmm", "--json"] {
         assert!(text.contains(flag), "{text}");
     }
     for flag in [
+        "--cpu",
         "--state",
         "--builder",
         "--undo",
@@ -810,9 +809,6 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     let invalid_timebase = seedbox(&["doctor", "--timebase", "invalid"], root);
     assert_eq!(invalid_timebase.status.code(), Some(2));
     assert!(stderr(&invalid_timebase).contains("--timebase"));
-    let invalid = seedbox(&["doctor", "--cpu", "1024"], root);
-    assert_eq!(invalid.status.code(), Some(2));
-    assert!(stderr(&invalid).contains("--cpu"));
     for json in [false, true] {
         let mut args = vec!["doctor", "--vmm", "missing"];
         if json {
@@ -2090,4 +2086,18 @@ fn fault_input_errors_are_reported_before_connecting() {
         stderr(&large),
         "error: fault large.yaml: exceeds 65536 bytes\n"
     );
+}
+
+#[test]
+fn offline_artifact_and_server_state_use_distinct_environment_variables() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["prepare", "export", "import"] {
+        let output = seedbox(&["help", command], directory.path());
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(help.contains("SEEDBOX_ARTIFACT_STATE"), "{help}");
+        assert!(!help.contains("SEEDBOX_STATE="), "{help}");
+    }
+    let output = seedbox(&["help", "serve"], directory.path());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("SEEDBOX_STATE"));
 }

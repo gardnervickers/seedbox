@@ -52,68 +52,31 @@ build context acquires the SDK during generation. The Python controller is in
 `workload/scenario.py`; the protocol used by the independent client is separate
 from the fault RPC protocol.
 
-Run all cases and effect-error controls from `nix develop` on a Linux KVM
-host:
+Run the generated projects through the current public CLI on a Linux KVM host:
 
 ```sh
-bash crates/seedbox/tests/accept-runtime.sh /absolute/bzImage 14 /absolute/fault-evidence faults
+build/current/seedbox run /absolute/generated-faults/fixed
+build/current/seedbox run /absolute/generated-faults/broken
+build/current/seedbox run /absolute/generated-faults/broken-no-faults
+build/current/seedbox replay SIMULATION_ID
 ```
 
-The evidence output must be fresh. The harness writes its report and command logs
-incrementally, preserving completed evidence if a later case fails. The
-[acceptance record](ACCEPTANCE.md) identifies the binaries, retained outcomes,
-replay witnesses and review results it was run with. Older records remain
-archived separately.
+Expected oracle results are PASS, FAIL and PASS respectively; replay of each
+completed simulation must MATCH. The guest owns its assertions. Use
+`seedbox logs ID [MACHINE]` and `seedbox events ID` while execution is active;
+these streams have no historical backlog. Server startup owns runtime inputs.
+The previous host runner and archived-console acceptance workflow have been
+removed. `verify.py` remains an offline reader for historical retained evidence.
+Generation helpers retain the control, lifecycle, early-request and cutoff
+scenario sources for focused guest checks. The default synthetic merge checks
+run through `bash harness/check.sh linux-apps`.
 
-To invoke the harness directly after building the CLI, VMM, and guest supervisor:
+### Historical focused scenario evidence
 
-```sh
-python3 examples/faults/run.py \
-  --seedbox "$PWD/build/current/seedbox" \
-  --vmm "$PWD/crates/seedbox-vmm/target/release/seedbox-vmm" \
-  --kernel /absolute/bzImage --guest-init /absolute/guest-init \
-  --cpu 14 --state /absolute/fault-state --output /absolute/fault-evidence
-```
-
-The harness checks fixed PASS, broken FAIL, broken-without-faults PASS, and replay
-of all three. Replays use the default performance settings; only the
-lifecycle case varies them (below). It uses 512 MiB per guest to accommodate the
-Python image and 2 ms stop tolerance. Runs are not silently retried.
-
-Raw `output/vmm.json` retains the fault effects, control request/response history,
-simulated timing, and network counters. Counters must show continuing drops after
-partial healing and renewed NIC acceptance after final healing. Already routed
-frames remain queued; new sends crossing a cut are dropped. NIC acceptance includes
-its bounded backlog, independently of IRQ notification. Receiver drops cannot
-count as delivery. `verify.py RUN --expected PASS` checks the retained evidence;
-use `--expected FAIL` for the broken case and `--no-faults` for its control.
-
-For missing effects, compile the guest supervisor with `-DSEEDBOX_DROP_EFFECTS`
-and add `--negative-guest-init /absolute/no-effects`. For explicit rejection,
-compile it with `-DSEEDBOX_REJECT_EFFECTS` and add
-`--rejecting-guest-init /absolute/reject-effects`. Both must produce ERROR. The
-controls perform their port I/O inside the guests.
-
-Add `--delayed-guest-init /absolute/delayed-ready` to run four more executions
-after the existing nine-case matrix. Compile that supervisor with
-`-DSEEDBOX_TEST_READY_DELAY_NS=4000000000ULL`. The focused projects retain
-`SEEDBOX_TEST_DELAY_READY=1` on the server only, so its initial application starts
-normally but its supervisor announces management readiness four simulated seconds
-later. The controller and client retain ordinary startup.
-
-The early-request case records 32 generation-1 acknowledgements, requests a stop,
-and checks that its admission precedes the server's management readiness. The stop
-must take effect after readiness and the fixed dispatch delay. A restart and 96
-more acknowledgements then verify all 128 saved values. Its replay must MATCH.
-
-The cutoff case requests a stop immediately under a three-second simulation limit.
-It must retain the pending call without a response or applied effect and end as
-TIMEOUT, before the original admission-plus-five-second acknowledgement deadline.
-Its replay must MATCH. Reaching the real acknowledgement deadline remains ERROR;
-a simulation cutoff does not manufacture an acknowledgement failure. The verifier
-rejects a run whose request was too late to exercise admission before the cutoff.
-Use `verify.py RUN --focused early-request` or
-`verify.py RUN --focused readiness-cutoff` to inspect these records separately.
+The following descriptions and offline verification commands describe the
+older retained-console acceptance records, rather than the current live server
+workflow. New simulations use exact stop boundaries; the former 2 ms tolerance
+changed those worlds' results.
 
 The control-cases scenario runs after the matrix and is replayed once. It rejects
 restart on a running server and a second stop, closes its first connection, then
@@ -125,7 +88,7 @@ all four recoverable errors and the absence of an infrastructure ERROR.
 Use `verify.py RUN --focused control-cases` to inspect this evidence separately.
 
 The lifecycle-cases scenario runs next. It is replayed with the default settings
-and again with a different `--watchdog-ms`; both must MATCH. It first pauses only the server's process (SIGSTOP) with one
+and again with a different host watchdog interval; both were required to MATCH. It first pauses only the server's process (SIGSTOP) with one
 connection established and another opened while it is frozen: both requests
 hang with no FIN or RST, and both are answered after `resume_process`. It then
 pauses the whole server machine while an established connection sends a request: nothing

@@ -97,8 +97,6 @@ enum Command {
         after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run `python3 tools/build.py` or pass --kernel."
     )]
     Doctor {
-        #[command(flatten)]
-        cpu: CpuArg,
         /// Print the admitted observations as JSON.
         #[arg(long)]
         json: bool,
@@ -400,8 +398,6 @@ impl From<TemplateArg> for Template {
 
 /// Apple Silicon Mac runs the built-in HVF engine; every other host runs KVM.
 const MAC: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const CPU_REQUIRES_KVM: &str = "--cpu requires Linux KVM; omit it on Mac";
 const VMM_REQUIRES_KVM: &str = "--vmm requires Linux KVM; use the built-in Mac engine";
 
 #[derive(Args)]
@@ -424,27 +420,9 @@ impl ComposeArg {
 }
 
 #[derive(Args)]
-struct CpuArg {
-    /// Host CPU to pin the VMM to [default: first free core other than CPU 0's].
-    #[arg(long, env = "SEEDBOX_CPU", value_parser = clap::value_parser!(u32).range(0..1024))]
-    cpu: Option<u32>,
-}
-
-impl CpuArg {
-    /// `--cpu` pins a KVM core; the Mac engine selects no core.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    fn reject_on_mac(&self) -> Result<()> {
-        if MAC && self.cpu.is_some() {
-            return Err(Error::Setup(CPU_REQUIRES_KVM.into()));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Args)]
 struct StateArg {
     /// Directory holding the content store and recorded runs.
-    #[arg(long, env = "SEEDBOX_STATE", default_value = ".seedbox")]
+    #[arg(long, env = "SEEDBOX_ARTIFACT_STATE", default_value = ".seedbox")]
     state: PathBuf,
 }
 
@@ -516,7 +494,6 @@ impl RuntimeInputs {
     fn backends(
         &self,
         store: &ContentStore,
-        cpu: Option<u32>,
         simulation: &config::Simulation,
         cancellation: &CancellationToken,
     ) -> Result<(Preparer, Executor)> {
@@ -554,9 +531,6 @@ impl RuntimeInputs {
         };
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         let executor = {
-            if cpu.is_some() {
-                return Err(Error::Setup(CPU_REQUIRES_KVM.into()));
-            }
             Executor::Mac(seedbox_application::mac::MacExecutor::new(
                 &engine,
                 &kernel,
@@ -569,10 +543,10 @@ impl RuntimeInputs {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         let executor = {
             let executor = if self.kvm.vmm.is_some() {
-                VmmExecutor::new(&engine, store, cpu, machine.memory_mb, witness)?
+                VmmExecutor::new(&engine, store, machine.memory_mb, witness)?
                     .with_detected_contract(store, &engine)?
             } else {
-                VmmExecutor::new_internal(&engine, store, cpu, machine.memory_mb, witness)?
+                VmmExecutor::new_internal(&engine, store, machine.memory_mb, witness)?
             };
             Executor::Linux(
                 executor
@@ -676,7 +650,7 @@ fn run(cli: Cli) -> Result<u8> {
             template,
         } => init(&directory, template),
         Command::Validate { compose, json } => validate(&compose, json),
-        Command::Doctor { cpu, inputs, json } => doctor(&cpu, inputs, json),
+        Command::Doctor { inputs, json } => doctor(inputs, json),
         Command::Prepare {
             compose,
             output,
@@ -823,10 +797,9 @@ fn validate(compose: &ComposeArg, json: bool) -> Result<u8> {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn doctor(cpu: &CpuArg, inputs: KvmInputs, json: bool) -> Result<u8> {
+fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
-    cpu.reject_on_mac()?;
     if let Some(path) = inputs.vmm {
         defaults::existing("--vmm", path)?;
         if let Some(kernel) = inputs.kernel {
@@ -855,23 +828,21 @@ fn doctor(cpu: &CpuArg, inputs: KvmInputs, json: bool) -> Result<u8> {
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-fn doctor(cpu: &CpuArg, inputs: KvmInputs, json: bool) -> Result<u8> {
+fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
     let internal = inputs.vmm.is_none();
     let engine = defaults::engine(inputs.vmm)?;
     let kernel = backends::guest_kernel(inputs.kernel)?;
     let report = if internal {
-        VmmExecutor::doctor_internal(&engine, &kernel, cpu.cpu)?
+        VmmExecutor::doctor_internal(&engine, &kernel)?
     } else {
-        VmmExecutor::doctor(&engine, &kernel, cpu.cpu)?
+        VmmExecutor::doctor(&engine, &kernel)?
     };
     if json {
         output::json(&report)?;
     } else {
         output::status("VALID", "compatible execution profile");
-        output::field("cpu", report.cpu);
-        output::field("cpus", output::Csv(&report.cpus));
         if let Some(version) = &report.simulator_version {
             output::field("simulator", version);
         }
@@ -899,7 +870,7 @@ fn prepare(
     let (store, _) = state.open()?;
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
-    let (preparer, _) = inputs.backends(&store, None, &simulation, &cancellation)?;
+    let (preparer, _) = inputs.backends(&store, &simulation, &cancellation)?;
     if cancellation.is_cancelled() {
         return Err(Error::PreparationCancelled);
     }

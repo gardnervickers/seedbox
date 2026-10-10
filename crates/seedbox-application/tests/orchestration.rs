@@ -1233,7 +1233,7 @@ fn actual_vmm_admission_rejects_an_invalid_retained_profile_before_execution() {
     fs::write(&engine, b"fixture engine").unwrap();
     let store = ContentStore::new(fixture.directory.path().join("store"));
     let executor =
-        seedbox_application::vmm::VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits)
+        seedbox_application::vmm::VmmExecutor::new(&engine, &store, 512, WitnessMode::Exits)
             .unwrap();
     for allow_engine_change in [false, true] {
         let rejected = fixture
@@ -1960,23 +1960,6 @@ fn worker_capacity_and_serial_default_refuse_before_preparation_and_bounds_are_l
     assert!(capacity.attempts.is_empty() && capacity.inputs.is_none());
     assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 0);
-    // The concrete backend rejects pinned parallel requests before touching host
-    // admission, even on a machine that cannot qualify its fake engine.
-    let engine = fixture.directory.path().join("fake-engine");
-    fs::write(&engine, b"fixture engine").unwrap();
-    let executor = seedbox_application::vmm::VmmExecutor::new(
-        &engine,
-        &ContentStore::new(fixture.directory.path().join("store")),
-        Some(4),
-        512,
-        WitnessMode::Exits,
-    )
-    .unwrap();
-    assert!(executor
-        .preflight_workers(2)
-        .unwrap_err()
-        .to_string()
-        .contains("omit --cpu"));
 }
 
 #[test]
@@ -2078,7 +2061,7 @@ fn kvm_executor_profile_records_only_its_settings_and_replays() {
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
-    let executor = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
+    let executor = VmmExecutor::new(&engine, &store, 1024, WitnessMode::Exits).unwrap();
     assert_eq!(
         executor.profile().semantic_parameters,
         SemanticParameters::new(1024)
@@ -2155,7 +2138,7 @@ fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
-    let executor = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
+    let executor = VmmExecutor::new(&engine, &store, 1024, WitnessMode::Exits).unwrap();
     f.backend.profile = executor.profile();
     f.preparer.inputs.profile = executor.profile();
     let before = f.run();
@@ -2205,7 +2188,7 @@ fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
-    let off = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
+    let off = VmmExecutor::new(&engine, &store, 1024, WitnessMode::Exits).unwrap();
     assert_eq!(off.profile(), off.clone().with_deferred_tx(false).profile());
     let on = off.clone().with_deferred_tx(true);
     assert!(on.profile().semantic_parameters.deferred_tx);

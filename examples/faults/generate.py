@@ -37,6 +37,83 @@ def generate(destination, seed=1009, *, batch=32):
         (project / "workload" / ".dockerignore").write_text("__pycache__\n*.pyc\n.git\n.seedbox\n")
     return destination
 
+
+EARLY_SCENARIO = """import json
+import time
+from main import BATCH, exchange
+from seedbox import World
+
+
+def client(address, command):
+    if command != "STATUS":
+        return json.loads(exchange(address, command, timeout=12))
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            return json.loads(exchange(address, command))
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
+def run(address, no_faults=False):
+    with World.connect() as world:
+        client(address, "STATUS")
+        first = client(address, "LOAD 1")
+        assert first == {"generation": 1, "acked": BATCH, "total": BATCH}, first
+        world.stop("server")
+        world.sleep(0.1)
+        world.restart("server")
+        for total in (64, 96, 128):
+            result = client(address, "LOAD 2")
+            assert result == {"generation": 2, "acked": BATCH, "total": total}, result
+        result = client(address, "VERIFY")
+        assert result == dict(status="pass", acked=128, pre_restart=32,
+                              post_restart=96, generation=2, missing=0), result
+        print("EARLY_REQUEST_RESULT " + json.dumps(result, sort_keys=True), flush=True)
+        return 0
+"""
+
+CUTOFF_SCENARIO = """from seedbox import World
+
+
+def run(address, no_faults=False):
+    with World.connect() as world:
+        world.stop("server")
+        raise RuntimeError("stop unexpectedly completed before the simulation cutoff")
+"""
+
+
+def focused_projects(projects):
+    """Fresh retained inputs for readiness and cutoff checks; no host fault calls."""
+    projects = Path(projects)
+    for name, program in (("early-request", EARLY_SCENARIO), ("readiness-cutoff", CUTOFF_SCENARIO)):
+        destination = projects / name
+        shutil.copytree(projects / "fixed", destination)
+        compose = destination / "compose.yaml"
+        text = compose.read_text().replace("name: synthetic-fault-fixed", "name: synthetic-fault-" + name)
+        server = '    command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]\n'
+        assert text.count(server) == 1, "missing canonical server command"
+        text = text.replace(server, server + '    environment: {SEEDBOX_TEST_DELAY_READY: "1"}\n')
+        if name == "readiness-cutoff":
+            text = text.replace("simulated_time: 30s", "simulated_time: 3s")
+        compose.write_text(text)
+        (destination / "workload" / "scenario.py").write_text(program)
+
+
+def control_project(projects, name="control-cases", scenario="control_scenario.py"):
+    destination = Path(projects) / name
+    shutil.copytree(Path(projects) / "fixed", destination)
+    compose = destination / "compose.yaml"
+    text = compose.read_text().replace("name: synthetic-fault-fixed", "name: synthetic-fault-" + name)
+    server = '    command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]'
+    assert text.count(server) == 1
+    text = text.replace(server, server + '\n    entrypoint: [python3, /workload/control_target.py]')
+    compose.write_text(text)
+    shutil.copyfile(destination / "workload" / scenario, destination / "workload/scenario.py")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination")

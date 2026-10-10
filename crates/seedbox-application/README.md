@@ -30,7 +30,7 @@ cargo run -- inspect .seedbox/runs/<attempt> --json
 
 The CLI links the platform VMM through target-specific dependencies and builds
 on the flake's Darwin and Linux development hosts. The workspace lockfile is checked in. Validation
-does not start guests, access registries, build images, or acquire a host lease.
+does not start guests, access registries or build images.
 It does check the existence of referenced local Dockerfiles and config files.
 `--json` prints the resolved environment, so its output may contain values the
 caller considers sensitive. Plain validation output does not print those values.
@@ -61,12 +61,12 @@ not establish image/kernel compatibility; preparation must check that separately
 | `x-seedbox.seed` | Optional unsigned 64-bit fixed seed. The library run option overrides it; absence of both is an error. Zero is valid. |
 | `x-seedbox.limits` | Required positive `simulated_time` and `wall_time`. |
 | `x-seedbox.network` | Optional `latency` (default `1ms`), `jitter` (default `0ns`) and directed `links` baselines (default `[]`). Jitter must be less than latency. See [directed policy](../../docs/runtime.md#directed-link-policy). |
-| `x-seedbox.schedule` | Optional `timer_jitter` and `stop_tolerance`, each defaulting to `0ns`. These are semantic schedule exploration settings. |
-| `x-seedbox.check` | Required known `service` and optional `exit_code` (default `0`, range 0–255). |
+| `x-seedbox.schedule` | Optional `timer_jitter`, defaulting to `0ns`. This is a semantic schedule exploration setting; stop boundaries are exact. |
+| `x-seedbox.check` | Known oracle `service` (defaults to `oracle`). Only oracle exit zero passes; nonzero fails. |
 | `x-seedbox.control` | Optional `{service: scenario}` selects the guest controller for the runtime RPC API. |
 | `x-seedbox.faults` | Omitted or `[]` only. Fault operations are issued through the runtime API; declarative schedules are future work. |
 
-The current VMM may deliver scheduled events/frames up to `early = min(latency/2, stop_tolerance)` early, never late. Effective one-way delay lies in `[latency - early, latency + jitter]`. Timer jitter and stop tolerance are retained in the simulation identity and passed explicitly to the executor.
+New simulations use exact stop boundaries (`stop_tolerance = 0`). Removing the former early-delivery tolerance changes results for worlds that previously configured it. Timer jitter remains retained in simulation identity.
 
 Durations use `ns`, `us`, `ms`, `s`, `m`, or `h`, including exact decimals such as
 `1.25ms`. Fractional nanoseconds and overflow are rejected. `image` and `build`
@@ -127,10 +127,10 @@ fn run_and_replay(
 Calls are synchronous and runtime-independent. An async application can use its
 blocking-task facility; cancellation is a clonable token the backend must honor.
 Concurrent calls use private attempt directories and a shared content store.
-The caller supplies the executor's CPU selection. Core reservations, process
-lifecycle and restoration belong to the executor. Multi-core scheduling is not
-implemented by this crate yet. Signal handlers exist only at the CLI boundary;
-programmatic callers control the cancellation token.
+The host scheduler places worker processes and threads; the executor does not
+pin CPUs or reserve cores. Process lifecycle and cleanup belong to the executor.
+Signal handlers exist only at the CLI boundary; programmatic callers control
+the cancellation token.
 
 `Orchestrator::run_prepared` executes a supplied complete retained closure through
 the same verification and manifest lifecycle as run. `Orchestrator::explore` accepts

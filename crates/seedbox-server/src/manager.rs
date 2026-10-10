@@ -2,7 +2,7 @@
 //! outside this lock; only durable lifecycle changes and their publication use it.
 
 use crate::catalogue::{Catalogue, Error};
-use crate::stream::{Payload, Stream, Subscription};
+use crate::stream::{Payload, PublishError, Stream, Subscription};
 use seedbox_api::{ControlReceipt, ControlRequest, ControlState, LogEntry};
 use seedbox_api::{EventKind, SimulationEvent};
 use seedbox_api::{ExecutionTermination, Phase, Simulation, SimulationId, SubmitRequest};
@@ -91,6 +91,23 @@ impl Live {
         }
     }
 
+    fn publish_event(&self, mut event: SimulationEvent) {
+        // An oversized observation loses only its payload, never the live stream.
+        // Durable control receipts remain available through resource inspection.
+        match self.events.publish(event.clone()) {
+            Err(PublishError::TooLarge { .. }) => {
+                event.event = EventKind::SourceUnavailable;
+                if self.events.publish(event).is_err() {
+                    let _ = self.events.close();
+                }
+            }
+            Err(_) => {
+                let _ = self.events.close();
+            }
+            Ok(_) => {}
+        }
+    }
+
     fn project(&self, status: &mut seedbox_api::SimulationStatus, now: Instant) {
         self.timing.project(status, now);
         if let Some((sample, received)) = &self.playback {
@@ -140,30 +157,20 @@ impl Live {
             }
         }
         for event in kinds {
-            // Observation delivery never changes the result of a committed
-            // mutation. A failed publisher closes so readers cannot mistake a
-            // broken stream for an idle simulation.
-            if self
-                .events
-                .publish(SimulationEvent {
-                    simulation: resource.metadata.id.clone(),
-                    revision: resource.metadata.revision,
-                    simulated_time_ns: (!matches!(
-                        previous.status.phase,
-                        Phase::Queued | Phase::Preparing
-                    ) || matches!(
-                        resource.status.phase,
-                        Phase::Running | Phase::Finalizing
-                    ))
-                    .then_some(resource.status.simulated_time_ns),
-                    position: None,
-                    event,
-                })
-                .is_err()
-            {
-                let _ = self.events.close();
-                break;
-            }
+            self.publish_event(SimulationEvent {
+                simulation: resource.metadata.id.clone(),
+                revision: resource.metadata.revision,
+                simulated_time_ns: (!matches!(
+                    previous.status.phase,
+                    Phase::Queued | Phase::Preparing
+                ) || matches!(
+                    resource.status.phase,
+                    Phase::Running | Phase::Finalizing
+                ))
+                .then_some(resource.status.simulated_time_ns),
+                position: None,
+                event,
+            });
         }
         self.status.send_replace(resource.clone());
     }
@@ -249,11 +256,7 @@ impl State {
                     control: Box::new(control),
                 },
             };
-            if live.events.publish(event).is_err() {
-                // Observation failure cannot undo a durable control receipt or
-                // stop execution. Readers can recover receipts through the API.
-                let _ = live.events.close();
-            }
+            live.publish_event(event);
         }
         Ok(())
     }
@@ -757,9 +760,7 @@ impl Manager {
             position: None,
             event,
         };
-        if live.events.publish(observation).is_err() {
-            let _ = live.events.close();
-        }
+        live.publish_event(observation);
     }
 
     pub(crate) fn publish_log(&self, id: &SimulationId, entry: LogEntry) {
@@ -852,6 +853,118 @@ mod tests {
         BoundaryPosition, InputSource, PlaybackRate, PlaybackStatus, SimulationSpec, Stage,
         SubmitRequest,
     };
+
+    #[tokio::test]
+    async fn oversized_observations_keep_event_stream_and_durable_receipts_available() {
+        use crate::stream::Delivery;
+        let directory = tempfile::tempdir().unwrap();
+        let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
+        let configuration = seedbox_application::config::parse(
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            std::path::Path::new("/project/compose.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let id = manager
+            .submit(SubmitRequest {
+                request_id: "oversized-events".into(),
+                spec: SimulationSpec {
+                    seed: Some(1),
+                    inputs: InputSource::Project,
+                    configuration,
+                },
+            })
+            .unwrap()
+            .0
+            .metadata
+            .id;
+        manager.begin(&id).unwrap().unwrap();
+        manager
+            .update(&id, |s| {
+                s.status.phase = Phase::Running;
+            })
+            .unwrap();
+        let mut events = manager.events(&id).unwrap();
+        let request = ControlRequest {
+            request_id: "step".into(),
+            command: seedbox_api::ControlCommand::Step,
+        };
+        manager
+            .0
+            .lock()
+            .unwrap()
+            .catalogue
+            .accept_control(&id, request)
+            .unwrap();
+        let receipt = ControlState::Acknowledged {
+            status: PlaybackStatus {
+                position: BoundaryPosition {
+                    boundary_index: 1,
+                    completed_rounds: 1,
+                    simulated_time_ns: 10,
+                },
+                rate: PlaybackRate::Paused,
+                achieved_rate: None,
+                stepping: true,
+                terminal: false,
+                application_ready: true,
+            },
+            error: None,
+            intervention: None,
+            checkpoint: None,
+            detail: Some("x".repeat(9000)),
+        };
+        manager
+            .acknowledge_control(&id, "step", receipt.clone())
+            .unwrap();
+        assert_eq!(
+            manager
+                .read(|c| Ok(c.control_receipt(&id, "step")?.unwrap().state.clone()))
+                .unwrap(),
+            receipt
+        );
+        let Delivery::Record(record) = events.recv().await else {
+            panic!("oversized control closed stream")
+        };
+        assert_eq!(record.payload.event, EventKind::SourceUnavailable);
+        manager.publish_engine_event(
+            &id,
+            10,
+            EventKind::ExecutionTerminated {
+                termination: ExecutionTermination::Error {
+                    message: "x".repeat(9000),
+                },
+            },
+        );
+        let Delivery::Record(record) = events.recv().await else {
+            panic!("oversized engine event closed stream")
+        };
+        assert_eq!(record.payload.event, EventKind::SourceUnavailable);
+        manager
+            .update(&id, |s| {
+                s.status.termination = Some(ExecutionTermination::Error {
+                    message: "x".repeat(9000),
+                });
+            })
+            .unwrap();
+        let Delivery::Record(record) = events.recv().await else {
+            panic!("oversized lifecycle event closed stream")
+        };
+        assert_eq!(record.payload.event, EventKind::SourceUnavailable);
+        let mut newcomer = manager.events(&id).unwrap();
+        let ready = EventKind::MachineReady {
+            machine: "oracle".into(),
+            incarnation: 0,
+        };
+        manager.publish_engine_event(&id, 11, ready.clone());
+        for reader in [&mut events, &mut newcomer] {
+            let Delivery::Record(record) = reader.recv().await else {
+                panic!("later event unavailable")
+            };
+            assert_eq!(record.payload.event, ready);
+        }
+        assert!(!manager.cancellation(&id).unwrap().is_cancelled());
+    }
 
     #[test]
     fn committed_oracle_exit_survives_missing_final_report_and_catalogue_restart() {

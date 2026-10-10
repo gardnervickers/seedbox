@@ -119,7 +119,8 @@ Server state defaults to `$XDG_STATE_HOME/seedbox` or
 `$HOME/.local/state/seedbox`; `SEEDBOX_STATE` selects another location. Use
 `seedbox serve` to run the server in the foreground. Starting it never builds
 assets or starts Docker/Podman. Offline artifact inspection and transfer remain
-available for retained run directories.
+available for retained run directories. Offline `prepare`, `export` and `import`
+use `--state` or `SEEDBOX_ARTIFACT_STATE`, defaulting to `.seedbox`.
 
 ## Learn more
 

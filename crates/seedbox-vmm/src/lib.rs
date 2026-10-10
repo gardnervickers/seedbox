@@ -338,7 +338,6 @@ fn simulate_segment(
     // Each pool thread opens its own clock: the watchdog measures that
     // thread's CPU time.
     let watchdog_ms = request.performance.watchdog_ms;
-    let cpus = &request.machine_cpus;
     let workers = world_windowed::Workers {
         count: request.machine_workers,
         skew,
@@ -347,12 +346,7 @@ fn simulate_segment(
         world,
         run,
         workers,
-        |w| {
-            if let Some(&cpu) = cpus.get(w) {
-                pin(cpu)?;
-            }
-            open_clock(watchdog_ms)
-        },
+        |_| open_clock(watchdog_ms),
         &mut boundary,
     )
 }
@@ -388,20 +382,6 @@ fn simulate_windowed(
     }
 }
 
-/// Pin the calling thread to one CPU.
-fn pin(cpu: usize) -> Result<(), String> {
-    unsafe {
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_SET(cpu, &mut set);
-        if libc::sched_setaffinity(0, std::mem::size_of_val(&set), &set) != 0 {
-            return Err(format!(
-                "pin machine worker to CPU {cpu}: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-    }
-    Ok(())
-}
 use world_core::reseed_checkpoint;
 
 fn release(

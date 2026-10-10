@@ -62,6 +62,15 @@ fn simulation_id(output: &str) -> Result<&str, String> {
         .ok_or_else(|| format!("missing PASS simulation ID: {output}"))
 }
 
+fn require_full_state_match(output: &str) -> Result<(), String> {
+    let comparison: seedbox_api::SimulationComparison =
+        serde_json::from_str(output).map_err(|error| format!("comparison: {error}"))?;
+    if comparison.full_state_matches != Some(true) {
+        return Err(format!("missing full-state MATCH: {output}"));
+    }
+    Ok(())
+}
+
 #[test]
 fn every_application_runs_twice_and_reruns_through_the_server() {
     let cli = std::env::var_os("SEEDBOX_TEST_CLI")
@@ -103,18 +112,44 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
             .join(workload.file_stem().unwrap());
         fs::create_dir_all(&directory).unwrap();
         let check = || -> Result<(), String> {
-            let run = ["run", workload.to_str().unwrap(), "--seed", "1009"];
-            let first = invoke(Path::new(&cli), &directory, state, "first", &run)?;
-            let second = invoke(Path::new(&cli), &directory, state, "second", &run)?;
-            let first = simulation_id(&first)?;
-            let second = simulation_id(&second)?;
-            invoke(
+            let first_output = invoke(
+                Path::new(&cli),
+                &directory,
+                state,
+                "first",
+                &["run", workload.to_str().unwrap()],
+            )?;
+            let first = simulation_id(&first_output)?;
+            let described = invoke(
+                Path::new(&cli),
+                &directory,
+                state,
+                "describe-first",
+                &["describe", "simulation", first, "--json"],
+            )?;
+            let resource: seedbox_api::Simulation = serde_json::from_str(&described)
+                .map_err(|error| format!("describe first: {error}"))?;
+            let seed = resource
+                .spec
+                .seed
+                .ok_or("first simulation has no seed")?
+                .to_string();
+            let second_output = invoke(
+                Path::new(&cli),
+                &directory,
+                state,
+                "second",
+                &["run", workload.to_str().unwrap(), "--seed", &seed],
+            )?;
+            let second = simulation_id(&second_output)?;
+            let comparison = invoke(
                 Path::new(&cli),
                 &directory,
                 state,
                 "compare",
-                &["compare", first, second],
+                &["compare", first, second, "--json"],
             )?;
+            require_full_state_match(&comparison)?;
             let repeated = invoke(
                 Path::new(&cli),
                 &directory,
@@ -122,13 +157,14 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 "rerun",
                 &["rerun", first],
             )?;
-            invoke(
+            let comparison = invoke(
                 Path::new(&cli),
                 &directory,
                 state,
                 "compare-rerun",
-                &["compare", first, simulation_id(&repeated)?],
+                &["compare", first, simulation_id(&repeated)?, "--json"],
             )?;
+            require_full_state_match(&comparison)?;
             Ok(())
         };
         if let Err(error) = check() {
@@ -152,7 +188,7 @@ impl Server {
     fn start(cli: &Path, state: &Path) -> Result<Self, String> {
         let mut server = Self(
             Command::new(cli)
-                .args(["serve", "--startup-handshake"])
+                .args(["serve", "--startup-handshake", "--full-state"])
                 .env("SEEDBOX_STATE", state)
                 .stdout(Stdio::piped())
                 .spawn()

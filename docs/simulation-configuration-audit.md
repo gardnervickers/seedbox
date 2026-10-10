@@ -10,7 +10,9 @@ The Compose parser now fixes stop tolerance at zero and page timer/deferred TX
 at false. `check.exit_code` is rejected in Compose; oracle exit zero passes and
 every nonzero exit fails. Fresh API submissions enforce those defaults as well. Retained input
 records preserve old settings for replay. Examples and acceptance Compose files
-use the reduced authoring surface.
+use the reduced authoring surface. Fixing the formerly configurable stop
+tolerance to zero changes results for worlds that used nonzero early-delivery
+tolerance; fresh runs are not expected to match those older worlds.
 
 ## Ownership
 
@@ -49,12 +51,12 @@ does not automatically become a configurable public API field.
 | `page_timer`, `deferred_tx` | KVM-specific implementation paths | Remove authoring overrides; use existing false defaults until engine changes choose a replacement. Retain actual values in internal reproduction inputs. |
 | Torn disk writes | Crash durability policy; result-changing | Keep experiment parameter, default false. |
 | Static fault arrays | Already rejected by parser | Remove; use the guest scenario API or interactive controls. |
-| CPU / `SEEDBOX_CPU` | Host admission and lease | Automatic server allocation; no submission field. |
+| Host CPU scheduling | Host scheduling | No Seedbox binding option or lease; external affinity tools remain available. |
 | Exploration workers | Host concurrent execution capacity | Server scheduling based on available capacity; no experiment field. Keep seed range/count as batch submission intent. |
 | Watchdog milliseconds | Diagnostic interruption cadence | Fixed implementation default, currently 20 ms; no authoring flag. |
 | Kernel/VMM/runtime assets/init/mke2fs | CLI discovery, preparation, worker launch | Discover once at server executable boundary; no per-simulation override. Continue to retain exact execution inputs. |
 | Docker/Podman endpoint | CLI discovery and OCI transport | Server connection discovery, with explicit server environment override. Never contact the engine for retained-input reruns. |
-| State directory / `SEEDBOX_STATE` | Content store and run allocation | User-wide server state by default, with an explicit server location override. Client working directory must not select a different daemon implicitly. |
+| State directory / `SEEDBOX_STATE` | Server catalogue and execution storage | User-wide server state by default, with an explicit server location override. Client working directory must not select a different daemon implicitly. |
 | Full-state evidence | Execution profile and retained comparisons | Keep the existing exit-witness default initially; the CLI currently selects full state only with `--full-state`. Do not expose that toggle in the public spec. Checkpoint capture retains the state needed for restoration independently of terminal comparison detail. |
 | `checkpoint-at-ns`, `branch-seed` | One-shot worker launch operations | Replace paired run flags with checkpoint and branch resource operations. |
 | Replay VMM override | Alternate engine comparison | Remove from ordinary rerun. Fresh source changes prepare a new simulation; rerun uses retained engine/inputs. |

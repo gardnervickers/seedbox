@@ -1600,7 +1600,7 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
     let engine = dir.path().join("engine");
     std::fs::write(&engine, b"engine").unwrap();
     let store = ContentStore::new(dir.path().join("objects"));
-    let executor = vmm::VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
+    let executor = vmm::VmmExecutor::new(&engine, &store, 512, WitnessMode::Exits).unwrap();
     let original = executor.profile();
     assert!(!original.semantic_parameters.torn_writes);
     assert_eq!(original.semantic_parameters.memory_mb, 512);

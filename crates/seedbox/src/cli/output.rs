@@ -1,8 +1,6 @@
 //! Text results on stdout: one `WORD: detail` status line, then lowercase
 //! `key: value` fields. Diagnostics go to stderr elsewhere.
 use seedbox_application::Result;
-#[cfg(any(target_os = "linux", test))]
-use std::fmt;
 use std::fmt::Display;
 
 /// Print the command's one `WORD: detail` status line.
@@ -63,32 +61,5 @@ pub fn word(value: &impl serde::Serialize) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(word)) => word,
         _ => "UNKNOWN".into(),
-    }
-}
-
-/// Values separated by commas, without spaces.
-#[cfg(any(target_os = "linux", test))]
-pub struct Csv<'a, T>(pub &'a [T]);
-#[cfg(any(target_os = "linux", test))]
-impl<T: Display> Display for Csv<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, value) in self.0.iter().enumerate() {
-            if index > 0 {
-                f.write_str(",")?;
-            }
-            value.fmt(f)?;
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wrappers_match_the_documented_text() {
-        assert_eq!(Csv::<u32>(&[]).to_string(), "");
-        assert_eq!(Csv(&[3, 4, 10]).to_string(), "3,4,10");
     }
 }

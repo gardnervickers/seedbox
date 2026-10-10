@@ -15,10 +15,10 @@ not part of the default acceptance suite.
 After building the release CLI and guest assets, with Docker/Podman available:
 
 ```sh
-./build/current/seedbox run examples/runtimes/postgres --full-state
-./build/current/seedbox replay .seedbox/runs/ATTEMPT
+./build/current/seedbox run examples/runtimes/postgres
+./build/current/seedbox replay SIMULATION_ID
 ```
 
 Replace `postgres` with another directory above.
-Run twice and use `seedbox diff RUN_A RUN_B` to check fresh-run determinism.
+Run twice and use `seedbox compare SIMULATION_A SIMULATION_B` to check fresh-run determinism.
 These are runnable examples, not claims of general application compatibility.

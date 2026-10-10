@@ -290,7 +290,8 @@ to the server executable boundary; libraries receive explicit paths and clients.
 
 The server owns the simulation catalogue, preparation, resource allocation,
 isolated worker processes, outcomes and retained inputs. Clients own rendering.
-Do not give clients ownership of CPU leases or guest process lifetimes.
+Do not give clients ownership of guest process lifetimes. Host scheduling and
+external affinity remain outside Seedbox; no CPU leases or binding options exist.
 
 Build on `orchestration.rs`, `execution.rs` and `worker_process.rs`. Keep
 `seedbox-artifacts` usable offline and free of server/hypervisor dependencies.

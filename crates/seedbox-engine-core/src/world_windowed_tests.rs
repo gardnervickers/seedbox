@@ -1686,3 +1686,63 @@ fn failed_intervention_persistence_stops_before_admission_or_guest_execution() {
     assert!(w.faults.log.is_empty());
     assert_eq!(w.faults.next_boundary(), u64::MAX);
 }
+
+#[test]
+fn rejected_interactive_state_does_not_terminate_the_world_or_add_fault_history() {
+    for paused in [false, true] {
+        let mut w = world(&["a", "b"]);
+        w.early = 0;
+        if paused {
+            plan(
+                &mut w,
+                2,
+                Action::Pause {
+                    machine: "a".into(),
+                },
+            );
+        }
+        w.machines[1].steps.push_back(Step::new(5, Stop::Control));
+        let run = Run {
+            duration: 30,
+            end_on: None,
+            fork: None,
+            checkpoint: None,
+            require_barrier: false,
+        };
+        let mut attempted = false;
+        let (outcome, _) = simulate(&mut w, &run, Duration::ZERO, &mut |boundary, admission| {
+            if attempted || boundary.position.simulated_time_ns < 5 || boundary.terminal {
+                return Ok(());
+            }
+            attempted = true;
+            let at = admission.earliest_effect_ns();
+            let action = if paused {
+                Action::Stop {
+                    machine: "a".into(),
+                }
+            } else {
+                Action::Heal {
+                    handle: "typo".into(),
+                }
+            };
+            assert!(admission
+                .propose(
+                    "invalid".into(),
+                    Plan {
+                        id: 0,
+                        at_ns: at,
+                        deadline_ns: at + 10,
+                        action,
+                    }
+                )
+                .is_err());
+            assert!(!admission.changed());
+            Ok(())
+        })
+        .unwrap();
+        assert!(attempted);
+        assert_eq!(outcome, RunOutcome::Duration);
+        assert!(w.faults.error.is_none());
+        assert_eq!(w.faults.log.len(), usize::from(paused));
+    }
+}

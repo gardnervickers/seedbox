@@ -34,7 +34,7 @@ impl BackendProvider for NativeBackends {
         cancellation: &CancellationToken,
     ) -> Result<Backends> {
         super::validate_machine(configuration)?;
-        let (preparation, execution) = self.0.backends(store, None, configuration, cancellation)?;
+        let (preparation, execution) = self.0.backends(store, configuration, cancellation)?;
         Ok(Backends {
             preparation: Box::new(preparation),
             execution: Box::new(execution),
@@ -68,7 +68,6 @@ impl BackendProvider for NativeBackends {
                 &engine,
                 store,
                 inputs.profile.clone(),
-                None,
             )?)
         };
         Ok(Box::new(executor))

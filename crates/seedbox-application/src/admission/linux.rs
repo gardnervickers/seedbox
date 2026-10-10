@@ -7,93 +7,6 @@ use std::{
     os::fd::AsRawFd,
 };
 
-struct Affinity {
-    original: libc::cpu_set_t,
-    active: bool,
-}
-impl Affinity {
-    fn pin(cpu: u32) -> Result<Self> {
-        if cpu >= libc::CPU_SETSIZE as u32 {
-            return Err(Error::Setup("CPU exceeds affinity mask".into()));
-        }
-        let mut original = unsafe { std::mem::zeroed() };
-        if unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&original), &mut original) }
-            != 0
-        {
-            return Err(Error::Setup(format!(
-                "read thread affinity: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        let mut pinned = unsafe { std::mem::zeroed() };
-        unsafe {
-            libc::CPU_ZERO(&mut pinned);
-            libc::CPU_SET(cpu as usize, &mut pinned);
-        }
-        if unsafe { libc::sched_setaffinity(0, std::mem::size_of_val(&pinned), &pinned) } != 0 {
-            return Err(Error::Setup(format!(
-                "CPU {cpu} temporary affinity: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(Self {
-            original,
-            active: true,
-        })
-    }
-    fn restore(&mut self) -> Result<()> {
-        if self.active {
-            let expected = affinity_bits(&self.original);
-            checked_affinity_restore(
-                &expected,
-                || {
-                    if unsafe {
-                        libc::sched_setaffinity(
-                            0,
-                            std::mem::size_of_val(&self.original),
-                            &self.original,
-                        )
-                    } != 0
-                    {
-                        return Err(Error::Execution(format!(
-                            "restore preflight affinity: {}",
-                            std::io::Error::last_os_error()
-                        )));
-                    }
-                    Ok(())
-                },
-                || {
-                    let mut restored = unsafe { std::mem::zeroed() };
-                    if unsafe {
-                        libc::sched_getaffinity(0, std::mem::size_of_val(&restored), &mut restored)
-                    } != 0
-                    {
-                        return Err(Error::Execution(format!(
-                            "read restored preflight affinity: {}",
-                            std::io::Error::last_os_error()
-                        )));
-                    }
-                    Ok(affinity_bits(&restored))
-                },
-            )?;
-            self.active = false;
-        }
-        Ok(())
-    }
-}
-fn affinity_bits(mask: &libc::cpu_set_t) -> Vec<u32> {
-    (0..libc::CPU_SETSIZE as u32)
-        .filter(|cpu| unsafe { libc::CPU_ISSET(*cpu as usize, mask) })
-        .collect()
-}
-impl Drop for Affinity {
-    fn drop(&mut self) {
-        if let Err(error) = self.restore() {
-            eprintln!("seedbox: {error}");
-        }
-    }
-}
-
 fn text(path: &str) -> Result<String> {
     let mut data = String::new();
     File::open(path)
@@ -117,10 +30,16 @@ fn query(file: &File, command: libc::c_ulong, argument: libc::c_ulong) -> Result
     Ok(result)
 }
 
-fn collect(cpu: u32) -> Result<CoreObservation> {
-    if unsafe { libc::sched_getcpu() } != cpu as i32 {
-        return Err(Error::Execution("preflight CPU affinity changed".into()));
+fn collect() -> Result<CoreObservation> {
+    // CPU identity is diagnostic metadata only; scheduling remains inherited.
+    let cpu = unsafe { libc::sched_getcpu() };
+    if cpu < 0 {
+        return Err(Error::Setup(format!(
+            "observe current CPU: {}",
+            std::io::Error::last_os_error()
+        )));
     }
+    let cpu = cpu as u32;
     let cpuinfo = text("/proc/cpuinfo")?;
     let fields = cpuinfo
         .split("\n\n")
@@ -197,8 +116,6 @@ fn collect(cpu: u32) -> Result<CoreObservation> {
     })
 }
 
-pub(super) fn observe(cpu: u32) -> Result<CoreObservation> {
-    let affinity = Affinity::pin(cpu)?;
-    // Every descriptor the probe opens closes before affinity restoration.
-    scoped_probe(affinity, || collect(cpu), Affinity::restore)
+pub(super) fn observe() -> Result<CoreObservation> {
+    collect()
 }

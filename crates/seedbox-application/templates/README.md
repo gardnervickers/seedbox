@@ -105,3 +105,6 @@ consecutive seeds using one preparation. Inspect them with
 `seedbox stop SOURCE_ID --all-seeds`. Each member has an ordinary simulation ID
 for describe, application logs and events. Closing the client does not cancel
 accepted work. The server chooses concurrency; no worker-count flag is needed.
+
+Server storage is selected by `SEEDBOX_STATE`. Offline `prepare`, `export` and
+`import` use `--state` or `SEEDBOX_ARTIFACT_STATE`, defaulting to `.seedbox`.

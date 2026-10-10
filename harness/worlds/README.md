@@ -37,8 +37,8 @@ and identities.
 | `entropy-barrier.json` | The same guest forked at its launch barrier instead (see below) |
 | `window2.json`, `window4.json` | Windowed-scheduler evidence: guests hash memory while pinging a neighbour; run by `harness/windowed-matrix.sh` ([design](../../docs/windowed-scheduler.md)) |
 
-`batch.sh` and `batch.py` still run these fixtures with shared CPU/SMT
-leases. Runtime lifecycle tests also use their CPU topology helpers. `guest/build-netns.sh` still needs `build-client.sh`,
+`batch.sh` and `batch.py` run these fixtures with normal host scheduling.
+Seedbox does not reserve cores or set CPU affinity. `guest/build-netns.sh` still needs `build-client.sh`,
 `build-initramfs.sh`, `cluster.init`, `single.init`, `network.sh`, `members.sh`,
 `netprobe.c` and `sbx.c` for the one-VM/multi-VM comparison. The raw boot/network
 fixtures use the same initramfs builder. These dependencies are not replaced by
@@ -69,8 +69,8 @@ that seed alone, byte for byte: compare `world_witness` and, with `--digest`,
 each machine's `state_digest`.
 
 ```sh
-CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/cluster-fork.json fork-cold "1010" --digest
-CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork.json fork-loop "1009" --digest --fork-seeds 1010,1011
+SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/cluster-fork.json fork-cold "1010" --digest
+SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork.json fork-loop "1009" --digest --fork-seeds 1010,1011
 ```
 
 With `boot.fork_at_ns` instead, the world forks at a simulated time rather
@@ -133,9 +133,9 @@ Management readiness signalled before a time fork carries over to every seed.
 run its seeds alone and in both orders and compare the witnesses:
 
 ```sh
-for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/cluster-fork-skew.json fork-skew-cold "$s" --digest; done
-CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork-skew.json fork-skew-ab "1009" --digest --fork-seeds 1010,1011
-CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork-skew.json fork-skew-ba "1009" --digest --fork-seeds 1011,1010
+for s in 1010 1011; do SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/cluster-fork-skew.json fork-skew-cold "$s" --digest; done
+SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork-skew.json fork-skew-ab "1009" --digest --fork-seeds 1010,1011
+SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork-skew.json fork-skew-ba "1009" --digest --fork-seeds 1011,1010
 ```
 
 The second command's `seed-1010` report must carry the first command's world
@@ -217,9 +217,9 @@ repeats exactly. `net-crash-fork.json` adds a time fork, so a crash in one
 seed is followed by a restore for the next:
 
 ```sh
-CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash.json crash "1009 1009" --digest
-for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash-fork.json crash-fork-cold "$s" --digest; done
-CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/net-crash-fork.json crash-fork-loop "1009" --digest --fork-seeds 1010,1011
+SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash.json crash "1009 1009" --digest
+for s in 1010 1011; do SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash-fork.json crash-fork-cold "$s" --digest; done
+SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/net-crash-fork.json crash-fork-loop "1009" --digest --fork-seeds 1010,1011
 ```
 
 ## Retained disk
@@ -270,9 +270,9 @@ a kernel with `VIRTIO_BLK` and `EXT4_FS` (`kernel/config.options`).
   wrote, flushed and crashed, so it must match that seed's cold run.
 
 ```sh
-for w in disk-nocrash disk-crash disk-ext4-crash; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/$w.json $w "1009 1009" --digest --trace; done
-for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-cold "$s" --digest; done
-CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-loop "1009" --digest --fork-seeds 1010,1011
+for w in disk-nocrash disk-crash disk-ext4-crash; do SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/$w.json $w "1009 1009" --digest --trace; done
+for s in 1010 1011; do SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-cold "$s" --digest; done
+SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-loop "1009" --digest --fork-seeds 1010,1011
 ```
 
 For seeded torn writes, set the world's top-level `disk_loss` object to
@@ -289,7 +289,7 @@ as each disk's `fault_model`. See
 On a Linux KVM host, run the fixture with repeated and distinct seeds:
 
 ```sh
-CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-ext4-torn.json disk-ext4-torn "1009 1009 1010 1011" --digest --trace
+SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-ext4-torn.json disk-ext4-torn "1009 1009 1010 1011" --digest --trace
 ```
 
 Check the recovered ledger retains all 50 acknowledged records and repeated-seed

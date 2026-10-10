@@ -10,11 +10,11 @@ fn internal_world_refusal_precedes_retention_or_input_reading() {
     let store = ContentStore::new(&store_path);
     let missing = temporary.path().join("missing");
     let expected = "built-in Compose world execution requires Linux x86-64; ARM world integration is not available yet";
-    let result = VmmExecutor::new_internal(&missing, &store, None, 512, WitnessMode::Exits);
+    let result = VmmExecutor::new_internal(&missing, &store, 512, WitnessMode::Exits);
     assert_eq!(result.unwrap_err().to_string(), expected);
     assert!(!store_path.exists());
     assert_eq!(
-        VmmExecutor::doctor_internal(&missing, &missing, None)
+        VmmExecutor::doctor_internal(&missing, &missing)
             .unwrap_err()
             .to_string(),
         expected
@@ -30,13 +30,11 @@ fn internal_doctor_reports_simulator_version() {
     std::fs::write(&executable, b"combined executable").unwrap();
     let store = ContentStore::new(temporary.path().join("objects"));
     let kernel = ContentDigest::of(b"kernel");
-    let executor =
-        VmmExecutor::new_internal(&executable, &store, None, 512, WitnessMode::Exits).unwrap();
+    let executor = VmmExecutor::new_internal(&executable, &store, 512, WitnessMode::Exits).unwrap();
     let report = executor
         .doctor_report(
             kernel,
             AdmissionProbe {
-                cpu: Some(8),
                 observations: vec![observed(8)],
                 result: Ok(()),
             },
@@ -56,14 +54,13 @@ fn replay_preserves_historical_policy_data_without_current_defaults() {
     let store = ContentStore::new(temporary.path().join("objects"));
     let profile = VmmExecutor::from_engine_digest(
         ContentDigest::of(b"retained executable"),
-        None,
         512,
         WitnessMode::Exits,
     )
     .unwrap()
     .profile;
     let before = serde_json::to_vec(&profile).unwrap();
-    let executor = VmmExecutor::from_retained(&executable, &store, profile, None).unwrap();
+    let executor = VmmExecutor::from_retained(&executable, &store, profile).unwrap();
     assert_eq!(serde_json::to_vec(&executor.profile).unwrap(), before);
     crate::admission::validate_profile(&executor.profile).unwrap();
     assert_eq!(
@@ -87,13 +84,12 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
     .unwrap();
     std::fs::write(&standalone, b"#!/bin/sh\nexit 2\n").unwrap();
     let store = ContentStore::new(directory.path().join("store"));
-    let original = VmmExecutor::new(&standalone, &store, None, 512, WitnessMode::Exits)
+    let original = VmmExecutor::new(&standalone, &store, 512, WitnessMode::Exits)
         .unwrap()
         .with_page_timer(true)
         .with_deferred_tx(true)
         .with_torn_writes(true);
-    let combined =
-        VmmExecutor::from_override(&combined, &store, original.profile.clone(), None).unwrap();
+    let combined = VmmExecutor::from_override(&combined, &store, original.profile.clone()).unwrap();
     assert_eq!(
         combined
             .profile
@@ -119,8 +115,7 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
         }
     );
     assert!(combined.profile.semantic_parameters.torn_writes);
-    let standalone =
-        VmmExecutor::from_override(&standalone, &store, combined.profile, None).unwrap();
+    let standalone = VmmExecutor::from_override(&standalone, &store, combined.profile).unwrap();
     assert_eq!(standalone.profile, original.profile);
     assert_eq!(
         engine_command(Path::new("engine"), &standalone.profile)
@@ -133,7 +128,6 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
     let detected = VmmExecutor::new_detected(
         &directory.path().join("combined"),
         &store,
-        None,
         512,
         WitnessMode::Exits,
     )
@@ -146,15 +140,11 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
 
 #[test]
 fn retained_worker_launch_preserves_timer_and_deferred_tx_options() {
-    let executor = VmmExecutor::from_engine_digest(
-        ContentDigest::of(b"engine"),
-        None,
-        512,
-        WitnessMode::Exits,
-    )
-    .unwrap()
-    .with_page_timer(true)
-    .with_deferred_tx(true);
+    let executor =
+        VmmExecutor::from_engine_digest(ContentDigest::of(b"engine"), 512, WitnessMode::Exits)
+            .unwrap()
+            .with_page_timer(true)
+            .with_deferred_tx(true);
     for internal in [false, true] {
         let mut profile = executor.profile.clone();
         if internal {
@@ -193,13 +183,11 @@ fn internal_profile_retains_identity_and_replays_through_worker_contract() {
     std::fs::write(&executable, b"combined executable").unwrap();
     let store = ContentStore::new(temporary.path().join("objects"));
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    let executor =
-        VmmExecutor::new_internal(&executable, &store, None, 512, WitnessMode::Exits).unwrap();
+    let executor = VmmExecutor::new_internal(&executable, &store, 512, WitnessMode::Exits).unwrap();
     // A retained Linux profile is inspectable on a Mac without host admission.
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     let executor = {
-        let mut executor =
-            VmmExecutor::new(&executable, &store, None, 512, WitnessMode::Exits).unwrap();
+        let mut executor = VmmExecutor::new(&executable, &store, 512, WitnessMode::Exits).unwrap();
         executor.profile.semantic_parameters.engine = Some(crate::engine::kvm_descriptor(
             crate::engine::ExecutableKind::InternalWorker,
             crate::engine::SIMULATOR_VERSION.into(),
@@ -212,7 +200,7 @@ fn internal_profile_retains_identity_and_replays_through_worker_contract() {
     );
     let bytes = serde_json::to_vec(&executor.profile).unwrap();
     let retained: ExecutionProfile = serde_json::from_slice(&bytes).unwrap();
-    let replay = VmmExecutor::from_retained(&executable, &store, retained, Some(8)).unwrap();
+    let replay = VmmExecutor::from_retained(&executable, &store, retained).unwrap();
     assert_eq!(serde_json::to_vec(&replay.profile).unwrap(), bytes);
     for profile in [&executor.profile, &replay.profile] {
         let command = engine_command(&executable, profile).unwrap();
@@ -223,7 +211,7 @@ fn internal_profile_retains_identity_and_replays_through_worker_contract() {
         );
     }
     // Historical standalone profiles keep their launch contract.
-    let legacy = VmmExecutor::new(&executable, &store, None, 512, WitnessMode::Exits).unwrap();
+    let legacy = VmmExecutor::new(&executable, &store, 512, WitnessMode::Exits).unwrap();
     assert_eq!(
         recorded_launch(&legacy.profile).unwrap(),
         ExecutableKind::Standalone
@@ -236,7 +224,7 @@ fn recorded_descriptor_is_data_and_unknown_settings_fail() {
     let executable = temporary.path().join("old-worker");
     std::fs::write(&executable, b"retained worker").unwrap();
     let store = ContentStore::new(temporary.path().join("objects"));
-    let mut profile = VmmExecutor::new(&executable, &store, None, 512, WitnessMode::Exits)
+    let mut profile = VmmExecutor::new(&executable, &store, 512, WitnessMode::Exits)
         .unwrap()
         .profile;
     profile.semantic_parameters.engine = Some(crate::engine::kvm_descriptor(
@@ -244,7 +232,7 @@ fn recorded_descriptor_is_data_and_unknown_settings_fail() {
         "0.1.0-dev.1".into(),
     ));
     let original = serde_json::to_vec(&profile).unwrap();
-    let executor = VmmExecutor::from_retained(&executable, &store, profile.clone(), None).unwrap();
+    let executor = VmmExecutor::from_retained(&executable, &store, profile.clone()).unwrap();
     assert_eq!(serde_json::to_vec(&executor.profile).unwrap(), original);
     assert_eq!(
         crate::engine::recorded_launch(&executor.profile).unwrap(),
@@ -263,7 +251,6 @@ fn replay_override_changes_only_retained_executable_digest() {
     let store = ContentStore::new(temporary.path().join("objects"));
     let profile = VmmExecutor::from_engine_digest(
         ContentDigest::of(b"original executable"),
-        None,
         512,
         WitnessMode::Exits,
     )
@@ -271,66 +258,17 @@ fn replay_override_changes_only_retained_executable_digest() {
     .profile;
     let mut expected = profile.clone();
     expected.engine = ContentDigest::of(b"replacement executable");
-    let executor = VmmExecutor::from_retained(&executable, &store, profile, None).unwrap();
+    let executor = VmmExecutor::from_retained(&executable, &store, profile).unwrap();
     assert_eq!(executor.profile, expected);
 }
 
 #[test]
-fn capacity_admission_holds_all_reservations_and_releases_them_on_every_exit() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct Reservation<'a>(&'a AtomicUsize);
-    impl Drop for Reservation<'_> {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-    for (available, refuse) in [(3, false), (2, false), (3, true)] {
-        // An unrelated owner must survive both capacity and admission errors.
-        let held = AtomicUsize::new(1);
-        let mut checked = false;
-        let result = with_capacity(
-            3,
-            || {
-                if held.load(Ordering::SeqCst) > available {
-                    return Err(Error::Setup("fixture capacity unavailable".into()));
-                }
-                held.fetch_add(1, Ordering::SeqCst);
-                Ok(Reservation(&held))
-            },
-            |reservations| {
-                checked = true;
-                assert_eq!(reservations.len(), 3);
-                assert_eq!(held.load(Ordering::SeqCst), 4);
-                if refuse {
-                    Err(Error::Setup("fixture core admission refused".into()))
-                } else {
-                    Ok(())
-                }
-            },
-        );
-        assert_eq!(held.load(Ordering::SeqCst), 1);
-        assert_eq!(checked, available == 3);
-        assert_eq!(result.is_ok(), available == 3 && !refuse);
-        if available == 2 {
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("--workers 3: cannot reserve 3 distinct eligible physical cores"));
-        }
-    }
-}
-
-#[test]
-fn parallel_preflight_preserves_the_experimental_admission_gate() {
-    let pinned = VmmExecutor::from_engine_digest(
-        ContentDigest::of(b"engine"),
-        None,
-        512,
-        WitnessMode::Exits,
-    )
-    .unwrap();
+fn parallel_preflight_rejects_worker_counts_outside_the_supported_range() {
+    let executor =
+        VmmExecutor::from_engine_digest(ContentDigest::of(b"engine"), 512, WitnessMode::Exits)
+            .unwrap();
     for workers in [0, 33] {
-        assert!(pinned
+        assert!(executor
             .preflight_workers(workers)
             .unwrap_err()
             .to_string()
@@ -357,13 +295,9 @@ fn observed(cpu: u32) -> CoreObservation {
 }
 #[test]
 fn replay_reconstructs_checkpoint_profile_without_performance_changes() {
-    let ordinary = VmmExecutor::from_engine_digest(
-        ContentDigest::of(b"engine"),
-        None,
-        512,
-        WitnessMode::Exits,
-    )
-    .unwrap();
+    let ordinary =
+        VmmExecutor::from_engine_digest(ContentDigest::of(b"engine"), 512, WitnessMode::Exits)
+            .unwrap();
     let slower_watchdog = ordinary.clone().with_watchdog_ms(200).unwrap();
     assert_eq!(slower_watchdog.profile(), ordinary.profile());
     assert_eq!(
@@ -401,7 +335,7 @@ fn any_engine_and_kernel_pair_is_admitted() {
         ),
     ] {
         let backend =
-            VmmExecutor::from_engine_digest(engine.clone(), None, 512, WitnessMode::Exits).unwrap();
+            VmmExecutor::from_engine_digest(engine.clone(), 512, WitnessMode::Exits).unwrap();
         let inputs = PreparedInputs {
             wall_clock_epoch: None,
             profile: backend.profile(),
@@ -429,7 +363,6 @@ fn any_engine_and_kernel_pair_is_admitted() {
             .doctor_report(
                 kernel,
                 AdmissionProbe {
-                    cpu: Some(8),
                     observations: vec![observed(8)],
                     result: Ok(()),
                 },
@@ -442,54 +375,42 @@ fn any_engine_and_kernel_pair_is_admitted() {
 }
 
 #[test]
-fn doctor_report_preserves_actual_selected_core_and_exact_admitted_observations() {
-    let executor = VmmExecutor::from_engine_digest(
-        ContentDigest::of(b"engine"),
-        None,
-        1024,
-        WitnessMode::Exits,
-    )
-    .unwrap();
+fn doctor_report_preserves_exact_admitted_observations_without_cpu_binding() {
+    let executor =
+        VmmExecutor::from_engine_digest(ContentDigest::of(b"engine"), 1024, WitnessMode::Exits)
+            .unwrap();
     let observations = vec![observed(2), observed(18)];
     let report = executor
         .doctor_report(
             ContentDigest::of(b"kernel"),
             AdmissionProbe {
-                cpu: Some(18),
                 observations: observations.clone(),
                 result: Ok(()),
             },
         )
         .unwrap();
-    assert_eq!(report.cpu, 18); // Selected CPU need not be the first sorted sibling.
-    assert_eq!(report.cpus, [2, 18]);
     assert_eq!(report.observations, observations);
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(
         json["observations"],
         serde_json::to_value(&observations).unwrap()
     );
-    assert_eq!(json["cpu"], 18);
+    assert!(json.get("cpu").is_none());
+    assert!(json.get("cpus").is_none());
     assert!(executor.admission.lock().unwrap().is_empty()); // No cached/second observation supplied the receipt.
 }
 #[test]
-fn no_doctor_success_report_on_probe_cleanup_error_or_capability_drift() {
-    let executor = VmmExecutor::from_engine_digest(
-        ContentDigest::of(b"engine"),
-        Some(2),
-        1024,
-        WitnessMode::Exits,
-    )
-    .unwrap();
+fn no_doctor_success_report_on_probe_error_or_capability_drift() {
+    let executor =
+        VmmExecutor::from_engine_digest(ContentDigest::of(b"engine"), 1024, WitnessMode::Exits)
+            .unwrap();
     for case in 0..2 {
         let mut observation = observed(2);
         if case == 1 {
             observation.immediate_exit = 0;
         }
         let result = if case == 0 {
-            Err(Error::Execution(
-                "host preflight cleanup failed: affinity readback mismatch".into(),
-            ))
+            Err(Error::Execution("KVM probe failed".into()))
         } else {
             Ok(())
         };
@@ -497,7 +418,6 @@ fn no_doctor_success_report_on_probe_cleanup_error_or_capability_drift() {
             .doctor_report(
                 ContentDigest::of(b"kernel"),
                 AdmissionProbe {
-                    cpu: Some(2),
                     observations: vec![observation],
                     result
                 }

@@ -16,8 +16,14 @@ read-only under `/seedbox/progress`. The supervisor (`guest/compose-init.c`)
 resolves ordinary ELF and script entrypoints and runs them under `drrun` with
 `-opt_speed -disable_traces` and their original arguments.
 
-The kernel charges each syscall; arm64 adds 1,000 bounded clock reads at syscall
-entry. See [application progress](determinism-catalogue.md#progress-from-translated-blocks),
+The kernel charges each syscall. ARM PV ABI 3 (`seedbox,pv-time-v3`) adds a
+host-owned `syscall_ns` word at time-page offset 48, with baseline 1000 ns.
+The kernel captures that cost once per syscall; throttle scales it while
+ordinary clock reads remain 1 ns. The new page word changes ARM state digests,
+even with throttle disabled, while baseline syscall virtual-time charging is
+unchanged. Fresh runs require matching ABI-3 engine/kernel inputs built with
+`python3 tools/build.py` inside `nix develop`. Old simulations replay using their
+retained engine and kernel. See [application progress](determinism-catalogue.md#progress-from-translated-blocks),
 [kernel polling coverage](determinism-catalogue.md#progress-inside-kernel-polling),
 and [watchdog behavior](determinism-catalogue.md#observation-without-guest-progress)
 for the time model and uncovered loops.

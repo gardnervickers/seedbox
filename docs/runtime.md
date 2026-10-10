@@ -322,28 +322,16 @@ The VMM defaults to the engine linked into `seedbox`; `serve --vmm` explicitly s
 the legacy standalone contract. A missing input fails before preparation starts
 and names every location searched.
 
-Linux execution performs host admission before OCI work: an x86-64 CPU with
-the KVM capabilities the engine needs (see
-[host requirements](cli-reference.md#host-requirements)). CPU model, microcode, CPUID,
-engine, guest-kernel and host-kernel bytes are not pinned. Temporary core
-reservations and affinity are released before preparation on success/error;
-cleanup failure refuses admission. The actual leased core/siblings are rechecked
-before the VMM spawn. Raw static/leased observations are retained as
-Seedbox-owned output.
+Linux execution checks the KVM capabilities the engine needs before OCI work
+and worker launch. CPU model, microcode, CPUID, engine, guest-kernel and
+host-kernel bytes are not pinned. Host observations are retained as diagnostics.
+Inspect, export and import preserve older manifests, including historical
+host-policy fields; those fields do not block replay.
 
-Inspect, export and import keep old manifests unchanged. Run identities carry no
-host-policy proof; `host_policy*` fields in older records are kept as data and do
-not block replay.
-
-The server executor leases the first free core, in ascending order,
-among the CPUs the process may run on, skipping CPU 0's core. CPU allocation is
-server-owned; submissions have no `--cpu` option. `doctor --cpu N` probes an
-explicit core and fails if another run holds it. The executor reserves
-the chosen core and all SMT siblings with the same `/tmp/seedbox-msr-cpu-N.lock` flock
-protocol as `harness/batch.py`, pins the VMM, and releases the lease only after
-reaping it.
-Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause cleanup through the same
-path. SIGKILL and host loss cannot guarantee cleanup.
+Seedbox uses normal host scheduling and does not reserve cores or change CPU
+affinity. Operators who want affinity can apply `taskset` externally on Linux.
+Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause owned-process cleanup.
+SIGKILL and host loss cannot guarantee cleanup.
 
 ## Playback control
 
@@ -394,8 +382,7 @@ pause and pacing waits do not consume `wall_time`; guest execution and other
 worker work do. A private process-shared monotonic clock accounts for an ongoing
 wait without advancing the guest or polling the control socket. Resuming restores
 the remaining budget. Retained older workers that do not publish wait accounting
-keep their original absolute wall-time behavior. CPU/SMT leases remain held
-throughout a pause; cleanup reaps the worker before releasing them.
+keep their original absolute wall-time behavior. Cleanup reaps owned workers.
 
 Portable tests exercise the socket gate and control acknowledgements. Native
 pause/resume acceptance uses the current server API: it creates a full-state
@@ -408,7 +395,7 @@ nix develop --command bash harness/check.sh linux-pause
 
 The harness builds current guest inputs, supplies a private server state directory
 and handles root execution. It requires Linux KVM and a Docker-compatible engine.
-The server allocates CPUs automatically. Source-test success alone does not
+The server uses normal host scheduling. Source-test success alone does not
 establish hardware witness invariance.
 
 ## Execution settings
@@ -447,10 +434,11 @@ the original encoding.
 
 `serve --state` chooses server storage, defaulting to `$XDG_STATE_HOME/seedbox`
 or `$HOME/.local/state/seedbox`. `SEEDBOX_STATE` overrides that default. Offline
-`prepare`, `export` and `import` use `--state` with default `.seedbox`.
+`prepare`, `export` and `import` use `--state` or `SEEDBOX_ARTIFACT_STATE`,
+with default `.seedbox`.
 `x-seedbox.machine.memory_mb` defaults to 1024 MiB per service and is a semantic parameter; `serve --full-state` requests RAM/register
 digests and retains per-page RAM hashes (format below). Preparation checks a conservative archive boot-memory floor before acquiring
-a CPU lease. Application memory can require a larger value; the etcd image failed
+execution. Application memory can require a larger value; the etcd image failed
 to unpack at 512 MiB and passed at 1024 MiB.
 The server owns the Linux watchdog interval, recorded per attempt outside
 semantic identity. There is no watchdog submission option. The watchdog only
@@ -589,18 +577,15 @@ On the supported Linux KVM host, as root:
 
 ```sh
 seedbox doctor
-seedbox doctor --cpu 15 --json
+seedbox doctor --json
 ```
 
 Doctor resolves the ordinary engine/kernel defaults without building missing
 inputs. It hashes those inputs and invokes the same bounded host probe used by
-execution admission. It opens KVM, reserves the selected core and its siblings,
-and verifies restoration of temporary affinity and release of all reservations. Any uncertainty prevents `VALID` or success
-JSON. The report names the actual selected CPU and siblings and preserves the
-exact observations admitted by that probe; there is no second read or cached
-host inventory. No content store, run directory, image preparation or guest is
-created. Missing inputs, unsupported capabilities, busy leases and profile drift
-retain the same actionable errors as execution; no repair or fallback occurs.
+execution admission. It opens KVM and reports the probe's observed capabilities,
+without selecting or reserving a CPU or changing affinity. No content store, run
+directory, image preparation or guest is created. Missing inputs and unsupported
+capabilities retain the same actionable errors as execution.
 
 Exit 0 means the reported policy is compatible. It does not prove repeatability
 on an unqualified machine. Plain output has one `VALID` status line and lowercase
@@ -729,25 +714,14 @@ bash harness/check.sh mac-apps               # Apple Silicon
 ```
 
 See [the test matrix](testing.md) for suites, Cargo features and inputs.
-The older focused runtime diagnostics remain available:
+The obsolete retained-directory runtime scripts have been removed. Current
+application acceptance uses a private server, full-state comparisons and
+simulation IDs. For guest-owned fault examples, generate the projects under
+[`examples/faults`](../examples/faults/README.md), then run and replay their
+simulation IDs. Historical acceptance records retain their original commands.
 
-```sh
-bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FRESH_OUTPUT_DIRECTORY
-bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU ANOTHER_FRESH_DIRECTORY lifecycle
-bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FAULT_OUTPUT_DIRECTORY faults
-```
-
-The OCI suite builds/tests as the current user and invokes only its final import
-executable with `sudo -n`. It verifies the prebuilt image metadata,
-whiteouts, symlinks and build-context filtering. It does not start guests.
-The default runtime suite runs both application examples and their intentional
-failure controls, then replays each. The lifecycle suite checks full-state and
-changed-watchdog replay, simulated timeout, wall expiry and SIGTERM cancellation.
-The `faults` mode uses a Python controller and synthetic key/value services to verify acknowledged-write
-retention across process restarts, overlapping partition healing, and retained
-replay. Its deliberately forgetful variant must fail after restart and pass
-without it. Missing and rejected effect acknowledgments must produce ERROR.
-All runtime modes start KVM guests. Choose available CPU/SMT lanes; contention fails without taking over another run's lease.
+The OCI suite verifies image metadata, whiteouts, symlinks and build-context
+filtering without starting guests.
 
 The guest fault RPC uses the same preparation, execution and retained replay
 path; replay executes the retained Python controller again. See [fault operations](../crates/seedbox/README.md#structured-faults) and the
@@ -986,7 +960,7 @@ Interactive changes to one simulation are not inherited by other seeds.
 `seedbox get simulations SOURCE_ID` to inspect the range and its current members,
 and `seedbox stop SOURCE_ID --all-seeds` to stop it. Closing the client leaves
 accepted work owned by the server; foreground Ctrl-C requests a range stop.
-The server owns concurrency and CPU allocation; there is no `--workers`,
+The server owns concurrency and uses normal host scheduling; there is no `--workers`,
 `--cpu`, asset override, or watchdog option on `explore`.
 
 Accepted range intent and member identities survive restart. Interrupted active
@@ -1246,5 +1220,4 @@ Delete an unused capture with `seedbox delete checkpoint ID NAME`
 completed, and deletion is rejected if any branch references the checkpoint.
 Deletion hides the capture from discovery and removes its captured metadata,
 machine files and frozen intervention copy. The control receipt remains for
-history and idempotent retries. Deletion during active execution is deferred in
-[local hardening](../LOCAL-HARDENING.md).
+history and idempotent retries. Deletion during active execution is deferred.

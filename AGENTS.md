@@ -174,8 +174,8 @@ See [docs/testing.md](docs/testing.md) for features, discovery and fixture input
 Keep VMM engine tests compiled by default; conditional `ignore` attributes enable
 hardware execution through features. Other feature-gated tests must be built by
 the portable `--no-run` checks. Add no per-test registration lists. The runner
-builds as the current user, signs disposable HVF test copies, and leases a
-CPU/SMT pair for application tests. Check other revisions in a Git worktree;
+builds as the current user and signs disposable HVF test copies. Workers use
+normal host scheduling; Seedbox does not reserve cores or pin CPUs. Check other revisions in a Git worktree;
 do not stamp Git revisions or checkout cleanliness in the runner.
 
 ## CLI
@@ -218,11 +218,11 @@ deliberately change one.
   each variant. Never use string matching followed by `unreachable!`.
 - Validate ranges and formats in a `value_parser`, so a bad value is a
   clap usage error that names the flag, not a runtime error later.
-- Reuse the shared `#[derive(Args)]` groups (`ComposeArg`, `CpuArg`,
+- Reuse the shared `#[derive(Args)]` groups (`ComposeArg`,
   `StateArg`, `RuntimeInputs`) instead of redeclaring flags.
   When several commands need a new option, add a group.
-- Environment variables (`env = "SEEDBOX_<NAME>"`) say where things are: paths,
-  CPU, state directory. Never back a parameter that changes results (seed,
+- Environment variables (`env = "SEEDBOX_<NAME>"`) say where things are: paths
+  and state directory. Never back a parameter that changes results (seed,
   memory, full-state, faults, schedule) with an environment variable; it would
   change a run's identity without appearing on the command line.
 
@@ -235,10 +235,9 @@ deliberately change one.
 3. On failure, return `missing(what, &searched, fix)`, which lists every
    location tried and one way to fix it.
 4. Resolve it in `RuntimeInputs::backends` or earlier, before any slow work
-   (image pulls, builds, CPU leases). Fail fast. `run` and `explore` check immutable runtime
+   (image pulls and builds). Fail fast. `run` and `explore` check immutable runtime
    inputs and backend host admission before
-   preparation; no transient affinity or CPU reservation survives
-   that check.
+   preparation.
 5. Add it to the defaults table in README.md's quick start.
 
 ### Help text
@@ -252,7 +251,7 @@ deliberately change one.
 - Group flags under the existing `next_help_heading` sections: the default
   options, "Runtime inputs", and "Performance (never changes results)". A flag
   takes the heading of the group declared before it, so flatten
-  general-purpose groups (`CpuArg`, `StateArg`) before `RuntimeInputs`.
+  general-purpose groups (`StateArg`) before `RuntimeInputs`.
 - `run`, `replay` and `diff` show `EXIT_CODES` in `after_help`.
 - Check the result with `cargo run -- help <command>`.
 
@@ -311,11 +310,11 @@ deliberately change one.
   defaults table), docs/runtime.md, and `crates/seedbox-application/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
 
-`doctor` checks KVM device access, the CPU reservation and the guest
+`doctor` checks KVM device access and the guest
 kernel/VMM/runtime inputs. It uses guest-kernel/VMM defaults; host-kernel
 bytes are not checked. VMM resolution is lookup-only and must never invoke a
 compiler or launch the worker. Success reports
-only the exact cleaned-up probe observations and selected core; the library does
+only the exact cleaned-up probe observations; the library does
 not read arguments/environment or print. It creates no state/run and never prepares
 images or executes guests. Compatibility readiness is not replay qualification.
 

@@ -63,7 +63,7 @@ impl<'a> Admission<'a> {
 
     pub fn propose(&self, request_id: String, plan: Plan) -> Result<Intervention, String> {
         self.active()?;
-        (self.validate_action)(&plan.action)?;
+        self.validate_action(&plan.action)?;
         let intervention = Intervention {
             request_id,
             position: self.boundary.position,
@@ -85,7 +85,7 @@ impl<'a> Admission<'a> {
             return Err("intervention position differs from the current boundary".into());
         }
         validate(intervention)?;
-        (self.validate_action)(&intervention.plan.action)?;
+        self.validate_action(&intervention.plan.action)?;
         self.faults
             .admit_exact(intervention.plan.clone(), self.earliest_effect_ns())?;
         self.changed = true;
@@ -94,6 +94,18 @@ impl<'a> Admission<'a> {
 
     pub(crate) fn changed(&self) -> bool {
         self.changed
+    }
+
+    fn validate_action(&self, action: &Action) -> Result<(), String> {
+        (self.validate_action)(action)?;
+        if let Some(error) = self.faults.admission_error(action) {
+            return Err(error.into());
+        }
+        if matches!(action, Action::Heal { handle } if !self.faults.active_handles().contains(handle))
+        {
+            return Err("heal of inactive handle".into());
+        }
+        Ok(())
     }
 
     fn active(&self) -> Result<(), String> {
@@ -249,6 +261,118 @@ mod tests {
     }
 
     #[test]
+    fn admission_rejects_invalid_state_before_proposal_or_commit_without_mutation() {
+        for (initial, action, error) in [
+            (
+                vec![],
+                Action::Heal {
+                    handle: "typo".into(),
+                },
+                "heal of inactive handle",
+            ),
+            (
+                vec![
+                    serde_json::json!({"id":1,"at_ns":10,"deadline_ns":10,"action":"pause","machine":"a"}),
+                ],
+                Action::Stop {
+                    machine: "a".into(),
+                },
+                "target machine is paused",
+            ),
+            (
+                vec![
+                    serde_json::json!({"id":1,"at_ns":10,"deadline_ns":100,"action":"clock_skew","handle":"clock","machine":"a","offset_ns":1}),
+                ],
+                Action::Heal {
+                    handle: "clock".into(),
+                },
+                "clock skew is not settled",
+            ),
+        ] {
+            let mut faults = Faults::new(initial, vec!["a".into(), "b".into()]).unwrap();
+            faults.apply_due(10);
+            let plan = Plan {
+                id: 0,
+                at_ns: 20,
+                deadline_ns: 30,
+                action,
+            };
+            // A caller or retained record cannot bypass proposal validation.
+            let intervention = Intervention {
+                request_id: "invalid".into(),
+                position: boundary(2).position,
+                plan: faults.propose(plan.clone(), 20).unwrap(),
+            };
+            let before = serde_json::to_vec(&faults).unwrap();
+            let mut admission = Admission::new(&mut faults, boundary(2), &|_| Ok(()));
+            assert_eq!(
+                admission.propose("invalid".into(), plan).unwrap_err(),
+                error
+            );
+            assert_eq!(admission.commit(&intervention).unwrap_err(), error);
+            assert!(!admission.changed());
+            assert_eq!(serde_json::to_vec(&faults).unwrap(), before);
+            assert!(faults.error.is_none());
+        }
+    }
+
+    #[test]
+    fn commit_rechecks_lifecycle_and_handle_state_after_a_proposal() {
+        for heal in [false, true] {
+            let initial = if heal {
+                vec![
+                    serde_json::json!({"id":1,"at_ns":10,"deadline_ns":10,"action":"partition","handle":"network","left":["a"],"right":["b"]}),
+                    serde_json::json!({"id":2,"at_ns":20,"deadline_ns":20,"action":"heal","handle":"network"}),
+                ]
+            } else {
+                vec![
+                    serde_json::json!({"id":1,"at_ns":20,"deadline_ns":20,"action":"pause","machine":"a"}),
+                ]
+            };
+            let mut faults = Faults::new(initial, vec!["a".into(), "b".into()]).unwrap();
+            faults.apply_due(10);
+            let action = if heal {
+                Action::Heal {
+                    handle: "network".into(),
+                }
+            } else {
+                Action::Stop {
+                    machine: "a".into(),
+                }
+            };
+            let proposal = Admission::new(&mut faults, boundary(2), &|_| Ok(()))
+                .propose(
+                    "race".into(),
+                    Plan {
+                        id: 0,
+                        at_ns: 20,
+                        deadline_ns: 30,
+                        action,
+                    },
+                )
+                .unwrap();
+            // Existing effects change state without consuming another admission ID.
+            faults.apply_due(20);
+            assert_eq!(
+                faults.propose(proposal.plan.clone(), 20).unwrap().id,
+                proposal.plan.id
+            );
+            let before = serde_json::to_vec(&faults).unwrap();
+            let mut admission = Admission::new(&mut faults, boundary(2), &|_| Ok(()));
+            assert_eq!(
+                admission.commit(&proposal).unwrap_err(),
+                if heal {
+                    "heal of inactive handle"
+                } else {
+                    "target machine is paused"
+                }
+            );
+            assert!(!admission.changed());
+            assert_eq!(serde_json::to_vec(&faults).unwrap(), before);
+        }
+    }
+
+    #[test]
     fn replay_rejects_unreached_or_divergent_inputs_without_silently_skipping_them() {
         for mutation in 0..4 {
             let mut replay = Replay::new(history()).unwrap();
@@ -284,14 +408,16 @@ mod tests {
     fn multiple_inputs_share_a_boundary_and_partial_failure_is_terminal() {
         let mut retained = history();
         retained.entries.push(Intervention {
-            request_id: "heal".into(),
+            request_id: "second-cut".into(),
             position: boundary(2).position,
             plan: Plan {
                 id: 2,
                 at_ns: 20,
                 deadline_ns: 20,
-                action: Action::Heal {
-                    handle: "network".into(),
+                action: Action::Partition {
+                    handle: "second-network".into(),
+                    left: vec!["a".into()],
+                    right: vec!["b".into()],
                 },
             },
         });

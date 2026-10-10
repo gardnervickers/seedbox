@@ -65,6 +65,11 @@ then frames. This is not a promise that arbitrary batched effects can be reorder
 into a single global stream. `Stop::Control` may represent console or fault effects
 as well as a control request.
 
+If a target exits before acknowledging an outstanding fault, the fault is
+recorded as `Unavailable` at that exit, including faults from static YAML plans.
+The coordinator does not wait for a dead target to reach an acknowledgement
+deadline and turn that target loss into `Failed`.
+
 Equal-time coordinator boundaries retain control, then trigger, then fault
 precedence. Host playback controls observe the resulting committed state after
 these policies, before the next round. Their acknowledgements carry committed

@@ -268,9 +268,7 @@ async fn delete_simulation(
         .execution
         .ok_or_else(|| HttpError::internal("execution evidence is unavailable"))?;
     tokio::task::spawn_blocking(move || {
-        execution
-            .delete(&id)
-            .map_err(|e| HttpError::invalid(e.to_string()))?;
+        execution.delete(&id).map_err(HttpError::from)?;
         Ok(Json(serde_json::json!({"simulation": id, "deleted": true})))
     })
     .await
@@ -288,7 +286,7 @@ async fn delete_checkpoint(
     tokio::task::spawn_blocking(move || {
         execution
             .delete_checkpoint(&id, &name)
-            .map_err(|e| HttpError::invalid(e.to_string()))?;
+            .map_err(HttpError::from)?;
         Ok(Json(
             serde_json::json!({"simulation": id, "checkpoint": name, "deleted": true}),
         ))
@@ -561,8 +559,42 @@ impl From<CatalogueError> for HttpError {
     }
 }
 
+impl From<crate::execution::Error> for HttpError {
+    fn from(error: crate::execution::Error) -> Self {
+        match error {
+            crate::execution::Error::Catalogue(error) => error.into(),
+            error => Self::internal(error.to_string()),
+        }
+    }
+}
+
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         (self.status, Json(self.error)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deletion_errors_keep_resource_and_storage_failures_distinct() {
+        let missing: SimulationId = "23456789".parse().unwrap();
+        let error = HttpError::from(crate::execution::Error::Catalogue(
+            CatalogueError::NotFound(missing),
+        ));
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.error.code, ErrorCode::NotFound);
+        let error = HttpError::from(crate::execution::Error::Storage(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "cleanup denied",
+        )));
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.error.code, ErrorCode::Internal);
+        let error = HttpError::from(crate::execution::Error::Catalogue(
+            CatalogueError::ControlUnavailable,
+        ));
+        assert_eq!(error.status, StatusCode::CONFLICT);
     }
 }

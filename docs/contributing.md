@@ -20,7 +20,7 @@ Run tests from the project Nix shell by naming the platform suites you want:
 ```sh
 nix develop --command bash harness/check.sh   # portable (the default)
 bash harness/check.sh linux-kvm               # any Linux KVM host, including GitHub-hosted Ubuntu runners
-bash harness/check.sh linux --cpu 14          # a Linux KVM host
+bash harness/check.sh linux          # a Linux KVM host
 bash harness/check.sh mac                     # Apple Silicon
 bash harness/check.sh linux-apps --list       # check requirements, build nothing
 bash harness/check.sh --help                  # list suites and groups
@@ -28,8 +28,8 @@ bash harness/check.sh --help                  # list suites and groups
 
 The runner never selects tests by probing the host. Every named suite runs, and
 a suite whose host requirements are missing fails with exit 2 before anything
-builds. The `linux` group covers generic KVM, OCI and applications under a
-CPU/SMT lease; `mac` covers signed native HVF tests and
+builds. The `linux` group covers generic KVM, OCI and applications with normal
+host scheduling; `mac` covers signed native HVF tests and
 applications. The guest-fixture suites need a hand-built kernel and initrd, so
 they are named explicitly (`linux-guests`, `mac-guests`). Application acceptance
 builds the complete CLI and current guest inputs with `python3 tools/build.py`.
@@ -54,11 +54,11 @@ have been removed. Their last versions are retained in Git at `c7d7c22`.
 
 `harness/batch.sh` remains for the raw kernel/network fixtures and the one-VM
 network comparison below, whose placement differs from one service per VM.
-Those fixtures still need the shared guest builders and CPU/SMT lease handling.
+Those fixtures still need the shared guest builders and owned-process cleanup.
 See [the fixture map](../harness/worlds/README.md).
 
-`--watchdog-ms` affects speed only, never results: it sets how often the host
-watchdog observes a guest that makes no natural exits.
+The server-owned watchdog interval affects speed only, never results: it sets
+how often the host watchdog observes a guest that makes no natural exits.
 
 Charged timer-port accesses apply their
 device effect or sample their read response once and conserve their full 1000 ns
@@ -112,7 +112,7 @@ seedbox compare BASELINE_ID SIMULATION_ID
 seedbox explore harness/acceptance/workloads/key-value.yaml --seed 4000 --count 11
 ```
 
-The CLI owns image preparation, CPU leases, restoration, retained evidence and
+The CLI owns image preparation, restoration, retained evidence and
 replay comparison. YAML owns the simulated and wall-time limits. Run the commands
 sequentially unless the host has sufficient resources for multiple worlds; each
 etcd scenario runs four guests.
@@ -147,16 +147,13 @@ BUILD_JOBS=1 taskset -c 14 kernel/build.sh
 (taskset -c 14 cargo build-vmm)
 taskset -c 14 guest/build-netns.sh artifacts/single.cpio src/etcd/v3.5.2/etcd single
 taskset -c 14 guest/build-netns.sh artifacts/multi.cpio src/etcd/v3.5.2/etcd multi
-CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/single-vm.json netns-one "1009" --digest
-CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/cluster-fixed.json netns-four "1009" --digest
+SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/single-vm.json netns-one "1009" --digest
+SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/cluster-fixed.json netns-four "1009" --digest
 ```
 
-Use a fresh output prefix for every invocation. The example CPU is the lane
-used for this investigation, not a requirement of the shared tooling. Check
-host topology and other jobs before choosing cores; keep SMT siblings unused
-by other workloads during measurements. `batch.sh` holds CPU/SMT leases until
-its children have finished; PV execution does not modify host MSRs. Do not
-reuse the historical fixed-CPU research runner for new fixture runs.
+Use a fresh output prefix for every invocation. Workers use normal host
+scheduling; apply external `taskset` if desired for a measurement. `batch.sh`
+reaps its children, and PV execution does not modify host MSRs.
 
 `single-vm-controls.json` exercises packet isolation and directionality;
 `single-vm-sanity.json` plants a missing acknowledgement to check the checker;

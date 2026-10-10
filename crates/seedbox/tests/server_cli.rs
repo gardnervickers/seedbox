@@ -14,11 +14,15 @@ struct ServerGuard {
 
 impl Drop for ServerGuard {
     fn drop(&mut self) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
-        let client = Client::connect_to(&self.socket).unwrap();
+        else {
+            return;
+        };
+        let Ok(client) = Client::connect_to(&self.socket) else {
+            return;
+        };
         if runtime
             .block_on(async { tokio::time::timeout(Duration::from_secs(2), client.info()).await })
             .is_ok_and(|result| result.is_ok_and(|info| info.process_id == self.pid))

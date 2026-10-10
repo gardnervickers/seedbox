@@ -102,3 +102,6 @@ successful controller-target action, an empty partition handle, and an effect
 left pending after a successful response. All three now have regression checks.
 The reviewer rechecked the fixes and reported no outstanding findings. The
 Claude skill was unavailable in this session.
+
+The commands above are historical receipts. The retained-directory runner has
+been removed; current usage is documented in [README.md](README.md).

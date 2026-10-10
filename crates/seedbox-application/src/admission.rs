@@ -1,4 +1,4 @@
-//! Host readiness: the KVM capabilities the engine needs on this core. It does
+//! Host readiness: the KVM capabilities the engine needs. It does
 //! not pin CPU vendors, models, microcode, CPUID, engines or kernels.
 use crate::{
     execution::ExecutionProfile, limits::Size, store::ContentDigest, Context, Error, Result,
@@ -134,22 +134,15 @@ pub fn validate_observation(o: &CoreObservation) -> Result<()> {
     Ok(())
 }
 
-// observe returns only after its descriptor/affinity cleanup. Retain that
-// observation, then fail immediately on established refusal before another core
-// can replace it with an unrelated collection error.
-#[cfg(any(target_os = "linux", test))]
+// Retain the bounded host observation before reporting a capability refusal.
 pub(crate) fn collect_admitted(
-    cpus: impl IntoIterator<Item = u32>,
     observations: &mut Vec<CoreObservation>,
-    mut observe: impl FnMut(u32) -> Result<CoreObservation>,
+    observe: impl FnOnce() -> Result<CoreObservation>,
 ) -> Result<()> {
-    for cpu in cpus {
-        let observation = observe(cpu)?;
-        let admission = validate_observation(&observation);
-        observations.push(observation);
-        admission?;
-    }
-    Ok(())
+    let observation = observe()?;
+    let admission = validate_observation(&observation);
+    observations.push(observation);
+    admission
 }
 
 // Publication never replaces an established refusal, especially cleanup
@@ -182,55 +175,17 @@ pub(crate) fn finish_admission(
     }
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
-fn checked_affinity_restore(
-    expected: &[u32],
-    set: impl FnOnce() -> Result<()>,
-    read: impl FnOnce() -> Result<Vec<u32>>,
-) -> Result<()> {
-    set()?;
-    if read()? != expected {
-        return Err(Error::Execution(
-            "restored preflight affinity differs from original; cleanup is unverified".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// The same scope boundary is exercised by portable cleanup controls.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
-fn scoped_probe<T, G>(
-    mut guard: G,
-    probe: impl FnOnce() -> Result<T>,
-    restore: impl FnOnce(&mut G) -> Result<()>,
-) -> Result<T> {
-    let result = probe(); // Probe-owned descriptors drop before restoring affinity.
-    if let Err(cleanup) = restore(&mut guard) {
-        return Err(Error::Execution(format!(
-            "host preflight cleanup failed: {cleanup}; observation: {}",
-            result
-                .as_ref()
-                .err()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "completed".into())
-        )));
-    }
-    result
-}
-
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod linux;
 
-/// Observe one core's KVM capabilities under a temporary affinity pin, which
-/// is restored before returning.
-pub(crate) fn observe(cpu: u32) -> Result<CoreObservation> {
+/// Observe KVM capabilities without modifying inherited CPU affinity.
+pub(crate) fn observe() -> Result<CoreObservation> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        linux::observe(cpu)
+        linux::observe()
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     {
-        let _ = cpu;
         Err(Error::Setup(
             "host admission requires Linux x86_64 KVM; use an admitted host".into(),
         ))
@@ -238,10 +193,9 @@ pub(crate) fn observe(cpu: u32) -> Result<CoreObservation> {
 }
 
 #[cfg(test)]
-mod cleanup_tests {
+mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use std::{cell::RefCell, rc::Rc};
     fn static_observation() -> CoreObservation {
         let p = required_policy();
         CoreObservation {
@@ -259,107 +213,40 @@ mod cleanup_tests {
             raw_cpuid: Vec::new(),
         }
     }
+
     #[test]
-    fn static_capability_refusal_names_the_capability_and_cleanup_takes_precedence() {
-        let mut observation = static_observation();
-        observation.immediate_exit = 0;
-        let error = validate_observation(&observation).unwrap_err().to_string();
-        assert!(error.contains("KVM immediate-exit capability"));
-        let result = scoped_probe(
-            (),
-            || Ok(observation),
-            |_| Err(Error::Execution("restore readback differs".into())),
-        );
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("host preflight cleanup failed"));
-        assert!(error.contains("restore readback differs"));
-    }
-    #[test]
-    fn first_sibling_static_refusal_cannot_be_masked_by_later_collection_error() {
+    fn host_observation_is_retained_before_capability_refusal() {
         let mut observations = Vec::new();
-        let mut attempted = Vec::new();
-        let result = collect_admitted([8, 24], &mut observations, |cpu| {
-            attempted.push(cpu);
-            if cpu == 24 {
-                return Err(Error::Setup("later sibling collection failed".into()));
-            }
-            let mut o = static_observation();
-            o.immediate_exit = 0;
-            Ok(o)
+        let result = collect_admitted(&mut observations, || {
+            let mut observation = static_observation();
+            observation.immediate_exit = 0;
+            Ok(observation)
         });
-        assert_eq!(attempted, [8]);
         assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].immediate_exit, 0);
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("KVM immediate-exit capability"));
-    }
-    #[test]
-    fn first_sibling_cleanup_failure_wins_and_later_collection_is_not_attempted() {
         let mut observations = Vec::new();
-        let mut attempted = Vec::new();
-        let mut restored = false;
-        let result = collect_admitted([8, 24], &mut observations, |cpu| {
-            attempted.push(cpu);
-            if cpu == 24 {
-                return Err(Error::Setup("later sibling collection failed".into()));
-            }
-            scoped_probe(
-                (),
-                || {
-                    let mut o = static_observation();
-                    o.immediate_exit = 0;
-                    Ok(o)
-                },
-                |_| {
-                    restored = true;
-                    Err(Error::Execution("restore readback differs".into()))
-                },
-            )
-        });
-        assert!(restored);
-        assert_eq!(attempted, [8]);
+        assert!(collect_admitted(&mut observations, || Err(Error::Setup(
+            "cannot open KVM".into()
+        )))
+        .is_err());
         assert!(observations.is_empty());
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("host preflight cleanup failed"));
-        assert!(error.contains("restore readback differs"));
     }
     #[test]
-    fn evidence_failure_cannot_replace_static_or_cleanup_refusal_or_admit_success() {
-        let mut drift = static_observation();
-        drift.immediate_exit = 0;
-        let static_refusal = validate_observation(&drift);
-        let cleanup_refusal = scoped_probe(
-            (),
-            || validate_observation(&drift),
-            |_| Err(Error::Execution("restore readback differs".into())),
-        );
-        for (admission, cause) in [
-            (static_refusal, "KVM immediate-exit capability"),
-            (cleanup_refusal, "host preflight cleanup failed"),
-        ] {
-            let mut published = false;
-            let error = finish_admission(admission, |established| {
-                assert!(established.is_err());
-                published = true;
-                Err(Error::Setup("injected evidence ENOSPC".into()))
-            })
-            .unwrap_err()
-            .to_string();
-            assert!(published);
-            assert!(error.contains(cause));
-            assert!(error.contains("additionally, evidence publication failed"));
-            assert!(error.contains("injected evidence ENOSPC"));
-        }
-        let error = finish_admission(Ok(()), |established| {
-            assert!(established.is_ok());
-            Err(Error::Setup("injected evidence ENOSPC".into()))
+    fn publication_failure_preserves_capability_refusal() {
+        let mut observation = static_observation();
+        observation.sync_regs = 0;
+        let error = finish_admission(validate_observation(&observation), |established| {
+            assert!(established.is_err());
+            Err(Error::Setup("evidence ENOSPC".into()))
         })
         .unwrap_err()
         .to_string();
-        assert_eq!(error, "injected evidence ENOSPC");
-
+        assert!(error.contains("KVM sync-register capability"));
+        assert!(error.contains("evidence ENOSPC"));
+        assert!(finish_admission(Ok(()), |_| Err(Error::Setup("evidence ENOSPC".into()))).is_err());
         let bounded = finish_admission(Err(Error::Execution("r".repeat(10000))), |_| {
             Err(Error::Execution("p".repeat(10000)))
         })
@@ -388,11 +275,7 @@ mod cleanup_tests {
                 }
             }
             fn preflight(&self, _: Option<&Path>) -> Result<()> {
-                scoped_probe(
-                    (),
-                    || Err(Error::Setup("cannot open /dev/kvm: EACCES (13)".into())),
-                    |_| Ok(()),
-                )
+                Err(Error::Setup("cannot open /dev/kvm: EACCES (13)".into()))
             }
             fn execute(&self, _: ExecutionRequest<'_>) -> Result<ExecutionReport> {
                 panic!("must not execute after host refusal")
@@ -418,92 +301,5 @@ mod cleanup_tests {
             .to_string();
         assert!(error.contains("EACCES (13)"));
         assert_eq!(prepare.0.load(Ordering::SeqCst), 0);
-    }
-    #[test]
-    fn successful_restore_setter_cannot_hide_restricted_or_unreadable_affinity() {
-        use std::cell::Cell;
-        for observed in [
-            Ok(vec![2, 18]),
-            Ok(vec![2]),
-            Err(Error::Execution("readback failed".into())),
-        ] {
-            let set = Cell::new(false);
-            let should_pass = observed.as_ref().is_ok_and(|cpus| cpus == &[2, 18]);
-            let result = scoped_probe(
-                (),
-                || Ok(()),
-                |_| {
-                    checked_affinity_restore(
-                        &[2, 18],
-                        || {
-                            set.set(true);
-                            Ok(())
-                        },
-                        || observed,
-                    )
-                },
-            );
-            assert!(set.get());
-            assert_eq!(result.is_ok(), should_pass);
-            if !should_pass {
-                assert!(result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("preflight cleanup failed"));
-            }
-        }
-    }
-    #[test]
-    fn descriptors_close_then_affinity_restores_on_success_and_probe_errors() {
-        struct Descriptor(Rc<RefCell<Vec<&'static str>>>);
-        impl Drop for Descriptor {
-            fn drop(&mut self) {
-                self.0.borrow_mut().push("close");
-            }
-        }
-        for fail in [false, true] {
-            let events = Rc::new(RefCell::new(vec!["pin"]));
-            let result = scoped_probe(
-                events.clone(),
-                || {
-                    let _descriptor = Descriptor(events.clone());
-                    events.borrow_mut().push("disabled-open");
-                    if fail {
-                        Err(Error::Setup("capability drift".into()))
-                    } else {
-                        Ok(())
-                    }
-                },
-                |events| {
-                    events.borrow_mut().push("restore");
-                    Ok(())
-                },
-            );
-            assert_eq!(result.is_err(), fail);
-            assert_eq!(
-                *events.borrow(),
-                ["pin", "disabled-open", "close", "restore"]
-            );
-        }
-    }
-    #[test]
-    fn cleanup_error_cannot_turn_probe_success_or_failure_into_admission() {
-        for fail in [false, true] {
-            let result = scoped_probe(
-                (),
-                || {
-                    if fail {
-                        Err(Error::Setup("probe".into()))
-                    } else {
-                        Ok(())
-                    }
-                },
-                |_| Err(Error::Execution("restore failed".into())),
-            );
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("preflight cleanup failed"));
-        }
     }
 }

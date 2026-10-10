@@ -7,7 +7,7 @@ nix develop
 python3 tools/build.py
 # Start Docker/Podman for application preparation.
 ./build/current/seedbox run examples/etcd
-./build/current/seedbox replay .seedbox/runs/ATTEMPT
+./build/current/seedbox replay SIMULATION_ID
 ```
 
 These are the canonical application definitions. Run either `etcd/compose.yaml`

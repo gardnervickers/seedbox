@@ -11,8 +11,6 @@ use std::{collections::BTreeMap, path::Path};
 
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
-    /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
-    pub cpu: Option<u32>,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
     admission: std::sync::Arc<std::sync::Mutex<Vec<Vec<crate::admission::CoreObservation>>>>,
@@ -21,8 +19,6 @@ pub struct VmmExecutor {
 /// Successful compatibility observation; it is not empirical replay qualification.
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
-    pub cpu: u32,
-    pub cpus: Vec<u32>,
     pub engine: ContentDigest,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub simulator_version: Option<String>,
@@ -31,7 +27,6 @@ pub struct DoctorReport {
 }
 
 struct AdmissionProbe {
-    cpu: Option<u32>,
     observations: Vec<crate::admission::CoreObservation>,
     result: Result<()>,
 }
@@ -41,12 +36,10 @@ impl VmmExecutor {
     pub fn new_detected(
         engine: &Path,
         store: &ContentStore,
-        cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
     ) -> Result<Self> {
-        Self::new(engine, store, cpu, memory_mb, witness_mode)?
-            .with_detected_contract(store, engine)
+        Self::new(engine, store, memory_mb, witness_mode)?.with_detected_contract(store, engine)
     }
 
     /// Preserve simulation settings and use the replacement's own argv contract.
@@ -55,9 +48,8 @@ impl VmmExecutor {
         engine: &Path,
         store: &ContentStore,
         profile: ExecutionProfile,
-        cpu: Option<u32>,
     ) -> Result<Self> {
-        Self::from_retained(engine, store, profile, cpu)?.with_detected_contract(store, engine)
+        Self::from_retained(engine, store, profile)?.with_detected_contract(store, engine)
     }
 
     /// Detect a retained executable after resolving other inputs.
@@ -83,12 +75,11 @@ impl VmmExecutor {
     pub fn new_internal(
         engine: &Path,
         store: &ContentStore,
-        cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
     ) -> Result<Self> {
         let descriptor = crate::engine::internal_descriptor()?;
-        let mut executor = Self::new(engine, store, cpu, memory_mb, witness_mode)?;
+        let mut executor = Self::new(engine, store, memory_mb, witness_mode)?;
         executor.profile.semantic_parameters.engine = Some(descriptor);
         Ok(executor)
     }
@@ -100,11 +91,9 @@ impl VmmExecutor {
         engine: &Path,
         store: &ContentStore,
         mut profile: ExecutionProfile,
-        cpu: Option<u32>,
     ) -> Result<Self> {
         profile.engine = store.put_file(engine)?;
         Ok(Self {
-            cpu,
             profile,
             performance: BTreeMap::new(),
             admission: Default::default(),
@@ -114,7 +103,6 @@ impl VmmExecutor {
     pub fn new(
         engine: &Path,
         store: &ContentStore,
-        cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
     ) -> Result<Self> {
@@ -123,12 +111,11 @@ impl VmmExecutor {
                 "guest memory must be 64..65536 MiB".into(),
             ));
         }
-        Self::from_engine_digest(store.put_file(engine)?, cpu, memory_mb, witness_mode)
+        Self::from_engine_digest(store.put_file(engine)?, memory_mb, witness_mode)
     }
 
     fn from_engine_digest(
         engine: ContentDigest,
-        cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
     ) -> Result<Self> {
@@ -139,7 +126,6 @@ impl VmmExecutor {
         }
         let semantic_parameters = SemanticParameters::new(memory_mb);
         Ok(Self {
-            cpu,
             admission: Default::default(),
             profile: ExecutionProfile {
                 backend: Backend::Kvm,
@@ -165,10 +151,9 @@ impl VmmExecutor {
 
     /// Check the existing execution policy without storing inputs or starting guests.
     /// Host observations are the same bounded probe used by execution preflight.
-    pub fn doctor(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
+    pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
         let executor = Self::from_engine_digest(
             crate::admission::file_digest(engine)?,
-            cpu,
             1024,
             WitnessMode::Exits,
         )?;
@@ -176,11 +161,10 @@ impl VmmExecutor {
     }
 
     /// Inspect the built-in worker without storing bytes or invoking it.
-    pub fn doctor_internal(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
+    pub fn doctor_internal(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
         let descriptor = crate::engine::internal_descriptor()?;
         let mut executor = Self::from_engine_digest(
             crate::admission::file_digest(engine)?,
-            cpu,
             1024,
             WitnessMode::Exits,
         )?;
@@ -202,14 +186,6 @@ impl VmmExecutor {
             crate::admission::validate_observation(observation)?;
         }
         Ok(DoctorReport {
-            cpu: probe
-                .cpu
-                .ok_or_else(|| Error::Execution("host probe did not select a CPU".into()))?,
-            cpus: probe
-                .observations
-                .iter()
-                .map(|observation| observation.cpu)
-                .collect(),
             engine: self.profile.engine.clone(),
             simulator_version: self.simulator_version(),
             kernel,
@@ -218,41 +194,15 @@ impl VmmExecutor {
     }
 
     fn probe(&self) -> AdmissionProbe {
-        self.probe_capacity(1)
-    }
-
-    fn probe_capacity(&self, workers: u32) -> AdmissionProbe {
-        let mut selected = None;
         let mut observations = Vec::new();
-        let result = (|| -> Result<()> {
-            #[cfg(target_os = "linux")]
-            {
-                crate::host::check_kvm_access()?;
-                with_capacity(
-                    workers,
-                    || crate::host::CpuReservation::acquire(self.cpu),
-                    |reservations| {
-                        selected = reservations.first().map(|reservation| reservation.cpu);
-                        for reservation in reservations {
-                            crate::admission::collect_admitted(
-                                reservation.cpus.iter().copied(),
-                                &mut observations,
-                                crate::admission::observe,
-                            )?;
-                        }
-                        Ok(())
-                    },
-                )?; // All reservations/affinity close before publication or OCI work.
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = (&mut selected, workers);
-                observations.push(crate::admission::observe(0)?);
-            }
-            Ok(())
-        })();
+        #[cfg(target_os = "linux")]
+        let access = crate::host::check_kvm_access();
+        #[cfg(not(target_os = "linux"))]
+        let access: Result<()> = Ok(());
+        let result = access.and_then(|()| {
+            crate::admission::collect_admitted(&mut observations, crate::admission::observe)
+        });
         AdmissionProbe {
-            cpu: selected,
             observations,
             result,
         }
@@ -291,9 +241,9 @@ impl VmmExecutor {
 
 /// Checkpoints are optional, but partial or malformed retained settings fail closed.
 impl VmmExecutor {
-    fn preflight_capacity(&self, workers: u32, output: Option<&Path>) -> Result<()> {
+    fn preflight_host(&self, output: Option<&Path>) -> Result<()> {
         crate::admission::validate_profile(&self.profile)?;
-        let probe = self.probe_capacity(workers);
+        let probe = self.probe();
         let observations = probe.observations;
         let collection = probe.result;
         crate::admission::finish_admission(collection, |collection| {
@@ -320,43 +270,17 @@ impl VmmExecutor {
     }
 }
 
-/// Keep the entire capacity reserved during admission, then release it before
-/// returning on either success or failure. The reservation enforces disjoint cores.
-#[cfg(any(target_os = "linux", test))]
-fn with_capacity<T>(
-    workers: u32,
-    mut reserve: impl FnMut() -> Result<T>,
-    check: impl FnOnce(&[T]) -> Result<()>,
-) -> Result<()> {
-    let mut reservations = Vec::new();
-    for _ in 0..workers {
-        reservations.push(reserve().map_err(|error| {
-            if workers > 1 {
-                Error::Setup(format!("--workers {workers}: cannot reserve {workers} distinct eligible physical cores: {error}"))
-            } else {
-                error
-            }
-        })?);
-    }
-    check(&reservations)
-}
-
 /// Missing page timer means the legacy port transport.
 impl ExecutionBackend for VmmExecutor {
     fn preflight_workers(&self, workers: u32) -> Result<()> {
         if !(1..=32).contains(&workers) {
             return Err(Error::Setup("--workers: use 1..32".into()));
         }
-        if workers > 1 && self.cpu.is_some() {
-            return Err(Error::Setup(
-                "--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into(),
-            ));
-        }
-        self.preflight_capacity(workers, None)
+        self.preflight(None)
     }
 
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
-        self.preflight_capacity(1, output)
+        self.preflight_host(output)
     }
     /// The engine runs the retained executable and reads only the kernel and
     /// each machine's guest image; image layers stay in the store.

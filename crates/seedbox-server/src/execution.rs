@@ -95,20 +95,15 @@ impl ExecutionService {
 
     /// Foreground cascading deletion: stop the frozen ownership tree, wait for
     /// execution cleanup, then remove dependents before their parents.
-    pub fn delete(&self, id: &SimulationId) -> seedbox_application::Result<()> {
-        let setup = |e: catalogue::Error| seedbox_application::Error::Setup(e.to_string());
-        let targets = self.manager.begin_delete(id).map_err(setup)?;
+    pub fn delete(&self, id: &SimulationId) -> Result<(), Error> {
+        let targets = self.manager.begin_delete(id)?;
         // Join control transport and journal I/O without holding the catalogue
         // mutex. Retirement prevents already cloned handles from starting later.
         for target in &targets {
             if let Some(worker) = &target.worker {
                 worker
                     .lock()
-                    .map_err(|_| {
-                        seedbox_application::Error::Setup(
-                            "worker control lock is poisoned during deletion".into(),
-                        )
-                    })?
+                    .map_err(|_| Error::Catalogue(catalogue::Error::StorageFailed))?
                     .retire();
             }
         }
@@ -120,7 +115,7 @@ impl ExecutionService {
                         std::thread::sleep(Duration::from_millis(50));
                     }
                     Ok(_) | Err(catalogue::Error::NotFound(_)) => break,
-                    Err(error) => return Err(setup(error)),
+                    Err(error) => return Err(error.into()),
                 }
             }
             // Paths are derived from validated IDs, never from retained metadata.
@@ -133,29 +128,27 @@ impl ExecutionService {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 result => result?,
             }
-            self.manager.delete(&id).map_err(setup)?;
+            self.manager.delete(&id)?;
         }
         Ok(())
     }
 
     /// Block new branches before removing the completed simulation's capture.
     /// Repeated deletion retries cleanup using the retained attempt reference.
-    pub fn delete_checkpoint(
-        &self,
-        id: &SimulationId,
-        name: &str,
-    ) -> seedbox_application::Result<()> {
-        self.manager
-            .delete_checkpoint(id, name)
-            .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
+    pub fn delete_checkpoint(&self, id: &SimulationId, name: &str) -> Result<(), Error> {
+        self.manager.delete_checkpoint(id, name)?;
         let inputs: RetainedInputs = serde_json::from_reader(fs::File::open(
             self.root.join("inputs").join(format!("{id}.json")),
-        )?)?;
-        let attempt = inputs.attempt.ok_or_else(|| {
-            seedbox_application::Error::Setup("checkpoint source has no execution attempt".into())
-        })?;
+        )?)
+        .map_err(std::io::Error::other)?;
+        let attempt = inputs
+            .attempt
+            .ok_or_else(|| std::io::Error::other("checkpoint source has no execution attempt"))?;
         crate::checkpoint_cleanup::remove(&attempt, name).map_err(|e| {
-            seedbox_application::Error::Setup(format!("checkpoint {name} cleanup: {e}"))
+            Error::Storage(std::io::Error::new(
+                e.kind(),
+                format!("checkpoint {name} cleanup: {e}"),
+            ))
         })
     }
 
@@ -230,9 +223,7 @@ impl ExecutionService {
                 .manager
                 .read(|catalogue| Ok(catalogue.pending_deletions()))?
             {
-                recovery
-                    .delete(&id)
-                    .map_err(|e| Error::Catalogue(catalogue::Error::Invalid(e.to_string())))?;
+                recovery.delete(&id)?;
             }
             Ok(())
         })
@@ -336,10 +327,11 @@ impl ExecutionService {
                     }
                 };
                 self.manager.update(&id, |s| {
-                    s.status.oracle_exit_code = s.status.oracle_exit_code.or(exit);
-                    if let Some(time) = report.and_then(|report| report.simulated_time_ns) {
-                        s.status.simulated_time_ns = time;
-                    }
+                    merge_report_observation(
+                        &mut s.status,
+                        exit,
+                        report.and_then(|r| r.simulated_time_ns),
+                    );
                     s.status.termination = Some(termination);
                     s.status.phase = Phase::Completed;
                     s.status.stage = None;
@@ -528,10 +520,11 @@ impl ExecutionService {
                         .update(id, |s| {
                             s.status.phase = Phase::Finalizing;
                             s.status.stage = Some(Stage::Finalizing);
-                            s.status.oracle_exit_code = s.status.oracle_exit_code.or(exit);
-                            if let Some(time) = report.and_then(|report| report.simulated_time_ns) {
-                                s.status.simulated_time_ns = time;
-                            }
+                            merge_report_observation(
+                                &mut s.status,
+                                exit,
+                                report.and_then(|r| r.simulated_time_ns),
+                            );
                         })
                         .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
                     Ok(())
@@ -586,6 +579,19 @@ fn save_inputs(
     Ok(())
 }
 
+// Committed observations may be ahead of a late final report. Neither the
+// oracle's first exit nor the public timeline may move backwards during cleanup.
+fn merge_report_observation(
+    status: &mut seedbox_api::SimulationStatus,
+    exit: Option<u8>,
+    time: Option<u64>,
+) {
+    status.oracle_exit_code = status.oracle_exit_code.or(exit);
+    if let Some(time) = time {
+        status.simulated_time_ns = status.simulated_time_ns.max(time);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +618,58 @@ mod tests {
             _: &ContentStore,
         ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
             panic!("the preparation timeout must not launch retained execution")
+        }
+    }
+
+    #[test]
+    fn final_report_cannot_regress_a_committed_oracle_observation() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager =
+            Manager::new(catalogue::Catalogue::open(&directory.path().join("catalogue")).unwrap());
+        let configuration = seedbox_application::config::parse(
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let id = manager
+            .submit(SubmitRequest {
+                request_id: "late-report".into(),
+                spec: SimulationSpec {
+                    seed: Some(1),
+                    inputs: InputSource::Project,
+                    configuration,
+                },
+            })
+            .unwrap()
+            .0
+            .metadata
+            .id;
+        manager.begin(&id).unwrap().unwrap();
+        manager
+            .update(&id, |s| {
+                s.status.phase = Phase::Running;
+            })
+            .unwrap();
+        manager.publish_engine_event(
+            &id,
+            100,
+            seedbox_api::EventKind::MachineExited {
+                machine: "oracle".into(),
+                incarnation: 0,
+                code: 0,
+            },
+        );
+        for phase in [Phase::Finalizing, Phase::Completed] {
+            manager
+                .update(&id, |s| {
+                    merge_report_observation(&mut s.status, Some(7), Some(50));
+                    s.status.phase = phase;
+                })
+                .unwrap();
+            let status = manager.describe(&id).unwrap().status;
+            assert_eq!(status.simulated_time_ns, 100);
+            assert_eq!(status.oracle_exit_code, Some(0));
         }
     }
 

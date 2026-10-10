@@ -146,7 +146,7 @@ advanced/offline command migration are tracked in the
 
 The table distinguishes project settings, server startup options and offline
 artifact commands. Runtime input options belong to `serve` and `prepare`;
-`doctor` accepts only kernel, VMM and CPU selection. They are not submission
+`doctor` accepts kernel and VMM selection. They are not submission
 options for `run`, `explore`, `rerun` or `replay`.
 
 | Input | Default | Override |
@@ -165,7 +165,7 @@ options for `run`, `explore`, `rerun` or `replay`.
 | Exploration count | `1` | `--count` |
 | Exploration concurrency | server-owned execution capacity | No per-submission option |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `x-seedbox.disk.torn_writes: true` |
-| CPU | Server-owned allocation; Linux leases a free core; Mac uses HVF scheduling | `doctor --cpu N` or `SEEDBOX_CPU` for doctor (Linux only) |
+| Host CPU scheduling | Normal operating-system scheduling | External affinity tools such as Linux `taskset` |
 | Guest kernel | `kernel` beside the executable | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
 | Guest helper archive | embedded by the complete build; explicit archive for plain Cargo builds | `--runtime-assets`, `SEEDBOX_RUNTIME_ASSETS` |
@@ -173,7 +173,7 @@ options for `run`, `explore`, `rerun` or `replay`.
 | mke2fs (only for named volumes) | from the helper archive | `--mke2fs`, `SEEDBOX_MKE2FS` |
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
 | Server state | `$XDG_STATE_HOME/seedbox`, otherwise `$HOME/.local/state/seedbox` | `serve --state`, `SEEDBOX_STATE` |
-| Offline preparation and artifact state | `.seedbox/` | `--state`, `SEEDBOX_STATE` on `prepare`, `export` and `import` |
+| Offline preparation and artifact state | `.seedbox/` | `--state`, `SEEDBOX_ARTIFACT_STATE` on `prepare`, `export` and `import` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
 | Witness log (Linux) | always; retain `output/machines/NAME.witness-log` for diff and replay to locate the first diverging 1 ms interval | none |
 | Per-page RAM evidence (Linux) | off; full-state capture retains `output/machines/NAME.pages` beside machine traces | `serve --full-state` or `prepare --full-state` |
@@ -256,8 +256,8 @@ use the shared world coordinator, including connection selectors and committed
 console triggers; ARM arbitrary snapshot/fork reuse remains unsupported. Its PV world identity,
 boot-layout evidence and HVF host admission are distinct from the existing ARM
 fixture and x86 KVM profiles. Mac defaults use locally built Image, supervisor,
-and mke2fs, with `linux/arm64` as the image platform. `doctor --cpu` and the standalone `--vmm` override
-remain Linux-only. Exploration concurrency belongs to the server.
+and mke2fs, with `linux/arm64` as the image platform. the standalone `--vmm` override
+remains Linux-only. Exploration concurrency belongs to the server.
 
 `x-seedbox.disk.torn_writes: true` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
@@ -335,7 +335,7 @@ Interactive changes to one simulation are not inherited by other seeds.
 `seedbox get simulations SOURCE_ID` to inspect the range and its current members,
 and `seedbox stop SOURCE_ID --all-seeds` to stop it. Closing the client leaves
 accepted work owned by the server; foreground Ctrl-C requests a range stop.
-The server owns concurrency and CPU allocation; there is no `--workers`,
+The server owns concurrency and uses normal host scheduling; there is no `--workers`,
 `--cpu`, asset override, or watchdog option on `explore`.
 
 Accepted range intent and member identities survive restart. Interrupted active
@@ -374,27 +374,23 @@ produced. Inspect each simulation with the ordinary describe/log/event commands.
 
 - Any Linux x86-64 host with KVM, including cloud VMs with nested KVM, or an
   Apple Silicon Mac. Root is not needed unless the host's `/dev/kvm`
-  permissions require it. On Linux the executor acquires the shared CPU/SMT
-  leases for the selected core and holds them until its child is reaped; the
-  legacy `batch.sh` runner uses the same lease protocol.
+  permissions require it. Seedbox does not pin workers or reserve cores; Linux
+  operators can apply `taskset` externally if desired.
 
 Host admission checks the KVM capabilities the engine needs. CPU model,
-microcode, CPUID and host-kernel bytes are not checked. Before image
-preparation, it temporarily reserves an eligible core and checks each
-online/allowed SMT sibling; affinity and reservations restore before
-preparation. This is readiness admission; it does not prove cross-host
-determinism. Run identities carry no host-policy proof; host-policy fields in
-older records are kept as data and do not block replay.
+microcode, CPUID and host-kernel bytes are not pinned. These readiness checks do
+not prove cross-host determinism. Historical host-policy fields remain data and
+do not block replay.
 
 ## Check execution compatibility
 
-`seedbox doctor` checks the installed engine, guest kernel and selected host core
+`seedbox doctor` checks the installed engine, guest kernel and host capabilities
 with the same readiness checks used by execution. It needs a Linux
 KVM host with `/dev/kvm` access, uses the normal
-`--cpu`, `--kernel` and `--vmm` defaults, and
+`--kernel` and `--vmm` defaults, and
 never builds a missing VMM, prepares images or starts guests. `--json` prints the
-exact admitted observations. Success prints `VALID` after probe resources and
-thread affinity are verified cleaned up; problems use the ordinary error and
+exact admitted observations. Success prints `VALID` after probe resources are
+cleaned up; problems use the ordinary error and
 exit status 2. This is compatibility readiness, not cross-host replay qualification.
 
 ## Applications
@@ -533,5 +529,4 @@ Delete an unused capture with `seedbox delete checkpoint ID NAME`
 completed, and deletion is rejected if any branch references the checkpoint.
 Deletion hides the capture from discovery and removes its captured metadata,
 machine files and frozen intervention copy. The control receipt remains for
-history and idempotent retries. Deletion during active execution is deferred in
-[local hardening](../LOCAL-HARDENING.md).
+history and idempotent retries. Deletion during active execution is deferred.
