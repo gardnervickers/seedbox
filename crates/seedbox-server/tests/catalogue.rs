@@ -377,3 +377,36 @@ fn seed_range_waits_for_frozen_inputs_and_continues_once_after_restart() {
     drop(catalogue);
     assert_eq!(Catalogue::open(&directory).unwrap().list().count(), 0);
 }
+
+#[test]
+fn deletion_rejects_new_controls_but_keeps_existing_receipt_retries() {
+    use seedbox_api::{ControlCommand, ControlRequest};
+    let temp = tempfile::tempdir().unwrap();
+    let mut catalogue = Catalogue::open(&temp.path().join("catalogue")).unwrap();
+    let (mut resource, _) = catalogue.submit(request()).unwrap();
+    let id = resource.metadata.id.clone();
+    resource.status.phase = Phase::Preparing;
+    resource = catalogue.update(resource).unwrap();
+    resource.status.phase = Phase::Running;
+    catalogue.update(resource).unwrap();
+    let request = ControlRequest {
+        request_id: "before-delete".into(),
+        command: ControlCommand::Step,
+    };
+    let (receipt, _) = catalogue.accept_control(&id, request.clone()).unwrap();
+    catalogue.begin_delete(&id).unwrap();
+    assert_eq!(
+        catalogue.accept_control(&id, request).unwrap(),
+        (receipt, false)
+    );
+    assert!(matches!(
+        catalogue.accept_control(
+            &id,
+            ControlRequest {
+                request_id: "after-delete".into(),
+                command: ControlCommand::Step,
+            }
+        ),
+        Err(Error::ControlUnavailable)
+    ));
+}

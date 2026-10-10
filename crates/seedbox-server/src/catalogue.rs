@@ -678,7 +678,10 @@ impl Catalogue {
                 Err(Error::RequestConflict)
             };
         }
-        if entry.resource.status.phase != Phase::Running || entry.resource.status.stop_requested {
+        if entry.deleting
+            || entry.resource.status.phase != Phase::Running
+            || entry.resource.status.stop_requested
+        {
             return Err(Error::ControlUnavailable);
         }
         if entry

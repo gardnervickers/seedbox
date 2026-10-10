@@ -97,8 +97,23 @@ impl ExecutionService {
     /// execution cleanup, then remove dependents before their parents.
     pub fn delete(&self, id: &SimulationId) -> seedbox_application::Result<()> {
         let setup = |e: catalogue::Error| seedbox_application::Error::Setup(e.to_string());
-        let ids = self.manager.begin_delete(id).map_err(setup)?;
-        for id in ids {
+        let targets = self.manager.begin_delete(id).map_err(setup)?;
+        // Join control transport and journal I/O without holding the catalogue
+        // mutex. Retirement prevents already cloned handles from starting later.
+        for target in &targets {
+            if let Some(worker) = &target.worker {
+                worker
+                    .lock()
+                    .map_err(|_| {
+                        seedbox_application::Error::Setup(
+                            "worker control lock is poisoned during deletion".into(),
+                        )
+                    })?
+                    .retire();
+            }
+        }
+        for target in targets {
+            let id = target.id;
             loop {
                 match self.manager.describe(&id) {
                     Ok(resource) if resource.status.phase != Phase::Completed => {
@@ -283,6 +298,9 @@ impl ExecutionService {
                 "simulation worker panicked".into(),
             ))
         });
+        // No completed resource may lose its final manager-owned control handle
+        // while that connection still has transport or journal work in flight.
+        self.manager.retire_worker(&id)?;
         match result {
             Ok(run) => {
                 let report = run.record.report.as_ref();
@@ -595,6 +613,189 @@ mod tests {
         ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
             panic!("the preparation timeout must not launch retained execution")
         }
+    }
+
+    #[test]
+    fn deletion_drains_control_io_and_retires_stale_handles_before_removing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let manager = Arc::new(Manager::new(
+            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
+        ));
+        let service = Arc::new(
+            ExecutionService::new(
+                manager.clone(),
+                root.into(),
+                ContentStore::new(root.join("store")),
+                Arc::new(WaitingProvider(AtomicBool::new(false))),
+            )
+            .unwrap(),
+        );
+        let configuration = seedbox_application::config::parse(
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let resource = manager
+            .submit(SubmitRequest {
+                request_id: "delete-control-io".into(),
+                spec: SimulationSpec {
+                    seed: Some(1),
+                    inputs: InputSource::Project,
+                    configuration,
+                },
+            })
+            .unwrap()
+            .0;
+        let id = resource.metadata.id;
+        manager.begin(&id).unwrap().unwrap();
+        manager
+            .update(&id, |resource| {
+                resource.status.phase = Phase::Running;
+            })
+            .unwrap();
+        let attempt = root.join("runs").join(id.as_str()).join("attempt");
+        fs::create_dir_all(&attempt).unwrap();
+        manager.attach_worker(&id, &attempt).unwrap();
+        let stale = manager.worker(&id).unwrap().unwrap();
+        // Hold the same mutex that drive owns throughout RPC and checkpoint I/O.
+        let active_operation = stale.lock().unwrap();
+        let (finished, completion) = std::sync::mpsc::channel();
+        let owner = service.clone();
+        let deleting_id = id.clone();
+        let deletion = std::thread::spawn(move || {
+            finished.send(owner.delete(&deleting_id)).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !manager.describe(&id).unwrap().status.stop_requested {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "deletion never requested stop"
+            );
+            std::thread::yield_now();
+        }
+        // Execution can complete before the held control operation finishes.
+        manager
+            .update(&id, |resource| {
+                resource.status.phase = Phase::Completed;
+            })
+            .unwrap();
+        assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(attempt.is_dir());
+        fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
+        drop(active_operation);
+        completion
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        deletion.join().unwrap();
+        assert!(!attempt.exists());
+        assert!(matches!(
+            manager.describe(&id),
+            Err(catalogue::Error::NotFound(_))
+        ));
+        let mut worker = stale.lock().unwrap();
+        assert!(worker.is_retired());
+        assert!(matches!(
+            worker.apply(&seedbox_api::ControlRequest {
+                request_id: "stale".into(),
+                command: seedbox_api::ControlCommand::Checkpoint,
+            }),
+            Err(crate::worker::Error::Retired)
+        ));
+        assert!(worker.inspect().is_err());
+        assert!(!attempt.exists());
+    }
+
+    #[test]
+    fn completion_retires_control_handles_before_later_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let manager = Arc::new(Manager::new(
+            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
+        ));
+        let service = Arc::new(
+            ExecutionService::new(
+                manager.clone(),
+                root.into(),
+                ContentStore::new(root.join("store")),
+                Arc::new(WaitingProvider(AtomicBool::new(false))),
+            )
+            .unwrap(),
+        );
+        let configuration = seedbox_application::config::parse(
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let resource = manager
+            .submit(SubmitRequest {
+                request_id: "delete-control-io".into(),
+                spec: SimulationSpec {
+                    seed: Some(1),
+                    inputs: InputSource::Project,
+                    configuration,
+                },
+            })
+            .unwrap()
+            .0;
+        let id = resource.metadata.id;
+        manager.begin(&id).unwrap().unwrap();
+        manager
+            .update(&id, |resource| {
+                resource.status.phase = Phase::Running;
+            })
+            .unwrap();
+        let attempt = root.join("runs").join(id.as_str()).join("attempt");
+        fs::create_dir_all(&attempt).unwrap();
+        manager.attach_worker(&id, &attempt).unwrap();
+        let stale = manager.worker(&id).unwrap().unwrap();
+        // Hold the same mutex that drive owns throughout RPC and checkpoint I/O.
+        let active_operation = stale.lock().unwrap();
+        let (finished, completion) = std::sync::mpsc::channel();
+        let owner = manager.clone();
+        let completing_id = id.clone();
+        let finalization = std::thread::spawn(move || {
+            // ExecutionService::execute uses this order after its receiver drains.
+            owner.retire_worker(&completing_id).unwrap();
+            owner
+                .update(&completing_id, |resource| {
+                    resource.status.phase = Phase::Completed;
+                })
+                .unwrap();
+            finished.send(()).unwrap();
+        });
+        assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(manager.describe(&id).unwrap().status.phase, Phase::Running);
+        fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
+        drop(active_operation);
+        completion.recv_timeout(Duration::from_secs(2)).unwrap();
+        finalization.join().unwrap();
+        assert_eq!(
+            manager.describe(&id).unwrap().status.phase,
+            Phase::Completed
+        );
+        assert!(manager.worker(&id).unwrap().is_none());
+        // Deletion begins after completion has dropped Live and its worker handle.
+        service.delete(&id).unwrap();
+        assert!(!attempt.exists());
+        assert!(matches!(
+            manager.describe(&id),
+            Err(catalogue::Error::NotFound(_))
+        ));
+        let mut worker = stale.lock().unwrap();
+        assert!(worker.is_retired());
+        assert!(matches!(
+            worker.apply(&seedbox_api::ControlRequest {
+                request_id: "stale".into(),
+                command: seedbox_api::ControlCommand::Checkpoint,
+            }),
+            Err(crate::worker::Error::Retired)
+        ));
+        assert!(worker.inspect().is_err());
+        assert!(!attempt.exists());
     }
 
     #[test]

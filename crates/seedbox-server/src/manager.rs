@@ -177,6 +177,11 @@ struct State {
 
 pub struct Manager(Mutex<State>);
 
+pub(crate) struct DeletionTarget {
+    pub id: SimulationId,
+    pub worker: Option<Arc<Mutex<crate::worker::Worker>>>,
+}
+
 impl State {
     fn persist(&mut self, mut resource: Simulation) -> Result<Simulation, Error> {
         let id = resource.metadata.id.clone();
@@ -382,6 +387,15 @@ impl Manager {
         directory: &std::path::Path,
     ) -> Result<(), Error> {
         let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        if state
+            .catalogue
+            .get(id)?
+            .metadata
+            .deletion_requested_at_unix_ms
+            .is_some()
+        {
+            return Err(Error::ControlUnavailable);
+        }
         let live = state
             .live
             .get_mut(id)
@@ -392,6 +406,15 @@ impl Manager {
         live.worker = Some(Arc::new(Mutex::new(crate::worker::Worker::new(
             directory.to_owned(),
         ))));
+        Ok(())
+    }
+
+    /// Join outstanding control I/O before execution publishes completion.
+    /// The manager mutex is released before waiting for the worker connection.
+    pub(crate) fn retire_worker(&self, id: &SimulationId) -> Result<(), Error> {
+        if let Some(worker) = self.worker(id)? {
+            worker.lock().map_err(|_| Error::StorageFailed)?.retire();
+        }
         Ok(())
     }
 
@@ -479,26 +502,31 @@ impl Manager {
         Ok(seedbox_api::SimulationList { items, next_cursor })
     }
 
-    pub(crate) fn begin_delete(&self, id: &SimulationId) -> Result<Vec<SimulationId>, Error> {
-        let ids = {
+    pub(crate) fn begin_delete(&self, id: &SimulationId) -> Result<Vec<DeletionTarget>, Error> {
+        let targets = {
             let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
             let ids = state.catalogue.begin_delete(id)?;
-            for id in &ids {
-                if let Some(live) = state.live.get(id) {
-                    live.publish(state.catalogue.get(id)?);
-                }
+            let mut targets = Vec::with_capacity(ids.len());
+            for id in ids {
+                let worker = if let Some(live) = state.live.get(&id) {
+                    live.publish(state.catalogue.get(&id)?);
+                    live.worker.clone()
+                } else {
+                    None
+                };
+                targets.push(DeletionTarget { id, worker });
             }
-            ids
+            targets
         };
-        for id in &ids {
-            match self.stop(id) {
+        for target in &targets {
+            match self.stop(&target.id) {
                 Err(Error::NotFound(_)) => {}
                 result => {
                     result?;
                 }
             }
         }
-        Ok(ids)
+        Ok(targets)
     }
 
     pub(crate) fn delete(&self, id: &SimulationId) -> Result<(), Error> {

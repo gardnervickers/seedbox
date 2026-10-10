@@ -66,6 +66,9 @@ fn drive(
         Err(TryLockError::WouldBlock) => return Ok(()),
         Err(TryLockError::Poisoned(_)) => return Err(Error::StorageFailed),
     };
+    if worker.is_retired() {
+        return Ok(());
+    }
     let Some(request) = request else {
         if let Ok(status) = worker.inspect() {
             manager.observe_playback(id, status)?;
@@ -75,6 +78,7 @@ fn drive(
     let result = worker.apply(&request);
     let receipt = match result {
         Ok(receipt) => receipt,
+        Err(crate::worker::Error::Retired) => return Ok(()),
         Err(crate::worker::Error::Pending) => return Ok(()),
         Err(crate::worker::Error::Transport(ClientError::Unsupported)) => ControlState::Unsupported,
         // Retain the same connection and wire request after an uncertain result.

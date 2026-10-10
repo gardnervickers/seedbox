@@ -10,6 +10,8 @@ const ATTEMPT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
+    #[error("worker control connection is retired")]
+    Retired,
     #[error("checkpoint capture is pending")]
     Pending,
     #[error(transparent)]
@@ -25,6 +27,7 @@ struct FaultTransaction {
 }
 
 pub(crate) struct Worker {
+    retired: bool,
     run: PathBuf,
     client: Option<Client>,
     journal: Option<Journal>,
@@ -34,11 +37,20 @@ pub(crate) struct Worker {
 impl Worker {
     pub fn new(run: PathBuf) -> Self {
         Self {
+            retired: false,
             run,
             client: None,
             journal: None,
             fault: None,
         }
+    }
+
+    pub(crate) fn retire(&mut self) {
+        self.retired = true;
+    }
+
+    pub(crate) fn is_retired(&self) -> bool {
+        self.retired
     }
 
     fn client(&mut self) -> Result<&mut Client, ClientError> {
@@ -51,6 +63,9 @@ impl Worker {
     }
 
     pub fn apply(&mut self, request: &ControlRequest) -> Result<ControlState, Error> {
+        if self.retired {
+            return Err(Error::Retired);
+        }
         let client = self.client()?;
         // Resolve a timed-out read before any mutation can overtake it.
         if client
@@ -216,6 +231,11 @@ impl Worker {
     }
 
     pub fn inspect(&mut self) -> Result<PlaybackStatus, ClientError> {
+        if self.retired {
+            return Err(ClientError::Protocol(
+                "worker control connection is retired".into(),
+            ));
+        }
         let reply = self.client()?.execute(Command::Status, ATTEMPT)?;
         if let Some(error) = reply.error {
             return Err(ClientError::Protocol(format!("status rejected: {error:?}")));
