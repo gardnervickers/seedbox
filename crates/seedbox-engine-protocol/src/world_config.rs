@@ -59,6 +59,8 @@ pub struct WorldConfig {
     /// Static fault plans, by id from 1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub faults: Vec<Plan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_program: Vec<crate::input_program::TimedInput>,
     /// Timed serial lines and legacy partitions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scenario: Vec<ScenarioEvent>,
@@ -226,6 +228,7 @@ pub struct KillRestart {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SeedPlan<'a> {
     pub faults: &'a [Plan],
+    pub input_program: &'a [crate::input_program::TimedInput],
     pub scenario: &'a [ScenarioEvent],
     pub kill_restart: Option<&'a KillRestart>,
     pub control: Option<&'a ControlConfig>,
@@ -235,6 +238,7 @@ impl WorldConfig {
     pub fn seed_plan(&self) -> SeedPlan<'_> {
         SeedPlan {
             faults: &self.faults,
+            input_program: &self.input_program,
             scenario: &self.scenario,
             kill_restart: self.kill_restart.as_ref(),
             control: self.control.as_ref(),
@@ -247,6 +251,8 @@ impl WorldConfig {
 pub struct SeedPlanConfig {
     #[serde(default)]
     pub faults: Vec<Plan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_program: Vec<crate::input_program::TimedInput>,
     #[serde(default)]
     pub scenario: Vec<ScenarioEvent>,
     #[serde(default)]
@@ -266,6 +272,7 @@ impl SeedPlanConfig {
     pub fn plan(&self) -> SeedPlan<'_> {
         SeedPlan {
             faults: &self.faults,
+            input_program: &self.input_program,
             scenario: &self.scenario,
             kill_restart: self.kill_restart.as_ref(),
             control: self.control.as_ref(),
@@ -282,6 +289,11 @@ impl SeedPlan<'_> {
         let scenario = self.scenario.iter().enumerate();
         let times = faults
             .map(|(i, f)| (format!("faults[{i}].at_ns"), f.at_ns))
+            .chain(
+                self.input_program
+                    .iter()
+                    .map(|input| (format!("input_program.{}.at_ns", input.key), input.at_ns)),
+            )
             .chain(scenario.map(|(i, e)| (format!("scenario[{i}].at_ns"), e.at_ns)))
             .chain(
                 self.kill_restart
@@ -370,6 +382,7 @@ mod tests {
             checkpoint: None,
             boot: None,
             faults: vec![],
+            input_program: vec![],
             scenario: vec![],
             kill_restart: None,
         };

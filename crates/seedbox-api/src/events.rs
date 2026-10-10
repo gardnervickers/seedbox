@@ -37,6 +37,12 @@ pub struct SimulationEvent {
     deny_unknown_fields
 )]
 pub enum EventKind {
+    /// A scheduled external action could not be applied to the current world.
+    OverrideRejected {
+        input_key: String,
+        at_ns: u64,
+        reason: String,
+    },
     DeletionRequested,
     ExecutionTerminated {
         termination: crate::ExecutionTermination,
@@ -57,10 +63,15 @@ pub enum EventKind {
     /// boundary are coalesced; application time remains explicit.
     FaultChanged {
         id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_key: Option<String>,
         action: String,
         machine: Option<String>,
         status: FaultStatus,
         applied_time_ns: Option<u64>,
+        /// The admitted action, so clients can tell what it affects.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<Box<serde_json::Value>>,
     },
     MachineLifecycle {
         machine: String,
@@ -85,7 +96,7 @@ pub enum EventKind {
     /// A malformed observation or missing final worker watermark.
     SourceUnavailable,
     ControlChanged {
-        control: Box<crate::ControlReceipt>,
+        control: Box<serde_json::Value>,
     },
 }
 
@@ -103,4 +114,18 @@ pub enum EventDelivery {
         last: u64,
     },
     Closed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn events_accept_unknown_fault_actions_and_control_payloads() {
+        let fault = serde_json::json!({"type":"faultChanged","id":1,"inputKey":"future-input","action":"future_action","machine":null,"status":"applied","appliedTimeNs":42,"plan":{"action":"future_action","novel":true}});
+        let event: EventKind = serde_json::from_value(fault.clone()).unwrap();
+        assert_eq!(serde_json::to_value(event).unwrap(), fault);
+        let control = serde_json::json!({"type":"controlChanged","control":{"request":{"command":{"type":"injectFault","action":{"action":"future_action"}}},"state":{"type":"futureStatus","extra":true}}});
+        let event: EventKind = serde_json::from_value(control.clone()).unwrap();
+        assert_eq!(serde_json::to_value(event).unwrap(), control);
+    }
 }

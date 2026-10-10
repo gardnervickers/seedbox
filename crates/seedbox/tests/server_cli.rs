@@ -58,9 +58,22 @@ fn cli(root: &Path) -> Command {
 }
 
 #[test]
-fn clients_share_automatic_server_and_inspect_a_retained_setup_failure() {
+fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
+    let mut server = cli(root)
+        .args(["serve", "--startup-handshake"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(server.stdout.take().unwrap()),
+        &mut ready,
+    )
+    .unwrap();
+    assert!(ready.contains("ready"), "{ready}");
     let mut children: Vec<_> = (0..2)
         .map(|_| {
             cli(root)
@@ -104,7 +117,7 @@ fn clients_share_automatic_server_and_inspect_a_retained_setup_failure() {
     let result = cli(root)
         .arg("run")
         .arg(&compose)
-        .arg("--json")
+        .args(["--paused", "--json"])
         .output()
         .unwrap();
     assert_eq!(
@@ -126,6 +139,7 @@ fn clients_share_automatic_server_and_inspect_a_retained_setup_failure() {
         seedbox_api::TestVerdict::Incomplete
     );
     assert!(simulation.spec.seed.is_some());
+    assert!(simulation.options.start_paused);
     let checkpoints = cli(root)
         .args([
             "get",
@@ -261,9 +275,12 @@ fn clients_share_automatic_server_and_inspect_a_retained_setup_failure() {
         "failed preparation must not be retried for every seed"
     );
     assert!(range.error.as_deref().unwrap().contains("prepared inputs"));
-    let private = root
-        .join("state/runs")
-        .join(simulation.metadata.id.as_str());
+    let session = std::fs::read_dir(root.join("state/sessions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .unwrap();
+    let private = session.join("runs").join(simulation.metadata.id.as_str());
     std::fs::create_dir_all(&private).unwrap();
     std::fs::write(private.join("temporary-output"), b"owned").unwrap();
     for id in [&simulation.metadata.id, &range.source] {
@@ -286,4 +303,26 @@ fn clients_share_automatic_server_and_inspect_a_retained_setup_failure() {
         .unwrap()
         .items
         .is_empty());
+    let stopped = cli(root).arg("shutdown").output().unwrap();
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    server.wait().unwrap();
+    assert!(!session.exists());
+    assert!(!root.join("state/catalogue").exists());
+    drop(_server);
+}
+
+#[test]
+fn noninteractive_commands_do_not_start_a_server() {
+    let temp = tempfile::tempdir().unwrap();
+    let result = cli(temp.path())
+        .args(["get", "simulations", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("start `seedbox serve`"));
+    assert!(!temp.path().join("state/server.sock").exists());
 }

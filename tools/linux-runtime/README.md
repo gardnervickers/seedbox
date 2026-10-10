@@ -1,4 +1,9 @@
-# Build the native CLI
+# Build Seedbox
 
-Use `nix develop --command python3 tools/build.py`, then run
-`build/current/seedbox` directly. See [complete builds](../runtime/README.md).
+```sh
+cargo xtask build-assets
+cargo build --release
+./target/release/seedbox examples/etcd
+```
+
+See [build instructions](../runtime/README.md) for host prerequisites and overrides.

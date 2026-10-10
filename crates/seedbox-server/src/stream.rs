@@ -1,5 +1,7 @@
 //! Bounded live delivery. Publication never performs client I/O and a reader
-//! cannot hold the publisher back. New subscriptions have no historical data.
+//! cannot hold the publisher back. Log streams optionally share bounded history.
+mod history;
+pub use history::History;
 
 use std::{
     num::NonZeroUsize,
@@ -55,9 +57,12 @@ struct State<T> {
 pub struct Stream<T> {
     state: Mutex<State<T>>,
     max_payload_bytes: NonZeroUsize,
+    history: Option<(Arc<History<T>>, u64)>,
 }
 
 pub struct Subscription<T> {
+    history: Option<(Arc<History<T>>, u64, u64)>,
+    history_next: u64,
     receiver: Option<broadcast::Receiver<Arc<Record<T>>>>,
     next_sequence: u64,
 }
@@ -71,12 +76,24 @@ impl<T: Payload> Stream<T> {
                 next_sequence: 1,
             }),
             max_payload_bytes,
+            history: None,
         }
+    }
+
+    pub fn with_history(mut self, history: Arc<History<T>>) -> Self {
+        let id = history.allocate();
+        self.history = Some((history, id));
+        self
     }
 
     pub fn subscribe(&self) -> Result<Subscription<T>, PublishError> {
         let state = self.state.lock().map_err(|_| PublishError::Poisoned)?;
         Ok(Subscription {
+            history: self
+                .history
+                .as_ref()
+                .map(|(history, id)| (history.clone(), *id, state.next_sequence)),
+            history_next: 1,
             receiver: state.sender.as_ref().map(|sender| sender.subscribe()),
             next_sequence: state.next_sequence,
         })
@@ -96,13 +113,18 @@ impl<T: Payload> Stream<T> {
             .ok_or(PublishError::SequenceExhausted)?;
         // No readers is normal. Sending does not await them or retain a backlog
         // for future readers, and receiver count has no effect on sequencing.
-        let _ = sender.send(Arc::new(Record { sequence, payload }));
+        let record = Arc::new(Record { sequence, payload });
+        if let Some((history, id)) = &self.history {
+            history.push(*id, record.clone())?;
+        }
+        let _ = sender.send(record);
         state.next_sequence = next;
         Ok(sequence)
     }
 
     /// Existing readers drain their bounded buffers, then see Closed. Later
-    /// subscribers immediately see Closed. Closing is idempotent.
+    /// subscribers drain retained history when enabled, then see Closed.
+    /// Closing is idempotent.
     pub fn close(&self) -> Result<(), PublishError> {
         let mut state = self.state.lock().map_err(|_| PublishError::Poisoned)?;
         state.sender.take();
@@ -110,15 +132,31 @@ impl<T: Payload> Stream<T> {
     }
 }
 
+impl<T> Drop for Stream<T> {
+    fn drop(&mut self) {
+        if let Some((history, id)) = &self.history {
+            history.remove(*id);
+        }
+    }
+}
+
 impl<T> Subscription<T> {
     pub fn closed() -> Self {
         Self {
             receiver: None,
+            history: None,
+            history_next: 1,
             next_sequence: 1,
         }
     }
 
     pub async fn recv(&mut self) -> Delivery<T> {
+        if let Some((history, id, end)) = &self.history {
+            if self.history_next < *end {
+                return history.read(*id, &mut self.history_next, *end);
+            }
+            self.history = None;
+        }
         let Some(receiver) = self.receiver.as_mut() else {
             return Delivery::Closed;
         };
@@ -214,5 +252,57 @@ mod tests {
             Err(PublishError::TooLarge { limit: 8 })
         ));
         assert_eq!(stream.publish(vec![0; 8]).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shared_budget_evicts_oldest_and_closed_stream_replays_before_closing() {
+        let charge = std::mem::size_of::<Record<Vec<u8>>>() + 65;
+        let history = Arc::new(History::new(charge * 2));
+        let first = Stream::new(NonZeroUsize::new(4).unwrap(), NonZeroUsize::new(8).unwrap())
+            .with_history(history.clone());
+        let second = Stream::new(NonZeroUsize::new(4).unwrap(), NonZeroUsize::new(8).unwrap())
+            .with_history(history);
+        first.publish(vec![1]).unwrap();
+        second.publish(vec![2]).unwrap();
+        first.publish(vec![3]).unwrap();
+        first.close().unwrap();
+        let mut subscriber = first.subscribe().unwrap();
+        assert!(matches!(
+            subscriber.recv().await,
+            Delivery::Gap { first: 1, last: 1 }
+        ));
+        let Delivery::Record(record) = subscriber.recv().await else {
+            panic!("missing history");
+        };
+        assert_eq!(record.payload, vec![3]);
+        assert!(matches!(subscriber.recv().await, Delivery::Closed));
+    }
+
+    #[tokio::test]
+    async fn history_to_live_handoff_has_no_duplicate_and_drop_discards_history() {
+        let history = Arc::new(History::new(4096));
+        let stream = Stream::new(NonZeroUsize::new(4).unwrap(), NonZeroUsize::new(8).unwrap())
+            .with_history(history);
+        stream.publish(vec![1]).unwrap();
+        let mut subscriber = stream.subscribe().unwrap();
+        stream.publish(vec![2]).unwrap();
+        for expected in [1, 2] {
+            let Delivery::Record(record) = subscriber.recv().await else {
+                panic!("missing record");
+            };
+            assert_eq!(record.sequence, expected);
+        }
+        let mut late = stream.subscribe().unwrap();
+        drop(stream);
+        assert!(matches!(
+            late.recv().await,
+            Delivery::Gap { first: 1, last: 2 }
+        ));
+        assert!(matches!(late.recv().await, Delivery::Closed));
     }
 }

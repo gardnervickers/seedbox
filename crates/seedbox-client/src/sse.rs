@@ -9,6 +9,8 @@ use std::{collections::VecDeque, pin::Pin};
 
 pub type SimulationStream = Pin<Box<dyn Stream<Item = Result<Simulation, Error>> + Send>>;
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<EventDelivery, Error>> + Send>>;
+pub type FrameStream =
+    Pin<Box<dyn Stream<Item = Result<seedbox_api::FrameDelivery, Error>> + Send>>;
 pub type LogStream = Pin<Box<dyn Stream<Item = Result<seedbox_api::LogDelivery, Error>> + Send>>;
 
 pub fn logs(response: reqwest::Response) -> LogStream {
@@ -59,6 +61,12 @@ impl Decoder {
 pub fn simulations(response: reqwest::Response) -> SimulationStream {
     decode(response, |simulation: &Simulation| {
         simulation.status.phase == Phase::Completed
+    })
+}
+
+pub fn frames(response: reqwest::Response) -> FrameStream {
+    decode(response, |delivery: &seedbox_api::FrameDelivery| {
+        matches!(delivery, seedbox_api::FrameDelivery::Closed)
     })
 }
 

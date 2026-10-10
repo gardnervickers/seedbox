@@ -74,6 +74,8 @@ impl Catalogue {
             SubmitRequest {
                 request_id: request.request_id,
                 spec: request.spec,
+                options: request.options,
+                metadata: request.metadata,
             },
             Some(Range {
                 count: request.count,
@@ -191,7 +193,10 @@ impl Catalogue {
         };
         let mut entry = self.entries[&id].clone();
         let range = entry.range.as_mut().ok_or(Error::StorageFailed)?;
-        if !matches!(entry.resource.spec.inputs, InputSource::Retained { .. }) {
+        if !matches!(
+            entry.resource.spec.inputs,
+            InputSource::Resolved { .. } | InputSource::Retained { .. }
+        ) {
             range.error = Some("source simulation did not retain prepared inputs".into());
             self.persist(&entry)?;
             self.entries.insert(id, entry);
@@ -200,12 +205,21 @@ impl Catalogue {
         let index = range.next;
         let mut spec = entry.resource.spec.clone();
         spec.seed = Some(spec.seed.ok_or(Error::StorageFailed)? + u64::from(index));
-        spec.inputs = InputSource::Prepared {
-            simulation: id.clone(),
-        };
+
+        if let InputSource::Retained { simulation } = &spec.inputs {
+            spec.inputs = InputSource::Prepared {
+                simulation: simulation.clone(),
+            };
+        }
         let member = match self.submit_inner(
             SubmitRequest {
                 request_id: member_request_id(&id, index),
+                options: entry.resource.options.clone(),
+                metadata: seedbox_spec::definition::Metadata {
+                    name: entry.resource.metadata.name.clone(),
+                    labels: entry.resource.metadata.labels.clone(),
+                    annotations: entry.resource.metadata.annotations.clone(),
+                },
                 spec,
             },
             None,
@@ -236,9 +250,13 @@ mod tests {
 
     fn request(name: &str) -> SeedRangeRequest {
         SeedRangeRequest {
+            metadata: Default::default(),
+            options: Default::default(),
             request_id: name.into(),
             count: 3,
             spec: SimulationSpec {
+                program: Vec::new(),
+                start_paused: false,
                 seed: Some(123),
                 inputs: InputSource::Project,
                 configuration: seedbox_application::config::parse(
@@ -269,6 +287,8 @@ mod tests {
         let (source, _) = catalogue.submit_seeds(request("broken-range")).unwrap();
         let id = source.metadata.id.clone();
         let collision = SubmitRequest {
+            metadata: Default::default(),
+            options: Default::default(),
             request_id: member_request_id(&id, 1),
             spec: request("unused").spec,
         };
@@ -278,6 +298,8 @@ mod tests {
         ));
         assert!(matches!(
             catalogue.submit_seeds(SeedRangeRequest {
+                metadata: Default::default(),
+                options: Default::default(),
                 request_id: collision.request_id.clone(),
                 spec: collision.spec.clone(),
                 count: 3,
@@ -300,7 +322,7 @@ mod tests {
         let mut catalogue = Catalogue::open(&directory).unwrap();
         assert!(catalogue.seed_range(&id).unwrap().error.is_some());
         let (member, _) = catalogue.advance_seeds().unwrap().unwrap();
-        assert_eq!(member.metadata.parent, Some(peer.metadata.id.clone()));
+        assert_eq!(member.metadata.parent, None);
         assert_eq!(member.spec.seed, Some(124));
         assert_eq!(catalogue.seed_range(&id).unwrap().members.len(), 1);
         assert_eq!(
@@ -320,6 +342,8 @@ mod tests {
         let base = request("source");
         let source = catalogue
             .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
                 request_id: base.request_id,
                 spec: base.spec,
             })
@@ -327,6 +351,8 @@ mod tests {
             .0;
         let source = complete(&mut catalogue, source);
         let mut rerun = SubmitRequest {
+            metadata: Default::default(),
+            options: Default::default(),
             request_id: "rerun".into(),
             spec: source.spec.clone(),
         };
@@ -341,6 +367,8 @@ mod tests {
         assert_eq!(catalogue.submit(rerun).unwrap().0.spec.seed, Some(124));
         assert!(catalogue
             .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
                 request_id: "same-seed".into(),
                 spec: source.spec,
             })

@@ -466,6 +466,7 @@ pub struct World<M: WorldMachine> {
     pub(crate) latency: u64,
     pub(crate) partitioned: BTreeMap<(usize, usize), bool>,
     pub(crate) faults: faults::Faults,
+    pub(crate) input_program: crate::input_program::Program,
     pub(crate) control: control::Control,
     pub(crate) strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
     pub(crate) macs: Vec<[u8; 6]>,
@@ -513,6 +514,7 @@ impl<M: WorldMachine> World<M> {
             control,
             macs,
             failure: None,
+            input_program: Default::default(),
             scheduler_continuation: None,
             branch_identity: None,
             incarnations: vec![Vec::new(); n],
@@ -530,6 +532,31 @@ impl<M: WorldMachine> World<M> {
         };
         world.validate()?;
         Ok(world)
+    }
+
+    /// Arm external inputs before execution or at a seed release.
+    pub fn arm_input_program(
+        &mut self,
+        inputs: Vec<crate::input_program::TimedInput>,
+        duration_ns: u64,
+        from: u64,
+    ) -> Result<(), String> {
+        self.check_active()?;
+        self.input_program = crate::input_program::Program::new(inputs, duration_ns, from)?;
+        Ok(())
+    }
+    pub fn merge_input_program(
+        &mut self,
+        inputs: Vec<crate::input_program::TimedInput>,
+    ) -> Result<(), String> {
+        self.check_active()?;
+        self.input_program.replace_pending(inputs)
+    }
+    pub fn input_rejections(&self) -> &[crate::input_program::InputRejection] {
+        self.input_program.rejections()
+    }
+    pub fn input_admissions(&self) -> &[crate::input_program::InputAdmission] {
+        self.input_program.admissions()
     }
 
     /// Attach a runtime-only sink; observations publish after a round commits.
@@ -593,6 +620,7 @@ impl<M: WorldMachine> World<M> {
     }
     /// Common admission for direct and IPC adapters, before any execution.
     pub fn validate(&self) -> Result<(), String> {
+        self.input_program.validate()?;
         self.check_active()?;
         let n = self.machines.len();
         if n == 0 {
@@ -1091,6 +1119,7 @@ pub fn arm_seed<M: WorldMachine>(
 ) -> Result<Vec<Kill>, String> {
     world.check_active()?;
     plan.check_after(from)?;
+    world.arm_input_program(plan.input_program.to_vec(), u64::MAX, from)?;
     let booted = std::mem::take(&mut world.faults.readiness);
     let connections = world.faults.connections.clone();
     world.faults = faults::Faults::with_plans(
@@ -1303,6 +1332,8 @@ pub struct WorldSnapshot<M: WorldMachine> {
     slices: u64,
     boundaries: u64,
     faults: faults::Faults,
+    #[serde(default)]
+    input_program: crate::input_program::Program,
     control: control::Control,
     run_seed: u64,
     branch_identity: Option<String>,
@@ -1360,6 +1391,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             slices: world.slices,
             boundaries: world.boundaries,
             faults: world.faults.clone(),
+            input_program: world.input_program.clone(),
             control: world.control.clone(),
             run_seed: world.run_seed,
             branch_identity: world.branch_identity.clone(),
@@ -1489,6 +1521,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         world.boundaries = self.boundaries;
         if self.boot_snapshot && self.control.triggers.records.is_empty() {
             let names: Vec<_> = world.machines.iter().map(|m| m.name.clone()).collect();
+            world.input_program = Default::default();
             world.faults = boot_faults(
                 &names,
                 &self.faults.readiness,
@@ -1499,6 +1532,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             world.control = control::Control::new(&Value::Null, names, world.latency, world.early)?;
         } else {
             world.faults = self.faults.clone();
+            world.input_program = self.input_program.clone();
             world.control = self.control.clone();
         }
         world.run_seed = self.run_seed;

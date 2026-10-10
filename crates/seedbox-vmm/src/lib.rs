@@ -311,6 +311,33 @@ use seedbox_engine_core::world_windowed::RunOutcome;
 type World = world_core::World<Machine>;
 type WorldSnapshot = world_core::WorldSnapshot<Machine>;
 
+/// Host playback is inspected before effects without creating a new retained
+/// boundary; ordinary replay/admission remains at its original hook.
+struct NativeBoundary<'a> {
+    host: &'a mut Option<host_control::HostControl>,
+}
+impl world_windowed::BoundaryCallbacks for NativeBoundary<'_> {
+    fn before_fault(&mut self, position: world_windowed::Boundary) -> Result<(), String> {
+        if let Some(host) = self.host.as_mut() {
+            host.before_fault(position)
+                .map_err(|e| format!("host control: {e}"))?;
+        }
+        Ok(())
+    }
+    fn boundary(
+        &mut self,
+        position: world_windowed::Boundary,
+        admission: &mut seedbox_engine_core::intervention::Admission<'_>,
+    ) -> Result<(), String> {
+        // All external actions are armed in the shared timed program.
+        if let Some(host) = self.host.as_mut() {
+            host.boundary_with_admission(position, admission)
+                .map_err(|e| format!("host control: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
 /// One segment of the run under the windowed scheduler, on one thread or
 /// the machine worker pool. Returns the outcome word and the scheduler's
 /// report section.
@@ -319,21 +346,12 @@ fn simulate_segment(
     run: &world_windowed::Run,
     request: &WorkerRequest,
     host_control: &mut Option<host_control::HostControl>,
-    replay: &mut seedbox_engine_core::intervention::Replay,
+    _replay: &mut seedbox_engine_core::intervention::Replay,
 ) -> Result<(RunOutcome, Value), String> {
-    let mut boundary =
-        |position, admission: &mut seedbox_engine_core::intervention::Admission<'_>| {
-            replay.boundary(admission)?;
-            if let Some(control) = host_control.as_mut() {
-                control
-                    .boundary_with_admission(position, admission)
-                    .map_err(|e| format!("host control: {e}"))?;
-            }
-            Ok(())
-        };
+    let mut boundary = NativeBoundary { host: host_control };
     let skew = std::time::Duration::from_micros(request.windowed_skew_us);
     if request.machine_workers <= 1 {
-        return world_windowed::simulate(world, run, skew, &mut boundary);
+        return world_windowed::simulate_with_callbacks(world, run, skew, &mut boundary);
     }
     // Each pool thread opens its own clock: the watchdog measures that
     // thread's CPU time.
@@ -342,7 +360,7 @@ fn simulate_segment(
         count: request.machine_workers,
         skew,
     };
-    world_windowed::simulate_parallel(
+    world_windowed::simulate_parallel_with_callbacks(
         world,
         run,
         workers,
@@ -405,12 +423,13 @@ fn read_config(path: &Path) -> Result<WorldConfig, String> {
 /// Check the parts of a world document that no type expresses, before any
 /// machine boots.
 fn validate_config(cfg: &WorldConfig) -> Result<(), String> {
+    seedbox_engine_core::input_program::validate_program(&cfg.input_program, cfg.duration_ns)?;
     if cfg.control.is_some() && cfg.control_channel.is_none() {
         return Err("runtime control requires virtio-console-v1 channel".into());
     }
     if let Some(control) = &cfg.control {
-        if cfg.seed_plan().has_static_events() {
-            return Err("runtime control cannot mix with static/legacy scenarios".into());
+        if !cfg.scenario.is_empty() || cfg.kill_restart.is_some() {
+            return Err("runtime control cannot mix with legacy scenarios".into());
         }
         if cfg.end_on_exit.as_ref() != Some(&control.machine) {
             return Err("controller must also be the end_on_exit machine".into());
@@ -513,9 +532,7 @@ pub fn run(
     console_trace: Option<ConsoleTraceCallback>,
 ) -> Result<RunReport, String> {
     options.validate()?;
-    let mut replay = seedbox_engine_core::intervention::Replay::new(
-        options.interventions.clone().unwrap_or_default(),
-    )?;
+    let mut replay = seedbox_engine_core::intervention::Replay::new(Default::default())?;
     let observations = options
         .observations
         .as_deref()
@@ -537,15 +554,20 @@ pub fn run(
     let mut host_control = options
         .host_control
         .as_deref()
-        .map(host_control::HostControl::bind)
+        .map(|path| {
+            if options.start_paused {
+                host_control::HostControl::bind_paused(path)
+            } else {
+                host_control::HostControl::bind(path)
+            }
+        })
         .transpose()
         .map_err(|e| format!("host control: {e}"))?;
-    if options.interventions.is_some() && options.resume_checkpoint.is_none() {
-        if let Some(host) = &mut host_control {
-            host.disable_fault_injection();
-        }
-    }
-    let cfg = read_config(config_path)?;
+    let mut cfg = read_config(config_path)?;
+    seedbox_engine_core::input_program::merge_interventions(
+        &mut cfg.input_program,
+        &options.interventions.clone().unwrap_or_default(),
+    )?;
     validate_config(&cfg)?;
     let disk_fault_model = disk::fault_model(cfg.disk_loss)?;
     let base = config_path.parent().unwrap_or(Path::new(""));
@@ -680,22 +702,10 @@ pub fn run(
     .with_observations(observations);
     if let Some(path) = &options.resume_checkpoint {
         let saved = live_checkpoint::load(path)?;
-        let mut state = saved.state;
-        let history = options.interventions.clone().unwrap_or_default();
-        let consumed = history
-            .entries
-            .iter()
-            .take_while(|entry| entry.position.boundary_index <= state.position.boundary_index)
-            .count();
-        if consumed < history.entries.len() {
-            if let Some(host) = &mut host_control {
-                host.disable_fault_injection();
-            }
-        }
-        state.replay.history = history;
-        state.replay.consumed = consumed;
-        replay = seedbox_engine_core::intervention::Replay::from_checkpoint(state.replay)?;
+        let state = saved.state;
+        replay = seedbox_engine_core::intervention::Replay::new(Default::default())?;
         state.world.restore_checkpoint(&mut world)?;
+        world.merge_input_program(cfg.input_program.clone())?;
         live_checkpoints.boot = saved.boot;
         live_checkpoints.kills = saved.kills;
         let started = Instant::now();
@@ -1300,6 +1310,10 @@ fn report(
             .map(|r| serde_json::to_value(r).map_err(|e| e.to_string()))
             .collect()
     };
+    if !world.input_rejections().is_empty() {
+        world_witness
+            .update(serde_json::to_vec(world.input_rejections()).map_err(|e| e.to_string())?);
+    }
     Ok(EngineReport {
         report_version: REPORT_VERSION,
         seed,
@@ -1309,6 +1323,8 @@ fn report(
             world_witness: hex::encode(world_witness.finalize()),
             faults,
             fault_error,
+            input_admissions: world.input_admissions().to_vec(),
+            input_rejections: world.input_rejections().to_vec(),
             control_history,
             control_latency_ns: world.control().latency,
             triggers,

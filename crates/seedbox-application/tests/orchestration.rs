@@ -447,6 +447,7 @@ fn unexpected_backend_failure_and_cancellation_retain_logs() {
             RunOptions {
                 seed: None,
                 cancellation: token,
+                wall_time_ns: None,
             },
             &fixture.preparer,
             &fixture.backend,
@@ -458,15 +459,45 @@ fn unexpected_backend_failure_and_cancellation_retain_logs() {
 
 #[test]
 fn backend_cannot_report_success_after_wall_deadline() {
-    let mut fixture = Fixture::new();
-    fixture.simulation.limits.wall_time_ns = 1;
-    assert_eq!(fixture.run().record.outcome, Outcome::Incomplete);
+    let fixture = Fixture::new();
+    let run = fixture
+        .orchestrator
+        .run(
+            &fixture.simulation,
+            RunOptions {
+                wall_time_ns: Some(1),
+                ..Default::default()
+            },
+            &fixture.preparer,
+            &fixture.backend,
+        )
+        .unwrap();
+    assert_eq!(run.record.outcome, Outcome::Incomplete);
+}
+
+#[test]
+fn runtime_timeout_does_not_change_the_experiment_identity() {
+    let fixture = Fixture::new();
+    let first = fixture.run();
+    let second = fixture
+        .orchestrator
+        .run(
+            &fixture.simulation,
+            RunOptions {
+                wall_time_ns: Some(60_000_000_000),
+                ..Default::default()
+            },
+            &fixture.preparer,
+            &fixture.backend,
+        )
+        .unwrap();
+    assert_eq!(first.record.run_id, second.record.run_id);
+    assert_eq!(first.record.identity, second.record.identity);
 }
 
 #[test]
 fn final_deadline_guard_excludes_reported_playback_waits() {
-    let mut fixture = Fixture::new();
-    fixture.simulation.limits.wall_time_ns = 100_000_000;
+    let fixture = Fixture::new();
     let executor = fixture.executing(|_| {
         let start = std::time::Instant::now();
         std::thread::sleep(std::time::Duration::from_millis(150));
@@ -478,7 +509,10 @@ fn final_deadline_guard_excludes_reported_playback_waits() {
         .orchestrator
         .run_prepared(
             &fixture.simulation,
-            RunOptions::default(),
+            RunOptions {
+                wall_time_ns: Some(100_000_000),
+                ..Default::default()
+            },
             fixture.preparer.inputs.clone(),
             &executor,
         )
@@ -2457,7 +2491,7 @@ fn oracle_report_is_observed_before_a_failed_final_record_write() {
 }
 
 #[test]
-fn interactive_history_is_sealed_and_replay_requires_its_retained_object() {
+fn interactive_history_is_sealed_as_portable_overrides_and_replays_without_journal() {
     use seedbox_engine_protocol::{
         host_control::BoundaryPosition,
         intervention::{History, Intervention},
@@ -2502,10 +2536,11 @@ fn interactive_history_is_sealed_and_replay_requires_its_retained_object() {
             &backend,
         )
         .unwrap();
-    assert_eq!(
-        first.record.identity.interventions,
-        Some(ContentDigest::of(&history.encode().unwrap()))
-    );
+    assert_eq!(first.record.identity.interventions, None);
+    assert_eq!(first.record.identity.program.len(), 1);
+    assert_eq!(first.record.identity.program[0].key, "stop-workload");
+    assert_eq!(first.record.identity.program[0].at_ns, 100);
+    assert_eq!(first.record.identity.program[0].timeout_ns, 100);
     assert_eq!(inspect(&first.directory).unwrap(), first.record);
     fs::remove_file(first.directory.join("interventions.json")).unwrap();
     let replay = fixture

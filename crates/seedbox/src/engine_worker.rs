@@ -74,6 +74,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
         let mut output = None;
         let mut seed = None;
         let mut host_control = None;
+        let mut start_paused = false;
         let mut observations = None;
         let mut interventions = None;
         let mut resume_checkpoint = None;
@@ -135,6 +136,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
                         args.next().ok_or("--observations needs a path")?,
                     ));
                 }
+                "--start-paused" => start_paused = true,
                 "--digest" => full_state = true,
                 "--stream-console" => {}
                 "--console-limit" => {
@@ -163,6 +165,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
             seed: seed.ok_or("worker requires --seed")?,
             full_state,
             host_control,
+            start_paused,
             interventions,
             resume_checkpoint,
             observations,

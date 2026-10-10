@@ -345,6 +345,7 @@ pub(crate) fn world(names: &[&str]) -> World<Mock> {
     let n = names.len();
     World {
         scheduler_continuation: None,
+        input_program: Default::default(),
         observations: None,
         failure: None,
         machines: names

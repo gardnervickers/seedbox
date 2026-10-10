@@ -3,7 +3,7 @@
 #![cfg(unix)]
 mod sse;
 pub use sse::LogStream;
-pub use sse::{EventStream, SimulationStream};
+pub use sse::{EventStream, FrameStream, SimulationStream};
 
 use reqwest::{Method, RequestBuilder};
 use seedbox_api::{ApiError, ServerInfo, Simulation, SimulationId, SimulationList, SubmitRequest};
@@ -62,6 +62,61 @@ impl Client {
             .await
     }
 
+    /// Submit a saved self-contained simulation document as a new immutable run.
+    pub async fn submit_definition(
+        &self,
+        document: &serde_json::Value,
+        start_paused: bool,
+    ) -> Result<Simulation, Error> {
+        let mut options: seedbox_api::ExecutionOptions = serde_json::from_value(
+            document
+                .get("options")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        )?;
+        options.start_paused = start_paused;
+        let mut metadata = serde_json::Map::new();
+        for key in ["name", "labels", "annotations"] {
+            if let Some(value) = document.get("metadata").and_then(|m| m.get(key)) {
+                metadata.insert(key.into(), value.clone());
+            }
+        }
+        let request = serde_json::json!({
+            "requestId": Self::request_id()?,
+            "spec": document["spec"],
+            "metadata": metadata,
+            "options": options,
+        });
+        let request: SubmitRequest = serde_json::from_value(request)?;
+        self.submit(&request).await
+    }
+
+    /// Export a checkpoint as a complete simulation definition with binary assets.
+    pub async fn checkpoint_definition(
+        &self,
+        id: &SimulationId,
+        checkpoint: &str,
+    ) -> Result<Simulation, Error> {
+        self.document(self.request(
+            Method::GET,
+            &format!("/v1/simulations/{id}/checkpoints/{checkpoint}/definition"),
+        ))
+        .await
+    }
+
+    /// Derive a new simulation using server-owned source inputs and selected entries.
+    pub async fn derive(
+        &self,
+        source: &SimulationId,
+        request: &seedbox_api::DeriveRequest,
+    ) -> Result<Simulation, Error> {
+        self.document(
+            self.request(Method::POST, &format!("/v1/simulations/{source}/derive"))
+                .json(request),
+        )
+        .await
+    }
+
     pub async fn submit_seeds(
         &self,
         request: &seedbox_api::SeedRangeRequest,
@@ -98,6 +153,11 @@ impl Client {
 
     pub async fn describe(&self, id: &SimulationId) -> Result<Simulation, Error> {
         self.document(self.request(Method::GET, &format!("/v1/simulations/{id}")))
+            .await
+    }
+
+    pub async fn timeline(&self, id: &SimulationId) -> Result<seedbox_api::FaultTimeline, Error> {
+        self.document(self.request(Method::GET, &format!("/v1/simulations/{id}/timeline")))
             .await
     }
 
@@ -158,6 +218,45 @@ impl Client {
         ))
     }
 
+    /// Server-owned schemas with current machine, link and heal target choices.
+    pub async fn fault_types(
+        &self,
+        id: &SimulationId,
+    ) -> Result<seedbox_api::FaultCatalogue, Error> {
+        self.document(self.request(Method::GET, &format!("/v1/simulations/{id}/fault-types")))
+            .await
+    }
+
+    /// Submit a schema-generated control without decoding its action locally.
+    pub async fn request_control_json(
+        &self,
+        id: &SimulationId,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        self.document(
+            self.request(Method::POST, &format!("/v1/simulations/{id}/controls"))
+                .json(request),
+        )
+        .await
+    }
+
+    /// Read a schema-generated control receipt without decoding its action locally.
+    pub async fn control_receipt_json(
+        &self,
+        id: &SimulationId,
+        request_id: &str,
+    ) -> Result<serde_json::Value, Error> {
+        let mut url = reqwest::Url::parse("http://seedbox.local/v1/simulations/")
+            .map_err(|e| Error::Stream(e.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|_| Error::Stream("invalid API base URL".into()))?
+            .pop_if_empty()
+            .push(&id.to_string())
+            .push("controls")
+            .push(request_id);
+        self.document(self.request(Method::GET, url.path())).await
+    }
+
     pub async fn request_control(
         &self,
         id: &SimulationId,
@@ -197,6 +296,20 @@ impl Client {
     pub async fn events(&self, id: &SimulationId) -> Result<EventStream, Error> {
         Ok(sse::events(
             self.event_response(&format!("/v1/simulations/{id}/events"))
+                .await?,
+        ))
+    }
+
+    /// The world's machines, links and faults as the server has observed them.
+    pub async fn world(&self, id: &SimulationId) -> Result<seedbox_api::WorldState, Error> {
+        self.document(self.request(Method::GET, &format!("/v1/simulations/{id}/world")))
+            .await
+    }
+
+    /// Routed frames from now on. Batches lost by a slow reader are reported as gaps.
+    pub async fn frames(&self, id: &SimulationId) -> Result<FrameStream, Error> {
+        Ok(sse::frames(
+            self.event_response(&format!("/v1/simulations/{id}/frames"))
                 .await?,
         ))
     }

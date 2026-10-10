@@ -1,5 +1,5 @@
-//! Text results on stdout: one `WORD: detail` status line, then lowercase
-//! `key: value` fields. Diagnostics go to stderr elsewhere.
+//! Text results on stdout: tables, documents, or status lines and result fields.
+//! Diagnostics go to stderr elsewhere.
 use seedbox_application::Result;
 use std::fmt::Display;
 
@@ -24,16 +24,6 @@ pub fn yaml(value: &impl serde::Serialize) -> Result<()> {
     std::io::stdout()
         .lock()
         .write_all(serde_yaml_ng::to_string(value)?.as_bytes())?;
-    Ok(())
-}
-
-/// Separate and flush each resource in a live YAML document stream.
-pub fn yaml_document(value: &impl serde::Serialize) -> Result<()> {
-    use std::io::Write;
-    let mut stdout = std::io::stdout().lock();
-    stdout.write_all(b"---\n")?;
-    stdout.write_all(serde_yaml_ng::to_string(value)?.as_bytes())?;
-    stdout.flush()?;
     Ok(())
 }
 
@@ -62,4 +52,58 @@ pub fn word(value: &impl serde::Serialize) -> String {
         Ok(serde_json::Value::String(word)) => word,
         _ => "UNKNOWN".into(),
     }
+}
+
+/// An aligned text table. Cells stay on one line, including untrusted names.
+pub struct Table<const N: usize> {
+    widths: [usize; N],
+}
+
+impl<const N: usize> Table<N> {
+    pub fn new(headers: [&str; N], minimum_widths: [usize; N]) -> Result<Self> {
+        let table = Self {
+            widths: std::array::from_fn(|i| minimum_widths[i].max(headers[i].len())),
+        };
+        table.row(headers.map(str::to_owned))?;
+        Ok(table)
+    }
+
+    pub fn row(&self, cells: [String; N]) -> Result<()> {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        for (i, cell) in cells.iter().enumerate() {
+            let cell: String = cell
+                .chars()
+                .map(|c| {
+                    if c.is_control() || c.is_whitespace() {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            if i + 1 == N {
+                writeln!(stdout, "{cell}")?;
+            } else {
+                write!(stdout, "{cell:width$}  ", width = self.widths[i])?;
+            }
+        }
+        stdout.flush()?;
+        Ok(())
+    }
+}
+
+/// Print a finite table, sizing columns from all of its rows.
+pub fn table<const N: usize>(headers: [&str; N], rows: Vec<[String; N]>) -> Result<()> {
+    let widths = std::array::from_fn(|i| {
+        rows.iter()
+            .map(|row| row[i].chars().count())
+            .max()
+            .unwrap_or(0)
+    });
+    let table = Table::new(headers, widths)?;
+    for row in rows {
+        table.row(row)?;
+    }
+    Ok(())
 }

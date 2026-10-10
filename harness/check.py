@@ -391,12 +391,22 @@ def main(argv=None):
             environment[key] = str(path)
     environment["SEEDBOX_ARM64_REPORT_DIR"] = str(reports / "arm64")
     if {"linux-apps", "linux-pause", "mac-apps"} & set(suites):
-        # The build's stdout is one completed directory. Pin every test to it;
-        # never resolve a mutable current pointer or ambient asset override later.
-        output = checks.run("application-build", [sys.executable, "tools/build.py"], capture=True)
+        output = checks.run("application-assets", ["cargo", "xtask", "build-assets"], capture=True)
         if output is None:
             return 1
-        select_build(environment, output.strip())
+        assets = Path(output.strip())
+        # Freeze both the asset paths and executable for this acceptance run.
+        build_env = dict(os.environ, SEEDBOX_BUILD_KERNEL=str(assets / "kernel"),
+                         SEEDBOX_BUILD_HELPERS=str(assets / "runtime.tar.gz"))
+        compiled = checks.run("application-build", ["cargo", "build", "--release", "--locked", "-p", "seedbox"], environment=build_env)
+        if not compiled:
+            return 1
+        complete = reports / "application-build"
+        complete.mkdir()
+        for name in ("kernel", "runtime.tar.gz"):
+            shutil.copy2(assets / name, complete / name)
+        shutil.copy2(ROOT / "target/release/seedbox", complete / "seedbox")
+        select_build(environment, complete)
     packages = [("seedbox-arm64", ["cargo", "test-arm64"])]
     if system == "Linux" and machine == "x86_64":
         packages.append(("seedbox-vmm", ["cargo", "test-vmm"]))

@@ -78,6 +78,7 @@ impl Args {
             out: self.out.unwrap_or_default(),
             digest: self.digest,
             host_control: self.host_control,
+            start_paused: false,
             interventions: None,
             resume_checkpoint: None,
             observations: self.observations,

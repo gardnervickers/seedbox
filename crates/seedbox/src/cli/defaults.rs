@@ -4,17 +4,19 @@ use std::{
     env,
     path::{Path, PathBuf},
 };
-const COMPOSE_FILES: [&str; 4] = [
+const COMPOSE_FILES: [&str; 6] = [
+    "seedbox.yaml",
+    "seedbox.yml",
     "compose.yaml",
     "compose.yml",
     "docker-compose.yaml",
     "docker-compose.yml",
 ];
 
-/// A Compose file path, or the Compose file inside a project directory.
+/// A native project file, falling back to an existing Compose project.
 pub fn compose_file(path: &Path) -> Result<PathBuf> {
     if !path.is_dir() {
-        return existing("Compose file", path.to_owned());
+        return existing("project file", path.to_owned());
     }
     COMPOSE_FILES
         .iter()
@@ -22,7 +24,7 @@ pub fn compose_file(path: &Path) -> Result<PathBuf> {
         .find(|candidate| candidate.is_file())
         .ok_or_else(|| {
             let searched: Vec<_> = COMPOSE_FILES.iter().map(|name| path.join(name)).collect();
-            missing("Compose file", &searched, "pass the file path directly")
+            missing("project file", &searched, "pass the file path directly")
         })
 }
 

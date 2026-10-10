@@ -20,7 +20,7 @@ libc.workspace = true
 getrandom.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 futures-util.workspace = true
+seedbox-spec.workspace = true
 
 [dev-dependencies]
-seedbox-spec.workspace = true
 seedbox-client.workspace = true

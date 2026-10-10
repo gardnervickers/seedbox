@@ -79,6 +79,10 @@ pub enum Command {
     SetRate {
         rate: PlaybackRate,
     },
+    /// One-shot playback stop before the next fault, without changing inputs.
+    PauseBeforeNextFault {
+        rate: PlaybackRate,
+    },
     Step,
     /// Request a stopped-world capture; acceptance is not capture completion.
     Checkpoint {
@@ -142,6 +146,7 @@ pub enum ControlError {
     StaleRequest,
     RequestConflict,
     NotPaused,
+    InvalidRate,
     StepPending,
     FaultPending,
     NoFaultPrepared,

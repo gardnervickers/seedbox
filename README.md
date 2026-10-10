@@ -3,8 +3,13 @@
 **Run real Linux applications. Reproduce the same execution.**
 
 Seedbox runs each service in its own Linux virtual machine and controls time,
-networking and disk faults. Describe your application with Compose, choose a
+networking and disk faults. Describe your application in `seedbox.yaml`, choose a
 seed, and replay a failure using the exact inputs retained by the run.
+
+![Seedbox TUI: isolate an etcd node, observe dropped traffic, then heal the partition](docs/assets/seedbox-tui.gif)
+
+*An actual three-node etcd simulation: inject a network partition, watch traffic
+and application logs, then heal it. The fault timeline is saved with the simulation.*
 
 [Quick start](#quick-start) · [Your application](#your-application) · [Runtime guide](docs/runtime.md) · [Contributing](docs/contributing.md)
 
@@ -18,18 +23,44 @@ Build Seedbox and its current guest inputs together:
 
 ```sh
 nix develop
-python3 tools/build.py
+cargo xtask build-assets
+cargo build --release
 ```
 
-Then run the etcd example directly, without Nix:
+`cargo xtask build-assets` builds the guest inputs; `cargo build --release`
+embeds them, including the architecture-matched kernel, into the CLI. Separate
+worktrees have independent builds; Nix reuses unchanged guest dependencies.
+
+### Explore a real etcd cluster
+
+Start the example paused, then open the TUI using the simulation ID it prints:
 
 ```sh
-./build/current/seedbox examples/etcd
+./target/release/seedbox run examples/etcd --paused --detach
+./target/release/seedbox tui <sim-id>
 ```
 
-The command publishes a complete build only after the guest inputs and native
-CLI succeed. The CLI finds its kernel beside the executable. Separate worktrees
-have independent builds; Nix reuses unchanged guest dependencies.
+Press **Space** to start the cluster. Once the machines are ready, press **f**
+and choose **Partition network**. Name the fault, put `n1` on one side and
+`n2` / `n3` on the other, then activate **Submit** with Enter. The menu pauses
+simulation time while you configure the fault and restores playback afterward.
+
+Use **←/→** to browse choices, **Space** to toggle machines in a group, and
+**Enter** to confirm and advance. Choose **Heal fault** to restore the link.
+Click panes to focus them and scroll application logs with the mouse wheel.
+The **3 timeline** tab shows the recorded faults; edit the timeline and rerun
+it to try a different sequence.
+
+Save the complete definition or verify the completed run with replay:
+
+```sh
+./target/release/seedbox describe simulation <sim-id> > simulation.yaml
+./target/release/seedbox run simulation.yaml --paused --detach
+./target/release/seedbox replay <sim-id>
+```
+
+Definitions retain their binary inputs in the server's cache across restarts.
+The simulation catalogue and live logs remain temporary.
 
 Seedbox finds your Docker or Podman socket, builds the example's workload oracle
 with the engine's normal cache, prepares the images, and runs the Linux guests.
@@ -37,9 +68,10 @@ Progress appears on stderr. Set `DOCKER_HOST` if your engine uses a custom socke
 Application progress comes from automatic binary instrumentation on both
 platforms; see the [determinism catalogue](docs/determinism-catalogue.md).
 
-The CLI connects to your local simulation server and starts it automatically
-when needed. The server owns execution; closing a client does not stop a
-simulation. `--detach` returns its short ID immediately. Foreground Ctrl-C sends
+If no local server is running, an interactive client asks before starting one.
+The server stays running for subsequent commands. Noninteractive callers must
+start `seedbox serve` explicitly. Use `seedbox shutdown` to stop the server and
+its active work gracefully. `--detach` returns the simulation ID immediately. Foreground Ctrl-C sends
 an explicit stop request. Use `seedbox rerun ID` to repeat a simulation,
 `seedbox compare FIRST_ID SECOND_ID` to compare results, or `seedbox replay ID`
 to rerun and compare in one command. Replay reports `MATCH`, `MISMATCH` or
@@ -47,8 +79,8 @@ to rerun and compare in one command. Replay reports `MATCH`, `MISMATCH` or
 Use `seedbox get simulation ID --watch` to follow status from another client.
 Ctrl-C detaches the watcher; it does not stop the simulation.
 
-Oracle exit zero passes; any nonzero exit fails. `x-seedbox.check.exit_code`
-is not configurable and must be omitted from Compose files.
+The dedicated oracle exits zero to pass; any nonzero exit fails. Success codes
+are not configurable.
 
 Simulation preparation has a 15-minute server deadline, separate from execution
 limits. On expiry the server cancels preparation and waits for cleanup. Without
@@ -56,32 +88,41 @@ an oracle exit, a preparation or execution timeout reports `TIMEOUT` (exit 124)
 and the simulation's test verdict remains incomplete.
 
 
-**The kernel is the only separate guest asset.** The complete build embeds
-its supervisor, filesystem tool and progress runtime in the executable. Copy
-`seedbox` and `kernel` together to run elsewhere. Running or replaying Seedbox
+**The complete executable includes its guest assets.** The build embeds the
+kernel, supervisor, filesystem tool and progress runtime for its architecture
+(x86-64 or AArch64). Copy just `seedbox` to another host of the same platform.
+At runtime the kernel is extracted to `$XDG_CACHE_HOME/seedbox/kernels`
+(or `$HOME/.cache/seedbox/kernels`), keyed by its contents. Running or replaying Seedbox
 never invokes Nix, Cargo, or an asset builder.
 
 Guest time starts at the latest build time recorded in the prepared images, so
 independent fresh runs of the same images start at the same time and can be
-compared directly. Set `x-seedbox.wall_clock_epoch` (Unix seconds, at least
-86400) in the Compose file to choose the start time. Replay always retains the
-original guest clock.
+compared directly. Resolved simulation definitions retain the exact guest clock.
 
 ### Your application
 
-Compose can reference an existing image or a Dockerfile build context:
+A native project describes application machines and a dedicated oracle:
 
 ```yaml
-services:
+name: database-test
+machines:
   database:
     image: quay.io/coreos/etcd:v3.5.2
-  oracle:
-    build: ./workload
+oracle:
+  build:
+    context: ./oracle
+network:
+  latency: 1ms
+simulator:
+  blocksPerProgressCall: 10000
 ```
 
-The full [etcd example](examples/etcd/compose.yaml) adds commands, the seed, limits,
-and the workload check. Edit the oracle and run the same command again: the
-engine reuses unchanged build layers. Seedbox has no separate source-hash cache.
+See the [annotated project format](docs/project-format.md) for all authoring fields.
+The [etcd example](examples/etcd/seedbox.yaml) includes its application commands
+and oracle. Edit the oracle and run the same command again: the engine reuses
+unchanged build layers. `seedbox.yaml` is preferred during directory discovery;
+existing Compose files remain readable.
+
 Images must match the guest platform: `linux/arm64` on Apple Silicon or
 `linux/amd64` on Linux x86-64. Existing local images are used before registry pulls.
 Build contexts honor `.dockerignore`; `build: {context: ..., dockerfile: ...}`
@@ -95,24 +136,25 @@ A run prints its result and short simulation ID. Inspect or rerun it from
 another client:
 
 ```sh
-./build/current/seedbox get simulations
-./build/current/seedbox describe simulation SIM_ID
-./build/current/seedbox rerun SIM_ID
-./build/current/seedbox stop SIM_ID
-./build/current/seedbox events SIM_ID
-./build/current/seedbox playback SIM_ID
-./build/current/seedbox pause SIM_ID
-./build/current/seedbox step SIM_ID
-./build/current/seedbox rate SIM_ID 1/10
-./build/current/seedbox resume SIM_ID
-./build/current/seedbox logs SIM_ID              # All machines.
-./build/current/seedbox logs SIM_ID MACHINE_NAME # One machine.
+./target/release/seedbox get simulations
+./target/release/seedbox describe simulation SIM_ID
+./target/release/seedbox rerun SIM_ID
+./target/release/seedbox stop SIM_ID
+./target/release/seedbox events SIM_ID
+./target/release/seedbox playback SIM_ID
+./target/release/seedbox pause SIM_ID
+./target/release/seedbox step SIM_ID
+./target/release/seedbox rate SIM_ID 1/10
+./target/release/seedbox resume SIM_ID
+./target/release/seedbox logs SIM_ID              # All machines.
+./target/release/seedbox logs SIM_ID MACHINE_NAME # One machine.
+./target/release/seedbox tui [SIM_ID]             # Interactive console.
 ```
 
 Describe emits YAML with the resolved specification, status and timings. Save it
-and submit its positional path with `seedbox run simulation.yaml`. After preparation, its input
-reference uses retained bytes, so rerun needs neither the container engine nor
-the original source, image registry or kernel. References remain local to this
+and submit its positional path with `seedbox run simulation.yaml`. After preparation, its definition
+references retained binary assets, so rerun needs neither the container engine nor
+the original project, image registry, or kernel path. References remain local to this
 server's storage. Each rerun receives a new ID and preserves the original.
 
 Server state defaults to `$XDG_STATE_HOME/seedbox` or
@@ -121,6 +163,27 @@ Server state defaults to `$XDG_STATE_HOME/seedbox` or
 assets or starts Docker/Podman. Offline artifact inspection and transfer remain
 available for retained run directories. Offline `prepare`, `export` and `import`
 use `--state` or `SEEDBOX_ARTIFACT_STATE`, defaulting to `.seedbox`.
+
+Start at the initial execution boundary with `seedbox run PROJECT --paused --detach`,
+then open `seedbox tui ID` to inspect and resume it. `--paused` also works with
+`explore`; every member starts paused. Preparation still runs before the pause.
+In the TUI, press `f` to choose a server-discovered fault, edit its generated
+parameter form, and activate Submit with Enter. Enter confirms a displayed
+choice and advances to the next field; Tab moves between fields and Submit.
+The menu pauses execution while you
+edit, then restores the previous speed after admission (or cancellation).
+Without `--detach`, the command waits for completion while another client controls
+playback. Initial playback state does not change deterministic results; `rerun`,
+`replay` and checkpoint branches start with normal playback.
+
+Logs fill the bottom pane; click to focus and use the mouse wheel or Page Up/Page
+Down to scroll. End returns to live output. Switching views never changes playback.
+
+The TUI's `3 timeline` view saves named recordings locally with application, seed
+and date. Remove/restore entries with `d`, clear with `C` twice, undo with `u`,
+and press Enter to run an edited recording as a new paused simulation after its
+definition is ready. `N` selects the next fault; `p` runs to just before it. Rerunning an unchanged definition preserves its ordered overrides. Fault forms accept schema-advertised units
+such as `100ms` and `2.5%`, and keep values when the server rejects a submission.
 
 ## Learn more
 
@@ -154,7 +217,7 @@ entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
 | [`crates/seedbox/`](crates/seedbox/README.md) | The `seedbox` CLI and private retained worker entrypoint |
 | `crates/seedbox-application/` | Configuration parsing, OCI preparation and orchestration |
 | `crates/seedbox-api/`, `crates/seedbox-spec/` | Public resource contracts and resolved experiment types |
-| `crates/seedbox-client/`, `crates/seedbox-server/` | Local HTTP transport, durable catalogue and execution ownership |
+| `crates/seedbox-client/`, `crates/seedbox-server/` | Local HTTP transport, in-memory catalogue and execution ownership |
 | `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
 | `crates/seedbox-engine-protocol/` | Worker requests, world configuration and retained evidence formats; no execution policy |
 | `crates/seedbox-artifacts/` | Offline records, content storage, logs, comparison and bundles; no container engine or hypervisor dependency |
@@ -185,9 +248,10 @@ retries and emit an admission receipt; stream `seedbox events SIM_ID` to observe
 the resulting effects. `ACTION_FILE` may be `-` for standard input.
 
 Rerunning a completed simulation reapplies its retained interventions at the
-same committed positions. Pausing, stepping and pacing remain available during
-rerun; new fault injection is rejected. A server restart can recover an
-interrupted simulation's durable intervention journal for rerun.
+same deterministic simulated-time positions. Pausing, stepping, pacing, and new
+external overrides remain available during rerun. New interventions form a new
+working definition. Restarting the server discards its catalogue; saved definitions
+remain usable when their binary assets are available.
 
 ### Checkpoint branches (in development)
 
@@ -197,7 +261,8 @@ one with `seedbox describe checkpoint ID NAME` (both accept `--json`). Wait
 for `checkpoint.state: captured` before running
 `seedbox branch ID NAME --detach`. The branch gets a new simulation ID, preserving
 its source seed, configuration and fault history up to the checkpoint. Its
-metadata names the parent simulation and checkpoint. Follow its application
+annotations may name the source simulation and checkpoint; the new definition
+is independent of that source. Follow its application
 output with `seedbox logs BRANCH_ID [MACHINE]` and its internal events with
 `seedbox events BRANCH_ID`. Historical application logs are not replayed.
 
@@ -208,9 +273,9 @@ restart.
 After admitting a fault, step through one committed round before capturing a
 checkpoint so the snapshot includes its effects.
 
-New simulations use exact stop boundaries, with page timer and deferred TX
-disabled. These engine settings have no Compose overrides. Machine memory,
-timer jitter, network behavior and disk fault policy remain configurable.
+Native projects use fixed machine and engine defaults. Baseline latency and
+PV progress budget are optional authoring settings; advanced faults belong in
+the oracle or interactive control API.
 
 ### Exploring seeds
 
@@ -223,13 +288,40 @@ accepted work. The server chooses concurrency; no worker-count flag is needed.
 
 ### Removing simulations
 
-Use `seedbox delete simulation ID` to delete a simulation and its descendants,
-including reruns, branches and seed-range members. The server stops the source
-and descendants, waits for termination, and removes their catalogue resources,
-checkpoints, retained input descriptors and private execution state. New
-descendants are blocked while deletion is in progress. Active simulations can
-be deleted directly. Repeating deletion succeeds. Shared content-addressed
-objects remain available to other simulations; garbage collection is deferred.
+Use `seedbox delete simulation ID` to delete a simulation and its owned resources,
+including checkpoints and seed-range members. The server stops owned executions,
+waits for termination, and removes their catalogue entries and private execution
+state. New dependents are blocked while deletion is in progress. Independent
+reruns and submitted checkpoint definitions carry only provenance annotations;
+deleting their source does not delete them. Active simulations can be deleted
+directly. Repeating deletion succeeds. Shared binary assets remain available to
+other simulations for the server session.
 
 Completed seed-range members may be deleted. `seedbox get simulations SOURCE_ID`
 omits them and reports their count as `deletedMembers`.
+
+### Resource tables and shell completion
+
+`seedbox get simulations` and other `get` commands show concise tables;
+`seedbox describe simulation ID` shows the full resource as YAML. Use `--json`
+for structured output. Logs include recent buffered application output, including
+for completed simulations while the server still holds it.
+
+Generate shell integration with `seedbox completions bash`,
+`seedbox completions zsh`, or `seedbox completions fish`. Completion queries the
+existing local server for simulation IDs and machine names; it never starts a
+server or prompts. Unavailable or slow servers simply yield no dynamic suggestions.
+
+Server metadata and log buffers are session-only and live in memory. Execution
+uses private scratch directories under the server state's `sessions/` directory.
+Immutable binary inputs (kernels, engines, boot archives and captured checkpoint
+binaries) and image preparation cache entries live separately under `cache/` and
+survive server restarts. Saved simulation definitions can reuse these assets on
+the same server state directory; simulation IDs, run evidence and observations
+remain session-only. The binary cache is not automatically pruned.
+Graceful shutdown removes the session directory after workers stop and reports
+cleanup failures. The next server startup, under the exclusive server lock,
+removes abandoned session directories left by a crash. Existing offline runs
+and older persistent catalogue data are not deleted or imported automatically.
+Resource tables show newest simulations first; checkpoint lists use descending
+simulation timeline time, with uncaptured requests last.

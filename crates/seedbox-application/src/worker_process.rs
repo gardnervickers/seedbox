@@ -204,6 +204,9 @@ impl WorkerLaunch {
         let console_limit = 1024 * 1024 * 1024 / streams;
         let digest = request.prepared.profile.witness_mode == WitnessMode::FullState;
         if kind == ExecutableKind::ArmWorld {
+            if request.start_paused {
+                command.arg("--start-paused");
+            }
             if let Some(path) = request.resume_checkpoint {
                 command.arg("--resume-checkpoint").arg(path);
             }
@@ -236,6 +239,7 @@ impl WorkerLaunch {
             worker.interventions = request.replay_interventions.cloned();
             worker.resume_checkpoint = request.resume_checkpoint.map(std::path::Path::to_owned);
             worker.digest = digest;
+            worker.start_paused = request.start_paused;
             worker.host_control = Some(endpoint.socket());
             worker.console_limit = Some(console_limit);
             // Bound observation metadata to at most 40 MiB across all streams.
@@ -577,7 +581,9 @@ mod tests {
                 })).unwrap();
             let checkpoint = directory.path().join("checkpoint.json");
             let request = ExecutionRequest {
+                program: &[],
                 intervention_history: None,
+                start_paused: true,
                 resume_checkpoint: Some(checkpoint.as_path()),
                 replay_interventions: Some(&history),
                 observations: None,
@@ -643,6 +649,7 @@ mod tests {
                     history
                 );
                 let expected = [
+                    "--start-paused",
                     "--resume-checkpoint",
                     checkpoint.to_str().unwrap(),
                     "--interventions",
@@ -670,6 +677,7 @@ mod tests {
                     serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
                 let mut expected =
                     WorkerRequest::new(directory.path().join("world.json"), 1009, out);
+                expected.start_paused = true;
                 expected.interventions = Some(history);
                 expected.resume_checkpoint = Some(checkpoint.clone());
                 expected.digest = true;

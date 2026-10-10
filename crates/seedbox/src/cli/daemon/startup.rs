@@ -6,7 +6,7 @@ use seedbox_client::Client;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::OpenOptions,
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     os::{
         fd::AsRawFd,
         unix::{fs::OpenOptionsExt, net::UnixStream, process::CommandExt},
@@ -77,7 +77,8 @@ pub(crate) fn connect(state: Option<PathBuf>) -> Result<Client> {
         std::thread::sleep(Duration::from_millis(20));
     }
     if !listening(&socket)? {
-        start(&root, deadline)?;
+        confirm_start()?;
+        start(&root, Instant::now() + TIMEOUT)?;
     }
     Client::connect_to(&socket).map_err(super::setup)
 }
@@ -155,4 +156,24 @@ fn start(root: &Path, deadline: Instant) -> Result<()> {
         let _ = child.wait();
     }
     result
+}
+
+fn confirm_start() -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        return Err(Error::Setup(
+            "no local server is running; start `seedbox serve` in another terminal".into(),
+        ));
+    }
+    eprint!(
+        "no local server is running. Start a persistent Seedbox server on this machine? [y/N] "
+    );
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Err(Error::Setup(
+            "server startup declined; start `seedbox serve` when ready".into(),
+        ));
+    }
+    Ok(())
 }

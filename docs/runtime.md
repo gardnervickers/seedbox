@@ -1,5 +1,10 @@
 # OCI preparation and execution
 
+Native application definitions use `seedbox.yaml` with `machines` and a dedicated
+`oracle`; see the [annotated format](project-format.md). The CLI translates authoring
+input and the server resolves images/defaults. Host execution timeouts are selected
+with `--wall-time`, outside either definition.
+
 See the [quick start](../README.md#quick-start) for asset builds and the etcd example.
 Seedbox prepares images through a running Docker or Podman engine, including local
 Dockerfile builds. It never starts the engine daemon or builds guest assets at
@@ -21,10 +26,95 @@ catalogue is still pending.
 `logs ID [MACHINE]` follows separate application stdout/stderr streams. Omitting
 the machine combines output in committed publication order; `--json` includes
 machine attribution and lossless bytes. Meanwhile,
-`events ID` follows structured internal observations. Both use bounded live
-delivery; reconnecting does not replay earlier output. Raw logs go to stdout,
+`events ID` follows structured internal observations without a backlog. Application
+logs retain recent output in a server-wide 64 MiB in-memory buffer. Subscribers
+receive retained output, then follow live output. The oldest records are evicted
+when the budget fills; omissions are reported. Completed simulations keep their
+remaining logs until eviction, simulation deletion, or server restart. Raw logs go to stdout,
 with omissions on stderr. JSON log mode and events produce newline-delimited
 records. The older console/archive interface is `retained-logs RUN`.
+
+`tui` opens an interactive console on the local server: the simulation list,
+and for one simulation its network map, machines, faults, logs and events.
+Everything it shows comes from the server API (`world`, `frames`, `events`,
+`logs`, `playback`), so machines that appear or disappear while a simulation
+runs are drawn as the server reports them. From the console you can pause,
+step and change the rate, partition, shape, crash, reboot or heal machines,
+choose a fault and edit its parameters, capture a checkpoint, branch, rerun, stop,
+delete and compare. It needs an interactive terminal; scripts use `events`,
+`logs` and `get` instead. With no machine selected, logs from all machines are
+merged by simulated time and labelled with their machine name. Tab cycles through
+machines and the all-machine view; `a` clears the selection. Press `?` for its keys.
+
+Application logs occupy the full-width lower pane. Click a pane to focus it;
+scroll the pane under the mouse with the wheel. Page Up/Page Down scroll the
+focused logs or events, Home goes to the oldest buffered line, and End returns
+to live following. Click tabs and list rows to navigate or select machines.
+Scrolling back keeps the viewport in place as new logs arrive, until older
+lines leave the bounded buffer.
+
+Press `f` (or `:`) to open the fault picker. The TUI generates its forms from
+`GET /v1/simulations/ID/fault-types`: each entry supplies a name, description,
+and JSON Schema with defaults, bounds, units and current target choices. The
+catalogue refreshes while the simulation is open. Tab moves between parameters
+and the Submit button. Choice fields preview the current candidate and mark it
+not selected until confirmed. Enter confirms it and advances to the next field;
+Enter on Submit injects the fault. Opening the picker pauses the simulation and
+waits for the worker to acknowledge
+the pause before editing. After acknowledged admission,
+the TUI restores the previous playback rate. Esc cancels and restores that rate
+without injecting anything. A simulation that was already paused stays paused.
+Rejected admission keeps the form and its entered values open, with the server error
+inline, so you can correct and retry. An uncertain acknowledgement leaves playback
+paused until you inspect it. Menus require application readiness. Numeric fields
+accept the units advertised by the schema, such as `100ms`, `1.5s`, or `2.5%`;
+Ctrl-U clears the current field.
+The server validates the complete request, including
+relationships between fields. No fault presets are built into the TUI.
+
+The `3 timeline` view keeps a client-owned JSON copy of the recorded timeline under the client state
+folder's `timelines/` directory. It survives server restarts independently of
+server-owned simulation data. Use `[` / `]` to switch saved recordings, arrows to
+select entries, `d` to remove or restore one, `C` twice to clear the edited timeline,
+`u` to undo, and `R` twice to reset to the recorded history. Removed entries remain
+visible but dimmed. Edited timeline inclusion and observed effects are separate columns:
+replay entries start as upcoming, then show pending, applied/active, failed, or
+unavailable from server observations. Viewing or editing the timeline does not
+change playback. Space explicitly pauses or resumes the focused simulation;
+1/2/3 switch views even while it is paused. Edits save automatically; incoming
+observations append without resurrecting deleted entries. The original
+simulation's recorded inputs remain unchanged. Saved timelines remain inspectable after their source
+simulation is deleted, but do not retain the source's machine images or snapshots.
+Saved recordings show their name, application, seed and recording date. Press `n`
+to rename one, `N` to select the next upcoming fault, and `p` to run until just
+before the next fault. The latter is a server control that stops at the engine's
+fault boundary, not a client timer. Playback controls only target the displayed
+source simulation. `w` saves an immutable definition snapshot; failed saves retain a persistent UNSAVED
+indicator and their error until saving succeeds.
+
+Press Enter to run the edited timeline as a new, initially paused simulation.
+A complete resolved definition and its binary assets must be available. The
+source simulation need not remain in the catalogue. The new run reuses those images and seed, schedules the included
+faults by simulated time through an ordered input program. The engine assigns
+fault IDs as inputs are admitted; future inputs do not reserve IDs. The TUI
+submits the complete edited definition to the server for validation. If a heal's
+handle does not exist when it executes, a structured rejection event explains
+why; subsequent overrides still run. Every fresh run uses this same timed-input
+scheduler, including rerun and replay. Authored inputs and subsequently injected
+faults both appear in the new simulation's timeline. See [Simulation inputs and timelines](input-program.md)
+for ordering, checkpoint and replay semantics.
+
+`GET /v1/simulations/ID/world` returns the observed world: machines with their
+condition and incarnation, directed links with their current policy, the fault
+handle that partitions or shapes them and their frame counters, and every fault
+with its admitted action. Configured services and machines introduced by routed
+frames or admitted network fault plans are included. Log and machine-event
+attribution remains limited to configured services. `GET /v1/simulations/ID/frames` streams batches of routed network frames
+(sender, receiver, send and due time, size and fate) as server-sent events.
+Both are best-effort observations and never change results. Frame batches may
+be omitted under load, so their counters describe sampled observations rather
+than exhaustive traffic accounting. Omitted visualization batches do not report
+application-log loss; logs and events retain their own loss diagnostics.
 
 Each event includes its `simulation` ID and revision. `simulatedTimeNs` is
 optional and omitted before execution; `position` carries an exact committed
@@ -36,14 +126,19 @@ separately from the workload oracle verdict.
 
 Pending deletion emits `deletionRequested` and sets
 `metadata.deletionRequestedAtUnixMs` once. Describe and watch expose that pending
-state while the server stops the simulation and its descendants.
+state while the server stops the simulation and its owned resources.
+
+If no local server is running, an interactive client asks before starting one.
+The server stays running for subsequent commands. Noninteractive callers must
+start `seedbox serve` explicitly. Use `seedbox shutdown` to stop the server and
+its active work gracefully.
 
 `run` connects to a user-local server, starting it when absent. It submits a
 resolved project and follows structured status; `--detach` returns after
 acceptance. `get simulations`, `describe simulation ID`, `stop ID` and `rerun ID`
-use the same API. Foreground Ctrl-C requests a stop; disconnecting does not.
+use the same API. Foreground Ctrl-C requests a stop. An existing server survives client disconnects.
 `get simulation ID --watch` observes status until completion or Ctrl-C, which
-only detaches the observer. It emits a YAML document stream, or newline-delimited
+only detaches the observer. It emits table rows, or newline-delimited
 JSON with `--json`. Submit either Compose or a saved simulation document as a
 positional path: `seedbox run simulation.yaml`.
 `playback ID` reads the active worker's committed position, rate and step state
@@ -64,10 +159,8 @@ accounting is still being implemented.
 Stage durations use the server's monotonic clock. Describe and list include the
 current elapsed duration; status watches refresh it once per second even when
 the lifecycle is unchanged. These display updates do not advance the resource
-revision or write catalogue records. A stage transition persists its duration,
-including preparation that ends in an error. If the server crashes, the active
-stage retains its last durable lower bound with `complete: false`; recovery
-does not invent a duration for time the server could not observe.
+revision or write catalogue records. A stage transition records its duration in memory, including preparation that
+ends in an error. Restarting the server discards this metadata.
 
 A simulation test passes only on oracle exit zero and fails on any nonzero
 oracle exit. Compose rejects `x-seedbox.check.exit_code`; expected success codes
@@ -85,6 +178,13 @@ not hide an explicit backend or cleanup error.
 The following checkpoint section documents existing engine mechanisms. Its old
 paired run flags have been removed from the client. Current resource operations
 are documented under [checkpoint and branch operations](#checkpoint-branches-in-development).
+
+Start at the initial execution boundary with `seedbox run PROJECT --paused --detach`,
+then open `seedbox tui ID` to inspect and resume it. `--paused` also works with
+`explore`; every member starts paused. Preparation still runs before the pause.
+Without `--detach`, the command waits for completion while another client controls
+playback. Initial playback state does not change deterministic results; `rerun`,
+`replay` and checkpoint branches start with normal playback.
 
 ## Runtime checkpoint design (experimental)
 
@@ -231,14 +331,15 @@ disk fixtures, including the ext4 fsync ledger, are documented in
 
 ```sh
 nix develop
-python3 tools/build.py
+cargo xtask build-assets
 ```
 
-The complete build resolves current guest inputs through Nix, then embeds the
-exact helper archive in the native CLI. On Mac the guest build uses a Linux
+`cargo xtask build-assets` resolves guest inputs through Nix, then
+`cargo build --release` embeds the kernel and helper archive in the native CLI. On Mac the guest build uses a Linux
 container with a persistent Nix store. Each checkout publishes its own complete
-`build/current` directory atomically; failed builds leave it unchanged.
-Run `build/current/seedbox` directly. The kernel lives beside that executable.
+`build/assets` link atomically; failed asset builds leave it unchanged.
+Run `target/release/seedbox` directly. Its architecture-matched kernel is embedded
+and extracted to the user cache when needed.
 Nix and Cargo are never invoked by `run` or `replay`.
 See [build outputs and explicit overrides](../tools/runtime/README.md).
 
@@ -296,7 +397,7 @@ After the release build, run as your current user with KVM device access on
 Linux:
 
 ```sh
-seedbox=./build/current/seedbox
+seedbox=./target/release/seedbox
 
 "$seedbox" prepare examples/redis --output prepared.json
 "$seedbox" run examples/redis
@@ -308,8 +409,10 @@ seedbox=./build/current/seedbox
 the server; configure them at startup with `seedbox serve`. `prepare` also
 accepts explicit runtime inputs for offline preparation. On Linux, explicit
 runtime input flags and their `SEEDBOX_*` path overrides take precedence.
-The default kernel is `kernel` beside the executable; complete builds embed
-helpers. Explicit `--kernel` / `SEEDBOX_KERNEL` and `--runtime-assets` /
+Complete builds embed the kernel and helpers for x86-64 or AArch64. The kernel
+is extracted to `$XDG_CACHE_HOME/seedbox/kernels` (otherwise
+`$HOME/.cache/seedbox/kernels`). Plain Cargo builds without embedded inputs
+fall back to `kernel` beside the executable. Explicit `--kernel` / `SEEDBOX_KERNEL` and `--runtime-assets` /
 `SEEDBOX_RUNTIME_ASSETS` select other inputs. `SEEDBOX_ASSET_DIR` explicitly
 selects the legacy `ARCH/kernel` and `ARCH/runtime.tar.gz` layout. Missing assets
 report the build command. Runtime commands never build or download them.
@@ -934,11 +1037,10 @@ for CPU, timer, network, incarnation and static-plan semantics.
 ## Delete simulations
 
 Delete a simulation with `seedbox delete simulation ID`
-(`DELETE /v1/simulations/ID`). Deletion cascades to its descendants, including
-reruns, branches and seed-range members. The server stops the source and all
-descendants, waits for termination, then removes their catalogue resources,
-checkpoints, retained input descriptors and private execution state. New
-descendants are blocked while deletion is in progress. Active simulations can
+(`DELETE /v1/simulations/ID`). The server stops that simulation, waits for
+termination, and removes its owned checkpoints, input descriptor, and private
+execution state. Independently submitted reruns and branches remain available;
+provenance annotations do not establish deletion ownership. Active simulations can
 be deleted; no separate stop or dependent deletion is required. Shared
 content-addressed objects remain available to other simulations; object garbage
 collection is deferred. Repeating deletion succeeds.
@@ -963,9 +1065,8 @@ accepted work owned by the server; foreground Ctrl-C requests a range stop.
 The server owns concurrency and uses normal host scheduling; there is no `--workers`,
 `--cpu`, asset override, or watchdog option on `explore`.
 
-Accepted range intent and member identities survive restart. Interrupted active
-simulations remain incomplete; undispatched seeds continue against retained
-inputs. Failed initial preparation ends the range without repeating preparation.
+Range intent and member identities live only in this server session. Restarting
+the server discards the range and all its simulations. Failed initial preparation ends the range without repeating preparation.
 `--json` prints one status document containing member summaries and any range
 error. No CLI process-resource measurements or separate exploration archive are
 produced. Inspect each simulation with the ordinary describe/log/event commands.
@@ -1187,14 +1288,18 @@ any remaining charge across boundaries, throttle changes and healing; ordinary
 clock reads remain 1 ns. Snapshots preserve the page and in-flight guest state,
 and the coordinator reapplies active throttle after a crash. This adds no ARM
 speed reseeding. Fresh simulations need a matching ABI-3 build from
-`python3 tools/build.py` inside `nix develop`; old retained simulations continue
+`cargo xtask build-assets` inside `nix develop`; old retained simulations continue
 with their retained engine and kernel. Native validation is pending. See the
 [ARM PV ABI](arm64-backends.md#guest-layout-and-pv-abi-3).
 
+Interactive admission records the exact committed boundary and fault plan in the
+simulation's retained intervention timeline before acknowledging the request.
+Time spent editing a TUI form is host time and does not enter that timeline.
 Rerunning a completed simulation reapplies its retained interventions at the
-same committed positions. Pausing, stepping and pacing remain available during
-rerun; new fault injection is rejected. A server restart can recover an
-interrupted simulation's durable intervention journal for rerun.
+same deterministic simulated-time positions. Pausing, stepping, pacing, and new
+external overrides remain available during rerun. New interventions form a new
+working definition. Restarting the server discards its catalogue; saved definitions
+remain usable when their binary assets are available.
 
 ### Checkpoint branches (in development)
 
@@ -1204,7 +1309,8 @@ one with `seedbox describe checkpoint ID NAME` (both accept `--json`). Wait
 for `checkpoint.state: captured` before running
 `seedbox branch ID NAME --detach`. The branch gets a new simulation ID, preserving
 its source seed, configuration and fault history up to the checkpoint. Its
-metadata names the parent simulation and checkpoint. Follow its application
+annotations may name the source simulation and checkpoint; the new definition
+is independent of that source. Follow its application
 output with `seedbox logs BRANCH_ID [MACHINE]` and its internal events with
 `seedbox events BRANCH_ID`. Historical application logs are not replayed.
 
@@ -1221,3 +1327,17 @@ completed, and deletion is rejected if any branch references the checkpoint.
 Deletion hides the capture from discovery and removes its captured metadata,
 machine files and frozen intervention copy. The control receipt remains for
 history and idempotent retries. Deletion during active execution is deferred.
+
+Server metadata and log buffers are session-only and live in memory. Execution
+uses private scratch directories under the server state's `sessions/` directory.
+Immutable binary inputs (kernels, engines, boot archives and captured checkpoint
+binaries) and image preparation cache entries live separately under `cache/` and
+survive server restarts. Saved simulation definitions can reuse these assets on
+the same server state directory; simulation IDs, run evidence and observations
+remain session-only. The binary cache is not automatically pruned.
+Graceful shutdown removes the session directory after workers stop and reports
+cleanup failures. The next server startup, under the exclusive server lock,
+removes abandoned session directories left by a crash. Existing offline runs
+and older persistent catalogue data are not deleted or imported automatically.
+Resource tables show newest simulations first; checkpoint lists use descending
+simulation timeline time, with uncaptured requests last.

@@ -18,7 +18,9 @@ pub struct ReplayOptions {
 
 #[derive(Clone, Debug, Default)]
 pub struct RunOptions {
-    /// An explicit override wins over x-seedbox.seed. Absence of both is an error.
+    /// Optional active host-time budget. Never part of the experiment identity.
+    pub wall_time_ns: Option<u64>,
+    /// An explicit override wins over the resolved seed.
     pub seed: Option<u64>,
     pub cancellation: CancellationToken,
 }
@@ -32,9 +34,11 @@ pub enum RunProgress<'a> {
 
 #[derive(Clone, Debug)]
 pub struct Orchestrator {
+    pub(crate) start_paused: bool,
     pub(crate) resume_checkpoint: Option<PathBuf>,
     pub(crate) observations: Option<PathBuf>,
     pub(crate) replay_history: Option<crate::store::ContentDigest>,
+    pub(crate) program: Vec<seedbox_engine_protocol::input_program::TimedInput>,
     pub(crate) store: ContentStore,
     pub(crate) runs: PathBuf,
     pub(crate) log_policy: LogPolicy,
@@ -43,6 +47,12 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    /// Hold execution at its first scheduler boundary until resumed by a client.
+    pub fn with_start_paused(mut self, paused: bool) -> Self {
+        self.start_paused = paused;
+        self
+    }
+
     /// Continue a saved engine position using the source simulation inputs.
     pub fn with_checkpoint(mut self, path: PathBuf) -> Self {
         self.resume_checkpoint = Some(path);
@@ -56,9 +66,11 @@ impl Orchestrator {
 
     pub fn new(store: ContentStore, runs: impl Into<PathBuf>) -> Self {
         Self {
+            start_paused: false,
             resume_checkpoint: None,
             observations: None,
             replay_history: None,
+            program: Vec::new(),
             store,
             runs: runs.into(),
             log_policy: LogPolicy::default(),
@@ -74,6 +86,14 @@ impl Orchestrator {
 
     pub fn with_log_policy(mut self, policy: LogPolicy) -> Self {
         self.log_policy = policy;
+        self
+    }
+
+    pub fn with_program(
+        mut self,
+        program: Vec<seedbox_engine_protocol::input_program::TimedInput>,
+    ) -> Self {
+        self.program = program;
         self
     }
 
@@ -141,19 +161,13 @@ impl Orchestrator {
             })?;
         let identity = RunIdentity {
             interventions: self.replay_history.clone(),
+            program: self.program.clone(),
             version: FORMAT_VERSION,
             seed,
             configuration: simulation.clone(),
             inputs,
         };
-        self.execute(
-            identity,
-            executor,
-            &options.cancellation,
-            None,
-            false,
-            progress,
-        )
+        self.execute(identity, executor, &options, None, false, progress)
     }
 
     /// Fresh execution with the original seed and retained artifacts. There is
@@ -195,7 +209,10 @@ impl Orchestrator {
         let mut run = self.execute(
             identity,
             executor,
-            &options.cancellation,
+            &RunOptions {
+                cancellation: options.cancellation.clone(),
+                ..Default::default()
+            },
             Some(&baseline),
             options.allow_engine_change,
             |_| Ok(()),
@@ -231,11 +248,12 @@ impl Orchestrator {
         &self,
         identity: RunIdentity,
         executor: &dyn ExecutionBackend,
-        cancellation: &CancellationToken,
+        options: &RunOptions,
         baseline: Option<&RunRecord>,
         allow_engine_change: bool,
         mut progress: impl FnMut(RunProgress<'_>) -> Result<()>,
     ) -> Result<Run> {
+        let cancellation = &options.cancellation;
         let run_id = self.store.put_unsynced(&serde_json::to_vec(&identity)?)?;
         fs::create_dir_all(&self.runs)?;
         let directory = tempfile::Builder::new()
@@ -317,13 +335,19 @@ impl Orchestrator {
             progress(RunProgress::Starting {
                 directory: &directory,
             })?;
+            let limits = crate::config::Limits {
+                simulated_time_ns: record.identity.configuration.limits.simulated_time_ns,
+                wall_time_ns: options.wall_time_ns.unwrap_or(u64::MAX),
+            };
             let mut report = executor.execute(ExecutionRequest {
+                start_paused: self.start_paused,
                 resume_checkpoint: self.resume_checkpoint.as_deref(),
                 intervention_history: Some(&directory.join("interventions.json")),
                 replay_interventions: replay_interventions.as_ref(),
                 observations: self.observations.as_deref(),
                 seed: record.identity.seed,
-                limits: &record.identity.configuration.limits,
+                program: &record.identity.program,
+                limits: &limits,
                 network: &record.identity.configuration.network,
                 schedule: &record.identity.configuration.schedule,
                 control: record.identity.configuration.control.as_ref(),
@@ -345,7 +369,7 @@ impl Orchestrator {
                     .elapsed()?
                     .saturating_sub(std::time::Duration::from_nanos(report.host_wait_ns))
                     .as_nanos()
-                    >= u128::from(record.identity.configuration.limits.wall_time_ns)
+                    >= u128::from(limits.wall_time_ns)
                 {
                     report.reason = StopReason::WallTimeLimit;
                 }
@@ -389,7 +413,7 @@ impl Orchestrator {
             if !history.entries.is_empty() {
                 let digest = self
                     .store
-                    .put(&history.encode().map_err(Error::Integrity)?)?;
+                    .put_unsynced(&history.encode().map_err(Error::Integrity)?)?;
                 if record
                     .identity
                     .interventions
@@ -400,8 +424,15 @@ impl Orchestrator {
                         "replayed intervention history changed during execution".into(),
                     ));
                 }
-                record.identity.interventions = Some(digest);
-                record.run_id = self.store.put(&serde_json::to_vec(&record.identity)?)?;
+                seedbox_engine_protocol::input_program::merge_interventions(
+                    &mut record.identity.program,
+                    &history,
+                )
+                .map_err(Error::Integrity)?;
+                record.identity.interventions = None;
+                record.run_id = self
+                    .store
+                    .put_unsynced(&serde_json::to_vec(&record.identity)?)?;
             }
         }
         if let Some(baseline) = baseline {
@@ -413,6 +444,7 @@ impl Orchestrator {
 }
 
 fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> Result<()> {
+    crate::engine_adapter::validate_input_program(&identity.configuration, &identity.program)?;
     let inputs = &identity.inputs;
     let machines: BTreeSet<_> = inputs.placement.values().collect();
     if inputs
@@ -449,7 +481,6 @@ fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> R
         .services
         .contains_key(&identity.configuration.check.service)
         || identity.configuration.limits.simulated_time_ns == 0
-        || identity.configuration.limits.wall_time_ns == 0
     {
         return Err(Error::Integrity(
             "invalid check or limits in prepared simulation".into(),

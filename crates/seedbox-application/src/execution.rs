@@ -43,6 +43,8 @@ pub trait PreparationBackend: Send + Sync {
 /// Only materialized, verified inputs reach the executor. Original Compose paths,
 /// registry references, and build contexts are deliberately absent.
 pub struct ExecutionRequest<'a> {
+    /// Initial host playback state; never part of guest experiment identity.
+    pub start_paused: bool,
     /// Saved engine position to restore before continuing this simulation.
     pub resume_checkpoint: Option<&'a Path>,
     /// Optional durable semantic-input journal, read after the worker stops.
@@ -52,6 +54,7 @@ pub struct ExecutionRequest<'a> {
     /// Explicit server-owned observation socket, outside retained experiment identity.
     pub observations: Option<&'a Path>,
     pub seed: u64,
+    pub program: &'a [seedbox_engine_protocol::input_program::TimedInput],
     pub limits: &'a Limits,
     pub network: &'a Network,
     pub schedule: &'a Schedule,

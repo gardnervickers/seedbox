@@ -50,7 +50,7 @@ impl Runtime {
                 || !names.insert(name.to_owned())
             {
                 return Err(Error::Integrity(format!(
-                    "invalid or duplicate runtime member {name}; rebuild with python3 tools/build.py"
+                    "invalid or duplicate runtime member {name}; rebuild with cargo xtask build-assets"
                 )));
             }
             size = size
@@ -62,7 +62,7 @@ impl Runtime {
         for name in REQUIRED {
             if !names.contains(name) {
                 return Err(Error::Setup(format!(
-                    "runtime archive missing {name}; rebuild with python3 tools/build.py"
+                    "runtime archive missing {name}; rebuild with cargo xtask build-assets"
                 )));
             }
         }
@@ -125,7 +125,7 @@ mod tests {
         let bytes = archive(&["compose-init", "NOTICE.txt"], tar::EntryType::Regular);
         let error = Runtime::from_bytes(&bytes).unwrap_err().to_string();
         assert!(error.contains("missing mke2fs"));
-        assert!(error.contains("python3 tools/build.py"));
+        assert!(error.contains("cargo xtask build-assets"));
     }
     #[test]
     fn archive_size_limits_are_checked_before_extracting_payloads() {

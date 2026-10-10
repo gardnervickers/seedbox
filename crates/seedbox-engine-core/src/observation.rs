@@ -100,6 +100,7 @@ impl Drop for Publisher {
 impl Publisher {
     pub fn connect(path: &Path) -> std::io::Result<Arc<Self>> {
         let socket = UnixDatagram::unbound()?;
+        seedbox_engine_protocol::observation::configure_socket(&socket)?;
         socket.connect(path)?;
         socket.set_nonblocking(true)?;
         Ok(Arc::new(Self(Mutex::new(Sender {
@@ -121,7 +122,10 @@ impl Publisher {
         let Some(sequence) = sender.sequence.checked_add(1) else {
             return;
         };
-        sender.sequence = sequence;
+        let optional_frames = matches!(kind, Kind::Frames { .. });
+        if !optional_frames {
+            sender.sequence = sequence;
+        }
         let observation = Observation {
             sequence,
             machine: machine.to_owned(),
@@ -130,8 +134,11 @@ impl Publisher {
             kind,
         };
         if let Ok(bytes) = serde_json::to_vec(&observation) {
-            if bytes.len() <= MAX_DATAGRAM_BYTES {
-                let _ = sender.socket.send(&bytes);
+            if bytes.len() <= MAX_DATAGRAM_BYTES
+                && sender.socket.send(&bytes).is_ok()
+                && optional_frames
+            {
+                sender.sequence = sequence;
             }
         }
     }
@@ -257,6 +264,60 @@ mod tests {
         assert_eq!(gap.kind, Kind::LogGap { records: 236 });
         assert_eq!((gap.time_ns, gap.incarnation), (299, 2));
         assert!(round.is_empty());
+    }
+
+    #[test]
+    fn large_frame_batches_cross_darwin_default_limit_and_omissions_do_not_gap_logs() {
+        use seedbox_engine_protocol::observation::{configure_socket, Frame, FrameFate};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observer");
+        let receiver = UnixDatagram::bind(&path).unwrap();
+        configure_socket(&receiver).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let publisher = Publisher::connect(&path).unwrap();
+        let frame = Frame {
+            from: "sender".into(),
+            to: "receiver".into(),
+            sent_ns: 1,
+            due_ns: Some(2),
+            bytes: 60,
+            fate: FrameFate::Scheduled,
+        };
+        publisher.publish(
+            "",
+            0,
+            1,
+            Kind::Frames {
+                frames: vec![frame.clone(); 96],
+            },
+        );
+        let mut bytes = [0; MAX_DATAGRAM_BYTES];
+        let count = receiver.recv(&mut bytes).unwrap();
+        assert!(count > 2048);
+        let observation: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+        assert_eq!(observation.sequence, 1);
+        // An omitted visualization batch has no application output to lose.
+        publisher.publish(
+            "",
+            0,
+            2,
+            Kind::Frames {
+                frames: vec![frame; 1000],
+            },
+        );
+        publisher.publish("oracle", 0, 3, Kind::MachineReady);
+        let count = receiver.recv(&mut bytes).unwrap();
+        let observation: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+        assert_eq!(observation.sequence, 2);
+        assert_eq!(observation.kind, Kind::MachineReady);
+        // Oversized mandatory observations still leave an explicit sequence gap.
+        publisher.publish(&"x".repeat(MAX_DATAGRAM_BYTES), 0, 4, Kind::MachineReady);
+        publisher.publish("oracle", 0, 5, Kind::MachineReady);
+        let count = receiver.recv(&mut bytes).unwrap();
+        let observation: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+        assert_eq!(observation.sequence, 4);
     }
 
     #[test]

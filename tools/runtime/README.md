@@ -1,54 +1,34 @@
 # Build Seedbox and guest inputs
 
-From the checkout's development shell:
+From the checkout (inside `nix develop` on Linux):
 
 ```sh
-python3 tools/build.py
-./build/current/seedbox examples/etcd
+cargo xtask build-assets
+cargo build --release
+./target/release/seedbox examples/etcd
 ```
 
-The build resolves the current guest kernel and runtime through Nix, then passes
-that exact helper archive to Cargo. Linux builds the guest inputs directly;
-Apple Silicon uses a Docker-compatible Linux container. Start Podman or Docker
-Desktop first; `SEEDBOX_ASSET_BUILDER` can select either explicitly. Mac builders
-retain Nix's store in an engine volume, scoped to the builder image, so subsequent
-builds reuse dependencies. Nix tracks the guest sources and recipes; there are no
-Git revision stamps or runtime qualification checks.
+The first command builds the current guest kernel and helpers using Nix. Linux
+x86-64 selects `bzImage`; Linux AArch64 selects `Image`. Apple Silicon runs the
+ARM64 Nix build inside Docker or Podman. Start that engine first; optionally
+select it with `SEEDBOX_ASSET_BUILDER`. Its Nix store persists in an engine volume.
 
-Each successful invocation prints a completed directory under `build/`, containing
-`seedbox`, `kernel`, and `runtime.tar.gz`. `build/current` points to the latest
-complete CLI build. Publication is atomic; a failed build leaves the previous
-one available. Concurrent invocations in one checkout serialize; separate
-worktrees have separate outputs and Cargo caches. Existing completed directories
-remain usable until explicitly removed. The native Cargo cache is `build/cargo`.
+Successful asset builds atomically update the checkout's `build/assets` link.
+Failed builds leave the previous assets available. Concurrent asset builds are
+serialized, and old asset directories remain available. Rerun the first command
+when changing guest sources or recipes; Cargo does not build guest inputs.
 
-The CLI embeds the helpers and finds `kernel` beside its executable. Copy those
-two files together to run elsewhere. Runtime commands never invoke Nix, Cargo,
-a build container, or asset downloads. Application image preparation still uses
-the user's Docker-compatible engine. Replay uses retained inputs and needs
-neither the builder nor the original build directory.
+The second command embeds the prepared kernel and helpers into the executable.
+Cargo tracks the asset link and selected files, and rejects assets built for a
+different target architecture. Explicit `SEEDBOX_BUILD_KERNEL` and
+`SEEDBOX_BUILD_HELPERS` override the prepared inputs. Without prepared assets,
+plain Cargo development builds retain explicit runtime-asset lookup.
 
-Hardware application checks invoke this same complete build and use its returned
-directory explicitly. They cannot inherit a stale global asset slot. Portable
-checks build ordinary unbundled Cargo executables and require no guest build.
-A plain `cargo build --release` also remains unbundled unless
-`SEEDBOX_BUILD_HELPERS=/path/to/runtime.tar.gz` explicitly selects an archive;
-Cargo never builds guest inputs itself.
+Copy just `target/release/seedbox` to another host of the same platform. Runtime
+commands never invoke Nix, Cargo, containers to build assets, or asset downloads.
+Application image preparation still uses the user's Docker-compatible engine.
+The embedded kernel is extracted to the user cache, keyed by its contents.
+`--kernel` and `--runtime-assets` remain available for development overrides.
 
-## Explicit inputs
-
-`python3 tools/build.py --assets-only` builds a separate kernel/runtime pair and
-prints its directory without changing `build/current`. On Linux the individual
-Nix outputs are also available:
-
-```sh
-nix build .#guestKernel --out-link kernel-output
-nix build .#runtimeArchive --out-link runtime-assets.tar.gz
-```
-
-Use `--kernel PATH` and `--runtime-assets PATH` (or `SEEDBOX_KERNEL` and
-`SEEDBOX_RUNTIME_ASSETS`) to run intentionally selected historical or experimental
-inputs. `SEEDBOX_ASSET_DIR` still explicitly selects the legacy `ARCH/kernel`
-and `ARCH/runtime.tar.gz` directory layout. It is never read by the complete
-build or used implicitly by Cargo. Archive extraction validates names, types,
-duplicates, required files, and size limits; no provenance manifest is needed.
+Hardware acceptance uses these same build steps and copies its selected inputs
+and executable into a private report directory before running guests.

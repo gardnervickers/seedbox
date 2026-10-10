@@ -12,6 +12,8 @@ mod controls;
 #[cfg(unix)]
 pub mod execution;
 #[cfg(unix)]
+mod fault_catalogue;
+#[cfg(unix)]
 pub mod http;
 #[cfg(unix)]
 pub mod manager;
@@ -24,6 +26,8 @@ pub mod stream;
 mod timing;
 #[cfg(unix)]
 mod worker;
+#[cfg(unix)]
+mod world;
 
 /// Run HTTP and owned execution together. The executable supplies a socket in
 /// its private state directory and handles signals through `shutdown`.
@@ -114,3 +118,5 @@ async fn run_seeds(
     }
     Ok(())
 }
+
+mod timeline;

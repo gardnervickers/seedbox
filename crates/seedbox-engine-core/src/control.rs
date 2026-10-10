@@ -771,15 +771,11 @@ impl Control {
                 }
             }
             if let Some(plan) = p.plan.take() {
-                if let Some(error) = faults.admission_error(&plan.action) {
-                    p.error = Some(error.into());
-                    p.error_code = Some("invalid_state".into());
-                    p.effect = Some(now);
-                } else if matches!(
-                    &plan.action,
-                    Action::Heal { handle } if !faults.active_handles().contains(handle)
-                ) {
-                    p.error = Some("heal of inactive handle".into());
+                if let Err(error) = faults.validate_admission_state(&plan.action) {
+                    p.error = Some(error.message().into());
+                    if let Some(code) = error.code() {
+                        p.error_code = Some(code.into());
+                    }
                     p.effect = Some(now);
                 } else {
                     if let Action::Heal { handle } = &plan.action {

@@ -14,8 +14,8 @@ pub fn init(destination: &Path, template: Template) -> Result<()> {
     let files: Vec<(&str, &str)> = match template {
         Template::Etcd => vec![
             (
-                "compose.yaml",
-                include_str!("../../../examples/etcd/compose.yaml"),
+                "seedbox.yaml",
+                include_str!("../../../examples/etcd/seedbox.yaml"),
             ),
             (
                 "workload/Dockerfile",
@@ -42,8 +42,8 @@ pub fn init(destination: &Path, template: Template) -> Result<()> {
         ],
         Template::Redis => vec![
             (
-                "compose.yaml",
-                include_str!("../../../examples/redis/compose.yaml"),
+                "seedbox.yaml",
+                include_str!("../../../examples/redis/seedbox.yaml"),
             ),
             (
                 "workload/Dockerfile",
@@ -74,7 +74,7 @@ pub fn init(destination: &Path, template: Template) -> Result<()> {
             destination.join("README.md"),
             include_str!("../templates/README.md"),
         )?;
-        config::load(&destination.join("compose.yaml"), &BTreeMap::new())?;
+        config::load(&destination.join("seedbox.yaml"), &BTreeMap::new())?;
         Ok(())
     })();
     if let Err(error) = write {

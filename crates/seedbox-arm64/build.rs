@@ -20,7 +20,25 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
         && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
     {
-        cc::Build::new()
+        let mut build = cc::Build::new();
+        if cfg!(target_os = "macos") {
+            // This shim targets Apple's Hypervisor SDK. Use the selected Apple
+            // toolchain directly: cc's macOS target spelling otherwise triggers
+            // Nix cc-wrapper's multi-target warning on native ARM builds.
+            println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+            let compiler = std::process::Command::new("/usr/bin/xcrun")
+                .args(["--sdk", "macosx", "--find", "clang"])
+                .output()
+                .expect("locate Apple clang; install Xcode Command Line Tools");
+            assert!(
+                compiler.status.success(),
+                "locate Apple clang: {}",
+                String::from_utf8_lossy(&compiler.stderr)
+            );
+            let compiler = String::from_utf8(compiler.stdout).expect("Apple clang path");
+            build.compiler(compiler.trim());
+        }
+        build
             .file("src/backend/hvf_simd.c")
             .compile("seedbox_hvf_simd");
     }

@@ -1,4 +1,7 @@
 //! Resolved configuration retained in run identities.
+pub mod definition;
+pub mod project;
+
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,6 +18,9 @@ pub struct Simulation {
     pub services: BTreeMap<String, Service>,
     pub configs: BTreeMap<String, PathBuf>,
     pub network: Network,
+    /// PV instrumentation semantics retained with the simulation.
+    #[serde(default)]
+    pub simulator: project::SimulatorDefaults,
     pub schedule: Schedule,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<Control>,
@@ -167,4 +173,19 @@ pub struct Schedule {
 pub struct Check {
     pub service: String,
     pub exit_code: u8,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn machine_defaults_remain_ordinary_configuration() {
+        assert!(MachineOptions::default().is_default());
+        assert!(DiskOptions::default().is_default());
+        assert!(!MachineOptions {
+            memory_mb: 512,
+            ..Default::default()
+        }
+        .is_default());
+    }
 }

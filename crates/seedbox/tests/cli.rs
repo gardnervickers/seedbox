@@ -82,7 +82,7 @@ fn long_server_state_path_fails_before_creating_state() {
 }
 
 #[test]
-fn relocated_cli_looks_for_kernel_beside_itself_without_build_tools() {
+fn explicit_asset_directory_overrides_bundled_kernel_without_build_tools() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let binary = root.join("seedbox");
@@ -92,11 +92,12 @@ fn relocated_cli_looks_for_kernel_beside_itself_without_build_tools() {
         .current_dir(&root)
         .env_clear()
         .env("HOME", &root)
+        .env("SEEDBOX_ASSET_DIR", &root)
         .env("PATH", "")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --kernel PATH\n", root.join("kernel").display()));
+    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass --kernel PATH\n", root.join(std::env::consts::ARCH).join("kernel").display()));
     assert!(!root.join(".seedbox").exists());
 }
 
@@ -126,6 +127,7 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
     assert!(run_help.status.success());
     let help = String::from_utf8_lossy(&run_help.stdout);
     assert!(help.contains("--detach"), "{help}");
+    assert!(help.contains("--paused"), "{help}");
     assert!(help.contains("--seed"), "{help}");
     assert!(!help.contains("--vmm"), "{help}");
 }
@@ -333,7 +335,7 @@ fn validation_cli_reports_structured_output_and_nonzero_errors() {
 }
 
 #[test]
-fn compose_argument_defaults_to_the_project_directory() {
+fn project_argument_defaults_to_the_project_directory() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("demo");
     let created = seedbox(&["init", "demo"], directory.path());
@@ -342,7 +344,7 @@ fn compose_argument_defaults_to_the_project_directory() {
     for args in [
         &["validate"][..],
         &["validate", "."],
-        &["validate", "compose.yaml"],
+        &["validate", "seedbox.yaml"],
     ] {
         let output = seedbox(args, &project);
         assert!(output.status.success(), "{args:?}");
@@ -363,11 +365,11 @@ fn setup_errors_name_the_missing_input_and_the_fix() {
         ),
         (
             &["validate", "nope.yaml"],
-            "error: Compose file nope.yaml: not found\n",
+            "error: project file nope.yaml: not found\n",
         ),
         (
             &["validate"],
-            "error: no Compose file found; searched:\n  ./compose.yaml\n  ./compose.yml\n  \
+            "error: no project file found; searched:\n  ./seedbox.yaml\n  ./seedbox.yml\n  ./compose.yaml\n  ./compose.yml\n  \
              ./docker-compose.yaml\n  ./docker-compose.yml\npass the file path directly\n",
         ),
         (
@@ -483,7 +485,7 @@ fn run_without_a_kernel_lists_where_it_looked() {
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("kernel");
-    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --kernel PATH\n", kernel.display()));
+    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass --kernel PATH\n", kernel.display()));
     assert!(!directory.path().join(".seedbox/runs").exists());
 }
 
@@ -512,7 +514,7 @@ fn missing_helpers_explain_the_asset_build_without_searching_path() {
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("runtime.tar.gz");
-    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --runtime-assets PATH\n", archive.display()));
+    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass --runtime-assets PATH\n", archive.display()));
 }
 
 #[cfg(target_os = "linux")]
@@ -555,6 +557,7 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     assert!(help.status.success());
     let text = String::from_utf8_lossy(&help.stdout);
     assert!(text.contains("--count") && text.contains("--detach") && text.contains("--json"));
+    assert!(text.contains("--paused"));
     assert!(!text.contains("--workers"));
     assert!(!project.join(".seedbox").exists());
 }
@@ -724,6 +727,7 @@ fn old_records_stay_inspectable_and_transferable() {
         provenance: BTreeMap::new(),
     };
     let identity = RunIdentity {
+        program: Vec::new(),
         interventions: None,
         version: 2,
         seed: 0,
@@ -845,7 +849,7 @@ fn doctor_reports_missing_temporary_assets_without_downloads() {
         .unwrap();
     let kernel = root.join("aarch64/kernel");
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --kernel PATH\n", kernel.display()));
+    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass --kernel PATH\n", kernel.display()));
     assert!(!root.join(".seedbox").exists());
 }
 
@@ -1943,7 +1947,10 @@ fn runtime_assets_override_is_documented_and_missing_paths_fail_before_preparati
         let help = String::from_utf8_lossy(&help.stdout);
         assert!(help.contains("--runtime-assets"), "{help}");
         assert!(help.contains("SEEDBOX_RUNTIME_ASSETS"), "{help}");
-        assert!(help.contains("kernel beside the executable"), "{help}");
+        assert!(
+            help.contains("embedded kernel, otherwise beside the executable"),
+            "{help}"
+        );
         let mut args = vec![command, "--runtime-assets", "missing.tar.gz"];
         if command == "prepare" {
             args.extend(["--output", "prepared.json"]);
@@ -2030,7 +2037,7 @@ fn omitted_run_subcommand_accepts_the_same_compose_argument() {
     assert_eq!(stderr(&explicit), stderr(&shorthand));
     assert_eq!(
         stderr(&shorthand),
-        "error: Compose file missing.yaml: not found\n"
+        "error: project file missing.yaml: not found\n"
     );
 }
 
@@ -2100,4 +2107,58 @@ fn offline_artifact_and_server_state_use_distinct_environment_variables() {
     }
     let output = seedbox(&["help", "serve"], directory.path());
     assert!(String::from_utf8_lossy(&output.stdout).contains("SEEDBOX_STATE"));
+}
+
+#[test]
+fn completion_is_silent_without_a_server_and_never_starts_one() {
+    let root = tempfile::tempdir().unwrap();
+    let result = seedbox(&["__complete", "--", "logs", ""], root.path());
+    assert!(result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(result.stderr.is_empty());
+    assert!(!root
+        .path()
+        .join(".local/state/seedbox/server.sock")
+        .exists());
+    let result = seedbox(&["__complete", "--", "lo"], root.path());
+    assert!(result.status.success());
+    assert!(String::from_utf8_lossy(&result.stdout)
+        .lines()
+        .any(|line| line == "logs"));
+    for shell in ["bash", "zsh", "fish"] {
+        let result = seedbox(&["completions", shell], root.path());
+        assert!(result.status.success());
+        assert!(String::from_utf8_lossy(&result.stdout).contains("__complete"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn tui_requires_an_interactive_terminal_before_starting_a_server() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = seedbox(&["tui"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        stderr(&output),
+        "error: seedbox tui needs an interactive terminal; use seedbox events or seedbox get from scripts\n"
+    );
+    assert!(!directory.path().join(".local/state/seedbox").exists());
+}
+
+#[test]
+fn native_project_discovery_prefers_seedbox_yaml_and_validates_oracle() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("compose.yaml"),
+        "invalid obsolete input",
+    )
+    .unwrap();
+    fs::write(directory.path().join("seedbox.yaml"), "name: native\nmachines:\n  app: {image: app}\noracle: {image: checker}\nnetwork: {latency: 2ms}\n").unwrap();
+    let output = seedbox(&["validate", ".", "--json"], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output = seedbox(&["run", ".", "--wall-time", "0s"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("--wall-time"));
+    assert!(stderr(&output).contains("duration must be positive"));
 }

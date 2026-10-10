@@ -1,5 +1,5 @@
 /* Automatic application progress, including shared libraries and JIT code.
- * Each thread charges one PV syscall per 10,000 counted block entries.
+ * Each thread charges one PV syscall per configured number of counted block entries.
  * The budget is part of execution semantics, not a performance setting.
  *
  * On AArch64 the patched translator implements software exclusive reservations.
@@ -18,7 +18,9 @@
 #include "drmgr.h"
 #include "drreg.h"
 
-#define BLOCK_BUDGET 10000
+#include "budget.h"
+
+static reg_t block_budget;
 static reg_id_t budget_segment;
 static uint budget_offset;
 
@@ -29,7 +31,7 @@ static reg_t *budget(void)
 
 static void checkpoint(void)
 {
-    *budget() = BLOCK_BUDGET;
+    *budget() = block_budget;
 #ifdef X86_64
     long result;
     __asm__ volatile("syscall" : "=a"(result) : "a"(39L)
@@ -47,7 +49,7 @@ static void checkpoint(void)
 static void thread_init(void *context)
 {
     (void)context;
-    *budget() = BLOCK_BUDGET;
+    *budget() = block_budget;
 }
 
 /* Insert the budget decrement and checkpoint call before `where`. */
@@ -120,6 +122,15 @@ static void finished(void)
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
 {
+    uint32_t parsed_budget;
+    if (argc != 3 || !seedbox_progress_budget(argv[1], argv[2], &parsed_budget)) {
+        dr_fprintf(STDERR, "seedbox progress: expected --blocks-per-progress-call with a positive u32\n");
+        dr_abort();
+        return;
+    }
+    /* Both supported ISAs use a 64-bit raw TLS word. Never encode the budget
+     * as an instruction immediate: the entire u32 range fits in reg_t. */
+    block_budget = (reg_t)parsed_budget;
     drreg_options_t options = {sizeof(options), 3, false};
     DR_ASSERT(drmgr_init());
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);

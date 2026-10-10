@@ -8,6 +8,7 @@ pub use seedbox_engine_protocol::intervention::{History, Intervention};
 
 pub struct Admission<'a> {
     faults: &'a mut Faults,
+    program: Option<&'a mut crate::input_program::Program>,
     boundary: Boundary,
     changed: bool,
     checkpoint_available: bool,
@@ -23,6 +24,7 @@ impl<'a> Admission<'a> {
     ) -> Self {
         Self {
             faults,
+            program: None,
             boundary,
             changed: false,
             checkpoint_available: false,
@@ -31,6 +33,10 @@ impl<'a> Admission<'a> {
         }
     }
 
+    pub(crate) fn with_program(mut self, program: &'a mut crate::input_program::Program) -> Self {
+        self.program = Some(program);
+        self
+    }
     pub(crate) fn with_checkpoint_support(mut self, available: bool) -> Self {
         self.checkpoint_available = available;
         self
@@ -63,6 +69,13 @@ impl<'a> Admission<'a> {
 
     pub fn propose(&self, request_id: String, plan: Plan) -> Result<Intervention, String> {
         self.active()?;
+        if self
+            .program
+            .as_ref()
+            .is_some_and(|program| program.contains_key(&request_id))
+        {
+            return Err(format!("duplicate input identity {request_id}"));
+        }
         self.validate_action(&plan.action)?;
         let intervention = Intervention {
             request_id,
@@ -86,8 +99,17 @@ impl<'a> Admission<'a> {
         }
         validate(intervention)?;
         self.validate_action(&intervention.plan.action)?;
-        self.faults
-            .admit_exact(intervention.plan.clone(), self.earliest_effect_ns())?;
+        let at = self.earliest_effect_ns();
+        if let Some(program) = &mut self.program {
+            program.commit_live(
+                self.faults,
+                intervention.request_id.clone(),
+                intervention.plan.clone(),
+                at,
+            )?;
+        } else {
+            self.faults.admit_exact(intervention.plan.clone(), at)?;
+        }
         self.changed = true;
         Ok(())
     }
@@ -98,14 +120,7 @@ impl<'a> Admission<'a> {
 
     fn validate_action(&self, action: &Action) -> Result<(), String> {
         (self.validate_action)(action)?;
-        if let Some(error) = self.faults.admission_error(action) {
-            return Err(error.into());
-        }
-        if matches!(action, Action::Heal { handle } if !self.faults.active_handles().contains(handle))
-        {
-            return Err("heal of inactive handle".into());
-        }
-        Ok(())
+        crate::input_program::validate_override_state(self.faults, action)
     }
 
     fn active(&self) -> Result<(), String> {
@@ -258,6 +273,38 @@ mod tests {
             }],
             ..History::default()
         }
+    }
+
+    #[test]
+    fn duplicate_override_identity_is_rejected_before_a_durable_proposal() {
+        let input = crate::input_program::TimedInput {
+            key: "existing".into(),
+            at_ns: 100,
+            action: Action::Partition {
+                handle: "p".into(),
+                left: vec!["a".into()],
+                right: vec!["b".into()],
+            },
+            timeout_ns: 100,
+        };
+        let mut program = crate::input_program::Program::new(vec![input.clone()], 300, 0).unwrap();
+        let mut faults = Faults::new(vec![], vec!["a".into(), "b".into()]).unwrap();
+        let admission =
+            Admission::new(&mut faults, boundary(2), &|_| Ok(())).with_program(&mut program);
+        let error = admission
+            .propose(
+                "existing".into(),
+                Plan {
+                    id: 0,
+                    at_ns: 20,
+                    deadline_ns: 120,
+                    action: input.action,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error, "duplicate input identity existing");
+        assert!(faults.log.is_empty());
+        assert!(program.admissions().is_empty());
     }
 
     #[test]

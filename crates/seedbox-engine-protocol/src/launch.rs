@@ -51,6 +51,9 @@ pub struct WorkerRequest {
     /// Write full-state page digests.
     pub digest: bool,
     pub host_control: Option<PathBuf>,
+    /// Initial host playback state, outside guest experiment identity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_paused: bool,
     /// Resume an explicitly captured simulation timeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_checkpoint: Option<PathBuf>,
@@ -91,6 +94,7 @@ impl WorkerRequest {
             out,
             digest: false,
             host_control: None,
+            start_paused: false,
             resume_checkpoint: None,
             interventions: None,
             observations: None,
@@ -108,6 +112,9 @@ impl WorkerRequest {
 
     /// Check settings that depend on each other or have bounded ranges.
     pub fn validate(&self) -> Result<(), String> {
+        if self.start_paused && self.host_control.is_none() {
+            return Err("start-paused requires a host control endpoint".into());
+        }
         if let Some(history) = &self.interventions {
             history.validate()?;
         }
@@ -138,6 +145,27 @@ mod tests {
         assert_eq!(value["features"]["deferred_tx"], true);
         value["unknown"] = true.into();
         assert!(serde_json::from_value::<WorkerRequest>(value).is_err());
+    }
+
+    #[test]
+    fn paused_start_is_optional_and_requires_controls() {
+        let mut request = WorkerRequest::new("w".into(), 0, "o".into());
+        let mut legacy = serde_json::to_value(&request).unwrap();
+        legacy.as_object_mut().unwrap().remove("start_paused");
+        assert!(
+            !serde_json::from_value::<WorkerRequest>(legacy)
+                .unwrap()
+                .start_paused
+        );
+        request.start_paused = true;
+        assert!(request.validate().is_err());
+        request.host_control = Some("control".into());
+        request.validate().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<WorkerRequest>(&serde_json::to_vec(&request).unwrap())
+                .unwrap(),
+            request
+        );
     }
 
     #[test]

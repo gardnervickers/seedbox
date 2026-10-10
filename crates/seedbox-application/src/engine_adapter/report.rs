@@ -13,6 +13,99 @@ use seedbox_engine_protocol::report::{
 };
 use serde_json::Value;
 
+fn external_program(
+    request: &ExecutionRequest<'_>,
+) -> Result<Vec<seedbox_engine_protocol::input_program::TimedInput>> {
+    let history = match request.intervention_history {
+        Some(path) => seedbox_artifacts::interventions::read_optional(path)?.unwrap_or_default(),
+        None => Default::default(),
+    };
+    let mut program = request.program.to_vec();
+    seedbox_engine_protocol::input_program::merge_interventions(&mut program, &history)
+        .map_err(Error::Integrity)?;
+    Ok(program)
+}
+
+/// Completed runs may stop before the end of a program. Every reported
+/// admission must be an exact prefix of the authored document, with IDs
+/// allocated in execution order rather than reserved by the document.
+fn validate_input_admissions(
+    program: &[seedbox_engine_protocol::input_program::TimedInput],
+    admissions: &[seedbox_engine_protocol::input_program::InputAdmission],
+    rejections: &[seedbox_engine_protocol::input_program::InputRejection],
+    duration_ns: u64,
+) -> Result<Vec<Plan>> {
+    seedbox_engine_protocol::input_program::validate_program(program, duration_ns)
+        .map_err(Error::Integrity)?;
+    if admissions.len() + rejections.len() > program.len() {
+        return Err(correlation_mismatch());
+    }
+    let mut admitted = admissions.iter().peekable();
+    let mut rejected = rejections.iter().peekable();
+    let mut previous = 0;
+    for input in program.iter().take(admissions.len() + rejections.len()) {
+        if rejected.peek().is_some_and(|r| r.key == input.key) {
+            let row = rejected.next().ok_or_else(correlation_mismatch)?;
+            if row.at_ns != input.at_ns || row.reason.is_empty() {
+                return Err(correlation_mismatch());
+            }
+            continue;
+        }
+        let row = admitted.next().ok_or_else(correlation_mismatch)?;
+        let plan = &row.plan;
+        if input.key != row.key
+            || input.at_ns != plan.at_ns
+            || input.action != plan.action
+            || plan.id <= previous
+            || input.at_ns.checked_add(input.timeout_ns) != Some(plan.deadline_ns)
+        {
+            return Err(correlation_mismatch());
+        }
+        previous = plan.id;
+    }
+    Ok(admissions.iter().map(|entry| entry.plan.clone()).collect())
+}
+
+fn validate_program_cutoff(
+    evidence: &WorldEvidence,
+    scheduler: &Value,
+    machines: &[MachineOutcome],
+    request: &ExecutionRequest<'_>,
+) -> Result<()> {
+    if evidence.outcome != RunOutcome::FaultFailed {
+        let program = external_program(request)?;
+        if let Some(next) =
+            program.get(evidence.input_admissions.len() + evidence.input_rejections.len())
+        {
+            let committed = scheduler
+                .get("committed_ns")
+                .and_then(Value::as_u64)
+                .ok_or_else(correlation_mismatch)?;
+            // Oracle exits and checkpoints can stop at T before its inputs.
+            let terminal_time = if evidence.outcome == RunOutcome::EndMachineExited {
+                let oracle = request
+                    .prepared
+                    .placement
+                    .get(&request.check.service)
+                    .ok_or_else(correlation_mismatch)?;
+                machines
+                    .iter()
+                    .find(|machine| &machine.name == oracle)
+                    .filter(|machine| machine.guest_exit_code.is_some())
+                    .map(|machine| machine.time_ns)
+                    .ok_or_else(correlation_mismatch)?
+                    .min(committed)
+            } else {
+                committed
+            };
+            if next.at_ns < terminal_time {
+                return Err(correlation_mismatch());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The ARM engine's report, as far as the shared validation reads it.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[derive(Deserialize)]
@@ -122,16 +215,33 @@ impl HistoryCheck<'_> {
     /// Check one accepted transcript row and record the fault it planned.
     fn row(&mut self, row: &ControlRecord, last: bool) -> Result<()> {
         let bad = correlation_mismatch;
-        while let Some(plan) = self
+        self.accepted += 1;
+        let times = self.correlate(row, last)?;
+        while self
             .external_plans
             .iter()
-            .find(|p| p.id == self.next_fault_id)
+            .any(|p| p.id == self.next_fault_id)
         {
+            self.next_fault_id = self.next_fault_id.checked_add(1).ok_or_else(bad)?;
+        }
+        // Only earlier admissions may affect this guest request's lifecycle.
+        self.down.clear();
+        self.clocks.clear();
+        let mut prior: Vec<_> = self
+            .external_plans
+            .iter()
+            .chain(self.expected.plans.iter())
+            .filter(|p| p.id < self.next_fault_id && p.at_ns <= times.admitted)
+            .collect();
+        prior.sort_by_key(|p| p.id);
+        for plan in prior {
+            let effect_at_admission = self.external_plans.iter().any(|p| p.id == plan.id)
+                || self.expected.effects.get(&plan.id) == Some(&plan.at_ns);
             match &plan.action {
-                Action::Crash { machine } => {
+                Action::Crash { machine } if effect_at_admission => {
                     self.down.insert(machine.clone());
                 }
-                Action::Reboot { machine } => {
+                Action::Reboot { machine } if effect_at_admission => {
                     self.down.remove(machine);
                 }
                 Action::ClockSkew { handle, .. } | Action::ClockDrift { handle, .. } => {
@@ -139,10 +249,7 @@ impl HistoryCheck<'_> {
                 }
                 _ => {}
             }
-            self.next_fault_id = self.next_fault_id.checked_add(1).ok_or_else(bad)?;
         }
-        self.accepted += 1;
-        let times = self.correlate(row, last)?;
         if !self.plans_fault(row, times)? {
             return Ok(());
         }
@@ -829,6 +936,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         ));
     }
     let machines: Vec<_> = raw.machines.into_iter().map(|m| m.outcome).collect();
+    validate_program_cutoff(&raw.evidence, &raw.scheduler, &machines, request)?;
     let mut report = checked_report(raw.evidence, &machines, request)?;
     report.simulated_time_ns = raw
         .scheduler
@@ -849,6 +957,7 @@ pub(crate) fn report_hvf(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result
         ));
     }
     crate::mac::validate_report(bytes, request)?;
+    validate_program_cutoff(&raw.evidence, &raw.scheduler, &raw.machines, request)?;
     let mut report = checked_report(raw.evidence, &raw.machines, request)?;
     report.simulated_time_ns = raw
         .scheduler
@@ -955,13 +1064,16 @@ pub(super) fn checked_report(
     {
         return Err(Error::Integrity("unexpected control transcript".into()));
     }
-    let interventions = match request.intervention_history {
-        Some(path) => seedbox_artifacts::interventions::read_optional(path)?.unwrap_or_default(),
-        None => Default::default(),
-    };
+    let program = external_program(request)?;
     let mut external_plans =
         validate_triggers(raw.triggers.as_deref(), &raw.control_history, request)?;
-    external_plans.extend(interventions.entries.iter().map(|entry| entry.plan.clone()));
+    let scheduled = validate_input_admissions(
+        &program,
+        &raw.input_admissions,
+        &raw.input_rejections,
+        request.limits.simulated_time_ns,
+    )?;
+    external_plans.extend(scheduled.iter().cloned());
     let mut expected = if request.control.is_some() {
         validate_control_history(
             &raw.control_history,
@@ -986,7 +1098,8 @@ pub(super) fn checked_report(
     };
     expected
         .interventions
-        .extend(interventions.entries.iter().map(|entry| entry.plan.id));
+        .extend(scheduled.iter().map(|plan| plan.id));
+
     let mut fault_failure = raw.fault_error.clone();
     if raw.faults.len() != expected.plans.len()
         && !(request.control.is_some() && fault_failure.is_some())
@@ -1208,7 +1321,98 @@ impl FaultCheck<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_admissions_are_an_exact_prefix_with_runtime_ids() {
+        use super::*;
+        use seedbox_engine_protocol::input_program::{InputAdmission, TimedInput};
+        let program: Vec<_> = (0..3)
+            .map(|i| TimedInput {
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                key: format!("input-{i}"),
+                at_ns: 10 + i,
+                action: Action::Stop {
+                    machine: "a".into(),
+                },
+            })
+            .collect();
+        let admissions: Vec<_> = program
+            .iter()
+            .take(2)
+            .enumerate()
+            .map(|(i, input)| InputAdmission {
+                key: input.key.clone(),
+                plan: Plan {
+                    id: 2 + i as u32 * 3,
+                    at_ns: input.at_ns,
+                    deadline_ns: input.at_ns + PROCESS_EFFECT_TIMEOUT_NS,
+                    action: input.action.clone(),
+                },
+            })
+            .collect();
+        assert_eq!(
+            validate_input_admissions(&program, &admissions, &[], 100)
+                .unwrap()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            [2, 5]
+        );
+        assert!(validate_input_admissions(&program, &[], &[], 100)
+            .unwrap()
+            .is_empty());
+        for field in 0..5 {
+            let mut bad = admissions.clone();
+            match field {
+                0 => bad[0].key = "other".into(),
+                1 => bad[0].plan.at_ns += 1,
+                2 => bad[0].plan.deadline_ns += 1,
+                3 => bad[1].plan.id = bad[0].plan.id,
+                _ => {
+                    bad[0].plan.action = Action::Crash {
+                        machine: "a".into(),
+                    }
+                }
+            }
+            assert!(validate_input_admissions(&program, &bad, &[], 100).is_err());
+        }
+    }
     use super::*;
+
+    #[test]
+    fn rejected_override_is_a_consumed_prefix_entry_without_reserving_a_fault_id() {
+        use seedbox_engine_protocol::input_program::{InputAdmission, InputRejection, TimedInput};
+        let input = |key: &str| TimedInput {
+            key: key.into(),
+            at_ns: 10,
+            timeout_ns: 37,
+            action: seedbox_control::Action::Heal {
+                handle: "cut".into(),
+            },
+        };
+        let program = [input("missing"), input("valid")];
+        let admissions = [InputAdmission {
+            key: "valid".into(),
+            plan: seedbox_control::Plan {
+                id: 1,
+                at_ns: 10,
+                deadline_ns: 47,
+                action: program[1].action.clone(),
+            },
+        }];
+        let mut rejections = [InputRejection {
+            key: "missing".into(),
+            at_ns: 10,
+            reason: "heal of inactive handle".into(),
+        }];
+        assert_eq!(
+            super::validate_input_admissions(&program, &admissions, &rejections, 100).unwrap()[0]
+                .id,
+            1
+        );
+        rejections[0].at_ns += 1;
+        assert!(super::validate_input_admissions(&program, &admissions, &rejections, 100).is_err());
+        assert!(super::validate_input_admissions(&program, &admissions, &[], 100).is_err());
+    }
 
     #[test]
     fn prior_lifecycle_uses_effect_time_then_admission_order() {

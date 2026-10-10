@@ -58,6 +58,9 @@ impl NetworkCounters {
                 .push((from, to, outcome));
         }
     }
+    pub fn frontier(&self) -> u64 {
+        self.frontier
+    }
     pub fn advance(&mut self, before: u64) {
         assert!(
             before >= self.frontier,

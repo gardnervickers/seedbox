@@ -13,6 +13,7 @@ fn fixture() -> sb::record::RunRecord {
         })]), configs: BTreeMap::new(),
         network: config::Network { name: "default".into(), latency_ns: 1_000_000,
             jitter_ns: 0, bandwidth_bps: None, queue_bound_ns: None, links: vec![] },
+        simulator: Default::default(),
         schedule: config::Schedule::default(), control: None,
         limits: config::Limits { simulated_time_ns: 1_000_000_000, wall_time_ns: 60_000_000_000 },
         check: config::Check { service: "workload".into(), exit_code: 0 },
@@ -20,6 +21,7 @@ fn fixture() -> sb::record::RunRecord {
         machine: config::MachineOptions::default(), disk: config::DiskOptions::default(),
     };
     let identity = RunIdentity {
+        program: Vec::new(),
             interventions: None,
         version: 2,
         seed: 0,

@@ -1,5 +1,7 @@
 //! Strict Compose subset parsing, without builds, registry access, or execution.
 
+mod native_project;
+
 use crate::{invalid, Error, Result};
 use serde_yaml_ng::{Mapping, Value};
 use std::{
@@ -44,6 +46,9 @@ pub fn parse_for_architecture(
 ) -> Result<Simulation> {
     let doc: Value = serde_yaml_ng::from_str(yaml)?;
     reject_tags(&doc, "$")?;
+    if doc.get("machines").is_some() || doc.get("oracle").is_some() {
+        return native_project::parse(doc, source, architecture);
+    }
     let top = fields(
         &doc,
         "$",
@@ -549,6 +554,7 @@ pub fn parse_for_architecture(
         services,
         configs,
         network,
+        simulator: Default::default(),
         schedule,
         control,
         limits,
@@ -886,4 +892,9 @@ fn duration(value: &Value, path: &str, zero: bool) -> Result<u64> {
         return invalid(path, "duration must be positive");
     }
     Ok(ns)
+}
+
+/// Parse an explicit positive duration without environment or filesystem access.
+pub fn duration_ns(value: &str) -> Result<u64> {
+    duration(&Value::String(value.to_owned()), "duration", false)
 }

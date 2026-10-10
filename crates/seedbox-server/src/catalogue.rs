@@ -68,10 +68,10 @@ struct Entry {
 }
 
 pub struct Catalogue {
-    directory: PathBuf,
+    directory: Option<PathBuf>,
     // Dropping the catalogue releases ownership. Never unlink the lock file:
     // that would let another process lock a different inode at the same path.
-    _lock: File,
+    _lock: Option<File>,
     entries: BTreeMap<SimulationId, Entry>,
     requests: BTreeMap<String, SimulationId>,
     storage_failed: bool,
@@ -79,6 +79,18 @@ pub struct Catalogue {
 }
 
 impl Catalogue {
+    /// Session-only catalogue: no records are read from or written to disk.
+    pub fn in_memory() -> Self {
+        Self {
+            directory: None,
+            _lock: None,
+            entries: BTreeMap::new(),
+            requests: BTreeMap::new(),
+            storage_failed: false,
+            pending: BTreeMap::new(),
+        }
+    }
+
     pub fn open(directory: &Path) -> Result<Self> {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true).mode(0o700);
@@ -118,8 +130,8 @@ impl Catalogue {
             });
         }
         let mut catalogue = Self {
-            directory: directory.to_owned(),
-            _lock: lock,
+            directory: Some(directory.to_owned()),
+            _lock: Some(lock),
             entries: BTreeMap::new(),
             requests: BTreeMap::new(),
             storage_failed: false,
@@ -228,16 +240,6 @@ impl Catalogue {
             return Err(Error::StorageFailed);
         }
         let mut ids = vec![root.clone()];
-        let mut cursor = 0;
-        while cursor < ids.len() {
-            let parent = ids[cursor].clone();
-            for (id, entry) in &self.entries {
-                if entry.resource.metadata.parent.as_ref() == Some(&parent) && !ids.contains(id) {
-                    ids.push(id.clone());
-                }
-            }
-            cursor += 1;
-        }
         for id in &ids {
             if let Some(entry) = self.entries.get(id) {
                 let mut entry = entry.clone();
@@ -289,16 +291,6 @@ impl Catalogue {
                 "stop the simulation and wait for completion before deleting it".into(),
             ));
         }
-        if self
-            .entries
-            .values()
-            .any(|entry| entry.resource.metadata.parent.as_ref() == Some(id))
-        {
-            return Err(Error::Invalid(
-                "simulation is referenced by another simulation; delete its dependents first"
-                    .into(),
-            ));
-        }
         if entry.range.is_some() && !self.seed_range(id)?.complete() {
             return Err(Error::Invalid(
                 "stop the seed range and wait for completion before deleting it".into(),
@@ -306,10 +298,12 @@ impl Catalogue {
         }
         let request = entry.request.request_id.clone();
         self.remove_seed_member(&request)?;
-        let path = self.directory.join(format!("{id}.json"));
-        if let Err(error) = at(&path, fs::remove_file(&path)) {
-            self.storage_failed = true;
-            return Err(error);
+        if let Some(directory) = &self.directory {
+            let path = directory.join(format!("{id}.json"));
+            if let Err(error) = at(&path, fs::remove_file(&path)) {
+                self.storage_failed = true;
+                return Err(error);
+            }
         }
         self.entries.remove(id);
         self.requests.remove(&request);
@@ -332,6 +326,15 @@ impl Catalogue {
         if self.storage_failed {
             return Err(Error::StorageFailed);
         }
+        let mut request = request;
+        if request.metadata.name.is_empty() {
+            request.metadata.name = request.spec.configuration.name.clone();
+        }
+        // Keep the durable and in-memory representations identical across public schema projection.
+        request = serde_json::from_value(
+            serde_json::to_value(&request).map_err(|e| Error::Invalid(e.to_string()))?,
+        )
+        .map_err(|e| Error::Invalid(e.to_string()))?;
         validate_request_id(&request.request_id)?;
         if let Some(id) = self.requests.get(&request.request_id) {
             let entry = &self.entries[id];
@@ -349,6 +352,7 @@ impl Catalogue {
             }
         };
         let mut spec = request.spec.clone();
+        resolve_program(&spec)?;
         // Explicit submission seed wins over the project's seed, then randomness.
         spec.seed = Some(match spec.seed.or(spec.configuration.seed) {
             Some(seed) => seed,
@@ -358,13 +362,17 @@ impl Catalogue {
                 u64::from_le_bytes(bytes)
             }
         });
+        spec = serde_json::from_value(
+            serde_json::to_value(&spec).map_err(|e| Error::Invalid(e.to_string()))?,
+        )
+        .map_err(|e| Error::Invalid(e.to_string()))?;
         if let Some(range) = &range {
             spec.seed
                 .and_then(|seed| seed.checked_add(u64::from(range.count - 1)))
                 .ok_or_else(|| Error::Invalid("seed range overflows u64".into()))?;
         }
         let reference = match &spec.inputs {
-            InputSource::Project => None,
+            InputSource::Project | InputSource::Resolved { .. } => None,
             InputSource::Retained { simulation }
             | InputSource::Prepared { simulation }
             | InputSource::Checkpoint { simulation, .. } => Some(simulation),
@@ -373,6 +381,18 @@ impl Catalogue {
             return Err(Error::Invalid("source simulation is being deleted".into()));
         }
         let parent = match &spec.inputs {
+            InputSource::Resolved { definition } => {
+                definition
+                    .start
+                    .validate_overrides(&definition.overrides)
+                    .map_err(Error::Invalid)?;
+                if definition.machines.contains_key(definition.oracle_name()) {
+                    return Err(Error::Invalid(
+                        "oracle must have its own dedicated declaration".into(),
+                    ));
+                }
+                None
+            }
             InputSource::Project => {
                 let config = &spec.configuration;
                 if config.check.exit_code != 0 {
@@ -397,13 +417,14 @@ impl Catalogue {
                 let original = self.get(simulation)?;
                 if original.spec.configuration != spec.configuration
                     || original.spec.seed != spec.seed
+                    || original.spec.program != spec.program
                 {
                     return Err(Error::Invalid(
                         "checkpoint requires its source configuration and seed".into(),
                     ));
                 }
                 self.captured_checkpoint(simulation, checkpoint)?;
-                Some(simulation.clone())
+                None
             }
             InputSource::Retained { simulation } | InputSource::Prepared { simulation } => {
                 let original = self.get(simulation)?;
@@ -419,12 +440,15 @@ impl Catalogue {
                         "retained execution requires its source seed; use prepared inputs to vary the seed".into(),
                     ));
                 }
-                if original.spec.configuration != spec.configuration {
+                if original.spec.configuration != spec.configuration
+                    || (matches!(spec.inputs, InputSource::Retained { .. })
+                        && original.spec.program != spec.program)
+                {
                     return Err(Error::Invalid(
                         "retained input configuration differs from its source".into(),
                     ));
                 }
-                Some(simulation.clone())
+                None
             }
         };
         let created_at_unix_ms = SystemTime::now()
@@ -432,8 +456,15 @@ impl Catalogue {
             .ok()
             .and_then(|d| u64::try_from(d.as_millis()).ok())
             .ok_or_else(|| Error::Invalid("host clock cannot be represented".into()))?;
-        let resource = Simulation::queued(
+        let mut resource = Simulation::queued(
             Metadata {
+                name: if request.metadata.name.is_empty() {
+                    spec.configuration.name.clone()
+                } else {
+                    request.metadata.name.clone()
+                },
+                labels: request.metadata.labels.clone(),
+                annotations: request.metadata.annotations.clone(),
                 id: id.clone(),
                 revision: 1,
                 created_at_unix_ms,
@@ -446,6 +477,7 @@ impl Catalogue {
             },
             spec,
         );
+        resource.options = request.options.clone();
         let entry = Entry {
             request,
             resource: resource.clone(),
@@ -771,11 +803,12 @@ impl Catalogue {
                 "simulation exceeds record size limit".into(),
             ));
         }
-        let path = self
-            .directory
-            .join(format!("{}.json", entry.resource.metadata.id));
+        let Some(directory) = &self.directory else {
+            return Ok(());
+        };
+        let path = directory.join(format!("{}.json", entry.resource.metadata.id));
         let result = (|| -> io::Result<()> {
-            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
+            let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
             temporary.write_all(&bytes)?;
             temporary.persist(&path).map_err(|e| e.error)?;
             Ok(())
@@ -843,4 +876,25 @@ fn validate_submission_request_id(id: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub(crate) fn resolve_program(
+    spec: &seedbox_api::SimulationSpec,
+) -> Result<Vec<seedbox_engine_protocol::input_program::TimedInput>> {
+    let program = spec
+        .program
+        .iter()
+        .map(|input| {
+            Ok(seedbox_engine_protocol::input_program::TimedInput {
+                key: input.key.clone(),
+                at_ns: input.at_ns,
+                timeout_ns: input.timeout_ns,
+                action: serde_json::from_value(input.action.clone())
+                    .map_err(|error| Error::Invalid(format!("program {}: {error}", input.key)))?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    seedbox_application::engine_adapter::validate_input_program(&spec.configuration, &program)
+        .map_err(|error| Error::Invalid(error.to_string()))?;
+    Ok(program)
 }

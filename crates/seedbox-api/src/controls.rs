@@ -1,5 +1,6 @@
 use crate::{PlaybackRate, PlaybackStatus};
 pub use seedbox_control::Action as FaultAction;
+pub use seedbox_engine_protocol::host_control::{CheckpointState, CheckpointStatus};
 pub use seedbox_engine_protocol::intervention::Intervention;
 use serde::{Deserialize, Serialize};
 
@@ -15,10 +16,18 @@ pub struct ControlRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum ControlCommand {
-    SetRate { rate: PlaybackRate },
+    SetRate {
+        rate: PlaybackRate,
+    },
+    /// Run at the selected rate, then pause before the next fault effect.
+    PauseBeforeNextFault {
+        rate: PlaybackRate,
+    },
     Step,
     Checkpoint,
-    InjectFault { action: FaultAction },
+    InjectFault {
+        action: FaultAction,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

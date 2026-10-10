@@ -1,6 +1,7 @@
 # Run from the repository root. These isolated standalone engines support
 # low-level fixtures. The public CLI links its platform engine directly.
 [alias]
+xtask = "run --quiet -p xtask --"
 # Keep standalone engine outputs separate from workspace builds; do not set a
 # global target-dir in [build].
 build-vmm = "build --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target"

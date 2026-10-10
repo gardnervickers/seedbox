@@ -24,6 +24,8 @@ pub struct HostControl {
     fault_injection: bool,
     checkpoints_enabled: bool,
     checkpoint: Option<CheckpointStatus>,
+    pause_before_next_fault: bool,
+    pre_effect: bool,
 }
 
 impl HostControl {
@@ -68,6 +70,17 @@ impl HostControl {
         self.fault_injection = false;
     }
 
+    /// Bind with playback already paused, before any scheduler work is permitted.
+    pub fn bind_paused(path: &Path) -> io::Result<Self> {
+        let mut control = Self::bind(path)?;
+        control.playback.set_rate(
+            PlaybackRate::Paused,
+            BoundaryPosition::default(),
+            Instant::now(),
+        );
+        Ok(control)
+    }
+
     pub fn bind(path: &Path) -> io::Result<Self> {
         let socket = UnixDatagram::bind(path)?;
         socket.set_nonblocking(true)?;
@@ -85,6 +98,8 @@ impl HostControl {
             fault_injection: true,
             checkpoints_enabled: false,
             checkpoint: None,
+            pause_before_next_fault: false,
+            pre_effect: false,
             socket,
             path: path.to_owned(),
             playback: Default::default(),
@@ -96,6 +111,28 @@ impl HostControl {
     /// Cancellation remains active; intentional waits are excluded from the execution budget.
     pub fn boundary(&mut self) -> io::Result<()> {
         self.boundary_at(Boundary::default())
+    }
+
+    /// A playback-only phase before an effect, reusing the published position.
+    /// No fault admission or checkpoint can be made while this stop is held.
+    pub fn before_fault(&mut self, boundary: Boundary) -> io::Result<()> {
+        if boundary.terminal
+            || (!self.pause_before_next_fault && self.playback.rate() != PlaybackRate::Paused)
+        {
+            return Ok(());
+        }
+        if self.pause_before_next_fault {
+            self.pause_before_next_fault = false;
+            self.playback
+                .set_rate(PlaybackRate::Paused, boundary.position, Instant::now());
+        }
+        // Initially paused runs may reach an input at the launch boundary
+        // before their first regular host callback. Hold its effect here too.
+        // Preserve an admitted step so it still permits exactly one round.
+        self.pre_effect = true;
+        let result = self.boundary_scope(boundary, None);
+        self.pre_effect = false;
+        result
     }
 
     pub fn boundary_at(&mut self, boundary: Boundary) -> io::Result<()> {
@@ -158,6 +195,7 @@ impl HostControl {
                         PAUSED.to_vec()
                     }
                     RESUME if !boundary.terminal => {
+                        self.pause_before_next_fault = false;
                         self.playback
                             .set_rate(PlaybackRate::Unlimited, position, Instant::now());
                         RUNNING.to_vec()
@@ -177,6 +215,11 @@ impl HostControl {
                 };
                 // A disappearing requester must never fail the guest execution.
                 let _ = self.socket.send_to(&reply, peer);
+                // Drain this action through the scheduler before accepting a
+                // dependent same-time host action, just like timed overrides.
+                if admission.as_ref().is_some_and(|scope| scope.changed()) {
+                    return Ok(());
+                }
                 // Release the borrowed admission scope so the owner can capture
                 // the whole world. Even a paused simulation must reach this path.
                 if self.pending_checkpoint().is_some() {
@@ -250,16 +293,45 @@ impl HostControl {
         {
             error = Some(ControlError::CheckpointPending);
         }
+        if error.is_none()
+            && self.pre_effect
+            && matches!(
+                request.command,
+                Command::Checkpoint { .. }
+                    | Command::PrepareFault { .. }
+                    | Command::CommitFault { .. }
+            )
+        {
+            error = Some(ControlError::Unsupported);
+            detail = Some("only playback controls are available before a fault effect".into());
+        }
         if error.is_none() {
             match &request.command {
                 Command::Status => {
                     intervention = self.prepared.as_ref().map(|(_, record)| record.clone());
                 }
                 Command::SetRate { rate } => {
+                    self.pause_before_next_fault = false;
                     self.playback.set_rate(*rate, position, Instant::now())
+                }
+                Command::PauseBeforeNextFault { rate } => {
+                    if *rate == PlaybackRate::Paused {
+                        error = Some(ControlError::InvalidRate);
+                        detail = Some(
+                            "choose a running playback rate for pause before next fault".into(),
+                        );
+                    } else if self.prepared.is_some() {
+                        error = Some(ControlError::FaultPending);
+                    } else {
+                        self.pause_before_next_fault = true;
+                        self.playback.set_rate(*rate, position, Instant::now());
+                    }
                 }
                 Command::Step => {
                     error = self.playback.step(position).err();
+                    if error.is_none() {
+                        self.pause_before_next_fault = false;
+                    }
                 }
                 Command::Checkpoint { request_id } => {
                     if self
@@ -494,6 +566,7 @@ mod tests {
                 control
                     .boundary_with_admission(boundary, &mut admission)
                     .unwrap();
+                control.before_fault(boundary).unwrap();
                 done.send(()).unwrap();
                 faults
             });
@@ -685,6 +758,48 @@ mod tests {
     }
 
     #[test]
+    fn paused_start_holds_the_initial_boundary_until_resumed() {
+        use std::{sync::mpsc, time::Duration};
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("control");
+        let mut control = HostControl::bind_paused(&endpoint).unwrap();
+        let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
+        client.connect(endpoint).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (done, completed) = mpsc::channel();
+        // Always resume before joining, including on a failed assertion.
+        struct Resume<'a>(&'a UnixDatagram);
+        impl Drop for Resume<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.send(RESUME);
+            }
+        }
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                control.boundary_at(Boundary::default()).unwrap();
+                done.send(()).unwrap();
+            });
+            let release = Resume(&client);
+            let request = Request {
+                id: 1,
+                command: Command::Status,
+            };
+            client.send(&serde_json::to_vec(&request).unwrap()).unwrap();
+            let mut bytes = [0; MAX_DATAGRAM];
+            let count = client.recv(&mut bytes).unwrap();
+            let status: Reply = serde_json::from_slice(&bytes[..count]).unwrap();
+            assert_eq!(status.rate, PlaybackRate::Paused);
+            assert_eq!(status.position.completed_rounds, 0);
+            assert_eq!(status.position.simulated_time_ns, 0);
+            assert!(completed.recv_timeout(Duration::from_millis(50)).is_err());
+            drop(release);
+            completed.recv_timeout(Duration::from_secs(2)).unwrap();
+        });
+    }
+
+    #[test]
     fn a_terminal_boundary_finishes_even_when_playback_is_paused() {
         let directory = tempfile::tempdir().unwrap();
         let mut control = HostControl::bind(&directory.path().join("control")).unwrap();
@@ -801,5 +916,204 @@ mod tests {
             Some(ControlError::RequestConflict)
         );
         assert!(!control.playback.stepping());
+    }
+}
+
+#[cfg(test)]
+mod pre_fault_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn one_shot_stop_preserves_position_allows_playback_and_rejects_semantic_controls() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("control");
+        let mut control = HostControl::bind(&endpoint).unwrap();
+        control.enable_checkpoints();
+        let boundary = Boundary {
+            position: BoundaryPosition {
+                boundary_index: 8,
+                completed_rounds: 3,
+                simulated_time_ns: 100,
+            },
+            application_ready: true,
+            terminal: false,
+        };
+        let armed = control.request(
+            Request {
+                id: 1,
+                command: Command::PauseBeforeNextFault {
+                    rate: PlaybackRate::Unlimited,
+                },
+            },
+            boundary,
+        );
+        assert_eq!(armed.error, None);
+        assert!(control.pause_before_next_fault);
+        let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
+        client.connect(&endpoint).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        struct Release(UnixDatagram);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = self.0.send(RESUME);
+            }
+        }
+        let cleanup = UnixDatagram::bind(directory.path().join("cleanup")).unwrap();
+        cleanup.connect(&endpoint).unwrap();
+        std::thread::scope(|scope| {
+            let _release = Release(cleanup);
+            let task = scope.spawn(|| {
+                control.before_fault(boundary).unwrap();
+                assert!(!control.pause_before_next_fault);
+                // A consumed stop never pauses again without being rearmed.
+                control.before_fault(boundary).unwrap();
+            });
+            let send = |id, command| {
+                client
+                    .send(&serde_json::to_vec(&Request { id, command }).unwrap())
+                    .unwrap();
+                let mut bytes = [0; MAX_DATAGRAM];
+                let count = client.recv(&mut bytes).unwrap();
+                serde_json::from_slice::<Reply>(&bytes[..count]).unwrap()
+            };
+            let paused = send(2, Command::Status);
+            assert_eq!(paused.rate, PlaybackRate::Paused);
+            assert_eq!(paused.position, boundary.position);
+            let rejected = send(
+                3,
+                Command::Checkpoint {
+                    request_id: "not-here".into(),
+                },
+            );
+            assert_eq!(rejected.error, Some(ControlError::Unsupported));
+            let resumed = send(
+                4,
+                Command::SetRate {
+                    rate: PlaybackRate::Unlimited,
+                },
+            );
+            assert_eq!(resumed.error, None);
+            assert_eq!(resumed.position, boundary.position);
+            task.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn arming_requires_running_rate_and_explicit_rate_changes_cancel_the_arm() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut control = HostControl::bind(&directory.path().join("control")).unwrap();
+        let boundary = Boundary {
+            position: BoundaryPosition::default(),
+            application_ready: true,
+            terminal: false,
+        };
+        assert_eq!(
+            control
+                .request(
+                    Request {
+                        id: 1,
+                        command: Command::PauseBeforeNextFault {
+                            rate: PlaybackRate::Paused
+                        }
+                    },
+                    boundary
+                )
+                .error,
+            Some(ControlError::InvalidRate)
+        );
+        assert!(!control.pause_before_next_fault);
+        control.request(
+            Request {
+                id: 2,
+                command: Command::PauseBeforeNextFault {
+                    rate: PlaybackRate::Unlimited,
+                },
+            },
+            boundary,
+        );
+        assert!(control.pause_before_next_fault);
+        control.request(
+            Request {
+                id: 3,
+                command: Command::SetRate {
+                    rate: PlaybackRate::Paused,
+                },
+            },
+            boundary,
+        );
+        assert!(!control.pause_before_next_fault);
+    }
+}
+
+#[cfg(test)]
+mod override_order_tests {
+    use super::*;
+    #[test]
+    fn queued_live_actions_drain_each_effect_before_next_proposal() {
+        use seedbox_control::Action;
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("control");
+        let mut host = HostControl::bind(&endpoint).unwrap();
+        let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
+        client.connect(&endpoint).unwrap();
+        let actions = [
+            Action::Partition {
+                handle: "cut".into(),
+                left: vec!["a".into()],
+                right: vec!["b".into()],
+            },
+            Action::Heal {
+                handle: "cut".into(),
+            },
+        ];
+        for (index, action) in actions.into_iter().enumerate() {
+            let request_id = format!("action-{index}");
+            for (id, command) in [
+                (
+                    index as u64 * 2 + 1,
+                    Command::PrepareFault {
+                        request_id: request_id.clone(),
+                        action,
+                        timeout_ns: 100,
+                    },
+                ),
+                (index as u64 * 2 + 2, Command::CommitFault { request_id }),
+            ] {
+                client
+                    .send(&serde_json::to_vec(&Request { id, command }).unwrap())
+                    .unwrap();
+            }
+        }
+        let boundary = Boundary {
+            position: BoundaryPosition {
+                boundary_index: 1,
+                completed_rounds: 0,
+                simulated_time_ns: 10,
+            },
+            terminal: false,
+            application_ready: true,
+        };
+        let mut faults = crate::faults::Faults::new(vec![], vec!["a".into(), "b".into()]).unwrap();
+        let mut program = crate::input_program::Program::default();
+        for count in 1..=2 {
+            let mut scope =
+                Admission::new(&mut faults, boundary, &|_| Ok(())).with_program(&mut program);
+            host.boundary_with_admission(boundary, &mut scope).unwrap();
+            assert_eq!(faults.log.len(), count);
+            faults.apply_due(10);
+        }
+        assert!(faults.active_handles().is_empty());
+        assert!(faults.error.is_none());
+        assert_eq!(
+            program
+                .admissions()
+                .iter()
+                .map(|row| row.key.as_str())
+                .collect::<Vec<_>>(),
+            ["action-0", "action-1"]
+        );
     }
 }

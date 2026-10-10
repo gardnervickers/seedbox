@@ -9,6 +9,28 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Shared runtime state rejection. Guest replies preserve the distinction
+/// between lifecycle errors and an inactive heal handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionError {
+    InvalidState(&'static str),
+    InactiveHandle,
+}
+impl AdmissionError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::InvalidState(message) => message,
+            Self::InactiveHandle => "heal of inactive handle",
+        }
+    }
+    pub fn code(self) -> Option<&'static str> {
+        match self {
+            Self::InvalidState(_) => Some("invalid_state"),
+            Self::InactiveHandle => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     Scheduled,
@@ -243,6 +265,16 @@ impl Faults {
             .position(|n| n == name)
             .ok_or_else(|| unknown.to_owned())
     }
+    /// Validate shape and target names without assigning or reserving an ID.
+    pub fn validate_action_shape(&self, action: &Action) -> Result<(), String> {
+        self.compile(Plan {
+            id: 0,
+            at_ns: 0,
+            deadline_ns: 0,
+            action: action.clone(),
+        })
+        .map(|_| ())
+    }
     fn compile(&self, plan: Plan) -> Result<Entry, String> {
         if plan.deadline_ns < plan.at_ns {
             return Err("fault deadline precedes request".into());
@@ -437,6 +469,13 @@ impl Faults {
         self.entries.push(entry);
         id
     }
+    /// True only for a newly due action, not an acknowledgement deadline.
+    pub fn has_effect_at(&self, at: u64) -> bool {
+        self.boundaries
+            .iter()
+            .any(|(time, _, event)| *time == at && *event == Event::Apply)
+    }
+
     pub fn next_boundary(&self) -> u64 {
         self.boundaries.first().map(|e| e.0).unwrap_or(u64::MAX)
     }
@@ -508,6 +547,18 @@ impl Faults {
             Life::Up => "Running",
         }
     }
+    /// Check the same live fault state for guest, interactive and program inputs.
+    /// Shape compilation and ID allocation remain in the ordinary admit path.
+    pub fn validate_admission_state(&self, action: &Action) -> Result<(), AdmissionError> {
+        if let Some(error) = self.admission_error(action) {
+            return Err(AdmissionError::InvalidState(error));
+        }
+        if matches!(action, Action::Heal { handle } if !self.active_handles().contains(handle)) {
+            return Err(AdmissionError::InactiveHandle);
+        }
+        Ok(())
+    }
+
     pub fn admission_error(&self, action: &Action) -> Option<&'static str> {
         if let Action::Heal { handle } = action {
             let clock = self.clocks.get(handle)?;

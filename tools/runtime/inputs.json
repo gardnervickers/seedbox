@@ -15,6 +15,7 @@
     "kernel-arm64/supervisor-io.h",
     "nix/progress.nix",
     "guest/progress/progress.c",
+    "guest/progress/budget.h",
     "guest/progress/CMakeLists.txt",
     "guest/progress/package.py",
     "guest/progress-launch.h"

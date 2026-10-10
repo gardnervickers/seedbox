@@ -70,3 +70,54 @@ fn large_artifacts_stream_with_bounded_reads_and_corrupt_copies_are_not_publishe
     assert!(store.materialize(&digest, &bad_output).is_err());
     assert_eq!(fs::read_dir(bad_output).unwrap().count(), 0);
 }
+
+#[test]
+fn split_store_keeps_inputs_and_derivation_cache_but_discards_session_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let session = directory.path().join("session");
+    let store = ContentStore::with_ephemeral_evidence(&cache, &session);
+    let binary = store.put(b"immutable binary").unwrap();
+    let identity = store.put_unsynced(b"run identity").unwrap();
+    let file = directory.path().join("application.log");
+    fs::write(&file, b"application output").unwrap();
+    let log = store.put_file_unsynced(&file).unwrap();
+    let record = ContentDigest::of(b"derivation cache key");
+    store.set_record(&record, &binary).unwrap();
+    assert_eq!(store.read(&identity).unwrap(), b"run identity");
+    assert_eq!(store.size(&log).unwrap(), 18);
+    assert!(!cache.join("sha256").join(identity.hex()).exists());
+    assert!(!cache.join("sha256").join(log.hex()).exists());
+    // Retaining an input whose bytes appeared as evidence must still populate
+    // the persistent cache, rather than reuse only the ephemeral copy.
+    let promoted = store.put_unsynced(b"later becomes an input").unwrap();
+    fs::write(&file, b"later becomes an input").unwrap();
+    assert_eq!(store.put_file(&file).unwrap(), promoted);
+    fs::remove_dir_all(&session).unwrap();
+    let restarted = ContentStore::with_ephemeral_evidence(&cache, &session);
+    assert_eq!(restarted.read(&binary).unwrap(), b"immutable binary");
+    assert_eq!(
+        restarted.read(&promoted).unwrap(),
+        b"later becomes an input"
+    );
+    assert_eq!(restarted.record(&record), Some(binary));
+    assert!(restarted.read(&identity).is_err());
+    assert!(restarted.read(&log).is_err());
+}
+
+#[test]
+fn session_copy_cannot_hide_a_corrupt_persistent_binary() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let session = directory.path().join("session");
+    let store = ContentStore::with_ephemeral_evidence(&cache, &session);
+    let bytes = b"same binary in both stores";
+    let digest = store.put(bytes).unwrap();
+    assert_eq!(store.put_unsynced(bytes).unwrap(), digest);
+    fs::write(cache.join("sha256").join(digest.hex()), b"corrupt").unwrap();
+    let source = directory.path().join("source");
+    fs::write(&source, bytes).unwrap();
+    assert!(store.read(&digest).is_err());
+    assert!(store.put_file(&source).is_err());
+    assert!(store.put(bytes).is_err());
+}

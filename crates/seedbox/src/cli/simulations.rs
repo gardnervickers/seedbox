@@ -55,6 +55,23 @@ pub(super) fn logs(
     })
 }
 
+pub(super) fn tui(id: Option<SimulationId>) -> Result<u8> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(Error::Setup(
+            "seedbox tui needs an interactive terminal; use seedbox events or seedbox get from scripts".into(),
+        ));
+    }
+    let client = daemon::connect(None)?;
+    runtime()?.block_on(async {
+        client.info().await.map_err(client_error)?;
+        seedbox_tui::run(client, id, daemon::state_directory(None)?.join("timelines"))
+            .await
+            .map_err(|e| Error::Setup(format!("terminal: {e}")))
+    })?;
+    Ok(0)
+}
+
 pub(super) fn events(id: &SimulationId) -> Result<u8> {
     let client = daemon::connect(None)?;
     let cancellation = CancellationToken::default();
@@ -76,7 +93,10 @@ pub(super) fn events(id: &SimulationId) -> Result<u8> {
     })
 }
 
-fn load_spec(compose: &ComposeArg, seed: Option<u64>) -> Result<SimulationSpec> {
+fn load_spec(
+    compose: &ComposeArg,
+    seed: Option<u64>,
+) -> Result<(SimulationSpec, seedbox_spec::definition::Metadata)> {
     let path = defaults::compose_file(&compose.compose)?;
     let path = path
         .canonicalize()
@@ -100,6 +120,8 @@ fn load_spec(compose: &ComposeArg, seed: Option<u64>) -> Result<SimulationSpec> 
             seedbox_application::guest::Architecture::Amd64
         };
         SimulationSpec {
+            program: Vec::new(),
+            start_paused: false,
             seed: None,
             inputs: InputSource::Project,
             configuration: seedbox_application::config::parse_for_architecture(
@@ -110,24 +132,72 @@ fn load_spec(compose: &ComposeArg, seed: Option<u64>) -> Result<SimulationSpec> 
             )?,
         }
     };
+    if document.get("apiVersion").is_none()
+        && (document.get("machines").is_some() || document.get("oracle").is_some())
+    {
+        for service in spec.configuration.services.values_mut() {
+            service.platform.clear();
+        }
+    }
     if seed.is_some() {
         spec.seed = seed;
     }
-    Ok(spec)
+    let metadata = seedbox_spec::definition::Metadata {
+        name: document
+            .get("metadata")
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&spec.configuration.name)
+            .into(),
+        labels: document
+            .get("metadata")
+            .and_then(|m| m.get("labels"))
+            .cloned()
+            .map(serde_yaml_ng::from_value)
+            .transpose()?
+            .unwrap_or_default(),
+        annotations: document
+            .get("metadata")
+            .and_then(|m| m.get("annotations"))
+            .cloned()
+            .map(serde_yaml_ng::from_value)
+            .transpose()?
+            .unwrap_or_default(),
+    };
+    Ok((spec, metadata))
 }
 
-pub(super) fn run(compose: &ComposeArg, seed: Option<u64>, detach: bool, json: bool) -> Result<u8> {
-    submit(load_spec(compose, seed)?, detach, json)
+pub(super) fn run(
+    compose: &ComposeArg,
+    seed: Option<u64>,
+    paused: bool,
+    detach: bool,
+    json: bool,
+    wall_time_ns: Option<u64>,
+) -> Result<u8> {
+    let (spec, metadata) = load_spec(compose, seed)?;
+    submit(
+        spec,
+        seedbox_api::ExecutionOptions {
+            start_paused: paused,
+            wall_time_ns,
+        },
+        metadata,
+        detach,
+        json,
+    )
 }
 
 pub(super) fn explore(
     compose: &ComposeArg,
     seed: Option<u64>,
     count: u32,
+    paused: bool,
     detach: bool,
     json: bool,
+    wall_time_ns: Option<u64>,
 ) -> Result<u8> {
-    let spec = load_spec(compose, seed)?;
+    let (spec, metadata) = load_spec(compose, seed)?;
     if spec
         .seed
         .or(spec.configuration.seed)
@@ -136,6 +206,11 @@ pub(super) fn explore(
         return Err(Error::Setup("seed range overflows u64".into()));
     }
     let request = seedbox_api::SeedRangeRequest {
+        options: seedbox_api::ExecutionOptions {
+            start_paused: paused,
+            wall_time_ns,
+        },
+        metadata,
         request_id: Client::request_id().map_err(client_error)?,
         spec,
         count,
@@ -198,13 +273,54 @@ pub(super) fn explore(
 
 pub(super) fn seed_range(id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(None)?;
-    let range = runtime()?
+    let mut range = runtime()?
         .block_on(client.seed_range(id))
         .map_err(client_error)?;
     if json {
         output::json(&range)?;
     } else {
-        output::yaml(&range)?;
+        let completed = range
+            .members
+            .iter()
+            .filter(|member| member.status.phase == Phase::Completed)
+            .count();
+        let state = if range.error.is_some() {
+            "error"
+        } else if range.complete() {
+            "completed"
+        } else if range.stop_requested {
+            "stopping"
+        } else {
+            "running"
+        };
+        output::table(
+            [
+                "SOURCE",
+                "FIRST-SEED",
+                "COUNT",
+                "COMPLETED",
+                "DELETED",
+                "STATE",
+            ],
+            vec![[
+                range.source.to_string(),
+                range.first_seed.to_string(),
+                range.count.to_string(),
+                completed.to_string(),
+                range.deleted_members.to_string(),
+                state.into(),
+            ]],
+        )?;
+        range.members.sort_by_key(|item| {
+            (
+                std::cmp::Reverse(item.metadata.created_at_unix_ms),
+                item.metadata.id.clone(),
+            )
+        });
+        simulation_table(range.members.iter().map(summary_row).collect())?;
+        if let Some(error) = &range.error {
+            eprintln!("seed range {}: {error}", range.source);
+        }
     }
     Ok(0)
 }
@@ -243,30 +359,56 @@ fn report_comparison(comparison: &seedbox_api::SimulationComparison, json: bool)
     })
 }
 
-pub(super) fn replay(id: &SimulationId, json: bool) -> Result<u8> {
+pub(super) fn replay(id: &SimulationId, json: bool, wall_time_ns: Option<u64>) -> Result<u8> {
     let client = daemon::connect(None)?;
     let resource = runtime()?
         .block_on(client.describe(id))
         .map_err(client_error)?;
-    if !matches!(resource.spec.inputs, InputSource::Retained { .. }) {
+    if !matches!(resource.spec.inputs, InputSource::Resolved { .. }) {
         return Err(Error::Setup(format!(
             "simulation {id} has no prepared inputs; run its project again"
         )));
     }
-    submit_with_comparison(resource.spec, false, json, Some(id))
+    let metadata = resource_metadata(&resource);
+    submit_with_comparison(
+        resource.spec,
+        seedbox_api::ExecutionOptions {
+            start_paused: false,
+            wall_time_ns,
+        },
+        metadata,
+        false,
+        json,
+        Some(id),
+    )
 }
 
-pub(super) fn rerun(id: &SimulationId, detach: bool, json: bool) -> Result<u8> {
+pub(super) fn rerun(
+    id: &SimulationId,
+    detach: bool,
+    json: bool,
+    wall_time_ns: Option<u64>,
+) -> Result<u8> {
     let client = daemon::connect(None)?;
     let resource = runtime()?
         .block_on(client.describe(id))
         .map_err(client_error)?;
-    if !matches!(resource.spec.inputs, InputSource::Retained { .. }) {
+    if !matches!(resource.spec.inputs, InputSource::Resolved { .. }) {
         return Err(Error::Setup(format!(
             "simulation {id} has no prepared inputs; run its project again"
         )));
     }
-    submit(resource.spec, detach, json)
+    let metadata = resource_metadata(&resource);
+    submit(
+        resource.spec,
+        seedbox_api::ExecutionOptions {
+            start_paused: false,
+            wall_time_ns,
+        },
+        metadata,
+        detach,
+        json,
+    )
 }
 
 pub(super) fn branch(
@@ -274,29 +416,54 @@ pub(super) fn branch(
     checkpoint: String,
     detach: bool,
     json: bool,
+    wall_time_ns: Option<u64>,
 ) -> Result<u8> {
     let client = daemon::connect(None)?;
-    let mut resource = runtime()?
-        .block_on(client.describe(id))
+    let resource = runtime()?
+        .block_on(client.checkpoint_definition(id, &checkpoint))
         .map_err(client_error)?;
-    resource.spec.inputs = InputSource::Checkpoint {
-        simulation: id.clone(),
-        checkpoint,
-    };
-    submit(resource.spec, detach, json)
+    let metadata = resource_metadata(&resource);
+    submit(
+        resource.spec,
+        seedbox_api::ExecutionOptions {
+            start_paused: false,
+            wall_time_ns,
+        },
+        metadata,
+        detach,
+        json,
+    )
 }
-
-fn submit(spec: SimulationSpec, detach: bool, json: bool) -> Result<u8> {
-    submit_with_comparison(spec, detach, json, None)
+fn resource_metadata(resource: &Simulation) -> seedbox_spec::definition::Metadata {
+    let mut annotations = resource.metadata.annotations.clone();
+    annotations.insert("derived-from".into(), resource.metadata.id.to_string());
+    seedbox_spec::definition::Metadata {
+        name: resource.metadata.name.clone(),
+        labels: resource.metadata.labels.clone(),
+        annotations,
+    }
+}
+fn submit(
+    spec: SimulationSpec,
+    options: seedbox_api::ExecutionOptions,
+    metadata: seedbox_spec::definition::Metadata,
+    detach: bool,
+    json: bool,
+) -> Result<u8> {
+    submit_with_comparison(spec, options, metadata, detach, json, None)
 }
 
 fn submit_with_comparison(
     spec: SimulationSpec,
+    options: seedbox_api::ExecutionOptions,
+    metadata: seedbox_spec::definition::Metadata,
     detach: bool,
     json: bool,
     baseline: Option<&SimulationId>,
 ) -> Result<u8> {
     let request = SubmitRequest {
+        options,
+        metadata,
         request_id: Client::request_id().map_err(client_error)?,
         spec,
     };
@@ -344,11 +511,21 @@ pub(super) fn watch(id: &SimulationId, json: bool) -> Result<u8> {
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
         let mut stream = client.watch(id).await.map_err(client_error)?;
+        let mut table = None;
         loop {
             tokio::select! {
                 next = stream.next() => match next {
                     Some(Ok(resource)) => {
-                        if json { output::json_line(&resource)?; } else { output::yaml_document(&resource)?; }
+                        if json {
+                            output::json_line(&resource)?;
+                        } else {
+                            if table.is_none() {
+                                table = Some(output::Table::new(SIMULATION_HEADERS, [8, 10, 10, 10, resource.spec.configuration.check.service.chars().count().max(24), 10, 8])?);
+                            }
+                            if let Some(table) = &table {
+                                table.row(simulation_row(&resource))?;
+                            }
+                        }
                         if resource.status.phase == Phase::Completed { return Ok(0); }
                     },
                     Some(Err(error)) => return Err(client_error(error)),
@@ -379,7 +556,13 @@ pub(super) fn list(json: bool) -> Result<u8> {
         if json {
             output::json(&items)?;
         } else {
-            output::yaml(&items)?;
+            items.sort_by_key(|item| {
+                (
+                    std::cmp::Reverse(item.metadata.created_at_unix_ms),
+                    item.metadata.id.clone(),
+                )
+            });
+            simulation_table(items.iter().map(summary_row).collect())?;
         }
         Ok(0)
     })
@@ -407,19 +590,132 @@ pub(super) fn checkpoints(id: &SimulationId, name: Option<&str>, json: bool) -> 
     let client = daemon::connect(None)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
-        let value = match name {
-            Some(name) => {
-                serde_json::to_value(client.checkpoint(id, name).await.map_err(client_error)?)?
+        if let Some(name) = name {
+            let receipt = client.checkpoint(id, name).await.map_err(client_error)?;
+            if json {
+                output::json(&receipt)?;
+            } else {
+                output::yaml(&receipt)?;
             }
-            None => serde_json::to_value(client.checkpoints(id).await.map_err(client_error)?)?,
-        };
-        if json {
-            output::json(&value)?;
         } else {
-            output::yaml(&value)?;
+            let mut receipts = client.checkpoints(id).await.map_err(client_error)?;
+            if json {
+                output::json(&receipts)?;
+            } else {
+                receipts.sort_by_key(|receipt| {
+                    let time = match &receipt.state {
+                        seedbox_api::ControlState::Acknowledged {
+                            checkpoint: Some(checkpoint),
+                            ..
+                        } => Some(checkpoint.position.simulated_time_ns),
+                        _ => None,
+                    };
+                    (std::cmp::Reverse(time), receipt.request.request_id.clone())
+                });
+                output::table(
+                    ["NAME", "STATE", "SIM-TIME", "BOUNDARY"],
+                    receipts.iter().map(checkpoint_row).collect(),
+                )?;
+            }
         }
         Ok(0)
     })
+}
+
+pub(super) fn get(id: &SimulationId, json: bool) -> Result<u8> {
+    let client = daemon::connect(None)?;
+    let resource = runtime()?
+        .block_on(client.describe(id))
+        .map_err(client_error)?;
+    if json {
+        output::json(&resource)?;
+    } else {
+        simulation_table(vec![simulation_row(&resource)])?;
+    }
+    Ok(0)
+}
+
+const SIMULATION_HEADERS: [&str; 7] = [
+    "ID", "PHASE", "STAGE", "VERDICT", "ORACLE", "SIM-TIME", "AGE",
+];
+
+fn simulation_table(rows: Vec<[String; 7]>) -> Result<()> {
+    output::table(SIMULATION_HEADERS, rows)
+}
+
+fn simulation_row(resource: &Simulation) -> [String; 7] {
+    resource_row(
+        &resource.metadata,
+        &resource.status,
+        &resource.spec.configuration.check.service,
+    )
+}
+
+fn summary_row(resource: &seedbox_api::SimulationSummary) -> [String; 7] {
+    resource_row(&resource.metadata, &resource.status, &resource.oracle)
+}
+
+fn resource_row(
+    metadata: &seedbox_api::Metadata,
+    status: &seedbox_api::SimulationStatus,
+    oracle: &str,
+) -> [String; 7] {
+    let age_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|now| {
+            now.as_millis()
+                .saturating_sub(u128::from(metadata.created_at_unix_ms))
+        })
+        .unwrap_or(0);
+    [
+        metadata.id.to_string(),
+        output::word(&status.phase),
+        status
+            .stage
+            .as_ref()
+            .map(output::word)
+            .unwrap_or_else(|| "-".into()),
+        output::word(&status.verdict()),
+        oracle.into(),
+        format!("{:.3}s", status.simulated_time_ns as f64 / 1_000_000_000.0),
+        age(age_ms / 1000),
+    ]
+}
+
+fn age(seconds: u128) -> String {
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m", seconds / 60),
+        3600..86400 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86400),
+    }
+}
+
+fn checkpoint_row(receipt: &seedbox_api::ControlReceipt) -> [String; 4] {
+    use seedbox_api::ControlState;
+    let (state, position) = match &receipt.state {
+        ControlState::Accepted => ("accepted".into(), None),
+        ControlState::Acknowledged {
+            error: Some(error), ..
+        } => (format!("error/{error:?}"), None),
+        ControlState::Acknowledged {
+            checkpoint: Some(checkpoint),
+            ..
+        } => (output::word(&checkpoint.state), Some(&checkpoint.position)),
+        ControlState::Acknowledged { .. } => ("acknowledged".into(), None),
+        ControlState::Unsupported => ("unsupported".into(), None),
+        ControlState::Interrupted => ("interrupted".into(), None),
+    };
+    [
+        receipt.request.request_id.clone(),
+        state,
+        position
+            .map(|p| format!("{:.3}s", p.simulated_time_ns as f64 / 1_000_000_000.0))
+            .unwrap_or_else(|| "-".into()),
+        position
+            .map(|p| p.boundary_index.to_string())
+            .unwrap_or_else(|| "-".into()),
+    ]
 }
 
 pub(super) fn describe(id: &SimulationId, json: bool) -> Result<u8> {

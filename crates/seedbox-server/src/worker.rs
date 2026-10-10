@@ -88,6 +88,7 @@ impl Worker {
         }
         let command = match request.command {
             ControlCommand::SetRate { rate } => Command::SetRate { rate },
+            ControlCommand::PauseBeforeNextFault { rate } => Command::PauseBeforeNextFault { rate },
             ControlCommand::Step => Command::Step,
             ControlCommand::Checkpoint => Command::Checkpoint {
                 request_id: request.request_id.clone(),

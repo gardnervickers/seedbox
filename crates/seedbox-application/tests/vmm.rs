@@ -48,7 +48,9 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
     };
     let artifacts = BTreeMap::from([(hash, "/verified/retained-input".into())]);
     let request = ExecutionRequest {
+        program: &[],
         intervention_history: None,
+        start_paused: false,
         resume_checkpoint: None,
         replay_interventions: None,
         observations: None,
@@ -125,7 +127,9 @@ fn initial_arm_launch_uses_numeric_cap_and_network_bound() {
         prepared.profile.semantic_parameters.engine =
             Some(seedbox_application::engine::arm_descriptor());
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -147,7 +151,9 @@ fn initial_arm_launch_uses_numeric_cap_and_network_bound() {
                 launch_max_skew_ns: cap,
             });
             let request = ExecutionRequest {
+                program: &[],
                 intervention_history: None,
+                start_paused: false,
                 resume_checkpoint: None,
                 replay_interventions: None,
                 observations: None,
@@ -178,6 +184,29 @@ fn current_parts_accept_text_events_and_validate_digests() {
                 .to_string()
                 .contains("expected a lowercase SHA-256 digest")
         );
+    });
+}
+
+#[test]
+fn open_ended_world_uses_a_real_scheduler_horizon_on_both_backends() {
+    fixture(|base| {
+        let limits = Limits {
+            simulated_time_ns: u64::MAX,
+            wall_time_ns: base.limits.wall_time_ns,
+        };
+        for backend in [Backend::Kvm, Backend::Hvf] {
+            let mut prepared = base.prepared.clone();
+            prepared.profile.backend = backend;
+            let request = ExecutionRequest {
+                limits: &limits,
+                prepared: &prepared,
+                ..*base
+            };
+            let world = engine_adapter::world(&request).unwrap();
+            assert_eq!(world.duration_ns, u64::MAX - 1);
+            assert_eq!(world.end_on_exit.as_deref(), Some("client-machine"));
+            assert_eq!(request.limits.simulated_time_ns, u64::MAX);
+        }
     });
 }
 
@@ -219,7 +248,9 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
             },
         );
         let world = world_json(&ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -232,7 +263,9 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
             branch_seed: 42,
         });
         let checkpoint_world = world_json(&ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -253,7 +286,9 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         assert_eq!(checkpoint_world["machines"], world["machines"]);
         prepared.images.clear();
         let without_volume = world_json(&ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -331,7 +366,9 @@ fn runtime_requests_resolve_placement_and_reports_validate_rpc_causality() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -386,7 +423,9 @@ fn runtime_report_rejects_impossible_sleep_and_now_metadata() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -425,7 +464,9 @@ fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -483,7 +524,9 @@ fn process_target_exit_after_admission_is_a_recoverable_unavailable_fault() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -601,7 +644,9 @@ fn in_flight_reply_at_world_cutoff_keeps_outcome_even_when_other_clock_is_later(
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -643,7 +688,9 @@ fn transcript_correlates_global_relay_and_connection_local_ids() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -680,7 +727,9 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
             .placement
             .insert("peer".into(), "peer-machine".into());
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -741,7 +790,9 @@ fn baseline_links_resolve_service_names_to_prepared_machines() {
             queue_bound_ns: None,
         });
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -757,7 +808,9 @@ fn baseline_links_resolve_service_names_to_prepared_machines() {
         network.links[0].bandwidth_bps = Some(1_000_000);
         network.links[0].queue_bound_ns = Some(12_000_000);
         let world = world_json(&ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -771,7 +824,9 @@ fn baseline_links_resolve_service_names_to_prepared_machines() {
         assert_eq!(world["network"]["links"][0]["queue_bound_ns"], 12_000_000);
         network.links[0].from = "missing".into();
         assert!(world_json(&ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -802,7 +857,9 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -908,7 +965,9 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1008,7 +1067,9 @@ fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1086,7 +1147,9 @@ fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1165,7 +1228,9 @@ fn machine_lifecycle_transcripts_attribute_services_and_require_admission_effect
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1242,7 +1307,9 @@ fn lifecycle_invalid_state_and_exited_pause_resume_are_recoverable_without_fault
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1304,7 +1371,9 @@ fn unavailable_process_fault_requires_exact_crash_evidence_in_its_window() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1368,7 +1437,9 @@ fn unavailable_at_admission_requires_prior_crash_without_intervening_reboot() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1397,6 +1468,51 @@ fn unavailable_at_admission_requires_prior_crash_without_intervening_reboot() {
             assert_eq!(parsed.reason, StopReason::Completed);
             assert_eq!(parsed.faults.len(), 1);
             assert_eq!(parsed.faults[0].action, "crash");
+            // A program admission is correlated with its actual runtime plan.
+            let mut schedule = vec![seedbox_engine_protocol::input_program::TimedInput {
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                key: "crash".into(),
+                at_ns: crash_at.as_u64().unwrap(),
+                action: seedbox_control::Action::Crash {
+                    machine: "server-machine".into(),
+                },
+            }];
+            let mut scheduled_raw = raw.clone();
+            scheduled_raw["control_history"] = json!([scheduled_raw["control_history"][1].clone()]);
+            scheduled_raw["control_history"][0]["relay_id"] = json!(1);
+            scheduled_raw["control_history"][0]["request"]["id"] = json!(1);
+            scheduled_raw["control_history"][0]["response"]["id"] = json!(1);
+            scheduled_raw["input_admissions"] =
+                json!([{"key":"crash", "plan":scheduled_raw["faults"][0]["request"].clone()}]);
+            let scheduled_request = ExecutionRequest {
+                program: &schedule,
+                ..request
+            };
+            assert!(engine_adapter::report(
+                &serde_json::to_vec(&scheduled_raw).unwrap(),
+                &scheduled_request
+            )
+            .is_ok());
+            schedule[0].at_ns = 80_000_000;
+            let future_request = ExecutionRequest {
+                program: &schedule,
+                ..request
+            };
+            let mut future_plan: seedbox_control::Plan =
+                serde_json::from_value(scheduled_raw["faults"][0]["request"].clone()).unwrap();
+            future_plan.at_ns = 80_000_000;
+            future_plan.deadline_ns = 80_000_000 + seedbox_control::PROCESS_EFFECT_TIMEOUT_NS;
+            scheduled_raw["input_admissions"] = json!([{"key":"crash", "plan":future_plan}]);
+            scheduled_raw["faults"][0]["request"] = serde_json::to_value(future_plan).unwrap();
+            scheduled_raw["faults"][0]["requested_at_ns"] = json!(80_000_000);
+            scheduled_raw["faults"][0]["applied_at_ns"] = json!(80_000_000);
+            scheduled_raw["machines"][1]["crashed_incarnations"] =
+                json!([{"crashed_at_ns":80_000_000}]);
+            assert!(engine_adapter::report(
+                &serde_json::to_vec(&scheduled_raw).unwrap(),
+                &future_request
+            )
+            .is_err());
             let mut late = raw.clone();
             let mut row = late["control_history"][1].take();
             let mut fault = late["faults"][1].take();
@@ -1425,7 +1541,9 @@ fn committed_trigger_reports_correlate_arms_effects_cancellation_and_cutoff() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1622,7 +1740,9 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
         let mut prepared = base.prepared.clone();
         prepared.profile.semantic_parameters.torn_writes = true;
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1655,7 +1775,9 @@ fn deferred_tx_report_must_match_semantic_parameter() {
             let mut prepared = base.prepared.clone();
             prepared.profile.semantic_parameters.deferred_tx = enabled;
             let request = ExecutionRequest {
+                program: &[],
                 intervention_history: None,
+                start_paused: false,
                 resume_checkpoint: None,
                 replay_interventions: None,
                 observations: None,
@@ -1688,7 +1810,9 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
             branch_seed: 42,
         });
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1735,7 +1859,9 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
             parameters.page_timer = page_timer;
             parameters.deferred_tx = deferred_tx;
             let world = world_json(&ExecutionRequest {
+                program: &[],
                 intervention_history: None,
+                start_paused: false,
                 resume_checkpoint: None,
                 replay_interventions: None,
                 observations: None,
@@ -1765,7 +1891,9 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
         }
         for (i, prepared) in inputs.iter().enumerate() {
             let request = ExecutionRequest {
+                program: &[],
                 intervention_history: None,
+                start_paused: false,
                 resume_checkpoint: None,
                 replay_interventions: None,
                 observations: None,
@@ -1792,7 +1920,9 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
         restored_off.profile.semantic_parameters.deferred_tx = false;
         assert_eq!(
             world_json(&ExecutionRequest {
+                program: &[],
                 intervention_history: None,
+                start_paused: false,
                 resume_checkpoint: None,
                 replay_interventions: None,
                 observations: None,
@@ -1818,7 +1948,9 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             branch_seed: 42,
         });
         let ordinary = world_json(&ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1829,7 +1961,9 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         .unwrap();
         inputs.profile.semantic_parameters.torn_writes = true;
         let cfg = world_json(&ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1861,7 +1995,9 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             let mut deferred_inputs = inputs.clone();
             deferred_inputs.profile.semantic_parameters.deferred_tx = true;
             let deferred_world = world_json(&ExecutionRequest {
+                program: &[],
                 intervention_history: None,
+                start_paused: false,
                 resume_checkpoint: None,
                 replay_interventions: None,
                 observations: None,
@@ -1902,7 +2038,9 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         *artifacts.values_mut().next().unwrap() = relocated;
         for (deferred_inputs, original) in deferred_worlds {
             let moved = world_json(&ExecutionRequest {
+                program: &[],
                 intervention_history: None,
+                start_paused: false,
                 resume_checkpoint: None,
                 replay_interventions: None,
                 observations: None,
@@ -1918,7 +2056,9 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             branch_seed: 43,
         });
         let moved = world_json(&ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1934,7 +2074,9 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         );
         inputs.profile.engine = ContentDigest::of(b"another engine");
         let changed = world_json(&ExecutionRequest {
+            program: &[],
             intervention_history: None,
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             observations: None,
@@ -1960,7 +2102,9 @@ fn reports_correlate_retained_interventions_with_guest_faults_and_oracle_exit() 
             service: "client".into(),
         };
         let request = ExecutionRequest {
+            program: &[],
             intervention_history: Some(&path),
+            start_paused: false,
             resume_checkpoint: None,
             replay_interventions: None,
             control: Some(&control),
@@ -1992,6 +2136,9 @@ fn reports_correlate_retained_interventions_with_guest_faults_and_oracle_exit() 
         };
         std::fs::write(&path, history.encode().unwrap()).unwrap();
         let mut raw = report();
+        raw["input_admissions"] = json!([
+            {"key":"fault-0", "plan":plans[0]}, {"key":"fault-2", "plan":plans[2]}
+        ]);
         raw["machines"][0]["guest_exit_code"] = json!(7);
         raw["machines"][0]["time_ns"] = json!(100_000_000);
         raw["machines"][1]["state"] = json!("Exited(0)");
@@ -2011,6 +2158,55 @@ fn reports_correlate_retained_interventions_with_guest_faults_and_oracle_exit() 
         assert_eq!(result.reason, StopReason::Completed);
         assert_eq!(result.workload_exit.unwrap().code, 7);
         assert_eq!(result.faults.len(), 2);
+        // Program admissions interleave with guest and interactive controls.
+        let schedule = [seedbox_engine_protocol::input_program::TimedInput {
+                    timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            key: "cut".into(),
+            at_ns: plans[0]["at_ns"].as_u64().unwrap(),
+            action: serde_json::from_value(json!({"action":"partition","handle":"cut","left":["client-machine"],"right":["server-machine"]})).unwrap(),
+        }];
+        let scheduled_request = ExecutionRequest {
+            program: &schedule,
+            ..request
+        };
+        let mut scheduled_plan: seedbox_control::Plan =
+            serde_json::from_value(plans[0].clone()).unwrap();
+        scheduled_plan.deadline_ns =
+            scheduled_plan.at_ns + seedbox_control::PROCESS_EFFECT_TIMEOUT_NS;
+        assert_eq!(scheduled_plan.id, 1);
+        let mut scheduled_raw = raw.clone();
+        scheduled_raw["input_admissions"] =
+            json!([{"key":"cut", "plan":scheduled_plan}, {"key":"fault-2", "plan":plans[2]}]);
+        scheduled_raw["faults"][0]["request"] = serde_json::to_value(&scheduled_plan).unwrap();
+        let scheduled_history = History {
+            entries: vec![entry(2)],
+            ..History::default()
+        };
+        std::fs::write(&path, scheduled_history.encode().unwrap()).unwrap();
+        let scheduled_result = parse(&scheduled_raw, &scheduled_request).unwrap();
+        assert_eq!(scheduled_result.faults.len(), 2);
+        assert_eq!(scheduled_result.workload_exit.unwrap().code, 7);
+        let mut remaining = schedule.to_vec();
+        remaining.push(seedbox_engine_protocol::input_program::TimedInput {
+            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            key: "after-oracle".into(),
+            at_ns: 60_000_000,
+            action: seedbox_control::Action::Stop {
+                machine: "server-machine".into(),
+            },
+        });
+        let remaining_request = ExecutionRequest {
+            program: &remaining,
+            ..scheduled_request
+        };
+        scheduled_raw["scheduler"]["committed_ns"] = json!(60_000_000);
+        assert!(parse(&scheduled_raw, &remaining_request).is_ok());
+        scheduled_raw["scheduler"]["committed_ns"] = json!(60_000_001);
+        assert!(parse(&scheduled_raw, &remaining_request).is_err());
+        let mut omitted = scheduled_raw.clone();
+        omitted["input_admissions"] = json!([]);
+        assert!(parse(&omitted, &scheduled_request).is_err());
+        std::fs::write(&path, history.encode().unwrap()).unwrap();
         let mut false_exit = raw.clone();
         false_exit["machines"][1]["state"] = json!("Running");
         assert!(parse(&false_exit, &request).is_err());
@@ -2022,10 +2218,14 @@ fn reports_correlate_retained_interventions_with_guest_faults_and_oracle_exit() 
         // The same fault evidence can be entirely host-originated. No guest
         // control transcript or fabricated RPC response is required.
         history.entries.insert(1, entry(1));
+        raw["input_admissions"] = json!([
+            {"key":"fault-0", "plan":plans[0]}, {"key":"fault-1", "plan":plans[1]}, {"key":"fault-2", "plan":plans[2]}
+        ]);
         std::fs::write(&path, history.encode().unwrap()).unwrap();
         raw["control_history"] = json!([]);
         raw["control_latency_ns"] = json!(0);
         let request = ExecutionRequest {
+            program: &[],
             control: None,
             ..request
         };

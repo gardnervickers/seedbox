@@ -64,7 +64,7 @@ async fn set_rate(client: &Client, id: &SimulationId, rate: PlaybackRate) -> Pla
 }
 
 #[test]
-fn paused_and_resumed_rerun_has_identical_witness_and_full_state() {
+fn paused_start_and_resume_has_identical_witness_and_full_state() {
     let binary = std::env::var_os("SEEDBOX_TEST_CLI")
         .expect("harness/check.sh supplies the current release CLI");
     let reports =
@@ -85,9 +85,9 @@ fn paused_and_resumed_rerun_has_identical_witness_and_full_state() {
     assert_eq!(source.status.verdict(), TestVerdict::Passed);
     let rerun = simulation(
         cli(binary, &state)
-            .arg("rerun")
-            .arg(source.metadata.id.as_str())
-            .args(["--detach", "--json"])
+            .arg("run")
+            .arg(&workload)
+            .args(["--seed", "1009", "--paused", "--detach", "--json"])
             .output()
             .unwrap(),
     );
@@ -102,7 +102,10 @@ fn paused_and_resumed_rerun_has_identical_witness_and_full_state() {
         loop {
             match client.playback(id).await {
                 Ok(observation) => {
-                    assert!(!observation.state.terminal, "rerun ended before pause");
+                    assert!(!observation.state.terminal, "run ended before resume");
+                    assert_eq!(observation.state.rate, PlaybackRate::Paused);
+                    assert_eq!(observation.state.position.completed_rounds, 0);
+                    assert_eq!(observation.state.position.simulated_time_ns, 0);
                     break;
                 }
                 Err(seedbox_client::Error::Rejected {

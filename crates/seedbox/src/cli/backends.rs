@@ -145,20 +145,55 @@ pub fn guest_assets(
     }
     let path = explicit.unwrap_or_else(|| asset_directory().join("runtime.tar.gz"));
     let path = local_asset("--runtime-assets", path)?;
-    seedbox_application::guest_assets::Runtime::from_archive(&path).map_err(|error| seedbox_application::Error::Setup(format!("runtime assets {}: {error}; rebuild with `python3 tools/build.py` or select a valid --runtime-assets archive", path.display())))
+    seedbox_application::guest_assets::Runtime::from_archive(&path).map_err(|error| seedbox_application::Error::Setup(format!("runtime assets {}: {error}; rebuild with `cargo xtask build-assets` or select a valid --runtime-assets archive", path.display())))
 }
 fn local_asset(flag: &str, path: std::path::PathBuf) -> Result<std::path::PathBuf> {
     if path.is_file() {
         Ok(path)
     } else {
-        Err(seedbox_application::Error::Setup(format!("{flag} {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass {flag} PATH", path.display())))
+        Err(seedbox_application::Error::Setup(format!("{flag} {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass {flag} PATH", path.display())))
     }
 }
 pub fn guest_kernel(explicit: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
     if let Some(path) = explicit {
         return super::defaults::existing("--kernel", path);
     }
+    if std::env::var_os("SEEDBOX_ASSET_DIR").is_none() {
+        if let Some(bytes) = seedbox_application::guest_assets::EMBEDDED_KERNEL {
+            let cache = std::env::var_os("XDG_CACHE_HOME")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|home| std::path::PathBuf::from(home).join(".cache"))
+                })
+                .ok_or_else(|| {
+                    seedbox_application::Error::Setup(
+                        "kernel cache unavailable; set XDG_CACHE_HOME or HOME".into(),
+                    )
+                })?;
+            return cached_kernel(bytes, &cache.join("seedbox/kernels"));
+        }
+    }
     local_asset("--kernel", asset_directory().join("kernel"))
+}
+
+fn cached_kernel(bytes: &[u8], root: &Path) -> Result<std::path::PathBuf> {
+    use std::io::Write;
+    let path = root.join(seedbox_application::store::ContentDigest::of(bytes).hex());
+    let extract = || -> std::io::Result<()> {
+        if std::fs::read(&path).is_ok_and(|cached| cached == bytes) {
+            return Ok(());
+        }
+        std::fs::create_dir_all(root)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(root)?;
+        temporary.write_all(bytes)?;
+        temporary.persist(&path).map_err(|error| error.error)?;
+        Ok(())
+    };
+    extract().map_err(|error| {
+        seedbox_application::Error::Setup(format!("kernel cache {}: {error}", root.display()))
+    })?;
+    Ok(path)
 }
 
 pub fn preparation_progress(message: &str) {
@@ -231,7 +266,22 @@ pub fn container_engine() -> Result<bollard::Docker> {
 
 #[cfg(test)]
 mod tests {
-    use super::assets_beside;
+    use super::{assets_beside, cached_kernel};
+
+    #[test]
+    fn embedded_kernel_cache_reuses_bytes_and_separates_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = cached_kernel(b"kernel one", directory.path()).unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"kernel one");
+        assert_eq!(
+            cached_kernel(b"kernel one", directory.path()).unwrap(),
+            first
+        );
+        let second = cached_kernel(b"kernel two", directory.path()).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(second).unwrap(), b"kernel two");
+    }
+
     use std::path::Path;
 
     #[test]

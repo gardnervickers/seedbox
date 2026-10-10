@@ -11,6 +11,7 @@ mod build_context;
 pub use seedbox_artifacts::bundle;
 pub mod config;
 pub mod container_images;
+pub mod definition;
 pub use seedbox_artifacts::diff;
 pub use seedbox_artifacts::engine;
 pub mod engine_adapter;

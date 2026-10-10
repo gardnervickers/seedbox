@@ -1,6 +1,7 @@
 //! The `seedbox` command line. Style rules for changes: `AGENTS.md`, "CLI".
 
 mod backends;
+mod completions;
 mod daemon;
 mod defaults;
 mod diagnostics;
@@ -51,7 +52,7 @@ const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty li
 #[command(
     version = seedbox_application::engine::SIMULATOR_VERSION,
     override_usage = "seedbox [RUN OPTIONS] [COMPOSE]\n       seedbox <COMMAND>",
-    after_help = "Run is the default: seedbox compose.yaml. See `seedbox help run` for run options.",
+    after_help = "Run is the default: seedbox seedbox.yaml. See `seedbox help run` for run options.",
     about = "Deterministic simulation of Compose applications on real Linux machines",
     long_about = "Deterministic simulation of Compose applications on real Linux machines.\n\n\
                   A seed plus the retained inputs regenerate the same execution. \
@@ -65,6 +66,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Generate shell integration with live simulation and machine completion.
+    Completions {
+        /// Shell to generate integration for.
+        #[arg(value_enum)]
+        shell: completions::Shell,
+    },
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
+    /// Gracefully stop the local simulation server and its active work.
+    Shutdown {
+        /// Server state directory [default: user state directory].
+        #[arg(long, env = "SEEDBOX_STATE")]
+        state: Option<PathBuf>,
+    },
     /// Serve the local simulation API in the foreground.
     Serve {
         /// Report startup to the launching client.
@@ -94,7 +112,7 @@ enum Command {
     },
     /// Check execution-profile compatibility without images or guests (Linux KVM host; or Apple Silicon Mac).
     #[command(
-        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run `python3 tools/build.py` or pass --kernel."
+        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run `cargo xtask build-assets` or pass --kernel."
     )]
     Doctor {
         /// Print the admitted observations as JSON.
@@ -123,12 +141,17 @@ enum Command {
         /// Simulation seed [default: project seed, otherwise allocated once by the server].
         #[arg(long)]
         seed: Option<u64>,
+        /// Pause before guest execution; use --detach to return immediately.
+        #[arg(long)]
+        paused: bool,
         /// Return after submission while the simulation continues on the server.
         #[arg(long)]
         detach: bool,
         /// Print exactly one simulation resource as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        execution: ExecutionArgs,
     },
     /// Compare deterministic results of two completed simulations.
     Compare {
@@ -150,6 +173,8 @@ enum Command {
         /// Print exactly one simulation resource as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        execution: ExecutionArgs,
     },
     /// Start a new simulation from a captured checkpoint.
     Branch {
@@ -163,6 +188,8 @@ enum Command {
         /// Print exactly one simulation resource as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        execution: ExecutionArgs,
     },
     /// List resources known to the server.
     Get {
@@ -187,6 +214,11 @@ enum Command {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
     },
+    /// Open the interactive simulation console.
+    Tui {
+        /// Short simulation ID to open first [default: the simulation list].
+        id: Option<seedbox_api::SimulationId>,
+    },
     /// Inspect playback state or a retained control receipt.
     Playback {
         /// Short simulation ID.
@@ -209,12 +241,17 @@ enum Command {
         /// Number of consecutive seeds to execute.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=4096))]
         count: u32,
+        /// Pause before guest execution; use --detach to return immediately.
+        #[arg(long)]
+        paused: bool,
         /// Return after the server accepts the seed range.
         #[arg(long)]
         detach: bool,
         /// Print one seed-range status document as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        execution: ExecutionArgs,
     },
     /// Rerun a simulation through the server and compare its retained results.
     #[command(after_help = EXIT_CODES)]
@@ -224,6 +261,8 @@ enum Command {
         /// Print the comparison as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        execution: ExecutionArgs,
     },
     /// Delete a retained resource.
     Delete {
@@ -402,8 +441,8 @@ const VMM_REQUIRES_KVM: &str = "--vmm requires Linux KVM; use the built-in Mac e
 
 #[derive(Args)]
 struct ComposeArg {
-    /// Compose file, or a directory containing compose.yaml.
-    #[arg(default_value = ".")]
+    /// Seedbox project file, or a directory containing seedbox.yaml.
+    #[arg(default_value = ".", value_name = "PROJECT")]
     compose: PathBuf,
 }
 
@@ -417,6 +456,17 @@ impl ComposeArg {
         };
         config::load_for_architecture(&path, &std::env::vars().collect(), architecture)
     }
+}
+
+#[derive(Args)]
+struct ExecutionArgs {
+    /// Stop after this much active host time, excluding explicit pauses [default: unlimited].
+    #[arg(long, value_parser = wall_time)]
+    wall_time: Option<u64>,
+}
+
+fn wall_time(value: &str) -> std::result::Result<u64, String> {
+    config::duration_ns(value).map_err(|error| error.to_string())
 }
 
 #[derive(Args)]
@@ -455,7 +505,7 @@ impl StateArg {
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
 struct KvmInputs {
-    /// Guest kernel Image on Mac, or bzImage on Linux [default: kernel beside the executable].
+    /// Guest kernel Image on Mac, or bzImage on Linux [default: embedded kernel, otherwise beside the executable].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
     /// Override with a legacy standalone VMM [default: the engine built into seedbox].
@@ -525,7 +575,7 @@ impl RuntimeInputs {
                 .map(|assets| assets.input(name))
                 .ok_or_else(|| {
                     Error::Setup(format!(
-                        "{flag}: missing guest helper; run `python3 tools/build.py`"
+                        "{flag}: missing guest helper; run `cargo xtask build-assets`"
                     ))
                 }),
         };
@@ -609,6 +659,9 @@ pub fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
+        Command::Completions { shell } => completions::script(shell),
+        Command::Complete { words } => completions::complete(&words),
+        Command::Shutdown { state } => daemon::shutdown(state),
         Command::Serve {
             state,
             inputs,
@@ -660,16 +713,24 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Run {
             compose,
             seed,
+            paused,
             detach,
             json,
-        } => simulations::run(&compose, seed, detach, json),
+            execution,
+        } => simulations::run(&compose, seed, paused, detach, json, execution.wall_time),
         Command::Branch {
             id,
             checkpoint,
             detach,
             json,
-        } => simulations::branch(&id, checkpoint, detach, json),
-        Command::Rerun { id, detach, json } => simulations::rerun(&id, detach, json),
+            execution,
+        } => simulations::branch(&id, checkpoint, detach, json, execution.wall_time),
+        Command::Rerun {
+            id,
+            detach,
+            json,
+            execution,
+        } => simulations::rerun(&id, detach, json, execution.wall_time),
         Command::Compare {
             baseline,
             simulation,
@@ -680,7 +741,7 @@ fn run(cli: Cli) -> Result<u8> {
                 if watch {
                     simulations::watch(&id, json)
                 } else {
-                    simulations::describe(&id, json)
+                    simulations::get(&id, json)
                 }
             }
             CollectionArg::Simulations { source, json } => match source {
@@ -703,6 +764,7 @@ fn run(cli: Cli) -> Result<u8> {
             }
         }
         Command::Events { id } => simulations::events(&id),
+        Command::Tui { id } => simulations::tui(id),
         Command::Playback {
             id,
             request_id,
@@ -712,16 +774,30 @@ fn run(cli: Cli) -> Result<u8> {
             compose,
             seed,
             count,
+            paused,
             detach,
             json,
-        } => simulations::explore(&compose, seed, count, detach, json),
+            execution,
+        } => simulations::explore(
+            &compose,
+            seed,
+            count,
+            paused,
+            detach,
+            json,
+            execution.wall_time,
+        ),
         Command::Delete {
             resource: DeleteArg::Simulation { id },
         } => simulations::delete(&id),
         Command::Delete {
             resource: DeleteArg::Checkpoint { id, name },
         } => simulations::delete_checkpoint(&id, &name),
-        Command::Replay { id, json } => simulations::replay(&id, json),
+        Command::Replay {
+            id,
+            json,
+            execution,
+        } => simulations::replay(&id, json, execution.wall_time),
         Command::Export {
             run,
             output,
@@ -1073,7 +1149,7 @@ enum CollectionArg {
     Simulations {
         /// Source simulation ID to restrict the result to its seed range.
         source: Option<seedbox_api::SimulationId>,
-        /// Print JSON instead of YAML.
+        /// Print JSON instead of a table.
         #[arg(long)]
         json: bool,
     },
@@ -1081,7 +1157,7 @@ enum CollectionArg {
     Checkpoints {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
-        /// Print JSON instead of YAML.
+        /// Print JSON instead of a table.
         #[arg(long)]
         json: bool,
     },

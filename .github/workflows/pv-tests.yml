@@ -50,7 +50,7 @@ jobs:
       - uses: nix-community/cache-nix-action/restore@v7
         id: nix-cache
         with:
-          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**', 'kernel/**', 'kernel-arm64/**', 'guest/**', 'tools/runtime/**', 'tools/build.py') }}
+          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**', 'kernel/**', 'kernel-arm64/**', 'guest/**', 'tools/runtime/**', 'crates/xtask/**') }}
           restore-prefixes-first-match: |
             pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-${{ runner.os }}-${{ runner.arch }}-

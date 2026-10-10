@@ -1542,10 +1542,18 @@ fn fault_events_distinguish_acknowledgement_timeout_and_target_loss() {
                             machine,
                             status,
                             applied_time_ns,
+                            plan,
+                            ..
                         } = observation.kind
                         {
                             if id == 1 {
                                 assert_eq!(action, "stop");
+                                assert_eq!(
+                                    plan,
+                                    Some(Box::new(Action::Stop {
+                                        machine: "a".into()
+                                    }))
+                                );
                                 assert_eq!(machine.as_deref(), Some("a"));
                                 delivered.push((id, status, applied_time_ns));
                             }
@@ -1744,5 +1752,795 @@ fn rejected_interactive_state_does_not_terminate_the_world_or_add_fault_history(
         assert_eq!(outcome, RunOutcome::Duration);
         assert!(w.faults.error.is_none());
         assert_eq!(w.faults.log.len(), usize::from(paused));
+    }
+}
+
+#[test]
+fn routed_frames_reach_observers_without_changing_the_world() {
+    use seedbox_engine_protocol::observation::{
+        Frame, FrameFate, Kind, Observation, MAX_DATAGRAM_BYTES,
+    };
+    let build = |observe: Option<&std::path::Path>| {
+        let mut w = world(&["a", "b"]).with_observations(
+            observe.map(|path| crate::observation::Publisher::connect(path).unwrap()),
+        );
+        plan(
+            &mut w,
+            10,
+            Action::Partition {
+                handle: "p".into(),
+                left: vec!["a".into()],
+                right: vec!["b".into()],
+            },
+        );
+        for at in [5, 20] {
+            let mut step = Step::new(at, Stop::Control);
+            step.frames = vec![vec![255; 14]];
+            w.machines[0].steps.push_back(step);
+        }
+        w
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("observer");
+    let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    let mut observed = build(Some(&path));
+    let mut plain = build(None);
+    assert_eq!(run(&mut observed, 60, None).unwrap(), "duration");
+    assert_eq!(run(&mut plain, 60, None).unwrap(), "duration");
+    assert_eq!(trace(&observed), trace(&plain));
+    assert_eq!(
+        serde_json::to_value(observed.network_snapshot()).unwrap(),
+        serde_json::to_value(plain.network_snapshot()).unwrap()
+    );
+    let mut frames = Vec::new();
+    let mut bytes = [0; MAX_DATAGRAM_BYTES];
+    while let Ok(count) = receiver.recv(&mut bytes) {
+        let observation: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+        if let Kind::Frames { frames: batch } = observation.kind {
+            frames.extend(batch);
+        }
+    }
+    let delivered = frames
+        .iter()
+        .find(|frame| frame.fate == FrameFate::Scheduled)
+        .expect("a scheduled frame");
+    assert_eq!((delivered.from.as_str(), delivered.to.as_str()), ("a", "b"));
+    assert_eq!(delivered.sent_ns, 5);
+    assert!(delivered.due_ns.is_some_and(|due| due > 5));
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.fate == FrameFate::PartitionDropped)
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![Frame {
+            from: "a".into(),
+            to: "b".into(),
+            sent_ns: 20,
+            due_ns: None,
+            bytes: 14,
+            fate: FrameFate::PartitionDropped,
+        }]
+    );
+}
+
+#[test]
+fn restored_fault_observations_seed_application_order_without_changing_history() {
+    use seedbox_engine_protocol::observation::{Kind, Observation, MAX_DATAGRAM_BYTES};
+    let mut w = world(&["a", "b"]);
+    // IDs need not describe application order.
+    plan(
+        &mut w,
+        8,
+        Action::Heal {
+            handle: "old".into(),
+        },
+    );
+    plan(&mut w, 3, partition("old"));
+    plan(&mut w, 4, partition("active"));
+    assert_eq!(
+        segment(&mut w, 30, None, None, Some(10), true).unwrap(),
+        "checkpoint"
+    );
+    let history = serde_json::to_value(&w.faults.log).unwrap();
+    let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    saved.restore_checkpoint(&mut w).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("observer");
+    let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    w = w.with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
+    assert_eq!(
+        segment(&mut w, 30, None, None, Some(11), true).unwrap(),
+        "checkpoint"
+    );
+    assert_eq!(serde_json::to_value(&w.faults.log).unwrap(), history);
+    assert!(w.faults.blocked(0, 1));
+    let mut ids = Vec::new();
+    let mut bytes = [0; MAX_DATAGRAM_BYTES];
+    while let Ok(count) = receiver.recv(&mut bytes) {
+        let observation: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+        if let Kind::FaultChanged {
+            id, status, plan, ..
+        } = observation.kind
+        {
+            assert_eq!(status, RowStatus::Applied);
+            assert!(plan.is_some());
+            ids.push(id);
+        }
+    }
+    assert_eq!(ids, vec![2, 3, 1]);
+}
+
+#[test]
+fn pre_fault_hook_precedes_effect_and_preserves_admission_positions() {
+    #[derive(Default)]
+    struct Hooks {
+        positions: Vec<Boundary>,
+        before: Vec<Boundary>,
+        stop: bool,
+    }
+    impl BoundaryCallbacks for Hooks {
+        fn boundary(
+            &mut self,
+            boundary: Boundary,
+            _: &mut crate::intervention::Admission<'_>,
+        ) -> Result<(), String> {
+            self.positions.push(boundary);
+            Ok(())
+        }
+        fn before_fault(&mut self, boundary: Boundary) -> Result<(), String> {
+            self.before.push(boundary);
+            if self.stop {
+                Err("held before fault".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let build = || {
+        let mut w = world(&["a", "b"]);
+        plan(&mut w, 10, partition("next"));
+        w
+    };
+    let run = Run {
+        duration: 30,
+        end_on: None,
+        fork: None,
+        checkpoint: None,
+        require_barrier: false,
+    };
+    let mut stopped = build();
+    let mut stop_hooks = Hooks {
+        stop: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        simulate_with_callbacks(&mut stopped, &run, Duration::ZERO, &mut stop_hooks).unwrap_err(),
+        "held before fault"
+    );
+    assert_eq!(stop_hooks.before.len(), 1);
+    assert_eq!(stopped.faults.log[0].status, RowStatus::Unrequested);
+    assert!(!stopped.faults.blocked(0, 1));
+    let mut observed = build();
+    let mut hooks = Hooks::default();
+    simulate_with_callbacks(&mut observed, &run, Duration::ZERO, &mut hooks).unwrap();
+    let mut plain = build();
+    let mut positions = Vec::new();
+    simulate(
+        &mut plain,
+        &run,
+        Duration::ZERO,
+        &mut |boundary, _: &mut crate::intervention::Admission<'_>| {
+            positions.push(boundary);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(hooks.positions, positions);
+    assert_eq!(trace(&observed), trace(&plain));
+    assert_eq!(
+        serde_json::to_value(&observed.faults.log).unwrap(),
+        serde_json::to_value(&plain.faults.log).unwrap()
+    );
+    assert_eq!(hooks.before.len(), 1);
+    assert!(hooks.positions.contains(&hooks.before[0]));
+}
+
+#[test]
+fn input_program_ids_follow_actual_admission_across_live_inputs_and_worker_counts() {
+    use crate::input_program::TimedInput;
+    let mut reference = None;
+    for workers in [0, 2, 4] {
+        let mut w = world(&["a", "b"]);
+        w.early = 0;
+        w.machines[1].steps.push_back(Step::new(5, Stop::Control));
+        w.arm_input_program(
+            vec![
+                TimedInput {
+                    timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                    key: "early".into(),
+                    at_ns: 2,
+                    action: partition("early"),
+                },
+                TimedInput {
+                    timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                    key: "late".into(),
+                    at_ns: 20,
+                    action: partition("late"),
+                },
+            ],
+            30,
+            0,
+        )
+        .unwrap();
+        assert!(w.faults.log.is_empty());
+        let run = Run {
+            duration: 30,
+            end_on: None,
+            fork: None,
+            checkpoint: None,
+            require_barrier: false,
+        };
+        let mut live = None;
+        let mut boundary =
+            |position: Boundary, admission: &mut crate::intervention::Admission<'_>| {
+                if live.is_none()
+                    && position.position.simulated_time_ns >= 5
+                    && position.position.simulated_time_ns < 20
+                    && !position.terminal
+                {
+                    let at = admission.earliest_effect_ns();
+                    let proposal = admission.propose(
+                        "live".into(),
+                        Plan {
+                            id: 0,
+                            at_ns: at,
+                            deadline_ns: at + 100,
+                            action: partition("live"),
+                        },
+                    )?;
+                    assert_eq!(proposal.plan.id, 2);
+                    admission.commit(&proposal)?;
+                    live = Some(proposal);
+                }
+                Ok(())
+            };
+        if workers == 0 {
+            simulate(&mut w, &run, Duration::ZERO, &mut boundary).unwrap();
+        } else {
+            simulate_parallel(
+                &mut w,
+                &run,
+                Workers {
+                    count: workers,
+                    skew: Duration::ZERO,
+                },
+                |_| Ok(MockClock::default()),
+                &mut boundary,
+            )
+            .unwrap();
+        }
+        assert!(live.is_some());
+        assert_eq!(
+            w.input_admissions()
+                .iter()
+                .map(|a| (a.key.as_str(), a.plan.id))
+                .collect::<Vec<_>>(),
+            [("early", 1), ("live", 2), ("late", 3)]
+        );
+        assert_eq!(w.faults.log.len(), 3);
+        let evidence = (w.faults.log.clone(), w.input_admissions().to_vec());
+        if let Some(expected) = &reference {
+            assert_eq!(&evidence, expected);
+        } else {
+            reference = Some(evidence);
+        }
+    }
+}
+
+#[test]
+fn input_program_equal_time_order_follows_guest_then_trigger_and_drains_dependencies() {
+    use crate::input_program::TimedInput;
+    let mut w = world(&["a", "b", "c"]);
+    w.early = 0;
+    configure_control(&mut w);
+    w.control
+        .triggers
+        .arm("a".into(), b"X".to_vec(), 0, 200, partition("trigger"))
+        .unwrap();
+    w.control.triggers.committed("a", 0, b'X', 50, 0).unwrap();
+    let request = json!({"version":1,"id":1,"op":"partition","left":[{"machine":"b"}],"right":[{"machine":"c"}]});
+    w.control
+        .request(0, 0, format!("SBX_RPC1 1 1 {request}").as_bytes(), 0)
+        .unwrap();
+    w.arm_input_program(
+        vec![
+            TimedInput {
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                key: "cut".into(),
+                at_ns: 50,
+                action: partition("program"),
+            },
+            TimedInput {
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                key: "heal".into(),
+                at_ns: 50,
+                action: Action::Heal {
+                    handle: "program".into(),
+                },
+            },
+        ],
+        120,
+        0,
+    )
+    .unwrap();
+    assert_eq!(run(&mut w, 120, None).unwrap(), "duration");
+    assert_eq!(w.control.log[0]["fault_id"], 1);
+    assert_eq!(w.control.triggers.records[0].fault_id, Some(2));
+    assert_eq!(
+        w.input_admissions()
+            .iter()
+            .map(|a| a.plan.id)
+            .collect::<Vec<_>>(),
+        [3, 4]
+    );
+    assert!(w.faults.log.iter().all(|row| row.applied_at_ns == Some(50)));
+    assert!(!w.faults.active_handles().contains(&"program".to_string()));
+}
+
+#[test]
+fn input_program_checkpoint_restores_consumed_prefix_and_pending_suffix_once() {
+    use crate::input_program::TimedInput;
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(
+        vec![
+            TimedInput {
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                key: "cut".into(),
+                at_ns: 10,
+                action: partition("program"),
+            },
+            TimedInput {
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                key: "heal".into(),
+                at_ns: 20,
+                action: Action::Heal {
+                    handle: "program".into(),
+                },
+            },
+        ],
+        30,
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        segment(&mut w, 30, None, None, Some(15), true).unwrap(),
+        "checkpoint"
+    );
+    assert_eq!(w.input_admissions().len(), 1);
+    assert_eq!(w.faults.log.len(), 1);
+    let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    let mut reference = None;
+    for _ in 0..2 {
+        saved.restore_checkpoint(&mut w).unwrap();
+        assert_eq!(w.input_admissions().len(), 1);
+        assert_eq!(run(&mut w, 30, None).unwrap(), "duration");
+        assert_eq!(w.input_admissions().len(), 2);
+        assert_eq!(w.faults.log.len(), 2);
+        assert!(w.faults.active_handles().is_empty());
+        let evidence = (w.faults.log.clone(), w.input_admissions().to_vec());
+        if let Some(expected) = &reference {
+            assert_eq!(&evidence, expected);
+        } else {
+            reference = Some(evidence);
+        }
+    }
+}
+
+#[test]
+fn input_program_state_rejection_is_evidence_and_does_not_poison_edited_suffix() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("observations");
+    let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    let mut w = world(&["a", "b"])
+        .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
+    w.arm_input_program(
+        vec![
+            crate::input_program::TimedInput {
+                key: "orphan".into(),
+                at_ns: 10,
+                action: Action::Heal {
+                    handle: "missing".into(),
+                },
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            },
+            crate::input_program::TimedInput {
+                key: "valid".into(),
+                at_ns: 10,
+                action: partition("valid"),
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            },
+        ],
+        30,
+        0,
+    )
+    .unwrap();
+    assert_eq!(run(&mut w, 30, None).unwrap(), "duration");
+    assert_eq!(
+        w.input_program.rejections()[0].reason,
+        "heal of inactive handle"
+    );
+    assert_eq!(w.input_admissions()[0].plan.id, 1);
+    assert_eq!(w.input_admissions()[0].key, "valid");
+    w.input_program.validate().unwrap();
+    let mut bytes = [0; seedbox_engine_protocol::observation::MAX_DATAGRAM_BYTES];
+    let mut rejected = Vec::new();
+    while let Ok(count) = receiver.recv(&mut bytes) {
+        let observed: seedbox_engine_protocol::observation::Observation =
+            serde_json::from_slice(&bytes[..count]).unwrap();
+        if let ObservationKind::OverrideRejected {
+            input_key,
+            at_ns,
+            reason,
+        } = observed.kind
+        {
+            rejected.push((input_key, at_ns, reason));
+        }
+    }
+    assert_eq!(
+        rejected,
+        [("orphan".into(), 10, "heal of inactive handle".into())]
+    );
+}
+
+#[test]
+fn initially_paused_program_holds_launch_boundary_effect_until_resume() {
+    use crate::host_control::HostControl;
+    use seedbox_engine_protocol::host_control::{
+        Command, PlaybackRate, Reply, Request, MAX_DATAGRAM,
+    };
+    use std::os::unix::net::UnixDatagram;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint = directory.path().join("control");
+    let control = HostControl::bind_paused(&endpoint).unwrap();
+    let released = Arc::new(AtomicBool::new(false));
+    struct Hooks {
+        control: HostControl,
+        released: Arc<AtomicBool>,
+    }
+    impl BoundaryCallbacks for Hooks {
+        fn before_fault(&mut self, boundary: Boundary) -> Result<(), String> {
+            self.control
+                .before_fault(boundary)
+                .map_err(|e| e.to_string())?;
+            self.released.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn boundary(
+            &mut self,
+            boundary: Boundary,
+            admission: &mut crate::intervention::Admission<'_>,
+        ) -> Result<(), String> {
+            self.control
+                .boundary_with_admission(boundary, admission)
+                .map_err(|e| e.to_string())
+        }
+    }
+    let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
+    client.connect(&endpoint).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    struct Release(UnixDatagram);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = self.0.send(seedbox_engine_protocol::host_control::RESUME);
+        }
+    }
+    let cleanup = UnixDatagram::bind(directory.path().join("cleanup")).unwrap();
+    cleanup.connect(&endpoint).unwrap();
+    let _release = Release(cleanup);
+    let signal = released.clone();
+    let task = std::thread::spawn(move || {
+        let mut w = world(&["a", "b"]);
+        w.arm_input_program(
+            vec![crate::input_program::TimedInput {
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                key: "first".into(),
+                at_ns: 0,
+                action: partition("first"),
+            }],
+            20,
+            0,
+        )
+        .unwrap();
+        let mut hooks = Hooks {
+            control,
+            released: signal,
+        };
+        simulate_with_callbacks(
+            &mut w,
+            &Run {
+                duration: 20,
+                end_on: None,
+                fork: None,
+                checkpoint: None,
+                require_barrier: false,
+            },
+            Duration::ZERO,
+            &mut hooks,
+        )
+        .unwrap();
+        assert_eq!(w.faults.log[0].applied_at_ns, Some(0));
+        assert!(w.faults.blocked(0, 1));
+        assert_eq!(w.input_admissions()[0].plan.id, 1);
+    });
+    let send = |id, command| {
+        client
+            .send(&serde_json::to_vec(&Request { id, command }).unwrap())
+            .unwrap();
+        let mut bytes = [0; MAX_DATAGRAM];
+        let count = client.recv(&mut bytes).unwrap();
+        serde_json::from_slice::<Reply>(&bytes[..count]).unwrap()
+    };
+    let paused = send(1, Command::Status);
+    assert_eq!(paused.rate, PlaybackRate::Paused);
+    assert_eq!(paused.position, BoundaryPosition::default());
+    assert!(!released.load(Ordering::SeqCst));
+    let resumed = send(
+        2,
+        Command::SetRate {
+            rate: PlaybackRate::Unlimited,
+        },
+    );
+    assert_eq!(resumed.error, None);
+    task.join().unwrap();
+    assert!(released.load(Ordering::SeqCst));
+}
+
+#[test]
+fn live_override_uses_effective_time_and_repeats_through_timed_program() {
+    use crate::input_program::TimedInput;
+    fn setup() -> World<Mock> {
+        let mut w = world(&["a", "b"]);
+        w.early = 0;
+        // An idle interval makes the scheduler apply future oracle controls
+        // before publishing the host stop. The round horizon alone is stale.
+        configure_control(&mut w);
+        w.control
+            .triggers
+            .arm("a".into(), b"X".to_vec(), 0, 200, partition("oracle"))
+            .unwrap();
+        w.control.triggers.committed("a", 0, b'X', 50, 0).unwrap();
+        for machine in &mut w.machines {
+            machine.state = State::Halted;
+            machine.timer = 100;
+        }
+        w.machines[0].steps.push_back(Step::new(100, Stop::Control));
+        w.machines[1].steps.push_back(Step::new(100, Stop::Control));
+        w
+    }
+    let mut live = setup();
+    let config = Run {
+        duration: 200,
+        end_on: None,
+        fork: None,
+        checkpoint: None,
+        require_barrier: false,
+    };
+    let mut record = None;
+    simulate(
+        &mut live,
+        &config,
+        Duration::ZERO,
+        &mut |boundary: Boundary, admission: &mut crate::intervention::Admission<'_>| {
+            if record.is_none() && !boundary.terminal && boundary.position.simulated_time_ns >= 50 {
+                let at = admission.earliest_effect_ns();
+                let proposal = admission.propose(
+                    "live-cut".into(),
+                    Plan {
+                        id: 0,
+                        at_ns: at,
+                        deadline_ns: at + 100,
+                        action: partition("live-cut"),
+                    },
+                )?;
+                admission.commit(&proposal)?;
+                record = Some(proposal);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    let record = record.expect("live injection");
+    assert_eq!(record.plan.at_ns, 100);
+    let input = TimedInput {
+        key: record.request_id,
+        at_ns: record.plan.at_ns,
+        timeout_ns: record.plan.deadline_ns - record.plan.at_ns,
+        action: record.plan.action,
+    };
+    for workers in [0, 2, 4] {
+        let mut replay = setup();
+        replay
+            .arm_input_program(vec![input.clone()], 200, 0)
+            .unwrap();
+        run_with(&mut replay, 200, None, workers, Duration::ZERO).unwrap();
+        assert_eq!(replay.faults.log, live.faults.log);
+        assert_eq!(replay.input_admissions(), live.input_admissions());
+        for machine in ["a", "b"] {
+            assert_eq!(
+                machine_trace(&replay, machine),
+                machine_trace(&live, machine)
+            );
+        }
+    }
+}
+
+#[test]
+fn checkpoint_edit_replaces_pending_suffix_and_preserves_consumed_identity() {
+    use crate::input_program::TimedInput;
+    let input = |key: &str, at_ns, action| TimedInput {
+        key: key.into(),
+        at_ns,
+        action,
+        timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+    };
+    let first = input("cut", 10, partition("cut"));
+    let removed = input("removed", 20, partition("removed"));
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(vec![first.clone(), removed], 50, 0)
+        .unwrap();
+    segment(&mut w, 50, None, None, Some(15), true).unwrap();
+    let prefix = w.faults.log.clone();
+    let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    let mut reference = None;
+    for _ in 0..2 {
+        saved.restore_checkpoint(&mut w).unwrap();
+        w.merge_input_program(vec![
+            first.clone(),
+            input(
+                "heal",
+                30,
+                Action::Heal {
+                    handle: "cut".into(),
+                },
+            ),
+        ])
+        .unwrap();
+        assert_eq!(w.faults.log, prefix);
+        run(&mut w, 50, None).unwrap();
+        assert_eq!(&w.faults.log[..prefix.len()], prefix.as_slice());
+        assert_eq!(
+            w.input_admissions()
+                .iter()
+                .map(|row| row.key.as_str())
+                .collect::<Vec<_>>(),
+            ["cut", "heal"]
+        );
+        assert!(w.faults.active_handles().is_empty());
+        let evidence = (w.faults.log.clone(), w.input_admissions().to_vec());
+        if let Some(expected) = &reference {
+            assert_eq!(&evidence, expected);
+        } else {
+            reference = Some(evidence);
+        }
+    }
+    saved.restore_checkpoint(&mut w).unwrap();
+    let mut changed = first;
+    changed.at_ns = 11;
+    assert!(w
+        .merge_input_program(vec![changed])
+        .unwrap_err()
+        .contains("cannot change applied override"));
+    assert_eq!(w.faults.log, prefix);
+}
+
+#[test]
+fn edited_duplicate_handle_is_rejected_and_future_actions_after_oracle_exit_stay_unapplied() {
+    use crate::input_program::TimedInput;
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.machines[0].steps.push_back(Step::new(25, Stop::Exited));
+    w.machines[1].state = State::Halted;
+    w.machines[1].timer = 100;
+    w.arm_input_program(
+        [("first", 10), ("duplicate", 10), ("unreached", 40)]
+            .into_iter()
+            .map(|(key, at_ns)| TimedInput {
+                key: key.into(),
+                at_ns,
+                action: partition("same"),
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            })
+            .collect(),
+        50,
+        0,
+    )
+    .unwrap();
+    assert_eq!(run(&mut w, 50, Some("a")).unwrap(), "end_machine_exited");
+    assert_eq!(w.input_admissions().len(), 1);
+    assert_eq!(w.input_program.rejections()[0].key, "duplicate");
+    assert_eq!(
+        w.input_program.rejections()[0].reason,
+        "duplicate active handle"
+    );
+    assert_eq!(w.input_program.next_time(), 40);
+    w.input_program.validate().unwrap();
+}
+
+#[test]
+fn checkpoint_continuation_schedules_edited_inputs_before_the_first_resumed_round() {
+    use crate::input_program::TimedInput;
+    let input = |key: &str, at_ns, action| TimedInput {
+        key: key.into(),
+        at_ns,
+        action,
+        timeout_ns: 100,
+    };
+    let first = input("consumed", 0, partition("consumed"));
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(vec![first.clone()], 50, 0).unwrap();
+    let config = Run {
+        duration: 50,
+        end_on: None,
+        fork: None,
+        checkpoint: None,
+        require_barrier: false,
+    };
+    let mut captured_at = None;
+    let (outcome, _) = simulate(
+        &mut w,
+        &config,
+        Duration::ZERO,
+        &mut |boundary, admission| {
+            if boundary.position.completed_rounds > 0 && !boundary.terminal {
+                captured_at = Some(boundary.position.simulated_time_ns);
+                admission.request_checkpoint()?;
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome, RunOutcome::Checkpoint);
+    let at = captured_at.unwrap();
+    let prefix = w.faults.log.clone();
+    assert_eq!(prefix.len(), 1);
+    let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    for workers in [0, 2, 4] {
+        saved.restore_checkpoint(&mut w).unwrap();
+        w.merge_input_program(vec![
+            first.clone(),
+            input(
+                "at-checkpoint",
+                at,
+                Action::Heal {
+                    handle: "consumed".into(),
+                },
+            ),
+            input("inside-next-round", at + 1, partition("new")),
+        ])
+        .unwrap();
+        run_with(&mut w, 50, None, workers, Duration::ZERO).unwrap();
+        assert_eq!(&w.faults.log[..prefix.len()], prefix.as_slice());
+        assert_eq!(
+            w.input_admissions()
+                .iter()
+                .map(|row| row.key.as_str())
+                .collect::<Vec<_>>(),
+            ["consumed", "at-checkpoint", "inside-next-round"]
+        );
+        assert_eq!(w.faults.log[1].applied_at_ns, Some(at));
+        assert_eq!(w.faults.log[2].applied_at_ns, Some(at + 1));
     }
 }

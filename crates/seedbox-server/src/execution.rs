@@ -63,6 +63,8 @@ pub enum Error {
     Catalogue(#[from] catalogue::Error),
     #[error("simulation storage: {0}")]
     Storage(#[from] std::io::Error),
+    #[error("simulation evidence: {0}")]
+    Evidence(#[from] seedbox_application::Error),
     #[error("simulation worker task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
 }
@@ -150,6 +152,104 @@ impl ExecutionService {
                 format!("checkpoint {name} cleanup: {e}"),
             ))
         })
+    }
+
+    /// Snapshot the atomically published semantic journal using owned paths.
+    /// Reading never acquires the writer lock or mutates the source simulation.
+    pub fn timeline(&self, id: &SimulationId) -> Result<seedbox_api::FaultTimeline, Error> {
+        let (resource, history) = self.recorded_snapshot(id)?;
+        let world = self.manager.world(id)?;
+        Ok(crate::timeline::project(&resource, &history, &world))
+    }
+
+    /// Return the immutable submitted inputs enriched with recorded external overrides.
+    /// This is an export projection; the catalogue's admitted definition stays immutable.
+    pub fn describe(&self, id: &SimulationId) -> Result<seedbox_api::Simulation, Error> {
+        self.recorded_snapshot(id).map(|(resource, _)| resource)
+    }
+
+    fn recorded_snapshot(
+        &self,
+        id: &SimulationId,
+    ) -> Result<
+        (
+            seedbox_api::Simulation,
+            seedbox_engine_protocol::intervention::History,
+        ),
+        Error,
+    > {
+        let mut resource = self.manager.describe(id)?;
+        let path = self.root.join("inputs").join(format!("{id}.json"));
+        let history = match fs::File::open(&path) {
+            Ok(file) => {
+                let retained: RetainedInputs =
+                    serde_json::from_reader(file).map_err(seedbox_application::Error::from)?;
+                if let Some(attempt) = retained.attempt {
+                    // Published attempts always have an explicit journal; missing
+                    // input here is an error, never an empty timeline.
+                    seedbox_artifacts::interventions::read(&attempt.join("interventions.json"))?
+                } else if let Some(digest) = retained.interventions {
+                    seedbox_engine_protocol::intervention::History::decode(
+                        &self.store.read(&digest)?,
+                    )
+                    .map_err(seedbox_application::Error::Integrity)?
+                } else {
+                    seedbox_engine_protocol::intervention::History::default()
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                seedbox_engine_protocol::intervention::History::default()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        resource.spec.program = crate::timeline::merge_external(&resource.spec.program, &history)?;
+        Ok((resource, history))
+    }
+
+    /// Resolve an edited recording on the server. Clients select stable entries;
+    /// the server owns retained input reuse and action scheduling semantics.
+    pub fn derive_request(
+        &self,
+        id: &SimulationId,
+        request: seedbox_api::DeriveRequest,
+    ) -> Result<seedbox_api::SubmitRequest, Error> {
+        let (resource, history) = self.recorded_snapshot(id)?;
+        let world = self.manager.world(id)?;
+        let timeline = crate::timeline::project(&resource, &history, &world);
+        crate::timeline::derive(resource, timeline, request).map_err(Error::Catalogue)
+    }
+
+    /// Export checkpoint state and its binary closure independently of the source resource.
+    pub fn checkpoint_definition(
+        &self,
+        id: &SimulationId,
+        name: &str,
+    ) -> Result<seedbox_api::Simulation, Error> {
+        self.manager.captured_checkpoint(id, name)?;
+        let mut resource = self.describe(id)?;
+        let seedbox_api::InputSource::Resolved { definition } = &mut resource.spec.inputs else {
+            return Err(Error::Evidence(seedbox_application::Error::Setup(
+                "simulation has no resolved definition".into(),
+            )));
+        };
+        let inputs: RetainedInputs = serde_json::from_reader(fs::File::open(
+            self.root.join("inputs").join(format!("{id}.json")),
+        )?)
+        .map_err(std::io::Error::other)?;
+        let attempt = inputs
+            .attempt
+            .ok_or_else(|| std::io::Error::other("checkpoint has no execution attempt"))?;
+        let path = attempt
+            .join("output")
+            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR)
+            .join(format!("checkpoint-{name}.json"));
+        definition.start =
+            seedbox_application::definition::capture_start(&path, &attempt, &self.store)?;
+        resource
+            .metadata
+            .annotations
+            .insert("derived-from".into(), id.to_string());
+        Ok(resource)
     }
 
     /// Read final evidence using server-owned attempt references. Clients never
@@ -292,6 +392,7 @@ impl ExecutionService {
         // No completed resource may lose its final manager-owned control handle
         // while that connection still has transport or journal work in flight.
         self.manager.retire_worker(&id)?;
+        let _ = self.timeline(&id)?;
         match result {
             Ok(run) => {
                 let report = run.record.report.as_ref();
@@ -363,6 +464,22 @@ impl ExecutionService {
         cancellation: &CancellationToken,
         preparation_expired: Arc<AtomicBool>,
     ) -> seedbox_application::Result<Run> {
+        let mut resolved_spec = spec.clone();
+        resolved_spec
+            .resolve_project_architecture(if cfg!(target_arch = "aarch64") {
+                seedbox_spec::definition::Architecture::Aarch64
+            } else {
+                seedbox_spec::definition::Architecture::X86_64
+            })
+            .map_err(seedbox_application::Error::Setup)?;
+        let spec = &resolved_spec;
+        let options = self
+            .manager
+            .describe(id)
+            .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
+            .options;
+        let program = crate::catalogue::resolve_program(spec)
+            .map_err(|error| seedbox_application::Error::Setup(error.to_string()))?;
         let budget = crate::preparation_budget::Budget::start(
             cancellation,
             preparation_expired,
@@ -374,6 +491,16 @@ impl ExecutionService {
         let directory = self.root.join("runs").join(id.as_str());
         fs::create_dir(&directory)?;
         let (inputs, interventions, checkpoint, executor) = match &spec.inputs {
+            InputSource::Resolved { definition } => {
+                let inputs = seedbox_application::definition::prepared(definition, &self.store)?;
+                let executor = self.backends.retained(&inputs, &self.store)?;
+                let checkpoint = seedbox_application::definition::materialize_start(
+                    definition,
+                    &self.store,
+                    &directory,
+                )?;
+                (inputs, None, checkpoint, executor)
+            }
             InputSource::Project => {
                 let backends = self.backends.project(
                     &spec.configuration,
@@ -446,7 +573,7 @@ impl ExecutionService {
                         let history = seedbox_artifacts::interventions::read(
                             &attempt.join(format!("checkpoint-{checkpoint}-interventions.json")),
                         )?;
-                        let digest = self.store.put(
+                        let digest = self.store.put_unsynced(
                             &history
                                 .encode()
                                 .map_err(seedbox_application::Error::Integrity)?,
@@ -465,6 +592,42 @@ impl ExecutionService {
                 (inputs, interventions, checkpoint, executor)
             }
         };
+        let overrides: Vec<_> = spec
+            .program
+            .iter()
+            .map(|p| seedbox_spec::definition::Override {
+                id: p.key.clone(),
+                at_ns: p.at_ns,
+                action: p.action.clone(),
+                timeout_ns: p.timeout_ns,
+            })
+            .collect();
+        let seed = spec.seed.ok_or_else(|| {
+            seedbox_application::Error::Integrity("unresolved submission seed".into())
+        })?;
+        let mut definition = if let InputSource::Resolved { definition } = &spec.inputs {
+            let mut d = definition.as_ref().clone();
+            d.seed = seed;
+            d.overrides = overrides;
+            d
+        } else {
+            seedbox_application::definition::resolve(&spec.configuration, &inputs, seed, overrides)?
+        };
+        // The first run and every resubmission use the same resolved private representation.
+        // Source paths, image transport manifests and human metadata never enter experiment identity.
+        let inputs = seedbox_application::definition::prepared(&definition, &self.store)?;
+        definition.runtime.execution =
+            seedbox_application::definition::execution_settings(&inputs.profile)?;
+        for (name, machine) in &mut definition.machines {
+            machine.boot_archive =
+                seedbox_spec::definition::Asset(format!("sha256:{}", inputs.guests[name].hex()));
+        }
+        let oracle_name = definition.oracle_name().to_owned();
+        definition.oracle.boot_archive = seedbox_spec::definition::Asset(format!(
+            "sha256:{}",
+            inputs.guests[&oracle_name].hex()
+        ));
+        let configuration = definition.configuration("");
         let mut retained = RetainedInputs {
             checkpoint: checkpoint.clone(),
             prepared: inputs.clone(),
@@ -477,9 +640,7 @@ impl ExecutionService {
         }
         self.manager
             .update(id, |s| {
-                s.spec.inputs = InputSource::Retained {
-                    simulation: id.clone(),
-                };
+                s.spec = seedbox_api::SimulationSpec::resolved(definition);
                 s.status.phase = Phase::Running;
                 s.status.stage = Some(Stage::Booting);
             })
@@ -490,12 +651,15 @@ impl ExecutionService {
             orchestrator = orchestrator.with_checkpoint(checkpoint);
         }
         orchestrator
+            .with_start_paused(options.start_paused)
             .with_observations(observations.path())
             .with_interventions(interventions)
+            .with_program(program)
             .run_prepared_observed(
-                &spec.configuration,
+                &configuration,
                 RunOptions {
                     seed: spec.seed,
+                    wall_time_ns: options.wall_time_ns,
                     cancellation: cancellation.clone(),
                 },
                 inputs,
@@ -552,7 +716,7 @@ impl ExecutionService {
             Ok(None)
         } else {
             self.store
-                .put(
+                .put_unsynced(
                     &history
                         .encode()
                         .map_err(seedbox_application::Error::Integrity)?,
@@ -634,8 +798,12 @@ mod tests {
         .unwrap();
         let id = manager
             .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
                 request_id: "late-report".into(),
                 spec: SimulationSpec {
+                    program: Vec::new(),
+                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -697,8 +865,12 @@ mod tests {
         .unwrap();
         let resource = manager
             .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
                 request_id: "delete-control-io".into(),
                 spec: SimulationSpec {
+                    program: Vec::new(),
+                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -790,8 +962,12 @@ mod tests {
         .unwrap();
         let resource = manager
             .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
                 request_id: "delete-control-io".into(),
                 spec: SimulationSpec {
+                    program: Vec::new(),
+                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -872,16 +1048,23 @@ mod tests {
         )
         .unwrap();
         service.preparation_limit = Duration::from_millis(10);
-        let configuration = seedbox_application::config::parse(
+        let mut configuration = seedbox_application::config::parse(
             "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
             Path::new("/project/compose.yaml"),
             &Default::default(),
         )
         .unwrap();
+        for service in configuration.services.values_mut() {
+            service.platform.clear();
+        }
         let resource = manager
             .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
                 request_id: "timeout".into(),
                 spec: SimulationSpec {
+                    program: Vec::new(),
+                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,

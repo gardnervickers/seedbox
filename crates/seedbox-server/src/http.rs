@@ -57,7 +57,13 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/simulations/{id}/compare/{other}", get(compare))
         .route("/v1/simulations/{id}/watch", get(watch))
         .route("/v1/simulations/{id}/playback", get(playback))
+        .route("/v1/simulations/{id}/timeline", get(timeline))
+        .route("/v1/simulations/{id}/derive", post(derive))
         .route("/v1/simulations/{id}/checkpoints", get(checkpoints))
+        .route(
+            "/v1/simulations/{id}/checkpoints/{request_id}/definition",
+            get(checkpoint_definition),
+        )
         .route(
             "/v1/simulations/{id}/checkpoints/{request_id}",
             get(checkpoint).delete(delete_checkpoint),
@@ -68,6 +74,9 @@ pub fn router(state: ApiState) -> Router {
             get(control_receipt),
         )
         .route("/v1/simulations/{id}/events", get(events))
+        .route("/v1/simulations/{id}/world", get(world))
+        .route("/v1/simulations/{id}/fault-types", get(fault_types))
+        .route("/v1/simulations/{id}/frames", get(frames))
         .route("/v1/simulations/{id}/logs/{machine}", get(logs))
         .route("/v1/simulations/{id}/logs", get(all_logs))
         .fallback(|| async {
@@ -119,6 +128,48 @@ async fn submit(
     })
     .await
     .map_err(|_| HttpError::internal("submission task failed"))?
+}
+
+/// Selection is interpreted by the server, never by a client copying private
+/// engine configuration. Queue reservation has the same ownership as submit.
+async fn derive(
+    State(state): State<ApiState>,
+    id: Result<Path<SimulationId>, PathRejection>,
+    request: Result<Json<seedbox_api::DeriveRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Simulation>), HttpError> {
+    let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let Json(request) = request.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let execution = state.execution.ok_or_else(|| {
+        HttpError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Unavailable,
+            "execution evidence is unavailable",
+        )
+    })?;
+    let permit = state.submissions.try_reserve_owned().map_err(|_| {
+        HttpError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Unavailable,
+            "execution queue unavailable; retry with the same request ID",
+        )
+    })?;
+    tokio::task::spawn_blocking(move || {
+        let request = execution.derive_request(&id, request)?;
+        let (simulation, created) = state.manager.submit(request)?;
+        if created {
+            permit.send(simulation.metadata.id.clone());
+        }
+        Ok((
+            if created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            },
+            Json(simulation),
+        ))
+    })
+    .await
+    .map_err(|_| HttpError::internal("derivation task failed"))?
 }
 
 async fn submit_seeds(
@@ -202,12 +253,35 @@ async fn compare(
     .map_err(|_| HttpError::internal("comparison task failed"))?
 }
 
+async fn timeline(
+    State(state): State<ApiState>,
+    id: Result<Path<SimulationId>, PathRejection>,
+) -> Result<Json<seedbox_api::FaultTimeline>, HttpError> {
+    let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
+    tokio::task::spawn_blocking(move || {
+        state.manager.describe(&id)?;
+        let execution = state.execution.ok_or_else(|| {
+            HttpError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::Unavailable,
+                "execution evidence is unavailable",
+            )
+        })?;
+        execution.timeline(&id).map(Json).map_err(HttpError::from)
+    })
+    .await
+    .map_err(|_| HttpError::internal("timeline task failed"))?
+}
+
 async fn describe(
     State(state): State<ApiState>,
     id: Result<Path<SimulationId>, PathRejection>,
 ) -> Result<Json<Simulation>, HttpError> {
     let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
     tokio::task::spawn_blocking(move || {
+        if let Some(execution) = state.execution {
+            return execution.describe(&id).map(Json).map_err(HttpError::from);
+        }
         state
             .manager
             .describe(&id)
@@ -447,6 +521,59 @@ async fn events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+async fn fault_types(
+    State(state): State<ApiState>,
+    id: Result<Path<SimulationId>, PathRejection>,
+) -> Result<Json<seedbox_api::FaultCatalogue>, HttpError> {
+    let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
+    tokio::task::spawn_blocking(move || {
+        state.manager.fault_types(&id).map(Json).map_err(Into::into)
+    })
+    .await
+    .map_err(|_| HttpError::internal("fault discovery task failed"))?
+}
+
+async fn world(
+    State(state): State<ApiState>,
+    id: Result<Path<SimulationId>, PathRejection>,
+) -> Result<Json<seedbox_api::WorldState>, HttpError> {
+    let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
+    tokio::task::spawn_blocking(move || state.manager.world(&id).map(Json).map_err(Into::into))
+        .await
+        .map_err(|_| HttpError::internal("world inspection task failed"))?
+}
+
+async fn frames(
+    State(state): State<ApiState>,
+    id: Result<Path<SimulationId>, PathRejection>,
+) -> Result<impl IntoResponse, HttpError> {
+    use crate::stream::Delivery;
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use seedbox_api::FrameDelivery;
+    let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let receiver = tokio::task::spawn_blocking(move || state.manager.frames(&id))
+        .await
+        .map_err(|_| HttpError::internal("frame subscription task failed"))??;
+    let stream = futures_util::stream::unfold(Some(receiver), |state| async move {
+        let mut receiver = state?;
+        let delivery = match receiver.recv().await {
+            Delivery::Record(record) => FrameDelivery::Frames {
+                sequence: record.sequence,
+                simulated_time_ns: record.payload.simulated_time_ns,
+                frames: record.payload.frames.clone(),
+            },
+            Delivery::Gap { first, last } => FrameDelivery::Gap { first, last },
+            Delivery::Closed => FrameDelivery::Closed,
+        };
+        let closed = matches!(delivery, FrameDelivery::Closed);
+        Some((
+            Event::default().event("observation").json_data(delivery),
+            if closed { None } else { Some(receiver) },
+        ))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 async fn logs(
     State(state): State<ApiState>,
     id: Result<Path<(SimulationId, String)>, PathRejection>,
@@ -572,6 +699,24 @@ impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         (self.status, Json(self.error)).into_response()
     }
+}
+
+async fn checkpoint_definition(
+    State(state): State<ApiState>,
+    path: Result<Path<(SimulationId, String)>, PathRejection>,
+) -> Result<Json<Simulation>, HttpError> {
+    let Path((id, name)) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let execution = state
+        .execution
+        .ok_or_else(|| HttpError::invalid("execution evidence is unavailable"))?;
+    tokio::task::spawn_blocking(move || {
+        execution
+            .checkpoint_definition(&id, &name)
+            .map(Json)
+            .map_err(HttpError::from)
+    })
+    .await
+    .map_err(|_| HttpError::internal("checkpoint export task failed"))?
 }
 
 #[cfg(test)]

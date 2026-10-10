@@ -29,6 +29,7 @@ pub struct Options {
     pub seed: u64,
     pub full_state: bool,
     pub host_control: Option<PathBuf>,
+    pub start_paused: bool,
     pub interventions: Option<seedbox_engine_core::intervention::History>,
     pub resume_checkpoint: Option<PathBuf>,
     pub observations: Option<PathBuf>,
@@ -48,6 +49,32 @@ struct Interactive {
     checkpoints: seedbox_engine_core::checkpoint::LiveCheckpoints<ArmMachine>,
 }
 
+/// Keep pre-effect playback waits separate from retained replay positions.
+struct NativeBoundary<'a> {
+    host: &'a mut Option<crate::host_control::HostControl>,
+}
+impl world_windowed::BoundaryCallbacks for NativeBoundary<'_> {
+    fn before_fault(&mut self, position: world_windowed::Boundary) -> Result<()> {
+        if let Some(host) = self.host.as_mut() {
+            host.before_fault(position)
+                .map_err(|e| format!("host control: {e}"))?;
+        }
+        Ok(())
+    }
+    fn boundary(
+        &mut self,
+        position: world_windowed::Boundary,
+        admission: &mut seedbox_engine_core::intervention::Admission<'_>,
+    ) -> Result<()> {
+        // All external actions are armed in the shared timed program.
+        if let Some(host) = self.host.as_mut() {
+            host.boundary_with_admission(position, admission)
+                .map_err(|e| format!("host control: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
 /// Interactive captures return the stopped world to its owner and then resume
 /// the retained scheduler plan. They are not terminal simulation outcomes.
 fn simulate_windowed(
@@ -64,19 +91,13 @@ fn simulate_windowed(
                 host.disable_checkpoints();
             }
         }
-        let mut boundary =
-            |position, admission: &mut seedbox_engine_core::intervention::Admission<'_>| {
-                interactive.replay.boundary(admission)?;
-                if let Some(host) = &mut interactive.host {
-                    host.boundary_with_admission(position, admission)
-                        .map_err(|e| format!("host control: {e}"))?;
-                }
-                Ok(())
-            };
+        let mut boundary = NativeBoundary {
+            host: &mut interactive.host,
+        };
         let (outcome, mut scheduler) = if machine_workers <= 1 {
-            world_windowed::simulate(world, run, Duration::ZERO, &mut boundary)
+            world_windowed::simulate_with_callbacks(world, run, Duration::ZERO, &mut boundary)
         } else {
-            world_windowed::simulate_parallel(
+            world_windowed::simulate_parallel_with_callbacks(
                 world,
                 run,
                 world_windowed::Workers {
@@ -138,6 +159,7 @@ fn decode_config(bytes: &[u8]) -> Result<seedbox_engine_core::world_config::Worl
                 | "control_channel"
                 | "disk_loss"
                 | "launch_skew_ns"
+                | "input_program"
         ) {
             return Err(format!(
                 "world config: unknown field `{key}` for ARM application execution"
@@ -175,12 +197,14 @@ fn decode_config(bytes: &[u8]) -> Result<seedbox_engine_core::world_config::Worl
 }
 
 pub fn run(options: &Options) -> Result<Value> {
-    let replay = seedbox_engine_core::intervention::Replay::new(
-        options.interventions.clone().unwrap_or_default(),
-    )?;
-    let cfg = decode_config(
+    let replay = seedbox_engine_core::intervention::Replay::new(Default::default())?;
+    let mut cfg = decode_config(
         &std::fs::read(&options.config)
             .map_err(|e| format!("world {}: {e}", options.config.display()))?,
+    )?;
+    seedbox_engine_core::input_program::merge_interventions(
+        &mut cfg.input_program,
+        &options.interventions.clone().unwrap_or_default(),
     )?;
     if cfg.machines.is_empty() || cfg.machines.len() > 254 {
         return Err("world requires 1..254 machines".into());
@@ -227,7 +251,14 @@ pub fn run(options: &Options) -> Result<Value> {
     validate_launch_skew(cfg.launch_skew_ns, lookahead)?;
     let initial_barrier = cfg.launch_skew_ns.is_some();
     let control = Control::from_config(cfg.control.as_ref(), names.clone(), lookahead, 0)?;
-    let mut faults = Faults::with_links(Vec::new(), names.clone(), links)?;
+    // With a launch barrier, release arms the complete plan after bootstrap.
+    // Older immediate-launch profiles need their typed faults from the outset.
+    let initial_faults = if initial_barrier {
+        Vec::new()
+    } else {
+        cfg.faults.clone()
+    };
+    let mut faults = Faults::with_plans(initial_faults, names.clone(), links)?;
     faults.require_readiness();
     let disk_fault_model = crate::disk::fault_model(cfg.disk_loss)?;
     let base = options.config.parent().unwrap_or(Path::new("."));
@@ -321,17 +352,23 @@ pub fn run(options: &Options) -> Result<Value> {
         macs,
     })?
     .with_observations(observations);
-    let mut host = options
+    seedbox_engine_core::input_program::validate_program(&cfg.input_program, cfg.duration_ns)?;
+    if !initial_barrier {
+        world.arm_input_program(cfg.input_program.clone(), cfg.duration_ns, 0)?;
+    }
+    let host = options
         .host_control
         .as_deref()
-        .map(crate::host_control::HostControl::bind)
+        .map(|path| {
+            if options.start_paused {
+                crate::host_control::HostControl::bind_paused(path)
+            } else {
+                crate::host_control::HostControl::bind(path)
+            }
+        })
         .transpose()
         .map_err(|e| format!("host control: {e}"))?;
-    if options.interventions.is_some() && options.resume_checkpoint.is_none() {
-        if let Some(host) = &mut host {
-            host.disable_fault_injection();
-        }
-    }
+
     let raw_config = serde_json::to_value(&cfg).map_err(|e| e.to_string())?;
     let end_on = cfg.end_on_exit.clone();
     let mut interactive = Interactive {
@@ -350,25 +387,10 @@ pub fn run(options: &Options) -> Result<Value> {
     if let Some(path) = &options.resume_checkpoint {
         let saved = checkpoint::load(path)?;
         interactive.initial_launch = saved.initial_launch;
-        let mut saved = saved.state;
-        // The branch journal contains the source prefix and, for a rerun,
-        // any later inputs recorded by that branch. Prefix effects are already
-        // in the saved world and must not be applied twice.
-        let history = options.interventions.clone().unwrap_or_default();
-        let consumed = history
-            .entries
-            .iter()
-            .take_while(|entry| entry.position.boundary_index <= saved.position.boundary_index)
-            .count();
-        if consumed < history.entries.len() {
-            if let Some(host) = &mut interactive.host {
-                host.disable_fault_injection();
-            }
-        }
-        saved.replay.history = history;
-        saved.replay.consumed = consumed;
-        let replay = seedbox_engine_core::intervention::Replay::from_checkpoint(saved.replay)?;
+        let saved = saved.state;
+        let replay = seedbox_engine_core::intervention::Replay::new(Default::default())?;
         saved.world.restore_checkpoint(&mut world)?;
+        world.merge_input_program(cfg.input_program.clone())?;
         interactive.replay = replay;
     }
     // Boot initial guests to their launch barriers without converting an
@@ -534,11 +556,16 @@ pub fn run(options: &Options) -> Result<Value> {
     );
     world.control().triggers.hash_into(&mut hash)?;
     let trigger_evidence = world.control().triggers.evidence()?;
+    if !world.input_rejections().is_empty() {
+        hash.update(serde_json::to_vec(world.input_rejections()).map_err(|e| e.to_string())?);
+    }
     let counters = arm_counters(&world);
     let mut report = json!({"report_version":2,"seed":options.seed,"timebase":"arm64-pv-world-v1",
         "outcome":outcome,"world_witness":hex::encode(hash.finalize()),
         "network_witness":network,"horizon_witness":horizons,"machines":rows,
         "frames_delivered":world.delivered(),"frames_dropped":world.dropped(),"network_counters":counters,
+        "input_admissions":world.input_admissions(),
+        "input_rejections":world.input_rejections(),
         "faults":world.faults().log,"fault_error":world.faults().error.clone().or(world.control().error.clone()),
         "control_history":world.control().log,"control_latency_ns":world.control().latency,
         "rejected_fault_effects":world.faults().rejected_effects,"management_readiness":world.faults().readiness,
@@ -637,6 +664,22 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&witness_counts(&counts)).unwrap(),
             br#"[[[0,1],[1,2,3,4]],[[1,0],[5,0,0,0,6]]]"#
+        );
+    }
+
+    #[test]
+    fn authored_input_program_crosses_the_arm_config_boundary() {
+        let mut raw = config();
+        raw["input_program"] = json!([{
+            "key": "pause-a", "at_ns": 20,
+            "action": {"action": "pause", "machine": "a"}
+        }]);
+        let cfg = decode_config(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(cfg.input_program.len(), 1);
+        assert_eq!(cfg.input_program[0].key, "pause-a");
+        assert_eq!(
+            serde_json::to_value(cfg).unwrap()["input_program"],
+            raw["input_program"]
         );
     }
 

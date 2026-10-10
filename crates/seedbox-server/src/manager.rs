@@ -2,7 +2,7 @@
 //! outside this lock; only durable lifecycle changes and their publication use it.
 
 use crate::catalogue::{Catalogue, Error};
-use crate::stream::{Payload, PublishError, Stream, Subscription};
+use crate::stream::{History, Payload, PublishError, Stream, Subscription};
 use seedbox_api::{ControlReceipt, ControlRequest, ControlState, LogEntry};
 use seedbox_api::{EventKind, SimulationEvent};
 use seedbox_api::{ExecutionTermination, Phase, Simulation, SimulationId, SubmitRequest};
@@ -24,6 +24,23 @@ struct Live {
     events: Stream<SimulationEvent>,
     logs: BTreeMap<String, Stream<LogEntry>>,
     all_logs: Stream<LogEntry>,
+    frames: Stream<FrameBatch>,
+}
+
+/// One observation's routed frames, published on the frame stream.
+#[derive(Debug)]
+pub struct FrameBatch {
+    pub simulated_time_ns: u64,
+    pub frames: Vec<seedbox_api::Frame>,
+}
+
+impl Payload for FrameBatch {
+    fn payload_bytes(&self) -> usize {
+        self.frames
+            .iter()
+            .map(|f| std::mem::size_of::<seedbox_api::Frame>() + f.from.len() + f.to.len())
+            .sum()
+    }
 }
 
 impl Payload for LogEntry {
@@ -39,6 +56,9 @@ impl Payload for LogEntry {
 impl Payload for SimulationEvent {
     fn payload_bytes(&self) -> usize {
         std::mem::size_of::<Self>().saturating_add(match &self.event {
+            EventKind::OverrideRejected {
+                input_key, reason, ..
+            } => input_key.len() + reason.len(),
             EventKind::ExecutionTerminated {
                 termination: ExecutionTermination::Error { message },
             } => message.len(),
@@ -46,8 +66,19 @@ impl Payload for SimulationEvent {
                 serde_json::to_vec(control).map_or(usize::MAX, |bytes| bytes.len())
             }
             EventKind::FaultChanged {
-                action, machine, ..
-            } => action.len() + machine.as_ref().map_or(0, String::len),
+                action,
+                machine,
+                plan,
+                input_key,
+                ..
+            } => {
+                action.len()
+                    + input_key.as_ref().map_or(0, String::len)
+                    + machine.as_ref().map_or(0, String::len)
+                    + plan.as_ref().map_or(0, |plan| {
+                        serde_json::to_vec(plan).map_or(usize::MAX, |bytes| bytes.len())
+                    })
+            }
             EventKind::PreparationProgress { machine, .. }
             | EventKind::MachineReady { machine, .. }
             | EventKind::MachineLifecycle { machine, .. }
@@ -58,13 +89,14 @@ impl Payload for SimulationEvent {
 }
 
 impl Live {
-    fn new(resource: &Simulation) -> Self {
+    fn new(resource: &Simulation, history: &Arc<History<LogEntry>>) -> Self {
         Self {
             worker: None,
             all_logs: Stream::new(
                 NonZeroUsize::MIN.saturating_add(255),
                 NonZeroUsize::MIN.saturating_add(4095),
-            ),
+            )
+            .with_history(history.clone()),
             timing: Default::default(),
             playback: None,
             logs: resource
@@ -78,12 +110,17 @@ impl Live {
                         Stream::new(
                             NonZeroUsize::MIN.saturating_add(255),
                             NonZeroUsize::MIN.saturating_add(4095),
-                        ),
+                        )
+                        .with_history(history.clone()),
                     )
                 })
                 .collect(),
             cancellation: CancellationToken::default(),
             status: watch::channel(resource.clone()).0,
+            frames: Stream::new(
+                NonZeroUsize::MIN.saturating_add(255),
+                NonZeroUsize::MIN.saturating_add(65535),
+            ),
             events: Stream::new(
                 NonZeroUsize::MIN.saturating_add(255),
                 NonZeroUsize::MIN.saturating_add(8191),
@@ -176,9 +213,18 @@ impl Live {
     }
 }
 
+struct RetainedLogs {
+    machines: BTreeMap<String, Stream<LogEntry>>,
+    all: Stream<LogEntry>,
+}
+
 struct State {
+    log_history: Arc<History<LogEntry>>,
+    retained_logs: BTreeMap<SimulationId, RetainedLogs>,
     catalogue: Catalogue,
     live: BTreeMap<SimulationId, Live>,
+    /// Observed worlds outlive their workers until the simulation is deleted.
+    worlds: BTreeMap<SimulationId, crate::world::Tracker>,
     accepting: bool,
 }
 
@@ -235,7 +281,19 @@ impl State {
             live.publish(&resource);
         }
         if resource.status.phase == Phase::Completed {
-            self.live.remove(&id);
+            if let Some(live) = self.live.remove(&id) {
+                let _ = live.all_logs.close();
+                for logs in live.logs.values() {
+                    let _ = logs.close();
+                }
+                self.retained_logs.insert(
+                    id.clone(),
+                    RetainedLogs {
+                        machines: live.logs,
+                        all: live.all_logs,
+                    },
+                );
+            }
         }
         Ok(resource)
     }
@@ -253,7 +311,9 @@ impl State {
                 simulated_time_ns: position.map(|position| position.simulated_time_ns),
                 position,
                 event: EventKind::ControlChanged {
-                    control: Box::new(control),
+                    control: Box::new(
+                        serde_json::to_value(control).expect("control receipt serializes"),
+                    ),
                 },
             };
             live.publish_event(event);
@@ -492,15 +552,19 @@ impl Manager {
         Ok(())
     }
     pub fn new(catalogue: Catalogue) -> Self {
+        let log_history = Arc::new(History::new(64 * 1024 * 1024));
         let live = catalogue
             .list()
             .filter(|s| s.status.phase != Phase::Completed)
-            .map(|s| (s.metadata.id.clone(), Live::new(s)))
+            .map(|s| (s.metadata.id.clone(), Live::new(s, &log_history)))
             .collect();
         Self(Mutex::new(State {
             catalogue,
+            log_history,
+            retained_logs: BTreeMap::new(),
             live,
             accepting: true,
+            worlds: BTreeMap::new(),
         }))
     }
 
@@ -575,6 +639,8 @@ impl Manager {
         let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         state.catalogue.delete(id)?;
         state.live.remove(id);
+        state.retained_logs.remove(id);
+        state.worlds.remove(id);
         Ok(())
     }
 
@@ -585,9 +651,8 @@ impl Manager {
         }
         let (resource, created) = state.catalogue.submit(request)?;
         if created {
-            state
-                .live
-                .insert(resource.metadata.id.clone(), Live::new(&resource));
+            let live = Live::new(&resource, &state.log_history);
+            state.live.insert(resource.metadata.id.clone(), live);
         }
         Ok((state.project(resource, Instant::now()), created))
     }
@@ -602,9 +667,8 @@ impl Manager {
         }
         let (resource, created) = state.catalogue.submit_seeds(request)?;
         if created {
-            state
-                .live
-                .insert(resource.metadata.id.clone(), Live::new(&resource));
+            let live = Live::new(&resource, &state.log_history);
+            state.live.insert(resource.metadata.id.clone(), live);
         }
         Ok((resource, created))
     }
@@ -618,9 +682,8 @@ impl Manager {
             return Ok(None);
         };
         if created {
-            state
-                .live
-                .insert(resource.metadata.id.clone(), Live::new(&resource));
+            let live = Live::new(&resource, &state.log_history);
+            state.live.insert(resource.metadata.id.clone(), live);
         }
         Ok((resource.status.phase == Phase::Queued).then_some(resource.metadata.id))
     }
@@ -692,7 +755,16 @@ impl Manager {
         if !resource.spec.configuration.services.contains_key(machine) {
             return Err(Error::Invalid(format!("unknown machine {machine}")));
         }
-        match state.live.get(id).and_then(|live| live.logs.get(machine)) {
+        match state
+            .live
+            .get(id)
+            .and_then(|live| live.logs.get(machine))
+            .or_else(|| {
+                state
+                    .retained_logs
+                    .get(id)
+                    .and_then(|logs| logs.machines.get(machine))
+            }) {
             Some(logs) => logs.subscribe().map_err(|_| Error::StorageFailed),
             None => Ok(Subscription::closed()),
         }
@@ -702,8 +774,13 @@ impl Manager {
     pub fn all_logs(&self, id: &SimulationId) -> Result<Subscription<LogEntry>, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         state.catalogue.get(id)?;
-        match state.live.get(id) {
-            Some(live) => live.all_logs.subscribe().map_err(|_| Error::StorageFailed),
+        match state
+            .live
+            .get(id)
+            .map(|live| &live.all_logs)
+            .or_else(|| state.retained_logs.get(id).map(|logs| &logs.all))
+        {
+            Some(logs) => logs.subscribe().map_err(|_| Error::StorageFailed),
             None => Ok(Subscription::closed()),
         }
     }
@@ -738,6 +815,10 @@ impl Manager {
         let Some(live) = state.live.get(id) else {
             return;
         };
+        let configuration = &state
+            .catalogue
+            .get(id)
+            .map(|r| r.spec.configuration.clone());
         let event = match &event {
             EventKind::FaultChanged {
                 machine: Some(machine),
@@ -752,9 +833,20 @@ impl Manager {
             }
             _ => event,
         };
+        let revision = live.status.borrow().metadata.revision;
+        if let Ok(configuration) = configuration {
+            state
+                .worlds
+                .entry(id.clone())
+                .or_insert_with(|| crate::world::Tracker::new(id.clone(), configuration))
+                .event(time, &event);
+        }
+        let Some(live) = state.live.get(id) else {
+            return;
+        };
         let observation = SimulationEvent {
             simulation: id.clone(),
-            revision: live.status.borrow().metadata.revision,
+            revision,
             simulated_time_ns: (!matches!(event, EventKind::PreparationProgress { .. }))
                 .then_some(time),
             position: None,
@@ -763,8 +855,73 @@ impl Manager {
         live.publish_event(observation);
     }
 
+    pub(crate) fn publish_frames(
+        &self,
+        id: &SimulationId,
+        time: u64,
+        frames: Vec<seedbox_api::Frame>,
+    ) {
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
+        if !state.live.contains_key(id) {
+            return;
+        }
+        let Ok(configuration) = state
+            .catalogue
+            .get(id)
+            .map(|r| r.spec.configuration.clone())
+        else {
+            return;
+        };
+        state
+            .worlds
+            .entry(id.clone())
+            .or_insert_with(|| crate::world::Tracker::new(id.clone(), &configuration))
+            .frames(time, &frames);
+        if let Some(live) = state.live.get(id) {
+            let _ = live.frames.publish(FrameBatch {
+                simulated_time_ns: time,
+                frames,
+            });
+        }
+    }
+
+    /// Fault forms and target choices from one consistent catalogue observation.
+    pub fn fault_types(&self, id: &SimulationId) -> Result<seedbox_api::FaultCatalogue, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let resource = state.catalogue.get(id)?;
+        let world = match state.worlds.get(id) {
+            Some(world) => world.snapshot(),
+            None => crate::world::Tracker::new(id.clone(), &resource.spec.configuration).snapshot(),
+        };
+        Ok(crate::fault_catalogue::discover(
+            &world,
+            resource.spec.configuration.network.latency_ns,
+        ))
+    }
+
+    /// The observed world, or the configured one before any observation.
+    pub fn world(&self, id: &SimulationId) -> Result<seedbox_api::WorldState, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let resource = state.catalogue.get(id)?;
+        Ok(match state.worlds.get(id) {
+            Some(world) => world.snapshot(),
+            None => crate::world::Tracker::new(id.clone(), &resource.spec.configuration).snapshot(),
+        })
+    }
+
+    pub fn frames(&self, id: &SimulationId) -> Result<Subscription<FrameBatch>, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        state.catalogue.get(id)?;
+        match state.live.get(id) {
+            Some(live) => live.frames.subscribe().map_err(|_| Error::StorageFailed),
+            None => Ok(Subscription::closed()),
+        }
+    }
+
     pub(crate) fn publish_log(&self, id: &SimulationId, entry: LogEntry) {
-        let Ok(state) = self.0.lock() else {
+        let Ok(mut state) = self.0.lock() else {
             return;
         };
         let Some(live) = state.live.get(id) else {
@@ -778,6 +935,20 @@ impl Manager {
                 LogEntry::SourceUnavailable
             }
             _ => entry,
+        };
+        if let Ok(configuration) = state
+            .catalogue
+            .get(id)
+            .map(|r| r.spec.configuration.clone())
+        {
+            state
+                .worlds
+                .entry(id.clone())
+                .or_insert_with(|| crate::world::Tracker::new(id.clone(), &configuration))
+                .log(&entry);
+        }
+        let Some(live) = state.live.get(id) else {
+            return;
         };
         if live.all_logs.publish(entry.clone()).is_err() {
             let _ = live.all_logs.publish(LogEntry::SourceUnavailable);
@@ -854,6 +1025,65 @@ mod tests {
         SubmitRequest,
     };
 
+    #[test]
+    fn log_tracking_keeps_configured_attribution_and_survives_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
+        let configuration = seedbox_application::config::parse(
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            std::path::Path::new("/project/compose.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let id = manager
+            .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
+                request_id: "world-logs".into(),
+                spec: SimulationSpec {
+                    program: Vec::new(),
+                    start_paused: false,
+                    seed: Some(1),
+                    inputs: InputSource::Project,
+                    configuration,
+                },
+            })
+            .unwrap()
+            .0
+            .metadata
+            .id;
+        manager.begin(&id).unwrap().unwrap();
+        for machine in ["oracle", "unknown"] {
+            manager.publish_log(
+                &id,
+                LogEntry::MachineGap {
+                    machine: machine.into(),
+                    incarnation: 1,
+                    simulated_time_ns: 42,
+                    records: 1,
+                },
+            );
+        }
+        manager.publish_engine_event(
+            &id,
+            43,
+            EventKind::MachineReady {
+                machine: "unknown".into(),
+                incarnation: 1,
+            },
+        );
+        let world = manager.world(&id).unwrap();
+        assert_eq!(world.machines.len(), 1);
+        assert_eq!(world.machines[0].incarnation, 1);
+        assert_eq!(world.simulated_time_ns, 43);
+        manager
+            .update(&id, |s| s.status.phase = Phase::Completed)
+            .unwrap();
+        assert_eq!(manager.world(&id).unwrap(), world);
+        manager.delete(&id).unwrap();
+        assert!(manager.world(&id).is_err());
+    }
+
     #[tokio::test]
     async fn oversized_observations_keep_event_stream_and_durable_receipts_available() {
         use crate::stream::Delivery;
@@ -867,8 +1097,12 @@ mod tests {
         .unwrap();
         let id = manager
             .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
                 request_id: "oversized-events".into(),
                 spec: SimulationSpec {
+                    program: Vec::new(),
+                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -980,8 +1214,12 @@ mod tests {
             .unwrap();
             let resource = manager
                 .submit(SubmitRequest {
+                    metadata: Default::default(),
+                    options: Default::default(),
                     request_id: "oracle-observation".into(),
                     spec: SimulationSpec {
+                        program: Vec::new(),
+                        start_paused: false,
                         seed: Some(1),
                         inputs: InputSource::Project,
                         configuration,
@@ -1061,8 +1299,12 @@ mod tests {
         .unwrap();
         let resource = manager
             .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
                 request_id: "readiness".into(),
                 spec: SimulationSpec {
+                    program: Vec::new(),
+                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,

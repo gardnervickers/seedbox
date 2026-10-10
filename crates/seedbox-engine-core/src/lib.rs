@@ -5,6 +5,7 @@ pub mod control;
 pub mod disk;
 pub mod faults;
 pub mod host_control;
+pub mod input_program;
 pub mod intervention;
 pub mod links;
 pub mod log_index;

@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SeedRangeRequest {
+    #[serde(default)]
+    pub options: crate::ExecutionOptions,
+    #[serde(default)]
+    pub metadata: seedbox_spec::definition::Metadata,
     pub request_id: String,
     pub spec: SimulationSpec,
     pub count: u32,
