@@ -92,6 +92,7 @@ bounded PV clock read after that hint, allowing the guest CPU to stop at a time
 bound without allocating, acquiring another lock, scheduling or enabling
 interrupts. Interrupt delivery stays deferred until the guest permits it.
 
+Each hook charges a 100 ns read and is inactive before PV activation.
 This covers the patched kernel `cpu_relax`/`rep_nop` paths. It does not cover
 arbitrary assembly `PAUSE`, early decompression, the vDSO, or every ARM kernel
 polling loop. Application polling is handled by binary instrumentation.
@@ -181,18 +182,41 @@ the epoch on return instead.
 
 This relies on one guest CPU and controlled guest invalidation boundaries.
 
+Implementation details that must stay aligned:
+
+- The shared PV page stores the epoch at byte 40. The kernel increments it after
+  signal and scheduling work, before restoring application registers, and clears
+  the physical reservation. The VMM increments it before device delivery even
+  when delivery might modify memory and then fail. Ordinary plan publication and
+  backend maintenance leave it unchanged.
+- The translator disables the shortcut for load/store pairs within one block:
+  a guest exception can interrupt that block too. It saves overlapping address
+  and destination registers before the load overwrites them. An explicit
+  reservation-clear instruction (`CLREX`) clears the software reservation.
+- A progress syscall between the application's load and store is a real guest
+  boundary and may cause a repeatable failure. The protocol does not promise
+  zero application-visible retries.
+
 Fault handling is part of the mechanism. A faulting store must reconstruct the
 original application instruction pointer and full register values. That includes
 stores whose success result the application discards and operations using the
 register borrowed by the translator. A spill slot is memory used to save a
 register temporarily; the translator's own slots must not be mistaken for the
-instrumentation client's slots. Separately, two kernel helpers for futexes (the
-primitive behind many application locks) also use exclusive load/store
-sequences. They retry physical failures locally rather than exposing their old
-128-attempt budget through a retryable `EAGAIN` error and rescheduling.
+instrumentation client's slots. The drreg lookup is bounded to its public slot
+range to prevent that confusion. A discarded store status (`WZR`, ARM's
+write-discarding zero register) needs a private temporary register so internal
+retries can still test whether the store succeeded.
 
-See the [complete protocol](progress.md#arm-software-reservations), [translator
-patch](../guest/progress/dynamorio-exclusives.patch), [kernel hook and futex
+Separately, two kernel helpers for futexes (the primitive behind many application
+locks) also use exclusive load/store
+sequences. They retry physical failures locally rather than exposing their old
+128-attempt budget through a retryable `EAGAIN` error and rescheduling. Their
+fault handling, value-mismatch exits and memory-ordering barriers remain intact.
+The audited translator atomics and enabled ARM kernel atomic helpers also retry
+physical failures internally, outside application block counting.
+
+See [runtime integration and acceptance](progress.md#arm-software-reservations),
+[translator patch](../guest/progress/dynamorio-exclusives.patch), [kernel hook and futex
 patches](../kernel-arm64/apply.py), and [exclusive regression
 workload](../harness/acceptance/workloads/exclusives.yaml). The [assembly
 fixtures](../guest/progress/fixtures/) cover widths, pairs, consumption,
@@ -238,9 +262,8 @@ values and other components remain unchanged. The guest itself writes one
 representation; full-state comparison continues to inspect the actual bytes.
 
 This repair does not cover signal-frame saves, direct application XSAVE, or all
-other state components. See [the kernel patch](../kernel/apply.py), [kernel
-notes](../kernel/README.md), and the controls and remaining scope in [the
-progress guide](progress.md#saved-x86-vector-state-representation).
+other state components. See [the kernel patch](../kernel/apply.py) and the
+controls and remaining scope in [the progress guide](progress.md#saved-x86-vector-state-representation).
 
 ## Independent random streams
 

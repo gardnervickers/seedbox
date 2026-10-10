@@ -1,25 +1,14 @@
 # Automatic application progress
 
-The [determinism catalogue](determinism-catalogue.md) places application progress
-and ARM reservations alongside the other guest and VMM mechanisms.
+The [determinism catalogue](determinism-catalogue.md) explains virtual clocks,
+automatic application progress, kernel polling and ARM software reservations.
+This guide records their runtime integration and validation evidence.
 
-Seedbox has one engine mode. Guest time is a PV clock: compute between exits
-costs no virtual time, and time advances at guest exits, syscalls and clock
-reads. Application code that computes without exiting would never advance the
-clock, so every application process runs under a binary translator that
-charges progress for it. Nothing is recompiled, and no application flags,
-environment overrides or `GOMAXPROCS` settings are required or applied.
+Seedbox has one engine mode. Applications run under the translator without
+recompilation or application-specific flags, environment overrides or
+`GOMAXPROCS` settings.
 
 ## Mechanism
-
-`guest/progress/progress.c` is a DynamoRIO 11.3.0 client. It keeps a per-thread
-counter in raw TLS and decrements it at the entry of each translated basic
-block, including shared libraries and JIT code. Every 10,000 block entries it
-issues one raw `getpid` syscall, which the kernel charges as PV progress like
-any other syscall. This counts block entries, not retired instructions; the
-translator's own code and the guest kernel are outside the client's coverage.
-x86 preserves flags through drreg; ARM uses non-flag-setting arithmetic and
-`CBNZ` with a reserved scratch register.
 
 `nix/progress.nix` packages DynamoRIO, drmgr, drreg, the client and a private
 launcher libc. The archive is retained with the prepared inputs and mounted
@@ -27,88 +16,31 @@ read-only under `/seedbox/progress`. The supervisor (`guest/compose-init.c`)
 resolves ordinary ELF and script entrypoints and runs them under `drrun` with
 `-opt_speed -disable_traces` and their original arguments.
 
-The guest kernel covers what the client cannot: the existing syscall hook
-charges each syscall, the x86 `cpu_relax` hook charges bounded clock reads in
-kernel polling loops, and the arm64 kernel charges 1,000 bounded clock reads at
-syscall entry. A loop none of these cover never exits and stalls virtual time
-until the world's wall-time limit; the host watchdog (`--watchdog-ms`)
-interrupts such a run to report on stderr where the guest is stuck, then
-resumes it, so it changes only how soon the report appears, never a result.
+The kernel charges each syscall; arm64 adds 1,000 bounded clock reads at syscall
+entry. See [application progress](determinism-catalogue.md#progress-from-translated-blocks),
+[kernel polling coverage](determinism-catalogue.md#progress-inside-kernel-polling),
+and [watchdog behavior](determinism-catalogue.md#observation-without-guest-progress)
+for the time model and uncovered loops.
 
 ## ARM software reservations
 
-The ARM guest and translator implement a software exclusive reservation. A host
-interrupt can clear the physical exclusive monitor without any observable guest
-exception, so passing the hardware `STXR` failure directly to the application
-would make weak CAS, retry counters and progress accounting nondeterministic.
+The [reservation protocol](determinism-catalogue.md#software-exclusive-reservations)
+is documented in the catalogue, including epoch publication, commit retries,
+fault restoration and the single-CPU assumption.
 
 `nix/dynamorio.nix` builds the ARM core and register-management extensions with
-`guest/progress/dynamorio-exclusives.patch`; x86 continues to use the upstream
-SDK core. The supervisor enables `-ldstex2cas` on ARM. Packing and the client's
-block-local retry exclusions are no longer used: every application block is
-charged, including split exclusive sequences and polling loops.
+`guest/progress/dynamorio-exclusives.patch`; x86 uses the upstream SDK core.
+The supervisor enables `-ldstex2cas` on ARM. Packing and the client's block-local
+retry exclusions are no longer used: every application block is charged,
+including split exclusive sequences and polling loops.
 
-The protocol relies on the existing single guest CPU:
-
-1. The kernel advances an epoch at every return to EL0, after signal/scheduling
-   work and before restoring user registers. It clears the physical monitor and
-   publishes the epoch in `TPIDRRO_EL0`. The epoch lives at byte 40 of the shared
-   PV page; the stopped VMM also advances it at semantic exits and before device
-   delivery, including delivery that can partially modify memory before failing.
-   Host interruptions, ordinary publication and backend debug-unlock maintenance
-   leave it unchanged. VMM updates of `TPIDRRO_EL0` are restricted to stopped EL0;
-   kernel entry code can continue to use that register as scratch at EL1.
-2. A translated exclusive load records the epoch before loading, together with
-   its address, value and size. The same-block optimization is disabled because
-   a guest exception can interrupt even a single translated block. Overlapping
-   address/destination registers are saved before the load overwrites them.
-3. A translated exclusive store checks address and size and consumes the saved
-   reservation. Its commit loop takes a physical exclusive reservation, compares
-   the value, reads the live epoch, and attempts the physical exclusive store.
-   Epoch validation is inside every physical attempt, closing the race between
-   the check and the store. There are no intervening memory accesses inside the
-   physical pair. A changed epoch or value fails the application store. A lost
-   physical reservation with unchanged guest state retries internally, below
-   application control flow and progress accounting. This retry loop is
-   deliberately unbounded: exposing failure after a fixed number of physical
-   retries would make application behavior depend on host interruptions again.
-4. `CLREX` invalidates the software reservation. Every attempted store consumes
-   it, including mismatched stores. `WZR` status uses a private scratch register
-   so physical retries still complete deterministically. Fault reconstruction
-   preserves the original full status register, other borrowed registers and
-   the application PC. Successful stores retain their actual zero/one status.
-
-Fault restoration also bounds drreg's TLS spill-slot lookup to the public slot
-range. Upstream's out-of-range arithmetic can mistake private translator slots
-for public client slots and overwrite correctly restored application registers.
-The paired-store fault regression exercises this interaction with the counting
-client enabled.
-
-The translator virtualizes application reads of `TPIDRRO_EL0` to Linux's native
-64-bit value of zero; applications do not see the epoch or supply any settings.
-The protocol covers translated shared libraries and JIT code as well as static
-binaries. A progress syscall between application load/store instructions is a
-real guest boundary and may cause a deterministic failed store. The aim is
-repeatable execution, not a promise that applications observe zero retries.
-
-The kernel's two futex LL/SC helpers retry physical failures locally rather than
-exhausting a 128-attempt budget and reaching `-EAGAIN`/`cond_resched`. Fault fixups,
-value-mismatch exits and memory barriers remain intact. The audited native
-DynamoRIO atomics and enabled ARM kernel atomic helpers likewise retry physical
-failures internally; they are outside application block counting.
-
-`harness/acceptance/workloads/exclusives.yaml` exercises a weak-CAS counter on
-both architectures. On ARM it also checks all exclusive widths, pairs, address
-overlap, consumed reservations, `CLREX`, syscall/ABA invalidation, discarded
-loads/status, stack and reserved-register operands, and signal contexts for
-faulting single/pair stores. Normal acceptance
-runs it twice and compares full state, then replays it. The assembly fixtures
-live under `guest/progress/fixtures/`. The older `run.sh` remains a native
-upstream packing diagnostic, not the acceptance gate for this protocol.
-
-The investigation is tracked in [#241](https://github.com/gardnervickers/seedbox/issues/241).
-Kernel polling that never reaches a PV operation can still stall virtual time;
-this reservation protocol does not add kernel progress instrumentation.
+[The exclusive acceptance workload](../harness/acceptance/workloads/exclusives.yaml)
+exercises a weak-CAS counter on both architectures and ARM-specific reservation
+and fault cases. Acceptance runs it twice, compares full state, then replays it.
+The [assembly fixtures](../guest/progress/fixtures/) include those cases; their
+older `run.sh` remains a native upstream packing diagnostic, not the acceptance
+gate for the protocol. The investigation is tracked in
+[#241](https://github.com/gardnervickers/seedbox/issues/241).
 
 ## Original reproducer and baseline evidence
 
@@ -211,10 +143,8 @@ bit in a kernel task's saved XSAVE header: zero YMM state was marked present
 in one run and absent in the other. The 256-byte YMM payload was zero in both.
 This is distinct from the observable ARM store-exclusive failures.
 
-The guest kernel now canonicalizes YMM after successful task-state saves.
-It zeroes ignored payload for an absent component and clears the presence bit
-for a present all-zero component. Nonzero state is preserved. Full-state
-comparison remains unchanged.
+The repair and its scope are explained in
+[canonical saved vector state](determinism-catalogue.md#canonical-saved-vector-state).
 
 With that repair, four atomic fresh runs matched across alternating watchdog
 settings, as did replay. A vector-preservation control passed 4,000 nonzero

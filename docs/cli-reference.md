@@ -114,10 +114,8 @@ remain Linux-only; Mac exploration is serial.
 512-byte disk sectors on crash. It is recorded in run identity and replayed
 automatically. It applies to retained disks, including Compose named volumes. See [disk semantics](runtime.md#disk-crash-policy).
 
-Virtual time is a PV clock: compute between exits costs no virtual time; time
-advances at guest exits, syscalls and clock reads, and instrumented application
-code charges a syscall every 10,000 translated blocks
-([automatic progress](progress.md)).
+Virtual time and automatic application progress follow the
+[determinism catalogue](determinism-catalogue.md#progress-from-translated-blocks).
 
 `seedbox help run` lists every option. The guest Python API supports
 [bounded committed console triggers](triggers.md) for future stop/partition
