@@ -1,0 +1,10 @@
+name: timer-races
+services:
+  races:
+    build: .
+    entrypoint: [/races]
+x-seedbox:
+  version: 1
+  seed: 1101
+  limits: {simulated_time: 20s, wall_time: 15m}
+  check: {service: races, exit_code: 0}
