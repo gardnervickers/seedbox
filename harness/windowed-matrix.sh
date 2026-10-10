@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Windowed-scheduler evidence (docs/windowed-scheduler.md). Run as root in the
+# Windowed-scheduler evidence (docs/internals.md#parallel-scheduling). Run as root in the
 # dev shell on a KVM host:
 #
 #   sudo -E env PATH="$PATH" bash harness/windowed-matrix.sh KERNEL VMM WORKERS

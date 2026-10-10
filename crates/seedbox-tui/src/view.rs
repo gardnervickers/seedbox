@@ -1388,7 +1388,11 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
         let (lx, ly) = curve.at(0.36);
         let at = (lx, ly + 0.6);
         if let Some(handle) = &cut {
-            labels.push((at, format!("✂ {handle}"), RED));
+            // One label per handle; a partition cuts many links.
+            let text = format!("✂ {handle}");
+            if !labels.iter().any(|(_, existing, _)| *existing == text) {
+                labels.push((at, text, RED));
+            }
         } else if let Some(link) = shaped {
             labels.push((at, format!("≈ {}", latency(link.policy.latency_ns)), YELLOW));
         } else if involved && !is_down {

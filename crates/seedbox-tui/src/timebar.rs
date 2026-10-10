@@ -82,7 +82,8 @@ impl TimeBar<'_> {
             .unwrap_or(6)
             .clamp(6, 14) as u16;
         let rows = area.height.saturating_sub(2);
-        let lane_rows = rows.saturating_sub(2) as usize;
+        // The ruler always shows; the checkpoint row gives way when space is short.
+        let lane_rows = rows.saturating_sub(if rows >= 4 { 2 } else { 1 }) as usize;
         let hidden = self.lanes.len().saturating_sub(lane_rows);
         let zoom_hint = if self.zoom == 0 {
             "[ ] zoom".to_string()

@@ -4,8 +4,6 @@
 //! implement separate traits; neither CLI parsing nor process-global environment
 //! access belongs in the orchestration layer.
 
-#![doc = include_str!("../README.md")]
-
 pub mod admission;
 mod build_context;
 pub use seedbox_artifacts::bundle;

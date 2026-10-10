@@ -71,7 +71,7 @@ pub struct WorkerRequest {
     /// Runtime checkpoints, strictly increasing; empty for none.
     pub checkpoint_at_ns: Vec<u64>,
     /// Machine threads for the windowed scheduler (performance only;
-    /// docs/windowed-scheduler.md).
+    /// docs/internals.md#parallel-scheduling).
     pub machine_workers: usize,
     /// Write raw console logs while the world runs.
     pub stream_console: bool,

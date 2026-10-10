@@ -2,7 +2,7 @@
 //! [`crate::window`], machines executed serially or on a work-stealing pool,
 //! and the world's policies (faults, runtime control, triggers, scenario
 //! input, lifecycle, forks and checkpoints) carried out by the coordinator
-//! between rounds. See docs/windowed-scheduler.md.
+//! between rounds. See docs/internals.md#parallel-scheduling.
 //!
 //! Every decision is made on the coordinator thread from committed state in
 //! a fixed order: machine reports are absorbed sorted by (time, machine,

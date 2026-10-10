@@ -76,7 +76,7 @@ mod guest {
     fn suite<B: Backend>(name: &str, fast: bool) {
         let input = |key| {
             let path = std::env::var_os(key)
-                .unwrap_or_else(|| panic!("set {key}; see docs/arm64-backends.md"));
+                .unwrap_or_else(|| panic!("set {key}; see docs/internals.md#development-checks"));
             std::fs::read(&path).unwrap()
         };
         let kernel = input("SEEDBOX_ARM64_KERNEL");

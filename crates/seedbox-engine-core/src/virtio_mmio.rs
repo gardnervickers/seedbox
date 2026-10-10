@@ -14,7 +14,8 @@ pub struct Spec {
     pub features: [u32; 2],
 }
 
-/// Existing register behavior; see docs/virtio-transport.md before converging profiles.
+/// Existing register behavior.
+/// See docs/internals.md#device-completion-and-disk-state before converging profiles.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Policy {
