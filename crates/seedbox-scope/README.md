@@ -1,5 +1,7 @@
 # seedbox-scope
 
+![seedbox-scope stepping through the faults of the #60 link-policy run](docs/scope.gif)
+
 A terminal viewer for a finished (or running) seedbox run. Move a cursor through
 simulated time and see, at each moment:
 

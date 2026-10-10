@@ -174,20 +174,13 @@ fn draw_links(frame: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         None => " links: policy (no traffic counters at this time) ".into(),
     };
     let block = Block::bordered().title(title);
-    let width = run
-        .machines
-        .iter()
-        .map(|m| m.len())
-        .max()
-        .unwrap_or(1)
-        .max(16) as u16;
-    let mut header = vec![Cell::from("from \\ to").dark_gray()];
-    header.extend(run.machines.iter().map(|m| Cell::from(m.as_str()).bold()));
-    let rows = run.machines.iter().enumerate().map(|(from, name)| {
-        let mut cells = vec![Cell::from(name.as_str()).bold()];
-        for to in 0..run.machines.len() {
+    let n = run.machines.len();
+    let mut grid: Vec<Vec<Text>> = Vec::new();
+    for (from, name) in run.machines.iter().enumerate() {
+        let mut cells = vec![Text::from(name.as_str()).bold()];
+        for to in 0..n {
             if from == to {
-                cells.push(Cell::from("·").dark_gray());
+                cells.push(Text::from("·").dark_gray());
                 continue;
             }
             let (policy, style) = match &snap.links[&(from, to)] {
@@ -218,12 +211,23 @@ fn draw_links(frame: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             });
             let mut text = Text::from(Line::styled(policy, style));
             text.push_line(traffic.unwrap_or_else(|| Line::from("")));
-            cells.push(Cell::from(text));
+            cells.push(text);
         }
-        Row::new(cells).height(2)
-    });
-    let widths = std::iter::once(Constraint::Length(width.min(12)))
-        .chain(run.machines.iter().map(|_| Constraint::Length(width + 6)));
+        grid.push(cells);
+    }
+    // Each column fits its widest cell, so shaped policies are never cut.
+    let widths: Vec<Constraint> = (0..=n)
+        .map(|c| {
+            let header = if c == 0 { 9 } else { run.machines[c - 1].len() };
+            let cells = grid.iter().map(|r| r[c].width()).max().unwrap_or(0);
+            Constraint::Length((header.max(cells) + 2) as u16)
+        })
+        .collect();
+    let mut header = vec![Cell::from("from \\ to").dark_gray()];
+    header.extend(run.machines.iter().map(|m| Cell::from(m.as_str()).bold()));
+    let rows = grid
+        .into_iter()
+        .map(|r| Row::new(r.into_iter().map(Cell::from)).height(2));
     let table = Table::new(rows, widths)
         .header(Row::new(header))
         .block(block);

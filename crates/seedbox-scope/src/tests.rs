@@ -250,3 +250,18 @@ fn stops_walk_fault_boundaries_in_order() {
     app.previous_stop();
     assert_eq!(app.at_ns, seen[seen.len() - 2]);
 }
+
+#[test]
+fn link_columns_fit_long_shaped_policies() {
+    let app = App::new(link60(), Some(4_000_000_000));
+    let mut terminal = Terminal::new(TestBackend::new(140, 44)).unwrap();
+    terminal.draw(|f| ui::draw(f, &app)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("1ms±500us 50% [lossmid]"));
+}
