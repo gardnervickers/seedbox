@@ -66,6 +66,17 @@ impl Api {
                     }
                 });
             }
+            Request::Preview(id) => {
+                tokio::spawn(async move {
+                    let world = client.world(&id).await.ok().map(Box::new);
+                    let timeline = client
+                        .timeline(&id)
+                        .await
+                        .map(|t| t.entries)
+                        .unwrap_or_default();
+                    let _ = tx.send(Update::Preview(id, world, timeline)).await;
+                });
+            }
             Request::Heal(id, action) => {
                 tokio::spawn(async move {
                     let handle = action["handle"].as_str().unwrap_or("fault").to_owned();

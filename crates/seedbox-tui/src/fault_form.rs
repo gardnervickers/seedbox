@@ -514,6 +514,14 @@ impl FaultForm {
             ));
             let visible = usize::from(height.saturating_sub(12)).max(1);
             let start = self.focus.saturating_sub(visible - 1);
+            let name_width = self
+                .fields
+                .iter()
+                .map(|f| f.path.join(".").chars().count() + if f.required { 2 } else { 0 })
+                .max()
+                .unwrap_or(10)
+                .clamp(10, usize::from(width) / 2)
+                + 2;
             for (index, field) in self.fields.iter().enumerate().skip(start).take(visible) {
                 let unit = field.schema["x-unit"].as_str().unwrap_or("");
                 let options = choices(&field.schema);
@@ -542,7 +550,9 @@ impl FaultForm {
                         format!(
                             "{}{}",
                             field.text,
-                            if unit.is_empty() {
+                            // Bare numbers are in the canonical unit; text that
+                            // already carries a unit is shown as typed.
+                            if unit.is_empty() || field.text.parse::<f64>().is_err() {
                                 String::new()
                             } else {
                                 format!(" {unit}")
@@ -568,7 +578,7 @@ impl FaultForm {
                 let line = Line::from(vec![
                     Span::styled(if on { "› " } else { "  " }, Style::default().fg(ICE)),
                     Span::styled(
-                        format!("{name:<18}"),
+                        format!("{name:<name_width$}"),
                         Style::default().fg(if on { ICE } else { DIM }),
                     ),
                     Span::styled(value, Style::default().fg(value_color)),

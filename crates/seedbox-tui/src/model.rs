@@ -65,6 +65,12 @@ pub enum Update {
     Checkpoints(Vec<Checkpoint>),
     /// Whether the catalogue poll reached the server.
     Connection(bool),
+    /// Faults and timeline of a catalogue row, for its detail pane.
+    Preview(
+        SimulationId,
+        Option<Box<WorldState>>,
+        Vec<seedbox_api::TimelineEntry>,
+    ),
     Comparison(SimulationComparison),
     Submitted {
         title: String,
@@ -92,6 +98,7 @@ pub enum Request {
     Delete(SimulationId),
     Compare(SimulationId, SimulationId),
     RefreshWorld(SimulationId),
+    Preview(SimulationId),
     /// Inject a heal without pausing; heals are admitted at the next boundary.
     Heal(SimulationId, serde_json::Value),
 }
@@ -197,6 +204,15 @@ pub struct Focus {
     /// Per-machine preparation progress reported before execution.
     pub preparation: BTreeMap<String, seedbox_api::PreparationStage>,
 }
+
+/// What the catalogue knows about a simulation beyond its summary.
+pub struct Preview {
+    pub world: Option<WorldState>,
+    pub timeline: Vec<seedbox_api::TimelineEntry>,
+    fetched: Instant,
+}
+
+const PREVIEW_EVERY: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Checkpoint {
@@ -464,6 +480,20 @@ impl Focus {
             })
     }
 
+    /// Whether this run starts from a checkpoint (a branch, or a rerun of one),
+    /// so its machines are restored rather than booted.
+    pub fn restoring(&self) -> bool {
+        self.resource
+            .as_ref()
+            .is_some_and(|r| match &r.spec.inputs {
+                seedbox_api::InputSource::Resolved { definition } => matches!(
+                    definition.start,
+                    seedbox_spec::definition::Start::Checkpoint { .. }
+                ),
+                _ => false,
+            })
+    }
+
     /// Why the simulation is not executing yet, if it is starting up.
     pub fn starting(&self) -> Option<seedbox_api::Phase> {
         let resource = self.resource.as_ref()?;
@@ -570,10 +600,15 @@ pub struct App {
     pub(super) events_scroll: usize,
     /// Show raw server events in place of logs.
     pub(super) events_tab: bool,
+    /// Keys typed while the inject palette is opening.
+    typeahead: Vec<KeyEvent>,
     /// Time bar zoom: each step halves the visible window.
     pub(super) zoom: u32,
     /// Whether the newest catalogue poll reached the server.
     pub connected: bool,
+    /// Observed faults and timelines of catalogue rows, for the detail pane.
+    pub previews: BTreeMap<SimulationId, Preview>,
+    preview_asked: BTreeMap<SimulationId, Instant>,
     pub screen: Screen,
     pub list: Vec<SimulationSummary>,
     pub list_selected: usize,
@@ -593,6 +628,8 @@ pub struct App {
     pub comparison: Option<SimulationComparison>,
     pub baseline: Option<SimulationId>,
     pub confirm_delete: Option<SimulationId>,
+    /// A rerun waiting for its confirming second `r`.
+    confirm_rerun: Option<SimulationId>,
     pub details: bool,
     pub help: bool,
     pub quit: bool,
@@ -895,8 +932,11 @@ impl App {
             logs_scroll: 0,
             events_scroll: 0,
             events_tab: false,
+            typeahead: Vec::new(),
             zoom: 0,
             connected: true,
+            previews: BTreeMap::new(),
+            preview_asked: BTreeMap::new(),
             screen: if focus.is_some() {
                 Screen::Simulation
             } else {
@@ -920,6 +960,7 @@ impl App {
             comparison: None,
             baseline: None,
             confirm_delete: None,
+            confirm_rerun: None,
             details: false,
             help: false,
             quit: false,
@@ -960,7 +1001,15 @@ impl App {
             placed: &mut std::collections::BTreeSet<SimulationId>,
             out: &mut Vec<(usize, &'a SimulationSummary)>,
         ) {
-            for s in list.iter().filter(|s| source_of(s).as_ref() == parent) {
+            let mut children: Vec<&'a SimulationSummary> = list
+                .iter()
+                .filter(|s| source_of(s).as_ref() == parent)
+                .collect();
+            // Top-level runs group by project, newest first within each.
+            if parent.is_none() {
+                children.sort_by(|a, b| a.metadata.name.cmp(&b.metadata.name));
+            }
+            for s in children {
                 if !placed.insert(s.metadata.id.clone()) {
                     continue;
                 }
@@ -982,6 +1031,43 @@ impl App {
             if placed.insert(s.metadata.id.clone()) {
                 out.push((0, s));
                 visit(&self.list, Some(&s.metadata.id), 1, &mut placed, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Fetch the selected catalogue row and its source for the detail pane,
+    /// at most every couple of seconds; completed runs are fetched once.
+    fn preview_requests(&mut self) -> Vec<Request> {
+        if self.screen != Screen::Catalogue || !self.connected {
+            return Vec::new();
+        }
+        let Some(summary) = self
+            .tree()
+            .get(self.list_selected)
+            .map(|(_, s)| (*s).clone())
+        else {
+            return Vec::new();
+        };
+        let mut ids = vec![summary.metadata.id.clone()];
+        ids.extend(source_of(&summary));
+        let mut out = Vec::new();
+        for id in ids {
+            let completed = self
+                .list
+                .iter()
+                .any(|s| s.metadata.id == id && s.status.phase == seedbox_api::Phase::Completed);
+            let fresh = self
+                .previews
+                .get(&id)
+                .is_some_and(|p| completed || p.fetched.elapsed() < PREVIEW_EVERY);
+            let asked = self
+                .preview_asked
+                .get(&id)
+                .is_some_and(|at| at.elapsed() < PREVIEW_EVERY);
+            if !fresh && !asked {
+                self.preview_asked.insert(id.clone(), Instant::now());
+                out.push(Request::Preview(id));
             }
         }
         out
@@ -1018,7 +1104,8 @@ impl App {
         } else {
             0
         };
-        let requests = self.apply_update(update);
+        let mut requests = self.apply_update(update);
+        requests.extend(self.preview_requests());
         if self.logs_scroll > 0 {
             let after = self
                 .focus
@@ -1125,11 +1212,18 @@ impl App {
                             .map(Focus::form_context)
                             .unwrap_or_default();
                         self.fault_form = Some(FaultForm::new(catalogue).with_context(context));
+                        for key in std::mem::take(&mut self.typeahead) {
+                            requests.extend(self.input_raw(Event::Key(key)));
+                        }
+                        if requests.iter().any(|r| matches!(r, Request::Fault(..))) {
+                            self.fault_menu = Some(FaultMenu::Finishing);
+                        }
                     } else {
                         return self.cancel_fault_menu();
                     }
                 }
                 Err(error) => {
+                    self.typeahead.clear();
                     self.fault_menu = Some(FaultMenu::Failed);
                     self.notify(error, Tone::Bad);
                     if self.quit_pending {
@@ -1455,6 +1549,16 @@ impl App {
                 }
             }
             Update::Comparison(comparison) => self.comparison = Some(comparison),
+            Update::Preview(id, world, timeline) => {
+                self.previews.insert(
+                    id,
+                    Preview {
+                        world: world.map(|w| *w),
+                        timeline,
+                        fetched: Instant::now(),
+                    },
+                );
+            }
             Update::Submitted {
                 title,
                 request,
@@ -1527,7 +1631,8 @@ impl App {
     }
 
     pub fn input(&mut self, event: Event) -> Vec<Request> {
-        let requests = self.input_raw(event);
+        let mut requests = self.input_raw(event);
+        requests.extend(self.preview_requests());
         let mut blocked = false;
         let mut requests: Vec<_> = requests
             .into_iter()
@@ -1599,6 +1704,9 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return Vec::new();
         }
+        if key.code != KeyCode::Char('r') {
+            self.confirm_rerun = None;
+        }
         if let Some(name) = self.timeline_name.as_mut() {
             match key.code {
                 KeyCode::Esc => self.timeline_name = None,
@@ -1630,6 +1738,14 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return self.request_quit();
+        }
+        // Keys typed while the palette waits for its pause belong to the
+        // palette; replay them once it opens rather than dropping them.
+        if self.fault_menu == Some(FaultMenu::Opening) && !self.quit_pending {
+            if self.typeahead.len() < 64 {
+                self.typeahead.push(key);
+            }
+            return Vec::new();
         }
         if self.fault_form.is_none() && key.code == KeyCode::Char('q') {
             return self.request_quit();
@@ -1762,6 +1878,18 @@ impl App {
             .rev()
             .find(|(rect, _)| rect.contains((mouse.column, mouse.row).into()))
             .map(|(_, target)| *target);
+        let click = mouse.kind == MouseEventKind::Down(MouseButton::Left);
+        // A click anywhere but on a machine releases the machine filter.
+        if click
+            && self.screen == Screen::Simulation
+            && !matches!(target, Some(HitTarget::Machine(_)))
+        {
+            if let Some(focus) = self.focus.as_mut() {
+                if focus.selected.take().is_some() {
+                    self.logs_scroll = 0;
+                }
+            }
+        }
         let Some(target) = target else {
             return Vec::new();
         };
@@ -1892,6 +2020,21 @@ impl App {
         focus.fault_selected = Some(keys[next].clone());
     }
 
+    /// A rerun creates a new simulation, so it takes a second `r` to confirm.
+    fn rerun(&mut self, id: SimulationId) -> Vec<Request> {
+        if self.confirm_rerun.as_ref() == Some(&id) {
+            self.confirm_rerun = None;
+            self.notify(format!("submitting a rerun of {id}…"), Tone::Info);
+            return vec![Request::Rerun(id)];
+        }
+        self.notify(
+            format!("press r again to rerun {id} as a new simulation"),
+            Tone::Info,
+        );
+        self.confirm_rerun = Some(id);
+        Vec::new()
+    }
+
     fn catalogue_key(&mut self, key: KeyEvent) -> Vec<Request> {
         let rows = self.tree().len();
         let selected = self.selected_summary();
@@ -1910,7 +2053,11 @@ impl App {
                     return self.open(id);
                 }
             }
-            KeyCode::Char('r') => return selected.map(Request::Rerun).into_iter().collect(),
+            KeyCode::Char('r') => {
+                if let Some(id) = selected {
+                    return self.rerun(id);
+                }
+            }
             KeyCode::Char('b') => return selected.map(Request::Branch).into_iter().collect(),
             KeyCode::Char('s') => return selected.map(Request::Stop).into_iter().collect(),
             KeyCode::Char('m') => {
@@ -2114,12 +2261,10 @@ impl App {
                 self.notify("branching from the newest checkpoint…", Tone::Info);
                 return vec![Request::Branch(id.clone())];
             }
-            KeyCode::Char('r') => {
-                self.notify(format!("submitting a rerun of {id}…"), Tone::Info);
-                return vec![Request::Rerun(id.clone())];
-            }
+            KeyCode::Char('r') => return self.rerun(id),
             KeyCode::Char('f') | KeyCode::Char(':') => {
                 if focus.fault_types.is_some() {
+                    self.typeahead.clear();
                     self.fault_menu = Some(FaultMenu::Opening);
                     return vec![Request::BeginFaultMenu(id)];
                 } else {
@@ -2317,10 +2462,16 @@ pub(crate) mod tests {
                 .text
                 .contains("simulation completed"));
         }
+        assert!(app.input(key('r')).is_empty());
+        assert!(app.notice.as_ref().unwrap().text.contains("press r again"));
         assert_eq!(
             app.input(key('r')),
             vec![Request::Rerun("k7m2p9qx".parse().unwrap())]
         );
+        // Any other key cancels a pending confirmation.
+        app.input(key('r'));
+        app.input(key('a'));
+        assert!(app.input(key('r')).is_empty());
     }
 
     #[test]
@@ -3227,5 +3378,46 @@ pub(crate) mod tests {
         more.revision = 3;
         app.apply(Update::World(more));
         assert_eq!(app.focus.as_ref().unwrap().seen, ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn keys_typed_while_the_palette_opens_are_replayed_into_it() {
+        let mut app = app(&["a"]);
+        app.apply(Update::FaultTypes(fault_catalogue("stop")));
+        assert_eq!(app.input(key(':')).len(), 1);
+        for c in "zzz".chars() {
+            assert!(app.input(key(c)).is_empty());
+        }
+        app.apply(Update::FaultMenuReady(Ok(PlaybackRate::Unlimited)));
+        // The filter matches nothing, so Enter cannot pick an entry by accident.
+        assert!(app
+            .input(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE
+            )))
+            .is_empty());
+        assert!(app.fault_form.is_some());
+    }
+
+    #[test]
+    fn clicking_off_a_machine_shows_every_machines_logs() {
+        let mut app = app(&["a", "b"]);
+        assert_eq!(app.focus.as_ref().unwrap().selected.as_deref(), Some("a"));
+        app.hitboxes.borrow_mut().push((
+            ratatui::layout::Rect::new(0, 0, 10, 1),
+            HitTarget::Machine(1),
+        ));
+        let click = |column, row| {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.input(click(2, 0));
+        assert_eq!(app.focus.as_ref().unwrap().selected.as_deref(), Some("b"));
+        app.input(click(40, 20));
+        assert_eq!(app.focus.as_ref().unwrap().selected, None);
     }
 }

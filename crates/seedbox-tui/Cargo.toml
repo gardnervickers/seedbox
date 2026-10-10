@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 seedbox-api.workspace = true
+seedbox-spec.workspace = true
 seedbox-client.workspace = true
 tokio.workspace = true
 futures-util.workspace = true

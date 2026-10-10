@@ -156,7 +156,17 @@ impl TimeBar<'_> {
                 .filter(|(_, item)| &item.lane == lane)
                 .collect()
         };
-        for (lane_index, lane) in self.lanes.iter().take(lane_rows).enumerate() {
+        // Short of rows, lanes with something still open come first.
+        let mut lanes: Vec<&Lane> = self.lanes.iter().collect();
+        if hidden > 0 {
+            let open = |lane: &Lane| {
+                self.activity.rows().any(|item| {
+                    &item.lane == lane && (item.open() || item.state == State::Upcoming)
+                })
+            };
+            lanes.sort_by_key(|lane| !open(lane));
+        }
+        for (lane_index, lane) in lanes.into_iter().take(lane_rows).enumerate() {
             let y = inner.y + 1 + lane_index as u16;
             let mut cells: Vec<(char, Style)> = vec![(' ', Style::new()); track];
             if let Some(x) = playhead {
@@ -222,6 +232,10 @@ impl TimeBar<'_> {
                 }
                 for cell in cells.iter_mut().take(to + 1).skip(from) {
                     *cell = (fill, style);
+                }
+                // The leading edge of an open span breathes.
+                if item.open() && crate::view::tick(500).is_multiple_of(2) {
+                    cells[to] = ('▓', style);
                 }
                 hitboxes.borrow_mut().push((
                     Rect::new(

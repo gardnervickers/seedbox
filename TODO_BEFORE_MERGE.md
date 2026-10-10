@@ -59,6 +59,13 @@ item says what it does instead.
 - **Fault descriptors have no category.** The inject palette can only group
   "heal" and "inject"; a `category` (network, machine, application, clock) on
   `FaultDescriptor` would let it group the rest without guessing from names.
+- **No way to preview a fault's effect.** The palette outlines the machines a
+  fault names but cannot say which links it cuts or what it leaves isolated
+  without knowing each fault's meaning. A dry-run endpoint returning the links
+  and machines an action would change would let it show that before submitting.
+- **Comparison does not say where runs diverge.** The catalogue lists which
+  faults an edited run removed or added, but "identical until 12.075 s" needs
+  the server's comparison to report the first differing boundary.
 - **`examples/README.md` is stale.** It refers to `compose.yaml` and
   `tools/build.py`; the etcd example now uses `seedbox.yaml`.
 

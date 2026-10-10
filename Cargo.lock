@@ -2084,6 +2084,7 @@ dependencies = [
  "ratatui",
  "seedbox-api",
  "seedbox-client",
+ "seedbox-spec",
  "serde",
  "serde_json",
  "serde_yaml_ng",

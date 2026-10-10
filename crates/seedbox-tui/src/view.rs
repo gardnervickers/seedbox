@@ -130,6 +130,16 @@ pub fn duration(ns: u64) -> String {
     }
 }
 
+/// A short elapsed time for tight spaces: seconds, then whole minutes or hours.
+fn coarse(ns: u64) -> String {
+    let seconds = ns / 1_000_000_000;
+    match seconds {
+        0..=59 => duration(ns),
+        60..=3599 => format!("{}m", seconds / 60),
+        _ => format!("{}h", seconds / 3600),
+    }
+}
+
 fn count(n: u64) -> String {
     match n {
         0..=9_999 => n.to_string(),
@@ -813,6 +823,47 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
     status_bar(frame, focus, &activity, status, sim_now, app.details);
 }
 
+/// Blend smoothly between two colours over `period_ms`, for things in progress.
+fn breathe(a: Color, b: Color, period_ms: u128) -> Color {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let t = ((ms % period_ms) as f64 / period_ms as f64 * std::f64::consts::TAU).sin() * 0.5 + 0.5;
+    match (a, b) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            let mix =
+                |x: u8, y: u8| (f64::from(x) + (f64::from(y) - f64::from(x)) * t).round() as u8;
+            Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
+        }
+        _ => a,
+    }
+}
+
+/// A light sweeping back and forth across `width` cells, for a machine that
+/// is still booting or restoring.
+fn scanner(width: usize) -> Vec<Span<'static>> {
+    let width = width.max(4);
+    let bounce = 2 * width - 2;
+    let position = tick(45) % bounce;
+    let head = if position < width {
+        position
+    } else {
+        bounce - position
+    };
+    (0..width)
+        .map(|i| {
+            let color = match i.abs_diff(head) {
+                0 => ICE_BRIGHT,
+                1..=2 => ICE,
+                3..=5 => ICE_MID,
+                6..=9 => ICE_DIM,
+                _ => FAINT,
+            };
+            Span::styled("━", Style::new().fg(color))
+        })
+        .collect()
+}
+
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 fn spinner() -> char {
@@ -964,7 +1015,7 @@ fn startup(frame: &mut Frame, app: &App, focus: &Focus, phase: Phase, area: Rect
                     .unwrap_or(4)
                     + 2;
                 for m in &world.machines {
-                    let (state, color) = condition(m);
+                    let (state, color) = condition(focus, m);
                     lines.push(Line::from(vec![
                         Span::styled(pad(&m.name, width), Style::new().fg(machine_color(&m.name))),
                         Span::styled(state, Style::new().fg(color)),
@@ -1012,54 +1063,159 @@ pub fn layout(slots: usize, area: Rect, box_width: u16, box_height: u16) -> Vec<
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pattern {
     Solid,
-    Dashed,
+    /// Dashes that march along the link, for cut links.
+    Marching,
     Dotted,
 }
 
-/// A link drawn on the braille canvas. Lines that cross an earlier link leave
-/// a small gap, so crossings read as bridges rather than knots.
-struct Link {
+/// Wall-clock phase for animation, in steps of `period_ms`.
+pub(crate) fn tick(period_ms: u128) -> usize {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| (d.as_millis() / period_ms) as usize)
+}
+
+/// A gentle quadratic curve between two machines. Curves bow away from the
+/// centre of the map so the middle stays readable.
+#[derive(Clone, Copy)]
+struct Curve {
     from: (f64, f64),
+    control: (f64, f64),
     to: (f64, f64),
+}
+
+impl Curve {
+    fn new(from: (f64, f64), to: (f64, f64), centre: (f64, f64), bias: f64) -> Self {
+        // Work in visual space, where a cell is about twice as tall as wide,
+        // so curves bow by the same amount whatever their direction.
+        const ASPECT: f64 = 2.0;
+        let visual = |p: (f64, f64)| (p.0, p.1 * ASPECT);
+        let (from_v, to_v, centre_v) = (visual(from), visual(to), visual(centre));
+        let control = Self::control(from_v, to_v, centre_v, bias);
+        Self {
+            from,
+            control: (control.0, control.1 / ASPECT),
+            to,
+        }
+    }
+
+    fn control(from: (f64, f64), to: (f64, f64), centre: (f64, f64), bias: f64) -> (f64, f64) {
+        let mid = ((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let length = (dx * dx + dy * dy).sqrt().max(1e-9);
+        let normal = (-dy / length, dx / length);
+        let outward = (mid.0 - centre.0) * normal.0 + (mid.1 - centre.1) * normal.1;
+        let sign = if outward.abs() < length * 0.05 {
+            bias
+        } else {
+            outward.signum()
+        };
+        let bow = length * 0.1 * sign;
+        (mid.0 + normal.0 * bow, mid.1 + normal.1 * bow)
+    }
+
+    fn at(&self, t: f64) -> (f64, f64) {
+        let u = 1.0 - t;
+        (
+            u * u * self.from.0 + 2.0 * u * t * self.control.0 + t * t * self.to.0,
+            u * u * self.from.1 + 2.0 * u * t * self.control.1 + t * t * self.to.1,
+        )
+    }
+
+    fn segments(&self, n: usize) -> Vec<((f64, f64), (f64, f64))> {
+        (0..n)
+            .map(|i| {
+                (
+                    self.at(i as f64 / n as f64),
+                    self.at((i + 1) as f64 / n as f64),
+                )
+            })
+            .collect()
+    }
+
+    /// Where this curve crosses another, if it does.
+    fn crossings(&self, other: &Curve) -> Vec<(f64, f64)> {
+        let mut out = Vec::new();
+        for a in self.segments(24) {
+            for b in other.segments(24) {
+                if let Some(p) = intersection(a, b) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A link drawn on the braille canvas: a curve whose weight follows traffic.
+/// Lines that cross an earlier link leave a small gap, so crossings read as
+/// bridges rather than knots.
+struct Link {
+    curve: Curve,
     color: Color,
     pattern: Pattern,
+    weight: u8,
     gaps: Vec<(f64, f64)>,
 }
 
 impl Shape for Link {
     fn draw(&self, painter: &mut Painter) {
-        let (Some((x1, y1)), Some((x2, y2))) = (
-            painter.get_point(self.from.0, self.from.1),
-            painter.get_point(self.to.0, self.to.1),
+        let (Some(a), Some(c), Some(b)) = (
+            painter.get_point(self.curve.from.0, self.curve.from.1),
+            painter.get_point(self.curve.control.0, self.curve.control.1),
+            painter.get_point(self.curve.to.0, self.curve.to.1),
         ) else {
             return;
         };
+        let distance =
+            |p: (usize, usize), q: (usize, usize)| p.0.abs_diff(q.0).max(p.1.abs_diff(q.1));
+        let steps = (distance(a, c) + distance(c, b)).max(1);
         let gaps: Vec<(usize, usize)> = self
             .gaps
             .iter()
-            .filter_map(|(x, y)| painter.get_point(*x, *y))
+            .filter_map(|p| painter.get_point(p.0, p.1))
             .collect();
-        let steps = x1.abs_diff(x2).max(y1.abs_diff(y2)).max(1);
+        let march = tick(110);
+        let mut points: Vec<(usize, usize)> = Vec::with_capacity(steps + 1);
         for i in 0..=steps {
             let visible = match self.pattern {
                 Pattern::Solid => true,
-                Pattern::Dashed => i % 6 < 4,
+                Pattern::Marching => (i + steps * 6 - march % 6) % 6 < 4,
                 Pattern::Dotted => i % 4 == 0,
             };
             if !visible {
                 continue;
             }
-            let x =
-                (x1 as f64 + (x2 as f64 - x1 as f64) * i as f64 / steps as f64).round() as usize;
-            let y =
-                (y1 as f64 + (y2 as f64 - y1 as f64) * i as f64 / steps as f64).round() as usize;
-            if gaps
-                .iter()
-                .any(|(gx, gy)| gx.abs_diff(x) <= 3 && gy.abs_diff(y) <= 3)
+            let (x, y) = self.curve.at(i as f64 / steps as f64);
+            let Some(point) = painter.get_point(x, y) else {
+                continue;
+            };
+            if points.last() == Some(&point)
+                || gaps
+                    .iter()
+                    .any(|(gx, gy)| gx.abs_diff(point.0) <= 3 && gy.abs_diff(point.1) <= 3)
             {
                 continue;
             }
+            points.push(point);
+        }
+        // Heavier links add a dot beside the line, perpendicular to its run,
+        // so weight reads as thickness rather than a solid block.
+        let steep = a.0.abs_diff(b.0) < a.1.abs_diff(b.1);
+        for (i, (x, y)) in points.into_iter().enumerate() {
             painter.paint(x, y, self.color);
+            if self.weight >= 2 {
+                let beside = if steep { (x + 1, y) } else { (x, y + 1) };
+                painter.paint(beside.0, beside.1, self.color);
+            }
+            if self.weight >= 3 && i % 2 == 0 {
+                let other = if steep {
+                    (x.saturating_sub(1), y)
+                } else {
+                    (x, y.saturating_sub(1))
+                };
+                painter.paint(other.0, other.1, self.color);
+            }
         }
     }
 }
@@ -1073,7 +1229,7 @@ fn intersection(a: ((f64, f64), (f64, f64)), b: ((f64, f64), (f64, f64))) -> Opt
     }
     let t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denominator;
     let u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denominator;
-    ((0.05..=0.95).contains(&t) && (0.05..=0.95).contains(&u))
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u))
         .then_some((x1 + t * (x2 - x1), y1 + t * (y2 - y1)))
 }
 
@@ -1092,6 +1248,15 @@ fn traffic_color(per_second: f64, involved: bool) -> Color {
         _ => 3,
     } + usize::from(involved);
     [FAINT, ICE_DIM, ICE_MID, ICE, ICE_BRIGHT][level.min(4)]
+}
+
+/// Line weight on a log scale relative to the busiest link.
+fn traffic_weight(per_second: f64, busiest: f64) -> u8 {
+    if per_second < 0.5 || busiest < 0.5 {
+        return 1;
+    }
+    let share = (per_second + 1.0).ln() / (busiest + 1.0).ln();
+    1 + (share * 2.0).round() as u8
 }
 
 fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: Rect, now: u64) {
@@ -1177,9 +1342,16 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
             pairs.push(key);
         }
     }
+    let busiest = pairs
+        .iter()
+        .map(|(a, b)| focus.traffic.link_rate(a, b) + focus.traffic.link_rate(b, a))
+        .fold(0.0f64, f64::max);
+    let map_centre = (w / 2.0, h / 2.0);
     let mut drawn: Vec<Link> = Vec::new();
+    let mut curves: Vec<((String, String), Curve)> = Vec::new();
     let mut labels: Vec<((f64, f64), String, Color)> = Vec::new();
-    for (a, b) in &pairs {
+    let pulse = tick(500).is_multiple_of(2);
+    for (index, (a, b)) in pairs.iter().enumerate() {
         let (Some(ca), Some(cb)) = (centre(a), centre(b)) else {
             continue;
         };
@@ -1193,26 +1365,28 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
         let is_down = machine(a).is_some_and(down) || machine(b).is_some_and(down);
         let involved = selected.is_some_and(|s| s == a || s == b);
         let traffic = focus.traffic.link_rate(a, b) + focus.traffic.link_rate(b, a);
-        let (color, pattern) = if cut.is_some() {
-            (RED, Pattern::Dashed)
+        let (color, pattern, weight) = if cut.is_some() {
+            (if pulse { RED } else { RED_SOFT }, Pattern::Marching, 1)
         } else if is_down {
-            (FAINT, Pattern::Dotted)
+            (FAINT, Pattern::Dotted, 1)
         } else if shaped.is_some() {
-            (YELLOW, Pattern::Solid)
+            (YELLOW, Pattern::Solid, traffic_weight(traffic, busiest))
         } else {
-            (traffic_color(traffic, involved), Pattern::Solid)
+            (
+                traffic_color(traffic, involved),
+                Pattern::Solid,
+                traffic_weight(traffic, busiest),
+            )
         };
-        let from = to_canvas(ca);
-        let to = to_canvas(cb);
+        let bias = if index % 2 == 0 { 1.0 } else { -1.0 };
+        let curve = Curve::new(to_canvas(ca), to_canvas(cb), map_centre, bias);
         let gaps = drawn
             .iter()
-            .filter_map(|other| intersection((from, to), (other.from, other.to)))
+            .flat_map(|other| curve.crossings(&other.curve))
             .collect();
         // Labels sit off-centre so they avoid the middle, where lines cross.
-        let at = (
-            from.0 + (to.0 - from.0) * 0.36,
-            from.1 + (to.1 - from.1) * 0.36 + 0.6,
-        );
+        let (lx, ly) = curve.at(0.36);
+        let at = (lx, ly + 0.6);
         if let Some(handle) = &cut {
             labels.push((at, format!("✂ {handle}"), RED));
         } else if let Some(link) = shaped {
@@ -1220,14 +1394,27 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
         } else if involved && !is_down {
             labels.push((at, format!("{}/s", rate(traffic)), ICE));
         }
+        curves.push(((a.clone(), b.clone()), curve));
         drawn.push(Link {
-            from,
-            to,
+            curve,
             color,
             pattern,
+            weight,
             gaps,
         });
     }
+    // Frames travel the same curve as their link, in either direction.
+    let along = |from: &str, to: &str, t: f64| {
+        curves.iter().find_map(|((a, b), curve)| {
+            if a == from && b == to {
+                Some(curve.at(t))
+            } else if a == to && b == from {
+                Some(curve.at(1.0 - t))
+            } else {
+                None
+            }
+        })
+    };
     let canvas = Canvas::default()
         .marker(Marker::Braille)
         .x_bounds([0.0, w])
@@ -1246,9 +1433,6 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
                 );
             }
             for frame in &focus.frames {
-                let (Some(a), Some(b)) = (centre(&frame.from), centre(&frame.to)) else {
-                    continue;
-                };
                 let span = frame
                     .due_ns
                     .unwrap_or(frame.sent_ns + 1_000_000)
@@ -1271,23 +1455,18 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
                     }
                 };
                 let progress = progress.clamp(0.0, 1.0);
-                let (ax, ay) = to_canvas(a);
-                let (bx, by) = to_canvas(b);
                 let (lo, hi) = (0.2, 0.8);
                 let t = lo + (hi - lo) * progress;
                 if frame.fate == FrameFate::Scheduled && progress > 0.06 {
-                    let tt = lo + (hi - lo) * (progress - 0.06);
-                    ctx.print(
-                        ax + (bx - ax) * tt,
-                        ay + (by - ay) * tt,
-                        Span::styled("•", Style::new().fg(dim(color))),
-                    );
+                    if let Some((x, y)) =
+                        along(&frame.from, &frame.to, lo + (hi - lo) * (progress - 0.06))
+                    {
+                        ctx.print(x, y, Span::styled("•", Style::new().fg(dim(color))));
+                    }
                 }
-                ctx.print(
-                    ax + (bx - ax) * t,
-                    ay + (by - ay) * t,
-                    Span::styled(glyph, Style::new().fg(color).bold()),
-                );
+                if let Some((x, y)) = along(&frame.from, &frame.to, t) {
+                    ctx.print(x, y, Span::styled(glyph, Style::new().fg(color).bold()));
+                }
             }
         });
     frame.render_widget(canvas, inner);
@@ -1412,8 +1591,11 @@ fn node_border(focus: &Focus, m: &MachineState, target: bool) -> (Color, bool) {
 }
 
 fn badge(frame: &mut Frame, focus: &Focus, m: &MachineState, rect: Rect, target: bool) {
-    let (state, color) = condition(m);
+    let (state, mut color) = condition(focus, m);
     let (border, selected) = node_border(focus, m, target);
+    if m.condition == MachineCondition::Starting && !focus.terminal() {
+        color = breathe(ICE_DIM, ICE_BRIGHT, 1600);
+    }
     let glyph = state.chars().next().unwrap_or('●');
     let line = Line::from(vec![
         Span::styled(
@@ -1448,8 +1630,14 @@ fn node(
     target: bool,
     now: u64,
 ) {
-    let (border, selected) = node_border(focus, m, target);
-    let (state, color) = condition(m);
+    let (mut border, selected) = node_border(focus, m, target);
+    let starting = m.condition == MachineCondition::Starting && !focus.terminal();
+    if !target && !selected && last.is_some_and(Item::open) && tick(500).is_multiple_of(2) {
+        border = last.map_or(border, |item| span_color(&item.action, false));
+    } else if !target && !selected && starting {
+        border = breathe(BORDER_HI, ICE, 1600);
+    }
+    let (state, color) = condition(focus, m);
     let mut title = vec![Span::styled(
         format!(" {} ", m.name),
         Style::new()
@@ -1497,16 +1685,32 @@ fn node(
             ),
             Span::styled(format!("↓{}/s", rate(rx)), Style::new().fg(DIM)),
         ]),
-        Line::styled(
-            sparkline(focus, &m.name, inner_width),
-            Style::new().fg(if down(m) {
-                FAINT
-            } else {
-                dim(machine_color(&m.name))
-            }),
-        ),
+        if starting {
+            Line::from(scanner(inner_width))
+        } else {
+            Line::styled(
+                sparkline(focus, &m.name, inner_width),
+                Style::new().fg(if down(m) {
+                    FAINT
+                } else {
+                    dim(machine_color(&m.name))
+                }),
+            )
+        },
     ];
-    if let Some(item) = last {
+    if starting && last.is_none_or(|item| !item.open()) {
+        let detail = match focus
+            .resource
+            .as_ref()
+            .and_then(|r| r.metadata.annotations.get("branch-at-ns"))
+            .and_then(|ns| ns.parse::<u64>().ok())
+        {
+            Some(at) if focus.restoring() => format!("from checkpoint @ {}", short_time(at)),
+            _ if focus.restoring() => "from a checkpoint".into(),
+            _ => "waiting for its ready signal".into(),
+        };
+        lines.push(Line::styled(detail, Style::new().fg(FAINT_TEXT)));
+    } else if let Some(item) = last {
         let ago = now.saturating_sub(item.end_ns.unwrap_or(item.start_ns));
         let color = if item.open() {
             span_color(&item.action, true)
@@ -1516,7 +1720,7 @@ fn node(
         let suffix = if item.open() {
             format!(" · {}", duration(now.saturating_sub(item.start_ns)))
         } else {
-            format!(" · {} ago", duration(ago))
+            format!(" · {} ago", coarse(ago))
         };
         lines.push(Line::styled(
             format!(
@@ -1531,9 +1735,21 @@ fn node(
     frame.render_widget(Paragraph::new(lines).block(b), rect);
 }
 
-fn condition(m: &MachineState) -> (String, Color) {
+fn condition(focus: &Focus, m: &MachineState) -> (String, Color) {
     let mut text = match m.condition {
-        MachineCondition::Starting => ("◌ starting".to_string(), YELLOW),
+        MachineCondition::Starting if focus.terminal() => ("◌ never ready".to_string(), FAINT_TEXT),
+        MachineCondition::Starting => (
+            format!(
+                "{} {}",
+                spinner(),
+                if focus.restoring() {
+                    "restoring"
+                } else {
+                    "booting"
+                }
+            ),
+            ICE,
+        ),
         MachineCondition::Ready => ("● ready".to_string(), GREEN),
         MachineCondition::Paused => ("❚❚ paused".to_string(), AMBER),
         MachineCondition::Crashed => ("✕ crashed".to_string(), RED),
@@ -1616,7 +1832,7 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
     let spark_width = width.saturating_sub(name_width + 2 + 14 + 14 + 6 + 2);
     for (index, m) in world.machines.iter().enumerate() {
         let selected = focus.selected.as_deref() == Some(m.name.as_str());
-        let (state, color) = condition(m);
+        let (state, color) = condition(focus, m);
         let dropped: u64 = world
             .links
             .iter()
@@ -1828,6 +2044,9 @@ fn faults(
                 let strong = matches!(item.state, State::Active | State::Down | State::Upcoming)
                     || item.state == State::Failed;
                 let glyph_color = match item.state {
+                    State::Active | State::Down if tick(500).is_multiple_of(2) => {
+                        span_color(&item.action, false)
+                    }
                     State::Upcoming => ICE,
                     State::Down => RED,
                     State::Failed => RED,
@@ -2145,10 +2364,157 @@ fn kind(s: &SimulationSummary) -> (String, Color) {
     }
 }
 
+/// A one-line strip of a run's faults over simulated time, with a legend of
+/// the most recent ones beneath.
+fn mini_timeline(
+    preview: &crate::model::Preview,
+    sim_time: u64,
+    completed: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let activity =
+        crate::activity::derive(preview.world.as_ref(), &preview.timeline, &[], sim_time);
+    let mut items: Vec<&Item> = activity.rows().collect();
+    items.sort_by_key(|item| item.start_ns);
+    // A finished run never reaches what is still scheduled.
+    let unreached = |item: &Item| completed && item.state == State::Upcoming;
+    if items.is_empty() {
+        return vec![Line::styled("no faults", Style::new().fg(FAINT_TEXT))];
+    }
+    let end = items
+        .iter()
+        .map(|item| item.end_ns.unwrap_or(item.start_ns))
+        .chain(std::iter::once(sim_time))
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64
+        * 1.02;
+    let width = width.max(8);
+    let column = |at: u64| ((at as f64 / end) * (width - 1) as f64).round() as usize;
+    let mut cells: Vec<(char, Color)> = vec![('─', FAINT); width];
+    for item in &items {
+        let from = column(item.start_ns).min(width - 1);
+        let color = match item.state {
+            _ if unreached(item) => FAINT_TEXT,
+            State::Upcoming => ICE,
+            State::Down | State::Failed => RED,
+            _ => span_color(&item.action, true),
+        };
+        if item.is_span() {
+            let to = column(item.end_ns.unwrap_or(sim_time)).min(width - 1);
+            for cell in cells.iter_mut().take(to + 1).skip(from) {
+                *cell = ('━', dim(color));
+            }
+        }
+        cells[from] = (glyph(&item.action, item.state), color);
+    }
+    let now = column(sim_time).min(width - 1);
+    if cells[now].0 == '─' {
+        cells[now] = ('│', ICE);
+    }
+    let strip: Vec<Span> = cells
+        .into_iter()
+        .map(|(c, color)| Span::styled(c.to_string(), Style::new().fg(color)))
+        .collect();
+    let mut lines = vec![Line::from(strip)];
+    for item in items.iter().take(5) {
+        let missed = unreached(item);
+        let glyph_color = if missed {
+            FAINT_TEXT
+        } else if item.state == State::Upcoming {
+            ICE
+        } else {
+            span_color(&item.action, true)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", glyph(&item.action, item.state)),
+                Style::new().fg(glyph_color),
+            ),
+            Span::styled(
+                format!("{:<10}", item.action),
+                Style::new().fg(if missed { FAINT_TEXT } else { TEXT }),
+            ),
+            Span::styled(format!("{:<14}", item.target), Style::new().fg(DIM)),
+            Span::styled(
+                format!(
+                    "{}{}",
+                    short_time(item.start_ns),
+                    if missed { "  not reached" } else { "" }
+                ),
+                Style::new().fg(FAINT_TEXT),
+            ),
+        ]));
+    }
+    if items.len() > 5 {
+        lines.push(Line::styled(
+            format!("… {} more", items.len() - 5),
+            Style::new().fg(FAINT_TEXT),
+        ));
+    }
+    lines
+}
+
+/// Faults removed from or added to a run relative to its source, by action
+/// and time.
+fn changes(
+    source: &[seedbox_api::TimelineEntry],
+    run: &[seedbox_api::TimelineEntry],
+    width: usize,
+) -> Vec<Line<'static>> {
+    let key = |e: &seedbox_api::TimelineEntry| (e.at_ns, e.action.to_string());
+    let line = |sign: &str, color: Color, e: &seedbox_api::TimelineEntry| {
+        let text = format!(
+            "{sign} {:<10}{:<14}@ {}",
+            crate::activity::action_name(&e.action),
+            crate::activity::fault_target(&e.action),
+            short_time(e.at_ns)
+        );
+        Line::styled(
+            text.chars().take(width).collect::<String>(),
+            Style::new().fg(color),
+        )
+    };
+    let mut out: Vec<Line> = Vec::new();
+    for entry in source {
+        if !run.iter().any(|other| key(other) == key(entry)) {
+            out.push(line("−", RED, entry));
+        }
+    }
+    for entry in run {
+        if !source.iter().any(|other| key(other) == key(entry)) {
+            out.push(line("+", GREEN, entry));
+        }
+    }
+    if out.is_empty() {
+        out.push(Line::styled(
+            "same faults as its source",
+            Style::new().fg(FAINT_TEXT),
+        ));
+    }
+    out
+}
+
+/// Whether a listed simulation is running but held at a pause.
+fn summary_paused(s: &SimulationSummary) -> bool {
+    s.status.phase == Phase::Running
+        && s.status
+            .playback
+            .as_ref()
+            .is_some_and(|p| !p.state.terminal && matches!(p.state.rate, PlaybackRate::Paused))
+}
+
 fn summary_phase(s: &SimulationSummary) -> (&'static str, Color) {
     match s.status.phase {
         Phase::Queued => ("◌ queued", AMBER),
         Phase::Preparing => ("◌ preparing", YELLOW),
+        Phase::Running if s.status.stage == Some(seedbox_api::Stage::Booting) => {
+            ("◌ booting", YELLOW)
+        }
+        Phase::Running if s.status.playback.as_ref().is_some_and(|p| p.state.stepping) => {
+            ("▷ stepping", YELLOW)
+        }
+        Phase::Running if summary_paused(s) => ("❚❚ paused", AMBER),
         Phase::Running => ("● running", GREEN),
         Phase::Finalizing => ("◌ finalizing", YELLOW),
         Phase::Completed => ("■ completed", DIM),
@@ -2172,10 +2538,19 @@ fn catalogue(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|s| s.status.phase == Phase::Running)
         .count();
+    let paused = app.list.iter().filter(|s| summary_paused(s)).count();
     let b = block("simulations", true)
         .title(
             Line::styled(
-                format!(" {} · {running} running ", tree.len()),
+                if paused > 0 {
+                    format!(
+                        " {} · {} running · {paused} paused ",
+                        tree.len(),
+                        running - paused
+                    )
+                } else {
+                    format!(" {} · {running} running ", tree.len())
+                },
                 Style::new().fg(DIM),
             )
             .right_aligned(),
@@ -2186,12 +2561,8 @@ fn catalogue(frame: &mut Frame, app: &App, area: Rect) {
     let width = inner.width as usize;
     let show_kind = width >= 70;
     let show_age = width >= 80;
-    let show_name = width >= 96;
     let id_width = 26;
     let mut header = format!("  {}", pad("ID", id_width));
-    if show_name {
-        header.push_str(&pad("NAME", 18));
-    }
     if show_kind {
         header.push_str(&pad("KIND", 18));
     }
@@ -2203,8 +2574,37 @@ fn catalogue(frame: &mut Frame, app: &App, area: Rect) {
     }
     let mut lines = vec![Line::styled(header, Style::new().fg(FAINT_TEXT))];
     let visible = inner.height.saturating_sub(1) as usize;
-    let start = app.list_selected.saturating_sub(visible.saturating_sub(1));
-    for (row, (depth, s)) in tree.iter().enumerate().skip(start).take(visible) {
+    let start = app.list_selected.saturating_sub(visible.saturating_sub(3));
+    let mut group: Option<&str> = None;
+    for (row, (depth, s)) in tree.iter().enumerate().skip(start) {
+        // Top-level runs are grouped under their project's name.
+        let name = if s.metadata.name.is_empty() {
+            "unnamed"
+        } else {
+            s.metadata.name.as_str()
+        };
+        if *depth == 0 && group != Some(name) {
+            if group.is_some() {
+                lines.push(Line::raw(""));
+            }
+            group = Some(name);
+            let runs = app
+                .list
+                .iter()
+                .filter(|other| other.metadata.name == s.metadata.name)
+                .count();
+            lines.push(Line::from(vec![
+                Span::styled("▍", Style::new().fg(ICE)),
+                Span::styled(format!("{name}  "), Style::new().fg(WHITE).bold()),
+                Span::styled(
+                    format!("{runs} run{}", if runs == 1 { "" } else { "s" }),
+                    Style::new().fg(FAINT_TEXT),
+                ),
+            ]));
+        }
+        if lines.len() >= inner.height as usize {
+            break;
+        }
         let selected = row == app.list_selected;
         let marked = app.baseline.as_ref() == Some(&s.metadata.id);
         let prefix = if *depth > 0 {
@@ -2241,17 +2641,6 @@ fn catalogue(frame: &mut Frame, app: &App, area: Rect) {
                     }),
             ),
         ];
-        if show_name {
-            let name = if s.metadata.name.is_empty() {
-                "—"
-            } else {
-                &s.metadata.name
-            };
-            spans.push(Span::styled(
-                pad(name, 18),
-                Style::new().fg(if *depth == 0 { TEXT } else { DIM }),
-            ));
-        }
         if show_kind {
             spans.push(Span::styled(
                 pad(&kind_text, 18),
@@ -2270,7 +2659,7 @@ fn catalogue(frame: &mut Frame, app: &App, area: Rect) {
                 Style::new().fg(DIM),
             ));
         }
-        let y = inner.y + 1 + (row - start) as u16;
+        let y = inner.y + lines.len() as u16;
         app.hitboxes.borrow_mut().push((
             Rect::new(inner.x, y, inner.width, 1),
             HitTarget::Catalogue(row),
@@ -2398,6 +2787,27 @@ fn detail(frame: &mut Frame, app: &App, area: Rect) {
             format!("{running} running on this server"),
             AMBER,
         ));
+    }
+    let inner_width = area.width.saturating_sub(2) as usize;
+    if let Some(preview) = app.previews.get(&s.metadata.id) {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("FAULTS", Style::new().fg(FAINT_TEXT).bold()));
+        lines.extend(mini_timeline(
+            preview,
+            s.status.simulated_time_ns,
+            s.status.phase == Phase::Completed,
+            inner_width,
+        ));
+        let source = crate::model::source_of(s).and_then(|id| app.previews.get(&id));
+        let derivation = s.metadata.annotations.get("derivation").map(String::as_str);
+        if let (Some(source), false) = (source, derivation == Some("branch")) {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "CHANGES FROM SOURCE",
+                Style::new().fg(FAINT_TEXT).bold(),
+            ));
+            lines.extend(changes(&source.timeline, &preview.timeline, inner_width));
+        }
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled("STAGES", Style::new().fg(FAINT_TEXT).bold()));
@@ -3088,5 +3498,51 @@ mod tests {
             // Node boxes collapse to badges rather than overlapping.
             assert!(!narrow.contains("╭ api"), "{narrow}");
         }
+    }
+
+    #[test]
+    fn catalogue_shows_paused_runs_as_paused() {
+        let summary = |id: &str, rate| {
+            let status = seedbox_api::SimulationStatus {
+                phase: Phase::Running,
+                stage: Some(seedbox_api::Stage::Executing),
+                playback: Some(seedbox_api::PlaybackObservation {
+                    state: seedbox_api::PlaybackStatus {
+                        position: Default::default(),
+                        rate,
+                        achieved_rate: None,
+                        stepping: false,
+                        terminal: false,
+                        application_ready: true,
+                    },
+                    age_ns: 0,
+                }),
+                ..Default::default()
+            };
+            SimulationSummary {
+                metadata: seedbox_api::Metadata {
+                    name: "demo".into(),
+                    labels: Default::default(),
+                    annotations: Default::default(),
+                    id: id.parse().unwrap(),
+                    revision: 1,
+                    created_at_unix_ms: 1,
+                    deletion_requested_at_unix_ms: None,
+                    parent: None,
+                    checkpoint: None,
+                },
+                status,
+                oracle: "oracle".into(),
+            }
+        };
+        let mut app = App::new(None);
+        app.apply(Update::List(vec![
+            summary("aaaaaaaa", PlaybackRate::Paused),
+            summary("bbbbbbbb", PlaybackRate::Unlimited),
+        ]));
+        let text = render_at(&app, 160, 30);
+        assert!(text.contains("❚❚ paused"), "{text}");
+        assert!(text.contains("● running"), "{text}");
+        assert!(text.contains("1 running · 1 paused"), "{text}");
     }
 }
