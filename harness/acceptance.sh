@@ -8,28 +8,43 @@ if [[ ${1:-portable} != portable || $# -gt 1 ]]; then
   exit 2
 fi
 cd "$(dirname "$0")/.."
-# Check discovery itself: a failing process substitution would otherwise leave
-# the loop empty while the portable suite silently skipped every shell file.
-scripts=$(git ls-files --cached --others --exclude-standard '*.sh' ':!:research/**')
-while IFS= read -r script; do
-  [[ -f $script ]] || continue
-  bash -n "$script"
-done <<< "$scripts"
+timed() {
+  local label=$1
+  shift
+  local TIMEFORMAT="timing: portable/$label: %3R seconds (user %3U, sys %3S)"
+  time "$@"
+}
+
+check_shells() {
+  # Check discovery itself: a failing process substitution would otherwise leave
+  # the loop empty while the portable suite silently skipped every shell file.
+  local scripts
+  scripts=$(git ls-files --cached --others --exclude-standard '*.sh' ':!:research/**')
+  while IFS= read -r script; do
+    [[ -f $script ]] || continue
+    bash -n "$script"
+  done <<< "$scripts"
+}
+timed shell-syntax check_shells
+
 # Discover new Python tests without maintaining per-module lists.
-(cd harness/tests && python3 -m unittest discover -s . -q)
-(cd python && python3 -m unittest discover -s tests -q)
+timed harness-python bash -c 'cd harness/tests && python3 -m unittest discover -s . -q'
+timed client-python bash -c 'cd python && python3 -m unittest discover -s tests -q'
 # Compile hardware-feature tests without opening KVM or HVF. Default execution
 # keeps hardware tests ignored, while their bodies remain type-checked.
 if [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]]; then
-  env -u CARGO_TARGET_DIR cargo test-vmm --all-features --no-run
-  env -u CARGO_TARGET_DIR cargo test-vmm
+  timed vmm-feature-build env -u CARGO_TARGET_DIR cargo test-vmm --all-features --no-run
+  timed vmm-tests env -u CARGO_TARGET_DIR cargo test-vmm
 fi
-env -u CARGO_TARGET_DIR cargo test-arm64 --all-features --no-run
-env -u CARGO_TARGET_DIR cargo test-arm64
-python3 kernel-arm64/test_inputs.py -q
-python3 crates/seedbox-arm64/test_compare.py -q
-cargo test --workspace --locked --all-features --no-run
-cargo test --workspace --locked
-for scenario in harness/acceptance/workloads/*.yaml; do
-  cargo run --quiet --locked -p seedbox -- validate "$scenario"
-done
+timed arm64-feature-build env -u CARGO_TARGET_DIR cargo test-arm64 --all-features --no-run
+timed arm64-tests env -u CARGO_TARGET_DIR cargo test-arm64
+timed kernel-inputs python3 kernel-arm64/test_inputs.py -q
+timed arm64-compare python3 crates/seedbox-arm64/test_compare.py -q
+timed workspace-feature-build cargo test --workspace --locked --all-features --no-run
+timed workspace-tests cargo test --workspace --locked
+validate_workloads() {
+  for scenario in harness/acceptance/workloads/*.yaml; do
+    cargo run --quiet --locked -p seedbox -- validate "$scenario"
+  done
+}
+timed workload-validation validate_workloads
