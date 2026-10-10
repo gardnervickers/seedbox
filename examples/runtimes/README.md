@@ -15,8 +15,8 @@ not part of the default acceptance suite.
 After building the release CLI and guest assets, with Docker/Podman available:
 
 ```sh
-./target/release/seedbox run examples/runtimes/postgres --full-state
-./target/release/seedbox replay .seedbox/runs/ATTEMPT
+./build/current/seedbox run examples/runtimes/postgres --full-state
+./build/current/seedbox replay .seedbox/runs/ATTEMPT
 ```
 
 Replace `postgres` with another directory above.

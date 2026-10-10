@@ -46,12 +46,12 @@ From an existing checkout on native Linux, use the same Nix recipe as CI:
 nix build .#guestKernel --out-link kernel-output
 
 # Linux x86-64:
-./target/release/seedbox run examples/etcd --kernel ./kernel-output/bzImage
+./build/current/seedbox run examples/etcd --kernel ./kernel-output/bzImage
 ```
 
 On ARM64 Linux the output is `kernel-output/Image`. To use it on an Apple
 Silicon Mac, copy that file to the Mac and run
-`./target/release/seedbox run examples/etcd --kernel ./Image`.
+`./build/current/seedbox run examples/etcd --kernel ./Image`.
 The kernel build targets require a Linux builder; they do not run natively on
 macOS. No Seedbox GitHub credentials or release access are needed for this path.
 The first source build still fetches public Linux source and Nix dependencies;
