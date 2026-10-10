@@ -6,6 +6,13 @@
  * Host-only retries stay inside one mangled store instruction, below this
  * client's block accounting. Guest boundaries may invalidate a reservation,
  * including a progress syscall between the application's load and store.
+ *
+ * The exclusive monitor is not the only state a host interruption touches: a
+ * host exception also wakes WFE/WFI, so a spin loop that waits would iterate,
+ * and be charged, a host-dependent number of times. With one guest CPU and
+ * interrupts delivered at deterministic rendezvous points, waiting gains the
+ * application nothing, so this client rewrites those hints to NOP before the
+ * translator sees them.
  */
 #include "dr_api.h"
 #include "drmgr.h"
@@ -74,6 +81,27 @@ static void charge_before(void *context, instrlist_t *block, instr_t *where)
 #endif
 }
 
+/* Replace application wait hints with NOP, keeping the original translation so
+ * faults and signals in the block still map to the application PC. */
+static dr_emit_flags_t neutralize_waits(void *context, void *tag, instrlist_t *block,
+                                        bool trace, bool translating)
+{
+#ifdef AARCH64
+    for (instr_t *instruction = instrlist_first_app(block); instruction != NULL;
+         instruction = instr_get_next_app(instruction)) {
+        int opcode = instr_get_opcode(instruction);
+        if (opcode != OP_wfe && opcode != OP_wfi && opcode != OP_wfet && opcode != OP_wfit)
+            continue;
+        instr_t *nop = INSTR_CREATE_nop(context);
+        instr_set_translation(nop, instr_get_app_pc(instruction));
+        instrlist_replace(block, instruction, nop);
+        instr_destroy(context, instruction);
+        instruction = nop;
+    }
+#endif
+    return DR_EMIT_DEFAULT;
+}
+
 static dr_emit_flags_t instrument(void *context, void *tag, instrlist_t *block,
                                  instr_t *instruction, bool trace,
                                  bool translating, void *user)
@@ -97,6 +125,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);
     DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 1, 0));
     drmgr_register_thread_init_event(thread_init);
+    drmgr_register_bb_app2app_event(neutralize_waits, NULL);
     drmgr_register_bb_instrumentation_event(NULL, instrument, NULL);
     dr_register_exit_event(finished);
 }

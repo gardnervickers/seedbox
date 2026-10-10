@@ -694,6 +694,11 @@ impl<B: Backend> Machine<B> {
                     }
                     idle = true;
                 }
+                // A host interruption wakes WFE, so letting the guest wait would
+                // make spin-loop iteration counts depend on host timing. The
+                // translator already rewrites application WFE/WFI to NOP; this
+                // covers kernel WFE and untranslated guest processes on HVF.
+                Exit::Wfe => (),
                 Exit::Hvc { imm: 0 } => {
                     let function = self.backend.get_reg(CoreReg::X(0))?;
                     let value = match function {
@@ -1265,6 +1270,37 @@ mod spi_regression {
         m.resume_at(30).unwrap();
         assert!(m.stopped_observation().pending_irq);
         assert_eq!(m.stopped_observation().next_deadline, u64::MAX);
+    }
+    #[test]
+    fn trapped_wfe_is_skipped_without_idling() {
+        let mut m = machine();
+        m.ready = true;
+        m.clock.arm(30).unwrap();
+        m.backend.stops.extend([
+            backend::Stop {
+                pc: RAM_BASE,
+                exit: Exit::Wfe,
+            }
+            .into(),
+            backend::Stop {
+                pc: RAM_BASE + 4,
+                exit: Exit::Wfi,
+            }
+            .into(),
+        ]);
+        // WFE leaves time at zero and continues; only the WFI idles to the horizon.
+        assert_eq!(
+            m.run_slice(20, 0, false).unwrap(),
+            MachineStop::Horizon { time_ns: 20 }
+        );
+        assert_eq!(m.trace.len(), 2);
+        assert_eq!(
+            (m.trace[0].kind, m.trace[0].time, m.trace[0].pc),
+            (5, 0, RAM_BASE)
+        );
+        assert_eq!((m.trace[1].kind, m.trace[1].time), (3, 20));
+        assert!(m.backend.injected.is_empty());
+        assert_eq!(m.stopped_observation().next_deadline, 30);
     }
     #[test]
     fn disk_install_rejects_entered_guest_before_consuming_input() {

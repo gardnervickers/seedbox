@@ -13,6 +13,10 @@ pkgs.stdenv.mkDerivation {
   postPatch = ''
     substituteInPlace ext/CMakeLists.txt \
       --replace-fail 'add_subdirectory(drsyms)' '# drsyms is not packaged'
+    # The AArch64 codec generator and order check run Python scripts by
+    # their /usr/bin/env shebangs when CMake's PYTHON3_EXECUTABLE is unset,
+    # and the Linux build sandbox has no /usr/bin/env.
+    patchShebangs make core/ir/aarch64
   '';
   nativeBuildInputs = with pkgs; [ cmake ninja perl python3 ];
   cmakeFlags = [
@@ -20,6 +24,9 @@ pkgs.stdenv.mkDerivation {
     # Upstream compiles C as gnu99 but probes types before setting that flag.
     # GCC 16 defaults to C23, whose built-in bool would misconfigure the core.
     "-DCMAKE_REQUIRED_FLAGS=-std=gnu99"
+    # The AArch64 codec scripts use this spelling; find_package(Python3) sets
+    # Python3_EXECUTABLE, so without it CMake would exec the scripts directly.
+    "-DPYTHON3_EXECUTABLE=${pkgs.python3}/bin/python3"
     "-DBUILD_TESTS=OFF"
     "-DBUILD_SAMPLES=OFF"
     "-DBUILD_CLIENTS=OFF"
