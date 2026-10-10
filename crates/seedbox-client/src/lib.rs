@@ -3,7 +3,7 @@
 #![cfg(unix)]
 mod sse;
 pub use sse::LogStream;
-pub use sse::{EventStream, SimulationStream};
+pub use sse::{EventStream, FrameStream, SimulationStream};
 
 use reqwest::{Method, RequestBuilder};
 use seedbox_api::{ApiError, ServerInfo, Simulation, SimulationId, SimulationList, SubmitRequest};
@@ -197,6 +197,20 @@ impl Client {
     pub async fn events(&self, id: &SimulationId) -> Result<EventStream, Error> {
         Ok(sse::events(
             self.event_response(&format!("/v1/simulations/{id}/events"))
+                .await?,
+        ))
+    }
+
+    /// The world's machines, links and faults as the server has observed them.
+    pub async fn world(&self, id: &SimulationId) -> Result<seedbox_api::WorldState, Error> {
+        self.document(self.request(Method::GET, &format!("/v1/simulations/{id}/world")))
+            .await
+    }
+
+    /// Routed frames from now on. Batches lost by a slow reader are reported as gaps.
+    pub async fn frames(&self, id: &SimulationId) -> Result<FrameStream, Error> {
+        Ok(sse::frames(
+            self.event_response(&format!("/v1/simulations/{id}/frames"))
                 .await?,
         ))
     }

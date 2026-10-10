@@ -24,6 +24,8 @@ pub mod stream;
 mod timing;
 #[cfg(unix)]
 mod worker;
+#[cfg(unix)]
+mod world;
 
 /// Run HTTP and owned execution together. The executable supplies a socket in
 /// its private state directory and handles signals through `shutdown`.

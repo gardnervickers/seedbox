@@ -26,21 +26,25 @@ pub(crate) struct Receiver {
 impl Receiver {
     pub fn start(manager: Arc<Manager>, id: SimulationId) -> io::Result<Self> {
         let events = manager.clone();
+        let frames = manager.clone();
         let event_id = id.clone();
+        let frame_id = id.clone();
         Self::with_sinks(
             move |entry| manager.publish_log(&id, entry),
             move |time, event| events.publish_engine_event(&event_id, time, event),
+            move |time, batch| frames.publish_frames(&frame_id, time, batch),
         )
     }
 
     #[cfg(test)]
     fn with_sink(emit: impl Fn(LogEntry) + Send + 'static) -> io::Result<Self> {
-        Self::with_sinks(emit, |_, _| {})
+        Self::with_sinks(emit, |_, _| {}, |_, _| {})
     }
 
     fn with_sinks(
         emit: impl Fn(LogEntry) + Send + 'static,
         event: impl Fn(u64, EventKind) + Send + 'static,
+        frames: impl Fn(u64, Vec<seedbox_api::Frame>) + Send + 'static,
     ) -> io::Result<Self> {
         let directory = tempfile::Builder::new()
             .prefix("seedbox-observe-")
@@ -94,6 +98,7 @@ impl Receiver {
                                     machine,
                                     status,
                                     applied_time_ns,
+                                    plan,
                                 } => event(
                                     last_time,
                                     EventKind::FaultChanged {
@@ -102,8 +107,10 @@ impl Receiver {
                                         machine,
                                         status,
                                         applied_time_ns,
+                                        plan,
                                     },
                                 ),
+                                Kind::Frames { frames: batch } => frames(last_time, batch),
                                 Kind::MachineLifecycle { transition } => event(
                                     last_time,
                                     EventKind::MachineLifecycle {
@@ -203,13 +210,29 @@ mod tests {
     fn machine_events_and_uncertain_tail_are_streamed_without_inventing_a_verdict() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let captured = received.clone();
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let captured_frames = batches.clone();
         let receiver = Receiver::with_sinks(
             |_| {},
             move |time, event| {
                 captured.lock().unwrap().push((time, event));
             },
+            move |time, frames| {
+                captured_frames.lock().unwrap().push((time, frames));
+            },
         )
         .unwrap();
+        let frame = seedbox_api::Frame {
+            from: "oracle".into(),
+            to: "db".into(),
+            sent_ns: 25,
+            due_ns: Some(26),
+            bytes: 60,
+            fate: seedbox_api::FrameFate::Scheduled,
+        };
+        let stop = seedbox_api::FaultAction::Stop {
+            machine: "oracle".into(),
+        };
         let sender = UnixDatagram::unbound().unwrap();
         sender.connect(receiver.path()).unwrap();
         for (sequence, simulated_time_ns, kind) in [
@@ -231,6 +254,14 @@ mod tests {
                     machine: Some("oracle".into()),
                     status: seedbox_api::FaultStatus::Unavailable,
                     applied_time_ns: None,
+                    plan: Some(stop.clone()),
+                },
+            ),
+            (
+                6,
+                30,
+                Kind::Frames {
+                    frames: vec![frame.clone()],
                 },
             ),
         ] {
@@ -282,12 +313,14 @@ mod tests {
                         action: "stop".into(),
                         machine: Some("oracle".into()),
                         status: seedbox_api::FaultStatus::Unavailable,
-                        applied_time_ns: None
+                        applied_time_ns: None,
+                        plan: Some(stop),
                     }
                 ),
                 (30, EventKind::SourceUnavailable),
             ]
         );
+        assert_eq!(*batches.lock().unwrap(), vec![(30, vec![frame])]);
     }
 
     #[test]

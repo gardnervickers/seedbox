@@ -24,6 +24,23 @@ struct Live {
     events: Stream<SimulationEvent>,
     logs: BTreeMap<String, Stream<LogEntry>>,
     all_logs: Stream<LogEntry>,
+    frames: Stream<FrameBatch>,
+}
+
+/// One observation's routed frames, published on the frame stream.
+#[derive(Debug)]
+pub struct FrameBatch {
+    pub simulated_time_ns: u64,
+    pub frames: Vec<seedbox_api::Frame>,
+}
+
+impl Payload for FrameBatch {
+    fn payload_bytes(&self) -> usize {
+        self.frames
+            .iter()
+            .map(|f| std::mem::size_of::<seedbox_api::Frame>() + f.from.len() + f.to.len())
+            .sum()
+    }
 }
 
 impl Payload for LogEntry {
@@ -46,8 +63,17 @@ impl Payload for SimulationEvent {
                 serde_json::to_vec(control).map_or(usize::MAX, |bytes| bytes.len())
             }
             EventKind::FaultChanged {
-                action, machine, ..
-            } => action.len() + machine.as_ref().map_or(0, String::len),
+                action,
+                machine,
+                plan,
+                ..
+            } => {
+                action.len()
+                    + machine.as_ref().map_or(0, String::len)
+                    + plan.as_ref().map_or(0, |plan| {
+                        serde_json::to_vec(plan).map_or(usize::MAX, |bytes| bytes.len())
+                    })
+            }
             EventKind::PreparationProgress { machine, .. }
             | EventKind::MachineReady { machine, .. }
             | EventKind::MachineLifecycle { machine, .. }
@@ -84,6 +110,10 @@ impl Live {
                 .collect(),
             cancellation: CancellationToken::default(),
             status: watch::channel(resource.clone()).0,
+            frames: Stream::new(
+                NonZeroUsize::MIN.saturating_add(255),
+                NonZeroUsize::MIN.saturating_add(65535),
+            ),
             events: Stream::new(
                 NonZeroUsize::MIN.saturating_add(255),
                 NonZeroUsize::MIN.saturating_add(8191),
@@ -179,6 +209,8 @@ impl Live {
 struct State {
     catalogue: Catalogue,
     live: BTreeMap<SimulationId, Live>,
+    /// Observed worlds outlive their workers until the simulation is deleted.
+    worlds: BTreeMap<SimulationId, crate::world::Tracker>,
     accepting: bool,
 }
 
@@ -501,6 +533,7 @@ impl Manager {
             catalogue,
             live,
             accepting: true,
+            worlds: BTreeMap::new(),
         }))
     }
 
@@ -575,6 +608,7 @@ impl Manager {
         let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         state.catalogue.delete(id)?;
         state.live.remove(id);
+        state.worlds.remove(id);
         Ok(())
     }
 
@@ -738,6 +772,10 @@ impl Manager {
         let Some(live) = state.live.get(id) else {
             return;
         };
+        let configuration = &state
+            .catalogue
+            .get(id)
+            .map(|r| r.spec.configuration.clone());
         let event = match &event {
             EventKind::FaultChanged {
                 machine: Some(machine),
@@ -752,15 +790,77 @@ impl Manager {
             }
             _ => event,
         };
+        let revision = live.status.borrow().metadata.revision;
+        if let Ok(configuration) = configuration {
+            state
+                .worlds
+                .entry(id.clone())
+                .or_insert_with(|| crate::world::Tracker::new(id.clone(), configuration))
+                .event(time, &event);
+        }
+        let Some(live) = state.live.get(id) else {
+            return;
+        };
         let observation = SimulationEvent {
             simulation: id.clone(),
-            revision: live.status.borrow().metadata.revision,
+            revision,
             simulated_time_ns: (!matches!(event, EventKind::PreparationProgress { .. }))
                 .then_some(time),
             position: None,
             event,
         };
         live.publish_event(observation);
+    }
+
+    pub(crate) fn publish_frames(
+        &self,
+        id: &SimulationId,
+        time: u64,
+        frames: Vec<seedbox_api::Frame>,
+    ) {
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
+        if !state.live.contains_key(id) {
+            return;
+        }
+        let Ok(configuration) = state
+            .catalogue
+            .get(id)
+            .map(|r| r.spec.configuration.clone())
+        else {
+            return;
+        };
+        state
+            .worlds
+            .entry(id.clone())
+            .or_insert_with(|| crate::world::Tracker::new(id.clone(), &configuration))
+            .frames(time, &frames);
+        if let Some(live) = state.live.get(id) {
+            let _ = live.frames.publish(FrameBatch {
+                simulated_time_ns: time,
+                frames,
+            });
+        }
+    }
+
+    /// The observed world, or the configured one before any observation.
+    pub fn world(&self, id: &SimulationId) -> Result<seedbox_api::WorldState, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let resource = state.catalogue.get(id)?;
+        Ok(match state.worlds.get(id) {
+            Some(world) => world.snapshot(),
+            None => crate::world::Tracker::new(id.clone(), &resource.spec.configuration).snapshot(),
+        })
+    }
+
+    pub fn frames(&self, id: &SimulationId) -> Result<Subscription<FrameBatch>, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        state.catalogue.get(id)?;
+        match state.live.get(id) {
+            Some(live) => live.frames.subscribe().map_err(|_| Error::StorageFailed),
+            None => Ok(Subscription::closed()),
+        }
     }
 
     pub(crate) fn publish_log(&self, id: &SimulationId, entry: LogEntry) {

@@ -45,6 +45,18 @@ async fn unix_client_submits_describes_and_retries_without_duplicate_work() {
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].metadata.id, simulation.metadata.id);
     assert!(page.next_cursor.is_none());
+    let world = client.world(&simulation.metadata.id).await.unwrap();
+    assert_eq!(world.simulation, simulation.metadata.id);
+    assert_eq!(
+        world
+            .machines
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
+        ["oracle"]
+    );
+    assert!(world.machines[0].oracle);
+    assert!(world.links.is_empty() && world.faults.is_empty());
 
     let mut conflicting = request;
     conflicting.spec.seed = Some(999);

@@ -1542,10 +1542,17 @@ fn fault_events_distinguish_acknowledgement_timeout_and_target_loss() {
                             machine,
                             status,
                             applied_time_ns,
+                            plan,
                         } = observation.kind
                         {
                             if id == 1 {
                                 assert_eq!(action, "stop");
+                                assert_eq!(
+                                    plan,
+                                    Some(Action::Stop {
+                                        machine: "a".into()
+                                    })
+                                );
                                 assert_eq!(machine.as_deref(), Some("a"));
                                 delivered.push((id, status, applied_time_ns));
                             }
@@ -1745,4 +1752,74 @@ fn rejected_interactive_state_does_not_terminate_the_world_or_add_fault_history(
         assert!(w.faults.error.is_none());
         assert_eq!(w.faults.log.len(), usize::from(paused));
     }
+}
+
+#[test]
+fn routed_frames_reach_observers_without_changing_the_world() {
+    use seedbox_engine_protocol::observation::{
+        Frame, FrameFate, Kind, Observation, MAX_DATAGRAM_BYTES,
+    };
+    let build = |observe: Option<&std::path::Path>| {
+        let mut w = world(&["a", "b"]).with_observations(
+            observe.map(|path| crate::observation::Publisher::connect(path).unwrap()),
+        );
+        plan(
+            &mut w,
+            10,
+            Action::Partition {
+                handle: "p".into(),
+                left: vec!["a".into()],
+                right: vec!["b".into()],
+            },
+        );
+        for at in [5, 20] {
+            let mut step = Step::new(at, Stop::Control);
+            step.frames = vec![vec![255; 14]];
+            w.machines[0].steps.push_back(step);
+        }
+        w
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("observer");
+    let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    let mut observed = build(Some(&path));
+    let mut plain = build(None);
+    assert_eq!(run(&mut observed, 60, None).unwrap(), "duration");
+    assert_eq!(run(&mut plain, 60, None).unwrap(), "duration");
+    assert_eq!(trace(&observed), trace(&plain));
+    assert_eq!(
+        serde_json::to_value(observed.network_snapshot()).unwrap(),
+        serde_json::to_value(plain.network_snapshot()).unwrap()
+    );
+    let mut frames = Vec::new();
+    let mut bytes = [0; MAX_DATAGRAM_BYTES];
+    while let Ok(count) = receiver.recv(&mut bytes) {
+        let observation: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+        if let Kind::Frames { frames: batch } = observation.kind {
+            frames.extend(batch);
+        }
+    }
+    let delivered = frames
+        .iter()
+        .find(|frame| frame.fate == FrameFate::Scheduled)
+        .expect("a scheduled frame");
+    assert_eq!((delivered.from.as_str(), delivered.to.as_str()), ("a", "b"));
+    assert_eq!(delivered.sent_ns, 5);
+    assert!(delivered.due_ns.is_some_and(|due| due > 5));
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.fate == FrameFate::PartitionDropped)
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![Frame {
+            from: "a".into(),
+            to: "b".into(),
+            sent_ns: 20,
+            due_ns: None,
+            bytes: 14,
+            fate: FrameFate::PartitionDropped,
+        }]
+    );
 }

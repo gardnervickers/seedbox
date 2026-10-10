@@ -68,6 +68,8 @@ pub fn router(state: ApiState) -> Router {
             get(control_receipt),
         )
         .route("/v1/simulations/{id}/events", get(events))
+        .route("/v1/simulations/{id}/world", get(world))
+        .route("/v1/simulations/{id}/frames", get(frames))
         .route("/v1/simulations/{id}/logs/{machine}", get(logs))
         .route("/v1/simulations/{id}/logs", get(all_logs))
         .fallback(|| async {
@@ -439,6 +441,47 @@ async fn events(
             Delivery::Closed => EventDelivery::Closed,
         };
         let closed = matches!(delivery, EventDelivery::Closed);
+        Some((
+            Event::default().event("observation").json_data(delivery),
+            if closed { None } else { Some(receiver) },
+        ))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn world(
+    State(state): State<ApiState>,
+    id: Result<Path<SimulationId>, PathRejection>,
+) -> Result<Json<seedbox_api::WorldState>, HttpError> {
+    let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
+    tokio::task::spawn_blocking(move || state.manager.world(&id).map(Json).map_err(Into::into))
+        .await
+        .map_err(|_| HttpError::internal("world inspection task failed"))?
+}
+
+async fn frames(
+    State(state): State<ApiState>,
+    id: Result<Path<SimulationId>, PathRejection>,
+) -> Result<impl IntoResponse, HttpError> {
+    use crate::stream::Delivery;
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use seedbox_api::FrameDelivery;
+    let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let receiver = tokio::task::spawn_blocking(move || state.manager.frames(&id))
+        .await
+        .map_err(|_| HttpError::internal("frame subscription task failed"))??;
+    let stream = futures_util::stream::unfold(Some(receiver), |state| async move {
+        let mut receiver = state?;
+        let delivery = match receiver.recv().await {
+            Delivery::Record(record) => FrameDelivery::Frames {
+                sequence: record.sequence,
+                simulated_time_ns: record.payload.simulated_time_ns,
+                frames: record.payload.frames.clone(),
+            },
+            Delivery::Gap { first, last } => FrameDelivery::Gap { first, last },
+            Delivery::Closed => FrameDelivery::Closed,
+        };
+        let closed = matches!(delivery, FrameDelivery::Closed);
         Some((
             Event::default().event("observation").json_data(delivery),
             if closed { None } else { Some(receiver) },

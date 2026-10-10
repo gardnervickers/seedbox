@@ -19,6 +19,7 @@ use crate::world::{self, Crash, Payload, SliceRequest, State, Stop, World, World
 use crate::world_events as events;
 use crate::{control, faults};
 pub use seedbox_engine_protocol::host_control::{Boundary, BoundaryPosition};
+use seedbox_engine_protocol::observation::{Frame, FrameFate, Kind as ObservationKind};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -431,6 +432,8 @@ struct Coord<'a, M: WorldMachine> {
     boundaries: &'a mut u64,
     application_ready: bool,
     fault_statuses: Vec<faults::RowStatus>,
+    /// Routed frames not yet published; empty without an observation socket.
+    frames: Vec<Frame>,
 }
 
 impl<M: WorldMachine> Coord<'_, M> {
@@ -455,6 +458,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                     machine: row.machine.clone(),
                     status: row.status,
                     applied_time_ns: row.applied_at_ns,
+                    plan: self.faults.plan(row.id).map(|plan| plan.action.clone()),
                 },
             );
             if let Some(status) = self.fault_statuses.get_mut(index) {
@@ -463,6 +467,44 @@ impl<M: WorldMachine> Coord<'_, M> {
                 self.fault_statuses.push(row.status);
             }
         }
+    }
+
+    /// Record a routed frame copy for observers. Without an observation
+    /// socket this does nothing; it never touches policy state.
+    fn observe_frame(
+        &mut self,
+        from: usize,
+        to: usize,
+        sent_ns: u64,
+        due_ns: Option<u64>,
+        bytes: usize,
+        fate: FrameFate,
+    ) {
+        if self.observations.is_none() {
+            return;
+        }
+        self.frames.push(Frame {
+            from: self.names[from].clone(),
+            to: self.names[to].clone(),
+            sent_ns,
+            due_ns,
+            bytes: u32::try_from(bytes).unwrap_or(u32::MAX),
+            fate,
+        });
+        if self.frames.len() >= FRAMES_PER_OBSERVATION {
+            self.publish_frames(sent_ns);
+        }
+    }
+
+    fn publish_frames(&mut self, at: u64) {
+        let Some(publisher) = self.observations else {
+            return;
+        };
+        if self.frames.is_empty() {
+            return;
+        }
+        let frames = std::mem::take(&mut self.frames);
+        publisher.publish("", 0, at, ObservationKind::Frames { frames });
     }
 
     fn count(&mut self, at: u64, from: usize, to: usize, outcome: usize) {
@@ -610,6 +652,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 publisher.publish(&self.names[m], entry.incarnation, at, entry.kind);
             }
         }
+        self.publish_frames(committed);
         if faults_changed {
             self.publish_faults(committed);
         }
@@ -1011,16 +1054,40 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
                 links::Outcome::Cut => {
                     *self.dropped += 1;
                     self.count(sent_at, src, dst, PARTITION_DROPPED);
+                    self.observe_frame(
+                        src,
+                        dst,
+                        sent_at,
+                        None,
+                        frame.len(),
+                        FrameFate::PartitionDropped,
+                    );
                     continue;
                 }
                 links::Outcome::Lost => {
                     *self.dropped += 1;
                     self.count(sent_at, src, dst, LOSS_DROPPED);
+                    self.observe_frame(
+                        src,
+                        dst,
+                        sent_at,
+                        None,
+                        frame.len(),
+                        FrameFate::LossDropped,
+                    );
                     continue;
                 }
                 links::Outcome::QueueDropped => {
                     *self.dropped += 1;
                     self.count(sent_at, src, dst, QUEUE_DROPPED);
+                    self.observe_frame(
+                        src,
+                        dst,
+                        sent_at,
+                        None,
+                        frame.len(),
+                        FrameFate::QueueDropped,
+                    );
                     continue;
                 }
                 links::Outcome::Deliver(at) => at,
@@ -1043,9 +1110,25 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
                     events::Arrival::Drop => {
                         *self.dropped += 1;
                         self.count(at, src, dst, RECEIVER_DROPPED);
+                        self.observe_frame(
+                            src,
+                            dst,
+                            sent_at,
+                            Some(at),
+                            bytes.len(),
+                            FrameFate::ReceiverDropped,
+                        );
                         continue;
                     }
                 }
+                self.observe_frame(
+                    src,
+                    dst,
+                    sent_at,
+                    Some(at),
+                    bytes.len(),
+                    FrameFate::Scheduled,
+                );
                 out.push(sw::Delivery {
                     to: dst,
                     at,
@@ -1135,6 +1218,8 @@ where
 
 /// Outputs one machine may buffer in one round.
 const MAX_OUTPUTS: usize = 1 << 16;
+/// Frames per observation datagram; well under its size limit.
+const FRAMES_PER_OBSERVATION: usize = 96;
 
 fn windowed<M, X>(
     world: &mut World<M>,
@@ -1259,6 +1344,7 @@ where
     let mut coord = Coord::<M> {
         application_ready,
         fault_statuses,
+        frames: Vec::new(),
         observations: observations.as_deref(),
         run,
         names,

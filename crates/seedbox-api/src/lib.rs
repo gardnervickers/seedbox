@@ -34,5 +34,11 @@ pub const API_VERSION: &str = "seedbox/v1";
 mod seeds;
 pub use seeds::{SeedRangeRequest, SeedRangeStatus};
 
+mod world;
+pub use world::{
+    FaultState, Frame, FrameDelivery, FrameFate, LinkCounters, LinkPolicy, LinkState,
+    MachineCondition, MachineState, WorldState,
+};
+
 mod comparison;
 pub use comparison::{ComparisonStatus, SimulationComparison};
