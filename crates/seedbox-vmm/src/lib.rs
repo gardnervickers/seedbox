@@ -1001,6 +1001,14 @@ fn machine_report(
             mach.page_hashes(),
         )
         .map_err(|e| e.to_string())?;
+        // DIAGNOSTIC ONLY (not for merge): the first 64 MiB of guest RAM.
+        let path = format!("{out}/{}.ram64", mach.world.name);
+        let ram = mach.memory();
+        std::fs::write(
+            path,
+            &ram[..ram.len().min(64 << 20)],
+        )
+        .map_err(|e| e.to_string())?;
         let parts = parts.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
         (Some(d), Some(parts))
     } else {
