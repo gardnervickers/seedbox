@@ -1,6 +1,8 @@
 { pkgs }:
 let
   arm = pkgs.stdenv.hostPlatform.isAarch64;
+  # Keep this SDK release and its hashes aligned with nix/dynamorio.nix.
+  # ARM uses its launcher/preload libraries with that patched core and extensions.
   sdk = pkgs.fetchurl {
     url = "https://github.com/DynamoRIO/dynamorio/releases/download/release_11.3.0-1/DynamoRIO-${if arm then "AArch64-Linux" else "Linux"}-11.3.0.tar.gz";
     hash = if arm then "sha256-n/e3uHdovA0O2hjyJH5VS6sbPoxXbvxXmS87dcEoqGM=" else "sha256-rgIEnfXE2uuC1Ah6qg04v1jN0ms4+2BC3M8ny8Ms7tk=";

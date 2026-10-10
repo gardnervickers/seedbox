@@ -66,7 +66,9 @@ The protocol relies on the existing single guest CPU:
    the check and the store. There are no intervening memory accesses inside the
    physical pair. A changed epoch or value fails the application store. A lost
    physical reservation with unchanged guest state retries internally, below
-   application control flow and progress accounting.
+   application control flow and progress accounting. This retry loop is
+   deliberately unbounded: exposing failure after a fixed number of physical
+   retries would make application behavior depend on host interruptions again.
 4. `CLREX` invalidates the software reservation. Every attempted store consumes
    it, including mismatched stores. `WZR` status uses a private scratch register
    so physical retries still complete deterministically. Fault reconstruction
