@@ -18,8 +18,8 @@ use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     time::Duration,
 };
@@ -641,11 +641,9 @@ mod tests {
         assert_eq!(completed.status.verdict(), TestVerdict::Incomplete);
         assert!(!completed.status.stop_requested);
         assert!(completed.status.stage_timings[&Stage::Preparing].complete);
-        assert!(
-            !root
-                .join("inputs")
-                .join(format!("{}.json", resource.metadata.id))
-                .exists()
-        );
+        assert!(!root
+            .join("inputs")
+            .join(format!("{}.json", resource.metadata.id))
+            .exists());
     }
 }

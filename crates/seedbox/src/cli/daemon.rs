@@ -83,11 +83,19 @@ pub(super) fn state_directory(explicit: Option<PathBuf>) -> Result<PathBuf> {
         .ok_or_else(|| {
             Error::Setup("server state location unavailable; set SEEDBOX_STATE or HOME".into())
         })?;
-    if path.is_absolute() {
-        Ok(path)
+    let path = if path.is_absolute() {
+        path
     } else {
-        Ok(std::env::current_dir()?.join(path))
-    }
+        std::env::current_dir()?.join(path)
+    };
+    let socket = path.join("server.sock");
+    std::os::unix::net::SocketAddr::from_pathname(&socket).map_err(|_| {
+        Error::Setup(format!(
+            "server socket {}: invalid local socket path; set SEEDBOX_STATE to a shorter directory",
+            socket.display()
+        ))
+    })?;
+    Ok(path)
 }
 
 pub(super) fn serve(

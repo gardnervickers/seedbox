@@ -28,6 +28,24 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[cfg(unix)]
+#[test]
+fn long_server_state_path_fails_before_creating_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("s".repeat(200));
+    let output = seedbox(
+        &["serve", "--state", state.to_str().unwrap()],
+        directory.path(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(stderr(&output), format!(
+        "error: server socket {}: invalid local socket path; set SEEDBOX_STATE to a shorter directory\n",
+        state.join("server.sock").display()
+    ));
+    assert!(!state.exists());
+}
+
 #[test]
 fn relocated_cli_looks_for_kernel_beside_itself_without_build_tools() {
     let directory = tempfile::tempdir().unwrap();

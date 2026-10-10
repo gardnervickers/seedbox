@@ -180,6 +180,10 @@ options for `run`, `explore`, `rerun` or `replay`.
 | Log selection | All indexed machines and both streams, with no time bounds; raw bytes on stdout (`--json` for metadata) | `retained-logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
+The server socket must fit the host's Unix socket path limit. If a custom state
+path is too long, startup fails before creating state and asks you to choose a
+shorter `SEEDBOX_STATE` directory.
+
 Settings that describe the simulated world live in the Compose file's
 `x-seedbox` section; flags choose only how a run executes. Every key below is
 optional and shows its non-default form:

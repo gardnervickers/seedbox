@@ -660,14 +660,19 @@ impl<M: WorldMachine> Coord<'_, M> {
                         incarnations: &mut self.incarnations[m],
                         at: t,
                     },
-                );
+                )
+                .and_then(|()| {
+                    // The successor is not usable until its active throttle is
+                    // restored. A failed RPC leaves the whole crash terminal.
+                    if let Some(factor) = self.faults.throttle(m) {
+                        guests[m].m.throttle(factor)?;
+                    }
+                    Ok(())
+                });
                 if let Err(mut error) = result {
                     world::terminate_workers(guests.iter_mut().map(|g| &mut *g.m), &mut error);
                     self.failure = Some(error.clone());
                     return Err(error);
-                }
-                if let Some(factor) = self.faults.throttle(m) {
-                    guests[m].m.throttle(factor)?;
                 }
             }
             faults::Lifecycle::Throttle(factor) => guests[m].m.throttle(factor)?,

@@ -1176,6 +1176,50 @@ fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across
 }
 
 #[test]
+fn failed_successor_throttle_terminates_workers_and_prevents_world_reuse() {
+    for workers in [0, 2] {
+        let mut w = world(&["a", "b"]);
+        for (at, action) in [
+            (
+                5,
+                json!({"action":"throttle","handle":"t","machine":"b","factor_permille":4000}),
+            ),
+            (10, json!({"action":"crash","machine":"b"})),
+        ] {
+            let mut action = action;
+            action["id"] = json!(0);
+            action["at_ns"] = json!(at);
+            action["deadline_ns"] = json!(at);
+            w.faults
+                .append(serde_json::from_value(action).unwrap())
+                .unwrap();
+        }
+        // Only the fresh crash successor gets the injected RPC failure.
+        w.factory.lock().unwrap().push("fail/throttle".into());
+        let error = run_with(&mut w, 30, None, workers, Duration::ZERO).unwrap_err();
+        assert!(error.contains("throttle ACK lost"), "{error}");
+        assert!(w.failure.is_some());
+        let failed_trace = trace(&w);
+        assert_eq!(
+            failed_trace
+                .iter()
+                .filter(|line| line.contains(":throttle/4000:"))
+                .count(),
+            2
+        );
+        for name in ["a", "b"] {
+            assert!(failed_trace
+                .iter()
+                .any(|line| line.starts_with(&format!("{name}:terminate:"))));
+        }
+        assert!(run_with(&mut w, 30, None, workers, Duration::ZERO)
+            .unwrap_err()
+            .contains("terminal"));
+        assert_eq!(trace(&w), failed_trace, "retry contacted a worker");
+    }
+}
+
+#[test]
 fn throttle_of_an_unsupported_machine_is_a_recoverable_unsupported_error() {
     let mut w = world(&["a", "b"]);
     configure_control(&mut w);

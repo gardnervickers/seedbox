@@ -104,6 +104,9 @@ impl WorldMachine for Mock {
         if trace.lock().unwrap().iter().any(|x| x == "fail/timer") {
             machine.bad = Some("timer");
         }
+        if trace.lock().unwrap().iter().any(|x| x == "fail/throttle") {
+            machine.bad = Some("throttle");
+        }
         if trace.lock().unwrap().iter().any(|x| x == "fail/install") {
             machine.bad = Some("install");
         }
@@ -217,6 +220,9 @@ impl WorldMachine for Mock {
     }
     fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
         self.record(&format!("throttle/{factor_permille}"));
+        if self.bad == Some("throttle") {
+            return Err("throttle ACK lost".into());
+        }
         Ok(())
     }
     fn exits(&self) -> u64 {
