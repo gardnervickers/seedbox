@@ -1,4 +1,4 @@
-//! Portable CLI path resolution; guest assets live in the local temporary directory.
+//! Portable CLI path resolution; complete builds keep guest inputs beside the executable.
 use seedbox::{Error, Result};
 use std::{
     env,

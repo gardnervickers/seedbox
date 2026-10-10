@@ -2,7 +2,7 @@
 
 Run from this committed checkout in the project development shell, on an AMD Zen KVM host as an authorized operator. Select an available physical core/SMT pair under the normal shared lease; `CPU` below is the chosen logical CPU, not a reservation of any historical lane. Preserve other workloads. Use one CLI, VMM, kernel, supervisor, static BusyBox and project-native Podman for every step. Do not increase memory/deadlines or silently retry failed worlds.
 
-If a Linux source build is needed, the existing aliases are `cargo build --release`, `cargo build-vmm` and `cargo test-vmm`; build the revision under test. The checklist passes the artifacts explicitly. `doctor` checks host compatibility only; replay MATCH is the determinism check.
+If a Linux source build is needed, the existing aliases are `python3 tools/build.py`, `cargo build-vmm` and `cargo test-vmm`; build the revision under test. The checklist passes the artifacts explicitly. `doctor` checks host compatibility only; replay MATCH is the determinism check.
 
 ## Stage and validate
 

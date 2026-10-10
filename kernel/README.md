@@ -29,11 +29,11 @@ before a draft release is published. A failed upload can resume its draft;
 published release assets are never overwritten by this workflow. Kernel releases
 are prereleases and do not replace the project's latest application release.
 
-`cargo build --release` builds the native CLI. Prepare guest assets explicitly
-with `bash tools/build-assets.sh`; it places the kernel and helper archive under
-`/tmp/seedbox-UID/ARCH`. Seedbox uses these local files and never downloads a
-kernel automatically. Missing files report the build command. `--kernel PATH`
-or `SEEDBOX_KERNEL` selects a different local kernel.
+`python3 tools/build.py` builds the native CLI with current guest inputs.
+The completed directory contains `seedbox`, `kernel`, and `runtime.tar.gz`;
+`build/current` selects the latest successful complete build. Seedbox finds
+its kernel beside its executable and never invokes a builder at runtime.
+`--kernel PATH` or `SEEDBOX_KERNEL` selects a different local kernel.
 
 CI publishing remains available for future public distribution. No release ID,
 source fingerprint or kernel hash gates execution. Replay uses retained bytes.
@@ -46,12 +46,12 @@ From an existing checkout on native Linux, use the same Nix recipe as CI:
 nix build .#guestKernel --out-link kernel-output
 
 # Linux x86-64:
-./target/release/seedbox run examples/etcd --kernel ./kernel-output/bzImage
+./build/current/seedbox run examples/etcd --kernel ./kernel-output/bzImage
 ```
 
 On ARM64 Linux the output is `kernel-output/Image`. To use it on an Apple
 Silicon Mac, copy that file to the Mac and run
-`./target/release/seedbox run examples/etcd --kernel ./Image`.
+`./build/current/seedbox run examples/etcd --kernel ./Image`.
 The kernel build targets require a Linux builder; they do not run natively on
 macOS. No Seedbox GitHub credentials or release access are needed for this path.
 The first source build still fetches public Linux source and Nix dependencies;

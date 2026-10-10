@@ -171,7 +171,7 @@ pub(crate) fn validate_progress(path: &Path, architecture: Architecture) -> Resu
 fn check_progress(path: &Path, architecture: Option<Architecture>) -> Result<()> {
     let bad = || {
         Error::Setup(format!(
-            "invalid progress bundle {}; rebuild with bash tools/build-assets.sh",
+            "invalid progress bundle {}; rebuild with python3 tools/build.py",
             path.display()
         ))
     };

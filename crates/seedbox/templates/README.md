@@ -1,15 +1,16 @@
 # Run this example
 
-Start Docker or Podman, then point your release Seedbox executable at a kernel:
+Start Docker or Podman, then run a complete Seedbox build (keep its kernel
+beside the executable, or select another with `--kernel`):
 
 ```sh
-seedbox --kernel /path/to/kernel .
+seedbox .
 ```
 
 Seedbox builds the workload's Dockerfile using the engine's normal cache and
 prepares the application images before starting the simulation. Edit the workload
 and run the same command again. Guest helpers are embedded in the release CLI;
-no helper archive or private GitHub download is needed at runtime.
+no helper archive, Nix, Cargo, or guest builder is needed at runtime.
 
 Run output names the retained directory. Use `seedbox replay RUN` to reproduce
 it, `seedbox inspect RUN` for a summary, or `seedbox logs RUN` for guest output.

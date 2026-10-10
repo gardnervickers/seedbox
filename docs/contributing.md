@@ -32,7 +32,7 @@ builds. The `linux` group covers generic KVM, OCI and applications under a
 CPU/SMT lease; `mac` covers signed native HVF tests and
 applications. The guest-fixture suites need a hand-built kernel and initrd, so
 they are named explicitly (`linux-guests`, `mac-guests`). Application acceptance
-uses the release CLI, after building guest assets with `bash tools/build-assets.sh`.
+builds the complete CLI and current guest inputs with `python3 tools/build.py`.
 
 Portable checks must pass before hardware execution. Hardware-feature suites
 are compiled with `--no-run` during portable checks, even without virtualization.
