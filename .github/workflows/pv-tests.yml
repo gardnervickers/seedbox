@@ -63,6 +63,7 @@ jobs:
           cmd-format: nix develop --command {0}
           workspaces: |
             . -> target
+            . -> build/cargo
             crates/seedbox-vmm -> target
             crates/seedbox-arm64 -> target
           cache-bin: false
