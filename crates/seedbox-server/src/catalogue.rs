@@ -679,6 +679,10 @@ impl Catalogue {
             };
         }
         if entry.deleting
+            || matches!(
+                entry.resource.status.termination,
+                Some(seedbox_api::ExecutionTermination::Error { .. })
+            )
             || entry.resource.status.phase != Phase::Running
             || entry.resource.status.stop_requested
         {

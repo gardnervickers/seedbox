@@ -184,6 +184,16 @@ pub(crate) struct DeletionTarget {
 
 impl State {
     fn persist(&mut self, mut resource: Simulation) -> Result<Simulation, Error> {
+        // An operational control failure survives execution cancellation and
+        // cleanup; only the execution owner decides when the resource completes.
+        if let Some(termination @ ExecutionTermination::Error { .. }) = &self
+            .catalogue
+            .get(&resource.metadata.id)?
+            .status
+            .termination
+        {
+            resource.status.termination = Some(termination.clone());
+        }
         let id = resource.metadata.id.clone();
         if let Some((sample, _)) = self.live.get(&id).and_then(|live| live.playback.as_ref()) {
             resource.status.simulated_time_ns = resource
@@ -265,7 +275,13 @@ impl Manager {
         Ok(state
             .live
             .iter()
-            .filter(|(_, live)| live.worker.is_some())
+            .filter(|(_, live)| {
+                live.worker.is_some()
+                    && !matches!(
+                        live.status.borrow().status.termination,
+                        Some(ExecutionTermination::Error { .. })
+                    )
+            })
             .map(|(id, _)| {
                 (
                     id.clone(),
@@ -327,6 +343,29 @@ impl Manager {
             .map_err(|_| Error::StorageFailed)?
             .catalogue
             .captured_checkpoint(id, request_id)
+    }
+
+    pub(crate) fn record_worker_control_failure(
+        &self,
+        id: &SimulationId,
+        message: String,
+    ) -> Result<(), Error> {
+        {
+            let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+            let mut resource = match state.catalogue.get(id) {
+                Ok(resource) if resource.status.phase != Phase::Completed => resource.clone(),
+                Ok(_) | Err(Error::NotFound(_)) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            resource.status.termination = Some(ExecutionTermination::Error {
+                message: format!("worker control: {message}"),
+            });
+            state.persist(resource)?;
+            if let Some(live) = state.live.get(id) {
+                live.cancellation.cancel();
+            }
+        }
+        Ok(())
     }
 
     pub fn accept_control(
