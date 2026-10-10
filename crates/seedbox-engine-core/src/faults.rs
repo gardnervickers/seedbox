@@ -17,18 +17,7 @@ pub enum Status {
     Failed,
     Unavailable(u64),
 }
-/// A fault row's status, serialized as its snake_case name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RowStatus {
-    /// Planned; its time has not come.
-    Unrequested,
-    /// Its time came; it waits for its guest effect.
-    Requested,
-    Applied,
-    Failed,
-    Unavailable,
-}
+pub use seedbox_engine_protocol::report::RowStatus;
 /// Selected-connection evidence, fields in sorted key order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct SelectionCounts {
@@ -1447,3 +1436,7 @@ mod clock_skew_tests;
 #[cfg(test)]
 #[path = "clock_drift_tests.rs"]
 mod clock_drift_tests;
+
+#[cfg(test)]
+#[path = "faults_tests.rs"]
+mod policy_tests;

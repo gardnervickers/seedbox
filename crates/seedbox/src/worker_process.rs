@@ -157,12 +157,12 @@ impl WorkerLaunch {
         let world = request.output.join("world.json");
         fs::write(
             &world,
-            serde_json::to_vec_pretty(&crate::vmm::world(request)?)?,
+            serde_json::to_vec_pretty(&crate::engine_adapter::world(request)?)?,
         )?;
         let report = request.output.join("vmm.json");
         let endpoint = Endpoint::new(request.output)?;
         let kind = crate::engine::recorded_launch(&request.prepared.profile)?;
-        let mut command = crate::vmm::engine_command(engine, &request.prepared.profile)?;
+        let mut command = crate::engine_adapter::engine_command(engine, &request.prepared.profile)?;
         let spawn_fix = match kind {
             ExecutableKind::Standalone => "check the retained executable and host setup",
             ExecutableKind::InternalWorker => "use the retained CLI executable for this host",
@@ -175,7 +175,9 @@ impl WorkerLaunch {
             .checked_mul(2)
             .filter(|count| *count != 0)
             .ok_or_else(|| Error::Integrity("execution requires prepared machines".into()))?;
-        let out = request.output.join(crate::vmm::MACHINE_OUTPUT_DIR);
+        let out = request
+            .output
+            .join(crate::engine_adapter::MACHINE_OUTPUT_DIR);
         let console_limit = 1024 * 1024 * 1024 / streams;
         let digest = request.prepared.profile.witness_mode == WitnessMode::FullState;
         if kind == ExecutableKind::ArmWorld {
@@ -202,7 +204,7 @@ impl WorkerLaunch {
             // Bound observation metadata to at most 40 MiB across all streams.
             worker.log_chunk_limit = Some((1_048_576 / streams).min(65_536));
             worker.stream_console = true;
-            worker.features = crate::vmm::recorded_features(&request.prepared.profile)?;
+            worker.features = crate::engine_adapter::recorded_features(&request.prepared.profile)?;
             worker.performance = launch_performance(request.performance_parameters)?;
             let path = request.output.join(WORKER_REQUEST_FILE);
             fs::write(&path, serde_json::to_vec_pretty(&worker)?)?;
@@ -265,7 +267,9 @@ impl RunningWorker {
                 return if success {
                     parse_report(&fs::read(&self.report)?)
                 } else {
-                    Err(Error::Execution(crate::vmm::VMM_FAILURE_MESSAGE.into()))
+                    Err(Error::Execution(
+                        crate::engine_adapter::VMM_FAILURE_MESSAGE.into(),
+                    ))
                 };
             }
             if self.started.elapsed() >= Duration::from_nanos(wall_time_ns) {
@@ -510,7 +514,9 @@ mod tests {
                 ExecutableKind::ArmWorld => &["__engine", crate::engine::ARM_WORLD_V1],
             };
             assert_eq!(&args[..dispatch.len()], dispatch);
-            let out = directory.path().join(crate::vmm::MACHINE_OUTPUT_DIR);
+            let out = directory
+                .path()
+                .join(crate::engine_adapter::MACHINE_OUTPUT_DIR);
             if kind == ExecutableKind::ArmWorld {
                 let world = directory.path().join("world.json");
                 let socket = launch.endpoint.socket();

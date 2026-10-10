@@ -8,9 +8,9 @@ pub mod host_control;
 pub mod links;
 pub mod log_index;
 pub mod network_counters;
-pub mod output_layout;
+pub use seedbox_engine_protocol::output_layout;
 pub mod rng;
-pub mod trace;
+pub use seedbox_engine_protocol::trace;
 pub mod triggers;
 
 pub mod network_faults;
@@ -26,10 +26,10 @@ pub mod virtio_block;
 pub mod virtio_network;
 
 pub mod checkpoint;
-pub mod launch;
+pub use seedbox_engine_protocol::launch;
 pub mod report;
 pub mod world;
-pub mod world_config;
+pub use seedbox_engine_protocol::world_config;
 pub mod world_events;
 
 pub mod window;

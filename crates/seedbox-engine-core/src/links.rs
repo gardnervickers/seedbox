@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub type Pair = (usize, usize);
 /// Global link latency when the network config names none: one millisecond.
-pub const DEFAULT_LATENCY_NS: u64 = 1_000_000;
+pub use seedbox_engine_protocol::world_config::DEFAULT_LATENCY_NS;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Policy {
     pub latency_ns: u64,

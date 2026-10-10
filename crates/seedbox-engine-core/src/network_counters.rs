@@ -2,7 +2,6 @@
 //! Packet DMA may happen in an early window, so physical totals cannot be sampled
 //! directly. Pending deltas are drained at every global frontier, not retained as
 //! packet history. The receiver's actual acceptance outcome remains authoritative.
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -17,28 +16,7 @@ pub const OUTCOMES: usize = 5;
 /// Per directed (from, to) machine pair, counts indexed by outcome.
 pub type LinkCounts = BTreeMap<(usize, usize), [u64; OUTCOMES]>;
 
-/// One directed pair's counts. Fields are in sorted key order, so the
-/// snapshot serializes byte for byte as the sorted-key JSON object that
-/// witnesses hash. Loss and queue drops are omitted while zero, so a run that
-/// loses nothing keeps the original counter keys.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PairCounts {
-    pub delivered: u64,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub loss_dropped: u64,
-    pub partition_dropped: u64,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub queue_dropped: u64,
-    pub receiver_dropped: u64,
-}
-
-fn is_zero(n: &u64) -> bool {
-    *n == 0
-}
-
-/// Counts keyed `"from->to"`.
-pub type Snapshot = BTreeMap<String, PairCounts>;
+pub use seedbox_engine_protocol::network_counters::{PairCounts, Snapshot};
 
 /// The named snapshot of `counts`.
 pub fn snapshot<'a>(name: impl Fn(usize) -> &'a str, counts: &LinkCounts) -> Snapshot {
@@ -125,3 +103,7 @@ mod tests {
         assert_eq!(back, typed);
     }
 }
+
+#[cfg(test)]
+#[path = "network_counters_sampling_tests.rs"]
+mod sampling_tests;

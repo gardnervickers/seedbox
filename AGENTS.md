@@ -46,6 +46,27 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   acceptance uses `seedbox run` / `seedbox replay` directly; do not add a host
   scenario runner. `kernel/` and `guest/` hold guest build inputs.
 
+## Crate and test boundaries
+
+`seedbox-engine-protocol` owns worker launch/configuration and retained evidence
+formats. It has no CPU backend, scheduler or device policy. `seedbox-artifacts`
+owns offline records, content storage, logs, comparison and bundles; it depends
+on protocol types, never engine-core, a hypervisor, Bollard or Tokio. The
+application crate reexports retained APIs and owns parsing, preparation,
+orchestration and `engine_adapter` request/report adaptation. Native modules own
+host admission and launching. Standalone workspaces have protocol wrappers with
+canonical source links, just like their engine-core and control wrappers.
+
+Construct real worlds through `World::new(WorldInputs { ... })`; keep coordinator
+bookkeeping private. Use read-only evidence accessors and guarded lifecycle
+commits instead of exposing mutable coordinator fields.
+
+Unit tests live alongside their component under `src/`; integration tests live
+in the owning crate's `tests/` and exercise public boundaries or interactions.
+Give each scenario one owner. Keep format and offline artifact tests out of the
+application crate unless they specifically exercise application composition.
+Hardware tests remain feature-controlled and compiled by portable checks.
+
 ## Shared engine policies, queues and transport
 
 `crates/seedbox-engine-core` owns deterministic RNG, disk, links, connection,

@@ -1,4 +1,5 @@
 #![recursion_limit = "256"]
+use seedbox::engine_adapter;
 
 use seedbox::{
     config::{Check, Limits, Network, Schedule},
@@ -14,7 +15,7 @@ use std::{collections::BTreeMap, path::Path};
 
 /// The world document as JSON, as the engine reads it.
 fn world_json(request: &ExecutionRequest<'_>) -> seedbox::Result<serde_json::Value> {
-    vmm::world(request).map(|world| serde_json::to_value(world).unwrap())
+    engine_adapter::world(request).map(|world| serde_json::to_value(world).unwrap())
 }
 
 /// A world document as the engine deserializes it.
@@ -155,13 +156,15 @@ fn current_parts_accept_text_events_and_validate_digests() {
                 "events": "exc:none int:none shadow:0 nmi:0/0/0"
             });
         }
-        let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
+        let parsed = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
         assert_eq!(parsed.full_state.as_ref().unwrap().len(), 2);
         raw["machines"][1]["state_digest_parts"]["disk"] = json!("invalid");
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), request)
-            .unwrap_err()
-            .to_string()
-            .contains("expected a lowercase SHA-256 digest"));
+        assert!(
+            engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), request)
+                .unwrap_err()
+                .to_string()
+                .contains("expected a lowercase SHA-256 digest")
+        );
     });
 }
 
@@ -246,7 +249,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
                 ("client-machine", None),
                 (
                     "server-machine",
-                    Some(json!({"size_mib": vmm::VOLUME_DISK_MIB}))
+                    Some(json!({"size_mib": engine_adapter::VOLUME_DISK_MIB}))
                 )
             ]
         );
@@ -258,7 +261,7 @@ fn application_exit_255_remains_distinct_from_infrastructure_failure() {
     fixture(|request| {
         let mut raw = report();
         raw["machines"][0]["guest_exit_code"] = json!(255);
-        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
+        let result = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
         assert_eq!(result.reason, StopReason::Completed);
         assert_eq!(
             result.workload_exit.unwrap(),
@@ -269,7 +272,7 @@ fn application_exit_255_remains_distinct_from_infrastructure_failure() {
         );
         assert_eq!(result.full_state.unwrap().len(), 2);
         raw["machines"][1]["infrastructure_error"] = json!(true);
-        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
+        let result = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
         assert_eq!(result.reason, StopReason::Error);
         assert!(result.detail.unwrap().contains("server-machine"));
     });
@@ -280,17 +283,17 @@ fn reports_reject_wrong_seed_missing_state_and_duplicate_machines() {
     fixture(|request| {
         let mut raw = report();
         raw["seed"] = json!(1010);
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), request).is_err());
         let mut raw = report();
         raw["machines"][0]["state_digest"] = json!(null);
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), request).is_err());
         let mut raw = report();
         raw["machines"][0] = raw["machines"][1].clone();
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), request).is_err());
         let mut raw = report();
         raw["outcome"] = json!("duration");
         raw["machines"][0]["guest_exit_code"] = json!(null);
-        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
+        let result = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
         assert_eq!(result.reason, StopReason::SimulatedTimeLimit);
         assert!(result.workload_exit.is_none());
     });
@@ -320,7 +323,7 @@ fn runtime_requests_resolve_placement_and_reports_validate_rpc_causality() {
         raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":reply},"delivered_at_ns":reply}]);
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":e,"action":"stop","machine":"server-machine","status":"applied","detail":"reaped"}]);
         assert_eq!(
-            vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
+            engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request)
                 .unwrap()
                 .faults
                 .len(),
@@ -329,21 +332,21 @@ fn runtime_requests_resolve_placement_and_reports_validate_rpc_causality() {
         for field in ["relay_id", "delivered_at_ns"] {
             let mut bad = raw.clone();
             bad["control_history"][0][field] = json!(0);
-            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+            assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         }
         let mut mismatch = raw.clone();
         mismatch["faults"][0]["applied_at_ns"] = json!(e + 1);
-        assert!(vmm::report(&serde_json::to_vec(&mismatch).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&mismatch).unwrap(), &request).is_err());
         let mut bad = raw.clone();
         bad["control_history"][0]["response"]["admitted_at_ns"] = json!(a + 1);
-        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         let mut bad = raw.clone();
         bad["faults"][0]["request"]["machine"] = json!("client-machine");
-        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         let mut bad = raw.clone();
         bad["control_history"][0]["request"]["id"] = json!(2);
         bad["control_history"][0]["response"]["id"] = json!(2);
-        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
     });
 }
 
@@ -373,11 +376,11 @@ fn runtime_report_rejects_impossible_sleep_and_now_metadata() {
             let mut raw = report();
             raw["control_latency_ns"] = json!(l);
             raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":if op=="now"{json!({"now_ns":e})}else{json!({})},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":reply},"delivered_at_ns":reply}]);
-            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+            assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
             raw["control_history"][0]["response"]["effect_at_ns"] = json!(e + 1);
             raw["control_history"][0]["response"]["replied_at_ns"] = json!(reply + 1);
             raw["control_history"][0]["delivered_at_ns"] = json!(reply + 1);
-            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+            assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
         }
     });
 }
@@ -404,7 +407,7 @@ fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":null,"action":"stop","machine":"server-machine","status":"requested","detail":"awaiting readiness"}]);
         raw["outcome"] = json!("duration");
         assert_eq!(
-            vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
+            engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request)
                 .unwrap()
                 .reason,
             StopReason::SimulatedTimeLimit
@@ -412,7 +415,7 @@ fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
         raw["outcome"] = json!("end_machine_exited");
         raw["machines"][0]["guest_exit_code"] = json!(1);
         assert_eq!(
-            vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
+            engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request)
                 .unwrap()
                 .reason,
             StopReason::Completed
@@ -423,7 +426,8 @@ fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
             0,
             json!({"status":"rejected","detail":"request from non-controller machine"}),
         );
-        let retained = vmm::report(&serde_json::to_vec(&rejected).unwrap(), &request).unwrap();
+        let retained =
+            engine_adapter::report(&serde_json::to_vec(&rejected).unwrap(), &request).unwrap();
         assert_eq!(retained.reason, StopReason::Error);
         assert_eq!(
             retained.detail.as_deref(),
@@ -431,7 +435,7 @@ fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
         );
         assert!(retained.witness.is_some());
         raw["control_history"][0]["plan"]["machine"] = json!("client-machine");
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
     });
 }
 
@@ -464,8 +468,9 @@ fn process_target_exit_after_admission_is_a_recoverable_unavailable_fault() {
         raw["machines"][1]["guest_exit_code"] = json!(0);
         raw["machines"][1]["state"] = json!("Exited(0)");
         raw["machines"][1]["time_ns"] = json!(e);
-        let parse =
-            |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+        let parse = |raw: &serde_json::Value| {
+            engine_adapter::report(&serde_json::to_vec(raw).unwrap(), &request)
+        };
         let accepted = parse(&raw).unwrap();
         assert_eq!(accepted.reason, StopReason::Completed);
         assert_eq!(accepted.workload_exit.unwrap().code, 1);
@@ -577,7 +582,8 @@ fn in_flight_reply_at_world_cutoff_keeps_outcome_even_when_other_clock_is_later(
             raw["fault_error"] = json!(detail);
             raw["control_latency_ns"] = json!(l);
             raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":{"version":1,"id":1,"op":"now"},"response":{"version":1,"id":1,"ok":true,"result":{"now_ns":a},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"status":"cut_off","cut_off_at_ns":reply+1000}]);
-            let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+            let parsed =
+                engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
             assert_eq!(parsed.reason, reason);
             assert_eq!(parsed.detail.as_deref(), detail);
             assert!(parsed.witness.is_some());
@@ -605,9 +611,9 @@ fn transcript_correlates_global_relay_and_connection_local_ids() {
             json!({"relay_id":index+1,"session_id":session,"request":{"version":1,"id":1,"op":"now"},"response":{"version":1,"id":1,"ok":true,"result":{"now_ns":a},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply})
         }).collect();
         raw["control_history"] = json!(rows);
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
         raw["control_history"][1]["session_id"] = json!(1);
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
     });
 }
 
@@ -643,22 +649,27 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
         raw["machines"].as_array_mut().unwrap().push(peer);
         raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":{"version":1,"id":1,"op":"partition","left":[{"service":"server"}],"right":[{"service":"peer"}]},"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
         raw["faults"] = json!([{"request":plan,"id":1,"requested_at_ns":a,"applied_at_ns":a,"action":"partition","machine":null,"status":"applied","detail":"partition p1"}]);
-        let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        let parsed = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
         assert!(parsed.faults[0].service.is_empty());
         let mut empty_handle = raw.clone();
         empty_handle["control_history"][0]["response"]["result"]["handle"] = json!("");
         empty_handle["faults"][0]["request"]["handle"] = json!("");
-        assert!(vmm::report(&serde_json::to_vec(&empty_handle).unwrap(), &request).is_err());
+        assert!(
+            engine_adapter::report(&serde_json::to_vec(&empty_handle).unwrap(), &request).is_err()
+        );
         let mut pending = raw.clone();
         pending["faults"][0]["status"] = json!("requested");
         pending["faults"][0]["applied_at_ns"] = serde_json::Value::Null;
-        assert!(vmm::report(&serde_json::to_vec(&pending).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&pending).unwrap(), &request).is_err());
         let mut controller_target = raw.clone();
         controller_target["control_history"][0]["request"]["left"][0]["service"] = json!("client");
         controller_target["faults"][0]["request"]["left"][0] = json!("client-machine");
-        assert!(vmm::report(&serde_json::to_vec(&controller_target).unwrap(), &request).is_err());
+        assert!(
+            engine_adapter::report(&serde_json::to_vec(&controller_target).unwrap(), &request)
+                .is_err()
+        );
         raw["faults"][0]["request"]["deadline_ns"] = json!("bad");
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
     });
 }
 
@@ -747,7 +758,7 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
         let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000,"action":"shape","handle":"p1","from":["server-machine"],"to":["client-machine"],"latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000});
         raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":a,"action":"shape","machine":null,"status":"applied","detail":"handle=p1"}]);
-        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        let result = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
         assert_eq!(result.faults[0].action, "shape");
         let mut finite = raw.clone();
         for (key, value) in [
@@ -757,16 +768,16 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
             finite["control_history"][0]["request"][key] = value.clone();
             finite["faults"][0]["request"][key] = value;
         }
-        assert!(vmm::report(&serde_json::to_vec(&finite).unwrap(), &request).is_ok());
+        assert!(engine_adapter::report(&serde_json::to_vec(&finite).unwrap(), &request).is_ok());
         finite["faults"][0]["request"]["bandwidth_bps"] = json!(2_000_000);
-        assert!(vmm::report(&serde_json::to_vec(&finite).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&finite).unwrap(), &request).is_err());
         let mut impaired = raw.clone();
         let settings = json!({"duplicate_ppm":1_000_000,"tcp_reset_ppm":500_000});
         impaired["control_history"][0]["request"]["network_faults"] = settings.clone();
         impaired["faults"][0]["request"]["network_faults"] = settings;
-        assert!(vmm::report(&serde_json::to_vec(&impaired).unwrap(), &request).is_ok());
+        assert!(engine_adapter::report(&serde_json::to_vec(&impaired).unwrap(), &request).is_ok());
         impaired["faults"][0]["request"]["network_faults"]["duplicate_ppm"] = json!(500_000);
-        assert!(vmm::report(&serde_json::to_vec(&impaired).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&impaired).unwrap(), &request).is_err());
         assert!(result.faults[0].service.is_empty());
         for (key, value) in [
             ("latency_ns", json!(99_999)),
@@ -784,16 +795,16 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
         ] {
             let mut bad = raw.clone();
             bad["control_history"][0]["request"][key] = value;
-            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+            assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         }
         for handle in [json!(""), json!(null), json!("p2")] {
             let mut bad = raw.clone();
             bad["control_history"][0]["response"]["result"]["handle"] = handle;
-            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+            assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         }
         let mut bad = raw.clone();
         bad["control_history"][0]["response"]["effect_at_ns"] = json!(a + 1);
-        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         // Admission followed by world cutoff retains the planned handle and policy.
         raw["outcome"] = json!("duration");
         raw["control_history"][0]["plan"] = raw["faults"][0]["request"].clone();
@@ -805,7 +816,7 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
         raw["control_history"][0]["admitted_at_ns"] = json!(a);
         raw["control_history"][0]["admitted_done"] = json!(true);
         raw["control_history"][0]["delivered_at_ns"] = json!(null);
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
     });
 }
 
@@ -861,7 +872,7 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
             {"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":e,"action":"clock_skew","machine":"server-machine","status":"applied","detail":"handle=p1; guest wall clock stepped by -12345 ns","offset_ns":-12345},
             {"id":2,"request":heal_plan,"requested_at_ns":a2,"applied_at_ns":e2,"action":"heal","machine":null,"status":"applied","detail":"handle=p1; guest wall clock stepped by 12345 ns","offset_ns":12345}
         ]);
-        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        let result = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
         assert_eq!(result.faults[0].action, "clock_skew");
         assert_eq!(result.faults[0].service, "server");
         assert_eq!(result.faults[0].applied_at_ns, e);
@@ -873,18 +884,18 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
         ] {
             let mut bad = raw.clone();
             bad["control_history"][0]["request"][key] = value;
-            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+            assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         }
         for handle in [json!(""), json!(null), json!("p2")] {
             let mut bad = raw.clone();
             bad["control_history"][0]["response"]["result"]["handle"] = handle;
-            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+            assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         }
         // A heal of a handle that is not a clock skew still applies at admission.
         let mut bad = raw.clone();
         bad["control_history"][1]["request"]["handle"] = json!("p9");
         bad["faults"][1]["request"]["handle"] = json!("p9");
-        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         // An unavailable skew keeps its allocated handle in the error reply.
         let mut gone = raw.clone();
         gone["control_history"].as_array_mut().unwrap().pop();
@@ -894,13 +905,13 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
         gone["faults"][0]["status"] = json!("unavailable");
         gone["faults"][0]["applied_at_ns"] = json!(null);
         gone["machines"][1]["crashed_incarnations"] = json!([{"crashed_at_ns":e}]);
-        let checked = vmm::report(&serde_json::to_vec(&gone).unwrap(), &request);
+        let checked = engine_adapter::report(&serde_json::to_vec(&gone).unwrap(), &request);
         let mut missing = gone.clone();
         missing["control_history"][0]["response"]["error"]
             .as_object_mut()
             .unwrap()
             .remove("handle");
-        assert!(vmm::report(&serde_json::to_vec(&missing).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&missing).unwrap(), &request).is_err());
         checked.unwrap();
     });
 }
@@ -956,7 +967,7 @@ fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
             {"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":e,"action":"clock_drift","machine":"server-machine","status":"applied","detail":"handle=p1; guest clock rate set to -4321 ppb","rate_ppb":-4321},
             {"id":2,"request":heal_plan,"requested_at_ns":a2,"applied_at_ns":e2,"action":"heal","machine":null,"status":"applied","detail":"handle=p1; guest clock rate set to 0 ppb","rate_ppb":0}
         ]);
-        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        let result = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
         assert_eq!(result.faults[0].action, "clock_drift");
         assert_eq!(result.faults[0].service, "server");
         assert_eq!(result.faults[0].applied_at_ns, e);
@@ -969,12 +980,12 @@ fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
         ] {
             let mut bad = raw.clone();
             bad["control_history"][0]["request"][key] = value;
-            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+            assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         }
         for handle in [json!(""), json!(null), json!("p2")] {
             let mut bad = raw.clone();
             bad["control_history"][0]["response"]["result"]["handle"] = handle;
-            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+            assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         }
     });
 }
@@ -1020,7 +1031,7 @@ fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time
         let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000,"action":"drop_connection","handle":"p1","connection":connection});
         raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":a,"action":"drop_connection","machine":null,"status":"applied","detail":"armed","selection_counts":{"matched":0,"dropped":0}}]);
-        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        let result = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
         assert_eq!(result.faults[0].action, "drop_connection");
         for (key, value) in [
             ("incarnation", json!(8)),
@@ -1032,22 +1043,22 @@ fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time
         ] {
             let mut bad = raw.clone();
             bad["control_history"][0]["request"]["connection"][key] = value;
-            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+            assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         }
         let mut bad = raw.clone();
         bad["control_history"][0]["response"]["effect_at_ns"] = json!(a + 1);
-        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
         // A unavailable incarnation is a recoverable admission error with no plan.
         raw["faults"] = json!([]);
         raw["control_history"][0]["response"]["ok"] = json!(false);
         raw["control_history"][0]["response"]["error"] =
             json!({"code":"invalid_state","message":"connection incarnation unavailable"});
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
         raw["control_history"][0]["request"] = json!({"version":1,"id":1,"op":"connections","from":{"service":"server"},"to":{"service":"client"},"after":0});
         raw["control_history"][0]["response"]["ok"] = json!(true);
         raw["control_history"][0]["response"]["result"] =
             json!({"connections":[connection],"next_after":7});
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
     });
 }
 
@@ -1088,8 +1099,9 @@ fn machine_lifecycle_transcripts_attribute_services_and_require_admission_effect
             .collect();
         raw["control_history"] = json!(rows.iter().map(|(r, _)| r).collect::<Vec<_>>());
         raw["faults"] = json!(rows.iter().map(|(_, f)| f).collect::<Vec<_>>());
-        let parse =
-            |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+        let parse = |raw: &serde_json::Value| {
+            engine_adapter::report(&serde_json::to_vec(raw).unwrap(), &request)
+        };
         let parsed = parse(&raw).unwrap();
         assert_eq!(parsed.reason, StopReason::Completed);
         assert_eq!(parsed.faults.len(), 4);
@@ -1166,8 +1178,9 @@ fn lifecycle_invalid_state_and_exited_pause_resume_are_recoverable_without_fault
             row["response"]["ok"] = json!(false);
             row["response"]["error"] = json!({"code":code,"message":"transition rejected"});
             raw["control_history"] = json!([row]);
-            let parse =
-                |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+            let parse = |raw: &serde_json::Value| {
+                engine_adapter::report(&serde_json::to_vec(raw).unwrap(), &request)
+            };
             let parsed = parse(&raw).unwrap();
             assert_eq!(parsed.reason, StopReason::Completed);
             assert!(parsed.faults.is_empty() && parsed.detail.is_none());
@@ -1210,8 +1223,9 @@ fn unavailable_process_fault_requires_exact_crash_evidence_in_its_window() {
             .unwrap();
         let mut raw = report();
         raw["control_latency_ns"] = json!(l);
-        let parse =
-            |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+        let parse = |raw: &serde_json::Value| {
+            engine_adapter::report(&serde_json::to_vec(raw).unwrap(), &request)
+        };
         for op in ["stop", "restart"] {
             let (mut row, mut fault) = machine_fault_row(1, op, 10_000_000, l);
             let a = row["response"]["admitted_at_ns"].as_u64().unwrap();
@@ -1267,8 +1281,9 @@ fn unavailable_at_admission_requires_prior_crash_without_intervening_reboot() {
         let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
-        let parse =
-            |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+        let parse = |raw: &serde_json::Value| {
+            engine_adapter::report(&serde_json::to_vec(raw).unwrap(), &request)
+        };
         for op in ["stop", "restart"] {
             let mut raw = report();
             raw["control_latency_ns"] = json!(l);
@@ -1329,8 +1344,9 @@ fn committed_trigger_reports_correlate_arms_effects_cancellation_and_cutoff() {
         raw["triggers"] = json!([trigger]);
         let plan = json!({"id":1,"at_ns":effect,"deadline_ns":effect+5_000_000_000u64,"action":"stop","machine":"server-machine"});
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":effect,"applied_at_ns":effect+10,"action":"stop","machine":"server-machine","status":"applied","detail":"reaped"}]);
-        let parse =
-            |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+        let parse = |raw: &serde_json::Value| {
+            engine_adapter::report(&serde_json::to_vec(raw).unwrap(), &request)
+        };
         assert_eq!(parse(&raw).unwrap().faults.len(), 1);
         // A matched trigger rejected at admission creates no second fault.
         let mut rejected = raw.clone();
@@ -1543,7 +1559,7 @@ fn deferred_tx_report_must_match_semantic_parameter() {
                     Some(reported) => raw["deferred_tx"] = json!(reported),
                     None => drop(raw.as_object_mut().unwrap().remove("deferred_tx")),
                 }
-                let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
+                let result = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request);
                 assert_eq!(result.is_ok(), reported == Some(enabled));
             }
         }
@@ -1578,11 +1594,11 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
             )
         );
         let mut raw = report();
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
         raw["checkpoint"] = checkpoint;
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
         raw["checkpoint"]["branch_seed"] = json!(43);
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        assert!(engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
         let mut json = serde_json::to_value(&inputs.profile).unwrap();
         json["semantic_parameters"]["checkpoint"]["at_ns"] = "0500".into();
         assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
@@ -1636,7 +1652,7 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
                 let mut raw = report();
                 raw["deferred_tx"] = json!(prepared.profile.semantic_parameters.deferred_tx);
                 raw["checkpoint"] = world["checkpoint"].clone();
-                let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
+                let result = engine_adapter::report(&serde_json::to_vec(&raw).unwrap(), &request);
                 if i == j {
                     assert!(result.is_ok(), "{result:?}");
                 } else {

@@ -4,6 +4,19 @@ The boundary is a Rust library API, defined in `src/execution.rs`. The CLI only
 parses arguments, supplies environment values, calls the library, and formats
 results. CLI commands and other Rust applications use the same API.
 
+The application crate owns preparation and execution orchestration.
+`seedbox::engine_adapter` translates prepared inputs into worker requests and
+validates worker reports for both native backends. Platform modules own host
+admission and launching. Shared wire types live in `seedbox-engine-protocol`;
+that crate contains formats, not scheduling or device policy.
+
+`seedbox-artifacts` owns retained records, resolved input types, content storage,
+logs, comparison and bundles. It depends on the protocol crate, but neither the
+engine core nor a native backend. Offline tools can depend on it directly without
+pulling in the container client or asynchronous runtime. The application crate
+reexports these APIs to preserve existing caller paths. Compose parsing and
+image preparation stay in the application crate.
+
 ```text
 CLI / Rust caller
     config::load(explicit environment)

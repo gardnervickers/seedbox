@@ -9,7 +9,7 @@ use std::{fs, path::Path, process::Command};
 #[allow(dead_code)]
 mod record_fixture {
     use seedbox as sb;
-    include!("support/diff_fixture.rs");
+    include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
 
     pub(super) fn record() -> sb::orchestration::RunRecord {
         fixture()

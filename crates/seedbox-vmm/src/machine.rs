@@ -714,7 +714,7 @@ impl Machine {
     /// Take a machine built for a reboot to its first instruction at `at`.
     pub fn boot_at(&mut self, at: u64) -> Result<(), String> {
         self.world.boot_at(at)?;
-        self.record(b'N', self.world.incarnation as u64);
+        self.record(b'N', self.world.incarnation() as u64);
         Ok(())
     }
 
@@ -751,7 +751,7 @@ impl Machine {
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
             let (disk, lost) =
                 blk.disk()
-                    .crashed_branch(seed, identity, &old.world.name, old.world.incarnation);
+                    .crashed_branch(seed, identity, &old.world.name, old.world.incarnation());
             *new = VirtioBlk::new(disk);
             Some(lost)
         } else {
@@ -958,7 +958,7 @@ impl Machine {
             uart.chunks.capture(
                 uart.out.len() as u64,
                 self.world.time,
-                self.world.incarnation,
+                self.world.incarnation(),
                 &mut self.log_order,
             );
         }
@@ -1559,13 +1559,13 @@ impl Machine {
                             return Ok(Stop::Exited);
                         }
                         BARRIER_PORT if self.barrier => {
-                            if self.world.parked || self.entropy_read != 0 {
+                            if self.world.is_parked() || self.entropy_read != 0 {
                                 return Err(format!(
                                     "{}: launch barrier reached twice",
                                     self.world.name
                                 ));
                             }
-                            self.world.parked = true;
+                            self.world.commit_park();
                             self.record(b'B', 0);
                             // Finish the port write now, so the machine is
                             // parked in a state a fork can save and restore.
@@ -2430,9 +2430,9 @@ mod fork_tests {
         let saved = m.snapshot().unwrap();
         let before = m.published_entropy();
         m.reseed_time_page([42; ENTROPY_WORDS]).unwrap();
-        assert!(m.paused);
+        assert!(m.is_paused());
         assert_eq!(m.time, 0);
-        assert!(!m.parked);
+        assert!(!m.is_parked());
         assert_eq!(m.page_get(PAGE_ENTROPY_GEN), 1);
         let page = page_entropy(&[42; ENTROPY_WORDS]);
         for (i, word) in page.into_iter().enumerate() {

@@ -1,0 +1,11 @@
+[package]
+name = "seedbox-engine-protocol"
+build = "../seedbox-engine-core/build.rs"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seedbox-control.workspace = true
+serde.workspace = true
+serde_json.workspace = true

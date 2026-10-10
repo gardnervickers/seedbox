@@ -5,15 +5,11 @@
 
 mod boundary;
 mod management_uart;
-#[cfg(test)]
-use seedbox_engine_core::faults;
-#[cfg(test)]
-use seedbox_engine_core::world::{replay_readiness, stop_progress};
-use seedbox_engine_core::{checkpoint, control, disk, links, network_counters, output_layout, rng};
+use seedbox_engine_core::{checkpoint, control, disk, links, output_layout, rng};
 #[cfg(test)]
 mod device_tests;
 mod devices;
-pub mod host_control;
+pub use seedbox_engine_core::host_control;
 mod machine;
 mod shadow;
 mod virtio_blk;
@@ -29,8 +25,6 @@ use machine::{
     BootSpec, Machine, State, BLK_IRQ, BLK_MMIO, CHANNEL_IRQ, CHANNEL_MMIO, NET_IRQ, NET_MMIO,
 };
 use rng::Rng;
-#[cfg(test)]
-use serde_json::json;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
@@ -299,8 +293,8 @@ fn boot_machine(
 pub use seedbox_engine_core::report::RunReport;
 use seedbox_engine_core::report::{
     BootReport, BootSummary, ControlChannelReport, ControlRecord, DiskReport, EngineReport,
-    FaultRecord, IoDirection, Kill, MachineOutcome, MachineReport, MachineState, PendingIo,
-    ShadowReport, SkewReport, TimerReport, WorldEvidence, REPORT_VERSION,
+    IoDirection, Kill, MachineOutcome, MachineReport, PendingIo, ShadowReport, SkewReport,
+    TimerReport, WorldEvidence, REPORT_VERSION,
 };
 use seedbox_engine_core::world::{
     self as world_core, arm_seed, boot_faults, entropy_seed, Payload,
@@ -353,38 +347,6 @@ fn simulate_windowed(
         &mut boundary,
     )
 }
-/// Run the world to its end, or with `fork` to its fork point, on one thread.
-#[cfg(test)]
-fn simulate(
-    world: &mut World,
-    duration: u64,
-    end_on: &Option<String>,
-    fork: Option<Option<u64>>,
-    host_control: &mut Option<host_control::HostControl>,
-) -> Result<&'static str, String> {
-    simulate_to(world, duration, end_on, fork, None, host_control)
-}
-/// As [`simulate`], stopping at `checkpoint`.
-#[cfg(test)]
-fn simulate_to(
-    world: &mut World,
-    duration: u64,
-    end_on: &Option<String>,
-    fork: Option<Option<u64>>,
-    checkpoint: Option<u64>,
-    host_control: &mut Option<host_control::HostControl>,
-) -> Result<&'static str, String> {
-    let run = world_windowed::Run {
-        duration,
-        end_on: end_on.as_deref(),
-        fork: fork.map(Into::into),
-        checkpoint,
-        require_barrier: true,
-    };
-    let request = WorkerRequest::new(Default::default(), 0, Default::default());
-    simulate_windowed(world, &run, &request, host_control).map(|(word, _)| word.as_str())
-}
-
 /// Pin the calling thread to one CPU.
 fn pin(cpu: usize) -> Result<(), String> {
     unsafe {
@@ -650,30 +612,22 @@ pub fn run(
         }
         machines.push(mach);
     }
-    let n = machines.len();
     let net = cfg.network.clone().unwrap_or_default();
     let latency = net.latency_ns;
     let early = (latency / 2).min(cfg.stop_tolerance_ns);
     // Host CPU time a run may go without an exit before it is checked for a
     // spin (performance only).
     let clock = open_clock(options.performance.watchdog_ms)?;
-    let mut world = World {
-        failure: None,
+    let mut world = World::new(world_core::WorldInputs {
         factory: kvm,
         boot: boots,
         barrier,
         boot_seed,
         run_seed: seed,
-        branch_identity: None,
-        incarnations: vec![Vec::new(); n],
-        paused_ingress: vec![0; n],
         clock,
-        events: (0..n).map(|_| BTreeMap::new()).collect(),
-        seq: 0,
         lookahead: latency,
         early,
         latency,
-        partitioned: BTreeMap::new(),
         // Faults, control and scenarios belong to the run seed: armed below,
         // or at the release of a booted world.
         faults: boot_faults(
@@ -683,15 +637,9 @@ pub fn run(
             links::Links::from_network(boot_seed, &names, &net)?,
         )?,
         control: control::Control::from_config(None, names.clone(), latency, early)?,
-        strict_events: (0..n).map(|_| BTreeMap::new()).collect(),
         macs,
-        dropped: 0,
-        delivered: 0,
-        link_counts: BTreeMap::new(),
-        semantic_counts: network_counters::NetworkCounters::default(),
-        slices: 0,
         machines,
-    };
+    })?;
     if !forked {
         let kills = arm_seed(&mut world, cfg.seed_plan(), &names, seed, 0)?;
         if !checkpoint_times.is_empty() {
@@ -810,7 +758,7 @@ pub fn run(
         &mut host_control,
     )?;
     let barrier_ns = world
-        .machines
+        .machines()
         .iter()
         .map(|m| m.world.time)
         .max()
@@ -898,7 +846,7 @@ fn open_outputs(mach: &mut Machine, out: &str, stream: bool) -> Result<(), Strin
 /// Move every machine's logs to a new output directory `out`, for a branch.
 fn reopen_outputs(world: &mut World, out: &str, stream: bool) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    for mach in &mut world.machines {
+    for mach in world.machines_mut() {
         open_outputs(mach, out, stream)?;
     }
     Ok(())
@@ -922,7 +870,7 @@ fn network_witness(world: &World) -> sha2::digest::Output<Sha256> {
     let mut network_hash = Sha256::new();
     network_hash.update(b"seedbox-network-v1");
     let mut frames = Vec::new();
-    for (to, events) in world.events.iter().enumerate() {
+    for (to, events) in world.events().iter().enumerate() {
         for (&(at, seq), payload) in events {
             if let Payload::Frame { from, bytes } = payload {
                 frames.push((at, seq, *from, to, Sha256::digest(bytes)));
@@ -937,8 +885,8 @@ fn network_witness(world: &World) -> sha2::digest::Output<Sha256> {
         links::pair_hash(&mut network_hash, (from, to));
         network_hash.update(bytes_hash);
     }
-    world.faults.network_witness(&mut network_hash);
-    let legacy_cuts: Vec<_> = world.partitioned.iter().filter(|(_, on)| **on).collect();
+    world.faults().network_witness(&mut network_hash);
+    let legacy_cuts: Vec<_> = world.partitions().iter().filter(|(_, on)| **on).collect();
     network_hash.update((legacy_cuts.len() as u64).to_le_bytes());
     for (&pair, _) in legacy_cuts {
         links::pair_hash(&mut network_hash, pair);
@@ -949,19 +897,19 @@ fn network_witness(world: &World) -> sha2::digest::Output<Sha256> {
 /// The world witness's world-level evidence, before each machine's.
 fn world_witness_prefix(world: &World, network_witness: &[u8]) -> Result<Sha256, String> {
     let mut world_witness = Sha256::new();
-    world.control.triggers.hash_into(&mut world_witness)?;
+    world.control().triggers.hash_into(&mut world_witness)?;
     // Only a run that uses link policy carries the network witness, so a run
     // without it keeps the world witness it had before link policy existed.
-    if world.faults.links.in_use() || world.faults.connections.used {
+    if world.faults().links.in_use() || world.faults().connections.used {
         world_witness.update(network_witness);
     }
-    if world.control.controller.is_some() {
-        world_witness.update(serde_json::to_vec(&world.control.log).map_err(|e| e.to_string())?);
+    if world.control().controller.is_some() {
+        world_witness.update(serde_json::to_vec(&world.control().log).map_err(|e| e.to_string())?);
     }
-    if !world.faults.log.is_empty() {
-        world_witness.update(serde_json::to_vec(&world.faults.log).map_err(|e| e.to_string())?);
-        world_witness.update(world.delivered.to_le_bytes());
-        world_witness.update(world.dropped.to_le_bytes());
+    if !world.faults().log.is_empty() {
+        world_witness.update(serde_json::to_vec(&world.faults().log).map_err(|e| e.to_string())?);
+        world_witness.update(world.delivered().to_le_bytes());
+        world_witness.update(world.dropped().to_le_bytes());
         world_witness
             .update(serde_json::to_vec(&world.network_snapshot()).map_err(|e| e.to_string())?);
     }
@@ -994,8 +942,7 @@ fn machine_report(
     digest: bool,
     out: &str,
 ) -> Result<MachineReport, String> {
-    let incarnations = &world.incarnations[index];
-    let mach = &mut world.machines[index];
+    let (mach, incarnations) = world.machine_with_history(index);
     let (state_digest, state_digest_parts) = if digest {
         let (d, parts) = mach.state_digest();
         // The host supplies output/MACHINE_OUTPUT_DIR as --out; retention
@@ -1023,7 +970,11 @@ fn machine_report(
             .sum::<u64>();
     let outcome = MachineOutcome {
         name: mach.world.name.clone(),
-        state: MachineState::of(mach.world.state, mach.world.paused, mach.world.down),
+        state: seedbox_engine_core::report::machine_state(
+            mach.world.state,
+            mach.world.is_paused(),
+            mach.world.is_down(),
+        ),
         time_ns: mach.world.time,
         guest_exit_code: mach.guest_exit_code,
         guest_init_error: mach.guest_init_error,
@@ -1068,8 +1019,8 @@ fn machine_report(
     };
     Ok(MachineReport {
         outcome,
-        incarnation: mach.world.incarnation,
-        booted_at_ns: mach.world.booted_at,
+        incarnation: mach.world.incarnation(),
+        booted_at_ns: mach.world.booted_at(),
         exits: s.exits,
         pio: s.pio,
         pio_total,
@@ -1141,19 +1092,23 @@ fn report(
         host_seconds,
         out,
     } = finished;
-    let slices = world.slices;
+    let slices = world.slices();
     world.finish(
         outcome.as_str(),
         run.duration,
         &run.end_on.map(str::to_owned),
     )?;
-    let triggers = Some(world.control.triggers.records.clone()).filter(|r| !r.is_empty());
-    let fault_error = world.faults.error.clone().or(world.control.error.clone());
+    let triggers = Some(world.control().triggers.records.clone()).filter(|r| !r.is_empty());
+    let fault_error = world
+        .faults()
+        .error
+        .clone()
+        .or(world.control().error.clone());
     let network_witness = network_witness(world);
     let mut world_witness = world_witness_prefix(world, &network_witness)?;
     let mut machines = Vec::new();
-    for index in 0..world.machines.len() {
-        let mach = &mut world.machines[index];
+    for index in 0..world.machines().len() {
+        let mach = &mut world.machines_mut()[index];
         if let Some(t) = mach.trace.as_mut() {
             use std::io::Write;
             let _ = t.flush();
@@ -1164,7 +1119,7 @@ fn report(
         if let Some(d) = &row.outcome.state_digest {
             world_witness.update(d.as_bytes());
         }
-        let mach = &world.machines[index];
+        let mach = &world.machines()[index];
         // A disk outlives its machine's crashes: what it holds is part of
         // the outcome even without --digest.
         if let Some(b) = &mach.blk {
@@ -1182,20 +1137,20 @@ fn report(
         machines.push(row);
     }
     let sim_ns = world
-        .machines
+        .machines()
         .iter()
         .map(|m| m.world.time)
         .max()
         .unwrap_or(0);
     let sim_seconds = sim_ns as f64 / 1e9;
     let faults = world
-        .faults
+        .faults()
         .log
         .iter()
-        .map(FaultRecord::of)
+        .map(seedbox_engine_core::report::fault_record)
         .collect::<Result<_, _>>()?;
     let control_history = world
-        .control
+        .control()
         .log
         .iter()
         .map(ControlRecord::of)
@@ -1208,27 +1163,27 @@ fn report(
     Ok(EngineReport {
         report_version: REPORT_VERSION,
         seed,
-        deferred_tx: world.boot.iter().any(|b| b.features.deferred_tx),
+        deferred_tx: world.boot_inputs().iter().any(|b| b.features.deferred_tx),
         evidence: WorldEvidence {
             outcome,
             world_witness: format!("{:x}", world_witness.finalize()),
             faults,
             fault_error,
             control_history,
-            control_latency_ns: world.control.latency,
+            control_latency_ns: world.control().latency,
             triggers,
         },
         sim_seconds,
         host_seconds,
         speed: Some(sim_seconds / host_seconds).filter(|s| s.is_finite()),
         slices,
-        frames_delivered: world.delivered,
-        frames_dropped: world.dropped,
+        frames_delivered: world.delivered(),
+        frames_dropped: world.dropped(),
         network_counters: world.network_snapshot(),
         network_witness: format!("{network_witness:x}"),
         kills: kills.to_vec(),
-        rejected_fault_effects: to_values(&world.faults.rejected_effects)?,
-        management_readiness: world.faults.readiness.clone(),
+        rejected_fault_effects: to_values(&world.faults().rejected_effects)?,
+        management_readiness: world.faults().readiness.clone(),
         in_flight_policy: "retain_send_time_decisions; cuts_dominate_shapes".into(),
         machines,
         scheduler,
@@ -1282,40 +1237,6 @@ mod progress_tests {
                 " seedbox.control=1 seedbox.blk=ext4".to_owned()
             )
         );
-    }
-
-    /// A Compose guest reports management readiness while it boots; with a
-    /// time fork that is before the release. The boot world accepts it, and
-    /// the seed's plan starts with that machine already ready.
-    #[test]
-    fn readiness_signalled_before_the_fork_carries_over_to_the_seed() {
-        let names = vec!["a".to_string(), "b".to_string()];
-        let links = links::Links::from_config(0, &names, &json!({"latency_ns":1000})).unwrap();
-        let mut boot = boot_faults(&names, &[], 1000, links).unwrap();
-        boot.management_ready(1, 700, 1000).unwrap();
-        let restored = boot_faults(&names, &boot.readiness, 1000, boot.links.clone()).unwrap();
-        assert_eq!(restored.readiness, boot.readiness);
-        let mut seed = faults::Faults::new(Vec::new(), names.clone()).unwrap();
-        seed.require_readiness();
-        replay_readiness(&mut seed, &names, &restored.readiness, 1000).unwrap();
-        assert_eq!(seed.readiness, vec![json!({"machine":"b","at_ns":700})]);
-        assert!(
-            seed.management_ready(1, 2000, 1000).is_err(),
-            "b is already ready"
-        );
-        assert!(seed.management_ready(0, 2000, 1000).is_ok());
-    }
-    #[test]
-    fn equal_time_delivery_can_replan_but_an_unchanged_plan_cannot_loop() {
-        let mut previous = None;
-        let plan = (0, 1000, 1000, 1000, 1000, 1000, 1000, 2000, 500, 1);
-        assert!(stop_progress(&mut previous, plan, false).is_ok());
-        let delivered = (0, 1000, 1000, 1000, 2000, 2000, 2000, 2000, 500, 2);
-        assert!(stop_progress(&mut previous, delivered, false).is_ok());
-        assert!(stop_progress(&mut previous, delivered, false).is_err());
-        assert!(stop_progress(&mut previous, delivered, true).is_ok());
-        assert_eq!(previous, None);
-        assert!(stop_progress(&mut previous, delivered, false).is_ok());
     }
 }
 
@@ -1379,6 +1300,3 @@ mod worker_options_tests {
         assert!(!console_trace_enabled());
     }
 }
-
-#[cfg(test)]
-mod checkpoint_tests;

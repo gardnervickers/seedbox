@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine_adapter::report;
 use crate::host::HostLease;
 use std::{fs, os::unix::process::CommandExt};
 

@@ -36,7 +36,9 @@ impl Display for Seconds {
 }
 
 /// Values separated by commas, without spaces.
+#[cfg(any(target_os = "linux", test))]
 pub struct Csv<'a, T>(pub &'a [T]);
+#[cfg(any(target_os = "linux", test))]
 impl<T: Display> Display for Csv<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, value) in self.0.iter().enumerate() {

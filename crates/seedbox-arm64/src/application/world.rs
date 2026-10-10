@@ -3,14 +3,11 @@ use super::{
     worker::Boot,
     world_adapter::{ArmMachine, Factory},
 };
-use crate::{
-    control::Control, faults::Faults, links::Links, network_counters::NetworkCounters, Result,
-};
+use crate::{control::Control, faults::Faults, links::Links, Result};
 use seedbox_engine_core::{
     world::{self as world_core, Payload, WorldMachine},
     world_windowed,
 };
-use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -63,47 +60,67 @@ fn simulate_windowed(
     )
     .map(|(outcome, scheduler)| (outcome.as_str(), scheduler))
 }
-#[derive(Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    kernel: PathBuf,
-    mem_mb: u64,
-    duration_ns: u64,
-    end_on_exit: String,
-    timer_jitter_ns: u64,
-    stop_tolerance_ns: u64,
-    network: Value,
-    machines: Vec<MachineConfig>,
-    control: Value,
-    control_channel: String,
-    #[serde(default)]
-    disk_loss: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    launch_skew_ns: Option<u64>,
-}
-#[derive(Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct MachineConfig {
-    name: String,
-    initrd: PathBuf,
-    #[serde(default)]
-    disk: Option<DiskConfig>,
-}
-#[derive(Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct DiskConfig {
-    #[serde(default)]
-    size_mib: Option<u64>,
-    #[serde(default)]
-    image: Option<PathBuf>,
+/// Decode the ARM application dialect into the shared typed world document.
+/// Keep its existing required keys and rejection of x86-only inputs explicit.
+fn decode_config(bytes: &[u8]) -> Result<seedbox_engine_core::world_config::WorldConfig> {
+    let raw: Value = serde_json::from_slice(bytes).map_err(|e| format!("world config: {e}"))?;
+    let object = raw.as_object().ok_or("world config: expected object")?;
+    for key in object.keys() {
+        if !matches!(
+            key.as_str(),
+            "kernel"
+                | "mem_mb"
+                | "duration_ns"
+                | "end_on_exit"
+                | "timer_jitter_ns"
+                | "stop_tolerance_ns"
+                | "network"
+                | "machines"
+                | "control"
+                | "control_channel"
+                | "disk_loss"
+                | "launch_skew_ns"
+        ) {
+            return Err(format!(
+                "world config: unknown field `{key}` for ARM application execution"
+            ));
+        }
+    }
+    for key in [
+        "kernel",
+        "mem_mb",
+        "duration_ns",
+        "end_on_exit",
+        "timer_jitter_ns",
+        "stop_tolerance_ns",
+        "network",
+        "machines",
+        "control",
+        "control_channel",
+    ] {
+        if !object.contains_key(key) {
+            return Err(format!("world config: missing field `{key}`"));
+        }
+    }
+    if raw["machines"]
+        .as_array()
+        .is_some_and(|machines| machines.iter().any(|m| m.get("cmdline").is_some()))
+    {
+        return Err("world config: unknown field `cmdline` for ARM application execution".into());
+    }
+    let cfg: seedbox_engine_core::world_config::WorldConfig =
+        serde_json::from_value(raw).map_err(|e| format!("world config: {e}"))?;
+    if cfg.end_on_exit.is_none() || cfg.network.is_none() || cfg.control_channel.is_none() {
+        return Err("world config: ARM requires end_on_exit, network and control_channel".into());
+    }
+    Ok(cfg)
 }
 
 pub fn run(options: &Options) -> Result<Value> {
-    let cfg: Config = serde_json::from_slice(
+    let cfg = decode_config(
         &std::fs::read(&options.config)
             .map_err(|e| format!("world {}: {e}", options.config.display()))?,
-    )
-    .map_err(|e| format!("world config: {e}"))?;
+    )?;
     if cfg.machines.is_empty() || cfg.machines.len() > 254 {
         return Err("world requires 1..254 machines".into());
     }
@@ -117,13 +134,18 @@ pub fn run(options: &Options) -> Result<Value> {
     if cfg.stop_tolerance_ns > 3_600_000_000_000 {
         return Err("invalid stop tolerance".into());
     }
-    if cfg.control_channel != "virtio-console-v1" {
+    if cfg.control_channel
+        != Some(seedbox_engine_core::world_config::ControlChannel::VirtioConsoleV1)
+    {
         return Err("unknown application control channel".into());
     }
     let names: Vec<_> = cfg.machines.iter().map(|m| m.name.clone()).collect();
     let unique: BTreeSet<_> = names.iter().collect();
     if unique.len() != names.len()
-        || !names.contains(&cfg.end_on_exit)
+        || !cfg
+            .end_on_exit
+            .as_ref()
+            .is_some_and(|end| names.contains(end))
         || names.iter().any(|n| {
             n.is_empty()
                 || !n
@@ -133,7 +155,8 @@ pub fn run(options: &Options) -> Result<Value> {
     {
         return Err("invalid world machine names or workload".into());
     }
-    let links = Links::from_config(options.seed, &names, &cfg.network)?;
+    let network = cfg.network.as_ref().ok_or("ARM world network missing")?;
+    let links = Links::from_network(options.seed, &names, network)?;
     let lookahead = links
         .global
         .latency_ns
@@ -142,10 +165,10 @@ pub fn run(options: &Options) -> Result<Value> {
         .ok_or("network lookahead must be positive")?;
     validate_launch_skew(cfg.launch_skew_ns, lookahead)?;
     let initial_barrier = cfg.launch_skew_ns.is_some();
-    let control = Control::new(&cfg.control, names.clone(), lookahead, 0)?;
+    let control = Control::from_config(cfg.control.as_ref(), names.clone(), lookahead, 0)?;
     let mut faults = Faults::with_links(Vec::new(), names.clone(), links)?;
     faults.require_readiness();
-    let disk_fault_model = crate::disk::parse_disk_fault_model(&cfg.disk_loss)?;
+    let disk_fault_model = crate::disk::fault_model(cfg.disk_loss)?;
     let base = options.config.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(&options.output).map_err(|e| format!("world output: {e}"))?;
     let factory = Factory::new(
@@ -205,34 +228,21 @@ pub fn run(options: &Options) -> Result<Value> {
         )?);
         boots.push(boot);
     }
-    let mut world = world_core::World {
+    let mut world = world_core::World::new(world_core::WorldInputs {
         machines,
         factory,
         boot: boots,
         barrier: initial_barrier,
         boot_seed: options.seed,
         run_seed: options.seed,
-        branch_identity: None,
-        incarnations: names.iter().map(|_| Vec::new()).collect(),
-        paused_ingress: vec![0; names.len()],
         clock: (),
-        events: names.iter().map(|_| BTreeMap::new()).collect(),
-        strict_events: names.iter().map(|_| BTreeMap::new()).collect(),
-        seq: 0,
         lookahead,
         early: 0,
         latency: lookahead,
-        partitioned: BTreeMap::new(),
         faults,
         control,
         macs,
-        dropped: 0,
-        delivered: 0,
-        link_counts: BTreeMap::new(),
-        semantic_counts: NetworkCounters::default(),
-        slices: 0,
-        failure: None,
-    };
+    })?;
     let mut host = options
         .host_control
         .as_deref()
@@ -240,7 +250,7 @@ pub fn run(options: &Options) -> Result<Value> {
         .transpose()
         .map_err(|e| format!("host control: {e}"))?;
     let raw_config = serde_json::to_value(&cfg).map_err(|e| e.to_string())?;
-    let end_on = Some(cfg.end_on_exit.clone());
+    let end_on = cfg.end_on_exit.clone();
     let mut boundary = || {
         if let Some(host) = &mut host {
             host.boundary().map_err(|e| format!("host control: {e}"))?;
@@ -282,7 +292,7 @@ pub fn run(options: &Options) -> Result<Value> {
     let (outcome, scheduler) = if let Some(stopped) = bootstrap.filter(|(s, _)| *s != "barrier") {
         stopped
     } else if let Some(skew) = cfg.launch_skew_ns {
-        let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+        let at = world.machines().iter().map(|m| m.time).max().unwrap_or(0);
         if let Some(launch) = &mut initial_launch {
             launch["barrier_ns"] = json!(at);
         }
@@ -300,14 +310,14 @@ pub fn run(options: &Options) -> Result<Value> {
                 return Err("ARM initial launch did not reseed through the launch barrier".into());
             }
             let release_times: BTreeMap<_, _> = world
-                .machines
+                .machines()
                 .iter()
                 .map(|m| (m.name.clone(), m.time))
                 .collect();
             if world
-                .machines
+                .machines()
                 .iter()
-                .any(|m| m.parked || m.time < at || m.time > release_at)
+                .any(|m| m.is_parked() || m.time < at || m.time > release_at)
             {
                 return Err("ARM initial launch acknowledgment outside release bounds".into());
             }
@@ -324,13 +334,13 @@ pub fn run(options: &Options) -> Result<Value> {
     } else {
         simulate_windowed(&mut world, &main, options.machine_workers, &mut boundary)?
     };
-    world.finish(outcome, cfg.duration_ns, &Some(cfg.end_on_exit.clone()))?;
+    world.finish(outcome, cfg.duration_ns, &cfg.end_on_exit)?;
     let mut hash = Sha256::new_with_prefix(b"seedbox-arm64-world-witness-v2\0");
     // Each machine's transcript in machine order: independent of the thread
     // that ran it and of round timing.
     let mut horizon_hash = Sha256::new_with_prefix(b"seedbox-arm64-world-horizons-v2\0");
     let mut event_hash = Sha256::new_with_prefix(b"seedbox-arm64-world-events-v2\0");
-    for m in &world.machines {
+    for m in world.machines() {
         let transcript = m.transcript();
         horizon_hash.update(transcript.horizons.clone().finalize());
         event_hash.update(transcript.events.clone().finalize());
@@ -339,7 +349,7 @@ pub fn run(options: &Options) -> Result<Value> {
     hash.update(horizons.as_bytes());
     hash.update(event_hash.finalize());
     let mut rows = Vec::new();
-    for m in &mut world.machines {
+    for m in world.machines_mut() {
         let evidence = m.evidence()?;
         hash.update(evidence.witness.as_bytes());
         if let Some(state) = &evidence.state_digest {
@@ -352,11 +362,11 @@ pub fn run(options: &Options) -> Result<Value> {
             .retired
             .as_ref()
             .map(|r| (r.incarnation, r.booted_at))
-            .unwrap_or((m.incarnation, m.booted_at));
+            .unwrap_or((m.incarnation(), m.booted_at()));
         let exit = m.exit();
-        let state = if m.down {
+        let state = if m.is_down() {
             "Down".into()
-        } else if m.paused {
+        } else if m.is_paused() {
             "Paused".into()
         } else {
             exit.map(|(code, _)| format!("Exited({code})"))
@@ -372,8 +382,8 @@ pub fn run(options: &Options) -> Result<Value> {
             "incarnation":incarnation,"crashed_incarnations":m.crashed}));
     }
     let mut network = Sha256::new();
-    world.faults.network_witness(&mut network);
-    for (to, events) in world.events.iter().enumerate() {
+    world.faults().network_witness(&mut network);
+    for (to, events) in world.events().iter().enumerate() {
         let mut retained = Vec::new();
         for (&key, payload) in events {
             match payload {
@@ -385,7 +395,7 @@ pub fn run(options: &Options) -> Result<Value> {
                 }
             }
         }
-        for (&key, bytes) in &world.strict_events[to] {
+        for (&key, bytes) in &world.strict_events()[to] {
             retained.push((key, None, bytes));
         }
         // Preserve the ARM witness's per-machine event sequence even though
@@ -406,22 +416,22 @@ pub fn run(options: &Options) -> Result<Value> {
     }
     let network = format!("{:x}", network.finalize());
     hash.update(network.as_bytes());
-    let counts = witness_counts(&world.link_counts);
+    let counts = witness_counts(&world.link_counts());
     hash.update(
-        serde_json::to_vec(&(&world.faults.log, &world.control.log, counts))
+        serde_json::to_vec(&(&world.faults().log, &world.control().log, counts))
             .map_err(|e| e.to_string())?,
     );
-    world.control.triggers.hash_into(&mut hash)?;
-    let trigger_evidence = world.control.triggers.evidence()?;
+    world.control().triggers.hash_into(&mut hash)?;
+    let trigger_evidence = world.control().triggers.evidence()?;
     let counters = arm_counters(&world);
     let mut report = json!({"report_version":2,"seed":options.seed,"timebase":"arm64-pv-world-v1",
         "outcome":outcome,"world_witness":format!("{:x}",hash.finalize()),
         "network_witness":network,"horizon_witness":horizons,"machines":rows,
-        "frames_delivered":world.delivered,"frames_dropped":world.dropped,"network_counters":counters,
-        "faults":world.faults.log,"fault_error":world.faults.error.or(world.control.error),
-        "control_history":world.control.log,"control_latency_ns":world.control.latency,
-        "rejected_fault_effects":world.faults.rejected_effects,"management_readiness":world.faults.readiness,
-        "slices":world.slices});
+        "frames_delivered":world.delivered(),"frames_dropped":world.dropped(),"network_counters":counters,
+        "faults":world.faults().log,"fault_error":world.faults().error.clone().or(world.control().error.clone()),
+        "control_history":world.control().log,"control_latency_ns":world.control().latency,
+        "rejected_fault_effects":world.faults().rejected_effects,"management_readiness":world.faults().readiness,
+        "slices":world.slices()});
     if let Some(launch) = initial_launch {
         report["initial_launch"] = launch;
     }
@@ -442,8 +452,8 @@ fn witness_counts(counts: &BTreeMap<(usize, usize), [u64; 5]>) -> Vec<(&(usize, 
         .collect()
 }
 fn arm_counters(world: &world_core::World<ArmMachine>) -> Value {
-    let counts: BTreeMap<_,_> = world.link_counts.iter().map(|(&(from,to),c)|
-        (format!("{}->{}",world.machines[from].name,world.machines[to].name),
+    let counts: BTreeMap<_,_> = world.link_counts().iter().map(|(&(from,to),c)|
+        (format!("{}->{}",world.machines()[from].name,world.machines()[to].name),
          {
              let mut row = json!({"delivered":c[0],"partition_dropped":c[1],"receiver_dropped":c[2],"loss_dropped":c[3]});
              if c[4] > 0 { row["queue_dropped"] = json!(c[4]); }
@@ -479,19 +489,19 @@ fn validate_pending_launch<M: WorldMachine>(
     // release: sender time + lookahead >= barrier time + maximum skew.
     // Already sampled bootstrap effects must satisfy that boundary too.
     let pending = world
-        .events
+        .events()
         .iter()
         .filter_map(|q| q.keys().next().map(|k| k.0))
         .chain(
             world
-                .strict_events
+                .strict_events()
                 .iter()
                 .filter_map(|q| q.keys().next().map(|k| k.0)),
         )
         .chain([
-            world.control.boundary(),
-            world.control.triggers.boundary(),
-            world.faults.next_boundary(),
+            world.control().boundary(),
+            world.control().triggers.boundary(),
+            world.faults().next_boundary(),
         ]);
     if pending.into_iter().any(|at| at < release) {
         return Err("ARM bootstrap effect is before the initial launch release bound".into());
@@ -522,14 +532,14 @@ mod tests {
     #[test]
     fn absent_launch_policy_preserves_legacy_config_shape_and_zero_is_explicit() {
         let mut raw = config();
-        let cfg: Config = serde_json::from_value(raw.clone()).unwrap();
+        let cfg = decode_config(&serde_json::to_vec(&raw).unwrap()).unwrap();
         assert_eq!(cfg.launch_skew_ns, None);
         assert!(serde_json::to_value(cfg)
             .unwrap()
             .get("launch_skew_ns")
             .is_none());
         raw["launch_skew_ns"] = json!(0);
-        let cfg: Config = serde_json::from_value(raw).unwrap();
+        let cfg = decode_config(&serde_json::to_vec(&raw).unwrap()).unwrap();
         assert_eq!(cfg.launch_skew_ns, Some(0));
         assert_eq!(serde_json::to_value(cfg).unwrap()["launch_skew_ns"], 0);
     }
@@ -545,7 +555,7 @@ mod tests {
         for value in [json!(-1), json!(1.5), json!("10")] {
             let mut raw = config();
             raw["launch_skew_ns"] = value;
-            assert!(serde_json::from_value::<Config>(raw).is_err());
+            assert!(decode_config(&serde_json::to_vec(&raw).unwrap()).is_err());
         }
     }
 

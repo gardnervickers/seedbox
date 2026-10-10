@@ -1,5 +1,6 @@
 use super::*;
 use crate::admission::{required_policy, CoreObservation};
+use crate::engine_adapter::{engine_command, recorded_checkpoint, recorded_features};
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 #[test]
