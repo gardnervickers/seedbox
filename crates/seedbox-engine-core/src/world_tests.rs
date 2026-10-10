@@ -361,6 +361,40 @@ fn partition(handle: &str) -> seedbox_control::Action {
 }
 #[test]
 fn admission_rejects_invalid_worlds_before_execution() {
+    fn construct(w: World<Mock>) -> Result<World<Mock>, String> {
+        World::new(WorldInputs {
+            machines: w.machines,
+            factory: w.factory,
+            boot: w.boot,
+            clock: w.clock,
+            barrier: w.barrier,
+            boot_seed: w.boot_seed,
+            run_seed: w.run_seed,
+            lookahead: w.lookahead,
+            early: w.early,
+            latency: w.latency,
+            faults: w.faults,
+            control: w.control,
+            macs: w.macs,
+        })
+    }
+    assert!(construct(world(&[]))
+        .err()
+        .unwrap()
+        .contains("at least one"));
+    let mut inputs = world(&["a"]);
+    inputs.boot.clear();
+    assert!(construct(inputs).err().unwrap().contains("lengths"));
+    let mut inputs = world(&["a"]);
+    inputs.early = inputs.lookahead;
+    assert!(construct(inputs).err().unwrap().contains("slack"));
+    let fresh = construct(world(&["a", "b"])).unwrap();
+    assert_eq!(fresh.events().len(), 2);
+    assert!(fresh.events().iter().all(BTreeMap::is_empty));
+    assert_eq!(
+        (fresh.delivered(), fresh.dropped(), fresh.slices()),
+        (0, 0, 0)
+    );
     let mut w = world(&[]);
     assert_eq!(
         simulate(&mut w, &Value::Null, 20, &None, None, &mut || Ok(())).unwrap_err(),

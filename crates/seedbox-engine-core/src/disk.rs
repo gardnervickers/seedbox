@@ -10,7 +10,7 @@
 //! power loss: nothing here is written to host storage.
 
 use crate::rng::Rng;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -19,14 +19,7 @@ use std::sync::Arc;
 
 pub const SECTOR: usize = 512;
 
-/// Crash-loss policy for unflushed sectors. These fields are part of the disk
-/// digest and retained run identity.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DiskFaultModel {
-    pub sector_bytes: usize,
-    pub survival_probability: f64,
-}
+pub use seedbox_engine_protocol::disk::DiskFaultModel;
 
 /// [`fault_model`] for a world document's `disk_loss` held as JSON.
 pub fn parse_disk_fault_model(value: &Value) -> Result<DiskFaultModel, &'static str> {
@@ -824,6 +817,30 @@ mod tests {
             zeros.digest(),
             Disk::new(Some(vec![0; 8 * SECTOR]), None).unwrap().digest(),
             "an image is not the zero base"
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "disk_transfer_tests.rs"]
+mod transfer_tests;
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    #[test]
+    fn disk_fault_model_is_parameterized_without_a_wire_name() {
+        let model = parse_disk_fault_model(&serde_json::json!({
+            "sector_bytes": 512,
+            "survival_probability": 0.5,
+        }))
+        .unwrap();
+        assert_eq!(
+            model,
+            DiskFaultModel {
+                sector_bytes: SECTOR,
+                survival_probability: 0.5
+            }
         );
     }
 }

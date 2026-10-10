@@ -236,3 +236,7 @@ impl Transport {
         Ok(Effect::None)
     }
 }
+
+#[cfg(test)]
+#[path = "virtio_mmio_tests.rs"]
+mod tests;

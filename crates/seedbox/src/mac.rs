@@ -236,7 +236,7 @@ impl ExecutionBackend for MacExecutor {
         WorkerLaunch::prepare(&request)?.spawn()?.wait(
             request.cancellation,
             request.limits.wall_time_ns,
-            |bytes| crate::vmm::report_hvf(bytes, &request),
+            |bytes| crate::engine_adapter::report_hvf(bytes, &request),
         )
     }
 }

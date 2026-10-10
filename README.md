@@ -125,6 +125,8 @@ entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
 | `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
+| `crates/seedbox-engine-protocol/` | Worker requests, world configuration and retained evidence formats; no execution policy |
+| `crates/seedbox-artifacts/` | Offline records, content storage, logs, comparison and bundles; no container engine or hypervisor dependency |
 | `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, the shared world coordinator and the [windowed scheduler](docs/windowed-scheduler.md) |
 | `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
 | `tools/mac-runtime/` | Mac signing and platform notes |

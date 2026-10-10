@@ -6,24 +6,8 @@ use crate::{
     store::{ContentDigest, ContentStore},
     Error, Result,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-};
-
-use seedbox_engine_core::checkpoint;
-/// Execution failure whose VMM stderr may be excerpted by the CLI.
-pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
-
-/// VMM `--out` directory relative to run output; recursive retention keeps this prefix.
-pub(crate) const MACHINE_OUTPUT_DIR: &str = "machines";
-
-/// Manifest-relative page evidence, beside the VMM's per-machine traces.
-pub(crate) fn page_hash_log(machine: &str) -> String {
-    format!("{MACHINE_OUTPUT_DIR}/{machine}.pages")
-}
+use serde::Serialize;
+use std::{collections::BTreeMap, path::Path};
 
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
@@ -357,35 +341,6 @@ fn with_capacity<T>(
     check(&reservations)
 }
 
-/// The retained executable and its recorded dispatch, without consulting the host.
-/// Run settings follow in its launch request (`worker_process`).
-pub(crate) fn engine_command(
-    engine: &Path,
-    profile: &ExecutionProfile,
-) -> Result<std::process::Command> {
-    let mut command = std::process::Command::new(engine);
-    match crate::engine::recorded_launch(profile)? {
-        crate::engine::ExecutableKind::Standalone => {}
-        crate::engine::ExecutableKind::InternalWorker => {
-            command.args(["__engine", crate::engine::INTERNAL_WORKER_V1]);
-        }
-        crate::engine::ExecutableKind::ArmWorld => {
-            command.args(["__engine", crate::engine::ARM_WORLD_V1]);
-        }
-    }
-    Ok(command)
-}
-
-/// The run-shaping machine features a profile records, as the x86 worker takes them.
-pub(crate) fn recorded_features(
-    profile: &ExecutionProfile,
-) -> Result<seedbox_engine_core::launch::MachineFeatures> {
-    Ok(seedbox_engine_core::launch::MachineFeatures {
-        page_timer: recorded_page_timer(profile),
-        deferred_tx: recorded_deferred_tx(profile)?,
-    })
-}
-
 /// Missing page timer means the legacy port transport.
 impl ExecutionBackend for VmmExecutor {
     fn preflight_workers(&self, workers: u32) -> Result<()> {
@@ -436,12 +391,6 @@ impl ExecutionBackend for VmmExecutor {
     }
 }
 
-mod profile;
-pub use profile::*;
-mod report;
-pub use report::*;
-mod world;
-pub use world::*;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(test)]

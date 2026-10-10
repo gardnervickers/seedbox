@@ -20,7 +20,6 @@ use crate::world_events as events;
 use crate::{control, faults};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::fmt;
 use std::time::{Duration, Instant};
 
 /// The coordinator's errors are plain messages, like the machines' own.
@@ -88,45 +87,7 @@ impl From<Option<u64>> for Fork {
     }
 }
 
-/// How a segment ended. Reports carry its snake_case name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunOutcome {
-    /// The run reached its duration, or only paused or down machines remain.
-    Duration,
-    /// No machine can act again.
-    Quiescent,
-    /// The machine named by `end_on` exited.
-    EndMachineExited,
-    /// Stopped before anything happens at the checkpoint time.
-    Checkpoint,
-    /// Every machine parked at the fork point.
-    Barrier,
-    /// A fault or control request failed the run.
-    FaultFailed,
-}
-impl RunOutcome {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Duration => "duration",
-            Self::Quiescent => "quiescent",
-            Self::EndMachineExited => "end_machine_exited",
-            Self::Checkpoint => "checkpoint",
-            Self::Barrier => "barrier",
-            Self::FaultFailed => "fault_failed",
-        }
-    }
-}
-impl fmt::Display for RunOutcome {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-impl PartialEq<&str> for RunOutcome {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
+pub use seedbox_engine_protocol::report::RunOutcome;
 
 /// Performance settings. None of them changes a run's results.
 #[derive(Clone, Debug, Default)]

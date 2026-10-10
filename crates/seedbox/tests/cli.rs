@@ -992,7 +992,7 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
 mod diff_tests {
     use super::*;
     use seedbox as sb;
-    include!("support/diff_fixture.rs");
+    include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
 
     #[test]
     fn ram_only_page_diagnostics_preserve_stdout_json_and_exit_contracts() {
@@ -1216,7 +1216,8 @@ mod diff_tests {
         let mut record = fixture();
         record.outcome = sb::orchestration::Outcome::Error;
         record.report = None;
-        let error = sb::Error::Execution(sb::vmm::VMM_FAILURE_MESSAGE.into()).to_string();
+        let error =
+            sb::Error::Execution(sb::engine_adapter::VMM_FAILURE_MESSAGE.into()).to_string();
         record.error = Some(error.clone());
         write_fixture(&run, &mut record, None, None);
         let manifest = fs::read(run.join("manifest.json")).unwrap();
@@ -1502,8 +1503,8 @@ mod diff_tests {
 mod timed_logs {
     use super::*;
     use seedbox as sb;
-    include!("support/diff_fixture.rs");
-    include!("support/logs_fixture.rs");
+    include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
+    include!("../../seedbox-artifacts/tests/support/logs_fixture.rs");
 
     #[test]
     fn logs_defaults_filters_and_binary_json() {
@@ -1645,7 +1646,7 @@ mod checkpoint_evidence {
     use seedbox as sb;
     use seedbox_engine_core::{log_index as producer, output_layout as checkpoint};
     use std::io::Write;
-    include!("support/diff_fixture.rs");
+    include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
 
     fn branch_record(seed: u64) -> sb::orchestration::RunRecord {
         let mut record = fixture();
@@ -1925,7 +1926,7 @@ fn timebase_is_no_longer_a_public_mode() {
 #[allow(dead_code)]
 mod record_fixture {
     use seedbox as sb;
-    include!("support/diff_fixture.rs");
+    include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
 
     pub(super) fn record() -> sb::orchestration::RunRecord {
         fixture()

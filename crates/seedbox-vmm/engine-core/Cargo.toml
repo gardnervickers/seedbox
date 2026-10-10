@@ -13,9 +13,13 @@ name = "seedbox_engine_core"
 path = "src/lib.rs"
 
 [dependencies]
+seedbox-engine-protocol = { package = "seedbox-vmm-protocol", path = "../protocol" }
 seedbox-control = { package = "seedbox-vmm-control", path = "../control" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 # Work-stealing machine workers for the windowed scheduler.
 rayon = "1"
+
+[dev-dependencies]
+tempfile = "3"

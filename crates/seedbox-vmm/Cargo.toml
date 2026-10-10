@@ -16,6 +16,7 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
+tempfile = "3"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -44,3 +45,6 @@ guest-tests = ["kvm-tests"]
 
 [profile.release]
 debug = 1
+
+[dev-dependencies]
+tempfile.workspace = true

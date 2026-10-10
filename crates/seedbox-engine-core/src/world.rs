@@ -66,17 +66,32 @@ pub struct MachineState {
     pub name: String,
     pub time: u64,
     pub state: State,
-    pub parked: bool,
-    pub paused: bool,
-    pub down: bool,
-    pub incarnation: u32,
-    pub booted_at: u64,
+    pub(crate) parked: bool,
+    pub(crate) paused: bool,
+    pub(crate) down: bool,
+    pub(crate) incarnation: u32,
+    pub(crate) booted_at: u64,
     pub fault_effects: Vec<(u32, u64, bool)>,
     pub control_requests: Vec<(u64, Vec<u8>)>,
     pub observe_console: bool,
     pub committed_console: Option<(u64, u8)>,
 }
 impl MachineState {
+    pub fn is_parked(&self) -> bool {
+        self.parked
+    }
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+    pub fn is_down(&self) -> bool {
+        self.down
+    }
+    pub fn incarnation(&self) -> u32 {
+        self.incarnation
+    }
+    pub fn booted_at(&self) -> u64 {
+        self.booted_at
+    }
     pub fn new(name: String) -> Self {
         Self {
             name,
@@ -385,44 +400,157 @@ pub fn entropy_seed_branch(seed: u64, identity: Option<&str>, domain: &str) -> [
     out
 }
 
-pub struct World<M: WorldMachine> {
-    /// A failed crash transaction is terminal even if a direct caller retains World.
-    pub failure: Option<String>,
+/// Physical machines and explicit initial policy supplied by a backend.
+/// Queue, counter and crash bookkeeping are initialized by the coordinator.
+pub struct WorldInputs<M: WorldMachine> {
     pub machines: Vec<M>,
     pub factory: M::Factory,
     pub boot: Vec<M::Boot>,
-    /// The first incarnation parks at its launch barrier.
+    pub clock: M::Clock,
     pub barrier: bool,
     pub boot_seed: u64,
-    /// The seed the world plan was armed with; reboots draw from it.
     pub run_seed: u64,
-    pub branch_identity: Option<String>,
-    /// Per machine, a summary of each incarnation that crashed.
-    pub incarnations: Vec<Vec<Value>>,
-    /// Frames queued for each paused machine during its current pause.
-    pub paused_ingress: Vec<u64>,
-    pub clock: M::Clock,
-    pub events: Vec<BTreeMap<(u64, u64), Payload>>,
-    pub seq: u64,
-    /// No frame can arrive sooner than this after it is sent: the horizon.
     pub lookahead: u64,
-    /// Slices may end, and events be delivered, up to this long before their
-    /// time. Below `lookahead`, so nothing is ever delivered into the past.
     pub early: u64,
     pub latency: u64,
-    pub partitioned: BTreeMap<(usize, usize), bool>,
     pub faults: faults::Faults,
     pub control: control::Control,
-    pub strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
     pub macs: Vec<[u8; 6]>,
-    pub dropped: u64,
-    pub delivered: u64,
-    pub link_counts: network_counters::LinkCounts,
-    pub semantic_counts: network_counters::NetworkCounters,
-    pub slices: u64,
+}
+
+pub struct World<M: WorldMachine> {
+    /// A failed crash transaction is terminal even if a direct caller retains World.
+    pub(crate) failure: Option<String>,
+    pub(crate) machines: Vec<M>,
+    pub(crate) factory: M::Factory,
+    pub(crate) boot: Vec<M::Boot>,
+    /// The first incarnation parks at its launch barrier.
+    pub(crate) barrier: bool,
+    pub(crate) boot_seed: u64,
+    /// The seed the world plan was armed with; reboots draw from it.
+    pub(crate) run_seed: u64,
+    pub(crate) branch_identity: Option<String>,
+    /// Per machine, a summary of each incarnation that crashed.
+    pub(crate) incarnations: Vec<Vec<Value>>,
+    /// Frames queued for each paused machine during its current pause.
+    pub(crate) paused_ingress: Vec<u64>,
+    pub(crate) clock: M::Clock,
+    pub(crate) events: Vec<BTreeMap<(u64, u64), Payload>>,
+    pub(crate) seq: u64,
+    /// No frame can arrive sooner than this after it is sent: the horizon.
+    pub(crate) lookahead: u64,
+    /// Slices may end, and events be delivered, up to this long before their
+    /// time. Below `lookahead`, so nothing is ever delivered into the past.
+    pub(crate) early: u64,
+    pub(crate) latency: u64,
+    pub(crate) partitioned: BTreeMap<(usize, usize), bool>,
+    pub(crate) faults: faults::Faults,
+    pub(crate) control: control::Control,
+    pub(crate) strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
+    pub(crate) macs: Vec<[u8; 6]>,
+    pub(crate) dropped: u64,
+    pub(crate) delivered: u64,
+    pub(crate) link_counts: network_counters::LinkCounts,
+    pub(crate) semantic_counts: network_counters::NetworkCounters,
+    pub(crate) slices: u64,
 }
 
 impl<M: WorldMachine> World<M> {
+    /// Create an active world with empty queues and counters. Validation runs
+    /// before the caller can execute any machine through the coordinator.
+    pub fn new(inputs: WorldInputs<M>) -> Result<Self, String> {
+        let WorldInputs {
+            machines,
+            factory,
+            boot,
+            clock,
+            barrier,
+            boot_seed,
+            run_seed,
+            lookahead,
+            early,
+            latency,
+            faults,
+            control,
+            macs,
+        } = inputs;
+        let n = machines.len();
+        let world = Self {
+            machines,
+            factory,
+            boot,
+            clock,
+            barrier,
+            boot_seed,
+            run_seed,
+            lookahead,
+            early,
+            latency,
+            faults,
+            control,
+            macs,
+            failure: None,
+            branch_identity: None,
+            incarnations: vec![Vec::new(); n],
+            paused_ingress: vec![0; n],
+            events: vec![BTreeMap::new(); n],
+            strict_events: vec![BTreeMap::new(); n],
+            seq: 0,
+            partitioned: BTreeMap::new(),
+            dropped: 0,
+            delivered: 0,
+            link_counts: BTreeMap::new(),
+            semantic_counts: network_counters::NetworkCounters::default(),
+            slices: 0,
+        };
+        world.validate()?;
+        Ok(world)
+    }
+
+    /// Fixed machine membership; adapters may inspect or update physical state.
+    pub fn machines(&self) -> &[M] {
+        &self.machines
+    }
+    pub fn machines_mut(&mut self) -> &mut [M] {
+        &mut self.machines
+    }
+
+    /// Immutable policy/evidence access for platform-specific report projection.
+    pub fn faults(&self) -> &faults::Faults {
+        &self.faults
+    }
+    pub fn control(&self) -> &control::Control {
+        &self.control
+    }
+    pub fn boot_inputs(&self) -> &[M::Boot] {
+        &self.boot
+    }
+    pub fn events(&self) -> &[BTreeMap<(u64, u64), Payload>] {
+        &self.events
+    }
+    pub fn strict_events(&self) -> &[BTreeMap<(u64, u64), Vec<u8>>] {
+        &self.strict_events
+    }
+    pub fn partitions(&self) -> &BTreeMap<(usize, usize), bool> {
+        &self.partitioned
+    }
+    pub fn link_counts(&self) -> &network_counters::LinkCounts {
+        &self.link_counts
+    }
+    pub fn delivered(&self) -> u64 {
+        self.delivered
+    }
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+    pub fn slices(&self) -> u64 {
+        self.slices
+    }
+    /// Split physical report access from the immutable retired-incarnation evidence.
+    pub fn machine_with_history(&mut self, index: usize) -> (&mut M, &[Value]) {
+        (&mut self.machines[index], &self.incarnations[index])
+    }
+
     pub fn check_active(&self) -> Result<(), String> {
         match &self.failure {
             Some(reason) => Err(format!("world is terminal after failed crash: {reason}")),
@@ -1644,3 +1772,41 @@ fn simulate_stopped<M: WorldMachine>(
 #[cfg(test)]
 #[path = "world_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    /// A Compose guest reports management readiness while it boots; with a
+    /// time fork that is before the release. The boot world accepts it, and
+    /// the seed's plan starts with that machine already ready.
+    #[test]
+    fn readiness_signalled_before_the_fork_carries_over_to_the_seed() {
+        let names = vec!["a".to_string(), "b".to_string()];
+        let links = links::Links::from_config(0, &names, &json!({"latency_ns":1000})).unwrap();
+        let mut boot = boot_faults(&names, &[], 1000, links).unwrap();
+        boot.management_ready(1, 700, 1000).unwrap();
+        let restored = boot_faults(&names, &boot.readiness, 1000, boot.links.clone()).unwrap();
+        assert_eq!(restored.readiness, boot.readiness);
+        let mut seed = faults::Faults::new(Vec::new(), names.clone()).unwrap();
+        seed.require_readiness();
+        replay_readiness(&mut seed, &names, &restored.readiness, 1000).unwrap();
+        assert_eq!(seed.readiness, vec![json!({"machine":"b","at_ns":700})]);
+        assert!(
+            seed.management_ready(1, 2000, 1000).is_err(),
+            "b is already ready"
+        );
+        assert!(seed.management_ready(0, 2000, 1000).is_ok());
+    }
+    #[test]
+    fn equal_time_delivery_can_replan_but_an_unchanged_plan_cannot_loop() {
+        let mut previous = None;
+        let plan = (0, 1000, 1000, 1000, 1000, 1000, 1000, 2000, 500, 1);
+        assert!(stop_progress(&mut previous, plan, false).is_ok());
+        let delivered = (0, 1000, 1000, 1000, 2000, 2000, 2000, 2000, 500, 2);
+        assert!(stop_progress(&mut previous, delivered, false).is_ok());
+        assert!(stop_progress(&mut previous, delivered, false).is_err());
+        assert!(stop_progress(&mut previous, delivered, true).is_ok());
+        assert_eq!(previous, None);
+        assert!(stop_progress(&mut previous, delivered, false).is_ok());
+    }
+}

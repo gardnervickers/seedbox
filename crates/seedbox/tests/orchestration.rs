@@ -2182,7 +2182,7 @@ fn replay_refuses_settings_drift_before_execution() {
 
 #[test]
 fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
-    use seedbox::vmm::{recorded_page_timer, VmmExecutor};
+    use seedbox::{engine_adapter::recorded_page_timer, vmm::VmmExecutor};
     let mut f = Fixture::new();
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
@@ -2254,7 +2254,7 @@ fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
         assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
         assert_eq!(replay.record.run_id, run.record.run_id);
         ids.push(run.record.run_id);
-        let enabled = seedbox::vmm::recorded_deferred_tx(&recorded.profile()).unwrap();
+        let enabled = seedbox::engine_adapter::recorded_deferred_tx(&recorded.profile()).unwrap();
         f.backend.profile = off.clone().with_deferred_tx(!enabled).profile();
         for allow_engine_change in [false, true] {
             let error = f
