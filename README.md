@@ -1,8 +1,7 @@
 # Seedbox
 
-> **⚠️ Early, buggy software.** Seedbox is under heavy development. Expect bugs,
-> rough edges and breaking changes to its commands, file formats and APIs. It is
-> not ready for production use.
+> **⚠️ Early, buggy software.** 
+> I vibe-coded the vast majority of this so temper your expectations. Expect slop, bugs, and dead code. Nothing api-wise is stable yet. 
 
 Seedbox runs Linux applications in virtual machines with controlled time,
 networking, and disk faults. A seed and recorded inputs let you repeat a
