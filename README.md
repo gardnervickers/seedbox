@@ -1,5 +1,10 @@
 # Seedbox
 
+> [!WARNING]
+> Seedbox is early and under heavy development. Expect bugs, rough edges and
+> breaking changes to its commands, file formats and APIs. It is not ready for
+> production use.
+
 Seedbox runs Linux applications in virtual machines with controlled time,
 networking, and disk faults. A seed and recorded inputs let you repeat a
 simulation and compare its results.
