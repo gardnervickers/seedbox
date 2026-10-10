@@ -187,6 +187,11 @@ enum Command {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
     },
+    /// Open the interactive simulation console.
+    Tui {
+        /// Short simulation ID to open first [default: the simulation list].
+        id: Option<seedbox_api::SimulationId>,
+    },
     /// Inspect playback state or a retained control receipt.
     Playback {
         /// Short simulation ID.
@@ -703,6 +708,7 @@ fn run(cli: Cli) -> Result<u8> {
             }
         }
         Command::Events { id } => simulations::events(&id),
+        Command::Tui { id } => simulations::tui(id),
         Command::Playback {
             id,
             request_id,

@@ -10,6 +10,7 @@ publish.workspace = true
 seedbox-application.workspace = true
 seedbox-api.workspace = true
 seedbox-client.workspace = true
+seedbox-tui.workspace = true
 seedbox-server.workspace = true
 seedbox-engine-protocol.workspace = true
 clap.workspace = true

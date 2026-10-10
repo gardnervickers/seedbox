@@ -20,6 +20,8 @@ contacting the container engine. Add `--detach` to return immediately, and use
 Use `seedbox logs ID [MACHINE]` for live application output and `seedbox events ID`
 for structured internal events. Both are live streams with no historical backlog.
 `seedbox get simulation ID --watch` follows status until completion; Ctrl-C only detaches.
+`seedbox tui [ID]` opens an interactive console with a live network map, logs,
+events and fault controls.
 Save `seedbox describe simulation ID` to `simulation.yaml` and submit it again
 with `seedbox run simulation.yaml`.
 `seedbox playback ID` inspects a running worker's committed position and playback rate.

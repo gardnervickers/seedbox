@@ -26,6 +26,24 @@ delivery; reconnecting does not replay earlier output. Raw logs go to stdout,
 with omissions on stderr. JSON log mode and events produce newline-delimited
 records. The older console/archive interface is `retained-logs RUN`.
 
+`tui` opens an interactive console on the local server: the simulation list,
+and for one simulation its network map, machines, faults, logs and events.
+Everything it shows comes from the server API (`world`, `frames`, `events`,
+`logs`, `playback`), so machines that appear or disappear while a simulation
+runs are drawn as the server reports them. From the console you can pause,
+step and change the rate, partition, shape, crash, reboot or heal machines,
+inject any fault action as YAML, capture a checkpoint, branch, rerun, stop,
+delete and compare. It needs an interactive terminal; scripts use `events`,
+`logs` and `get` instead. Press `?` for its keys.
+
+`GET /v1/simulations/ID/world` returns the observed world: machines with their
+condition and incarnation, directed links with their current policy, the fault
+handle that partitions or shapes them and their frame counters, and every fault
+with its admitted action. A machine first seen in an event, log or frame is
+added. `GET /v1/simulations/ID/frames` streams batches of routed network frames
+(sender, receiver, send and due time, size and fate) as server-sent events.
+Both are best-effort observations and never change results.
+
 Each event includes its `simulation` ID and revision. `simulatedTimeNs` is
 optional and omitted before execution; `position` carries an exact committed
 position when known, including control acknowledgements. `preparationProgress`

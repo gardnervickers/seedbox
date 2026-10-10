@@ -63,7 +63,7 @@ pub enum EventKind {
         applied_time_ns: Option<u64>,
         /// The admitted action, so clients can tell what it affects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        plan: Option<crate::FaultAction>,
+        plan: Option<Box<crate::FaultAction>>,
     },
     MachineLifecycle {
         machine: String,

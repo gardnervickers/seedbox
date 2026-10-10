@@ -107,6 +107,7 @@ another client:
 ./build/current/seedbox resume SIM_ID
 ./build/current/seedbox logs SIM_ID              # All machines.
 ./build/current/seedbox logs SIM_ID MACHINE_NAME # One machine.
+./build/current/seedbox tui [SIM_ID]             # Interactive console.
 ```
 
 Describe emits YAML with the resolved specification, status and timings. Save it

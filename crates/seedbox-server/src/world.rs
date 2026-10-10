@@ -159,7 +159,7 @@ impl Tracker {
                 fault.status = *status;
                 fault.applied_time_ns = *applied_time_ns;
                 if plan.is_some() {
-                    fault.plan = plan.clone();
+                    fault.plan = plan.as_deref().cloned();
                 }
                 if *status == FaultStatus::Applied {
                     if let Some(plan) = fault.plan.clone() {
@@ -374,7 +374,7 @@ mod tests {
             machine: None,
             status,
             applied_time_ns: (status == FaultStatus::Applied).then_some(10),
-            plan: Some(plan),
+            plan: Some(Box::new(plan)),
         }
     }
 

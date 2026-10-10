@@ -458,7 +458,10 @@ impl<M: WorldMachine> Coord<'_, M> {
                     machine: row.machine.clone(),
                     status: row.status,
                     applied_time_ns: row.applied_at_ns,
-                    plan: self.faults.plan(row.id).map(|plan| plan.action.clone()),
+                    plan: self
+                        .faults
+                        .plan(row.id)
+                        .map(|plan| Box::new(plan.action.clone())),
                 },
             );
             if let Some(status) = self.fault_statuses.get_mut(index) {

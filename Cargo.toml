@@ -18,6 +18,7 @@ seedbox-application = { path = "crates/seedbox-application" }
 seedbox-server = { path = "crates/seedbox-server" }
 seedbox-api = { path = "crates/seedbox-api" }
 seedbox-client = { path = "crates/seedbox-client" }
+seedbox-tui = { path = "crates/seedbox-tui" }
 seedbox-spec = { path = "crates/seedbox-spec" }
 tokio = { version = "1", features = ["rt", "time", "fs", "macros", "sync"] }
 thiserror = "2"

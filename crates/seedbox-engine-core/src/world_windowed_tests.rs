@@ -1549,9 +1549,9 @@ fn fault_events_distinguish_acknowledgement_timeout_and_target_loss() {
                                 assert_eq!(action, "stop");
                                 assert_eq!(
                                     plan,
-                                    Some(Action::Stop {
+                                    Some(Box::new(Action::Stop {
                                         machine: "a".into()
-                                    })
+                                    }))
                                 );
                                 assert_eq!(machine.as_deref(), Some("a"));
                                 delivered.push((id, status, applied_time_ns));

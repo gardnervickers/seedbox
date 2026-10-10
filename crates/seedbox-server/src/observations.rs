@@ -254,7 +254,7 @@ mod tests {
                     machine: Some("oracle".into()),
                     status: seedbox_api::FaultStatus::Unavailable,
                     applied_time_ns: None,
-                    plan: Some(stop.clone()),
+                    plan: Some(Box::new(stop.clone())),
                 },
             ),
             (
@@ -314,7 +314,7 @@ mod tests {
                         machine: Some("oracle".into()),
                         status: seedbox_api::FaultStatus::Unavailable,
                         applied_time_ns: None,
-                        plan: Some(stop),
+                        plan: Some(Box::new(stop)),
                     }
                 ),
                 (30, EventKind::SourceUnavailable),

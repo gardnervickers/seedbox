@@ -55,6 +55,23 @@ pub(super) fn logs(
     })
 }
 
+pub(super) fn tui(id: Option<SimulationId>) -> Result<u8> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(Error::Setup(
+            "seedbox tui needs an interactive terminal; use seedbox events or seedbox get from scripts".into(),
+        ));
+    }
+    let client = daemon::connect(None)?;
+    runtime()?.block_on(async {
+        client.info().await.map_err(client_error)?;
+        seedbox_tui::run(client, id)
+            .await
+            .map_err(|e| Error::Setup(format!("terminal: {e}")))
+    })?;
+    Ok(0)
+}
+
 pub(super) fn events(id: &SimulationId) -> Result<u8> {
     let client = daemon::connect(None)?;
     let cancellation = CancellationToken::default();

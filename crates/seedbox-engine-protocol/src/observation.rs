@@ -32,7 +32,7 @@ pub enum Kind {
         /// The admitted plan's action, so observers can tell which links or
         /// machines it affects. Absent from workers that predate it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        plan: Option<seedbox_control::Action>,
+        plan: Option<Box<seedbox_control::Action>>,
     },
     /// Frames routed since the previous batch, in routing order. Published
     /// only to an observation socket; never part of evidence.

@@ -2101,3 +2101,17 @@ fn offline_artifact_and_server_state_use_distinct_environment_variables() {
     let output = seedbox(&["help", "serve"], directory.path());
     assert!(String::from_utf8_lossy(&output.stdout).contains("SEEDBOX_STATE"));
 }
+
+#[cfg(unix)]
+#[test]
+fn tui_requires_an_interactive_terminal_before_starting_a_server() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = seedbox(&["tui"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        stderr(&output),
+        "error: seedbox tui needs an interactive terminal; use seedbox events or seedbox get from scripts\n"
+    );
+    assert!(!directory.path().join(".local/state/seedbox").exists());
+}
