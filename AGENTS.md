@@ -46,6 +46,27 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   acceptance uses `seedbox run` / `seedbox replay` directly; do not add a host
   scenario runner. `kernel/` and `guest/` hold guest build inputs.
 
+## Crate and test boundaries
+
+`seedbox-engine-protocol` owns worker launch/configuration and retained evidence
+formats. It has no CPU backend, scheduler or device policy. `seedbox-artifacts`
+owns offline records, content storage, logs, comparison and bundles; it depends
+on protocol types, never engine-core, a hypervisor, Bollard or Tokio. The
+application crate reexports retained APIs and owns parsing, preparation,
+orchestration and `engine_adapter` request/report adaptation. Native modules own
+host admission and launching. Standalone workspaces have protocol wrappers with
+canonical source links, just like their engine-core and control wrappers.
+
+Construct real worlds through `World::new(WorldInputs { ... })`; keep coordinator
+bookkeeping private. Use read-only evidence accessors and guarded lifecycle
+commits instead of exposing mutable coordinator fields.
+
+Unit tests live alongside their component under `src/`; integration tests live
+in the owning crate's `tests/` and exercise public boundaries or interactions.
+Give each scenario one owner. Keep format and offline artifact tests out of the
+application crate unless they specifically exercise application composition.
+Hardware tests remain feature-controlled and compiled by portable checks.
+
 ## Shared engine policies, queues and transport
 
 `crates/seedbox-engine-core` owns deterministic RNG, disk, links, connection,
@@ -95,8 +116,9 @@ transports; retries must fail before any worker activity.
 The standalone backends compile the canonical sources through their in-workspace
 `engine-core` packages, with distinct package names just like their control
 packages. Each `src` link points to the canonical directory; its build script
-watches that whole directory, including new modules. Canonical and wrapper build
-scripts track the automatic build-only `SEEDBOX_BUILD_ROOT` from `.cargo/config.toml`
+watches that whole directory, including new modules. The canonical packages and
+the VMM wrappers share one build script, `crates/seedbox-engine-core/build.rs`,
+which resolves the canonical source through the wrapper's link. Build scripts track the automatic build-only `SEEDBOX_BUILD_ROOT` from `.cargo/config.toml`
 to invalidate a reused target when switching checkouts, even if source timestamps
 predate the cache. Run Cargo from the checkout root for caching; missing or unrelated
 config safely forces a source rebuild on every invocation, including older checkouts.
@@ -116,8 +138,9 @@ the canonical crate; do not restore sibling source inclusion for these policies.
   Reformatting, moving code and changing build flags are ordinary changes;
   run `cargo fmt` on the VMM like any other crate.
 - The linked CLI uses the root lockfile and records an explicit internal-worker
-  contract; historical profiles without it retain the standalone launch
-  contract. Platform/version metadata never gates development replay.
+  contract; profiles without it start a standalone `seedbox-vmm`. Both read one
+  JSON launch request (`seedbox_engine_core::launch::WorkerRequest`, written as
+  `output/worker-request.json`); the standalone VMM also builds it from its flags. Platform/version metadata never gates development replay.
 
 ## Checks
 
@@ -153,8 +176,11 @@ do not stamp Git revisions or checkout cleanliness in the runner.
 
 The CLI lives in `crates/seedbox/src/cli/`:
 
-- `mod.rs`: argument definitions, dispatch and output.
+- `mod.rs`: argument definitions and one function per command.
+- `output.rs`: status lines, `key: value` fields and their value formats.
 - `defaults.rs`: how each runtime input is found when no flag is given.
+- `backends.rs`: platform backend selection and guest-asset lookup.
+- `diagnostics.rs`: excerpts of local execution diagnostics for text output.
 - `signals.rs`: cancellation.
 
 `src/main.rs` dispatches the private retained worker before calling `cli::main()`.
@@ -224,9 +250,11 @@ deliberately change one.
   `WORD: detail`, where `WORD` is the SCREAMING_SNAKE_CASE serde name
   produced by `word()` (`PASS`, `MATCH`, `VALID`, `CREATED`, ...). Any
   further lines are lowercase `key: value` (`replay: MATCH`, `error: ...`).
+  Print both through `cli::output` rather than `println!`.
 - `logs` without `--json` writes only the selected raw bytes to stdout, with no
   decoration or added newlines. Its lowercase `logs:` status and `omission:`
-  diagnostics go to stderr; `--json` includes chunk metadata and `bytes_hex`.
+  diagnostics go to stderr; `--json` includes chunk metadata and `bytes_hex`,
+  and the library's `logs::Reader::write_json` writes that document.
 - Scripts find the run directory with `sed -n 's/^[A-Z]*: //p'` over both
   output streams of `run` and `replay`. Exactly one line may match
   `^[A-Z]*: `, and it must be `OUTCOME: run-directory`.
@@ -247,9 +275,9 @@ deliberately change one.
   run bash tools/build-assets.sh`.
 - Never let a bare `io::Error` from a user-supplied path or a spawned program
   reach the user. Check the path first (`existing`), or add context as
-  `oci::spawn_error` does.
-- Exit codes are a fixed contract (`EXIT_CODES`, README.md, docs/runtime.md,
-  and the acceptance scripts): 0 PASS/MATCH, 1 FAIL/MISMATCH/DIFFERENT, 2
+  `WorkerLaunch::spawn` (`worker_process.rs`) and `host::msr_error` do.
+- Exit codes are a fixed contract (`EXIT_CODES`, docs/cli-reference.md,
+  docs/runtime.md, and the acceptance scripts): 0 PASS/MATCH, 1 FAIL/MISMATCH/DIFFERENT, 2
   ERROR/NOT_COMPARABLE/usage/setup, 3 INCOMPLETE, 124 TIMEOUT. Don't change
   what a code means. A new code must be added to all four places.
 
@@ -287,9 +315,10 @@ images or executes guests. Compatibility readiness is not replay qualification.
 - There is one engine mode: PV time with automatic application progress
   from binary instrumentation (`docs/progress.md`). Do not require
   application-specific flags or environment overrides to make replay succeed.
-  ARM exclusive-store retries and uncovered polling loops remain known
-  limitations tracked in `docs/progress.md`; the accounting mitigation is not
-  a general determinism fix.
+  ARM uses guest-epoch software exclusive reservations; host interruptions and
+  backend maintenance must not advance their epoch. Keep the shared PV word,
+  kernel EL0 return hook and translator commit checks aligned. Kernel polling
+  without PV progress remains a limitation documented in `docs/progress.md`.
   `.github/workflows/pv-tests.yml` runs its checks on GitHub-hosted Ubuntu
   x86-64 runners.
 - `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers

@@ -10,7 +10,7 @@
 //! power loss: nothing here is written to host storage.
 
 use crate::rng::Rng;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -19,30 +19,23 @@ use std::sync::Arc;
 
 pub const SECTOR: usize = 512;
 
-/// Crash-loss policy for unflushed sectors. These fields are part of the disk
-/// digest and retained run identity.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DiskFaultModel {
-    pub sector_bytes: usize,
-    pub survival_probability: f64,
+pub use seedbox_engine_protocol::disk::DiskFaultModel;
+
+/// [`fault_model`] for a world document's `disk_loss` held as JSON.
+pub fn parse_disk_fault_model(value: &Value) -> Result<DiskFaultModel, &'static str> {
+    let model =
+        Option::<DiskFaultModel>::deserialize(value).map_err(|_| "unknown disk_loss parameters")?;
+    fault_model(model)
 }
 
-pub fn parse_disk_fault_model(value: &Value) -> Result<DiskFaultModel, &'static str> {
-    let model = if value.is_null() {
-        DiskFaultModel {
-            sector_bytes: SECTOR,
-            survival_probability: 0.0,
-        }
-    } else {
-        serde_json::from_value(value.clone()).map_err(|_| "unknown disk_loss parameters")?
-    };
+/// A world's crash-loss policy: absent drops every unflushed sector.
+pub fn fault_model(model: Option<DiskFaultModel>) -> Result<DiskFaultModel, &'static str> {
+    let model = model.unwrap_or(DiskFaultModel {
+        sector_bytes: SECTOR,
+        survival_probability: 0.0,
+    });
     validate_disk_fault_model(model)?;
     Ok(model)
-}
-
-pub fn disk_fault_model_report(model: DiskFaultModel) -> Value {
-    serde_json::to_value(model).unwrap()
 }
 
 fn validate_disk_fault_model(model: DiskFaultModel) -> Result<(), &'static str> {
@@ -80,7 +73,7 @@ fn seeded_survival_branch(
     }
 }
 
-fn sector_survives(model: DiskFaultModel, rng: &mut Rng, _sector: u64, _data: &[u8]) -> bool {
+fn sector_survives(model: DiskFaultModel, rng: &mut Rng) -> bool {
     let draw = rng.next() as f64 / (u64::MAX as f64 + 1.0);
     draw < model.survival_probability
 }
@@ -131,9 +124,7 @@ impl Disk {
             (None, Some(sectors)) if sectors > 0 => (None, sectors),
             (None, _) => return Err("disk needs an image or a size".into()),
         };
-        let base_sha256 = base
-            .as_ref()
-            .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+        let base_sha256 = base.as_ref().map(crate::sha256_hex);
         Ok(Self {
             base,
             capacity,
@@ -178,9 +169,7 @@ impl Disk {
         else {
             return self.crashed();
         };
-        self.crashed_keeping(|sector, data| {
-            sector_survives(self.fault_model, &mut rng, sector, data)
-        })
+        self.crashed_keeping(|_, _| sector_survives(self.fault_model, &mut rng))
     }
 
     /// Stream a crash survivor overlay without rebasing its immutable image.
@@ -570,7 +559,7 @@ mod tests {
             for sector in 0..64 {
                 assert_eq!(
                     at(&after, sector),
-                    if sector_survives(d.fault_model, &mut rng, sector, &[b'B'; 512]) {
+                    if sector_survives(d.fault_model, &mut rng) {
                         b'B'
                     } else {
                         b'A'
@@ -828,6 +817,30 @@ mod tests {
             zeros.digest(),
             Disk::new(Some(vec![0; 8 * SECTOR]), None).unwrap().digest(),
             "an image is not the zero base"
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "disk_transfer_tests.rs"]
+mod transfer_tests;
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    #[test]
+    fn disk_fault_model_is_parameterized_without_a_wire_name() {
+        let model = parse_disk_fault_model(&serde_json::json!({
+            "sector_bytes": 512,
+            "survival_probability": 0.5,
+        }))
+        .unwrap();
+        assert_eq!(
+            model,
+            DiskFaultModel {
+                sector_bytes: SECTOR,
+                survival_probability: 0.5
+            }
         );
     }
 }

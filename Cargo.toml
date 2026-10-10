@@ -11,6 +11,11 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
+tempfile = "3"
+tar = "0.4"
+serde_yaml_ng = "0.10"
+seedbox-engine-protocol = { path = "crates/seedbox-engine-protocol" }
+clap = { version = "4", features = ["derive", "env"] }
 seedbox-engine-core = { path = "crates/seedbox-engine-core" }
 serde = { version = "1", features = ["derive"] }
 seedbox-control = { path = "crates/seedbox-control" }

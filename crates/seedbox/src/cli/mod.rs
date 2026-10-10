@@ -3,24 +3,28 @@
 mod backends;
 mod defaults;
 mod diagnostics;
+mod output;
 mod signals;
 use backends::{Executor, Preparer};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox::{
     bundle, config, diff,
-    execution::{CancellationToken, ExecutionBackend, PreparationBackend, WitnessMode},
+    execution::{Backend, CancellationToken, ExecutionBackend, PreparationBackend, WitnessMode},
     exploration::{self, ExploreOptions},
     logs,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{recorded_deferred_tx, recorded_page_timer, recorded_torn_writes, VmmExecutor},
+    vmm::VmmExecutor,
     Error, Result,
 };
 use signals::Signals;
-use std::{path::PathBuf, process::ExitCode};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 const EXIT_CODES: &str = "\
 Exit status:
@@ -274,6 +278,13 @@ impl From<TemplateArg> for Template {
     }
 }
 
+/// Apple Silicon Mac runs the built-in HVF engine; every other host runs KVM.
+const MAC: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+const CHECKPOINT_REQUIRES_KVM: &str =
+    "--checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac";
+const CPU_REQUIRES_KVM: &str = "--cpu requires Linux KVM; omit it on Mac";
+const VMM_REQUIRES_KVM: &str = "--vmm requires Linux KVM; use the built-in Mac engine";
+
 #[derive(Args)]
 struct ComposeArg {
     /// Compose file, or a directory containing compose.yaml.
@@ -284,14 +295,12 @@ struct ComposeArg {
 impl ComposeArg {
     fn load(&self) -> Result<config::Simulation> {
         let path = defaults::compose_file(&self.compose)?;
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        return config::load_for_architecture(
-            &path,
-            &std::env::vars().collect(),
-            seedbox::guest::Architecture::Arm64,
-        );
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        config::load(&path, &std::env::vars().collect())
+        let architecture = if MAC {
+            seedbox::guest::Architecture::Arm64
+        } else {
+            seedbox::guest::Architecture::Amd64
+        };
+        config::load_for_architecture(&path, &std::env::vars().collect(), architecture)
     }
 }
 
@@ -304,12 +313,9 @@ struct CpuArg {
 
 impl CpuArg {
     /// `--cpu` pins a KVM core; the Mac engine selects no core.
-    fn admit(&self) -> Result<()> {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        if self.cpu.is_some() {
-            return Err(Error::Setup(
-                "--cpu requires Linux KVM; omit it on Mac".into(),
-            ));
+    fn reject_on_mac(&self) -> Result<()> {
+        if MAC && self.cpu.is_some() {
+            return Err(Error::Setup(CPU_REQUIRES_KVM.into()));
         }
         Ok(())
     }
@@ -327,6 +333,15 @@ struct Transfer {
     /// Maximum unique object payload and materialized log bytes.
     #[arg(long, default_value_t = bundle::DEFAULT_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..))]
     max_bytes: u64,
+}
+
+impl Transfer {
+    fn options(&self, cancellation: CancellationToken) -> bundle::Options {
+        bundle::Options {
+            max_bytes: self.max_bytes,
+            cancellation,
+        }
+    }
 }
 
 impl StateArg {
@@ -371,13 +386,8 @@ struct RuntimeInputs {
 
 impl RuntimeInputs {
     fn validate_platform(&self) -> Result<()> {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            if self.kvm.vmm.is_some() {
-                return Err(Error::Setup(
-                    "--vmm requires Linux KVM; use the built-in Mac engine".into(),
-                ));
-            }
+        if MAC && self.kvm.vmm.is_some() {
+            return Err(Error::Setup(VMM_REQUIRES_KVM.into()));
         }
         Ok(())
     }
@@ -387,7 +397,6 @@ impl RuntimeInputs {
         &self,
         store: &ContentStore,
         cpu: Option<u32>,
-        scratch: &std::path::Path,
         simulation: &config::Simulation,
         cancellation: &CancellationToken,
     ) -> Result<(Preparer, Executor)> {
@@ -405,7 +414,6 @@ impl RuntimeInputs {
                 defaults::existing(flag, path.clone())?;
             }
         }
-        let _ = scratch;
         let witness = if self.full_state {
             WitnessMode::FullState
         } else {
@@ -427,9 +435,7 @@ impl RuntimeInputs {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         let executor = {
             if cpu.is_some() {
-                return Err(Error::Setup(
-                    "--cpu requires Linux KVM; omit it on Mac".into(),
-                ));
+                return Err(Error::Setup(CPU_REQUIRES_KVM.into()));
             }
             Executor::Mac(seedbox::mac::MacExecutor::new(
                 &engine,
@@ -473,18 +479,39 @@ impl RuntimeInputs {
             executor,
         ))
     }
+
+    /// Backends for a fresh `run` or `explore`, admitted on this host before any preparation.
+    fn admitted_backends(
+        &self,
+        store: &ContentStore,
+        cpu: &CpuArg,
+        simulation: &config::Simulation,
+        cancellation: &CancellationToken,
+        checkpoint: Option<(u64, u64)>,
+        performance: &Performance,
+    ) -> Result<(Preparer, Executor)> {
+        cpu.reject_on_mac()?;
+        let (mut preparer, executor) = self.backends(store, cpu.cpu, simulation, cancellation)?;
+        if cancellation.is_cancelled() {
+            return Err(Error::PreparationCancelled);
+        }
+        let executor = match checkpoint {
+            Some((at, branch)) => executor.with_checkpoint(at, branch)?,
+            None => executor,
+        };
+        preparer.profile = executor.profile();
+        Ok((preparer, performance.apply(executor)?))
+    }
 }
 
 /// Reject world machine options the selected platform cannot execute, before any state.
 fn validate_machine(simulation: &config::Simulation) -> Result<()> {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    if simulation.machine.page_timer || simulation.machine.deferred_tx {
+    if MAC && (simulation.machine.page_timer || simulation.machine.deferred_tx) {
         return Err(Error::Setup(
             "x-seedbox.machine page_timer and deferred_tx require Linux KVM; remove them on Mac"
                 .into(),
         ));
     }
-    let _ = simulation;
     Ok(())
 }
 
@@ -493,9 +520,11 @@ fn validate_machine(simulation: &config::Simulation) -> Result<()> {
 #[command(next_help_heading = "Performance (never changes results)")]
 struct Performance {
     /// Watchdog interval in milliseconds; never changes results.
-    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..=60000))]
+    #[arg(long, default_value_t = launch::DEFAULT_WATCHDOG_MS, value_parser = clap::value_parser!(u64).range(1..=60000))]
     watchdog_ms: u64,
 }
+
+use seedbox_engine_core::launch;
 
 impl Performance {
     fn apply(&self, executor: Executor) -> Result<Executor> {
@@ -526,144 +555,20 @@ pub fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
-        Command::Pause { run } => {
-            let status = seedbox::host_control::set_paused(&run, true)?;
-            println!("{}: {}", word(&status), run.display());
-            Ok(0)
-        }
-        Command::Resume { run } => {
-            let status = seedbox::host_control::set_paused(&run, false)?;
-            println!("{}: {}", word(&status), run.display());
-            Ok(0)
-        }
+        Command::Pause { run } => host_control(&run, true),
+        Command::Resume { run } => host_control(&run, false),
         Command::Init {
             directory,
             template,
-        } => {
-            if directory.exists() {
-                return Err(Error::Setup(format!(
-                    "{}: already exists; choose a new directory",
-                    directory.display()
-                )));
-            }
-            seedbox::templates::init(&directory, template.into())?;
-            println!("CREATED: {}", directory.display());
-            Ok(0)
-        }
-        Command::Validate { compose, json } => {
-            let simulation = compose.load()?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&simulation)?);
-            } else {
-                println!(
-                    "VALID: {} ({} services; image compatibility is checked by `prepare`)",
-                    simulation.name,
-                    simulation.services.len()
-                );
-            }
-            Ok(0)
-        }
-        Command::Doctor { cpu, inputs, json } => {
-            let cancellation = CancellationToken::default();
-            let _signals = Signals::register(&cancellation)?;
-            cpu.admit()?;
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            {
-                if let Some(path) = inputs.vmm.as_ref() {
-                    defaults::existing("--vmm", path.clone())?;
-                    if let Some(kernel) = inputs.kernel.as_ref() {
-                        defaults::existing("--kernel", kernel.clone())?;
-                    }
-                    return Err(Error::Setup(
-                        "--vmm requires Linux KVM; use the built-in Mac engine".into(),
-                    ));
-                }
-                let engine = defaults::engine(None)?;
-                let kernel = match inputs.kernel {
-                    Some(path) => defaults::existing("--kernel", path)?,
-                    None => backends::guest_kernel(None)?,
-                };
-                if cancellation.is_cancelled() {
-                    return Err(Error::Setup("doctor cancelled".into()));
-                }
-                let report = seedbox::mac::MacExecutor::doctor(&engine, &kernel)?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                } else {
-                    println!("VALID: compatible execution profile");
-                    println!("simulator: {}", report.simulator_version);
-                    println!("engine: {}", report.engine.hex());
-                    println!("kernel: {}", report.kernel.hex());
-                }
-                Ok(0)
-            }
-            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-            {
-                let internal = inputs.vmm.is_none();
-                let engine = defaults::engine(inputs.vmm)?;
-                let kernel_path = backends::guest_kernel(inputs.kernel)?;
-                let kernel = &kernel_path;
-                let report = if internal {
-                    VmmExecutor::doctor_internal(&engine, kernel, cpu.cpu)?
-                } else {
-                    VmmExecutor::doctor(&engine, kernel, cpu.cpu)?
-                };
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                } else {
-                    println!("VALID: compatible execution profile");
-                    println!("cpu: {}", report.cpu);
-                    println!(
-                        "cpus: {}",
-                        report
-                            .cpus
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    );
-                    if let Some(version) = &report.simulator_version {
-                        println!("simulator: {version}");
-                    }
-                    println!("engine: {}", report.engine.hex());
-                    println!("kernel: {}", report.kernel.hex());
-                }
-                Ok(0)
-            }
-        }
+        } => init(&directory, template),
+        Command::Validate { compose, json } => validate(&compose, json),
+        Command::Doctor { cpu, inputs, json } => doctor(&cpu, inputs, json),
         Command::Prepare {
             compose,
             output,
             state,
             inputs,
-        } => {
-            inputs.validate_platform()?;
-            if output.exists() {
-                return Err(Error::Setup(format!(
-                    "--output {}: already exists",
-                    output.display()
-                )));
-            }
-            let simulation = compose.load()?;
-            validate_machine(&simulation)?;
-            let (store, _) = state.open()?;
-            let scratch = tempfile::tempdir()?;
-            let cancellation = CancellationToken::default();
-            let _signals = Signals::register(&cancellation)?;
-            let (preparer, _) =
-                inputs.backends(&store, None, scratch.path(), &simulation, &cancellation)?;
-            if cancellation.is_cancelled() {
-                return Err(Error::PreparationCancelled);
-            }
-            let prepared = preparer.prepare(&simulation, &store)?;
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&output)?;
-            serde_json::to_writer_pretty(file, &prepared)?;
-            println!("PREPARED: {}", output.display());
-            Ok(0)
-        }
+        } => prepare(&compose, &output, &state, &inputs),
         Command::Run {
             compose,
             seed,
@@ -673,45 +578,15 @@ fn run(cli: Cli) -> Result<u8> {
             state,
             inputs,
             performance,
-        } => {
-            cpu.admit()?;
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            if checkpoint_at_ns.is_some() || branch_seed.is_some() {
-                return Err(Error::Setup(
-                    "--checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac"
-                        .into(),
-                ));
-            }
-            inputs.validate_platform()?;
-            let simulation = compose.load()?;
-            validate_machine(&simulation)?;
-            if checkpoint_at_ns.is_some_and(|t| t >= simulation.limits.simulated_time_ns) {
-                return Err(Error::Setup("--checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint".into()));
-            }
-            let (store, orchestrator) = state.open()?;
-            let scratch = tempfile::tempdir()?;
-            let cancellation = CancellationToken::default();
-            let _signals = Signals::register(&cancellation)?;
-            let (mut preparer, executor) =
-                inputs.backends(&store, cpu.cpu, scratch.path(), &simulation, &cancellation)?;
-            if cancellation.is_cancelled() {
-                return Err(Error::PreparationCancelled);
-            }
-            let executor = match (checkpoint_at_ns, branch_seed) {
-                (Some(at), Some(branch)) => executor.with_checkpoint(at, branch)?,
-                _ => executor,
-            };
-            preparer.profile = executor.profile();
-            let executor = performance.apply(executor)?;
-            // Backend admission checks the selected core before preparation.
-            let result = orchestrator.run(
-                &simulation,
-                RunOptions { seed, cancellation },
-                &preparer,
-                &executor,
-            )?;
-            Ok(report(&result))
-        }
+        } => run_simulation(
+            &compose,
+            seed,
+            checkpoint_at_ns.zip(branch_seed),
+            &cpu,
+            &state,
+            &inputs,
+            &performance,
+        ),
         Command::Explore {
             compose,
             seed,
@@ -723,276 +598,40 @@ fn run(cli: Cli) -> Result<u8> {
             state,
             inputs,
             performance,
-        } => {
-            inputs.validate_platform()?;
-            let resources = Resources::start();
-            let simulation = compose.load()?;
-            validate_machine(&simulation)?;
-            let cancellation = CancellationToken::default();
-            let _signals = Signals::register(&cancellation)?;
-            let options = ExploreOptions {
+        } => explore(
+            &compose,
+            ExploreOptions {
                 seed,
                 count,
                 workers,
                 fork,
-                cancellation: cancellation.clone(),
-            };
-            let (first, _) = exploration::bounds(&simulation, &options)?;
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            if fork {
-                return Err(Error::Setup(
-                    "--fork requires Linux KVM; omit it on Mac".into(),
-                ));
-            }
-            if workers > 1 && cpu.cpu.is_some() {
-                return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
-            }
-            cpu.admit()?;
-            let (store, orchestrator) = state.open()?;
-            let scratch = tempfile::tempdir()?;
-            let (mut preparer, executor) =
-                inputs.backends(&store, cpu.cpu, scratch.path(), &simulation, &cancellation)?;
-            if cancellation.is_cancelled() {
-                return Err(Error::PreparationCancelled);
-            }
-            let executor = if fork {
-                executor.with_boot_seed(first)?
-            } else {
-                executor
-            };
-            preparer.profile = executor.profile();
-            let executor = performance.apply(executor)?;
-            // Exploration retains any backend admission refusal in its batch checkpoint.
-            let mut result = orchestrator.explore(&simulation, options, &preparer, &executor)?;
-            result.record_resources(resources.finish())?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            } else {
-                println!("{}: {}", word(&result.outcome), result.directory.display());
-                println!("seeds: {}..={}", result.first_seed, result.last_seed);
-                println!("workers: {}", result.workers);
-                if let Some(seed) = result.boot_seed {
-                    println!("boot-seed: {seed}");
-                }
-                println!("peak-running: {}", result.peak_running);
-                println!(
-                    "active-attempt-seconds: {:.3}",
-                    result.active_attempt_seconds
-                );
-                println!("attempted: {}", result.attempts.len());
-                println!("pass: {}", result.counts.pass);
-                println!("fail: {}", result.counts.fail);
-                println!("timeout: {}", result.counts.timeout);
-                println!("error-count: {}", result.counts.error);
-                println!("incomplete: {}", result.counts.incomplete);
-                println!("unfinished: {}", result.counts.unfinished);
-                println!("undispatched: {}", result.undispatched_count);
-                println!("elapsed-seconds: {:.3}", result.total_seconds);
-                for attempt in &result.attempts {
-                    if let (Some(directory), Some(outcome)) = (&attempt.directory, &attempt.outcome)
-                    {
-                        eprintln!(
-                            "seed {}: {} {}",
-                            attempt.seed,
-                            word(outcome),
-                            directory.display()
-                        );
-                        if let Some(error) = &attempt.error {
-                            eprintln!("error: seed {}: {error}", attempt.seed);
-                            diagnostics::vmm_failure(directory, error);
-                        }
-                    }
-                }
-                if let Some(error) = &result.error {
-                    eprintln!("error: {error}");
-                }
-            }
-            Ok(outcome_code(&result.outcome))
-        }
+                cancellation: CancellationToken::default(),
+            },
+            json,
+            &cpu,
+            &state,
+            &inputs,
+            &performance,
+        ),
         Command::Replay {
             run,
             cpu,
             state,
             performance,
             vmm,
-        } => {
-            let allow_engine_change = vmm.is_some();
-            let run = defaults::run_directory(run)?;
-            let previous = orchestration::inspect(&run)?;
-            let is_mac = previous.identity.inputs.profile.backend == "seedbox-hvf";
-            let deferred_tx = if is_mac {
-                false
-            } else {
-                recorded_deferred_tx(&previous.identity.inputs.profile)?
-            };
-            let (store, orchestrator) = state.open()?;
-            let scratch = tempfile::tempdir()?;
-            let profile = &previous.identity.inputs.profile;
-            let override_engine = vmm.is_some();
-            let engine = match vmm {
-                Some(path) => defaults::existing("--vmm", path)?,
-                None => store.materialize(&profile.engine, scratch.path())?,
-            };
-            let executor = if profile.backend == "seedbox-hvf" {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                {
-                    cpu.admit()?;
-                    Executor::Mac(seedbox::mac::MacExecutor::from_retained(
-                        &engine,
-                        &store,
-                        profile.clone(),
-                    )?)
-                }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-                {
-                    return Err(Error::Setup(
-                        "replay of an HVF world requires an Apple Silicon Mac".into(),
-                    ));
-                }
-            } else {
-                let executor = if override_engine {
-                    VmmExecutor::from_override(&engine, &store, profile.clone(), cpu.cpu)?
-                } else {
-                    VmmExecutor::from_retained(&engine, &store, profile.clone(), cpu.cpu)?
-                };
-                Executor::Linux(
-                    executor
-                        .with_page_timer(recorded_page_timer(profile))
-                        .with_deferred_tx(deferred_tx)
-                        .with_torn_writes(recorded_torn_writes(profile)?)
-                        .with_recorded_checkpoint(profile)?,
-                )
-            };
-            let executor = performance.apply(executor)?;
-            let cancellation = CancellationToken::default();
-            let _signals = Signals::register(&cancellation)?;
-            let result = orchestrator.replay_with_options(
-                &run,
-                &executor,
-                ReplayOptions {
-                    cancellation,
-                    allow_engine_change,
-                },
-            )?;
-            Ok(report(&result))
-        }
+        } => replay(run, &cpu, &state, &performance, vmm),
         Command::Export {
             run,
             output,
             state,
             transfer,
-        } => {
-            let run = defaults::run_directory(run)?;
-            let output = match output {
-                Some(path) => path,
-                None => {
-                    let name = run.file_name().ok_or_else(|| {
-                        Error::Setup(format!("{}: no run directory name", run.display()))
-                    })?;
-                    let mut name = name.to_os_string();
-                    name.push(".seedbox.tar");
-                    PathBuf::from(name)
-                }
-            };
-            if output.symlink_metadata().is_ok() {
-                return Err(Error::Setup(format!(
-                    "--output {}: already exists; choose a new file",
-                    output.display()
-                )));
-            }
-            let cancellation = CancellationToken::default();
-            let _signals = Signals::register(&cancellation)?;
-            let options = bundle::Options {
-                max_bytes: transfer.max_bytes,
-                cancellation,
-            };
-            let store = ContentStore::new(state.state.join("objects"));
-            let record = bundle::export(&run, &store, &output, &options).map_err(|e| {
-                Error::Setup(format!(
-                    "export {} to {}: {e}",
-                    run.display(),
-                    output.display()
-                ))
-            })?;
-            println!("EXPORTED: {}", output.display());
-            print_omissions(&record);
-            Ok(0)
-        }
+        } => export(run, output, &state, &transfer),
         Command::Import {
-            bundle: path,
+            bundle,
             state,
             transfer,
-        } => {
-            let path = defaults::existing("bundle", path)?;
-            let cancellation = CancellationToken::default();
-            let _signals = Signals::register(&cancellation)?;
-            let options = bundle::Options {
-                max_bytes: transfer.max_bytes,
-                cancellation,
-            };
-            // Import performs its own no-follow opening; StateArg::open would
-            // canonicalize away root symlink evidence.
-            let run = bundle::import(&path, &state.state, &options).map_err(|e| {
-                Error::Setup(format!(
-                    "import {} into {}: {e}",
-                    path.display(),
-                    state.state.display()
-                ))
-            })?;
-            println!("IMPORTED: {}", run.directory.display());
-            print_omissions(&run.record);
-            Ok(0)
-        }
-        Command::Diff { run_a, run_b, json } => {
-            let comparison = diff::diff(&run_a, &run_b)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&comparison)?);
-            } else {
-                println!(
-                    "{}: {} <> {}",
-                    word(&comparison.status),
-                    run_a.display(),
-                    run_b.display()
-                );
-                println!(
-                    "world witness: {}",
-                    serde_json::to_string(&comparison.world_witness)?
-                );
-                for machine in &comparison.machines {
-                    println!("machine: {}", serde_json::to_string(machine)?);
-                    if let Some(pages) = &machine.ram_pages {
-                        diagnostics::ram_pages(&machine.machine, pages);
-                    }
-                }
-                println!(
-                    "divergence: {}",
-                    serde_json::to_string(&comparison.divergence)?
-                );
-                if let Some(divergence) = &comparison.divergence {
-                    diagnostics::divergence(divergence);
-                }
-                println!(
-                    "first record: {}",
-                    serde_json::to_string(&comparison.first_record)?
-                );
-                for (label, differences) in [
-                    ("identity", &comparison.identity_differences),
-                    ("result", &comparison.result_differences),
-                    ("evidence", &comparison.evidence_differences),
-                ] {
-                    for difference in differences {
-                        println!("{label}: {}", serde_json::to_string(difference)?);
-                    }
-                }
-                for limitation in &comparison.limitations {
-                    println!("limitation: {limitation}");
-                }
-            }
-            Ok(match comparison.status {
-                diff::Status::Match => 0,
-                diff::Status::Different => 1,
-            })
-        }
+        } => import(bundle, &state, &transfer),
+        Command::Diff { run_a, run_b, json } => compare(&run_a, &run_b, json),
         Command::Logs {
             run,
             machine,
@@ -1000,100 +639,497 @@ fn run(cli: Cli) -> Result<u8> {
             since_ns,
             until_ns,
             json,
-        } => {
-            let run = defaults::run_directory(run)?;
-            let mut reader = logs::Reader::open(
-                &run,
-                &logs::Filter {
-                    machine,
-                    stream: stream.map(Into::into),
-                    since_ns,
-                    until_ns,
-                },
-            )?;
-            use std::io::Write;
-            let mut output = std::io::BufWriter::new(std::io::stdout().lock());
-            if json {
-                writeln!(
-                    output,
-                    "{{\n  \"status\": {},\n  \"omissions\": {},\n  \"chunks\": [",
-                    serde_json::to_string(&reader.report.status)?,
-                    serde_json::to_string_pretty(&reader.report.omissions)?
-                )?;
-            } else {
-                let mut diagnostics = std::io::stderr().lock();
-                writeln!(diagnostics, "logs: {}", run.display())?;
-                for (name, reason) in &reader.report.omissions {
-                    writeln!(
-                        diagnostics,
-                        "omission: {}",
-                        serde_json::to_string(&(name, reason))?
-                    )?;
-                }
-            }
-            for index in 0..reader.report.chunks.len() {
-                if json {
-                    output.write_all(b"    ")?;
-                    reader.write_chunk_json(index, &mut output)?;
-                    if index + 1 < reader.report.chunks.len() {
-                        output.write_all(b",")?;
-                    }
-                    output.write_all(b"\n")?;
-                } else {
-                    reader.copy_chunk(index, &mut output)?;
-                }
-            }
-            if json {
-                writeln!(output, "  ]\n}}")?;
-            }
-            output.flush()?;
-            Ok(0)
+        } => show_logs(
+            run,
+            logs::Filter {
+                machine,
+                stream: stream.map(Into::into),
+                since_ns,
+                until_ns,
+            },
+            json,
+        ),
+        Command::Inspect { run, json } => inspect(run, json),
+    }
+}
+
+fn host_control(run: &Path, paused: bool) -> Result<u8> {
+    let status = seedbox::host_control::set_paused(run, paused)?;
+    output::status(&output::word(&status), run.display());
+    Ok(0)
+}
+
+fn init(directory: &Path, template: TemplateArg) -> Result<u8> {
+    if directory.exists() {
+        return Err(Error::Setup(format!(
+            "{}: already exists; choose a new directory",
+            directory.display()
+        )));
+    }
+    seedbox::templates::init(directory, template.into())?;
+    output::status("CREATED", directory.display());
+    Ok(0)
+}
+
+fn validate(compose: &ComposeArg, json: bool) -> Result<u8> {
+    let simulation = compose.load()?;
+    if json {
+        output::json(&simulation)?;
+    } else {
+        output::status(
+            "VALID",
+            format_args!(
+                "{} ({} services; image compatibility is checked by `prepare`)",
+                simulation.name,
+                simulation.services.len()
+            ),
+        );
+    }
+    Ok(0)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn doctor(cpu: &CpuArg, inputs: KvmInputs, json: bool) -> Result<u8> {
+    let cancellation = CancellationToken::default();
+    let _signals = Signals::register(&cancellation)?;
+    cpu.reject_on_mac()?;
+    if let Some(path) = inputs.vmm {
+        defaults::existing("--vmm", path)?;
+        if let Some(kernel) = inputs.kernel {
+            defaults::existing("--kernel", kernel)?;
         }
-        Command::Inspect { run, json } => {
-            let run = defaults::run_directory(run)?;
-            let record = orchestration::inspect(&run)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&record)?);
-                return Ok(0);
+        return Err(Error::Setup(VMM_REQUIRES_KVM.into()));
+    }
+    let engine = defaults::engine(None)?;
+    let kernel = match inputs.kernel {
+        Some(path) => defaults::existing("--kernel", path)?,
+        None => backends::guest_kernel(None)?,
+    };
+    if cancellation.is_cancelled() {
+        return Err(Error::Setup("doctor cancelled".into()));
+    }
+    let report = seedbox::mac::MacExecutor::doctor(&engine, &kernel)?;
+    if json {
+        output::json(&report)?;
+    } else {
+        output::status("VALID", "compatible execution profile");
+        output::field("simulator", &report.simulator_version);
+        output::field("engine", report.engine.hex());
+        output::field("kernel", report.kernel.hex());
+    }
+    Ok(0)
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn doctor(cpu: &CpuArg, inputs: KvmInputs, json: bool) -> Result<u8> {
+    let cancellation = CancellationToken::default();
+    let _signals = Signals::register(&cancellation)?;
+    let internal = inputs.vmm.is_none();
+    let engine = defaults::engine(inputs.vmm)?;
+    let kernel = backends::guest_kernel(inputs.kernel)?;
+    let report = if internal {
+        VmmExecutor::doctor_internal(&engine, &kernel, cpu.cpu)?
+    } else {
+        VmmExecutor::doctor(&engine, &kernel, cpu.cpu)?
+    };
+    if json {
+        output::json(&report)?;
+    } else {
+        output::status("VALID", "compatible execution profile");
+        output::field("cpu", report.cpu);
+        output::field("cpus", output::Csv(&report.cpus));
+        if let Some(version) = &report.simulator_version {
+            output::field("simulator", version);
+        }
+        output::field("engine", report.engine.hex());
+        output::field("kernel", report.kernel.hex());
+    }
+    Ok(0)
+}
+
+fn prepare(
+    compose: &ComposeArg,
+    output: &Path,
+    state: &StateArg,
+    inputs: &RuntimeInputs,
+) -> Result<u8> {
+    inputs.validate_platform()?;
+    if output.exists() {
+        return Err(Error::Setup(format!(
+            "--output {}: already exists",
+            output.display()
+        )));
+    }
+    let simulation = compose.load()?;
+    validate_machine(&simulation)?;
+    let (store, _) = state.open()?;
+    let cancellation = CancellationToken::default();
+    let _signals = Signals::register(&cancellation)?;
+    let (preparer, _) = inputs.backends(&store, None, &simulation, &cancellation)?;
+    if cancellation.is_cancelled() {
+        return Err(Error::PreparationCancelled);
+    }
+    let prepared = preparer.prepare(&simulation, &store)?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)?;
+    serde_json::to_writer_pretty(file, &prepared)?;
+    output::status("PREPARED", output.display());
+    Ok(0)
+}
+
+fn run_simulation(
+    compose: &ComposeArg,
+    seed: Option<u64>,
+    checkpoint: Option<(u64, u64)>,
+    cpu: &CpuArg,
+    state: &StateArg,
+    inputs: &RuntimeInputs,
+    performance: &Performance,
+) -> Result<u8> {
+    cpu.reject_on_mac()?;
+    // clap requires both checkpoint flags together.
+    if MAC && checkpoint.is_some() {
+        return Err(Error::Setup(CHECKPOINT_REQUIRES_KVM.into()));
+    }
+    inputs.validate_platform()?;
+    let simulation = compose.load()?;
+    validate_machine(&simulation)?;
+    if checkpoint.is_some_and(|(at, _)| at >= simulation.limits.simulated_time_ns) {
+        return Err(Error::Setup("--checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint".into()));
+    }
+    let (store, orchestrator) = state.open()?;
+    let cancellation = CancellationToken::default();
+    let _signals = Signals::register(&cancellation)?;
+    let (preparer, executor) = inputs.admitted_backends(
+        &store,
+        cpu,
+        &simulation,
+        &cancellation,
+        checkpoint,
+        performance,
+    )?;
+    // Backend admission checks the selected core before preparation.
+    let result = orchestrator.run(
+        &simulation,
+        RunOptions { seed, cancellation },
+        &preparer,
+        &executor,
+    )?;
+    Ok(report(&result))
+}
+
+fn explore(
+    compose: &ComposeArg,
+    options: ExploreOptions,
+    json: bool,
+    cpu: &CpuArg,
+    state: &StateArg,
+    inputs: &RuntimeInputs,
+    performance: &Performance,
+) -> Result<u8> {
+    inputs.validate_platform()?;
+    let resources = Resources::start();
+    let simulation = compose.load()?;
+    validate_machine(&simulation)?;
+    let _signals = Signals::register(&options.cancellation)?;
+    let (first, _) = exploration::bounds(&simulation, &options)?;
+    if options.fork && MAC {
+        return Err(Error::Setup(
+            "--fork requires Linux KVM; omit it on Mac".into(),
+        ));
+    }
+    if options.workers > 1 && cpu.cpu.is_some() {
+        return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
+    }
+    cpu.reject_on_mac()?;
+    let (store, orchestrator) = state.open()?;
+    let cancellation = options.cancellation.clone();
+    let (mut preparer, executor) =
+        inputs.admitted_backends(&store, cpu, &simulation, &cancellation, None, performance)?;
+    // Every attempt boots under the first seed and forks at its launch barrier.
+    let executor = if options.fork {
+        executor.with_boot_seed(first)?
+    } else {
+        executor
+    };
+    preparer.profile = executor.profile();
+    // Exploration retains any backend admission refusal in its batch checkpoint.
+    let mut result = orchestrator.explore(&simulation, options, &preparer, &executor)?;
+    result.record_resources(resources.finish())?;
+    if json {
+        output::json(&result)?;
+    } else {
+        output::status(&output::word(&result.outcome), result.directory.display());
+        output::field(
+            "seeds",
+            format_args!("{}..={}", result.first_seed, result.last_seed),
+        );
+        output::field("workers", result.workers);
+        if let Some(seed) = result.boot_seed {
+            output::field("boot-seed", seed);
+        }
+        output::field("peak-running", result.peak_running);
+        output::field(
+            "active-attempt-seconds",
+            output::Seconds(result.active_attempt_seconds),
+        );
+        output::field("attempted", result.attempts.len());
+        output::field("pass", result.counts.pass);
+        output::field("fail", result.counts.fail);
+        output::field("timeout", result.counts.timeout);
+        output::field("error-count", result.counts.error);
+        output::field("incomplete", result.counts.incomplete);
+        output::field("unfinished", result.counts.unfinished);
+        output::field("undispatched", result.undispatched_count);
+        output::field("elapsed-seconds", output::Seconds(result.total_seconds));
+        for attempt in &result.attempts {
+            if let (Some(directory), Some(outcome)) = (&attempt.directory, &attempt.outcome) {
+                eprintln!(
+                    "seed {}: {} {}",
+                    attempt.seed,
+                    output::word(outcome),
+                    directory.display()
+                );
+                if let Some(error) = &attempt.error {
+                    eprintln!("error: seed {}: {error}", attempt.seed);
+                    diagnostics::vmm_failure(directory, error);
+                }
             }
-            println!(
-                "{}: {} (seed {})",
-                word(&record.outcome),
-                record.attempt,
-                record.identity.seed
-            );
-            if let Some(replay) = record.replay {
-                println!("replay: {}", word(&replay.status));
-            }
-            if let Some(error) = record.error {
-                println!("error: {error}");
-                diagnostics::vmm_failure(&run, &error);
-            }
-            Ok(0)
+        }
+        if let Some(error) = &result.error {
+            eprintln!("error: {error}");
         }
     }
+    Ok(outcome_code(&result.outcome))
+}
+
+fn replay(
+    run: PathBuf,
+    cpu: &CpuArg,
+    state: &StateArg,
+    performance: &Performance,
+    vmm: Option<PathBuf>,
+) -> Result<u8> {
+    let allow_engine_change = vmm.is_some();
+    let run = defaults::run_directory(run)?;
+    let previous = orchestration::inspect(&run)?;
+    let profile = &previous.identity.inputs.profile;
+    let is_mac = profile.backend == Backend::Hvf;
+    let (store, orchestrator) = state.open()?;
+    let scratch = tempfile::tempdir()?;
+    let engine = match vmm {
+        Some(path) => defaults::existing("--vmm", path)?,
+        None => store.materialize(&profile.engine, scratch.path())?,
+    };
+    let executor = if is_mac {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            cpu.reject_on_mac()?;
+            Executor::Mac(seedbox::mac::MacExecutor::from_retained(
+                &engine,
+                &store,
+                profile.clone(),
+            )?)
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            return Err(Error::Setup(
+                "replay of an HVF world requires an Apple Silicon Mac".into(),
+            ));
+        }
+    } else {
+        // The recorded profile carries every semantic setting.
+        Executor::Linux(if allow_engine_change {
+            VmmExecutor::from_override(&engine, &store, profile.clone(), cpu.cpu)?
+        } else {
+            VmmExecutor::from_retained(&engine, &store, profile.clone(), cpu.cpu)?
+        })
+    };
+    let executor = performance.apply(executor)?;
+    let cancellation = CancellationToken::default();
+    let _signals = Signals::register(&cancellation)?;
+    let result = orchestrator.replay_with_options(
+        &run,
+        &executor,
+        ReplayOptions {
+            cancellation,
+            allow_engine_change,
+        },
+    )?;
+    Ok(report(&result))
+}
+
+fn export(
+    run: PathBuf,
+    output: Option<PathBuf>,
+    state: &StateArg,
+    transfer: &Transfer,
+) -> Result<u8> {
+    let run = defaults::run_directory(run)?;
+    let output = match output {
+        Some(path) => path,
+        None => {
+            let name = run
+                .file_name()
+                .ok_or_else(|| Error::Setup(format!("{}: no run directory name", run.display())))?;
+            let mut name = name.to_os_string();
+            name.push(".seedbox.tar");
+            PathBuf::from(name)
+        }
+    };
+    if output.symlink_metadata().is_ok() {
+        return Err(Error::Setup(format!(
+            "--output {}: already exists; choose a new file",
+            output.display()
+        )));
+    }
+    let cancellation = CancellationToken::default();
+    let _signals = Signals::register(&cancellation)?;
+    let options = transfer.options(cancellation);
+    let store = ContentStore::new(state.state.join("objects"));
+    let record = bundle::export(&run, &store, &output, &options).map_err(|e| {
+        Error::Setup(format!(
+            "export {} to {}: {e}",
+            run.display(),
+            output.display()
+        ))
+    })?;
+    output::status("EXPORTED", output.display());
+    print_omissions(&record);
+    Ok(0)
+}
+
+fn import(path: PathBuf, state: &StateArg, transfer: &Transfer) -> Result<u8> {
+    let path = defaults::existing("bundle", path)?;
+    let cancellation = CancellationToken::default();
+    let _signals = Signals::register(&cancellation)?;
+    let options = transfer.options(cancellation);
+    // Import performs its own no-follow opening; StateArg::open would
+    // canonicalize away root symlink evidence.
+    let run = bundle::import(&path, &state.state, &options).map_err(|e| {
+        Error::Setup(format!(
+            "import {} into {}: {e}",
+            path.display(),
+            state.state.display()
+        ))
+    })?;
+    output::status("IMPORTED", run.directory.display());
+    print_omissions(&run.record);
+    Ok(0)
+}
+
+fn compare(run_a: &Path, run_b: &Path, json: bool) -> Result<u8> {
+    let comparison = diff::diff(run_a, run_b)?;
+    if json {
+        output::json(&comparison)?;
+    } else {
+        output::status(
+            &output::word(&comparison.status),
+            format_args!("{} <> {}", run_a.display(), run_b.display()),
+        );
+        output::field(
+            "world witness",
+            serde_json::to_string(&comparison.world_witness)?,
+        );
+        for machine in &comparison.machines {
+            output::field("machine", serde_json::to_string(machine)?);
+            if let Some(pages) = &machine.ram_pages {
+                diagnostics::ram_pages(&machine.machine, pages);
+            }
+        }
+        output::field("divergence", serde_json::to_string(&comparison.divergence)?);
+        if let Some(divergence) = &comparison.divergence {
+            diagnostics::divergence(divergence);
+        }
+        output::field(
+            "first record",
+            serde_json::to_string(&comparison.first_record)?,
+        );
+        for (label, differences) in [
+            ("identity", &comparison.identity_differences),
+            ("result", &comparison.result_differences),
+            ("evidence", &comparison.evidence_differences),
+        ] {
+            for difference in differences {
+                output::field(label, serde_json::to_string(difference)?);
+            }
+        }
+        for limitation in &comparison.limitations {
+            output::field("limitation", limitation);
+        }
+    }
+    Ok(match comparison.status {
+        diff::Status::Match => 0,
+        diff::Status::Different => 1,
+    })
+}
+
+fn show_logs(run: PathBuf, filter: logs::Filter, json: bool) -> Result<u8> {
+    use std::io::Write;
+    let run = defaults::run_directory(run)?;
+    let mut reader = logs::Reader::open(&run, &filter)?;
+    let mut output = std::io::BufWriter::new(std::io::stdout().lock());
+    if json {
+        reader.write_json(&mut output)?;
+    } else {
+        let mut diagnostics = std::io::stderr().lock();
+        writeln!(diagnostics, "logs: {}", run.display())?;
+        for (name, reason) in &reader.report.omissions {
+            writeln!(
+                diagnostics,
+                "omission: {}",
+                serde_json::to_string(&(name, reason))?
+            )?;
+        }
+        reader.write_raw(&mut output)?;
+    }
+    output.flush()?;
+    Ok(0)
+}
+
+fn inspect(run: PathBuf, json: bool) -> Result<u8> {
+    let run = defaults::run_directory(run)?;
+    let record = orchestration::inspect(&run)?;
+    if json {
+        output::json(&record)?;
+        return Ok(0);
+    }
+    output::status(
+        &output::word(&record.outcome),
+        format_args!("{} (seed {})", record.attempt, record.identity.seed),
+    );
+    if let Some(replay) = record.replay {
+        output::field("replay", output::word(&replay.status));
+    }
+    if let Some(error) = record.error {
+        output::field("error", &error);
+        diagnostics::vmm_failure(&run, &error);
+    }
+    Ok(0)
 }
 
 /// Print a finished run and return its exit status (see `EXIT_CODES`).
 fn report(run: &orchestration::Run) -> u8 {
     // Scripts parse the run directory from this one `OUTCOME: path` line.
-    println!("{}: {}", word(&run.record.outcome), run.directory.display());
-    if let Some(version) = run
+    output::status(&output::word(&run.record.outcome), run.directory.display());
+    if let Some(engine) = &run
         .record
         .identity
         .inputs
         .profile
         .semantic_parameters
-        .get("simulator_version")
+        .engine
     {
-        println!("simulator: {version}");
+        output::field("simulator", &engine.simulator_version);
     }
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
         diagnostics::vmm_failure(&run.directory, error);
     }
     if let Some(replay) = &run.record.replay {
-        println!("replay: {}", word(&replay.status));
+        output::field("replay", output::word(&replay.status));
         diagnostics::replay_pages(replay);
         diagnostics::replay_divergence(replay);
         return match replay.status {
@@ -1111,14 +1147,6 @@ fn outcome_code(outcome: &Outcome) -> u8 {
         Outcome::Error => 2,
         Outcome::Incomplete => 3,
         Outcome::Timeout => 124,
-    }
-}
-
-/// The serialized (SCREAMING_SNAKE_CASE) name of a status enum, as in `--json`.
-fn word(value: &impl serde::Serialize) -> String {
-    match serde_json::to_value(value) {
-        Ok(serde_json::Value::String(word)) => word,
-        _ => "UNKNOWN".into(),
     }
 }
 
@@ -1173,7 +1201,9 @@ impl Resources {
 }
 #[cfg(unix)]
 fn usage(who: libc::c_int) -> Option<libc::rusage> {
+    // SAFETY: rusage is plain C data, so all-zero bytes are a valid value.
     let mut usage = unsafe { std::mem::zeroed() };
+    // SAFETY: `usage` is a valid, writable rusage for the duration of the call.
     if unsafe { libc::getrusage(who, &mut usage) } == 0 {
         Some(usage)
     } else {
@@ -1183,6 +1213,6 @@ fn usage(who: libc::c_int) -> Option<libc::rusage> {
 
 fn print_omissions(record: &orchestration::RunRecord) {
     if !record.omitted_logs.is_empty() {
-        println!("omitted files: {}", record.omitted_logs.len());
+        output::field("omitted files", record.omitted_logs.len());
     }
 }

@@ -98,7 +98,7 @@ fn text(path: &str) -> Result<String> {
     let mut data = String::new();
     File::open(path)
         .and_then(|file| file.take(2 * 1024 * 1024 + 1).read_to_string(&mut data))
-        .map_err(|e| Error::Setup(format!("host admission {path}: {e}")))?;
+        .context(Error::Setup, format_args!("host admission {path}"))?;
     if data.len() > 2 * 1024 * 1024 {
         return Err(Error::Setup(format!(
             "host admission {path}: exceeds read bound"
@@ -149,7 +149,7 @@ fn collect(cpu: u32) -> Result<CoreObservation> {
         .read(true)
         .write(true)
         .open("/dev/kvm")
-        .map_err(|e| Error::Setup(format!("/dev/kvm admission: {e}")))?;
+        .context(Error::Setup, "/dev/kvm admission")?;
     // KVM UAPI header plus at most 1024 complete 40-byte entries, aligned for ioctl.
     let mut words = vec![0u64; 1 + 1024 * 5];
     words[0] = 1024;

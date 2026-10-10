@@ -39,8 +39,7 @@ Seedbox finds your Docker or Podman socket, builds the example's workload oracle
 with the engine's normal cache, prepares the images, and runs the Linux guests.
 Progress appears on stderr. Set `DOCKER_HOST` if your engine uses a custom socket.
 Application progress comes from automatic binary instrumentation on both
-platforms. ARM exclusive-store retries can still cause replay mismatches or
-stalled progress; see [automatic progress and its limitations](docs/progress.md).
+platforms; see the [determinism catalogue](docs/determinism-catalogue.md).
 
 On Linux, `--watchdog-ms 200` raises the host CPU interval (default 20 ms)
 after which a guest that makes no exits is interrupted so the engine can
@@ -104,6 +103,7 @@ need them; clearing temporary build assets does not remove run data.
 | Build or replace guest assets | [Asset builds](tools/runtime/README.md) |
 | Platform requirements | [Mac](tools/mac-runtime/README.md) · [Linux](tools/linux-runtime/README.md) |
 | Design and direction | [Vision](docs/vision.md) |
+| Determinism mechanisms and their invariants | [Technique catalogue](docs/determinism-catalogue.md) |
 
 Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
 prepared inputs and each `SBXLAUNCH4` boot recipe. `x-seedbox.wall_clock_epoch`
@@ -125,6 +125,8 @@ entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
 | `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
+| `crates/seedbox-engine-protocol/` | Worker requests, world configuration and retained evidence formats; no execution policy |
+| `crates/seedbox-artifacts/` | Offline records, content storage, logs, comparison and bundles; no container engine or hypervisor dependency |
 | `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, the shared world coordinator and the [windowed scheduler](docs/windowed-scheduler.md) |
 | `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
 | `tools/mac-runtime/` | Mac signing and platform notes |

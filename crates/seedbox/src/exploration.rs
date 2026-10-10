@@ -257,7 +257,7 @@ impl Orchestrator {
             1
         };
         if options.fork {
-            batch.boot_seed = crate::vmm::recorded_boot_seed(&profile)?;
+            batch.boot_seed = crate::engine_adapter::recorded_boot_seed(&profile);
             batch.fork_batch = Some(batch_size);
         }
         let workers = u64::from(options.workers).min(options.count.div_ceil(batch_size)) as usize;

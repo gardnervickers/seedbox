@@ -1,0 +1,16 @@
+[package]
+name = "seedbox-artifacts"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seedbox-engine-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror = "2"
+serde_yaml_ng.workspace = true
+tempfile.workspace = true
+libc.workspace = true
+tar.workspace = true

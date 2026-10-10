@@ -1,7 +1,10 @@
 //! Typed portable fault state. Only outstanding boundaries enter the scheduler;
 //! completed history is retained as evidence but never searched to find work.
-use crate::links::{Links, Policy};
-use seedbox_control::{Action, Plan};
+use crate::control::disjoint_sides;
+use crate::links::{Links, Policy, QueueCounts};
+use crate::network_faults::Counts;
+use seedbox_control::{Action, NetworkFaults, Plan};
+use serde::{Serialize, Serializer};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,6 +16,67 @@ pub enum Status {
     Applied(u64),
     Failed,
     Unavailable(u64),
+}
+pub use seedbox_engine_protocol::report::RowStatus;
+/// Selected-connection evidence, fields in sorted key order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SelectionCounts {
+    pub dropped: u64,
+    pub matched: u64,
+}
+/// One fault's evidence row, as reports and witnesses carry it. Fields are in
+/// sorted key order and nested counts serialize with sorted keys, so a row
+/// serializes byte for byte as the sorted-key JSON object it replaced.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FaultRow {
+    pub action: &'static str,
+    pub applied_at_ns: Option<u64>,
+    pub detail: String,
+    pub id: u32,
+    pub machine: Option<String>,
+    /// Nominal network counters when a network change applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_counters: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "sorted")]
+    pub network_fault_counts: Option<Counts>,
+    /// The wall-clock step asked of the guest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset_ns: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "sorted")]
+    pub queue_counts: Option<QueueCounts>,
+    /// The clock rate error asked of the guest, in parts per billion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_ppb: Option<i64>,
+    /// The plan as requested, a sorted-key object.
+    pub request: Value,
+    pub requested_at_ns: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection_counts: Option<SelectionCounts>,
+    pub status: RowStatus,
+}
+impl FaultRow {
+    /// The row as a JSON value.
+    pub fn json(&self) -> Value {
+        serde_json::to_value(self).expect("a fault row is plain JSON")
+    }
+}
+/// Serialize through a JSON value, whose object keys are sorted.
+fn sorted<T: Serialize, S: Serializer>(value: &Option<T>, s: S) -> Result<S::Ok, S::Error> {
+    serde_json::to_value(value)
+        .map_err(serde::ser::Error::custom)?
+        .serialize(s)
+}
+/// A guest effect that matched no waiting fault, kept as evidence. Fields are
+/// in sorted key order.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RejectedEffect {
+    pub at_ns: u64,
+    pub detail: &'static str,
+    pub id: u32,
+    pub machine: Option<String>,
+    /// Always `"rejected"`.
+    pub status: &'static str,
+    pub success: bool,
 }
 #[derive(Clone)]
 struct Entry {
@@ -80,9 +144,12 @@ enum Event {
     Dispatch,
     Deadline,
 }
+/// Commands for target guests: (machine, management line).
+type Commands = Vec<(usize, Vec<u8>)>;
 #[derive(Clone)]
 pub struct Faults {
-    pub log: Vec<Value>,
+    /// One evidence row per fault, by ID.
+    pub log: Vec<FaultRow>,
     pub links: Links,
     pub connections: crate::connections::Connections,
     entries: Vec<Entry>,
@@ -106,7 +173,7 @@ pub struct Faults {
     names: Vec<String>,
     changed_network: Vec<usize>,
     pub error: Option<String>,
-    pub rejected_effects: Vec<Value>,
+    pub rejected_effects: Vec<RejectedEffect>,
 }
 impl Faults {
     pub fn new(plans: Vec<Value>, names: Vec<String>) -> Result<Self, String> {
@@ -124,7 +191,16 @@ impl Faults {
         )?;
         Self::with_links(plans, names, links)
     }
+    /// [`Faults::with_plans`] for plans held as JSON.
     pub fn with_links(plans: Vec<Value>, names: Vec<String>, links: Links) -> Result<Self, String> {
+        let plans = plans
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<Plan>, _>>()
+            .map_err(|e| format!("invalid fault plan: {e}"))?;
+        Self::with_plans(plans, names, links)
+    }
+    pub fn with_plans(plans: Vec<Plan>, names: Vec<String>, links: Links) -> Result<Self, String> {
         let count = names.len();
         let mut f = Self {
             log: vec![],
@@ -149,9 +225,7 @@ impl Faults {
             error: None,
             rejected_effects: vec![],
         };
-        for (i, value) in plans.into_iter().enumerate() {
-            let plan: Plan =
-                serde_json::from_value(value).map_err(|e| format!("invalid fault plan: {e}"))?;
+        for (i, plan) in plans.into_iter().enumerate() {
             if plan.id as usize != i + 1 {
                 return Err("invalid ordered fault identity/time".into());
             }
@@ -161,6 +235,12 @@ impl Faults {
     }
     pub fn require_readiness(&mut self) {
         self.ready.fill(false);
+    }
+    fn machine_index(&self, name: &str, unknown: &str) -> Result<usize, String> {
+        self.names
+            .iter()
+            .position(|n| n == name)
+            .ok_or_else(|| unknown.to_owned())
     }
     fn compile(&self, plan: Plan) -> Result<Entry, String> {
         if plan.deadline_ns < plan.at_ns {
@@ -190,12 +270,7 @@ impl Faults {
                         return Err("invalid throttle handle/factor".into());
                     }
                 }
-                target = Some(
-                    self.names
-                        .iter()
-                        .position(|n| n == machine)
-                        .ok_or("unknown fault machine")?,
-                );
+                target = Some(self.machine_index(machine, "unknown fault machine")?);
             }
             Action::Partition {
                 handle,
@@ -205,72 +280,33 @@ impl Faults {
                 if handle.is_empty() || left.is_empty() || right.is_empty() {
                     return Err("empty fault handle/partition side".into());
                 }
-                let mut members = BTreeSet::new();
-                let mut sides = Vec::new();
-                for side in [left, right] {
-                    let mut indices = Vec::new();
-                    for n in side {
-                        let m = self
-                            .names
-                            .iter()
-                            .position(|x| x == n)
-                            .ok_or("unknown partition machine")?;
-                        if !members.insert(m) {
-                            return Err("invalid/disjoint fault partition members".into());
-                        }
-                        indices.push(m);
-                    }
-                    sides.push(indices);
-                }
-                for a in &sides[0] {
-                    for b in &sides[1] {
-                        pairs.insert((*a, *b));
-                        pairs.insert((*b, *a));
+                let [left, right] = disjoint_sides(
+                    [left, right],
+                    |n| self.machine_index(n, "unknown partition machine"),
+                    "invalid/disjoint fault partition members",
+                )?;
+                for &a in &left {
+                    for &b in &right {
+                        pairs.insert((a, b));
+                        pairs.insert((b, a));
                     }
                 }
             }
             Action::Shape {
-                handle,
-                from,
-                to,
-                latency_ns,
-                jitter_ns,
-                loss_ppm,
-                bandwidth_bps,
-                queue_bound_ns,
-                network_faults,
+                handle, from, to, ..
             } => {
-                Policy {
-                    latency_ns: *latency_ns,
-                    jitter_ns: *jitter_ns,
-                    loss_ppm: *loss_ppm,
-                    bandwidth_bps: *bandwidth_bps,
-                    queue_bound_ns: *queue_bound_ns,
-                }
-                .validate(self.links.global.latency_ns)?;
-                network_faults.validate(*latency_ns, *jitter_ns)?;
+                let (policy, network_faults) = shape(&plan.action).expect("a shape action");
+                policy.validate_shape(self.links.global.latency_ns, &network_faults)?;
                 if handle.is_empty() || from.is_empty() || to.is_empty() {
                     return Err("empty fault handle/shape side".into());
                 }
-                let mut members = BTreeSet::new();
-                let mut sides = Vec::new();
-                for side in [from, to] {
-                    let mut indices = Vec::new();
-                    for name in side {
-                        let m = self
-                            .names
-                            .iter()
-                            .position(|n| n == name)
-                            .ok_or("unknown shape machine")?;
-                        if !members.insert(m) {
-                            return Err("shape sides must be disjoint with unique machines".into());
-                        }
-                        indices.push(m);
-                    }
-                    sides.push(indices);
-                }
-                for &a in &sides[0] {
-                    for &b in &sides[1] {
+                let [from, to] = disjoint_sides(
+                    [from, to],
+                    |n| self.machine_index(n, "unknown shape machine"),
+                    "shape sides must be disjoint with unique machines",
+                )?;
+                for &a in &from {
+                    for &b in &to {
                         pairs.insert((a, b));
                     }
                 }
@@ -302,12 +338,7 @@ impl Faults {
                 if handle.is_empty() {
                     return Err("empty fault handle".into());
                 }
-                target = Some(
-                    self.names
-                        .iter()
-                        .position(|n| n == machine)
-                        .ok_or("unknown fault machine")?,
-                );
+                target = Some(self.machine_index(machine, "unknown fault machine")?);
             }
             Action::ClockDrift {
                 handle,
@@ -348,7 +379,22 @@ impl Faults {
         }
         plan.id = id;
         let entry = self.compile(plan)?;
-        self.log.push(json!({"request":entry.plan,"id":id,"requested_at_ns":entry.plan.at_ns,"action":entry.plan.action.name(),"machine":entry.plan.action.machine(),"applied_at_ns":null,"status":"unrequested","detail":"scheduled"}));
+        self.log.push(FaultRow {
+            action: entry.plan.action.name(),
+            applied_at_ns: None,
+            detail: "scheduled".into(),
+            id,
+            machine: entry.plan.action.machine().map(str::to_owned),
+            network_counters: None,
+            network_fault_counts: None,
+            offset_ns: None,
+            queue_counts: None,
+            rate_ppb: None,
+            request: json!(entry.plan),
+            requested_at_ns: entry.plan.at_ns,
+            selection_counts: None,
+            status: RowStatus::Unrequested,
+        });
         self.boundaries.insert((entry.plan.at_ns, id, Event::Apply));
         if let (Some(m), Some(_)) = (entry.target, lifecycle(&entry.plan.action)) {
             self.lifecycle_at[m].insert((entry.plan.at_ns, id));
@@ -366,7 +412,7 @@ impl Faults {
             .map(|e| e.0)
             .unwrap_or(u64::MAX)
     }
-    #[allow(dead_code)] // The world reads Machine::paused/down; tests read this.
+    /// Machine `m`'s lifecycle as the fault model sees it.
     pub fn life(&self, m: usize) -> Life {
         self.life[m]
     }
@@ -377,22 +423,25 @@ impl Faults {
     pub fn pending_boundaries(&self) -> usize {
         self.boundaries.len()
     }
-    pub fn plan(&self, id: u32) -> Option<&Plan> {
+    fn index(&self, id: u32) -> Option<usize> {
         id.checked_sub(1)
-            .and_then(|n| self.entries.get(n as usize))
-            .map(|e| &e.plan)
+            .map(|n| n as usize)
+            .filter(|&i| i < self.entries.len())
+    }
+    pub fn plan(&self, id: u32) -> Option<&Plan> {
+        self.index(id).map(|i| &self.entries[i].plan)
+    }
+    /// Fault `id`'s evidence row.
+    pub fn row(&self, id: u32) -> Option<&FaultRow> {
+        self.index(id).map(|i| &self.log[i])
     }
     pub fn outcome(&self, id: u32) -> Option<(Status, &str)> {
-        id.checked_sub(1)
-            .and_then(|n| self.entries.get(n as usize))
-            .map(|e| {
-                (
-                    e.status,
-                    self.log[id as usize - 1]["detail"]
-                        .as_str()
-                        .unwrap_or("fault failed"),
-                )
-            })
+        self.index(id)
+            .map(|i| (self.entries[i].status, self.log[i].detail.as_str()))
+    }
+    /// Record the nominal network counters as fault row `i`'s network change applied.
+    pub fn set_network_counters(&mut self, i: usize, counters: Value) {
+        self.log[i].network_counters = Some(counters);
     }
     pub fn active_handles(&self) -> Vec<String> {
         let mut handles: Vec<_> = self
@@ -524,9 +573,12 @@ impl Faults {
         let c = self.connections.observe(src, dst, frame);
         let cut = legacy_cut || self.blocked(src, dst);
         // Only selector rows grow selection evidence; legacy logs stay identical.
+        let log = &mut self.log;
         let drop = self.connections.drops(c, cut, |s| {
-            self.log[s.fault_id as usize - 1]["selection_counts"] =
-                json!({"matched":s.matched,"dropped":s.dropped});
+            log[s.fault_id as usize - 1].selection_counts = Some(SelectionCounts {
+                dropped: s.dropped,
+                matched: s.matched,
+            });
         });
         if drop {
             self.links.selected_drop(src, dst);
@@ -544,7 +596,8 @@ impl Faults {
         frame: &[u8],
     ) -> Vec<(u64, Vec<u8>)> {
         let deliveries = self.links.deliveries((src, dst), at, frame);
-        if deliveries[0].1 != frame && deliveries[0].1.get(47) == Some(&0x14) {
+        // An injected reset is observed like the original segment would be.
+        if deliveries[0].1 != frame && crate::connections::is_reset_frame(&deliveries[0].1) {
             self.connections.observe(src, dst, &deliveries[0].1);
         }
         self.record_link_counts(src, dst);
@@ -558,11 +611,12 @@ impl Faults {
             .rev()
             .find(|(_, l)| l.pairs.contains(&(src, dst)))
         {
+            let row = &mut self.log[id as usize - 1];
             if layer.policy.bandwidth_bps.is_some() {
-                self.log[id as usize - 1]["queue_counts"] = json!(layer.queue_counts);
+                row.queue_counts = Some(layer.queue_counts);
             }
             if !layer.network_faults.is_off() {
-                self.log[id as usize - 1]["network_fault_counts"] = json!(layer.network_counts);
+                row.network_fault_counts = Some(layer.network_counts);
             }
         }
     }
@@ -586,28 +640,32 @@ impl Faults {
             self.lifecycle_at[m].remove(&(e.plan.at_ns, id));
         }
     }
-    fn fail(&mut self, i: usize, message: String) {
+    /// Resolve entry `i`: nothing of it remains outstanding.
+    fn settle(&mut self, i: usize, status: Status, detail: String) {
         self.clear_pending(i);
-        self.entries[i].status = Status::Failed;
-        self.log[i]["status"] = json!("failed");
-        self.log[i]["applied_at_ns"] = Value::Null;
-        self.log[i]["detail"] = json!(message);
+        self.entries[i].status = status;
+        let row = &mut self.log[i];
+        (row.status, row.applied_at_ns) = match status {
+            Status::Applied(time) => (RowStatus::Applied, Some(time)),
+            Status::Failed => (RowStatus::Failed, None),
+            Status::Unavailable(_) => (RowStatus::Unavailable, None),
+            Status::Scheduled | Status::Waiting => unreachable!("settled faults are resolved"),
+        };
+        row.detail = detail;
+    }
+    fn fail(&mut self, i: usize, message: String) {
+        self.settle(i, Status::Failed, message.clone());
         self.error = Some(message);
     }
     fn applied(&mut self, i: usize, time: u64, detail: String) {
-        self.clear_pending(i);
-        self.entries[i].status = Status::Applied(time);
-        self.log[i]["status"] = json!("applied");
-        self.log[i]["applied_at_ns"] = json!(time);
-        self.log[i]["detail"] = json!(detail);
+        self.settle(i, Status::Applied(time), detail);
+    }
+    fn unavailable(&mut self, i: usize, time: u64, detail: &str) {
+        self.settle(i, Status::Unavailable(time), detail.into());
     }
     /// A target VM that exits before acknowledging leaves its process fault unavailable, not failed.
     pub fn target_exited(&mut self, id: u32, machine: usize, time: u64) {
-        let Some(i) = id
-            .checked_sub(1)
-            .map(|n| n as usize)
-            .filter(|i| *i < self.entries.len())
-        else {
+        let Some(i) = self.index(id) else {
             return;
         };
         if self.entries[i].status != Status::Waiting
@@ -617,19 +675,8 @@ impl Faults {
         {
             return;
         }
-        self.clear_pending(i);
-        self.entries[i].status = Status::Unavailable(time);
-        self.log[i]["status"] = json!("unavailable");
-        self.log[i]["applied_at_ns"] = Value::Null;
-        self.log[i]["detail"] = json!("target VM exited before the process effect");
+        self.unavailable(i, time, "target VM exited before the process effect");
         self.forget_clocks(machine);
-    }
-    fn unavailable(&mut self, i: usize, time: u64, detail: &str) {
-        self.clear_pending(i);
-        self.entries[i].status = Status::Unavailable(time);
-        self.log[i]["status"] = json!("unavailable");
-        self.log[i]["applied_at_ns"] = Value::Null;
-        self.log[i]["detail"] = json!(detail);
     }
     /// The machine's incarnation is gone. Its process faults can no longer
     /// take effect, and the next incarnation reports readiness afresh, so
@@ -682,7 +729,7 @@ impl Faults {
     }
     /// Wait for entry `i`'s guest effect: arm its deadline and dispatch it now
     /// if the target is ready, or at readiness otherwise.
-    fn request_effect(&mut self, i: usize, commands: &mut Vec<(usize, Vec<u8>)>) {
+    fn request_effect(&mut self, i: usize, commands: &mut Commands) {
         let id = self.entries[i].plan.id;
         self.boundaries
             .insert((self.entries[i].plan.deadline_ns, id, Event::Deadline));
@@ -702,7 +749,7 @@ impl Faults {
         }
         self.ready[m] = true;
         self.readiness
-            .push(json!({"machine":self.names[m],"at_ns":time}));
+            .push(json!({ "machine": self.names[m], "at_ns": time }));
         for id in std::mem::take(&mut self.waiting_ready[m]) {
             let dispatch = time
                 .checked_add(latency)
@@ -715,7 +762,9 @@ impl Faults {
         }
         Ok(())
     }
-    pub fn apply_due(&mut self, now: u64) -> Vec<(usize, Vec<u8>)> {
+    /// Apply every boundary at or before `now`, in (time, ID, event) order.
+    /// Returns the management commands to send, in order.
+    pub fn apply_due(&mut self, now: u64) -> Commands {
         let mut commands = Vec::new();
         while self.boundaries.first().is_some_and(|b| b.0 <= now) {
             let Some((_, id, event)) = self.boundaries.pop_first() else {
@@ -736,357 +785,352 @@ impl Faults {
                         }
                     }
                 }
-                Event::Apply => {
-                    self.entries[i].status = Status::Waiting;
-                    self.log[i]["status"] = json!("requested");
-                    match self.entries[i].plan.action.clone() {
-                        action
-                            if action.is_process()
-                                && self.entries[i]
-                                    .target
-                                    .is_some_and(|m| self.life[m] == Life::Down) =>
-                        {
-                            self.unavailable(i, now, "target machine is down");
-                        }
-                        Action::Stop { .. }
-                        | Action::Restart { .. }
-                        | Action::PauseProcess { .. }
-                        | Action::ResumeProcess { .. } => {
-                            self.request_effect(i, &mut commands);
-                        }
-                        Action::ClockSkew {
-                            handle,
-                            offset_ns,
-                            max_offset_ns,
-                            ..
-                        } => {
-                            if self.active_handles().contains(&handle) {
-                                self.fail(i, "duplicate active handle".into());
-                                continue;
-                            }
-                            let m = self.entries[i].target.unwrap();
-                            if self.life[m] == Life::Down {
-                                self.fail(i, "clock_skew of a down machine".into());
-                                continue;
-                            }
-                            // Draw only for a seeded skew, at this boundary.
-                            let offset = match (offset_ns, max_offset_ns) {
-                                (Some(offset), _) => offset,
-                                (None, max) => match self.links.clock_offset(m, max.unwrap_or(0)) {
-                                    Ok(offset) => offset,
-                                    Err(error) => {
-                                        self.fail(i, error);
-                                        continue;
-                                    }
-                                },
-                            };
-                            self.log[i]["offset_ns"] = json!(offset);
-                            self.clocks.insert(
-                                handle,
-                                Clock {
-                                    machine: m,
-                                    change: ClockChange::Step(offset),
-                                    state: ClockState::Pending,
-                                },
-                            );
-                            self.entries[i].clock = Some(ClockChange::Step(offset));
-                            self.request_effect(i, &mut commands);
-                        }
-                        Action::ClockDrift {
-                            handle,
-                            rate_ppb,
-                            max_rate_ppb,
-                            ..
-                        } => {
-                            if self.active_handles().contains(&handle) {
-                                self.fail(i, "duplicate active handle".into());
-                                continue;
-                            }
-                            let m = self.entries[i].target.unwrap();
-                            if self.life[m] == Life::Down {
-                                self.fail(i, "clock_drift of a down machine".into());
-                                continue;
-                            }
-                            if self.drifting(m) {
-                                self.fail(i, "clock_drift of an already drifting machine".into());
-                                continue;
-                            }
-                            // Draw only for a seeded drift, at this boundary.
-                            let rate = match (rate_ppb, max_rate_ppb) {
-                                (Some(rate), _) => rate,
-                                (None, max) => match self.links.clock_offset(m, max.unwrap_or(0)) {
-                                    Ok(rate) => rate,
-                                    Err(error) => {
-                                        self.fail(i, error);
-                                        continue;
-                                    }
-                                },
-                            };
-                            self.log[i]["rate_ppb"] = json!(rate);
-                            self.clocks.insert(
-                                handle,
-                                Clock {
-                                    machine: m,
-                                    change: ClockChange::Rate(rate),
-                                    state: ClockState::Pending,
-                                },
-                            );
-                            self.entries[i].clock = Some(ClockChange::Rate(rate));
-                            self.request_effect(i, &mut commands);
-                        }
-                        Action::Partition { handle, .. } => {
-                            if self.active_handles().contains(&handle) {
-                                self.fail(i, "duplicate active partition".into());
-                                continue;
-                            }
-                            let pairs = self.entries[i].pairs.clone();
-                            for pair in &pairs {
-                                *self.cuts.entry(*pair).or_default() += 1;
-                            }
-                            self.handles.insert(handle.clone(), pairs);
-                            self.applied(
-                                i,
-                                now,
-                                format!("handle={handle}; in-flight frames retained"),
-                            );
-                            self.changed_network.push(i);
-                        }
-                        Action::Shape {
-                            handle,
-                            latency_ns,
-                            jitter_ns,
-                            loss_ppm,
-                            bandwidth_bps,
-                            queue_bound_ns,
-                            network_faults,
-                            ..
-                        } => {
-                            if self.active_handles().contains(&handle) {
-                                self.fail(i, "duplicate active handle".into());
-                                continue;
-                            }
-                            if let Err(error) = self.links.shape_with_faults(
-                                id,
-                                handle.clone(),
-                                self.entries[i].pairs.clone(),
-                                Policy {
-                                    latency_ns,
-                                    jitter_ns,
-                                    loss_ppm,
-                                    bandwidth_bps,
-                                    queue_bound_ns,
-                                },
-                                network_faults,
-                            ) {
-                                self.fail(i, error);
-                                continue;
-                            }
-                            if bandwidth_bps.is_some() {
-                                self.log[i]["queue_counts"] =
-                                    json!(crate::links::QueueCounts::default());
-                            }
-                            if !network_faults.is_off() {
-                                self.log[i]["network_fault_counts"] =
-                                    json!(crate::network_faults::Counts::default());
-                            }
-                            self.applied(
-                                i,
-                                now,
-                                format!("handle={handle}; in-flight frames retained"),
-                            );
-                            self.changed_network.push(i);
-                        }
-                        Action::DropConnection { handle, connection } => {
-                            if self.active_handles().contains(&handle) {
-                                self.fail(i, "duplicate active handle".into());
-                                continue;
-                            }
-                            if let Err(error) =
-                                self.connections
-                                    .select(id, handle.clone(), connection, &self.names)
-                            {
-                                self.fail(i, error);
-                                continue;
-                            }
-                            self.log[i]["selection_counts"] = json!({"matched":0,"dropped":0});
-                            self.applied(
-                                i,
-                                now,
-                                format!("handle={handle}; armed; in-flight frames retained"),
-                            );
-                        }
-                        Action::Heal { handle } if self.clocks.contains_key(&handle) => {
-                            let clock = self.clocks[&handle];
-                            match clock.state {
-                                ClockState::Pending | ClockState::Healing => {
-                                    self.fail(i, clock.unsettled().into());
-                                }
-                                ClockState::Lost => {
-                                    self.clocks.remove(&handle);
-                                    self.applied(
-                                        i,
-                                        now,
-                                        format!("handle={handle}; {} ended with its machine incarnation", match clock.change {
-                                            ClockChange::Step(_) => "skew",
-                                            ClockChange::Rate(_) => "drift",
-                                        }),
-                                    );
-                                }
-                                ClockState::Active => {
-                                    self.clocks.get_mut(&handle).unwrap().state =
-                                        ClockState::Healing;
-                                    // Undo the change: step back, or restore the nominal rate.
-                                    let undo = match clock.change {
-                                        ClockChange::Step(offset) => {
-                                            self.log[i]["offset_ns"] = json!(-offset);
-                                            ClockChange::Step(-offset)
-                                        }
-                                        ClockChange::Rate(_) => {
-                                            self.log[i]["rate_ppb"] = json!(0);
-                                            ClockChange::Rate(0)
-                                        }
-                                    };
-                                    self.entries[i].target = Some(clock.machine);
-                                    self.entries[i].clock = Some(undo);
-                                    self.request_effect(i, &mut commands);
-                                }
-                            }
-                        }
-                        Action::Throttle {
-                            handle,
-                            factor_permille,
-                            ..
-                        } => {
-                            let m = self.entries[i].target.unwrap();
-                            if self.active_handles().contains(&handle) {
-                                self.fail(i, "duplicate active handle".into());
-                                continue;
-                            }
-                            if self.throttle(m).is_some() {
-                                self.fail(i, "target machine is already throttled".into());
-                                continue;
-                            }
-                            self.throttles.insert(handle.clone(), (m, factor_permille));
-                            self.applied(
-                                i,
-                                now,
-                                format!("handle={handle}; factor_permille={factor_permille}"),
-                            );
-                            self.lifecycle
-                                .push((m, Lifecycle::Throttle(factor_permille)));
-                        }
-                        Action::Heal { handle } => {
-                            if let Some((m, _)) = self.throttles.remove(&handle) {
-                                self.applied(
-                                    i,
-                                    now,
-                                    format!("handle={handle}; seeded speed restored"),
-                                );
-                                self.lifecycle.push((m, Lifecycle::Throttle(1_000)));
-                                continue;
-                            }
-                            if let Some(selection) = self.connections.selections.remove(&handle) {
-                                self.log[i]["selection_counts"] = json!({"matched":selection.matched,"dropped":selection.dropped});
-                                self.applied(
-                                    i,
-                                    now,
-                                    format!(
-                                        "handle={handle}; selected packets dropped={}",
-                                        selection.dropped
-                                    ),
-                                );
-                                continue;
-                            }
-                            let queue_counts = self
-                                .links
-                                .layers
-                                .values()
-                                .find(|l| l.handle == handle && l.policy.bandwidth_bps.is_some())
-                                .map(|l| l.queue_counts);
-                            let network_counts = self
-                                .links
-                                .layers
-                                .values()
-                                .find(|l| l.handle == handle && !l.network_faults.is_off())
-                                .map(|l| l.network_counts);
-                            if self.links.heal(&handle) {
-                                if let Some(counts) = queue_counts {
-                                    self.log[i]["queue_counts"] = json!(counts);
-                                }
-                                if let Some(counts) = network_counts {
-                                    self.log[i]["network_fault_counts"] = json!(counts);
-                                }
-                                self.applied(
-                                    i,
-                                    now,
-                                    format!("handle={handle}; prior policy revealed"),
-                                );
-                                self.changed_network.push(i);
-                                continue;
-                            }
-                            let Some(pairs) = self.handles.remove(&handle) else {
-                                self.fail(i, "heal of inactive handle".into());
-                                continue;
-                            };
-                            for pair in pairs {
-                                if let Some(n) = self.cuts.get_mut(&pair) {
-                                    *n -= 1;
-                                    if *n == 0 {
-                                        self.cuts.remove(&pair);
-                                    }
-                                }
-                            }
-                            self.applied(
-                                i,
-                                now,
-                                format!("handle={handle}; overlapping handles retained"),
-                            );
-                            self.changed_network.push(i);
-                        }
-                        action @ (Action::Pause { .. }
-                        | Action::Resume { .. }
-                        | Action::Crash { .. }
-                        | Action::Reboot { .. }) => {
-                            let op = lifecycle(&action).unwrap();
-                            let m = self.entries[i].target.unwrap();
-                            let life = self.life[m];
-                            let to = match (op, life) {
-                                (Lifecycle::Pause, Life::Up) => Life::Paused,
-                                (Lifecycle::Resume, Life::Paused) => Life::Up,
-                                (Lifecycle::Crash, Life::Up | Life::Paused) => Life::Down,
-                                (Lifecycle::Reboot, Life::Down) => Life::Up,
-                                _ => {
-                                    self.fail(
-                                        i,
-                                        format!(
-                                            "{} of a {} machine",
-                                            action.name(),
-                                            life_name(life)
-                                        ),
-                                    );
-                                    continue;
-                                }
-                            };
-                            self.life[m] = to;
-                            if op == Lifecycle::Crash {
-                                self.machine_down(m, now);
-                            }
-                            self.applied(i, now, format!("machine {}", life_name(to)));
-                            self.lifecycle.push((m, op));
-                        }
-                    }
-                }
+                Event::Apply => self.apply(i, now, &mut commands),
             }
         }
         commands
     }
+    /// Entry `i`'s time has come: carry out its action.
+    fn apply(&mut self, i: usize, now: u64, commands: &mut Commands) {
+        self.entries[i].status = Status::Waiting;
+        self.log[i].status = RowStatus::Requested;
+        match self.entries[i].plan.action.clone() {
+            action
+                if action.is_process()
+                    && self.entries[i]
+                        .target
+                        .is_some_and(|m| self.life[m] == Life::Down) =>
+            {
+                self.unavailable(i, now, "target machine is down");
+            }
+            Action::Stop { .. }
+            | Action::Restart { .. }
+            | Action::PauseProcess { .. }
+            | Action::ResumeProcess { .. } => {
+                self.request_effect(i, commands);
+            }
+            Action::ClockSkew {
+                handle,
+                offset_ns,
+                max_offset_ns,
+                ..
+            } => self.apply_clock_skew(i, handle, offset_ns, max_offset_ns, commands),
+            Action::ClockDrift {
+                handle,
+                rate_ppb,
+                max_rate_ppb,
+                ..
+            } => self.apply_clock_drift(i, handle, rate_ppb, max_rate_ppb, commands),
+            Action::Partition { handle, .. } => self.apply_partition(i, now, handle),
+            action @ Action::Shape { .. } => self.apply_shape(i, now, &action),
+            Action::DropConnection { handle, connection } => {
+                self.apply_drop_connection(i, now, handle, connection)
+            }
+            Action::Heal { handle } if self.clocks.contains_key(&handle) => {
+                self.heal_clock(i, now, handle, commands)
+            }
+            Action::Throttle {
+                handle,
+                factor_permille,
+                ..
+            } => self.apply_throttle(i, now, handle, factor_permille),
+            Action::Heal { handle } => self.heal(i, now, handle),
+            action @ (Action::Pause { .. }
+            | Action::Resume { .. }
+            | Action::Crash { .. }
+            | Action::Reboot { .. }) => self.apply_lifecycle(i, now, &action),
+        }
+    }
+    fn apply_clock_skew(
+        &mut self,
+        i: usize,
+        handle: String,
+        offset_ns: Option<i64>,
+        max_offset_ns: Option<u64>,
+        commands: &mut Commands,
+    ) {
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        let m = self.entries[i].target.expect("a clock skew has a target");
+        if self.life[m] == Life::Down {
+            return self.fail(i, "clock_skew of a down machine".into());
+        }
+        // Draw only for a seeded skew, at this boundary.
+        let offset = match (offset_ns, max_offset_ns) {
+            (Some(offset), _) => offset,
+            (None, max) => match self.links.clock_offset(m, max.unwrap_or(0)) {
+                Ok(offset) => offset,
+                Err(error) => return self.fail(i, error),
+            },
+        };
+        self.log[i].offset_ns = Some(offset);
+        self.clocks.insert(
+            handle,
+            Clock {
+                machine: m,
+                change: ClockChange::Step(offset),
+                state: ClockState::Pending,
+            },
+        );
+        self.entries[i].clock = Some(ClockChange::Step(offset));
+        self.request_effect(i, commands);
+    }
+    fn apply_clock_drift(
+        &mut self,
+        i: usize,
+        handle: String,
+        rate_ppb: Option<i64>,
+        max_rate_ppb: Option<u64>,
+        commands: &mut Commands,
+    ) {
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        let m = self.entries[i].target.expect("a clock drift has a target");
+        if self.life[m] == Life::Down {
+            return self.fail(i, "clock_drift of a down machine".into());
+        }
+        if self.drifting(m) {
+            return self.fail(i, "clock_drift of an already drifting machine".into());
+        }
+        // Draw only for a seeded drift, at this boundary.
+        let rate = match (rate_ppb, max_rate_ppb) {
+            (Some(rate), _) => rate,
+            (None, max) => match self.links.clock_offset(m, max.unwrap_or(0)) {
+                Ok(rate) => rate,
+                Err(error) => return self.fail(i, error),
+            },
+        };
+        self.log[i].rate_ppb = Some(rate);
+        self.clocks.insert(
+            handle,
+            Clock {
+                machine: m,
+                change: ClockChange::Rate(rate),
+                state: ClockState::Pending,
+            },
+        );
+        self.entries[i].clock = Some(ClockChange::Rate(rate));
+        self.request_effect(i, commands);
+    }
+    fn apply_partition(&mut self, i: usize, now: u64, handle: String) {
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active partition".into());
+        }
+        let pairs = self.entries[i].pairs.clone();
+        for pair in &pairs {
+            *self.cuts.entry(*pair).or_default() += 1;
+        }
+        self.handles.insert(handle.clone(), pairs);
+        self.applied(
+            i,
+            now,
+            format!("handle={handle}; in-flight frames retained"),
+        );
+        self.changed_network.push(i);
+    }
+    fn apply_shape(&mut self, i: usize, now: u64, action: &Action) {
+        let Action::Shape { handle, .. } = action else {
+            unreachable!("a shape action")
+        };
+        let (policy, network_faults) = shape(action).expect("a shape action");
+        if self.active_handles().contains(handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        let id = self.entries[i].plan.id;
+        let pairs = self.entries[i].pairs.clone();
+        if let Err(error) =
+            self.links
+                .shape_with_faults(id, handle.clone(), pairs, policy, network_faults)
+        {
+            return self.fail(i, error);
+        }
+        if policy.bandwidth_bps.is_some() {
+            self.log[i].queue_counts = Some(QueueCounts::default());
+        }
+        if !network_faults.is_off() {
+            self.log[i].network_fault_counts = Some(Counts::default());
+        }
+        self.applied(
+            i,
+            now,
+            format!("handle={handle}; in-flight frames retained"),
+        );
+        self.changed_network.push(i);
+    }
+    fn apply_drop_connection(
+        &mut self,
+        i: usize,
+        now: u64,
+        handle: String,
+        connection: seedbox_control::Connection,
+    ) {
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        let id = self.entries[i].plan.id;
+        if let Err(error) = self
+            .connections
+            .select(id, handle.clone(), connection, &self.names)
+        {
+            return self.fail(i, error);
+        }
+        self.log[i].selection_counts = Some(SelectionCounts::default());
+        self.applied(
+            i,
+            now,
+            format!("handle={handle}; armed; in-flight frames retained"),
+        );
+    }
+    fn heal_clock(&mut self, i: usize, now: u64, handle: String, commands: &mut Commands) {
+        let clock = self.clocks[&handle];
+        match clock.state {
+            ClockState::Pending | ClockState::Healing => {
+                self.fail(i, clock.unsettled().into());
+            }
+            ClockState::Lost => {
+                self.clocks.remove(&handle);
+                let what = match clock.change {
+                    ClockChange::Step(_) => "skew",
+                    ClockChange::Rate(_) => "drift",
+                };
+                self.applied(
+                    i,
+                    now,
+                    format!("handle={handle}; {what} ended with its machine incarnation"),
+                );
+            }
+            ClockState::Active => {
+                if let Some(c) = self.clocks.get_mut(&handle) {
+                    c.state = ClockState::Healing;
+                }
+                // Undo the change: step back, or restore the nominal rate.
+                let undo = match clock.change {
+                    ClockChange::Step(offset) => {
+                        self.log[i].offset_ns = Some(-offset);
+                        ClockChange::Step(-offset)
+                    }
+                    ClockChange::Rate(_) => {
+                        self.log[i].rate_ppb = Some(0);
+                        ClockChange::Rate(0)
+                    }
+                };
+                self.entries[i].target = Some(clock.machine);
+                self.entries[i].clock = Some(undo);
+                self.request_effect(i, commands);
+            }
+        }
+    }
+    fn apply_throttle(&mut self, i: usize, now: u64, handle: String, factor_permille: u64) {
+        let m = self.entries[i].target.expect("a throttle has a target");
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        if self.throttle(m).is_some() {
+            return self.fail(i, "target machine is already throttled".into());
+        }
+        self.throttles.insert(handle.clone(), (m, factor_permille));
+        self.applied(
+            i,
+            now,
+            format!("handle={handle}; factor_permille={factor_permille}"),
+        );
+        self.lifecycle
+            .push((m, Lifecycle::Throttle(factor_permille)));
+    }
+    /// Heal a throttle, connection selector, shape layer or partition.
+    fn heal(&mut self, i: usize, now: u64, handle: String) {
+        if let Some((m, _)) = self.throttles.remove(&handle) {
+            self.applied(i, now, format!("handle={handle}; seeded speed restored"));
+            self.lifecycle.push((m, Lifecycle::Throttle(1_000)));
+            return;
+        }
+        if let Some(selection) = self.connections.selections.remove(&handle) {
+            self.log[i].selection_counts = Some(SelectionCounts {
+                dropped: selection.dropped,
+                matched: selection.matched,
+            });
+            self.applied(
+                i,
+                now,
+                format!(
+                    "handle={handle}; selected packets dropped={}",
+                    selection.dropped
+                ),
+            );
+            return;
+        }
+        let layers = || self.links.layers.values().filter(|l| l.handle == handle);
+        let queue_counts = layers()
+            .find(|l| l.policy.bandwidth_bps.is_some())
+            .map(|l| l.queue_counts);
+        let network_counts = layers()
+            .find(|l| !l.network_faults.is_off())
+            .map(|l| l.network_counts);
+        if self.links.heal(&handle) {
+            if queue_counts.is_some() {
+                self.log[i].queue_counts = queue_counts;
+            }
+            if network_counts.is_some() {
+                self.log[i].network_fault_counts = network_counts;
+            }
+            self.applied(i, now, format!("handle={handle}; prior policy revealed"));
+            self.changed_network.push(i);
+            return;
+        }
+        let Some(pairs) = self.handles.remove(&handle) else {
+            return self.fail(i, "heal of inactive handle".into());
+        };
+        for pair in pairs {
+            if let Some(n) = self.cuts.get_mut(&pair) {
+                *n -= 1;
+                if *n == 0 {
+                    self.cuts.remove(&pair);
+                }
+            }
+        }
+        self.applied(
+            i,
+            now,
+            format!("handle={handle}; overlapping handles retained"),
+        );
+        self.changed_network.push(i);
+    }
+    fn apply_lifecycle(&mut self, i: usize, now: u64, action: &Action) {
+        let op = lifecycle(action).expect("a lifecycle action");
+        let m = self.entries[i]
+            .target
+            .expect("a lifecycle action has a target");
+        let life = self.life[m];
+        let to = match (op, life) {
+            (Lifecycle::Pause, Life::Up) => Life::Paused,
+            (Lifecycle::Resume, Life::Paused) => Life::Up,
+            (Lifecycle::Crash, Life::Up | Life::Paused) => Life::Down,
+            (Lifecycle::Reboot, Life::Down) => Life::Up,
+            _ => {
+                let error = format!("{} of a {} machine", action.name(), life_name(life));
+                return self.fail(i, error);
+            }
+        };
+        self.life[m] = to;
+        if op == Lifecycle::Crash {
+            self.machine_down(m, now);
+        }
+        self.applied(i, now, format!("machine {}", life_name(to)));
+        self.lifecycle.push((m, op));
+    }
     pub fn effect(&mut self, machine: usize, id: u32, time: u64, success: bool) {
-        let Some(i) = id
-            .checked_sub(1)
-            .map(|n| n as usize)
-            .filter(|i| *i < self.entries.len())
-        else {
-            self.rejected_effects.push(json!({"id":id,"machine":self.names.get(machine),"at_ns":time,"success":success,"status":"rejected","detail":"unknown request ID"}));
+        let rejected = |detail| RejectedEffect {
+            at_ns: time,
+            detail,
+            id,
+            machine: self.names.get(machine).cloned(),
+            status: "rejected",
+            success,
+        };
+        let Some(i) = self.index(id) else {
+            self.rejected_effects.push(rejected("unknown request ID"));
             self.error = Some(format!("unexpected fault effect id {id}"));
             return;
         };
@@ -1097,7 +1141,8 @@ impl Faults {
             || time < e.plan.at_ns
             || time > e.plan.deadline_ns
         {
-            self.rejected_effects.push(json!({"id":id,"machine":self.names.get(machine),"at_ns":time,"success":success,"status":"rejected","detail":"state/machine/time mismatch"}));
+            self.rejected_effects
+                .push(rejected("state/machine/time mismatch"));
             self.fail(
                 i,
                 format!("stale/duplicate/miscorrelated fault effect {id}"),
@@ -1156,6 +1201,31 @@ impl Faults {
         } else {
             self.fail(i, format!("guest rejected fault {id}"));
         }
+    }
+}
+
+/// A shape action's link policy and impairments.
+fn shape(action: &Action) -> Option<(Policy, NetworkFaults)> {
+    match action {
+        Action::Shape {
+            latency_ns,
+            jitter_ns,
+            loss_ppm,
+            bandwidth_bps,
+            queue_bound_ns,
+            network_faults,
+            ..
+        } => Some((
+            Policy {
+                latency_ns: *latency_ns,
+                jitter_ns: *jitter_ns,
+                loss_ppm: *loss_ppm,
+                bandwidth_bps: *bandwidth_bps,
+                queue_bound_ns: *queue_bound_ns,
+            },
+            *network_faults,
+        )),
+        _ => None,
     }
 }
 
@@ -1248,8 +1318,11 @@ mod link_tests {
             assert_eq!(f.links.policy((1, 0)).latency_ns, 10);
             assert!(f.active_handles().is_empty());
             assert!(f.error.is_none());
-            assert_eq!(f.log[0]["status"], "applied");
-            assert!(f.log[0]["detail"].as_str().unwrap().contains("handle=old"));
+            assert_eq!(f.log[0].json()["status"], "applied");
+            assert!(f.log[0].json()["detail"]
+                .as_str()
+                .unwrap()
+                .contains("handle=old"));
         }
     }
     #[test]
@@ -1294,6 +1367,66 @@ mod link_tests {
         f.apply_due(10);
         assert!(f.error.is_some());
     }
+    /// Fault rows are witnessed and reported as text: their bytes must equal
+    /// the sorted-key JSON objects they replaced.
+    #[test]
+    fn fault_row_bytes_are_pinned() {
+        let mut row = FaultRow {
+            action: "shape",
+            applied_at_ns: Some(10),
+            detail: "applied".into(),
+            id: 2,
+            machine: Some("a".into()),
+            network_counters: Some(json!({"b": 1, "a": 2})),
+            network_fault_counts: Some(Counts {
+                matched: 1,
+                duplicated: 2,
+                ..Counts::default()
+            }),
+            offset_ns: Some(-5),
+            queue_counts: Some(QueueCounts {
+                matched: 3,
+                queue_dropped: 1,
+                delayed_max_ns: 9,
+            }),
+            rate_ppb: None,
+            request: json!({"id": 2, "action": "shape"}),
+            requested_at_ns: 7,
+            selection_counts: Some(SelectionCounts {
+                dropped: 1,
+                matched: 4,
+            }),
+            status: RowStatus::Applied,
+        };
+        let text = serde_json::to_string(&row).unwrap();
+        assert_eq!(text, serde_json::to_string(&row.json()).unwrap());
+        assert_eq!(
+            text,
+            concat!(
+                r#"{"action":"shape","applied_at_ns":10,"detail":"applied","id":2,"machine":"a","#,
+                r#""network_counters":{"a":2,"b":1},"network_fault_counts":{"burst_dropped":0,"#,
+                r#""delayed_max_ns":0,"duplicated":2,"matched":1,"reordered":0,"spiked":0,"#,
+                r#""tcp_reset":0},"offset_ns":-5,"queue_counts":{"delayed_max_ns":9,"matched":3,"#,
+                r#""queue_dropped":1},"request":{"action":"shape","id":2},"requested_at_ns":7,"#,
+                r#""selection_counts":{"dropped":1,"matched":4},"status":"applied"}"#
+            )
+        );
+        row.applied_at_ns = None;
+        row.machine = None;
+        row.network_counters = None;
+        row.network_fault_counts = None;
+        row.offset_ns = None;
+        row.queue_counts = None;
+        row.selection_counts = None;
+        row.status = RowStatus::Unrequested;
+        assert_eq!(
+            serde_json::to_string(&row).unwrap(),
+            concat!(
+                r#"{"action":"shape","applied_at_ns":null,"detail":"applied","id":2,"machine":null,"#,
+                r#""request":{"action":"shape","id":2},"requested_at_ns":7,"status":"unrequested"}"#
+            )
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1303,3 +1436,7 @@ mod clock_skew_tests;
 #[cfg(test)]
 #[path = "clock_drift_tests.rs"]
 mod clock_drift_tests;
+
+#[cfg(test)]
+#[path = "faults_tests.rs"]
+mod policy_tests;

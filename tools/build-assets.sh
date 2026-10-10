@@ -22,12 +22,16 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir "$work/output"
-if [[ $(uname -s) == Linux ]]; then
-  echo 'assets: building Linux kernel and guest helpers with Nix' >&2
+# Runs here on Linux and, through declare -f, inside the Mac build container.
+nix_build() { # OUTPUT-DIRECTORY KERNEL-NAME
   kernel=$(nix build --no-link --print-out-paths .#guestKernel)
   runtime=$(nix build --no-link --print-out-paths .#runtimeArchive)
-  cp "$kernel/$kernel_name" "$work/output/kernel"
-  cp "$runtime" "$work/output/runtime.tar.gz"
+  cp "$kernel/$2" "$1/kernel"
+  cp "$runtime" "$1/runtime.tar.gz"
+}
+if [[ $(uname -s) == Linux ]]; then
+  echo 'assets: building Linux kernel and guest helpers with Nix' >&2
+  nix_build "$work/output" "$kernel_name"
 else
   client=${SEEDBOX_ASSET_BUILDER:-}
   if [[ -z "$client" ]]; then
@@ -46,16 +50,13 @@ else
   done > "$work/files"
   tar --null -T "$work/files" -cf "$work/source.tar"
   container=$("$client" create -i --platform linux/arm64 docker.io/nixos/nix:latest \
-    sh -eu -c '
+    sh -eu -c "$(declare -f nix_build)"'
       mkdir /source /output
       tar -xf - -C /source
       cd /source
       export NIX_CONFIG="experimental-features = nix-command flakes
 sandbox = false"
-      kernel=$(nix build --no-link --print-out-paths .#guestKernel)
-      runtime=$(nix build --no-link --print-out-paths .#runtimeArchive)
-      cp "$kernel/Image" /output/kernel
-      cp "$runtime" /output/runtime.tar.gz
+      nix_build /output Image
     ')
   "$client" start --attach --interactive "$container" < "$work/source.tar"
   "$client" cp "$container:/output/." "$work/output/"

@@ -11,6 +11,10 @@ import subprocess
 import sys
 import time
 
+# CPU/SMT lease files live here for every tool that leases cores, including
+# the Rust CLI (crates/seedbox/src/host.rs), so the directory is fixed rather
+# than configurable: two lessees must always see each other's locks.
+LOCK_DIR = Path('/tmp')
 
 class Interrupted(Exception):
     def __init__(self, signum):
@@ -35,7 +39,7 @@ def siblings(cpu):
 
 
 @contextlib.contextmanager
-def cpu_locks(cpus, directory=Path('/tmp')):
+def cpu_locks(cpus, directory=LOCK_DIR):
     with contextlib.ExitStack() as stack:
         for cpu in sorted(cpus):
             # Never follow a user-created symlink when the supervisor runs as root.
@@ -100,7 +104,7 @@ def stop_owned_group(child):
 
 
 def run_batch(root, world, prefix, seeds, extra, cpus, timeout, vmm,
-              lock_dir=Path('/tmp')):
+              lock_dir=LOCK_DIR):
     if not seeds or len(cpus) != len(seeds) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('expected nonempty seeds and positive timeout')
     if not hasattr(os, "WNOWAIT"):
@@ -173,16 +177,24 @@ def run_batch(root, world, prefix, seeds, extra, cpus, timeout, vmm,
     return result
 
 
+# Settings batch.sh forwards when the caller sets them.
+DEFAULTS = {
+    'CPU0': '2',
+    'VMM': './crates/seedbox-vmm/target/release/seedbox-vmm',
+    'SEEDBOX_TIMEOUT': '3600',
+}
+
+
 def main():
     if os.geteuid() != 0:
         raise ValueError('run through batch.sh (root supervisor required)')
     world, prefix, seed_arg, *extra = sys.argv[1:]
     seeds = [int(seed) for seed in seed_arg.split()]
-    cpu0 = int(os.environ.get('CPU0', '2'))
+    setting = {key: os.environ.get(key) or default for key, default in DEFAULTS.items()}
+    cpu0 = int(setting['CPU0'])
     return run_batch(Path(os.environ['SEEDBOX_ROOT']), world, prefix, seeds,
                      extra, list(range(cpu0, cpu0 + len(seeds))),
-                     float(os.environ.get('SEEDBOX_TIMEOUT', '3600')),
-                     os.environ.get('VMM', './crates/seedbox-vmm/target/release/seedbox-vmm'))
+                     float(setting['SEEDBOX_TIMEOUT']), setting['VMM'])
 
 
 if __name__ == '__main__':

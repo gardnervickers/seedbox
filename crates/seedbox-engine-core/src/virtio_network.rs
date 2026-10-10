@@ -189,7 +189,25 @@ impl Network {
     }
     pub fn report(&self, transport: &Transport) -> serde_json::Value {
         let s = &self.stats;
-        serde_json::json!({"tx":s.tx_frames,"rx":s.rx_frames,"rx_dropped":s.rx_dropped,"event_idx":self.event_idx(transport),"doorbell_exits":s.doorbell_exits,"suppressed_interrupts":s.suppressed_interrupts,"deferred_tx":self.deferred_tx,"tx_polled":s.tx_polled,"tx_polled_at_boundary":s.tx_polled_at_boundary,"tx_pickup_samples":s.tx_pickup_samples,"tx_pickup_delay_upper_ns_mean":if s.tx_pickup_samples == 0 {0}else{(s.tx_pickup_delay_upper_ns_sum / s.tx_pickup_samples as u128) as u64},"tx_pickup_delay_upper_ns_max":s.tx_pickup_delay_upper_ns_max})
+        let pickup_mean = if s.tx_pickup_samples == 0 {
+            0
+        } else {
+            (s.tx_pickup_delay_upper_ns_sum / s.tx_pickup_samples as u128) as u64
+        };
+        serde_json::json!({
+            "tx": s.tx_frames,
+            "rx": s.rx_frames,
+            "rx_dropped": s.rx_dropped,
+            "event_idx": self.event_idx(transport),
+            "doorbell_exits": s.doorbell_exits,
+            "suppressed_interrupts": s.suppressed_interrupts,
+            "deferred_tx": self.deferred_tx,
+            "tx_polled": s.tx_polled,
+            "tx_polled_at_boundary": s.tx_polled_at_boundary,
+            "tx_pickup_samples": s.tx_pickup_samples,
+            "tx_pickup_delay_upper_ns_mean": pickup_mean,
+            "tx_pickup_delay_upper_ns_max": s.tx_pickup_delay_upper_ns_max,
+        })
     }
     pub fn projection(&self) -> serde_json::Value {
         serde_json::json!({"kind":"net","mac":self.mac,"backlog":self.backlog})
@@ -282,7 +300,6 @@ impl Network {
         memory: &mut [u8],
         base: u64,
         frame: &[u8],
-        suppress: bool,
         dirty: &mut impl FnMut(usize, usize),
     ) -> Result<bool, String> {
         let Some(chain) = self.chain(&transport.queues[0], memory, base, true)? else {
@@ -297,9 +314,6 @@ impl Network {
                 "network receive buffer too small"
             }
             .into());
-        }
-        if suppress {
-            transport.queues[0].suppress_notify(memory, base, true, &mut *dirty)?;
         }
         let mut packet = vec![0; HEADER];
         packet[10] = 1;
@@ -338,7 +352,7 @@ impl Network {
                     transport.queues[0].suppress_notify(memory, base, true, &mut *dirty)?;
                 }
                 while let Some(frame) = self.backlog.front().cloned() {
-                    if !self.put_frame(transport, memory, base, &frame, false, dirty)? {
+                    if !self.put_frame(transport, memory, base, &frame, dirty)? {
                         break;
                     }
                     self.backlog.pop_front();
@@ -350,7 +364,7 @@ impl Network {
             }
         } else {
             while let Some(frame) = self.backlog.front().cloned() {
-                if !self.put_frame(transport, memory, base, &frame, false, dirty)? {
+                if !self.put_frame(transport, memory, base, &frame, dirty)? {
                     break;
                 }
                 self.backlog.pop_front();
@@ -394,7 +408,7 @@ impl Network {
         }
         let old_used = transport.queues[0].used_idx;
         if !self.backlog.is_empty()
-            || !self.put_frame(transport, memory, base, frame, false, &mut dirty)?
+            || !self.put_frame(transport, memory, base, frame, &mut dirty)?
         {
             if self.backlog.len() >= BACKLOG {
                 self.stats.rx_dropped += 1;

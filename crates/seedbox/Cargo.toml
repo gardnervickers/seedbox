@@ -7,17 +7,18 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-clap = { version = "4", features = ["derive", "env"] }
+seedbox-artifacts = { path = "../seedbox-artifacts" }
+seedbox-engine-protocol.workspace = true
+clap.workspace = true
 serde.workspace = true
 seedbox-control.workspace = true
 seedbox-engine-core.workspace = true
 serde_json.workspace = true
-serde_yaml_ng = "0.10"
+serde_yaml_ng.workspace = true
 sha2.workspace = true
 shell-words = "1"
-tempfile = "3"
-thiserror = "2"
-tar = "0.4"
+tempfile.workspace = true
+tar.workspace = true
 walkdir = "2"
 flate2 = "1"
 xattr = "1"
@@ -48,3 +49,7 @@ required-features = ["application-tests"]
 [[test]]
 name = "host_pause"
 required-features = ["retained-run-tests"]
+
+[[test]]
+name = "oci_engine"
+required-features = ["oci-tests"]

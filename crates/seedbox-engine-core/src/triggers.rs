@@ -1,7 +1,8 @@
 //! Bounded streaming matchers. Only the machine's committed UART sink feeds
 //! these; no speculative bytes, host log tail, packet inference or wall clock.
 use seedbox_control::{
-    Action, Plan, TriggerRecord, MAX_TRIGGERS, MAX_TRIGGER_MARKER, PROCESS_EFFECT_TIMEOUT_NS,
+    check_trigger_budget, valid_trigger_marker, Action, Plan, TriggerRecord, TriggerStatus,
+    MAX_TRIGGER_MARKER, PROCESS_EFFECT_TIMEOUT_NS,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -20,11 +21,11 @@ impl Triggers {
         timeout: u64,
         action: Action,
     ) -> Result<u32, String> {
-        if self.records.len() >= MAX_TRIGGERS {
-            return Err("trigger budget exhausted (64 per run)".into());
-        }
-        if marker.is_empty() || marker.len() > MAX_TRIGGER_MARKER {
-            return Err("marker must contain 1..=256 bytes".into());
+        check_trigger_budget(self.records.len())?;
+        if !valid_trigger_marker(&marker) {
+            return Err(format!(
+                "marker must contain 1..={MAX_TRIGGER_MARKER} bytes"
+            ));
         }
         if timeout == 0 {
             return Err("match timeout must be positive".into());
@@ -62,7 +63,7 @@ impl Triggers {
             fault_id: None,
             cancelled_at_ns: None,
             cut_off_at_ns: None,
-            status: "armed".into(),
+            status: TriggerStatus::Armed,
             rejection_reason: None,
         });
         self.failure.push(failure);
@@ -71,17 +72,17 @@ impl Triggers {
     pub fn observes(&self, source: &str) -> bool {
         self.records
             .iter()
-            .any(|r| r.status == "armed" && r.source == source)
+            .any(|r| r.status == TriggerStatus::Armed && r.source == source)
     }
     pub fn cancel(&mut self, id: u32, now: u64) -> Result<(), String> {
         let r = self
             .records
             .get_mut(id.checked_sub(1).ok_or("unknown trigger ID")? as usize)
             .ok_or("unknown trigger ID")?;
-        if r.status != "armed" || now < r.armed_at_ns || now > r.match_deadline_ns {
+        if r.status != TriggerStatus::Armed || now < r.armed_at_ns || now > r.match_deadline_ns {
             return Err("trigger is no longer armed".into());
         }
-        r.status = "cancelled".into();
+        r.status = TriggerStatus::Cancelled;
         r.cancelled_at_ns = Some(now);
         Ok(())
     }
@@ -96,7 +97,7 @@ impl Triggers {
         max_time: u64,
     ) -> Result<(), String> {
         for (r, failure) in self.records.iter_mut().zip(&self.failure) {
-            if r.status != "armed"
+            if r.status != TriggerStatus::Armed
                 || r.source != source
                 || at < r.armed_at_ns
                 || at >= r.match_deadline_ns
@@ -118,7 +119,7 @@ impl Triggers {
                 if effect < max_time {
                     return Err("trigger effect is in committed machine past".into());
                 }
-                r.status = "matched".into();
+                r.status = TriggerStatus::Matched;
                 r.matched_at_ns = Some(at);
                 r.effect_at_ns = Some(effect);
             }
@@ -128,9 +129,9 @@ impl Triggers {
     pub fn boundary(&self) -> u64 {
         self.records
             .iter()
-            .filter_map(|r| match r.status.as_str() {
-                "armed" => Some(r.match_deadline_ns),
-                "matched" => r.effect_at_ns,
+            .filter_map(|r| match r.status {
+                TriggerStatus::Armed => Some(r.match_deadline_ns),
+                TriggerStatus::Matched => r.effect_at_ns,
                 _ => None,
             })
             .min()
@@ -143,12 +144,12 @@ impl Triggers {
         now: u64,
     ) -> Result<(), String> {
         for r in &mut self.records {
-            if r.status == "armed" && r.match_deadline_ns == now {
-                r.status = "expired".into();
+            if r.status == TriggerStatus::Armed && r.match_deadline_ns == now {
+                r.status = TriggerStatus::Expired;
             }
-            if r.status == "matched" && r.effect_at_ns == Some(now) {
+            if r.status == TriggerStatus::Matched && r.effect_at_ns == Some(now) {
                 if let Some(reason) = faults.admission_error(&r.action) {
-                    r.status = "rejected".into();
+                    r.status = TriggerStatus::Rejected;
                     r.rejection_reason = Some(reason.into());
                     continue;
                 }
@@ -162,14 +163,14 @@ impl Triggers {
                         action: r.action.clone(),
                     })?,
                 );
-                r.status = "fired".into();
+                r.status = TriggerStatus::Fired;
             }
         }
         Ok(())
     }
     pub fn reset_source(&mut self, source: &str) {
         for r in &mut self.records {
-            if r.status == "armed" && r.source == source {
+            if r.status == TriggerStatus::Armed && r.source == source {
                 r.prefix = 0;
                 r.resets += 1;
             }
@@ -177,9 +178,9 @@ impl Triggers {
     }
     pub fn cut_off(&mut self, now: u64) {
         for r in &mut self.records {
-            if r.status == "armed" || r.status == "matched" {
+            if r.status == TriggerStatus::Armed || r.status == TriggerStatus::Matched {
                 r.cut_off_at_ns = Some(now);
-                r.status = "cut_off".into();
+                r.status = TriggerStatus::CutOff;
             }
         }
     }

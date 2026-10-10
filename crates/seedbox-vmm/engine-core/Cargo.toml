@@ -1,5 +1,6 @@
 [package]
-build = "build-cache.rs"
+# Shared source-cache watcher (see that file).
+build = "../../seedbox-engine-core/build.rs"
 name = "seedbox-vmm-engine-core"
 version.workspace = true
 edition.workspace = true
@@ -12,9 +13,13 @@ name = "seedbox_engine_core"
 path = "src/lib.rs"
 
 [dependencies]
+seedbox-engine-protocol = { package = "seedbox-vmm-protocol", path = "../protocol" }
 seedbox-control = { package = "seedbox-vmm-control", path = "../control" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 # Work-stealing machine workers for the windowed scheduler.
 rayon = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -6,16 +6,14 @@ use crate::{
     store::{ContentDigest, ContentStore},
     Error, Result,
 };
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Write,
     path::{Path, PathBuf},
     time::Instant,
 };
 
-const FORMAT_VERSION: u32 = 2;
+pub use seedbox_artifacts::record::*;
 
 #[derive(Clone, Debug, Default)]
 pub struct ReplayOptions {
@@ -24,103 +22,11 @@ pub struct ReplayOptions {
     pub allow_engine_change: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LogPolicy {
-    pub max_file_bytes: u64,
-    pub max_total_bytes: u64,
-}
-
-impl Default for LogPolicy {
-    fn default() -> Self {
-        Self {
-            max_file_bytes: 256 * 1024 * 1024,
-            max_total_bytes: 1024 * 1024 * 1024,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct RunOptions {
     /// An explicit override wins over x-seedbox.seed. Absence of both is an error.
     pub seed: Option<u64>,
     pub cancellation: CancellationToken,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum Outcome {
-    Pass,
-    Fail,
-    Error,
-    Timeout,
-    Incomplete,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ReplayStatus {
-    Match,
-    Mismatch,
-    NotComparable,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReplayComparison {
-    pub status: ReplayStatus,
-    pub outcome_matches: bool,
-    pub witness_matches: Option<bool>,
-    pub full_state_matches: Option<bool>,
-    pub fault_history_matches: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ram_pages: Option<crate::diff::RamPageReport>,
-    /// Where the witness logs first disagree; diagnostic only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub divergence: Option<crate::diff::DivergenceReport>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RunIdentity {
-    pub version: u32,
-    pub seed: u64,
-    pub configuration: Simulation,
-    pub inputs: PreparedInputs,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RunRecord {
-    pub run_id: ContentDigest,
-    /// Distinct executions of the same identity never share output paths.
-    pub attempt: String,
-    pub identity: RunIdentity,
-    pub performance_parameters: BTreeMap<String, String>,
-    pub allow_engine_change: bool,
-    pub log_policy: LogPolicy,
-    pub omitted_logs: BTreeMap<String, String>,
-    pub outcome: Outcome,
-    pub report: Option<ExecutionReport>,
-    pub error: Option<String>,
-    pub logs: BTreeMap<String, ContentDigest>,
-    pub replay_of: Option<String>,
-    pub replay: Option<ReplayComparison>,
-}
-
-/// A checksum protects all recorded results as well as the input identity.
-/// This detects corruption; it is not an authenticity signature.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    sha256: ContentDigest,
-    record: RunRecord,
-}
-
-#[derive(Clone, Debug)]
-pub struct Run {
-    pub directory: PathBuf,
-    pub record: RunRecord,
 }
 
 #[derive(Clone, Debug)]
@@ -228,29 +134,16 @@ impl Orchestrator {
         options: ReplayOptions,
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
-        // Refuse TX-mode drift before creating an attempt or executing anything.
-        if baseline.identity.inputs.profile.backend == "seedbox-kvm"
-            && crate::vmm::recorded_deferred_tx(&baseline.identity.inputs.profile)?
-                != crate::vmm::recorded_deferred_tx(&executor.profile())?
-        {
-            return Err(Error::Integrity("executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into()));
-        }
+        // Refuse settings drift before creating an attempt or executing anything.
+        let requested = executor.profile();
+        drift(&baseline.identity.inputs.profile, &requested)?;
         let mut identity = baseline.identity.clone();
         if options.allow_engine_change {
-            let replacement = executor.profile();
-            identity.inputs.profile.engine = replacement.engine;
+            identity.inputs.profile.engine = requested.engine;
             // A new executable can use different argv without changing the
-            // simulation's retained memory, faults or other settings.
-            for key in crate::engine::DESCRIPTOR_FIELDS {
-                identity.inputs.profile.semantic_parameters.remove(key);
-                if let Some(value) = replacement.semantic_parameters.get(key) {
-                    identity
-                        .inputs
-                        .profile
-                        .semantic_parameters
-                        .insert(key.into(), value.clone());
-                }
-            }
+            // simulation's retained memory, timebase, faults or other settings.
+            identity.inputs.profile.semantic_parameters.engine =
+                requested.semantic_parameters.engine;
         }
         let mut run = self.execute(
             identity,
@@ -721,38 +614,6 @@ fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
     }
 }
 
-pub fn inspect(directory: &Path) -> Result<RunRecord> {
-    inspect_bytes(&fs::read(directory.join("manifest.json"))?)
-}
-
-/// Validate a retained manifest without consulting its original directory.
-pub(crate) fn inspect_bytes(bytes: &[u8]) -> Result<RunRecord> {
-    let manifest: Manifest = serde_json::from_slice(bytes)?;
-    let record = manifest.record;
-    if ContentDigest::of(&serde_json::to_vec(&record)?) != manifest.sha256
-        || ContentDigest::of(&serde_json::to_vec(&record.identity)?) != record.run_id
-    {
-        return Err(Error::Integrity("manifest checksum mismatch".into()));
-    }
-    if record.identity.version != FORMAT_VERSION {
-        return Err(Error::Integrity("unsupported run format".into()));
-    }
-    Ok(record)
-}
-
-fn write_record(directory: &Path, record: &RunRecord) -> Result<()> {
-    let manifest = Manifest {
-        sha256: ContentDigest::of(&serde_json::to_vec(record)?),
-        record: record.clone(),
-    };
-    let mut temp = tempfile::NamedTempFile::new_in(directory)?;
-    temp.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
-    temp.as_file().sync_all()?;
-    temp.persist(directory.join("manifest.json"))
-        .map_err(|e| e.error)?;
-    Ok(())
-}
-
 fn retain_logs(
     base: &Path,
     directory: &Path,
@@ -807,4 +668,33 @@ fn retain_logs(
         }
     }
     Ok(())
+}
+
+/// Refuse, before any attempt exists, a KVM executor whose result-changing
+/// settings differ from the recorded run, naming a TX-mode difference first,
+/// then the first other one. The executable descriptor may differ; it only
+/// selects argv.
+fn drift(recorded: &ExecutionProfile, requested: &ExecutionProfile) -> Result<()> {
+    if recorded.backend != Backend::Kvm {
+        return Ok(());
+    }
+    let (was, now) = (
+        &recorded.semantic_parameters,
+        &requested.semantic_parameters,
+    );
+    let differences = was.differences(now);
+    let first = if differences.contains(&"deferred_tx") {
+        "deferred_tx"
+    } else {
+        let Some(&first) = differences.first() else {
+            return Ok(());
+        };
+        first
+    };
+    Err(Error::Integrity(match first {
+        "deferred_tx" => "executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into(),
+        setting => format!(
+            "executor {setting} does not match the recorded run; use an executor with the recorded settings"
+        ),
+    }))
 }

@@ -1,7 +1,10 @@
 //! Native preparation retains immutable inputs and honors cancellation.
 use seedbox::{
     config,
-    execution::{CancellationToken, ExecutionProfile, PreparationBackend, WitnessMode},
+    execution::{
+        Backend, CancellationToken, ExecutionProfile, PreparationBackend, SemanticParameters,
+        WitnessMode,
+    },
     oci::{ImageTransport, ImportedImage, RootFilesystem},
     preparation::{OciPreparer, PreparationContext},
     store::{ContentDigest, ContentStore},
@@ -36,10 +39,10 @@ fn fixture(root: &Path) -> (OciPreparer, config::Simulation, ContentStore) {
     archive.finish().unwrap();
     let store = ContentStore::new(root.join("store"));
     let profile = ExecutionProfile {
-        backend: "test-only".into(),
+        backend: Backend::Other("test-only".into()),
         engine: ContentDigest::of(b"engine"),
         witness_mode: WitnessMode::Exits,
-        semantic_parameters: BTreeMap::from([("memory_mb".into(), "1024".into())]),
+        semantic_parameters: SemanticParameters::new(1024),
     };
     let preparer = OciPreparer {
         kernel,
@@ -76,12 +79,13 @@ fn cancelled_preparation_never_imports_images() {
 fn invalid_profile_fails_before_image_import() {
     let root = tempfile::tempdir().unwrap();
     let (mut preparer, simulation, store) = fixture(root.path());
-    preparer.profile.backend = "seedbox-kvm".into();
+    preparer.profile.backend = Backend::Kvm;
+    preparer.profile.semantic_parameters.memory_mb = 32;
     assert!(preparer
         .prepare(&simulation, &store)
         .unwrap_err()
         .to_string()
-        .contains("unsupported guest_abi"));
+        .contains("admitted profile requires memory_mb in 64..65536"));
 }
 #[test]
 fn preparation_retains_kernel_before_transport_changes_source() {

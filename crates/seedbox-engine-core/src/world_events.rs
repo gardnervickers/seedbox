@@ -20,6 +20,9 @@ pub fn pop_before<T>(queue: &mut BTreeMap<(u64, u64), T>, t: u64) -> Option<(u64
     (key.0 < t).then(|| (key.0, queue.remove(&key).unwrap()))
 }
 
+/// Frames a paused machine keeps for its resume; later arrivals are dropped.
+pub const PAUSED_INGRESS_FRAMES: u64 = 256;
+
 /// What a frame finds when it reaches a machine that may be paused or down.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Arrival {

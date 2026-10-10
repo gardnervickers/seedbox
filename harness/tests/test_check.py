@@ -58,6 +58,17 @@ class SelectionTests(unittest.TestCase):
                          ["hvf-tests", "guest-tests"])
         self.assertEqual(check.features_for("seedbox-vmm", "arm64", check.expand(["mac"], "arm64")), [])
 
+    def test_hardware_targets_follow_cargo_declarations(self):
+        metadata = {"packages": [{"name": "seedbox", "targets": [
+            {"name": "portable", "kind": ["test"]},
+            {"name": "image_engine", "kind": ["test"], "required-features": ["oci-tests"]},
+            {"name": "combined", "kind": ["test"], "required-features": ["oci-tests", "application-tests"]},
+            {"name": "library", "kind": ["lib"], "required-features": ["oci-tests"]},
+        ]}]}
+        self.assertEqual(check.feature_test_targets(metadata, "seedbox", ["oci-tests"]), ["image_engine"])
+        self.assertEqual(check.feature_test_targets(metadata, "seedbox", ["application-tests", "oci-tests"]), ["combined", "image_engine"])
+        self.assertEqual(check.feature_test_targets(metadata, "seedbox", []), [])
+
     def test_kvm_suite_needs_no_root(self):
         self.assertEqual(self.linux("linux-kvm", {"kvm": ""}, root=False), [])
 

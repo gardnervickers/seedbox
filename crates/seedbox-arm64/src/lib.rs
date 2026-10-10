@@ -15,10 +15,9 @@ pub mod witness;
 
 // One policy implementation is compiled through this backend's isolated package.
 pub use seedbox_engine_core::disk;
-pub(crate) use seedbox_engine_core::{control, faults, links, network_counters, rng};
+pub(crate) use seedbox_engine_core::{control, faults, links, rng};
 
-#[path = "../../seedbox-vmm/src/host_control.rs"]
-pub(crate) mod host_control;
+pub(crate) use seedbox_engine_core::host_control;
 
 pub type Result<T> = std::result::Result<T, String>;
 
