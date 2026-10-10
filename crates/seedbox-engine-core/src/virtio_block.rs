@@ -16,13 +16,15 @@ const S_IOERR: u8 = 1;
 const S_UNSUPP: u8 = 2;
 
 /// Existing descriptor and effect policies, preserved during extraction.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Policy {
     Application,
     Block,
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Stats {
     pub reads: u64,
     pub writes: u64,
@@ -47,6 +49,15 @@ pub struct Block {
     policy: Policy,
     // Application counters stay disabled and are not part of retained state.
     stats: Stats,
+}
+
+/// Device metadata paired with the separate streaming disk checkpoint.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    policy: Policy,
+    stats: Stats,
+    disk_digest: String,
 }
 
 struct Request {
@@ -168,6 +179,27 @@ impl Request {
 }
 
 impl Block {
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            policy: self.policy,
+            stats: self.stats.clone(),
+            disk_digest: self.disk.digest(),
+        }
+    }
+
+    /// Construct with the restored disk first. Reject mismatched sidecars before
+    /// publishing the device, including application counters that cannot occur.
+    pub fn restore_snapshot(mut self, snapshot: Snapshot) -> Result<Self> {
+        if self.policy != snapshot.policy
+            || self.disk.digest() != snapshot.disk_digest
+            || (self.policy == Policy::Application && snapshot.stats != Stats::default())
+        {
+            return Err("block snapshot policy, disk or counters mismatch".into());
+        }
+        self.stats = snapshot.stats;
+        Ok(self)
+    }
+
     pub fn new(disk: Disk, policy: Policy) -> Self {
         Self {
             disk,

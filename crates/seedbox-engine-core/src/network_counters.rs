@@ -40,8 +40,9 @@ pub fn snapshot_value<'a>(name: impl Fn(usize) -> &'a str, counts: &LinkCounts) 
     serde_json::to_value(snapshot(name, counts)).expect("counts are plain JSON")
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetworkCounters {
+    #[serde(with = "crate::checkpoint::ordered_map")]
     totals: LinkCounts,
     pending: BTreeMap<u64, Vec<(usize, usize, usize)>>,
     frontier: u64,

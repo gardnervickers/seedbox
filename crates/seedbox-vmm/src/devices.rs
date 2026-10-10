@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 pub use seedbox_engine_core::log_index;
 
 /// Master 8259A. The slave is accepted but never raises interrupts.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Pic {
     imr: u8,
     irr: u8,
@@ -81,7 +81,7 @@ impl Pic {
 
 const PIT_HZ: u128 = 1_193_182;
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 struct PitChannel {
     mode: u8,
     access: u8,
@@ -115,7 +115,7 @@ impl PitChannel {
 }
 
 /// 8254 timer: channel 0 drives IRQ0, channel 2 serves boot calibration.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Pit {
     ch: [PitChannel; 3],
     gate2: bool,
@@ -281,7 +281,7 @@ impl Pit {
 }
 
 /// 16550A UART with immediate transmit and an input queue.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Uart {
     ier: u8,
     lcr: u8,
@@ -293,6 +293,10 @@ pub struct Uart {
     thre: bool,
     level: bool,
     pub out: Vec<u8>,
+    /// Observation counter, independent of whether raw bytes are retained.
+    pub transmitted: u64,
+    pub discard_output: bool,
+    #[serde(skip)]
     pub output_file: Option<std::fs::File>,
     pub output_limit: Option<usize>,
     pub chunks: log_index::Index,
@@ -312,6 +316,8 @@ impl Uart {
             thre: self.thre,
             level: self.level,
             out: self.out.clone(),
+            transmitted: self.transmitted,
+            discard_output: self.discard_output,
             output_file: None,
             output_limit: None,
             chunks: self.chunks.snapshot(),
@@ -382,9 +388,10 @@ impl Uart {
         Ok(())
     }
     pub fn transmit(&mut self, v: u8) -> Result<(), String> {
-        if self
-            .output_limit
-            .is_some_and(|limit| self.out.len() >= limit)
+        if !self.discard_output
+            && self
+                .output_limit
+                .is_some_and(|limit| self.out.len() >= limit)
         {
             return Err("guest serial output limit exceeded".into());
         }
@@ -393,7 +400,10 @@ impl Uart {
             file.write_all(&[v])
                 .map_err(|error| format!("serial log: {error}"))?;
         }
-        self.out.push(v);
+        self.transmitted = self.transmitted.saturating_add(1);
+        if !self.discard_output {
+            self.out.push(v);
+        }
         Ok(())
     }
     /// Rising edge of the interrupt condition since the last call.

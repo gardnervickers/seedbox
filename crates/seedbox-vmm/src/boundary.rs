@@ -37,7 +37,7 @@ pub fn io_charge(port: u16, write: bool) -> u64 {
 
 /// A sampled/applied KVM I/O operation whose deterministic cost is unpaid.
 /// None in Machine means KVM completion succeeded, not merely zero debt.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingIo {
     pub remaining_ns: u64,
     pub port: u16,

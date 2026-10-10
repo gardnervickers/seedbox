@@ -18,11 +18,11 @@ pub struct ContentDigest(String);
 
 impl ContentDigest {
     pub fn of(bytes: &[u8]) -> Self {
-        Self(format!("{:x}", Sha256::digest(bytes)))
+        Self(hex::encode(Sha256::digest(bytes)))
     }
     /// The digest of everything fed to a streaming hasher.
     pub fn finish(hash: Sha256) -> Self {
-        Self(format!("{:x}", hash.finalize()))
+        Self(hex::encode(hash.finalize()))
     }
     pub fn hex(&self) -> &str {
         &self.0

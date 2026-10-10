@@ -17,11 +17,13 @@ pub(crate) struct MockClock {
     pub(crate) watchdog_deadline: Option<u64>,
     pub(crate) restore_calls: usize,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Step {
     pub(crate) at: u64,
     pub(crate) stop: Stop,
     pub(crate) console: Option<u8>,
+    pub(crate) output: Vec<u8>,
+    pub(crate) observations: Vec<seedbox_engine_protocol::observation::Kind>,
     pub(crate) requests: Vec<Vec<u8>>,
     pub(crate) effects: Vec<(u32, bool)>,
     pub(crate) frames: Vec<Vec<u8>>,
@@ -32,6 +34,8 @@ impl Step {
             at,
             stop,
             console: None,
+            output: Vec::new(),
+            observations: Vec::new(),
             requests: vec![],
             effects: vec![],
             frames: vec![],
@@ -48,7 +52,7 @@ pub(crate) struct Mock {
     pub(crate) bad: Option<&'static str>,
     pub(crate) throttleable: bool,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Saved {
     common: MachineState,
     steps: VecDeque<Step>,
@@ -240,6 +244,10 @@ impl WorldMachine for Mock {
         })
     }
     fn restore(&mut self, s: &Saved) -> Result<u64, String> {
+        if self.bad == Some("restore") {
+            self.time = 999;
+            return Err("partial restore failed".into());
+        }
         self.common = s.common.clone();
         self.steps = s.steps.clone();
         self.owed = None;
@@ -271,6 +279,16 @@ impl WorldMachine for Mock {
             .and_then(|owed| owed.checked_sub(paid))
             .filter(|&owed| owed > 0);
         self.common.time = step.at;
+        for kind in step.observations {
+            self.common.observations.push(crate::observation::Entry {
+                time_ns: step.at,
+                incarnation: self.common.incarnation(),
+                kind,
+            });
+        }
+        if request.observe_console && !step.output.is_empty() {
+            self.common.committed_output.push((step.at, step.output));
+        }
         self.common.committed_console = step
             .console
             .filter(|_| request.observe_console)
@@ -320,6 +338,8 @@ pub(crate) fn world(names: &[&str]) -> World<Mock> {
     let trace = Trace::default();
     let n = names.len();
     World {
+        scheduler_continuation: None,
+        observations: None,
         failure: None,
         machines: names
             .iter()
@@ -355,5 +375,6 @@ pub(crate) fn world(names: &[&str]) -> World<Mock> {
         link_counts: BTreeMap::new(),
         semantic_counts: network_counters::NetworkCounters::default(),
         slices: 0,
+        boundaries: 0,
     }
 }

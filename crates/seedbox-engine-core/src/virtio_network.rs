@@ -16,7 +16,8 @@ pub fn poll_limit(now: u64, limit: u64, deferred: bool) -> u64 {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Policy {
     Application,
     Network,
@@ -31,7 +32,8 @@ pub struct Notified {
     pub frames: Vec<Vec<u8>>,
     pub irq: bool,
 }
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Stats {
     pub tx_frames: u64,
     pub rx_frames: u64,
@@ -53,7 +55,48 @@ pub struct Network {
     deferred_tx: bool,
     tx_empty_at: Option<u64>,
 }
+/// Owned checkpoint metadata; constructor-owned policy is verified on restore.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    policy: Policy,
+    mac: [u8; 6],
+    backlog: VecDeque<Vec<u8>>,
+    stats: Stats,
+    deferred_tx: bool,
+    tx_empty_at: Option<u64>,
+}
+
 impl Network {
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            policy: self.policy,
+            mac: self.mac,
+            backlog: self.backlog.clone(),
+            stats: self.stats.clone(),
+            deferred_tx: self.deferred_tx,
+            tx_empty_at: self.tx_empty_at,
+        }
+    }
+
+    /// Consume a configured model; failure never publishes partially restored state.
+    pub fn restore_snapshot(self, snapshot: Snapshot) -> std::result::Result<Self, String> {
+        if snapshot.policy != self.policy
+            || snapshot.mac != self.mac
+            || snapshot.backlog.len() > BACKLOG
+        {
+            return Err("network snapshot configuration or backlog mismatch".into());
+        }
+        Ok(Self {
+            policy: snapshot.policy,
+            mac: snapshot.mac,
+            backlog: snapshot.backlog,
+            stats: snapshot.stats,
+            deferred_tx: snapshot.deferred_tx,
+            tx_empty_at: snapshot.tx_empty_at,
+        })
+    }
+
     pub fn new(mac: [u8; 6], policy: Policy) -> Self {
         Self {
             policy,

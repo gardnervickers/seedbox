@@ -41,4 +41,4 @@ pub const EVENT_ADDR: u64 = 0x0a01_0000;
 pub const TIMER_SPI: u32 = 40;
 pub const UART_SPI: u32 = 33;
 pub const PAGE_SIZE: usize = 0x4000; // also meets Apple Silicon's host alignment
-pub const ABI: u64 = 2;
+pub const ABI: u64 = 3;

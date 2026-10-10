@@ -3,9 +3,21 @@
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    io::{BufRead, BufReader},
+    path::Path,
+    process::{Child, Command, Stdio},
+    time::{Duration, Instant},
+};
 
-fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<String, String> {
+fn invoke(
+    cli: &Path,
+    directory: &Path,
+    state: &Path,
+    name: &str,
+    args: &[&str],
+) -> Result<String, String> {
     let logfile = directory.join(format!("{name}.log"));
     let log = fs::File::create(&logfile).map_err(|error| error.to_string())?;
     eprintln!("application: {} / {name}", directory.display());
@@ -13,15 +25,9 @@ fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<Str
     command
         .args(args)
         .env_remove("SEEDBOX_VMM")
+        .env("SEEDBOX_STATE", state)
         .stdout(log.try_clone().map_err(|error| error.to_string())?)
         .stderr(log);
-    if args.first() != Some(&"diff") {
-        command.arg("--state").arg(directory.join("state"));
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if let Some(cpu) = std::env::var_os("SEEDBOX_TEST_CPU") {
-            command.arg("--cpu").arg(cpu);
-        }
-    }
     let status = command
         .status()
         .map_err(|error| format!("{}: {error}", cli.display()))?;
@@ -49,15 +55,15 @@ fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<Str
     )
 }
 
-fn run_directory(output: &str) -> Result<&str, String> {
+fn simulation_id(output: &str) -> Result<&str, String> {
     output
         .lines()
         .find_map(|line| line.strip_prefix("PASS: "))
-        .ok_or_else(|| format!("missing PASS run directory: {output}"))
+        .ok_or_else(|| format!("missing PASS simulation ID: {output}"))
 }
 
 #[test]
-fn every_application_runs_twice_and_replays() {
+fn every_application_runs_twice_and_reruns_through_the_server() {
     let cli = std::env::var_os("SEEDBOX_TEST_CLI")
         .expect("harness/check.sh supplies the current release CLI");
     let reports =
@@ -74,6 +80,22 @@ fn every_application_runs_twice_and_replays() {
         .collect();
     workloads.sort();
     assert!(!workloads.is_empty());
+    // macOS limits Unix socket paths to 104 bytes. The checkout/report path
+    // can exceed that before appending the socket name.
+    let state_directory = tempfile::Builder::new()
+        .prefix("seedbox-apps-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    // Let the daemon create its own state directory with private permissions.
+    let state_path = state_directory.path().join("state");
+    let state = state_path.as_path();
+    let server = match Server::start(Path::new(&cli), state) {
+        Ok(server) => server,
+        Err(error) => {
+            let retained = state_directory.keep();
+            panic!("{error}; retained server state: {}", retained.display());
+        }
+    };
     let mut failures = Vec::new();
     for workload in workloads {
         let directory = Path::new(&reports)
@@ -81,23 +103,95 @@ fn every_application_runs_twice_and_replays() {
             .join(workload.file_stem().unwrap());
         fs::create_dir_all(&directory).unwrap();
         let check = || -> Result<(), String> {
-            let run = ["run", workload.to_str().unwrap(), "--full-state"];
-            let first = invoke(Path::new(&cli), &directory, "first", &run)?;
-            let second = invoke(Path::new(&cli), &directory, "second", &run)?;
-            let first = run_directory(&first)?;
-            let second = run_directory(&second)?;
+            let run = ["run", workload.to_str().unwrap(), "--seed", "1009"];
+            let first = invoke(Path::new(&cli), &directory, state, "first", &run)?;
+            let second = invoke(Path::new(&cli), &directory, state, "second", &run)?;
+            let first = simulation_id(&first)?;
+            let second = simulation_id(&second)?;
             invoke(
                 Path::new(&cli),
                 &directory,
-                "diff",
-                &["diff", first, second],
+                state,
+                "compare",
+                &["compare", first, second],
             )?;
-            invoke(Path::new(&cli), &directory, "replay", &["replay", first])?;
+            let repeated = invoke(
+                Path::new(&cli),
+                &directory,
+                state,
+                "rerun",
+                &["rerun", first],
+            )?;
+            invoke(
+                Path::new(&cli),
+                &directory,
+                state,
+                "compare-rerun",
+                &["compare", first, simulation_id(&repeated)?],
+            )?;
             Ok(())
         };
         if let Err(error) = check() {
             failures.push(format!("{}: {error}", workload.display()));
         }
     }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    drop(server);
+    if !failures.is_empty() {
+        let retained = state_directory.keep();
+        panic!(
+            "{}\nretained server state: {}",
+            failures.join("\n"),
+            retained.display()
+        );
+    }
+}
+
+/// The acceptance fixture owns its server process; retained reports outlive it.
+struct Server(Child);
+impl Server {
+    fn start(cli: &Path, state: &Path) -> Result<Self, String> {
+        let mut server = Self(
+            Command::new(cli)
+                .args(["serve", "--startup-handshake"])
+                .env("SEEDBOX_STATE", state)
+                .stdout(Stdio::piped())
+                .spawn()
+                .map_err(|e| e.to_string())?,
+        );
+        let mut ready = String::new();
+        BufReader::new(
+            server
+                .0
+                .stdout
+                .take()
+                .ok_or("server startup pipe missing")?,
+        )
+        .read_line(&mut ready)
+        .map_err(|e| e.to_string())?;
+        let ready: serde_json::Value = serde_json::from_str(&ready).map_err(|e| e.to_string())?;
+        if ready["status"] != "ready" {
+            return Err("server failed to start".into());
+        }
+        Ok(server)
+    }
+}
+impl Drop for Server {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        // SAFETY: this is the unreaped child owned by this fixture.
+        unsafe {
+            libc::kill(self.0.id() as i32, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if self.0.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }

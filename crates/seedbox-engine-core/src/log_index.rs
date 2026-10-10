@@ -5,9 +5,10 @@ use std::io::{BufWriter, Write};
 
 pub use seedbox_engine_protocol::log_index::*;
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Index {
     pub records: Vec<ChunkRecord>,
+    #[serde(skip)]
     pub file: Option<BufWriter<std::fs::File>>,
     pub limit: Option<usize>,
     pub seen: u64,

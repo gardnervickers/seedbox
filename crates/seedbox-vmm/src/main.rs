@@ -32,6 +32,9 @@ struct Args {
     /// Host control socket path.
     #[arg(long)]
     host_control: Option<PathBuf>,
+    /// Private live observation datagram socket.
+    #[arg(long)]
+    observations: Option<PathBuf>,
     /// Bytes retained per console stream.
     #[arg(long)]
     console_limit: Option<usize>,
@@ -78,6 +81,9 @@ impl Args {
             out: self.out.unwrap_or_default(),
             digest: self.digest,
             host_control: self.host_control,
+            interventions: None,
+            resume_checkpoint: None,
+            observations: self.observations,
             console_limit: self.console_limit,
             log_chunk_limit: self.log_chunk_limit,
             features: MachineFeatures {

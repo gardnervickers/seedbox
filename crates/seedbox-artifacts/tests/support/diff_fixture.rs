@@ -20,6 +20,7 @@ fn fixture() -> sb::record::RunRecord {
         machine: config::MachineOptions::default(), disk: config::DiskOptions::default(),
     };
     let identity = RunIdentity {
+            interventions: None,
         version: 2,
         seed: 0,
         configuration,
@@ -49,6 +50,8 @@ fn fixture() -> sb::record::RunRecord {
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
+            host_wait_ns: 0,
+            simulated_time_ns: None,
             reason: StopReason::Completed,
             workload_exit: Some(WorkloadExit {
                 service: "workload".into(),

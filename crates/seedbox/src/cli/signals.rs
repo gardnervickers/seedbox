@@ -1,17 +1,28 @@
 //! Cooperative cancellation on SIGINT, SIGTERM and SIGHUP.
 
-use seedbox::{execution::CancellationToken, Result};
+use seedbox_application::{execution::CancellationToken, Result};
 
 pub struct Signals(Vec<signal_hook::SigId>);
 
 impl Signals {
     pub fn register(token: &CancellationToken) -> Result<Self> {
+        Self::for_signals(
+            token,
+            &[
+                signal_hook::consts::SIGINT,
+                signal_hook::consts::SIGTERM,
+                signal_hook::consts::SIGHUP,
+            ],
+        )
+    }
+
+    pub fn interrupt(token: &CancellationToken) -> Result<Self> {
+        Self::for_signals(token, &[signal_hook::consts::SIGINT])
+    }
+
+    fn for_signals(token: &CancellationToken, signals: &[i32]) -> Result<Self> {
         let mut handlers = Self(Vec::new());
-        for signal in [
-            signal_hook::consts::SIGINT,
-            signal_hook::consts::SIGTERM,
-            signal_hook::consts::SIGHUP,
-        ] {
+        for &signal in signals {
             let token = token.clone();
             // SAFETY: the callback performs only an atomic store, which is
             // async-signal-safe; cleanup happens in normal executor code

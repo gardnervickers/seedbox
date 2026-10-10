@@ -13,3 +13,6 @@ path = "src/lib.rs"
 seedbox-control = { package = "seedbox-vmm-control", path = "../control" }
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

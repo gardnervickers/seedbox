@@ -52,7 +52,8 @@ fn relocated_cli_looks_for_kernel_beside_itself_without_build_tools() {
 fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("compose.yaml"), "name: mac-options\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
-    for command in ["run", "explore", "doctor"] {
+    {
+        let command = "doctor";
         let args = [command, "--cpu", "1"];
         let output = seedbox(&args, directory.path());
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -66,40 +67,6 @@ fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[test]
-fn mac_explore_accepts_multiple_workers_and_rejects_out_of_range_before_state() {
-    let directory = tempfile::tempdir().unwrap();
-    assert!(seedbox(&["init", "demo"], directory.path())
-        .status
-        .success());
-    let project = directory.path().join("demo");
-
-    let help = seedbox(&["help", "explore"], &project);
-    assert!(help.status.success());
-    let help = String::from_utf8_lossy(&help.stdout);
-    assert!(help.contains("Maximum active attempts. Omit --cpu for Linux parallel execution"));
-    assert!(!help.contains("Mac supports only 1"));
-    assert!(help.contains("[default: 1]"));
-
-    let output = seedbox_with(&["explore", "--workers", "33"], &project, None);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert!(stderr(&output).contains("--workers"));
-    assert!(!project.join(".seedbox").exists());
-
-    // Several workers pass argument checks like one does; the next refusal is
-    // the missing kernel, before any runtime setup.
-    let output = seedbox_with(&["explore", "--workers", "4"], &project, None);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert!(
-        stderr(&output).starts_with("error: --kernel "),
-        "{}",
-        stderr(&output)
-    );
-}
-
 #[test]
 fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch() {
     let directory = tempfile::tempdir().unwrap();
@@ -108,7 +75,10 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
     assert!(version.status.success());
     assert_eq!(
         String::from_utf8_lossy(&version.stdout),
-        format!("seedbox {}\n", seedbox::engine::SIMULATOR_VERSION)
+        format!(
+            "seedbox {}\n",
+            seedbox_application::engine::SIMULATOR_VERSION
+        )
     );
     assert!(version.stderr.is_empty());
 
@@ -122,9 +92,9 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
     let run_help = seedbox(&["help", "run"], directory.path());
     assert!(run_help.status.success());
     let help = String::from_utf8_lossy(&run_help.stdout);
-    assert!(help.contains("--vmm"), "{help}");
-    assert!(help.contains("legacy standalone VMM"), "{help}");
-    assert!(help.contains("engine built into seedbox"), "{help}");
+    assert!(help.contains("--detach"), "{help}");
+    assert!(help.contains("--seed"), "{help}");
+    assert!(!help.contains("--vmm"), "{help}");
 }
 
 #[test]
@@ -220,7 +190,7 @@ fn arm_fixture_contract_uses_the_shared_fixture_argument_parser() {
 fn host_pause_commands_acknowledge_boundaries_and_reject_inactive_runs() {
     let directory = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     let cwd = directory.path();
-    for command in ["pause", "resume"] {
+    for command in ["retained-pause", "retained-resume"] {
         let help = seedbox(&["help", command], cwd);
         assert!(help.status.success());
         assert!(String::from_utf8_lossy(&help.stdout).contains("<RUN>"));
@@ -253,7 +223,7 @@ fn host_pause_commands_acknowledge_boundaries_and_reject_inactive_runs() {
                     .unwrap();
             }
         });
-        for (command, status) in [("pause", "PAUSED"), ("resume", "RESUMED")] {
+        for (command, status) in [("retained-pause", "PAUSED"), ("retained-resume", "RESUMED")] {
             let output = seedbox(&[command, "run"], cwd);
             assert!(output.status.success(), "{}", stderr(&output));
             assert!(output.stderr.is_empty());
@@ -266,7 +236,7 @@ fn host_pause_commands_acknowledge_boundaries_and_reject_inactive_runs() {
     });
     drop(server);
     fs::remove_file(socket).unwrap();
-    let stale = seedbox(&["pause", "run"], cwd);
+    let stale = seedbox(&["retained-pause", "run"], cwd);
     assert_eq!(stale.status.code(), Some(2));
     assert!(stderr(&stale).contains("not available"));
 }
@@ -293,11 +263,11 @@ fn host_pause_rejects_invalid_acknowledgements_and_bounds_missing_replies() {
             // Receive the second request but deliberately never acknowledge it.
             server.recv_from(&mut bytes).unwrap();
         });
-        let invalid = seedbox(&["resume", "run"], cwd);
+        let invalid = seedbox(&["retained-resume", "run"], cwd);
         assert_eq!(invalid.status.code(), Some(2));
         assert!(invalid.stdout.is_empty());
         assert_eq!(stderr(&invalid), "error: host control run: invalid boundary acknowledgement; use an executing run/replay with a host-control engine and the same user (or root)\n");
-        let unanswered = seedbox(&["pause", "run"], cwd);
+        let unanswered = seedbox(&["retained-pause", "run"], cwd);
         assert_eq!(unanswered.status.code(), Some(2));
         assert!(unanswered.stdout.is_empty());
         assert_eq!(stderr(&unanswered), "error: host control run: no boundary acknowledgement within 5s (request may still take effect); use an executing run/replay with a host-control engine and the same user (or root)\n");
@@ -415,10 +385,10 @@ fn bad_values_are_usage_errors() {
     for (args, expected) in [
         (&["run", "--watchdog-ms", "0"][..], "--watchdog-ms"),
         (
-            &["replay", "missing", "--watchdog-ms", "60001"],
+            &["replay", "abcd2345", "--watchdog-ms", "60001"],
             "--watchdog-ms",
         ),
-        (&["run", "--cpu", "5000"], "not in 0..1024"),
+        (&["doctor", "--cpu", "5000"], "not in 0..1024"),
         (
             &["init", "x", "--template", "bogus"],
             "possible values: etcd, redis",
@@ -435,37 +405,21 @@ fn bad_values_are_usage_errors() {
 }
 
 #[test]
-fn watchdog_is_the_only_explicit_performance_option() {
+fn execution_commands_keep_performance_settings_on_the_server() {
     let directory = tempfile::tempdir().unwrap();
-    for command in ["run", "replay", "explore"] {
+    for command in ["run", "rerun", "replay", "explore"] {
         let output = seedbox(&["help", command], directory.path());
         assert!(output.status.success());
         let help = String::from_utf8(output.stdout).unwrap();
-        assert!(
-            help.contains("Performance (never changes results)"),
-            "{help}"
-        );
-        assert!(help.contains("--watchdog-ms"), "{help}");
-        assert!(help.contains("[default: 20]"), "{help}");
-        assert!(!help.contains("SEEDBOX_WATCHDOG_MS"), "{help}");
-        for removed in ["--pv-watchdog-ms", "--margin", "--undo", "--timebase"] {
-            assert!(!help.contains(removed), "{help}");
-        }
-    }
-    let accepted = seedbox(
-        &["replay", "missing", "--watchdog-ms", "200"],
-        directory.path(),
-    );
-    assert_eq!(accepted.status.code(), Some(2));
-    assert!(!stderr(&accepted).contains("unexpected argument"));
-    assert!(stderr(&accepted).contains("missing"));
-    for (flag, value) in [
-        ("--pv-watchdog-ms", "20"),
-        ("--margin", "adaptive"),
-        ("--undo", "0"),
-    ] {
-        for command in ["run", "replay", "explore"] {
-            let output = seedbox(&[command, "missing", flag, value], directory.path());
+        for flag in [
+            "--watchdog-ms",
+            "--pv-watchdog-ms",
+            "--margin",
+            "--undo",
+            "--timebase",
+        ] {
+            assert!(!help.contains(flag), "{command}: {help}");
+            let output = seedbox(&[command, "abcd2345", flag, "20"], directory.path());
             assert_eq!(output.status.code(), Some(2));
             assert!(
                 stderr(&output).contains(&format!("unexpected argument '{flag}'")),
@@ -485,7 +439,12 @@ fn runtime_project() -> (tempfile::TempDir, Vec<String>) {
             .status
             .success()
     );
-    let mut args = vec!["run".to_owned(), "demo".to_owned()];
+    let mut args = vec![
+        "prepare".to_owned(),
+        "demo".to_owned(),
+        "--output".to_owned(),
+        "prepared.json".to_owned(),
+    ];
     for flag in ["kernel", "vmm", "guest-init"] {
         let path = directory.path().join(flag);
         fs::write(&path, b"").unwrap();
@@ -561,80 +520,27 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
         .status
         .success());
     let project = directory.path().join("demo");
-    for count in ["0", "nope"] {
+    for count in ["0", "4097", "nope"] {
         let output = seedbox(&["explore", "--count", count], &project);
         assert_eq!(output.status.code(), Some(2));
         assert!(stderr(&output).contains("--count"));
-        assert!(!project.join(".seedbox").exists());
     }
     let overflow = seedbox(
         &["explore", "--seed", "18446744073709551615", "--count", "2"],
         &project,
     );
-    assert_eq!(stderr(&overflow),"error: --seed/--count: range is empty or overflows u64; use a positive --count and reduce the range\n");
-    assert!(!project.join(".seedbox").exists());
-    for workers in ["0", "33", "nope"] {
-        let output = seedbox(&["explore", "--workers", workers], &project);
+    assert_eq!(stderr(&overflow), "error: seed range overflows u64\n");
+    for flag in ["--workers", "--cpu", "--runtime-assets", "--watchdog-ms"] {
+        let output = seedbox(&["explore", flag, "1"], &project);
         assert_eq!(output.status.code(), Some(2));
-        assert!(stderr(&output).contains("--workers"));
-        assert!(!project.join(".seedbox").exists());
+        assert!(stderr(&output).contains("unexpected argument"));
     }
-    let pinned = seedbox(&["explore", "--workers", "2", "--cpu", "4"], &project);
-    assert_eq!(pinned.status.code(), Some(2));
-    assert_eq!(stderr(&pinned), "error: --workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU\n");
-    assert!(!project.join(".seedbox").exists());
-    let env_pinned = Command::new(env!("CARGO_BIN_EXE_seedbox"))
-        .args(["explore", "--workers", "2"])
-        .current_dir(&project)
-        .env_clear()
-        .env("HOME", &project)
-        .env("PATH", "")
-        .env("SEEDBOX_CPU", "4")
-        .output()
-        .unwrap();
-    assert_eq!(env_pinned.status.code(), Some(2));
-    assert_eq!(stderr(&env_pinned), stderr(&pinned));
-    assert!(!project.join(".seedbox").exists());
-    let boundary = seedbox(
-        &["explore", "--seed", "18446744073709551615", "--count", "1"],
-        &project,
-    );
-    assert_eq!(boundary.status.code(), Some(2));
-    assert!(!stderr(&boundary).contains("overflows"));
     let help = seedbox(&["help", "explore"], &project);
     assert!(help.status.success());
     let text = String::from_utf8_lossy(&help.stdout);
-    assert!(
-        text.contains("--count")
-            && text.contains("[default: 1]")
-            && text.contains("--json")
-            && text.contains("Exit status:")
-    );
-    assert!(text.contains("--workers"));
-    fs::write(project.join("compose.yaml"),"services:\n  a: {image: example/a}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: a}\n").unwrap();
-    let missing = seedbox(&["explore"], &project);
-    assert_eq!(
-        stderr(&missing),
-        "error: --seed: no Compose seed; provide --seed FIRST\n"
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn explore_resolves_assets_before_host_or_preparation() {
-    let (directory, mut args) = runtime_project();
-    args[0] = "explore".into();
-    args.push("--json".into());
-    let args: Vec<_> = args.iter().map(String::as_str).collect();
-    let output = seedbox(&args, directory.path());
-    let archive = directory
-        .path()
-        .join("assets")
-        .join(std::env::consts::ARCH)
-        .join("runtime.tar.gz");
-    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --runtime-assets PATH\n", archive.display()));
-    assert!(output.stdout.is_empty());
-    assert!(!directory.path().join(".seedbox/runs").exists());
+    assert!(text.contains("--count") && text.contains("--detach") && text.contains("--json"));
+    assert!(!text.contains("--workers"));
+    assert!(!project.join(".seedbox").exists());
 }
 
 #[test]
@@ -757,7 +663,7 @@ fn validate_cli_resolves_directed_baselines_and_reports_each_policy_error() {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn old_records_stay_inspectable_and_transferable() {
-    use seedbox::{
+    use seedbox_application::{
         config,
         execution::*,
         image::Launch,
@@ -802,6 +708,7 @@ fn old_records_stay_inspectable_and_transferable() {
         provenance: BTreeMap::new(),
     };
     let identity = RunIdentity {
+        interventions: None,
         version: 2,
         seed: 0,
         configuration: simulation,
@@ -818,6 +725,8 @@ fn old_records_stay_inspectable_and_transferable() {
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
+            host_wait_ns: 0,
+            simulated_time_ns: None,
             reason: StopReason::Completed,
             workload_exit: Some(WorkloadExit {
                 service: "workload".into(),
@@ -1010,7 +919,7 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
 
 mod diff_tests {
     use super::*;
-    use seedbox as sb;
+    use seedbox_application as sb;
     include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
 
     #[test]
@@ -1521,7 +1430,7 @@ mod diff_tests {
 #[allow(dead_code)]
 mod timed_logs {
     use super::*;
-    use seedbox as sb;
+    use seedbox_application as sb;
     include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
     include!("../../seedbox-artifacts/tests/support/logs_fixture.rs");
 
@@ -1530,13 +1439,13 @@ mod timed_logs {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         timed_fixture(&root.join("run"));
-        let text = seedbox(&["logs", "run"], root);
+        let text = seedbox(&["retained-logs", "run"], root);
         assert!(text.status.success(), "{}", stderr(&text));
         assert_eq!(stderr(&text), "logs: run\n");
         assert_eq!(text.stdout, b"\0\xff\xfeA\nB");
         let text = seedbox(
             &[
-                "logs",
+                "retained-logs",
                 "run",
                 "--stream",
                 "console",
@@ -1549,17 +1458,17 @@ mod timed_logs {
         );
         assert!(text.status.success());
         assert_eq!(text.stdout, b"\0\xffA\n");
-        let text = seedbox(&["logs", "run", "--since-ns", "20"], root);
+        let text = seedbox(&["retained-logs", "run", "--since-ns", "20"], root);
         assert!(text.status.success());
         assert_eq!(text.stdout, b"B"); // No added newline or chunk decoration.
-        let text = seedbox(&["logs", "run", "--until-ns", "10"], root);
+        let text = seedbox(&["retained-logs", "run", "--until-ns", "10"], root);
         assert!(text.status.success());
         assert!(text.stdout.is_empty());
         for (args, orders) in [
-            (vec!["logs", "run", "--json"], vec![0, 1, 2, 3]),
+            (vec!["retained-logs", "run", "--json"], vec![0, 1, 2, 3]),
             (
                 vec![
-                    "logs",
+                    "retained-logs",
                     "run",
                     "--machine",
                     "workload",
@@ -1573,9 +1482,18 @@ mod timed_logs {
                 ],
                 vec![0, 2],
             ),
-            (vec!["logs", "run", "--stream", "mgmt", "--json"], vec![1]),
-            (vec!["logs", "run", "--since-ns", "20", "--json"], vec![3]),
-            (vec!["logs", "run", "--until-ns", "10", "--json"], vec![]),
+            (
+                vec!["retained-logs", "run", "--stream", "mgmt", "--json"],
+                vec![1],
+            ),
+            (
+                vec!["retained-logs", "run", "--since-ns", "20", "--json"],
+                vec![3],
+            ),
+            (
+                vec!["retained-logs", "run", "--until-ns", "10", "--json"],
+                vec![],
+            ),
         ] {
             let output = seedbox(&args, root);
             assert!(output.status.success(), "{}", stderr(&output));
@@ -1593,7 +1511,7 @@ mod timed_logs {
             assert_eq!(json["status"], "LOGS");
             assert_eq!(json["omissions"], serde_json::json!({}));
         }
-        let out = seedbox(&["logs", "run", "--json"], root);
+        let out = seedbox(&["retained-logs", "run", "--json"], root);
         let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(json["chunks"][0]["bytes_hex"], "00ff");
     }
@@ -1606,15 +1524,22 @@ mod timed_logs {
         let mut record = timed_fixture(&path);
         for (args, expected) in [
             (
-                vec!["logs", "missing"],
+                vec!["retained-logs", "missing"],
                 "error: run directory missing: not found\n",
             ),
             (
-                vec!["logs", "run", "--machine", "unknown"],
+                vec!["retained-logs", "run", "--machine", "unknown"],
                 "error: --machine unknown: unknown machine; use a machine from inspect --json\n",
             ),
             (
-                vec!["logs", "run", "--since-ns", "20", "--until-ns", "10"],
+                vec![
+                    "retained-logs",
+                    "run",
+                    "--since-ns",
+                    "20",
+                    "--until-ns",
+                    "10",
+                ],
                 "error: --until-ns must be at least --since-ns\n",
             ),
         ] {
@@ -1628,20 +1553,20 @@ mod timed_logs {
             ("--since-ns", "1s"),
             ("--until-ns", "18446744073709551616"),
         ] {
-            let out = seedbox(&["logs", "run", flag, value], root);
+            let out = seedbox(&["retained-logs", "run", flag, value], root);
             assert_eq!(out.status.code(), Some(2));
             assert!(stderr(&out).contains(flag));
         }
         record.logs.remove("machines/workload.console.chunks");
         write_fixture(&path, &mut record, None, None);
-        let out = seedbox(&["logs", "run", "--json"], root);
+        let out = seedbox(&["retained-logs", "run", "--json"], root);
         assert!(out.status.success());
         let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert!(json["omissions"]["machines/workload.console.chunks"]
             .as_str()
             .unwrap()
             .contains("unavailable"));
-        let out = seedbox(&["logs", "run"], root);
+        let out = seedbox(&["retained-logs", "run"], root);
         assert!(out.status.success());
         assert_eq!(out.stdout, b"\xfe");
         assert_eq!(stderr(&out), "logs: run\nomission: [\"machines/workload.console.chunks\",\"committed-time index unavailable; raw bytes cannot be timed\"]\n");
@@ -1652,7 +1577,7 @@ mod timed_logs {
             b"SBLOG001x",
         );
         write_fixture(&path, &mut record, None, None);
-        let out = seedbox(&["logs", "run"], root);
+        let out = seedbox(&["retained-logs", "run"], root);
         assert_eq!(out.status.code(), Some(2));
         assert!(out.stdout.is_empty());
         assert_eq!(stderr(&out),"error: logs run: machines/workload.console.chunks: truncated or oversized chunk index; use an intact retained run directory (import bundles first)\n");
@@ -1662,7 +1587,7 @@ mod timed_logs {
 #[allow(dead_code)]
 mod checkpoint_evidence {
     use super::*;
-    use seedbox as sb;
+    use seedbox_application as sb;
     use seedbox_engine_core::{log_index as producer, output_layout as checkpoint};
     use std::io::Write;
     include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
@@ -1750,14 +1675,28 @@ mod checkpoint_evidence {
             write_fixture(&run, &mut record, None, None);
             for (ext, expected) in [("console", b"console"), ("mgmt", b"manage!")] {
                 let out = seedbox(
-                    &["logs", "branch", "--stream", ext, "--since-ns", "20"],
+                    &[
+                        "retained-logs",
+                        "branch",
+                        "--stream",
+                        ext,
+                        "--since-ns",
+                        "20",
+                    ],
                     root,
                 );
                 assert!(out.status.success(), "{}", stderr(&out));
                 assert_eq!(out.stdout, expected);
                 assert_eq!(stderr(&out), "logs: branch\n");
                 let out = seedbox(
-                    &["logs", "branch", "--stream", ext, "--until-ns", "20"],
+                    &[
+                        "retained-logs",
+                        "branch",
+                        "--stream",
+                        ext,
+                        "--until-ns",
+                        "20",
+                    ],
                     root,
                 );
                 assert!(out.status.success(), "{}", stderr(&out));
@@ -1804,7 +1743,7 @@ mod checkpoint_evidence {
 #[test]
 fn logs_help_is_portable_and_has_no_runtime_options() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = seedbox(&["help", "logs"], tmp.path());
+    let out = seedbox(&["help", "retained-logs"], tmp.path());
     assert!(out.status.success());
     let help = String::from_utf8(out.stdout).unwrap();
     for text in [
@@ -1820,7 +1759,7 @@ fn logs_help_is_portable_and_has_no_runtime_options() {
     for text in ["--kernel", "--seed", "--vmm", "--cpu", "--state"] {
         assert!(!help.contains(text));
     }
-    let out = seedbox(&["logs"], tmp.path());
+    let out = seedbox(&["retained-logs"], tmp.path());
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("<RUN>"));
 }
@@ -1839,7 +1778,7 @@ fn simulation_parameters_are_world_options_not_flags() {
             &["--torn-writes"],
         ] {
             assert!(!help.contains(flag[0]), "{command} help lists {}", flag[0]);
-            let mut args = vec![command, "."];
+            let mut args = vec![command, if command == "replay" { "abcd2345" } else { "." }];
             args.extend_from_slice(flag);
             let output = seedbox(&args, directory.path());
             assert_eq!(output.status.code(), Some(2));
@@ -1853,78 +1792,23 @@ fn simulation_parameters_are_world_options_not_flags() {
 }
 
 #[test]
-fn checkpoint_flags_are_paired_typed_and_documented() {
-    let dir = tempfile::tempdir().unwrap();
-    for (args, phrase) in [
-        (vec!["run", "--checkpoint-at-ns", "1"], "--branch-seed"),
-        (vec!["run", "--branch-seed", "2"], "--checkpoint-at-ns"),
-        (
-            vec!["run", "--checkpoint-at-ns", "bad", "--branch-seed", "2"],
-            "--checkpoint-at-ns",
-        ),
-        (
-            vec![
-                "run",
-                "--checkpoint-at-ns",
-                "1",
-                "--branch-seed",
-                "18446744073709551616",
-            ],
-            "--branch-seed",
-        ),
-    ] {
-        let result = seedbox_with(&args, dir.path(), None);
-        assert_eq!(result.status.code(), Some(2));
-        assert!(stderr(&result).contains(phrase), "{}", stderr(&result));
-    }
-    let help = seedbox_with(&["help", "run"], dir.path(), None);
+fn run_keeps_server_and_execution_controls_out_of_submission_flags() {
+    let directory = tempfile::tempdir().unwrap();
+    let help = seedbox(&["help", "run"], directory.path());
     assert!(help.status.success());
-    let help = String::from_utf8(help.stdout).unwrap();
-    assert!(help.contains("--checkpoint-at-ns"));
-    assert!(help.contains("the parent seed continues unchanged"));
-    assert!(help.contains("--branch-seed"));
-    assert!(!help.contains("SEEDBOX_CHECKPOINT"));
-    fs::write(dir.path().join("compose.yaml"), "name: checkpoint-test\nservices:\n  workload: {image: example/workload:v1}\nx-seedbox:\n  version: 1\n  seed: 0\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: workload}\n").unwrap();
-    let result = seedbox_with(
-        &[
-            "run",
-            "--checkpoint-at-ns",
-            "1000000000",
-            "--branch-seed",
-            "2",
-        ],
-        dir.path(),
-        None,
-    );
-    assert_eq!(result.status.code(), Some(2));
-    let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n"
-    } else {
-        "error: --checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint\n"
-    };
-    assert_eq!(stderr(&result), expected);
-    assert!(!dir.path().join(".seedbox").exists());
-    let accepted = seedbox_with(
-        &[
-            "run",
-            "--checkpoint-at-ns",
-            "0",
-            "--branch-seed",
-            "0",
-            "--vmm",
-            "/checkpoint-missing-vmm",
-        ],
-        dir.path(),
-        None,
-    );
-    assert_eq!(
-        stderr(&accepted),
-        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n"
-        } else {
-            "error: --vmm /checkpoint-missing-vmm: not found\n"
-        }
-    );
+    let help = String::from_utf8_lossy(&help.stdout);
+    for flag in [
+        "--checkpoint-at-ns",
+        "--branch-seed",
+        "--kernel",
+        "--cpu",
+        "--watchdog-ms",
+    ] {
+        assert!(!help.contains(flag));
+        let result = seedbox(&["run", flag, "1"], directory.path());
+        assert_eq!(result.status.code(), Some(2));
+        assert!(stderr(&result).contains(&format!("unexpected argument '{flag}'")));
+    }
 }
 
 #[test]
@@ -1944,7 +1828,7 @@ fn timebase_is_no_longer_a_public_mode() {
 
 #[allow(dead_code)]
 mod record_fixture {
-    use seedbox as sb;
+    use seedbox_application as sb;
     include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
 
     pub(super) fn record() -> sb::orchestration::RunRecord {
@@ -1954,7 +1838,7 @@ mod record_fixture {
 
 /// A retained KVM run.
 fn kvm_record(directory: &Path) {
-    use seedbox::{execution::Backend, store::ContentDigest};
+    use seedbox_application::{execution::Backend, store::ContentDigest};
     let mut record = record_fixture::record();
     record.identity.inputs.profile.backend = Backend::Kvm;
     record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
@@ -1994,36 +1878,27 @@ fn inspect_prints_no_timebase_and_json_preserves_library_fields() {
     assert!(parameters.get("clock").is_none());
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
-fn mac_linux_only_runtime_modes_fail_before_state_or_preparation() {
+fn internal_runtime_modes_are_not_authoring_options() {
     let directory = tempfile::tempdir().unwrap();
-    fs::write(directory.path().join("compose.yaml"), "name: mac-modes\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app, exit_code: 0}\n").unwrap();
-    let args = ["run", ".", "--checkpoint-at-ns", "1", "--branch-seed", "2"];
-    let output = seedbox(&args, directory.path());
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        stderr(&output),
-        "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n"
-    );
-    assert!(output.stdout.is_empty());
-    assert!(!directory.path().join(".seedbox").exists());
-    for option in ["page_timer", "deferred_tx"] {
-        fs::write(directory.path().join("compose.yaml"), format!("name: mac-modes\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  machine: {{{option}: true}}\n  limits: {{simulated_time: 1s, wall_time: 1m}}\n  check: {{service: app, exit_code: 0}}\n")).unwrap();
-        for command in ["run", "explore"] {
-            let output = seedbox(&[command, "."], directory.path());
-            assert_eq!(output.status.code(), Some(2));
-            assert_eq!(
-                stderr(&output),
-                "error: x-seedbox.machine page_timer and deferred_tx require Linux KVM; remove them on Mac\n"
-            );
-            assert!(!directory.path().join(".seedbox").exists());
-        }
+    for (group, option, value) in [
+        ("machine", "page_timer", "true"),
+        ("machine", "deferred_tx", "true"),
+        ("schedule", "stop_tolerance", "1ms"),
+    ] {
+        fs::write(directory.path().join("compose.yaml"), format!("name: defaults\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  {group}: {{{option}: {value}}}\n  check: {{service: app}}\n")).unwrap();
+        let output = seedbox(&["validate", "."], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            stderr(&output),
+            format!("error: $.x-seedbox.{group}.{option}: unsupported field\n")
+        );
+        assert!(!directory.path().join(".seedbox").exists());
     }
 }
 
 #[test]
-fn replay_rejects_an_unknown_recorded_deferred_tx_mode() {
+fn inspect_rejects_an_unknown_recorded_deferred_tx_mode() {
     let directory = tempfile::tempdir().unwrap();
     kvm_record(directory.path());
     let path = directory.path().join("manifest.json");
@@ -2032,7 +1907,7 @@ fn replay_rejects_an_unknown_recorded_deferred_tx_mode() {
     manifest["record"]["identity"]["inputs"]["profile"]["semantic_parameters"]["deferred_tx"] =
         "future".into();
     fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    let output = seedbox(&["replay", "."], directory.path());
+    let output = seedbox(&["inspect", "."], directory.path());
     assert_eq!(output.status.code(), Some(2));
     assert!(
         stderr(&output).contains("invalid type: string \"future\", expected a boolean"),
@@ -2047,7 +1922,8 @@ fn runtime_assets_override_is_documented_and_missing_paths_fail_before_preparati
     let root = directory.path();
     assert!(seedbox(&["init", "demo"], root).status.success());
     let project = root.join("demo");
-    for command in ["run", "explore", "prepare"] {
+    {
+        let command = "prepare";
         let help = seedbox(&["help", command], root);
         assert!(help.status.success());
         let help = String::from_utf8_lossy(&help.stdout);
@@ -2068,7 +1944,7 @@ fn runtime_assets_override_is_documented_and_missing_paths_fail_before_preparati
         assert!(!project.join(".seedbox/runs").exists());
     }
     let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
-        .arg("run")
+        .args(["prepare", "--output", "prepared.json"])
         .current_dir(&project)
         .env_clear()
         .env("HOME", root)
@@ -2099,7 +1975,9 @@ fn invalid_local_runtime_archive_has_path_context_without_downloads_or_tools() {
     fs::write(project.join("kernel"), b"kernel").unwrap();
     let output = seedbox(
         &[
-            "run",
+            "prepare",
+            "--output",
+            "prepared.json",
             "--kernel",
             "kernel",
             "--runtime-assets",
@@ -2129,14 +2007,69 @@ fn removed_preparation_flags_fail_before_preparation() {
 }
 
 #[test]
-fn omitted_run_subcommand_accepts_the_same_kernel_and_compose_arguments() {
+fn omitted_run_subcommand_accepts_the_same_compose_argument() {
     let directory = tempfile::tempdir().unwrap();
-    assert!(seedbox(&["init", "demo"], directory.path())
-        .status
-        .success());
-    let explicit = seedbox(&["run", "--kernel", "missing", "demo"], directory.path());
-    let shorthand = seedbox(&["--kernel", "missing", "demo"], directory.path());
+    let explicit = seedbox(&["run", "missing.yaml"], directory.path());
+    let shorthand = seedbox(&["missing.yaml"], directory.path());
+    assert_eq!(explicit.status.code(), Some(2));
     assert_eq!(explicit.status.code(), shorthand.status.code());
     assert_eq!(stderr(&explicit), stderr(&shorthand));
-    assert_eq!(stderr(&shorthand), "error: --kernel missing: not found\n");
+    assert_eq!(
+        stderr(&shorthand),
+        "error: Compose file missing.yaml: not found\n"
+    );
+}
+
+#[test]
+fn playback_validates_its_positional_id_before_starting_a_server() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = seedbox(&["playback", "invalid", "--json"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(stderr(&output).contains("simulation ID must contain eight characters"));
+}
+
+#[test]
+fn playback_mutations_reject_invalid_rates_and_request_ids_before_connecting() {
+    let directory = tempfile::tempdir().unwrap();
+    for (args, phrase) in [
+        (vec!["rate", "k7m2p9qx", "1/0"], "rate must be"),
+        (vec!["rate", "k7m2p9qx", "4294967296"], "rate must be"),
+        (
+            vec!["pause", "k7m2p9qx", "--request-id", "bad/id"],
+            "request ID must be",
+        ),
+        (vec!["playback", "k7m2p9qx", "bad/id"], "request ID must be"),
+    ] {
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(stderr(&output).contains(phrase), "{}", stderr(&output));
+    }
+}
+
+#[test]
+fn fault_input_errors_are_reported_before_connecting() {
+    let directory = tempfile::tempdir().unwrap();
+    let cwd = directory.path();
+    let missing = seedbox(&["inject", "k7m2p9qx", "missing.yaml"], cwd);
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(missing.stdout.is_empty());
+    assert_eq!(
+        stderr(&missing),
+        "error: fault missing.yaml: No such file or directory (os error 2)\n"
+    );
+    fs::write(cwd.join("invalid.yaml"), "action: nonexistent\n").unwrap();
+    let invalid = seedbox(&["inject", "k7m2p9qx", "invalid.yaml"], cwd);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
+    assert!(stderr(&invalid)
+        .contains("error: fault invalid.yaml: action: unknown variant `nonexistent`"));
+    fs::write(cwd.join("large.yaml"), vec![b' '; 65537]).unwrap();
+    let large = seedbox(&["inject", "k7m2p9qx", "large.yaml"], cwd);
+    assert_eq!(large.status.code(), Some(2));
+    assert_eq!(
+        stderr(&large),
+        "error: fault large.yaml: exceeds 65536 bytes\n"
+    );
 }

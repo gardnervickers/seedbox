@@ -1,6 +1,9 @@
 //! World state → round plan → machine reports → committed world state.
 //! Pure coordinator logic: no threads, no host time.
 
+mod checkpoint;
+pub use checkpoint::Checkpoint;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -12,7 +15,9 @@ pub const NEVER: Time = u64::MAX;
 
 /// Breaks ties between events at the same instant. World events (scenario
 /// input) come before frames.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Class {
     /// Scheduled by the coordinator.
     World,
@@ -21,7 +26,9 @@ pub enum Class {
 }
 
 /// Who produced an event. The world sorts before every machine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Source {
     World,
     Machine(usize),
@@ -29,7 +36,9 @@ pub enum Source {
 
 /// Total order of a machine's queued events. `seq` counts the source's own
 /// outputs, so the key does not depend on which machine was processed first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct EventKey {
     pub at: Time,
     pub class: Class,
@@ -37,14 +46,14 @@ pub struct EventKey {
     pub seq: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Event<P> {
     pub key: EventKey,
     pub payload: P,
 }
 
 /// Semantic parameters: changing any of them changes runs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Params {
     /// No frame arrives sooner than this after it is sent.
     pub latency: Time,
@@ -163,7 +172,7 @@ pub trait Router<P> {
     fn route(&mut self, from: usize, sent_at: Time, payload: P, out: &mut Vec<Delivery<P>>);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MachineState {
     pub time: Time,
     pub next: Time,
@@ -188,7 +197,7 @@ impl MachineState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Outcome {
     /// The run reached its duration.
     Duration { at: Time },
@@ -206,7 +215,7 @@ pub enum Outcome {
 }
 
 /// One committed round, for witnesses and window statistics.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RoundRecord {
     pub round: u64,
     pub start: Time,
@@ -282,6 +291,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// The committed world: everything the coordinator decides from.
+#[derive(Clone)]
 pub struct World<P> {
     params: Params,
     machines: Vec<MachineState>,
@@ -462,20 +472,44 @@ impl<P: Clone + Hash> World<P> {
 
     /// Plan the next round, or say how the world ended.
     pub fn plan(&self) -> Step<P> {
-        if let Some(outcome) = self.outcome {
-            return Step::Done(outcome);
-        }
         let keys: Vec<Time> = (0..self.machines.len()).map(|m| self.key(m)).collect();
         let start = keys.iter().copied().min().unwrap_or(NEVER);
+        if let Some(outcome) = self.outcome_at(start) {
+            return Step::Done(outcome);
+        }
+        let duration = self.params.duration;
+        self.plan_at(keys, start, duration)
+    }
+
+    /// Inspect termination without allocating assignments or changing state.
+    /// The coordinator must first apply its pending lifecycle boundaries.
+    pub fn outcome(&self) -> Option<Outcome> {
+        self.outcome_at(
+            (0..self.machines.len())
+                .map(|m| self.key(m))
+                .min()
+                .unwrap_or(NEVER),
+        )
+    }
+
+    fn outcome_at(&self, start: Time) -> Option<Outcome> {
+        if let Some(outcome) = self.outcome {
+            return Some(outcome);
+        }
         if start == NEVER {
-            return Step::Done(Outcome::Quiescent {
+            return Some(Outcome::Quiescent {
                 committed: self.committed,
             });
         }
-        let duration = self.params.duration;
-        if start >= duration {
-            return Step::Done(Outcome::Duration { at: duration });
+        if start >= self.params.duration {
+            return Some(Outcome::Duration {
+                at: self.params.duration,
+            });
         }
+        None
+    }
+
+    fn plan_at(&self, keys: Vec<Time>, start: Time, duration: Time) -> Step<P> {
         // Boundaries at or before `start` have passed: no machine can act
         // before `start`, so each one already stands at or before them.
         let next_boundary = self
@@ -747,6 +781,7 @@ impl<P: Clone + Hash> World<P> {
 }
 
 /// FNV-1a: a stable digest with no dependencies.
+#[derive(Clone)]
 struct Fnv(u64);
 
 impl Fnv {
@@ -960,6 +995,54 @@ mod tests {
                 (1, Source::Machine(0), 1, 2)
             ]
         );
+        w.schedule(0, 500, 9).unwrap();
+        let saved = serde_json::to_value(w.checkpoint()).unwrap();
+        let mut restored = World::from_checkpoint(
+            serde_json::from_value::<Checkpoint<u32>>(saved.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(round(&w), round(&restored));
+        for world in [&mut w, &mut restored] {
+            let plan = round(world);
+            let reports = plan
+                .assignments
+                .iter()
+                .map(|assignment| Report {
+                    consumed: assignment.incoming.len(),
+                    ..report(
+                        assignment.stop,
+                        vec![Output {
+                            sent_at: assignment.wake,
+                            payload: 7,
+                        }],
+                    )
+                })
+                .collect();
+            world.commit(&plan, reports, &mut Fixed(100)).unwrap();
+            world.schedule(1, 600, 10).unwrap();
+        }
+        assert_eq!(
+            serde_json::to_value(w.checkpoint()).unwrap(),
+            serde_json::to_value(restored.checkpoint()).unwrap()
+        );
+        for field in ["version", "world_seq", "round"] {
+            let mut corrupt = saved.clone();
+            corrupt[field] = serde_json::json!(999);
+            if field == "world_seq" {
+                corrupt[field] = serde_json::json!(0);
+            }
+            assert!(World::from_checkpoint(
+                serde_json::from_value::<Checkpoint<u32>>(corrupt).unwrap()
+            )
+            .is_err());
+        }
+        let mut corrupt = saved;
+        let queue = corrupt["queues"][0].as_array_mut().unwrap();
+        queue.push(queue[0].clone());
+        assert!(World::from_checkpoint(
+            serde_json::from_value::<Checkpoint<u32>>(corrupt).unwrap()
+        )
+        .is_err());
     }
 
     #[test]

@@ -1,0 +1,26 @@
+[package]
+name = "seedbox-server"
+description = "Simulation catalogue, execution ownership and live observation"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seedbox-control.workspace = true
+seedbox-artifacts.workspace = true
+seedbox-application.workspace = true
+seedbox-api.workspace = true
+seedbox-engine-protocol.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+libc.workspace = true
+getrandom.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+futures-util.workspace = true
+
+[dev-dependencies]
+seedbox-spec.workspace = true
+seedbox-client.workspace = true

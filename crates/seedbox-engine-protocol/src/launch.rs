@@ -51,6 +51,15 @@ pub struct WorkerRequest {
     /// Write full-state page digests.
     pub digest: bool,
     pub host_control: Option<PathBuf>,
+    /// Resume an explicitly captured simulation timeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_checkpoint: Option<PathBuf>,
+    /// Exact retained interactive inputs for this timeline, consumed across segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interventions: Option<crate::intervention::History>,
+    /// Private live observation datagram socket; no observations are retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observations: Option<PathBuf>,
     /// Bytes retained per console stream.
     pub console_limit: Option<usize>,
     /// Chunk index entries retained per console stream.
@@ -84,6 +93,9 @@ impl WorkerRequest {
             out,
             digest: false,
             host_control: None,
+            resume_checkpoint: None,
+            interventions: None,
+            observations: None,
             console_limit: None,
             log_chunk_limit: None,
             features: MachineFeatures::default(),
@@ -99,6 +111,9 @@ impl WorkerRequest {
 
     /// Check settings that depend on each other or have bounded ranges.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(history) = &self.interventions {
+            history.validate()?;
+        }
         if !(1..=MAX_MACHINE_WORKERS).contains(&self.machine_workers) {
             return Err(format!("--machine-workers: use 1..{MAX_MACHINE_WORKERS}"));
         }

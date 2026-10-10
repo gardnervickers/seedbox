@@ -101,6 +101,13 @@ int main(int argc, char **argv) {
         assert(limit.rlim_cur == limit.rlim_max && limit.rlim_max <= APPLICATION_NOFILE + INSTRUMENTATION_FDS);
     }
     if (argc > 1 && !strcmp(argv[1], "exit-now")) _exit(1);
+    if (argc > 1 && !strcmp(argv[1], "output-exit")) {
+        const unsigned char out[] = {0, 255, '\n'}, err[] = {'e', 0, 128};
+        int reopened = open("/proc/self/fd/1", O_WRONLY); assert(reopened >= 0);
+        assert(write(reopened, out, sizeof(out)) == sizeof(out)); close(reopened);
+        assert(write(STDERR_FILENO, err, sizeof(err)) == sizeof(err));
+        _exit(9);
+    }
     if (argc > 1 && !strcmp(argv[1], "exit-later")) {
         /* Launched by the supervisor: SIGCHLD must not stay blocked. */
         sigset_t mask; assert(!sigprocmask(SIG_SETMASK, NULL, &mask));
@@ -291,6 +298,25 @@ int main(int argc, char **argv) {
     }
     close(control_listener); control_listener = -1;
     assert(!unlink(address.sun_path) && !unlink(cmdline_path) && !rmdir(directory));
+    /* Final output must reach the transport before the oracle exit, even when
+     * SIGCHLD wins the poll race. Binary bytes and stream identity survive. */
+    int logs[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, logs));
+    check = fork(); assert(check >= 0);
+    if (!check) {
+        alarm(10); close(logs[1]); close(management); management = logs[0];
+        watch_children();
+        arguments = (char *[]){argv[0], "output-exit", NULL};
+        child = start(); assert(child > 0);
+        supervise(&child);
+    }
+    close(logs[0]);
+    assert(waitpid(check, &status, 0) == check);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 9);
+    size_t logged = 0;
+    while ((n = read(logs[1], buffer + logged, sizeof(buffer) - logged - 1)) > 0) logged += (size_t)n;
+    assert(n == 0); buffer[logged] = 0; close(logs[1]);
+    assert(strstr(buffer, "SBX_LOG1 1 00ff0a\n"));
+    assert(strstr(buffer, "SBX_LOG1 2 650080\n"));
     /* With no timeout and nothing else to wake it, the supervisor still sees
      * its application exit, whether before or during the wait. */
     for (int later = 0; later < 2; later++) {

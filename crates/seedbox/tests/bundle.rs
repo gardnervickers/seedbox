@@ -1,5 +1,5 @@
 //! Contract tests use a test-only backend. No hardware qualification is implied.
-use seedbox::{
+use seedbox_application::{
     bundle::{self, Options},
     config::{self, Simulation},
     execution::{self, *},
@@ -130,6 +130,8 @@ impl Fixture {
             performance: BTreeMap::from([("SEEDBOX_WATCHDOG_MS".into(), "20".into())]),
             extra_logs: BTreeMap::new(),
             report: ExecutionReport {
+                host_wait_ns: 0,
+                simulated_time_ns: None,
                 reason: StopReason::Completed,
                 workload_exit: Some(WorkloadExit {
                     service: "workload".into(),
@@ -805,7 +807,8 @@ fn timed_indexes_and_explicit_omissions_round_trip_without_original_output() {
         assert_eq!(imported.record.logs, run.record.logs);
         assert_eq!(imported.record.omitted_logs, run.record.omitted_logs);
         let mut reader =
-            seedbox::logs::Reader::open(&imported.directory, &Default::default()).unwrap();
+            seedbox_application::logs::Reader::open(&imported.directory, &Default::default())
+                .unwrap();
         if omit {
             assert!(reader.report.chunks.is_empty());
             assert!(reader

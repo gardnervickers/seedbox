@@ -212,7 +212,7 @@ required API is absent. HVF reports dirty tracking as `Unsupported`; KVM returns
 its dirty bitmap and native host page size. Neither is used to omit RAM bytes
 from the power-off hash.
 
-## Guest layout and PV ABI 2
+## Guest layout and PV ABI 3
 
 The CLI fixture's FDT describes 128 MiB RAM, one CPU, GICv3, a PL011 with fixed 24 MHz input
 clocks, PSCI/HVC, chosen/initrd/bootargs, and the PV node. It has no architectural
@@ -235,19 +235,45 @@ device and PV addresses remain fixed.
 | `0x46000000` | initrd, at most 16 MiB |
 | `0x47000000` | FDT |
 
-The time page contains little-endian u64 `now`, `last`, `bound`, `abi`,
-`deferred_irq_pending` at offsets 0, 8, 16, 24, 32. Host owns all words except
-`last`, which the guest owns. `abi` is 2 and the FDT compatible is
-`seedbox,pv-time-v2`; ABI-1 guests must be rebuilt. The pending word is 1 when
-any SPI assertion is deferred and 0 otherwise. The kernel serializes reads
-with local IRQ masking: return now if newer, otherwise last+1, store last. At
-a semantic exit Machine reconciles `max(now,last)` and republishes. Between exits,
-computation costs zero time. Guest-local read progress becomes host-visible
-only at the next exit, matching the shape of the x86 PV design.
+The time page contains little-endian u64 words:
+
+| Offset | Word | Owner |
+| --- | --- | --- |
+| 0 | `now` | Host |
+| 8 | `last` | Guest kernel |
+| 16 | `bound` | Host |
+| 24 | `abi` | Host; value 3 |
+| 32 | `deferred_irq_pending` | Host |
+| 40 | `exclusive_epoch` | Shared kernel/VMM |
+| 48 | `syscall_ns` | Host |
+
+The FDT compatible is `seedbox,pv-time-v3`. Fresh simulations require a matching
+ABI-3 engine and guest kernel; build them through `nix develop` and
+`python3 tools/build.py`. Old retained simulations continue using their retained
+engine and kernel. This ABI change does not substitute current inputs into them.
+
+The pending word is 1 when any SPI assertion is deferred and 0 otherwise.
+Ordinary clock reads retain their 1 ns increment: the kernel serializes reads
+with local IRQ masking, returns now if newer or otherwise last+1, then stores
+last. At a semantic exit Machine reconciles `max(now,last)` and republishes.
+Guest-local read progress becomes host-visible only at the next exit, matching
+the shape of the x86 PV design.
+
+The baseline syscall charge is 1000 ns. ARM throttle factors from 1000 through
+1000000 permille map exactly to `syscall_ns`, scaling that baseline. The kernel
+captures the cost once per syscall. Crossing a scheduler boundary, changing the
+throttle or healing it does not rewrite the remaining charge of an in-flight
+syscall. Ordinary clock reads remain 1 ns under throttle.
+
+Snapshots retain the raw page and guest state, preserving both the selected
+cost and in-flight charge. After a crash, the shared coordinator reapplies any
+active throttle fault. ARM throttle changes add no speed reseeding. The Mac
+harness passed with ABI 3, including the `slow-machine` throttle oracle,
+independent fresh-run comparison and retained replay comparison.
 
 Clockevent u64 writes: offset 0 arms an absolute deadline (zero cancels); 8
 acknowledges and lowers the IRQ; 16 declares idle; 24 yields at the published
-clock bound; 32 performs the ABI-2 handshake. Idle with an armed deadline jumps
+clock bound; 32 performs the ABI-3 handshake. Idle with an armed deadline jumps
 to it and raises SPI 40 while stopped. New IRQ assertions require PSTATE.I to
 be clear and no other source to be asserted. Machine retains other level
 assertions until the active source deasserts and an unmasked semantic exit occurs;
@@ -272,8 +298,9 @@ UART accesses and firmware calls have no extra time charge. PL011 transmission
 is synchronous; its empty TX FIFO asserts a level IRQ when enabled, and guest
 mask writes deassert it. Receive stays empty.
 
-This milestone omits syscall charging and fixed-point
-spin detection. A guest computing forever without exits can still hang; use an
+The historical fixture milestone omitted syscall charging; ABI 3 now supplies
+the syscall cost described above. Fixed-point spin detection remains outside
+that milestone. A guest computing forever without exits can still hang; use an
 external operator timeout. A host timeout must fail, never advance virtual time.
 The 5,000,000 raw-stop limit catches exit-producing runaway guests, including
 repeated transparent debug writes. Report `exits` counts witnessed semantic stops.

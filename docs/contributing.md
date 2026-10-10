@@ -91,8 +91,8 @@ workload/checker, injects confirmed process restarts and peer partitions, checks
 that packets were actually dropped, heals the partitions, and verifies the
 acknowledgement ledger. The short scenario performs two fault rounds; the long
 etcd 3.5.3 scenario performs twenty. The sanity scenario requires detection of its
-planted missing acknowledgement and uses `check.exit_code: 1`, so the acceptance
-command succeeds when that negative control behaves correctly. The race driver
+planted missing acknowledgement. A nonzero oracle exit is a failed simulation;
+the acceptance check must explicitly expect that failure for a negative control. The race driver
 checks its output and atomic control inside the guest; it does not require a
 particular seed to lose a fixed number of updates. The volume scenario puts
 keys into a single etcd node whose data directory is a named volume, crashes and
@@ -101,12 +101,13 @@ key to be read back.
 
 Each command uses normal CLI outcomes and exit codes. There is no host-side
 console parsing, scenario verdict, seed pin, automatic retry, or acceptance-only
-execution path. Change the seed with `--seed`, request state digests with
-`--full-state`, or compare performance settings using the retained run:
+execution path. Change the seed with `--seed`. Configure full-state capture
+when starting the server with `seedbox serve --full-state`; performance settings
+are server-owned. Replay and comparison use simulation IDs:
 
 ```sh
-seedbox replay /path/to/retained/run
-seedbox replay /path/to/retained/run --watchdog-ms 5
+seedbox replay SIMULATION_ID
+seedbox compare BASELINE_ID SIMULATION_ID
 
 seedbox explore harness/acceptance/workloads/key-value.yaml --seed 4000 --count 11
 ```

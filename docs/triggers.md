@@ -1,10 +1,12 @@
 # Committed console triggers (development engine)
 
-Issue #62 adds a deliberately small event surface: actual COM1 UART transmit
-bytes (including debug port 0xe9) on one prepared machine. Application stdout
-reaches this stream through the ordinary supervisor. Markers are opaque bytes;
-no log JSON, protocol decoding, packet counts, host log tailing or application
-commit inference is involved. COM2 and virtio management traffic are excluded.
+The trigger surface includes actual COM1 UART transmit bytes (including debug
+port 0xe9) and decoded application stdout/stderr on one prepared machine.
+The current supervisor sends application output as bounded `SBX_LOG1` frames
+over its management channel. Only those frames contribute application bytes;
+ordinary management commands and diagnostics remain excluded. Markers are opaque
+bytes, matched in supervisor frame order across stdout and stderr. No host log
+tailing, client subscription, or application-level commit inference is involved.
 Network/control event selectors and connection-selected triggers are deferred.
 
 `World.arm_console_stop(source, marker, target, match_timeout=seconds)` and
@@ -48,6 +50,12 @@ has already stopped its target before the trigger's effect time.
    too late. Expiration removes the matcher without creating a fault or an
    infrastructure error. A missing marker is visible in retained state; the
    scenario owns whether that makes its check fail.
+   For framed application output, all bytes in a frame commit when its final
+   transport byte is accepted. A partial frame contributes no bytes, even if it
+   began before trigger admission. The decoder feeds complete frames directly
+   into the coordinator independently of client delivery; missing subscribers and dropped
+   observation datagrams cannot change trigger matching. Pattern prefixes may
+   span multiple complete frames.
 4. Effect time is `matched_at_ns + control_latency_ns`. This fixed semantic
    delay is at least the world lookahead plus its early-delivery allowance.
    The match cannot insert an effect behind another machine's committed time.
@@ -78,7 +86,8 @@ There are at most 64 successfully armed triggers over the entire run, including
 expired/cancelled ones. A marker contains 1..=256 bytes. A streaming KMP matcher
 keeps a prefix counter and a derived failure table per trigger; it never buffers
 an unbounded console suffix. The source-to-world handoff holds one committed
-byte. A machine crash resets that source's unmatched prefixes so markers cannot
+console byte or the bounded application frames from one device write. A machine
+crash resets that source's unmatched prefixes so markers cannot
 span incarnations. Process stop/restart leaves the machine's console stream
 intact. Checked byte counts and incarnation reset counts are retained with the prefix.
 

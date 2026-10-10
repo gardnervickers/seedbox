@@ -8,10 +8,13 @@ if [[ ${1:-portable} != portable || $# -gt 1 ]]; then
   exit 2
 fi
 cd "$(dirname "$0")/.."
+# Check discovery itself: a failing process substitution would otherwise leave
+# the loop empty while the portable suite silently skipped every shell file.
+scripts=$(git ls-files --cached --others --exclude-standard '*.sh' ':!:research/**')
 while IFS= read -r script; do
   [[ -f $script ]] || continue
   bash -n "$script"
-done < <(git ls-files --cached --others --exclude-standard '*.sh' ':!:research/**' | sort -u)
+done <<< "$scripts"
 # Discover new Python tests without maintaining per-module lists.
 (cd harness/tests && python3 -m unittest discover -s . -q)
 (cd python && python3 -m unittest discover -s tests -q)

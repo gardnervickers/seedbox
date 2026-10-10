@@ -1,23 +1,27 @@
 //! The `seedbox` command line. Style rules for changes: `AGENTS.md`, "CLI".
 
 mod backends;
+mod daemon;
 mod defaults;
 mod diagnostics;
+mod faults;
 mod output;
+mod playback_args;
 mod signals;
+mod simulations;
 use backends::{Executor, Preparer};
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+use seedbox_application::vmm::VmmExecutor;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use seedbox::{
+use seedbox_application::{
     bundle, config, diff,
-    execution::{Backend, CancellationToken, ExecutionBackend, PreparationBackend, WitnessMode},
-    exploration::{self, ExploreOptions},
+    execution::{CancellationToken, ExecutionBackend, PreparationBackend, WitnessMode},
     logs,
-    orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
+    orchestration::{self, Orchestrator},
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::VmmExecutor,
     Error, Result,
 };
 use signals::Signals;
@@ -31,23 +35,23 @@ Exit status:
   0    PASS, or a replay/diff MATCH
   1    FAIL, replay MISMATCH, or diff DIFFERENT
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
-  3    INCOMPLETE (wall-time limit or cancelled)
+  3    INCOMPLETE (cancelled or otherwise incomplete)
        A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
-  124  TIMEOUT (simulated-time limit)";
+  124  TIMEOUT";
 
 const HOST_CONTROL_HELP: &str = "\
 Host execution control:
-  seedbox pause RUN     Wait for a host slice-boundary pause
-  seedbox resume RUN    Resume the same live world
-Pause preserves guest time and witnesses. Wall-time limits and cancellation remain active.
+  seedbox retained-pause RUN     Wait for a host slice-boundary pause
+  seedbox retained-resume RUN    Resume the same live world
+Pause preserves guest time and witnesses. Cancellation remains active; current workers exclude intentional waits from the execution budget.
 The executing attempt has an output/host-control locator; replay uses its new attempt.";
 const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty lines from the final 8 KiB of output/vmm.stderr on stderr; JSON output is unchanged.";
 
 #[derive(Parser)]
 #[command(
-    version = seedbox::engine::SIMULATOR_VERSION,
+    version = seedbox_application::engine::SIMULATOR_VERSION,
     override_usage = "seedbox [RUN OPTIONS] [COMPOSE]\n       seedbox <COMMAND>",
-    after_help = "Run is the default: seedbox --kernel PATH compose.yaml. See `seedbox help run` for run options.",
+    after_help = "Run is the default: seedbox compose.yaml. See `seedbox help run` for run options.",
     about = "Deterministic simulation of Compose applications on real Linux machines",
     long_about = "Deterministic simulation of Compose applications on real Linux machines.\n\n\
                   A seed plus the retained inputs regenerate the same execution. \
@@ -61,6 +65,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Serve the local simulation API in the foreground.
+    Serve {
+        /// Report startup to the launching client.
+        #[arg(long, hide = true)]
+        startup_handshake: bool,
+        /// Server state directory [default: user state directory].
+        #[arg(long, env = "SEEDBOX_STATE")]
+        state: Option<PathBuf>,
+        #[command(flatten)]
+        inputs: RuntimeInputs,
+    },
     /// Create a self-contained example project.
     Init {
         /// Directory to create.
@@ -103,85 +118,164 @@ enum Command {
         inputs: RuntimeInputs,
     },
     /// Prepare images and run a simulation (Linux KVM host; or Apple Silicon Mac).
-    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
+    #[command(after_help = format!("{EXIT_CODES}\n\nPreparation has a 15-minute deadline, separate from the simulation execution budget.\n\n{VMM_FAILURE_HELP}"))]
     Run {
         #[command(flatten)]
         compose: ComposeArg,
-        /// Simulation seed [default: x-seedbox.seed from the Compose file].
+        /// Simulation seed [default: project seed, otherwise allocated once by the server].
         #[arg(long)]
         seed: Option<u64>,
-        /// Capture the world before this simulated nanosecond and retain a branch with ordinary logs and diff evidence.
-        #[arg(long, requires = "branch_seed", value_parser = clap::value_parser!(u64))]
-        checkpoint_at_ns: Option<u64>,
-        /// Branch seed for simulator and guest kernel randomness; the parent seed continues unchanged.
-        #[arg(long, requires = "checkpoint_at_ns", value_parser = clap::value_parser!(u64))]
-        branch_seed: Option<u64>,
-        #[command(flatten)]
-        cpu: CpuArg,
-        #[command(flatten)]
-        state: StateArg,
-        #[command(flatten)]
-        inputs: RuntimeInputs,
-        #[command(flatten)]
-        performance: Performance,
+        /// Return after submission while the simulation continues on the server.
+        #[arg(long)]
+        detach: bool,
+        /// Print exactly one simulation resource as JSON.
+        #[arg(long)]
+        json: bool,
     },
-    /// Explore a finite seed sequence with one frozen preparation (Linux KVM host; or Apple Silicon Mac).
-    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
+    /// Compare deterministic results of two completed simulations.
+    Compare {
+        /// Baseline simulation ID.
+        baseline: seedbox_api::SimulationId,
+        /// Simulation ID to compare with the baseline.
+        simulation: seedbox_api::SimulationId,
+        /// Print the comparison as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rerun a simulation using its retained inputs and original seed.
+    Rerun {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Return after submission.
+        #[arg(long)]
+        detach: bool,
+        /// Print exactly one simulation resource as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start a new simulation from a captured checkpoint.
+    Branch {
+        /// Short source simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Checkpoint request ID returned by checkpoint capture.
+        checkpoint: String,
+        /// Return after submission.
+        #[arg(long)]
+        detach: bool,
+        /// Print exactly one simulation resource as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List resources known to the server.
+    Get {
+        #[command(subcommand)]
+        resource: CollectionArg,
+    },
+    /// Describe a simulation or checkpoint as structured text.
+    Describe {
+        #[command(subcommand)]
+        resource: ResourceArg,
+    },
+    /// Request that a simulation stop.
+    Stop {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Stop every simulation in the seed range started by this ID.
+        #[arg(long)]
+        all_seeds: bool,
+    },
+    /// Stream live structured events as newline-delimited JSON.
+    Events {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+    },
+    /// Inspect playback state or a retained control receipt.
+    Playback {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Control request ID [default: inspect current playback state].
+        #[arg(value_parser = playback_args::request_id)]
+        request_id: Option<String>,
+        /// Print JSON instead of YAML.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run consecutive seeds on the server using one frozen preparation.
+    #[command(after_help = EXIT_CODES)]
     Explore {
         #[command(flatten)]
         compose: ComposeArg,
-        /// First simulation seed [default: x-seedbox.seed from the Compose file].
+        /// First simulation seed [default: project seed, otherwise allocated by the server].
         #[arg(long)]
         seed: Option<u64>,
         /// Number of consecutive seeds to execute.
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
-        count: u64,
-        /// Maximum active attempts. Omit --cpu for Linux parallel execution.
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32))]
-        workers: u32,
-        /// Print exactly one exploration report as JSON.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=4096))]
+        count: u32,
+        /// Return after the server accepts the seed range.
+        #[arg(long)]
+        detach: bool,
+        /// Print one seed-range status document as JSON.
         #[arg(long)]
         json: bool,
-        #[command(flatten)]
-        cpu: CpuArg,
-        #[command(flatten)]
-        state: StateArg,
-        #[command(flatten)]
-        inputs: RuntimeInputs,
-        #[command(flatten)]
-        performance: Performance,
     },
-    /// Re-execute a recorded run from its retained inputs and compare (Linux KVM host; or Apple Silicon Mac).
-    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
+    /// Rerun a simulation through the server and compare its retained results.
+    #[command(after_help = EXIT_CODES)]
     Replay {
-        /// Run directory, as printed by `run`.
-        run: PathBuf,
-        #[command(flatten)]
-        cpu: CpuArg,
-        #[command(flatten)]
-        state: StateArg,
-        /// Replay with this VMM instead of the recorded one.
+        /// Completed simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Print the comparison as JSON.
         #[arg(long)]
-        vmm: Option<PathBuf>,
-        // Last: its help heading applies to every flag declared after it.
-        #[command(flatten)]
-        performance: Performance,
+        json: bool,
     },
-    /// Pause host execution at a slice boundary (same execution user or root).
+    /// Delete a retained resource.
+    Delete {
+        #[command(subcommand)]
+        resource: DeleteArg,
+    },
+    /// Inject a YAML or JSON fault action at a committed simulation boundary.
+    Inject {
+        #[command(flatten)]
+        mutation: playback_args::Mutation,
+        /// Fault action file, or - to read standard input.
+        action: PathBuf,
+    },
+    /// Heal a named fault handle in a simulation.
+    Heal {
+        #[command(flatten)]
+        mutation: playback_args::Mutation,
+        /// Handle assigned by the original fault action.
+        handle: String,
+    },
+    /// Pause a simulation at its next committed boundary.
+    Pause(playback_args::Mutation),
+    /// Resume a simulation at unlimited speed.
+    Resume(playback_args::Mutation),
+    /// Advance one committed round and remain paused.
+    Step(playback_args::Mutation),
+    /// Save a checkpoint at a committed simulation boundary.
+    Checkpoint(playback_args::Mutation),
+    /// Set simulated seconds per wall-clock second; 0 pauses and unlimited removes pacing.
+    Rate {
+        #[command(flatten)]
+        mutation: playback_args::Mutation,
+        /// Playback rate: 0, a positive integer or fraction, or unlimited.
+        rate: playback_args::Rate,
+    },
+    /// Pause a legacy retained run or replay attempt.
     #[command(after_help = HOST_CONTROL_HELP)]
-    Pause {
+    RetainedPause {
         /// Directory of the executing run or replay attempt.
         run: PathBuf,
     },
-    /// Resume host execution from a paused slice boundary (same execution user or root).
+    /// Resume a legacy retained run or replay attempt.
     #[command(after_help = HOST_CONTROL_HELP)]
-    Resume {
+    RetainedResume {
         /// Directory of the executing run or replay attempt.
         run: PathBuf,
     },
     /// Export a recorded run and its retained inputs and logs.
     Export {
-        /// Run directory, as printed by run or replay.
+        /// Offline run directory, as printed by import.
         run: PathBuf,
         /// Bundle file to create [default: RUN-directory-name.seedbox.tar].
         #[arg(long, short)]
@@ -211,8 +305,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show committed-time logs as raw bytes without executing guests.
+    /// Stream live application output.
     Logs {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Machine name [default: all machines].
+        machine: Option<String>,
+        /// Select stdout or stderr [default: both].
+        #[arg(long, value_enum)]
+        stream: Option<ApplicationLogStream>,
+        /// Print metadata and bytes as newline-delimited JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read legacy retained console output without executing guests.
+    RetainedLogs {
         /// Retained run directory.
         run: PathBuf,
         /// Select one machine from the retained run.
@@ -234,12 +341,28 @@ enum Command {
     /// Show a recorded run, including its error on stdout, after verifying its manifest.
     #[command(after_help = VMM_FAILURE_HELP)]
     Inspect {
-        /// Run directory, as printed by `run` or `replay`.
+        /// Offline run directory, as printed by import.
         run: PathBuf,
         /// Print the full record as JSON.
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ApplicationLogStream {
+    /// Application standard output.
+    Stdout,
+    /// Application standard error.
+    Stderr,
+}
+impl From<ApplicationLogStream> for seedbox_api::LogStream {
+    fn from(value: ApplicationLogStream) -> Self {
+        match value {
+            ApplicationLogStream::Stdout => Self::Stdout,
+            ApplicationLogStream::Stderr => Self::Stderr,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -277,8 +400,7 @@ impl From<TemplateArg> for Template {
 
 /// Apple Silicon Mac runs the built-in HVF engine; every other host runs KVM.
 const MAC: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
-const CHECKPOINT_REQUIRES_KVM: &str =
-    "--checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const CPU_REQUIRES_KVM: &str = "--cpu requires Linux KVM; omit it on Mac";
 const VMM_REQUIRES_KVM: &str = "--vmm requires Linux KVM; use the built-in Mac engine";
 
@@ -293,9 +415,9 @@ impl ComposeArg {
     fn load(&self) -> Result<config::Simulation> {
         let path = defaults::compose_file(&self.compose)?;
         let architecture = if MAC {
-            seedbox::guest::Architecture::Arm64
+            seedbox_application::guest::Architecture::Arm64
         } else {
-            seedbox::guest::Architecture::Amd64
+            seedbox_application::guest::Architecture::Amd64
         };
         config::load_for_architecture(&path, &std::env::vars().collect(), architecture)
     }
@@ -310,6 +432,7 @@ struct CpuArg {
 
 impl CpuArg {
     /// `--cpu` pins a KVM core; the Mac engine selects no core.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     fn reject_on_mac(&self) -> Result<()> {
         if MAC && self.cpu.is_some() {
             return Err(Error::Setup(CPU_REQUIRES_KVM.into()));
@@ -434,7 +557,7 @@ impl RuntimeInputs {
             if cpu.is_some() {
                 return Err(Error::Setup(CPU_REQUIRES_KVM.into()));
             }
-            Executor::Mac(seedbox::mac::MacExecutor::new(
+            Executor::Mac(seedbox_application::mac::MacExecutor::new(
                 &engine,
                 &kernel,
                 store,
@@ -476,29 +599,6 @@ impl RuntimeInputs {
             executor,
         ))
     }
-
-    /// Backends for a fresh `run` or `explore`, admitted on this host before any preparation.
-    fn admitted_backends(
-        &self,
-        store: &ContentStore,
-        cpu: &CpuArg,
-        simulation: &config::Simulation,
-        cancellation: &CancellationToken,
-        checkpoint: Option<(u64, u64)>,
-        performance: &Performance,
-    ) -> Result<(Preparer, Executor)> {
-        cpu.reject_on_mac()?;
-        let (mut preparer, executor) = self.backends(store, cpu.cpu, simulation, cancellation)?;
-        if cancellation.is_cancelled() {
-            return Err(Error::PreparationCancelled);
-        }
-        let executor = match checkpoint {
-            Some((at, branch)) => executor.with_checkpoint(at, branch)?,
-            None => executor,
-        };
-        preparer.profile = executor.profile();
-        Ok((preparer, performance.apply(executor)?))
-    }
 }
 
 /// Reject world machine options the selected platform cannot execute, before any state.
@@ -510,23 +610,6 @@ fn validate_machine(simulation: &config::Simulation) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-/// Host-side execution settings: they change speed, never results.
-#[derive(Args)]
-#[command(next_help_heading = "Performance (never changes results)")]
-struct Performance {
-    /// Watchdog interval in milliseconds; never changes results.
-    #[arg(long, default_value_t = launch::DEFAULT_WATCHDOG_MS, value_parser = clap::value_parser!(u64).range(1..=60000))]
-    watchdog_ms: u64,
-}
-
-use seedbox_engine_core::launch;
-
-impl Performance {
-    fn apply(&self, executor: Executor) -> Result<Executor> {
-        executor.performance(self.watchdog_ms)
-    }
 }
 
 pub fn main() -> ExitCode {
@@ -552,8 +635,42 @@ pub fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
-        Command::Pause { run } => host_control(&run, true),
-        Command::Resume { run } => host_control(&run, false),
+        Command::Serve {
+            state,
+            inputs,
+            startup_handshake,
+        } => daemon::serve(state, inputs, startup_handshake),
+        Command::RetainedPause { run } => host_control(&run, true),
+        Command::Inject { mutation, action } => faults::inject(mutation, &action),
+        Command::Heal { mutation, handle } => simulations::mutate_control(
+            mutation,
+            seedbox_api::ControlCommand::InjectFault {
+                action: seedbox_api::FaultAction::Heal { handle },
+            },
+        ),
+        Command::Pause(mutation) => simulations::mutate_control(
+            mutation,
+            seedbox_api::ControlCommand::SetRate {
+                rate: seedbox_api::PlaybackRate::Paused,
+            },
+        ),
+        Command::Resume(mutation) => simulations::mutate_control(
+            mutation,
+            seedbox_api::ControlCommand::SetRate {
+                rate: seedbox_api::PlaybackRate::Unlimited,
+            },
+        ),
+        Command::Step(mutation) => {
+            simulations::mutate_control(mutation, seedbox_api::ControlCommand::Step)
+        }
+        Command::Checkpoint(mutation) => {
+            simulations::mutate_control(mutation, seedbox_api::ControlCommand::Checkpoint)
+        }
+        Command::Rate { mutation, rate } => simulations::mutate_control(
+            mutation,
+            seedbox_api::ControlCommand::SetRate { rate: rate.0 },
+        ),
+        Command::RetainedResume { run } => host_control(&run, false),
         Command::Init {
             directory,
             template,
@@ -569,52 +686,68 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Run {
             compose,
             seed,
-            checkpoint_at_ns,
-            branch_seed,
-            cpu,
-            state,
-            inputs,
-            performance,
-        } => run_simulation(
-            &compose,
-            seed,
-            checkpoint_at_ns.zip(branch_seed),
-            &cpu,
-            &state,
-            &inputs,
-            &performance,
-        ),
+            detach,
+            json,
+        } => simulations::run(&compose, seed, detach, json),
+        Command::Branch {
+            id,
+            checkpoint,
+            detach,
+            json,
+        } => simulations::branch(&id, checkpoint, detach, json),
+        Command::Rerun { id, detach, json } => simulations::rerun(&id, detach, json),
+        Command::Compare {
+            baseline,
+            simulation,
+            json,
+        } => simulations::compare(&baseline, &simulation, json),
+        Command::Get { resource } => match resource {
+            CollectionArg::Simulation { id, watch, json } => {
+                if watch {
+                    simulations::watch(&id, json)
+                } else {
+                    simulations::describe(&id, json)
+                }
+            }
+            CollectionArg::Simulations { source, json } => match source {
+                Some(id) => simulations::seed_range(&id, json),
+                None => simulations::list(json),
+            },
+            CollectionArg::Checkpoints { id, json } => simulations::checkpoints(&id, None, json),
+        },
+        Command::Describe { resource } => match resource {
+            ResourceArg::Simulation { id, json } => simulations::describe(&id, json),
+            ResourceArg::Checkpoint { id, name, json } => {
+                simulations::checkpoints(&id, Some(&name), json)
+            }
+        },
+        Command::Stop { id, all_seeds } => {
+            if all_seeds {
+                simulations::stop_seeds(&id)
+            } else {
+                simulations::stop(&id)
+            }
+        }
+        Command::Events { id } => simulations::events(&id),
+        Command::Playback {
+            id,
+            request_id,
+            json,
+        } => simulations::playback(&id, request_id.as_deref(), json),
         Command::Explore {
             compose,
             seed,
             count,
-            workers,
+            detach,
             json,
-            cpu,
-            state,
-            inputs,
-            performance,
-        } => explore(
-            &compose,
-            ExploreOptions {
-                seed,
-                count,
-                workers,
-                cancellation: CancellationToken::default(),
-            },
-            json,
-            &cpu,
-            &state,
-            &inputs,
-            &performance,
-        ),
-        Command::Replay {
-            run,
-            cpu,
-            state,
-            performance,
-            vmm,
-        } => replay(run, &cpu, &state, &performance, vmm),
+        } => simulations::explore(&compose, seed, count, detach, json),
+        Command::Delete {
+            resource: DeleteArg::Simulation { id },
+        } => simulations::delete(&id),
+        Command::Delete {
+            resource: DeleteArg::Checkpoint { id, name },
+        } => simulations::delete_checkpoint(&id, &name),
+        Command::Replay { id, json } => simulations::replay(&id, json),
         Command::Export {
             run,
             output,
@@ -628,6 +761,12 @@ fn run(cli: Cli) -> Result<u8> {
         } => import(bundle, &state, &transfer),
         Command::Diff { run_a, run_b, json } => compare(&run_a, &run_b, json),
         Command::Logs {
+            id,
+            machine,
+            stream,
+            json,
+        } => simulations::logs(&id, machine.as_deref(), stream, json),
+        Command::RetainedLogs {
             run,
             machine,
             stream,
@@ -649,7 +788,7 @@ fn run(cli: Cli) -> Result<u8> {
 }
 
 fn host_control(run: &Path, paused: bool) -> Result<u8> {
-    let status = seedbox::host_control::set_paused(run, paused)?;
+    let status = seedbox_application::host_control::set_paused(run, paused)?;
     output::status(&output::word(&status), run.display());
     Ok(0)
 }
@@ -661,7 +800,7 @@ fn init(directory: &Path, template: TemplateArg) -> Result<u8> {
             directory.display()
         )));
     }
-    seedbox::templates::init(directory, template.into())?;
+    seedbox_application::templates::init(directory, template.into())?;
     output::status("CREATED", directory.display());
     Ok(0)
 }
@@ -703,7 +842,7 @@ fn doctor(cpu: &CpuArg, inputs: KvmInputs, json: bool) -> Result<u8> {
     if cancellation.is_cancelled() {
         return Err(Error::Setup("doctor cancelled".into()));
     }
-    let report = seedbox::mac::MacExecutor::doctor(&engine, &kernel)?;
+    let report = seedbox_application::mac::MacExecutor::doctor(&engine, &kernel)?;
     if json {
         output::json(&report)?;
     } else {
@@ -772,173 +911,6 @@ fn prepare(
     serde_json::to_writer_pretty(file, &prepared)?;
     output::status("PREPARED", output.display());
     Ok(0)
-}
-
-fn run_simulation(
-    compose: &ComposeArg,
-    seed: Option<u64>,
-    checkpoint: Option<(u64, u64)>,
-    cpu: &CpuArg,
-    state: &StateArg,
-    inputs: &RuntimeInputs,
-    performance: &Performance,
-) -> Result<u8> {
-    cpu.reject_on_mac()?;
-    // clap requires both checkpoint flags together.
-    if MAC && checkpoint.is_some() {
-        return Err(Error::Setup(CHECKPOINT_REQUIRES_KVM.into()));
-    }
-    inputs.validate_platform()?;
-    let simulation = compose.load()?;
-    validate_machine(&simulation)?;
-    if checkpoint.is_some_and(|(at, _)| at >= simulation.limits.simulated_time_ns) {
-        return Err(Error::Setup("--checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint".into()));
-    }
-    let (store, orchestrator) = state.open()?;
-    let cancellation = CancellationToken::default();
-    let _signals = Signals::register(&cancellation)?;
-    let (preparer, executor) = inputs.admitted_backends(
-        &store,
-        cpu,
-        &simulation,
-        &cancellation,
-        checkpoint,
-        performance,
-    )?;
-    // Backend admission checks the selected core before preparation.
-    let result = orchestrator.run(
-        &simulation,
-        RunOptions { seed, cancellation },
-        &preparer,
-        &executor,
-    )?;
-    Ok(report(&result))
-}
-
-fn explore(
-    compose: &ComposeArg,
-    options: ExploreOptions,
-    json: bool,
-    cpu: &CpuArg,
-    state: &StateArg,
-    inputs: &RuntimeInputs,
-    performance: &Performance,
-) -> Result<u8> {
-    inputs.validate_platform()?;
-    let resources = Resources::start();
-    let simulation = compose.load()?;
-    validate_machine(&simulation)?;
-    let _signals = Signals::register(&options.cancellation)?;
-    exploration::bounds(&simulation, &options)?;
-    if options.workers > 1 && cpu.cpu.is_some() {
-        return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
-    }
-    cpu.reject_on_mac()?;
-    let (store, orchestrator) = state.open()?;
-    let cancellation = options.cancellation.clone();
-    let (preparer, executor) =
-        inputs.admitted_backends(&store, cpu, &simulation, &cancellation, None, performance)?;
-    // Exploration retains any backend admission refusal in its batch checkpoint.
-    let mut result = orchestrator.explore(&simulation, options, &preparer, &executor)?;
-    result.record_resources(resources.finish())?;
-    if json {
-        output::json(&result)?;
-    } else {
-        output::status(&output::word(&result.outcome), result.directory.display());
-        output::field(
-            "seeds",
-            format_args!("{}..={}", result.first_seed, result.last_seed),
-        );
-        output::field("workers", result.workers);
-        output::field("peak-running", result.peak_running);
-        output::field(
-            "active-attempt-seconds",
-            output::Seconds(result.active_attempt_seconds),
-        );
-        output::field("attempted", result.attempts.len());
-        output::field("pass", result.counts.pass);
-        output::field("fail", result.counts.fail);
-        output::field("timeout", result.counts.timeout);
-        output::field("error-count", result.counts.error);
-        output::field("incomplete", result.counts.incomplete);
-        output::field("unfinished", result.counts.unfinished);
-        output::field("undispatched", result.undispatched_count);
-        output::field("elapsed-seconds", output::Seconds(result.total_seconds));
-        for attempt in &result.attempts {
-            if let (Some(directory), Some(outcome)) = (&attempt.directory, &attempt.outcome) {
-                eprintln!(
-                    "seed {}: {} {}",
-                    attempt.seed,
-                    output::word(outcome),
-                    directory.display()
-                );
-                if let Some(error) = &attempt.error {
-                    eprintln!("error: seed {}: {error}", attempt.seed);
-                    diagnostics::vmm_failure(directory, error);
-                }
-            }
-        }
-        if let Some(error) = &result.error {
-            eprintln!("error: {error}");
-        }
-    }
-    Ok(outcome_code(&result.outcome))
-}
-
-fn replay(
-    run: PathBuf,
-    cpu: &CpuArg,
-    state: &StateArg,
-    performance: &Performance,
-    vmm: Option<PathBuf>,
-) -> Result<u8> {
-    let allow_engine_change = vmm.is_some();
-    let run = defaults::run_directory(run)?;
-    let previous = orchestration::inspect(&run)?;
-    let profile = &previous.identity.inputs.profile;
-    let is_mac = profile.backend == Backend::Hvf;
-    let (store, orchestrator) = state.open()?;
-    let scratch = tempfile::tempdir()?;
-    let engine = match vmm {
-        Some(path) => defaults::existing("--vmm", path)?,
-        None => store.materialize(&profile.engine, scratch.path())?,
-    };
-    let executor = if is_mac {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            cpu.reject_on_mac()?;
-            Executor::Mac(seedbox::mac::MacExecutor::from_retained(
-                &engine,
-                &store,
-                profile.clone(),
-            )?)
-        }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        {
-            return Err(Error::Setup(
-                "replay of an HVF world requires an Apple Silicon Mac".into(),
-            ));
-        }
-    } else {
-        // The recorded profile carries every semantic setting.
-        Executor::Linux(if allow_engine_change {
-            VmmExecutor::from_override(&engine, &store, profile.clone(), cpu.cpu)?
-        } else {
-            VmmExecutor::from_retained(&engine, &store, profile.clone(), cpu.cpu)?
-        })
-    };
-    let executor = performance.apply(executor)?;
-    let cancellation = CancellationToken::default();
-    let _signals = Signals::register(&cancellation)?;
-    let result = orchestrator.replay_with_options(
-        &run,
-        &executor,
-        ReplayOptions {
-            cancellation,
-            allow_engine_change,
-        },
-    )?;
-    Ok(report(&result))
 }
 
 fn export(
@@ -1090,109 +1062,79 @@ fn inspect(run: PathBuf, json: bool) -> Result<u8> {
     Ok(0)
 }
 
-/// Print a finished run and return its exit status (see `EXIT_CODES`).
-fn report(run: &orchestration::Run) -> u8 {
-    // Scripts parse the run directory from this one `OUTCOME: path` line.
-    output::status(&output::word(&run.record.outcome), run.directory.display());
-    if let Some(engine) = &run
-        .record
-        .identity
-        .inputs
-        .profile
-        .semantic_parameters
-        .engine
-    {
-        output::field("simulator", &engine.simulator_version);
-    }
-    if let Some(error) = &run.record.error {
-        eprintln!("{error}");
-        diagnostics::vmm_failure(&run.directory, error);
-    }
-    if let Some(replay) = &run.record.replay {
-        output::field("replay", output::word(&replay.status));
-        diagnostics::replay_pages(replay);
-        diagnostics::replay_divergence(replay);
-        return match replay.status {
-            ReplayStatus::Match => 0,
-            ReplayStatus::Mismatch => 1,
-            ReplayStatus::NotComparable => 2,
-        };
-    }
-    outcome_code(&run.record.outcome)
-}
-fn outcome_code(outcome: &Outcome) -> u8 {
-    match outcome {
-        Outcome::Pass => 0,
-        Outcome::Fail => 1,
-        Outcome::Error => 2,
-        Outcome::Incomplete => 3,
-        Outcome::Timeout => 124,
-    }
-}
-
-/// Invocation-wide CPU deltas and separate process-family RSS high-water marks.
-struct Resources {
-    #[cfg(unix)]
-    self_usage: Option<libc::rusage>,
-    #[cfg(unix)]
-    child_usage: Option<libc::rusage>,
-}
-impl Resources {
-    fn start() -> Self {
-        Self {
-            #[cfg(unix)]
-            self_usage: usage(libc::RUSAGE_SELF),
-            #[cfg(unix)]
-            child_usage: usage(libc::RUSAGE_CHILDREN),
-        }
-    }
-    fn finish(self) -> Option<exploration::ProcessResources> {
-        #[cfg(unix)]
-        {
-            let current = usage(libc::RUSAGE_SELF)?;
-            let children = usage(libc::RUSAGE_CHILDREN)?;
-            let before = self.self_usage?;
-            let before_children = self.child_usage?;
-            let seconds =
-                |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1_000_000.0;
-            let bytes = |rss: libc::c_long| {
-                if cfg!(target_os = "macos") {
-                    rss as u64
-                } else {
-                    (rss as u64).saturating_mul(1024)
-                }
-            };
-            Some(exploration::ProcessResources {
-                self_user_seconds: seconds(current.ru_utime) - seconds(before.ru_utime),
-                self_system_seconds: seconds(current.ru_stime) - seconds(before.ru_stime),
-                reaped_children_user_seconds: seconds(children.ru_utime)
-                    - seconds(before_children.ru_utime),
-                reaped_children_system_seconds: seconds(children.ru_stime)
-                    - seconds(before_children.ru_stime),
-                self_rss_high_water_bytes: bytes(current.ru_maxrss),
-                reaped_children_rss_high_water_bytes: bytes(children.ru_maxrss),
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            None
-        }
-    }
-}
-#[cfg(unix)]
-fn usage(who: libc::c_int) -> Option<libc::rusage> {
-    // SAFETY: rusage is plain C data, so all-zero bytes are a valid value.
-    let mut usage = unsafe { std::mem::zeroed() };
-    // SAFETY: `usage` is a valid, writable rusage for the duration of the call.
-    if unsafe { libc::getrusage(who, &mut usage) } == 0 {
-        Some(usage)
-    } else {
-        None
-    }
-}
-
 fn print_omissions(record: &orchestration::RunRecord) {
     if !record.omitted_logs.is_empty() {
         output::field("omitted files", record.omitted_logs.len());
     }
+}
+
+#[derive(Subcommand)]
+enum DeleteArg {
+    /// Stop and delete a simulation, its descendants and their private files.
+    Simulation {
+        /// Root simulation ID.
+        id: seedbox_api::SimulationId,
+    },
+
+    /// Delete an unreferenced checkpoint from a completed simulation.
+    Checkpoint {
+        /// Source simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Checkpoint request ID.
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CollectionArg {
+    /// Show one simulation and optionally watch its status.
+    Simulation {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Stream status until completion or Ctrl-C; never stop the simulation.
+        #[arg(long)]
+        watch: bool,
+        /// Print JSON; with --watch, emit newline-delimited documents.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List simulations retained by the server.
+    Simulations {
+        /// Source simulation ID to restrict the result to its seed range.
+        source: Option<seedbox_api::SimulationId>,
+        /// Print JSON instead of YAML.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List checkpoint captures belonging to a simulation.
+    Checkpoints {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Print JSON instead of YAML.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ResourceArg {
+    /// Describe one run of one seed as resubmittable YAML.
+    Simulation {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Print JSON instead of YAML.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Describe a checkpoint capture and its timeline position.
+    Checkpoint {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Checkpoint request ID.
+        #[arg(value_parser = playback_args::request_id)]
+        name: String,
+        /// Print JSON instead of YAML.
+        #[arg(long)]
+        json: bool,
+    },
 }

@@ -53,6 +53,8 @@ pub fn arm_launch_skew(profile: &ExecutionProfile, lookahead: u64) -> Option<u64
 pub fn arm_descriptor() -> EngineDescriptor {
     EngineDescriptor {
         kind: ExecutableKind::ArmWorld,
+        owner_pipe: true,
+        live_observations: true,
         simulator_version: SIMULATOR_VERSION.into(),
         host_os: "macos".into(),
         host_arch: "aarch64".into(),
@@ -66,6 +68,8 @@ pub fn arm_descriptor() -> EngineDescriptor {
 pub fn kvm_descriptor(kind: ExecutableKind, simulator_version: String) -> EngineDescriptor {
     EngineDescriptor {
         kind,
+        owner_pipe: false,
+        live_observations: false,
         simulator_version,
         host_os: "linux".into(),
         host_arch: "x86_64".into(),
@@ -82,10 +86,10 @@ pub fn internal_descriptor() -> Result<EngineDescriptor> {
             "built-in Compose world execution requires Linux x86-64; ARM world integration is not available yet".into(),
         ));
     }
-    Ok(kvm_descriptor(
-        ExecutableKind::InternalWorker,
-        SIMULATOR_VERSION.into(),
-    ))
+    let mut descriptor = kvm_descriptor(ExecutableKind::InternalWorker, SIMULATOR_VERSION.into());
+    descriptor.owner_pipe = true;
+    descriptor.live_observations = true;
+    Ok(descriptor)
 }
 
 /// Decode the executable protocol; other recorded metadata is descriptive.
@@ -158,6 +162,8 @@ mod tests {
         ] {
             recorded.semantic_parameters.engine = Some(EngineDescriptor {
                 kind,
+                owner_pipe: false,
+                live_observations: false,
                 simulator_version: "development version".into(),
                 host_os: "future-os".into(),
                 host_arch: "future-arch".into(),

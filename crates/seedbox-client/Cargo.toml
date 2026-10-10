@@ -1,0 +1,16 @@
+[package]
+name = "seedbox-client"
+description = "Local HTTP client for the Seedbox simulation API"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seedbox-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }

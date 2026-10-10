@@ -4,7 +4,7 @@
 Each suite names a platform and the Cargo test features it enables. A selected
 suite whose host requirements are missing is an error before anything builds.
 Tests belong to Cargo or unittest discovery, not a list of individual test names.
-Application assertions remain in guests; applications.rs uses run/replay directly.
+Application assertions remain in guests; applications.rs uses server-owned run/rerun/compare commands.
 """
 import argparse
 import json
@@ -25,8 +25,8 @@ SUITES = {
     "linux-kvm": "Linux x86-64 or ARM64 with /dev/kvm: native backend KVM tests; no root needed.",
     "linux-guests": "Fixture kernel and initrd on Linux KVM: real guest determinism and checkpoints.",
     "linux-oci": "Linux x86-64 with a running Docker-compatible engine: real image import and Dockerfile builds.",
-    "linux-apps": "Linux x86-64 KVM, root, a Docker-compatible engine and Nix guest builds: every acceptance workload run twice, diffed and replayed.",
-    "linux-pause": "Linux x86-64 KVM, root and a supplied retained run: pause/resume replay.",
+    "linux-apps": "Linux x86-64 KVM, root, a Docker-compatible engine and Nix guest builds: every acceptance workload run twice, compared and rerun.",
+    "linux-pause": "Linux x86-64 KVM, root, a Docker-compatible engine and guest builds: server pause/resume rerun.",
     "mac-hvf": "Apple Silicon with macOS 15+, Hypervisor.framework and codesign: native CPU/state and cancellation primitives.",
     "mac-guests": "mac-hvf plus the ARM fixture kernel and initrd: real guest controls.",
     "mac-apps": "mac-hvf plus a Docker-compatible engine and Nix guest builds: every acceptance workload on ARM PV.",
@@ -79,7 +79,7 @@ def privileged(prefix, command, environment):
     # test/runtime inputs, the guest asset directory and the engine socket, not
     # the user's general environment.
     inputs = [f"{key}={value}" for key, value in environment.items()
-              if key.startswith(("SEEDBOX_TEST_", "SEEDBOX_ARM64_", "SEEDBOX_HOST_PAUSE_"))
+              if key.startswith(("SEEDBOX_TEST_", "SEEDBOX_ARM64_"))
               or key in ("SEEDBOX_KERNEL", "SEEDBOX_RUNTIME_ASSETS", "SEEDBOX_BUSYBOX",
                          "SEEDBOX_MKE2FS", "SEEDBOX_STATIC_CC", "DOCKER_HOST", "SEEDBOX_ASSET_DIR")]
     return [*prefix, *inputs, *command]
@@ -201,12 +201,9 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
             engine()
             need(can_root or not engine_needs_root(environment),
                  "the engine socket is not writable by this user; join its group, or allow passwordless sudo")
-        elif suite == "linux-apps":
+        elif suite in ("linux-apps", "linux-pause"):
             engine()
             missing.extend(build_requirements(environment, system))
-        elif suite == "linux-pause":
-            for key in ("SEEDBOX_HOST_PAUSE_RUN", "SEEDBOX_HOST_PAUSE_STATE"):
-                need(environment.get(key), f"set {key}")
         return [reason for reason in missing if reason]
     if not mac:
         return ["requires macOS on Apple Silicon"]
@@ -230,8 +227,10 @@ def features_for(package, machine, suites):
     """Cargo test features for one package; selection depends only on the suites."""
     def pick(pairs):
         return [feature for suite, feature in pairs if suite in suites]
+    if package == "seedbox-application":
+        return pick((("linux-oci", "oci-tests"),))
     if package == "seedbox":
-        return pick((("linux-oci", "oci-tests"), ("linux-apps", "application-tests"),
+        return pick((("linux-apps", "application-tests"),
                      ("mac-apps", "application-tests"), ("linux-pause", "retained-run-tests")))
     if package == "seedbox-vmm":
         return pick((("linux-kvm", "kvm-tests"),
@@ -340,7 +339,6 @@ def main(argv=None):
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("suites", nargs="*", metavar="SUITE",
                         help="Suites or groups to run [default: portable].")
-    parser.add_argument("--cpu", type=int, help="Linux CPU for linux-apps.")
     parser.add_argument("--list", action="store_true",
                         help="Check the selected suites' requirements without building or running tests.")
     parser.add_argument("--probe-linux", action="store_true", help=argparse.SUPPRESS)
@@ -353,11 +351,6 @@ def main(argv=None):
         parser.error("unknown suite: " + ", ".join(unknown) + "; see --help")
     system, machine = platform.system(), platform.machine()
     suites = expand(args.suites or ["portable"], machine)
-    if args.cpu is not None:
-        if args.cpu < 0:
-            parser.error("--cpu must be nonnegative")
-        if "linux-apps" not in suites:
-            parser.error("--cpu applies only to linux-apps")
     environment = os.environ.copy()
     hardware = [suite for suite in suites if suite != "portable"]
     prefix = root_prefix() if system == "Linux" and hardware else None
@@ -390,8 +383,6 @@ def main(argv=None):
     reports = Path(tempfile.mkdtemp(prefix="run-", dir=reports_root))
     print(f"reports: {reports}")
     environment["SEEDBOX_TEST_REPORT_DIR"] = str(reports)
-    if args.cpu is not None:
-        environment["SEEDBOX_TEST_CPU"] = str(args.cpu)
     for key, default in (("SEEDBOX_TEST_KERNEL", "artifacts/bzImage"),
                          ("SEEDBOX_TEST_INITRD", "artifacts/entropy-fork.cpio"),
                          ("SEEDBOX_ARM64_KERNEL", "artifacts/arm64-hres/Image"),
@@ -399,7 +390,7 @@ def main(argv=None):
         if (path := available_file(environment, key, ROOT / default)) is not None:
             environment[key] = str(path)
     environment["SEEDBOX_ARM64_REPORT_DIR"] = str(reports / "arm64")
-    if {"linux-apps", "mac-apps"} & set(suites):
+    if {"linux-apps", "linux-pause", "mac-apps"} & set(suites):
         # The build's stdout is one completed directory. Pin every test to it;
         # never resolve a mutable current pointer or ambient asset override later.
         output = checks.run("application-build", [sys.executable, "tools/build.py"], capture=True)
@@ -409,11 +400,12 @@ def main(argv=None):
     packages = [("seedbox-arm64", ["cargo", "test-arm64"])]
     if system == "Linux" and machine == "x86_64":
         packages.append(("seedbox-vmm", ["cargo", "test-vmm"]))
-    packages.append(("seedbox", ["cargo", "test", "-p", "seedbox", "--locked"]))
+    packages.extend((package, ["cargo", "test", "-p", package, "--locked"])
+                    for package in ("seedbox", "seedbox-application"))
     for package, command in packages:
         features = features_for(package, machine, suites)
         if features:
-            if package == "seedbox":
+            if package in ("seedbox", "seedbox-application"):
                 metadata = checks.run("test-targets", ["cargo", "metadata", "--no-deps", "--format-version=1", "--locked"], capture=True)
                 if metadata is None:
                     return 1

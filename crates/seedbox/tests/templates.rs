@@ -1,4 +1,4 @@
-use seedbox::{
+use seedbox_application::{
     config,
     templates::{self, Template},
 };

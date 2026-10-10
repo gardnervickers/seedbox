@@ -145,11 +145,18 @@ pub struct Checkpoint {
 }
 
 /// The retained executable's launch contract plus descriptive build metadata.
-/// Only `kind` selects behaviour; the other fields are informational.
+/// `kind` and `owner_pipe` describe the launch protocol; build metadata is informational.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineDescriptor {
     pub kind: ExecutableKind,
+    /// The executable accepts `--owner-pipe` after its private contract. EOF on
+    /// stdin then terminates its process group if the owning server disappears.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_pipe: bool,
+    /// Supports the private nonblocking observation socket launch argument.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub live_observations: bool,
     pub simulator_version: String,
     pub host_os: String,
     pub host_arch: String,
@@ -284,6 +291,14 @@ pub struct FaultEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionReport {
+    /// Intentional host pause/pacing time, excluded from the execution budget.
+    /// Runtime-only accounting; never part of serialized result comparisons.
+    #[serde(skip)]
+    pub host_wait_ns: u64,
+    /// Final scheduler position (furthest machine clock for legacy reports).
+    /// Absent when execution produced no report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulated_time_ns: Option<u64>,
     pub reason: StopReason,
     pub workload_exit: Option<WorkloadExit>,
     pub witness: Option<ContentDigest>,

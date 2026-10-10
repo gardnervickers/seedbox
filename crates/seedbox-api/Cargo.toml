@@ -1,0 +1,16 @@
+[package]
+name = "seedbox-api"
+description = "Public simulation resources and client/server wire contracts"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seedbox-control.workspace = true
+seedbox-engine-protocol.workspace = true
+seedbox-spec.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

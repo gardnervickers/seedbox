@@ -7,7 +7,8 @@ use crate::{
     timebase::{Publication, Timebase},
     Result,
 };
-#[derive(Default, Debug, serde::Serialize)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PvClock {
     now: u64,
     deadline: Option<u64>,

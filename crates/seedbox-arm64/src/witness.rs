@@ -99,7 +99,7 @@ pub struct Report {
     pub trace: Vec<Record>,
 }
 pub fn hash(b: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(b))
+    hex::encode(Sha256::digest(b))
 }
 pub fn finish(
     trace: &[Record],
@@ -128,10 +128,10 @@ pub fn finish(
     all.update(console_digest);
     all.update(ram_digest);
     (
-        format!("{:x}", all.finalize()),
-        format!("{trace_digest:x}"),
-        format!("{console_digest:x}"),
-        format!("{ram_digest:x}"),
+        hex::encode(all.finalize()),
+        hex::encode(trace_digest),
+        hex::encode(console_digest),
+        hex::encode(ram_digest),
     )
 }
 #[cfg(test)]

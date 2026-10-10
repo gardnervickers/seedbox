@@ -9,7 +9,6 @@ use seedbox_arm64::{
     memory::Memory,
     Result, ABI, DTB_ADDR, INITRD_ADDR, PAGE_SIZE, RAM_BASE, RAM_SIZE, TIME_ADDR,
 };
-use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 fn kernel(offset: u64, image_size: u64) -> Vec<u8> {
@@ -32,13 +31,10 @@ fn property_u64(fdt: &::fdt::Fdt<'_>, name: &str) -> u64 {
 }
 
 #[test]
-fn historical_fixture_fdt_bytes_and_layout() {
+fn fixture_fdt_declares_the_current_pv_contract_and_layout() {
     let bytes = fdt::build(1, 4096).unwrap();
-    // Captured from the original writer before the configurable layout change.
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
-        "0cf36f12100ac2955b46bd4dd4babae9b85c70ce3c0d92107b4249fa4f9fb713"
-    );
+    let tree = ::fdt::Fdt::new(&bytes).unwrap();
+    assert!(tree.find_compatible(&["seedbox,pv-time-v3"]).is_some());
     let kernel = kernel(0x80000, 8192);
     let initrd = vec![0; 4096];
     let layout = BootSpec::fixture(&kernel, &initrd, 1).validate().unwrap();

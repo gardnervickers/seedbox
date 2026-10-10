@@ -27,7 +27,7 @@ fn segment(
         checkpoint,
         require_barrier,
     };
-    simulate(w, &run, Duration::ZERO, &mut || Ok(())).map(|(word, _)| word.as_str())
+    simulate(w, &run, Duration::ZERO, &mut |_, _| Ok(())).map(|(word, _)| word.as_str())
 }
 
 fn run_with(
@@ -45,7 +45,7 @@ fn run_with(
         require_barrier: true,
     };
     if workers == 0 {
-        simulate(w, &run, skew, &mut || Ok(()))
+        simulate(w, &run, skew, &mut |_, _| Ok(()))
     } else {
         simulate_parallel(
             w,
@@ -55,7 +55,7 @@ fn run_with(
                 skew,
             },
             |_| Ok(MockClock::default()),
-            &mut || Ok(()),
+            &mut |_, _| Ok(()),
         )
     }
     .map(|(word, evidence)| (word.as_str(), evidence))
@@ -365,6 +365,30 @@ fn requests_console_and_readiness_from_a_round_arm_later_boundaries() {
 }
 
 #[test]
+fn application_output_bursts_match_across_frames_and_worker_counts() {
+    for workers in [0, 1, 2] {
+        let mut w = world(&["a", "b"]);
+        configure_control(&mut w);
+        w.control
+            .triggers
+            .arm("a".into(), b"READY".to_vec(), 0, 200, partition("output"))
+            .unwrap();
+        let mut first = Step::new(2, Stop::Control);
+        first.output = b"noise RE".to_vec();
+        let mut second = Step::new(4, Stop::Control);
+        second.output = b"ADY\n".to_vec();
+        w.machines[0].steps.extend([first, second]);
+        let (outcome, _) = run_with(&mut w, 120, None, workers, Duration::from_micros(10)).unwrap();
+        assert_eq!(outcome, "duration");
+        let trigger = &w.control.triggers.records[0];
+        assert_eq!(trigger.matched_at_ns, Some(4));
+        assert_eq!(trigger.effect_at_ns, Some(54));
+        assert_eq!(w.faults.active_handles(), ["output"]);
+        assert!(w.machines.iter().all(|m| m.committed_output.is_empty()));
+    }
+}
+
+#[test]
 fn pending_error_still_delivers_strict_reply_before_stopping() {
     let mut w = world(&["a"]);
     configure_control(&mut w);
@@ -384,6 +408,45 @@ fn pending_error_still_delivers_strict_reply_before_stopping() {
     assert!(trace(&w)
         .iter()
         .any(|line| line.starts_with("a:control/SBX_REPLY1 ")));
+}
+
+#[test]
+fn boundary_identity_survives_segments_and_snapshot_restore() {
+    let mut w = world(&["a"]);
+    let run = Run {
+        duration: 100,
+        end_on: None,
+        fork: Some(Fork::from(Some(10))),
+        checkpoint: None,
+        require_barrier: true,
+    };
+    let mut positions = Vec::new();
+    simulate(&mut w, &run, Duration::ZERO, &mut |boundary, _| {
+        positions.push(boundary.position);
+        Ok(())
+    })
+    .unwrap();
+    assert!(positions
+        .windows(2)
+        .all(|pair| pair[1].boundary_index == pair[0].boundary_index + 1));
+    let previous = *positions.last().unwrap();
+    let snapshot = WorldSnapshot::take(&mut w).unwrap();
+    let mut continuations = Vec::new();
+    for pass in 0..2 {
+        if pass == 1 {
+            snapshot.restore(&mut w).unwrap();
+        }
+        let mut observed = Vec::new();
+        simulate(&mut w, &run, Duration::ZERO, &mut |boundary, _| {
+            observed.push(boundary.position);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(observed[0].boundary_index, previous.boundary_index + 1);
+        assert_eq!(observed[0].completed_rounds, previous.completed_rounds);
+        continuations.push(observed);
+    }
+    assert_eq!(continuations[0], continuations[1]);
 }
 
 #[test]
@@ -500,7 +563,7 @@ fn initial_launch_preserves_end_machine_exit_and_cancellation() {
         require_barrier: false,
     };
     assert_eq!(
-        simulate(&mut cancelled, &run, Duration::ZERO, &mut || Err(
+        simulate(&mut cancelled, &run, Duration::ZERO, &mut |_, _| Err(
             "cancelled".into()
         ))
         .unwrap_err(),
@@ -797,7 +860,12 @@ fn adapter_observations_are_rejected_before_effects_are_consumed() {
 
 #[test]
 fn a_failed_crash_terminates_every_worker_and_poisons_the_world() {
-    let mut w = world(&["a", "b"]);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("observer");
+    let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    let mut w = world(&["a", "b"])
+        .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
     plan(
         &mut w,
         5,
@@ -815,6 +883,11 @@ fn a_failed_crash_terminates_every_worker_and_poisons_the_world() {
         .count();
     assert_eq!(terminations, 3);
     assert!(run(&mut w, 30, None).unwrap_err().contains("terminal"));
+    let mut bytes = [0; seedbox_engine_protocol::observation::MAX_DATAGRAM_BYTES];
+    assert_eq!(
+        receiver.recv(&mut bytes).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 /// The legacy receipts' world: pause, crash, resume and reboot faults, a
@@ -1001,7 +1074,15 @@ fn an_event_already_due_is_delivered_even_when_the_machine_stands_past_the_slice
 fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across_workers() {
     let mut reference = None;
     for workers in [0, 1, 2, 4] {
-        let mut w = world(&["a", "b"]);
+        use seedbox_engine_protocol::observation::{
+            Kind, MachineTransition, Observation, MAX_DATAGRAM_BYTES,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observer");
+        let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let mut w = world(&["a", "b"])
+            .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
         for (at, action) in [
             (
                 10,
@@ -1023,6 +1104,48 @@ fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across
             w.machines[1].steps.push_back(Step::new(at, Stop::Sent));
         }
         run_with(&mut w, 60, None, workers, Duration::from_micros(3)).unwrap();
+        let mut delivered = Vec::new();
+        let mut bytes = [0; MAX_DATAGRAM_BYTES];
+        loop {
+            match receiver.recv(&mut bytes) {
+                Ok(count) => {
+                    let event: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+                    if let Kind::MachineLifecycle { transition } = event.kind {
+                        delivered.push((
+                            event.simulated_time_ns,
+                            event.machine,
+                            event.incarnation,
+                            transition,
+                        ));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("{error}"),
+            }
+        }
+        assert_eq!(
+            delivered,
+            vec![
+                (
+                    10,
+                    "b".into(),
+                    0,
+                    MachineTransition::Throttled {
+                        factor_permille: 4000
+                    }
+                ),
+                (20, "b".into(), 0, MachineTransition::Crashed),
+                (25, "b".into(), 1, MachineTransition::Rebooted),
+                (
+                    30,
+                    "b".into(),
+                    1,
+                    MachineTransition::Throttled {
+                        factor_permille: 1000
+                    }
+                ),
+            ]
+        );
         let throttles: Vec<String> = machine_trace(&w, "b")
             .into_iter()
             .filter(|line| line.contains(":throttle/"))
@@ -1070,4 +1193,452 @@ fn throttle_of_an_unsupported_machine_is_a_recoverable_unsupported_error() {
     assert!(!machine_trace(&w, "b")
         .iter()
         .any(|l| l.contains("throttle")));
+}
+
+#[test]
+fn interactive_checkpoint_stops_before_another_round_and_preserves_continuation() {
+    let mut outcomes = Vec::new();
+    let mut queued = Vec::new();
+    for capture in [false, true] {
+        let mut w = world(&["a", "b"]);
+        w.early = 0;
+        w.events[1].insert(
+            (100, 1),
+            Payload::Frame {
+                from: 0,
+                bytes: vec![7, 8, 9],
+            },
+        );
+        w.seq = 1;
+        w.machines[0].steps.push_back(Step::new(5, Stop::Control));
+        let run = Run {
+            duration: 30,
+            end_on: None,
+            fork: None,
+            checkpoint: None,
+            require_barrier: false,
+        };
+        let mut selected = None;
+        let (outcome, _) = simulate(&mut w, &run, Duration::ZERO, &mut |boundary, admission| {
+            if capture && boundary.position.completed_rounds > 0 && !boundary.terminal {
+                admission.request_checkpoint()?;
+                admission.request_checkpoint()?; // Repeating the request is harmless.
+                selected = Some(boundary.position);
+            }
+            Ok(())
+        })
+        .unwrap();
+        if capture {
+            assert_eq!(outcome, RunOutcome::Checkpoint);
+            let selected = selected.unwrap();
+            assert_eq!(w.slices, selected.completed_rounds);
+            assert_eq!(w.boundaries, selected.boundary_index);
+            let incompatible = Run {
+                duration: 31,
+                ..run
+            };
+            assert!(
+                simulate(&mut w, &incompatible, Duration::ZERO, &mut |_, _| Ok(()))
+                    .unwrap_err()
+                    .contains("parameters changed")
+            );
+            let snapshot = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+            let snapshot: WorldSnapshot<Mock> =
+                serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            let prefix = trace(&w);
+            simulate(&mut w, &run, Duration::ZERO, &mut |_, _| Ok(())).unwrap();
+            outcomes.push(trace(&w));
+            queued.push((
+                w.seq,
+                w.boundaries,
+                w.events[1].keys().copied().collect::<Vec<_>>(),
+            ));
+            let continuation = trace(&w)[prefix.len()..].to_vec();
+            snapshot.restore_checkpoint(&mut w).unwrap();
+            w.factory.lock().unwrap().clear();
+            simulate(&mut w, &run, Duration::ZERO, &mut |_, _| Ok(())).unwrap();
+            assert_eq!(trace(&w), continuation);
+            assert_eq!(
+                (
+                    w.seq,
+                    w.boundaries,
+                    w.events[1].keys().copied().collect::<Vec<_>>()
+                ),
+                queued[0]
+            );
+        } else {
+            outcomes.push(trace(&w));
+            queued.push((
+                w.seq,
+                w.boundaries,
+                w.events[1].keys().copied().collect::<Vec<_>>(),
+            ));
+        }
+    }
+    assert_eq!(outcomes[0], outcomes[1]);
+    assert_eq!(queued[0], queued[1]);
+}
+
+#[test]
+fn host_controls_observe_terminal_exit_and_duration_boundaries() {
+    for oracle_exit in [false, true] {
+        let mut world = world(&["oracle"]);
+        if oracle_exit {
+            world.machines[0]
+                .steps
+                .push_back(Step::new(3, Stop::Exited));
+        }
+        let run = Run {
+            duration: 120,
+            end_on: Some("oracle"),
+            fork: None,
+            checkpoint: None,
+            require_barrier: false,
+        };
+        let mut boundaries = Vec::new();
+        simulate(&mut world, &run, Duration::ZERO, &mut |boundary, _| {
+            boundaries.push(boundary);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!boundaries[0].terminal);
+        assert!(boundaries.last().unwrap().terminal);
+        assert_eq!(
+            boundaries.last().unwrap().position.completed_rounds,
+            world.slices
+        );
+        assert_eq!(boundaries.iter().filter(|b| b.terminal).count(), 1);
+    }
+}
+
+#[test]
+fn observations_publish_in_commit_order_and_failed_rounds_publish_nothing() {
+    use crate::observation::Publisher;
+    use seedbox_engine_protocol::{
+        application_log::{Chunk, Stream},
+        observation::{Kind, Observation, MAX_DATAGRAM_BYTES},
+    };
+    use std::os::unix::net::UnixDatagram;
+
+    for workers in [0, 1, 2] {
+        for fail in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("observer");
+            let receiver = UnixDatagram::bind(&path).unwrap();
+            receiver.set_nonblocking(true).unwrap();
+            let publisher = Publisher::connect(&path).unwrap();
+            let mut w = world(&["a", "b"]).with_observations(Some(publisher));
+            w.early = 0;
+            for machine in &mut w.machines {
+                for at in [2, 4] {
+                    let mut step = Step::new(at, Stop::Control);
+                    step.observations.push(Kind::Log(Chunk {
+                        stream: Stream::Stdout,
+                        bytes: vec![at as u8],
+                    }));
+                    machine.steps.push_back(step);
+                }
+            }
+            if fail {
+                w.machines[1].bad = Some("state");
+            }
+            let result = run_with(&mut w, 20, None, workers, Duration::from_millis(2));
+            assert_eq!(result.is_err(), fail, "{result:?}");
+            let mut delivered = Vec::new();
+            let mut bytes = [0; MAX_DATAGRAM_BYTES];
+            loop {
+                match receiver.recv(&mut bytes) {
+                    Ok(count) => {
+                        let entry: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+                        delivered.push((entry.simulated_time_ns, entry.machine));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            let expected = if fail {
+                vec![]
+            } else {
+                vec![
+                    (2, "a".into()),
+                    (2, "b".into()),
+                    (4, "a".into()),
+                    (4, "b".into()),
+                ]
+            };
+            assert_eq!(delivered, expected, "workers={workers}, fail={fail}");
+            assert!(w
+                .machines
+                .iter()
+                .all(|machine| machine.observations.is_empty()));
+        }
+    }
+}
+
+#[test]
+fn readiness_is_reported_only_after_all_machine_effects_commit() {
+    use crate::observation::Publisher;
+    use seedbox_engine_protocol::observation::{Kind, Observation, MAX_DATAGRAM_BYTES};
+    use std::os::unix::net::UnixDatagram;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("observer");
+    let receiver = UnixDatagram::bind(&path).unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    let mut w = world(&["a", "b"]).with_observations(Some(Publisher::connect(&path).unwrap()));
+    w.faults.require_readiness();
+    for (machine, at) in w.machines.iter_mut().zip([2, 12]) {
+        let mut step = Step::new(at, Stop::Control);
+        step.effects.push((0, true));
+        machine.steps.push_back(step);
+    }
+    let run = Run {
+        duration: 30,
+        end_on: None,
+        fork: None,
+        checkpoint: None,
+        require_barrier: true,
+    };
+    let mut samples = Vec::new();
+    simulate(&mut w, &run, Duration::ZERO, &mut |boundary, _| {
+        samples.push(boundary);
+        Ok(())
+    })
+    .unwrap();
+    assert!(!samples.first().unwrap().application_ready);
+    assert!(samples.last().unwrap().application_ready);
+    assert!(samples
+        .iter()
+        .filter(|sample| sample.position.simulated_time_ns < 12)
+        .all(|sample| !sample.application_ready));
+    assert!(w.faults.initial_applications_ready());
+    w.machines[0].steps.push_back(Step::new(35, Stop::Exited));
+    run_with(&mut w, 40, None, 2, Duration::from_micros(10)).unwrap();
+    let mut delivered = Vec::new();
+    let mut bytes = [0; MAX_DATAGRAM_BYTES];
+    loop {
+        match receiver.recv(&mut bytes) {
+            Ok(count) => {
+                let observation: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+                delivered.push((
+                    observation.simulated_time_ns,
+                    observation.machine,
+                    observation.incarnation,
+                    observation.kind,
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("{error}"),
+        }
+    }
+    assert_eq!(
+        delivered,
+        vec![
+            (2, "a".into(), 0, Kind::MachineReady),
+            (12, "b".into(), 0, Kind::MachineReady),
+            (35, "a".into(), 0, Kind::MachineExited { code: 0 }),
+        ]
+    );
+}
+
+#[test]
+fn fault_events_distinguish_acknowledgement_timeout_and_target_loss() {
+    use seedbox_engine_protocol::observation::{Kind, Observation, MAX_DATAGRAM_BYTES};
+    for workers in [0, 2] {
+        for (expected, exited) in [
+            (RowStatus::Applied, false),
+            (RowStatus::Failed, false),
+            (RowStatus::Unavailable, false),
+            (RowStatus::Unavailable, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("observer");
+            let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+            receiver.set_nonblocking(true).unwrap();
+            let mut w = world(&["a"])
+                .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
+            w.faults.management_ready(0, 0, 10).unwrap();
+            plan(
+                &mut w,
+                10,
+                Action::Stop {
+                    machine: "a".into(),
+                },
+            );
+            match expected {
+                RowStatus::Applied => {
+                    let mut step = Step::new(20, Stop::Control);
+                    step.effects.push((1, true));
+                    w.machines[0].steps.push_back(step);
+                }
+                RowStatus::Unavailable if exited => {
+                    w.machines[0].steps.push_back(Step::new(20, Stop::Exited));
+                }
+                RowStatus::Unavailable => {
+                    plan(
+                        &mut w,
+                        20,
+                        Action::Crash {
+                            machine: "a".into(),
+                        },
+                    );
+                }
+                _ => {}
+            }
+            run_with(&mut w, 200, None, workers, Duration::from_micros(5)).unwrap();
+            let mut delivered = Vec::new();
+            let mut bytes = [0; MAX_DATAGRAM_BYTES];
+            loop {
+                match receiver.recv(&mut bytes) {
+                    Ok(count) => {
+                        let observation: Observation =
+                            serde_json::from_slice(&bytes[..count]).unwrap();
+                        if let Kind::FaultChanged {
+                            id,
+                            action,
+                            machine,
+                            status,
+                            applied_time_ns,
+                        } = observation.kind
+                        {
+                            if id == 1 {
+                                assert_eq!(action, "stop");
+                                assert_eq!(machine.as_deref(), Some("a"));
+                                delivered.push((id, status, applied_time_ns));
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            assert_eq!(
+                delivered,
+                vec![
+                    (1, RowStatus::Requested, None),
+                    (1, expected, (expected == RowStatus::Applied).then_some(20)),
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn interactive_admission_replays_exactly_across_workers() {
+    use seedbox_engine_protocol::intervention::Intervention;
+    let mut retained: Vec<Intervention> = Vec::new();
+    let mut results = Vec::new();
+    for workers in [0, 2] {
+        let mut w = world(&["a", "b"]);
+        w.early = 0;
+        w.machines[1].steps.push_back(Step::new(5, Stop::Control));
+        let run = Run {
+            duration: 30,
+            end_on: None,
+            fork: None,
+            checkpoint: None,
+            require_barrier: false,
+        };
+        let mut replay =
+            crate::intervention::Replay::new(seedbox_engine_protocol::intervention::History {
+                entries: retained.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut committed = false;
+        let mut boundary =
+            |position: Boundary, admission: &mut crate::intervention::Admission<'_>| {
+                if workers != 0 {
+                    replay.boundary(admission)?;
+                    committed = replay.finish().is_ok();
+                    return Ok(());
+                }
+                if committed || position.position.completed_rounds == 0 || position.terminal {
+                    return Ok(());
+                }
+                if workers == 0 {
+                    let earliest = admission.earliest_effect_ns();
+                    assert_eq!(earliest, position.position.simulated_time_ns);
+                    let mut plan = Plan {
+                        id: 0,
+                        at_ns: earliest - 1,
+                        deadline_ns: earliest,
+                        action: Action::Partition {
+                            handle: "interactive".into(),
+                            left: vec!["a".into()],
+                            right: vec!["b".into()],
+                        },
+                    };
+                    assert!(admission.propose("cut".into(), plan.clone()).is_err());
+                    plan.at_ns = earliest;
+                    let proposal = admission.propose("cut".into(), plan.clone())?;
+                    // Preparation is read-only: repeated proposals assign the same ID.
+                    assert_eq!(admission.propose("cut".into(), plan)?, proposal);
+                    retained.push(proposal);
+                }
+                let record = &retained[0];
+                let mut wrong = record.clone();
+                wrong.position.boundary_index += 1;
+                assert!(admission.commit(&wrong).is_err());
+                wrong = record.clone();
+                wrong.plan.id += 1;
+                assert!(admission.commit(&wrong).is_err());
+                admission.commit(record)?;
+                committed = true;
+                Ok(())
+            };
+        let result = if workers == 0 {
+            simulate(&mut w, &run, Duration::ZERO, &mut boundary)
+        } else {
+            simulate_parallel(
+                &mut w,
+                &run,
+                Workers {
+                    count: workers,
+                    skew: Duration::ZERO,
+                },
+                |_| Ok(MockClock::default()),
+                &mut boundary,
+            )
+        };
+        result.unwrap();
+        replay.finish().unwrap();
+        assert!(committed);
+        assert!(w.faults.blocked(0, 1));
+        assert_eq!(w.faults.log.len(), 1);
+        assert_eq!(w.faults.log[0].applied_at_ns, Some(retained[0].plan.at_ns));
+        results.push(w.faults.log.clone());
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+#[test]
+fn failed_intervention_persistence_stops_before_admission_or_guest_execution() {
+    let mut w = world(&["a"]);
+    let run = Run {
+        duration: 30,
+        end_on: None,
+        fork: None,
+        checkpoint: None,
+        require_barrier: false,
+    };
+    let error = simulate(&mut w, &run, Duration::ZERO, &mut |_, admission| {
+        let at = admission.earliest_effect_ns();
+        let _proposal = admission.propose(
+            "crash".into(),
+            Plan {
+                id: 0,
+                at_ns: at,
+                deadline_ns: at,
+                action: Action::Crash {
+                    machine: "a".into(),
+                },
+            },
+        )?;
+        Err("persist intervention: disk full".into())
+    })
+    .unwrap_err();
+    assert_eq!(error, "persist intervention: disk full");
+    assert!(trace(&w).is_empty());
+    assert!(w.faults.log.is_empty());
+    assert_eq!(w.faults.next_boundary(), u64::MAX);
 }

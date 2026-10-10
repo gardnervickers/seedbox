@@ -4,6 +4,7 @@
 #![recursion_limit = "256"]
 
 mod boundary;
+mod live_checkpoint;
 mod management_uart;
 use seedbox_engine_core::{checkpoint, control, disk, links, output_layout, rng};
 #[cfg(test)]
@@ -226,6 +227,7 @@ pub struct BootInputs {
     console_limit: Option<usize>,
     features: MachineFeatures,
     log_chunk_limit: Option<usize>,
+    observations: Option<std::sync::Arc<seedbox_engine_core::observation::Publisher>>,
 }
 
 /// A machine's disk: zeroed, or a raw image relative to `base` (with
@@ -285,6 +287,9 @@ fn boot_machine(
     mach.com2.output_limit = b.console_limit;
     mach.com1.chunks.limit = b.log_chunk_limit;
     mach.com2.chunks.limit = b.log_chunk_limit;
+    mach.observations = b.observations.clone();
+    mach.com1.discard_output = b.observations.is_some();
+    mach.com2.discard_output = b.observations.is_some();
     mach.tolerance = b.tolerance;
     mach.timer_jitter = b.timer_jitter;
     mach.exact_timer_ppm = b.exact_timer_ppm;
@@ -309,20 +314,23 @@ type WorldSnapshot = world_core::WorldSnapshot<Machine>;
 /// One segment of the run under the windowed scheduler, on one thread or
 /// the machine worker pool. Returns the outcome word and the scheduler's
 /// report section.
-fn simulate_windowed(
+fn simulate_segment(
     world: &mut World,
     run: &world_windowed::Run,
     request: &WorkerRequest,
     host_control: &mut Option<host_control::HostControl>,
+    replay: &mut seedbox_engine_core::intervention::Replay,
 ) -> Result<(RunOutcome, Value), String> {
-    let mut boundary = || {
-        if let Some(control) = host_control.as_mut() {
-            control
-                .boundary()
-                .map_err(|e| format!("host control: {e}"))?;
-        }
-        Ok(())
-    };
+    let mut boundary =
+        |position, admission: &mut seedbox_engine_core::intervention::Admission<'_>| {
+            replay.boundary(admission)?;
+            if let Some(control) = host_control.as_mut() {
+                control
+                    .boundary_with_admission(position, admission)
+                    .map_err(|e| format!("host control: {e}"))?;
+            }
+            Ok(())
+        };
     let skew = std::time::Duration::from_micros(request.windowed_skew_us);
     if request.machine_workers <= 1 {
         return world_windowed::simulate(world, run, skew, &mut boundary);
@@ -348,6 +356,38 @@ fn simulate_windowed(
         &mut boundary,
     )
 }
+/// Hold interactive snapshots across segments; a successful capture is an
+/// observation of the current timeline, not the simulation's final outcome.
+fn simulate_windowed(
+    world: &mut World,
+    run: &world_windowed::Run,
+    request: &WorkerRequest,
+    host: &mut Option<host_control::HostControl>,
+    replay: &mut seedbox_engine_core::intervention::Replay,
+    checkpoints: &mut live_checkpoint::Checkpoints,
+) -> Result<(RunOutcome, Value), String> {
+    let mut segments = Vec::new();
+    loop {
+        if let Some(host) = host.as_mut() {
+            checkpoints.held.configure(host);
+        }
+        let (outcome, mut scheduler) = simulate_segment(world, run, request, host, replay)?;
+        if outcome == RunOutcome::Checkpoint {
+            if let Some(host) = host.as_mut() {
+                if checkpoints.capture(world, replay, host, &request.out)? {
+                    segments.push(scheduler);
+                    continue;
+                }
+            }
+        }
+        if !segments.is_empty() {
+            segments.push(scheduler.clone());
+            scheduler["segments"] = serde_json::json!(segments);
+        }
+        return Ok((outcome, scheduler));
+    }
+}
+
 /// Pin the calling thread to one CPU.
 fn pin(cpu: usize) -> Result<(), String> {
     unsafe {
@@ -493,6 +533,15 @@ pub fn run(
     console_trace: Option<ConsoleTraceCallback>,
 ) -> Result<RunReport, String> {
     options.validate()?;
+    let mut replay = seedbox_engine_core::intervention::Replay::new(
+        options.interventions.clone().unwrap_or_default(),
+    )?;
+    let observations = options
+        .observations
+        .as_deref()
+        .map(seedbox_engine_core::observation::Publisher::connect)
+        .transpose()
+        .map_err(|e| format!("observation socket: {e}"))?;
     START.with(|_| ());
     let _console_trace =
         ConsoleTraceGuard(CONSOLE_TRACE.with(|trace| trace.replace(console_trace)));
@@ -504,12 +553,18 @@ pub fn run(
     let digest = options.digest;
     let features = options.features;
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let mut live_checkpoints = live_checkpoint::Checkpoints::default();
     let mut host_control = options
         .host_control
         .as_deref()
         .map(host_control::HostControl::bind)
         .transpose()
         .map_err(|e| format!("host control: {e}"))?;
+    if options.interventions.is_some() && options.resume_checkpoint.is_none() {
+        if let Some(host) = &mut host_control {
+            host.disable_fault_injection();
+        }
+    }
     let cfg = read_config(config_path)?;
     validate_config(&cfg)?;
     let disk_fault_model = disk::fault_model(cfg.disk_loss)?;
@@ -598,6 +653,7 @@ pub fn run(
             console_limit,
             features,
             log_chunk_limit: options.log_chunk_limit,
+            observations: observations.clone(),
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
         let mut mach = boot_machine(&kvm, &names[i], &boot, barrier, seed)?;
@@ -640,9 +696,54 @@ pub fn run(
         control: control::Control::from_config(None, names.clone(), latency, early)?,
         macs,
         machines,
-    })?;
+    })?
+    .with_observations(observations);
+    if let Some(path) = &options.resume_checkpoint {
+        let saved = live_checkpoint::load(path)?;
+        let mut state = saved.state;
+        let history = options.interventions.clone().unwrap_or_default();
+        let consumed = history
+            .entries
+            .iter()
+            .take_while(|entry| entry.position.boundary_index <= state.position.boundary_index)
+            .count();
+        if consumed < history.entries.len() {
+            if let Some(host) = &mut host_control {
+                host.disable_fault_injection();
+            }
+        }
+        state.replay.history = history;
+        state.replay.consumed = consumed;
+        replay = seedbox_engine_core::intervention::Replay::from_checkpoint(state.replay)?;
+        state.world.restore_checkpoint(&mut world)?;
+        live_checkpoints.boot = saved.boot;
+        live_checkpoints.kills = saved.kills;
+        let started = Instant::now();
+        let run = segment(None, None);
+        let (outcome, scheduler) = simulate_windowed(
+            &mut world,
+            &run,
+            options,
+            &mut host_control,
+            &mut replay,
+            &mut live_checkpoints,
+        )?;
+        replay.finish()?;
+        let finished = Finished {
+            outcome,
+            scheduler,
+            seed,
+            kills: &live_checkpoints.kills,
+            host_seconds: started.elapsed().as_secs_f64(),
+            out: &out,
+        };
+        let mut result = report(&mut world, &run, digest, finished)?;
+        result.boot = live_checkpoints.boot;
+        return Ok(RunReport::Single(Box::new(result)));
+    }
     if !forked {
         let kills = arm_seed(&mut world, cfg.seed_plan(), &names, seed, 0)?;
+        live_checkpoints.kills = kills.clone();
         if !checkpoint_times.is_empty() {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let engine =
@@ -676,22 +777,36 @@ pub fn run(
             } else {
                 None
             };
+            let origin_replay = replay.clone();
             let mut held = Vec::new();
             for &at in &checkpoint_times {
                 if let Some(origin) = origin.as_ref().filter(|_| !held.is_empty()) {
                     origin.restore_checkpoint(&mut world)?;
+                    replay = origin_replay.clone();
                 }
                 let run = segment(None, Some(at));
-                let (outcome, _) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
+                let (outcome, _) = simulate_windowed(
+                    &mut world,
+                    &run,
+                    options,
+                    &mut host_control,
+                    &mut replay,
+                    &mut live_checkpoints,
+                )?;
                 if outcome != RunOutcome::Checkpoint {
                     return Err(format!("checkpoint at {at} ns not reached: {outcome}"));
                 }
-                held.push((at, WorldSnapshot::take_checkpoint(&mut world)?));
+                held.push((
+                    at,
+                    WorldSnapshot::take_checkpoint(&mut world)?,
+                    replay.clone(),
+                ));
             }
             let mut reports = Vec::new();
-            for (at, snapshot) in &held {
+            for (at, snapshot, saved_replay) in &held {
                 for &branch_seed in &seeds {
                     snapshot.restore_checkpoint(&mut world)?;
+                    replay = saved_replay.clone();
                     let identity = checkpoint::branch_identity(&parent, *at, branch_seed);
                     let reseed =
                         reseed_checkpoint(&mut world, &names, seed, branch_seed, &identity)?;
@@ -705,8 +820,15 @@ pub fn run(
                     reopen_outputs(&mut world, &dir, options.stream_console)?;
                     let started = Instant::now();
                     let run = segment(None, None);
-                    let (outcome, scheduler) =
-                        simulate_windowed(&mut world, &run, options, &mut host_control)?;
+                    let (outcome, scheduler) = simulate_windowed(
+                        &mut world,
+                        &run,
+                        options,
+                        &mut host_control,
+                        &mut replay,
+                        &mut live_checkpoints,
+                    )?;
+                    replay.finish()?;
                     // The public report's seed remains the parent seed; the
                     // semantic branch seed and identity have explicit fields.
                     let finished = Finished {
@@ -739,7 +861,14 @@ pub fn run(
         }
         let started = Instant::now();
         let run = segment(None, None);
-        let (outcome, scheduler) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
+        let (outcome, scheduler) = simulate_windowed(
+            &mut world,
+            &run,
+            options,
+            &mut host_control,
+            &mut replay,
+            &mut live_checkpoints,
+        )?;
         let finished = Finished {
             outcome,
             scheduler,
@@ -748,6 +877,7 @@ pub fn run(
             host_seconds: started.elapsed().as_secs_f64(),
             out: &out,
         };
+        replay.finish()?;
         return report(&mut world, &run, digest, finished).map(|r| RunReport::Single(Box::new(r)));
     }
 
@@ -757,6 +887,8 @@ pub fn run(
         &segment(Some(fork_at.into()), None),
         options,
         &mut host_control,
+        &mut replay,
+        &mut live_checkpoints,
     )?;
     let barrier_ns = world
         .machines()
@@ -772,9 +904,11 @@ pub fn run(
         None
     };
     let snapshot_host_seconds = started.elapsed().as_secs_f64();
+    let snapshot_replay = replay.clone();
     let stream = options.stream_console;
     let mut reports = Vec::new();
     for (i, &seed) in seeds.iter().enumerate() {
+        replay = snapshot_replay.clone();
         let started = Instant::now();
         let restored_pages = match (i, snapshot.as_ref()) {
             (0, _) | (_, None) => 0,
@@ -791,8 +925,27 @@ pub fn run(
         }
         let started = Instant::now();
         let (kills, reseed) = release(&mut world, cfg.seed_plan(), &names, seed, release_skew)?;
+        live_checkpoints.kills = kills.clone();
+        live_checkpoints.boot = Some(BootReport {
+            seed: boot_seed,
+            barrier_ns,
+            fork_at_ns: fork_at,
+            release_skew_ns: release_skew,
+            boot_host_seconds,
+            forked: i > 0,
+            restored_pages,
+            restore_host_seconds,
+            reseed: reseed.clone(),
+        });
         let run = segment(None, None);
-        let (outcome, scheduler) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
+        let (outcome, scheduler) = simulate_windowed(
+            &mut world,
+            &run,
+            options,
+            &mut host_control,
+            &mut replay,
+            &mut live_checkpoints,
+        )?;
         let finished = Finished {
             outcome,
             scheduler,
@@ -801,6 +954,7 @@ pub fn run(
             host_seconds: started.elapsed().as_secs_f64(),
             out: &dir,
         };
+        replay.finish()?;
         let mut r = report(&mut world, &run, digest, finished)?;
         r.boot = Some(BootReport {
             seed: boot_seed,
@@ -834,6 +988,9 @@ pub fn run(
 /// indexes and, when streaming, the raw logs, which start with the bytes the
 /// machine has already written.
 fn open_outputs(mach: &mut Machine, out: &str, stream: bool) -> Result<(), String> {
+    if mach.observations.is_some() {
+        return Ok(());
+    }
     for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
         uart.output_file = uart.chunks.reopen_stream(
             &format!("{out}/{}.{ext}", mach.world.name),
@@ -1131,10 +1288,12 @@ fn report(
             mach.witness_log.encode(mach.world.time, &mach.witness),
         )
         .map_err(|e| e.to_string())?;
-        std::fs::write(format!("{out}/{}.console", mach.world.name), &mach.com1.out)
-            .map_err(|e| e.to_string())?;
-        std::fs::write(format!("{out}/{}.mgmt", mach.world.name), &mach.com2.out)
-            .map_err(|e| e.to_string())?;
+        if mach.observations.is_none() {
+            std::fs::write(format!("{out}/{}.console", mach.world.name), &mach.com1.out)
+                .map_err(|e| e.to_string())?;
+            std::fs::write(format!("{out}/{}.mgmt", mach.world.name), &mach.com2.out)
+                .map_err(|e| e.to_string())?;
+        }
         machines.push(row);
     }
     let sim_ns = world
@@ -1167,7 +1326,7 @@ fn report(
         deferred_tx: world.boot_inputs().iter().any(|b| b.features.deferred_tx),
         evidence: WorldEvidence {
             outcome,
-            world_witness: format!("{:x}", world_witness.finalize()),
+            world_witness: hex::encode(world_witness.finalize()),
             faults,
             fault_error,
             control_history,
@@ -1181,7 +1340,7 @@ fn report(
         frames_delivered: world.delivered(),
         frames_dropped: world.dropped(),
         network_counters: world.network_snapshot(),
-        network_witness: format!("{network_witness:x}"),
+        network_witness: hex::encode(network_witness),
         kills: kills.to_vec(),
         rejected_fault_effects: to_values(&world.faults().rejected_effects)?,
         management_readiness: world.faults().readiness.clone(),

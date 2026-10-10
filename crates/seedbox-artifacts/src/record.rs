@@ -64,6 +64,9 @@ pub struct RunIdentity {
     pub seed: u64,
     pub configuration: Simulation,
     pub inputs: PreparedInputs,
+    /// Content-addressed semantic history, sealed after interactive execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interventions: Option<ContentDigest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,4 +133,64 @@ pub fn write_record(directory: &Path, record: &RunRecord) -> Result<()> {
     temp.persist(directory.join("manifest.json"))
         .map_err(|e| e.error)?;
     Ok(())
+}
+
+/// Compare retained result evidence; callers separately establish input compatibility.
+pub fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
+    let outcome_matches = baseline.outcome == fresh.outcome;
+    let evidence = |record: &RunRecord| {
+        record.report.as_ref().is_some_and(|r| {
+            r.witness.is_some()
+                && (record.identity.inputs.profile.witness_mode != WitnessMode::FullState
+                    || r.full_state
+                        .as_ref()
+                        .is_some_and(|s| s.keys().eq(record.identity.inputs.guests.keys())))
+        })
+    };
+    let comparable = matches!(
+        baseline.outcome,
+        Outcome::Pass | Outcome::Fail | Outcome::Timeout
+    ) && matches!(
+        fresh.outcome,
+        Outcome::Pass | Outcome::Fail | Outcome::Timeout
+    ) && evidence(baseline)
+        && evidence(fresh);
+    let (witness_matches, full_state_matches, fault_history_matches, result_matches) =
+        match (&baseline.report, &fresh.report) {
+            (Some(a), Some(b)) => (
+                a.witness
+                    .as_ref()
+                    .zip(b.witness.as_ref())
+                    .map(|(a, b)| a == b),
+                match (&a.full_state, &b.full_state) {
+                    (Some(a), Some(b)) => Some(a == b),
+                    (None, None) => None,
+                    _ => Some(false),
+                },
+                a.faults == b.faults,
+                a.workload_exit == b.workload_exit && a.reason == b.reason,
+            ),
+            _ => (None, None, false, false),
+        };
+    let status = if !comparable {
+        ReplayStatus::NotComparable
+    } else if outcome_matches
+        && result_matches
+        && witness_matches == Some(true)
+        && full_state_matches != Some(false)
+        && fault_history_matches
+    {
+        ReplayStatus::Match
+    } else {
+        ReplayStatus::Mismatch
+    };
+    ReplayComparison {
+        status,
+        outcome_matches,
+        witness_matches,
+        full_state_matches,
+        fault_history_matches,
+        ram_pages: None,
+        divergence: None,
+    }
 }

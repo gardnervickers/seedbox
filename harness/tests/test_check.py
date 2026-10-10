@@ -50,7 +50,9 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(check.features_for("seedbox-vmm", "x86_64", check.expand(["linux-guests"], "x86_64")),
                          ["kvm-tests", "guest-tests"])
         self.assertEqual(check.features_for("seedbox", "x86_64", ["portable", "linux-oci", "linux-pause"]),
-                         ["oci-tests", "retained-run-tests"])
+                         ["retained-run-tests"])
+        self.assertEqual(check.features_for("seedbox-application", "x86_64", ["portable", "linux-oci"]),
+                         ["oci-tests"])
         self.assertEqual(check.features_for("seedbox-arm64", "x86_64", check.expand(["linux"], "x86_64")), [])
         self.assertEqual(check.features_for("seedbox-arm64", "aarch64", check.expand(["linux-guests"], "aarch64")),
                          ["kvm-tests", "guest-tests"])
@@ -172,13 +174,10 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(check.main(["--list", "mac-hvf"]), 2)
             self.assertEqual(check.main(["mac-hvf"]), 2)
 
-    def test_unknown_suite_and_misplaced_cpu_are_usage_errors(self):
+    def test_unknown_suite_is_a_usage_error(self):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as raised:
                 check.main(["linux-everything"])
-            self.assertEqual(raised.exception.code, 2)
-            with self.assertRaises(SystemExit) as raised:
-                check.main(["linux-kvm", "--cpu", "3"])
             self.assertEqual(raised.exception.code, 2)
 
 

@@ -12,7 +12,7 @@ pub const INTERVAL_NS: u64 = 1_000_000;
 /// records and the first eight witness bytes read as little-endian.
 pub const ENTRY_BYTES: usize = 24;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WitnessLog {
     entries: Vec<[u64; 3]>,
     /// Witness records so far, across incarnations.

@@ -86,7 +86,7 @@ jobs:
             du -sh /nix/store
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Portable prerequisites and PV application acceptance
-        run: nix develop --command bash harness/check.sh linux-apps --cpu 1
+        run: nix develop --command bash harness/check.sh linux-apps
       - name: Bound diagnostic artifact storage
         if: always()
         # Privileged KVM tests leave root-owned manifests and logs.
