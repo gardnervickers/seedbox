@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /* A waiter that spins on WFE and WFI until another thread sets a flag after a
  * virtual-time sleep. A host interruption wakes both hints, so without the
  * client's NOP rewrite the iteration count, and the progress charged for it,
