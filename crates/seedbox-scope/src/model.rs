@@ -211,13 +211,15 @@ impl Console {
 /// records of (time, incarnation, order, offset, length).
 pub fn parse_chunks(bytes: &[u8]) -> Option<Vec<Chunk>> {
     let body = bytes.strip_prefix(CHUNK_MAGIC)?;
-    if body.len() % 40 != 0 {
+    let (records, rest) = body.as_chunks::<40>();
+    if !rest.is_empty() {
         return None;
     }
-    let mut chunks: Vec<Chunk> = body
-        .chunks_exact(40)
+    let mut chunks: Vec<Chunk> = records
+        .iter()
         .map(|r| {
-            let f = |i: usize| u64::from_le_bytes(r[i * 8..i * 8 + 8].try_into().unwrap());
+            let words = r.as_chunks::<8>().0;
+            let f = |i: usize| u64::from_le_bytes(words[i]);
             Chunk {
                 time_ns: f(0),
                 incarnation: f(1),
