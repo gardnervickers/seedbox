@@ -6,5 +6,5 @@ x-seedbox:
   version: 1
   seed: 1009
   limits: {simulated_time: 2s, wall_time: 2m}
-  schedule: {timer_jitter: 1ms, stop_tolerance: 2ms}
-  check: {service: probe, exit_code: 0}
+  schedule: {timer_jitter: 1ms}
+  check: {service: probe}

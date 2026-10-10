@@ -2,7 +2,8 @@
 
 use sha2::{Digest, Sha256};
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Rng {
     key: [u8; 32],
     counter: u64,

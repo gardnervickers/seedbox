@@ -774,14 +774,62 @@ fn accepted_channels_are_complete_even_when_retained_capture_is_exhausted() {
 }
 
 #[test]
-fn unsupported_snapshot_and_time_reseed_do_not_send_or_fabricate_state() {
+fn checkpoint_restore_rewinds_only_after_an_exact_acknowledgement() {
+    for forged in [false, true] {
+        let fixture = Fixture::new();
+        let initial = boot_reply()["observation"].clone();
+        let checkpoint = json!({
+            "artifact":fs::canonicalize(&fixture.root).unwrap().join("output").join(format!(".arm-checkpoint-{}-1-1", std::process::id())),
+            "identity":identity("a",1,0), "observation":initial,
+            "console_offset":0, "sha256":"a".repeat(64),
+        });
+        let captured = json!({"sequence":1,"before":identity("a",1,0),"after":identity("a",1,0),
+            "observation":initial,"answer":{"Snapshot":checkpoint}});
+        let mut advanced = horizon_reply();
+        advanced["sequence"] = json!(2);
+        let mut restored = json!({"sequence":3,"before":identity("a",1,0),"after":identity("a",1,0),
+            "observation":initial,"answer":{"Restored":checkpoint}});
+        if forged {
+            restored["answer"]["Restored"]["sha256"] = json!("b".repeat(64));
+        }
+        let mut machine = proxy(&fixture, &[boot_reply(), captured, advanced, restored], 0);
+        let before = format!("{:?}", *machine);
+        let saved = machine.snapshot().unwrap();
+        let saved = serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        machine
+            .advance(
+                &mut (),
+                SliceRequest {
+                    hard_limit: 10,
+                    early_slack: 0,
+                    observe_console: false,
+                },
+                &mut Vec::new(),
+            )
+            .unwrap();
+        let advanced = format!("{:?}", *machine);
+        let result = machine.restore(&saved);
+        if forged {
+            assert!(result.unwrap_err().contains("acknowledgement mismatch"));
+            assert_eq!(format!("{:?}", *machine), advanced);
+            assert!(machine.snapshot().is_err());
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                boot_inputs(&fixture).memory_bytes.div_ceil(4096)
+            );
+            assert_eq!(format!("{:?}", *machine), before);
+            assert_eq!(machine.exits(), 0);
+        }
+    }
+}
+
+#[test]
+fn unsupported_time_reseed_does_not_send_or_fabricate_state() {
     let fixture = Fixture::new();
     let mut machine = proxy(&fixture, &[boot_reply()], 2);
     let before = format!("{:?}", *machine);
     let requests = fs::read(fixture.path("requests")).unwrap();
-    assert!(
-        matches!(machine.snapshot(), Err(error) if error == "ARM arbitrary machine snapshots are unsupported")
-    );
     assert!(machine
         .release(10, [0; 8])
         .unwrap_err()

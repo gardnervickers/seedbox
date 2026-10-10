@@ -1,0 +1,45 @@
+[package]
+name = "seedbox-application"
+build = "build-runtime.rs"
+description = "Seedbox simulation configuration and orchestration"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+hex.workspace = true
+seedbox-artifacts.workspace = true
+seedbox-engine-protocol.workspace = true
+serde.workspace = true
+seedbox-control.workspace = true
+seedbox-engine-core.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+sha2.workspace = true
+shell-words = "1"
+tempfile.workspace = true
+tar.workspace = true
+walkdir = "2"
+flate2 = "1"
+xattr = "1"
+bollard.workspace = true
+futures-util.workspace = true
+tokio-util = { version = "0.7", features = ["io"] }
+globset = "0.4"
+tokio.workspace = true
+libc.workspace = true
+ocirender = "0.2.2"
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+seedbox-vmm = { path = "../seedbox-vmm" }
+
+[target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))'.dependencies]
+seedbox-arm64 = { path = "../seedbox-arm64" }
+
+
+[features]
+oci-tests = []
+
+[[test]]
+name = "oci_engine"
+required-features = ["oci-tests"]

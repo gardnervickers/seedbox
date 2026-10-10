@@ -56,14 +56,26 @@ reply and delivery boundaries. Parking and capture require no owed I/O.
 Adapters return at the first causal stop. Frames carry that stop's committed
 time. Committed console observation stops on the first relevant byte; an adapter
 must not scan a horizon-sized log batch and reconstruct trigger timing afterward.
+Decoded application output bursts join the console observation channel at their
+complete-frame commit time. They must be drained before another slice or a
+checkpoint; client delivery is independent of this semantic channel.
 The existing effect channels preserve reference processing order: console,
 fault acknowledgements, exit availability, control requests, fault observation,
 then frames. This is not a promise that arbitrary batched effects can be reordered
 into a single global stream. `Stop::Control` may represent console or fault effects
 as well as a control request.
 
+If a target exits before acknowledging an outstanding fault, the fault is
+recorded as `Unavailable` at that exit, including faults from static YAML plans.
+The coordinator does not wait for a dead target to reach an acknowledgement
+deadline and turn that target loss into `Failed`.
+
 Equal-time coordinator boundaries retain control, then trigger, then fault
-precedence. Strict replies are never delivered early, including a reply owed
+precedence. Host playback controls observe the resulting committed state after
+these policies, before the next round. Their acknowledgements carry committed
+time, completed-round count and a snapshot-preserved boundary index. A terminal boundary cannot be held by playback
+pause or pacing; a barrier/checkpoint segment transition remains nonterminal.
+Strict replies are never delivered early, including a reply owed
 before a fatal control failure terminates execution. Shared finalization cuts off
 control and trigger evidence at the designated end machine's committed exit time
 (or the duration boundary), even when another machine ran ahead by lookahead. A crash discards the dead
@@ -117,3 +129,44 @@ extraction is also checked against the actual pre-extraction KVM coordinator wit
 identical mocked physical primitives and retained state/trace receipts. These are
 policy and extraction checks on Mac, not Linux CPU/KVM qualification. The existing
 real KVM tests remain for the final Linux merge train.
+
+### Live observations
+
+Backend decoders place application log records in a bounded runtime-only buffer
+on each machine. The window adapter drains that buffer into another bounded
+buffer for the round. Only successful coordinator absorption publishes records,
+in simulation-time, machine-index, then per-machine record order. Failed rounds
+discard pending observations. Neither reader speed nor delivery success feeds
+back into guest scheduling, output triggers, witnesses, or oracle verdicts.
+
+Overflow emits a machine-attributed record count at the last omitted position.
+These omissions are distinct from sequence gaps during datagram delivery. The
+publisher and delivery sequence are outside snapshots; checkpoints require all
+machine messages to have been drained.
+
+### Fault admission order
+
+Fault IDs identify admission order. Their scheduled times need not be monotonic:
+a runtime action can precede a previously scheduled future action. The policy
+queue executes by time and then ID. Runtime callers use `Faults::admit` with
+the current committed admission boundary; a plan before that boundary is rejected
+before any state changes. Initial plan loading uses `append` with a zero floor.
+Retained-report lifecycle checks use the same time/ID order.
+
+Host callbacks receive a restricted `Admission` scope after normal boundary
+policies. `propose` validates and assigns the next fault ID without mutation;
+`commit` requires the exact retained position and ID. The host must durably save
+the proposal before commit, and terminate on persistence or retained-commit
+failure. Effects cannot precede the committed scheduler horizon. On callback
+return, newly admitted faults enter the exact-boundary queue before another
+machine round; segment stops carry them into continuation. The native control socket now supports prepare/commit: preparation holds the
+world at the same boundary until commit, status reports the pending proposal,
+and identical wire retries return their original reply. This hold is accounted
+as intentional host waiting. Initial boot rejects preparation until application
+readiness, because scenario arming replaces boot fault policy. The server must
+persist before committing and terminate its worker if persistence fails; server
+journal wiring is implemented, while fault CLI and rerun wiring remain in progress.
+
+Interactive proposal and commit also consult stopped-machine backend capabilities.
+In particular, unsupported throttle is refused before the host persists a plan;
+it must not be accepted and then fail when the scheduler applies it.

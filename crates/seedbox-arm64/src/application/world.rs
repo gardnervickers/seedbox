@@ -29,36 +29,94 @@ pub struct Options {
     pub seed: u64,
     pub full_state: bool,
     pub host_control: Option<PathBuf>,
+    pub interventions: Option<seedbox_engine_core::intervention::History>,
+    pub resume_checkpoint: Option<PathBuf>,
+    pub observations: Option<PathBuf>,
     pub console_limit: usize,
     /// Machine threads under the windowed scheduler; a performance setting
     /// that never changes results. 1 runs every machine on this thread.
     pub machine_workers: usize,
 }
 
-/// One segment of the run under the windowed scheduler. Every machine is
-/// its own stopped worker process, so the pool threads need no clock: the
-/// adapter's clock is `()`.
+mod checkpoint;
+
+struct Interactive {
+    initial_launch: Option<Value>,
+    output: PathBuf,
+    host: Option<crate::host_control::HostControl>,
+    replay: seedbox_engine_core::intervention::Replay,
+    checkpoints: seedbox_engine_core::checkpoint::LiveCheckpoints<ArmMachine>,
+}
+
+/// Interactive captures return the stopped world to its owner and then resume
+/// the retained scheduler plan. They are not terminal simulation outcomes.
 fn simulate_windowed(
     world: &mut world_core::World<ArmMachine>,
     run: &world_windowed::Run,
     machine_workers: usize,
-    boundary: &mut dyn FnMut() -> Result<()>,
+    interactive: &mut Interactive,
 ) -> Result<(&'static str, Value)> {
-    if machine_workers <= 1 {
-        return world_windowed::simulate(world, run, Duration::ZERO, boundary)
-            .map(|(outcome, scheduler)| (outcome.as_str(), scheduler));
+    let mut segments = Vec::new();
+    loop {
+        if let Some(host) = &mut interactive.host {
+            interactive.checkpoints.configure(host);
+            if run.fork.is_some() {
+                host.disable_checkpoints();
+            }
+        }
+        let mut boundary =
+            |position, admission: &mut seedbox_engine_core::intervention::Admission<'_>| {
+                interactive.replay.boundary(admission)?;
+                if let Some(host) = &mut interactive.host {
+                    host.boundary_with_admission(position, admission)
+                        .map_err(|e| format!("host control: {e}"))?;
+                }
+                Ok(())
+            };
+        let (outcome, mut scheduler) = if machine_workers <= 1 {
+            world_windowed::simulate(world, run, Duration::ZERO, &mut boundary)
+        } else {
+            world_windowed::simulate_parallel(
+                world,
+                run,
+                world_windowed::Workers {
+                    count: machine_workers,
+                    skew: Duration::ZERO,
+                },
+                |_| Ok(()),
+                &mut boundary,
+            )
+        }?;
+        if outcome == world_windowed::RunOutcome::Checkpoint {
+            if let Some(host) = &mut interactive.host {
+                if interactive.checkpoints.capture_pending_with(
+                    world,
+                    &interactive.replay,
+                    host,
+                    |id, saved| {
+                        checkpoint::publish(
+                            &interactive.output,
+                            id,
+                            &checkpoint::Saved {
+                                state: saved,
+                                initial_launch: interactive.initial_launch.clone(),
+                            },
+                        )
+                    },
+                )? {
+                    segments.push(scheduler);
+                    continue;
+                }
+            }
+        }
+        // Preserve each segment's diagnostic counters rather than presenting
+        // only the final segment as the cost of the whole simulation.
+        if !segments.is_empty() {
+            segments.push(scheduler.clone());
+            scheduler["segments"] = json!(segments);
+        }
+        return Ok((outcome.as_str(), scheduler));
     }
-    world_windowed::simulate_parallel(
-        world,
-        run,
-        world_windowed::Workers {
-            count: machine_workers,
-            skew: Duration::ZERO,
-        },
-        |_| Ok(()),
-        boundary,
-    )
-    .map(|(outcome, scheduler)| (outcome.as_str(), scheduler))
 }
 /// Decode the ARM application dialect into the shared typed world document.
 /// Keep its existing required keys and rejection of x86-only inputs explicit.
@@ -117,6 +175,9 @@ fn decode_config(bytes: &[u8]) -> Result<seedbox_engine_core::world_config::Worl
 }
 
 pub fn run(options: &Options) -> Result<Value> {
+    let replay = seedbox_engine_core::intervention::Replay::new(
+        options.interventions.clone().unwrap_or_default(),
+    )?;
     let cfg = decode_config(
         &std::fs::read(&options.config)
             .map_err(|e| format!("world {}: {e}", options.config.display()))?,
@@ -171,13 +232,29 @@ pub fn run(options: &Options) -> Result<Value> {
     let disk_fault_model = crate::disk::fault_model(cfg.disk_loss)?;
     let base = options.config.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(&options.output).map_err(|e| format!("world output: {e}"))?;
-    let factory = Factory::new(
-        options.executable.clone(),
-        options.output.clone(),
-        &names,
-        options.console_limit,
-        options.full_state,
-    )?;
+    let observations = options
+        .observations
+        .as_deref()
+        .map(seedbox_engine_core::observation::Publisher::connect)
+        .transpose()
+        .map_err(|e| format!("observation socket: {e}"))?;
+    let factory = if observations.is_some() {
+        Factory::live(
+            options.executable.clone(),
+            options.output.clone(),
+            &names,
+            options.full_state,
+        )?
+    } else {
+        Factory::new(
+            options.executable.clone(),
+            options.output.clone(),
+            &names,
+            options.console_limit,
+            options.full_state,
+        )?
+    }
+    .with_observations(observations.clone());
     let mut machines = Vec::new();
     let mut boots = Vec::new();
     let mut macs = Vec::new();
@@ -242,30 +319,61 @@ pub fn run(options: &Options) -> Result<Value> {
         faults,
         control,
         macs,
-    })?;
+    })?
+    .with_observations(observations);
     let mut host = options
         .host_control
         .as_deref()
         .map(crate::host_control::HostControl::bind)
         .transpose()
         .map_err(|e| format!("host control: {e}"))?;
+    if options.interventions.is_some() && options.resume_checkpoint.is_none() {
+        if let Some(host) = &mut host {
+            host.disable_fault_injection();
+        }
+    }
     let raw_config = serde_json::to_value(&cfg).map_err(|e| e.to_string())?;
     let end_on = cfg.end_on_exit.clone();
-    let mut boundary = || {
-        if let Some(host) = &mut host {
-            host.boundary().map_err(|e| format!("host control: {e}"))?;
-        }
-        Ok(())
+    let mut interactive = Interactive {
+        initial_launch: cfg.launch_skew_ns.map(|skew| {
+            json!({
+                "policy": LAUNCH_POLICY, "max_skew_ns": skew, "released": false,
+                "barrier_ns": null, "release_ns": null, "release_times": {}
+            })
+        }),
+        output: options.output.clone(),
+        host,
+        replay,
+        checkpoints: Default::default(),
     };
-    let mut initial_launch = cfg.launch_skew_ns.map(|skew| {
-        json!({
-            "policy": LAUNCH_POLICY, "max_skew_ns": skew, "released": false,
-            "barrier_ns": null, "release_ns": null, "release_times": {}
-        })
-    });
+    let resuming = options.resume_checkpoint.is_some();
+    if let Some(path) = &options.resume_checkpoint {
+        let saved = checkpoint::load(path)?;
+        interactive.initial_launch = saved.initial_launch;
+        let mut saved = saved.state;
+        // The branch journal contains the source prefix and, for a rerun,
+        // any later inputs recorded by that branch. Prefix effects are already
+        // in the saved world and must not be applied twice.
+        let history = options.interventions.clone().unwrap_or_default();
+        let consumed = history
+            .entries
+            .iter()
+            .take_while(|entry| entry.position.boundary_index <= saved.position.boundary_index)
+            .count();
+        if consumed < history.entries.len() {
+            if let Some(host) = &mut interactive.host {
+                host.disable_fault_injection();
+            }
+        }
+        saved.replay.history = history;
+        saved.replay.consumed = consumed;
+        let replay = seedbox_engine_core::intervention::Replay::from_checkpoint(saved.replay)?;
+        saved.world.restore_checkpoint(&mut world)?;
+        interactive.replay = replay;
+    }
     // Boot initial guests to their launch barriers without converting an
     // ordinary duration or end-machine exit into a failed fork.
-    let bootstrap = if initial_barrier {
+    let bootstrap = if initial_barrier && !resuming {
         let launch = world_windowed::Run {
             duration: cfg.duration_ns,
             end_on: end_on.as_deref(),
@@ -277,7 +385,7 @@ pub fn run(options: &Options) -> Result<Value> {
             &mut world,
             &launch,
             options.machine_workers,
-            &mut boundary,
+            &mut interactive,
         )?)
     } else {
         None
@@ -289,11 +397,13 @@ pub fn run(options: &Options) -> Result<Value> {
         checkpoint: None,
         require_barrier: true,
     };
-    let (outcome, scheduler) = if let Some(stopped) = bootstrap.filter(|(s, _)| *s != "barrier") {
+    let (outcome, scheduler) = if resuming {
+        simulate_windowed(&mut world, &main, options.machine_workers, &mut interactive)?
+    } else if let Some(stopped) = bootstrap.filter(|(s, _)| *s != "barrier") {
         stopped
     } else if let Some(skew) = cfg.launch_skew_ns {
         let at = world.machines().iter().map(|m| m.time).max().unwrap_or(0);
-        if let Some(launch) = &mut initial_launch {
+        if let Some(launch) = &mut interactive.initial_launch {
             launch["barrier_ns"] = json!(at);
         }
         if let Some(release_at) = launch_release_bound(&raw_config, at, skew, cfg.duration_ns)? {
@@ -321,19 +431,20 @@ pub fn run(options: &Options) -> Result<Value> {
             {
                 return Err("ARM initial launch acknowledgment outside release bounds".into());
             }
-            initial_launch = Some(json!({
+            interactive.initial_launch = Some(json!({
                 "policy": LAUNCH_POLICY, "max_skew_ns": skew, "released": true,
                 "barrier_ns": at, "release_ns": release_at, "release_times": release_times
             }));
-            simulate_windowed(&mut world, &main, options.machine_workers, &mut boundary)?
+            simulate_windowed(&mut world, &main, options.machine_workers, &mut interactive)?
         } else {
             // The duration is absolute: never move a release or extend a run
             // to make room for initial launch, including the exact endpoint.
             ("duration", Value::Null)
         }
     } else {
-        simulate_windowed(&mut world, &main, options.machine_workers, &mut boundary)?
+        simulate_windowed(&mut world, &main, options.machine_workers, &mut interactive)?
     };
+    interactive.replay.finish()?;
     world.finish(outcome, cfg.duration_ns, &cfg.end_on_exit)?;
     let mut hash = Sha256::new_with_prefix(b"seedbox-arm64-world-witness-v2\0");
     // Each machine's transcript in machine order: independent of the thread
@@ -345,7 +456,7 @@ pub fn run(options: &Options) -> Result<Value> {
         horizon_hash.update(transcript.horizons.clone().finalize());
         event_hash.update(transcript.events.clone().finalize());
     }
-    let horizons = format!("{:x}", horizon_hash.finalize());
+    let horizons = hex::encode(horizon_hash.finalize());
     hash.update(horizons.as_bytes());
     hash.update(event_hash.finalize());
     let mut rows = Vec::new();
@@ -414,9 +525,9 @@ pub fn run(options: &Options) -> Result<Value> {
             network.update(Sha256::digest(bytes));
         }
     }
-    let network = format!("{:x}", network.finalize());
+    let network = hex::encode(network.finalize());
     hash.update(network.as_bytes());
-    let counts = witness_counts(&world.link_counts());
+    let counts = witness_counts(world.link_counts());
     hash.update(
         serde_json::to_vec(&(&world.faults().log, &world.control().log, counts))
             .map_err(|e| e.to_string())?,
@@ -425,14 +536,14 @@ pub fn run(options: &Options) -> Result<Value> {
     let trigger_evidence = world.control().triggers.evidence()?;
     let counters = arm_counters(&world);
     let mut report = json!({"report_version":2,"seed":options.seed,"timebase":"arm64-pv-world-v1",
-        "outcome":outcome,"world_witness":format!("{:x}",hash.finalize()),
+        "outcome":outcome,"world_witness":hex::encode(hash.finalize()),
         "network_witness":network,"horizon_witness":horizons,"machines":rows,
         "frames_delivered":world.delivered(),"frames_dropped":world.dropped(),"network_counters":counters,
         "faults":world.faults().log,"fault_error":world.faults().error.clone().or(world.control().error.clone()),
         "control_history":world.control().log,"control_latency_ns":world.control().latency,
         "rejected_fault_effects":world.faults().rejected_effects,"management_readiness":world.faults().readiness,
         "slices":world.slices()});
-    if let Some(launch) = initial_launch {
+    if let Some(launch) = interactive.initial_launch {
         report["initial_launch"] = launch;
     }
     if !scheduler.is_null() {

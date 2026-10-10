@@ -24,6 +24,7 @@
 #include "io.h"
 #endif
 #include "control.h"
+#include "application-output.h"
 #include "barrier.h"
 #include "progress-launch.h"
 #include <sys/mount.h>
@@ -195,6 +196,7 @@ static int open_management(const char *sysfs, const char *devices) {
 }
 
 static int launch_error_fd = -1;
+static int diagnostic_fd = STDERR_FILENO;
 /* SIGCHLD stays blocked except inside ppoll, so a child's exit wakes the
  * supervisor and cannot land between the reap and the wait. Waiting needs no
  * timeout: an idle supervisor costs its machine no timer interrupts. */
@@ -223,7 +225,7 @@ static void finish(int status, int error) {
     for (;;) pause();
 }
 static void die(const char *what) {
-    fprintf(stderr, "SEEDBOX_INIT_ERROR %s: %s\n", what, strerror(errno));
+    dprintf(diagnostic_fd, "SEEDBOX_INIT_ERROR %s: %s\n", what, strerror(errno));
     if (getpid() != 1) {
         if (launch_error_fd >= 0) { char error = 1; ssize_t sent; do { sent = write(launch_error_fd, &error, 1); } while (sent < 0 && errno == EINTR); }
         _exit(125);
@@ -481,16 +483,46 @@ static void credentials(void) {
     if (setgid(gid) || setuid(uid)) die("set image user");
     free(copy);
 }
+static struct application_output application_outputs[2] = {{-1, -1}, {-1, -1}};
+static void relay_output(unsigned stream, size_t limit) {
+    char frame[2 * APPLICATION_OUTPUT_BYTES + 16];
+    ssize_t size = application_output_frame(&application_outputs[stream], stream, limit, frame);
+    if (size < 0) die("read application output");
+    if (size) send_all(management, frame, (size_t)size);
+}
+/* Drain the bytes already queued at termination, without waiting for inherited
+ * writers in descendants. A descendant cannot delay the oracle's final exit. */
+static void drain_output(void) {
+    for (unsigned stream = 0; stream < 2; ++stream) {
+        int pending = 0;
+        if (application_outputs[stream].read_fd < 0) continue;
+        if (ioctl(application_outputs[stream].read_fd, FIONREAD, &pending)) die("pending application output");
+        while (pending > 0) {
+            size_t count = (size_t)pending < APPLICATION_OUTPUT_BYTES ? (size_t)pending : APPLICATION_OUTPUT_BYTES;
+            relay_output(stream, count); pending -= (int)count;
+        }
+    }
+}
 static pid_t start(void) {
+    for (unsigned stream = 0; stream < 2; ++stream) {
+        application_output_close(&application_outputs[stream]);
+        if (application_output_open(&application_outputs[stream])) die("application output pipe");
+    }
     int launch_error[2];
     if (pipe2(launch_error, O_CLOEXEC)) die("launch error pipe");
     pid_t pid = fork();
     if (pid < 0) die("fork application");
     if (!pid) {
         close(launch_error[0]); launch_error_fd = launch_error[1];
+        diagnostic_fd = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3);
+        if (diagnostic_fd < 0) { diagnostic_fd = STDERR_FILENO; die("supervisor diagnostic descriptor"); }
         if (setpgid(0, 0)) die("application process group");
         if (watching && sigprocmask(SIG_SETMASK, &wait_mask, NULL)) die("application signal mask");
         if (management >= 0) close(management);
+        for (unsigned stream = 0; stream < 2; ++stream) {
+            if (dup2(application_outputs[stream].write_fd, (int)stream + 1) < 0) die("application output");
+            application_output_close(&application_outputs[stream]);
+        }
         int input = open("/dev/null", O_RDONLY);
         if (input < 0 || dup2(input, STDIN_FILENO) < 0) die("application stdin");
         if (input > 2) close(input);
@@ -525,6 +557,10 @@ static pid_t start(void) {
         die("exec application");
     }
     close(launch_error[1]);
+    for (unsigned stream = 0; stream < 2; ++stream) {
+        close(application_outputs[stream].write_fd);
+        application_outputs[stream].write_fd = -1;
+    }
     char error; ssize_t received;
     do { received = read(launch_error[0], &error, 1); } while (received < 0 && errno == EINTR);
     close(launch_error[0]);
@@ -588,7 +624,10 @@ static int stop(pid_t *child) {
     *child = -1;
     /* Reap killed descendants adopted by PID 1 in the application group. */
     while (waitpid(-group, &status, 0) >= 0 || errno == EINTR) {}
-    return errno == ECHILD ? 0 : -1;
+    if (errno != ECHILD) return -1;
+    drain_output();
+    for (unsigned stream = 0; stream < 2; ++stream) application_output_close(&application_outputs[stream]);
+    return 0;
 }
 /* Test builds replace the privileged clock adjustment. */
 #ifndef SEEDBOX_ADJTIMEX
@@ -689,19 +728,25 @@ static void relay_management(pid_t *child) {
  * idle disconnect releases the current session; a partial or outstanding RPC
  * still fails closed. The listener stays open for a later connection. */
 static void service_channels(pid_t *child, int timeout) {
-    struct pollfd pfds[3] = {
+    struct pollfd pfds[5] = {
         {.fd = management, .events = POLLIN},
         {.fd = control_client < 0 ? control_listener : -1, .events = POLLIN},
-        {.fd = control_client, .events = POLLIN}
+        {.fd = control_client, .events = POLLIN},
+        {.fd = application_outputs[0].read_fd, .events = POLLIN},
+        {.fd = application_outputs[1].read_fd, .events = POLLIN}
     };
     struct timespec limit = {.tv_sec = timeout / 1000, .tv_nsec = timeout % 1000 * 1000000L};
-    int ready = ppoll(pfds, 3, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
+    int ready = ppoll(pfds, 5, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
     if (ready < 0) { if (errno != EINTR) die("poll management"); return; }
     if (!ready) return;
     if (pfds[1].revents & (POLLERR|POLLHUP|POLLNVAL)) { errno = EIO; die("control listener poll"); }
     if (pfds[1].revents & POLLIN) relay_accept();
     if (pfds[2].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("control client poll"); }
     if (pfds[2].revents & (POLLIN|POLLHUP)) relay_requests();
+    for (unsigned stream = 0; stream < 2; ++stream) {
+        if (pfds[3 + stream].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("application output poll"); }
+        if (pfds[3 + stream].revents & (POLLIN|POLLHUP)) relay_output(stream, APPLICATION_OUTPUT_BYTES);
+    }
     if (pfds[0].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("management port poll"); }
     if (pfds[0].revents & (POLLIN|POLLHUP)) relay_management(child);
 }
@@ -710,7 +755,10 @@ static void supervise(pid_t *child) {
         int status;
         pid_t done;
         while ((done = waitpid(-1, &status, WNOHANG)) > 0) {
-            if (done == *child) finish(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), 0);
+            if (done == *child) {
+                drain_output();
+                finish(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), 0);
+            }
         }
         service_channels(child, -1);
     }

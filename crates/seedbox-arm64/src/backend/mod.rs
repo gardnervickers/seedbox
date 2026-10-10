@@ -120,6 +120,16 @@ pub trait Backend: Sized {
     fn complete(&mut self, read: Option<u64>) -> Result<()>;
     fn inject_spi(&mut self, intid: u32, level: bool) -> Result<()>;
     fn dirty_pages(&self, slot: u32) -> Result<DirtyPages>;
+    /// Capture restorable state with no held native operation. Evidence-only
+    /// register inspection does not by itself promise a restorable snapshot.
+    fn snapshot_state(&self) -> Result<BackendState> {
+        Err("backend architectural snapshot is unavailable".into())
+    }
+    /// Restore architectural state into a fresh, never-entered VM. The caller
+    /// restores mapped RAM and machine/device policy separately before execution.
+    fn restore_state(&mut self, _state: &BackendState) -> Result<()> {
+        Err("backend architectural restore is unavailable".into())
+    }
     fn state(&self) -> Result<BackendState> {
         Err("complete stopped backend state is unavailable".into())
     }

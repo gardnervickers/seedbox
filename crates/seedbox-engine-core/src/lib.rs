@@ -5,9 +5,11 @@ pub mod control;
 pub mod disk;
 pub mod faults;
 pub mod host_control;
+pub mod intervention;
 pub mod links;
 pub mod log_index;
 pub mod network_counters;
+pub mod playback;
 pub use seedbox_engine_protocol::output_layout;
 pub mod rng;
 pub use seedbox_engine_protocol::trace;
@@ -41,5 +43,7 @@ use sha2::{Digest, Sha256};
 
 /// Lowercase hex SHA-256 of `bytes`, as digests and witnesses record it.
 pub fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
+#[cfg(unix)]
+pub mod observation;

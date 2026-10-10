@@ -50,5 +50,5 @@ x-seedbox:
   seed: 1009
   limits: {simulated_time: 120s, wall_time: 30m}
   network: {latency: 1ms, jitter: 200us}
-  schedule: {timer_jitter: 1ms, stop_tolerance: 2ms}
-  check: {service: client, exit_code: 0}
+  schedule: {timer_jitter: 1ms}
+  check: {service: client}

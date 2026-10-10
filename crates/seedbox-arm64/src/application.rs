@@ -38,6 +38,7 @@ impl BootIdentity {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Devices {
     pub net: virtio::Virtio,
     pub console: virtio::Virtio,

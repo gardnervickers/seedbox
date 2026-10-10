@@ -113,8 +113,8 @@ Invocation shapes:
 ```sh
 # One worker: use this affinity mask for the complete process.
 taskset -c 14,15,30,31 "$VMM" --config "$WORLD" --seed 7 --out "$OUT" --digest
-# Four workers: pin to four physical cores, with the coordinator in this mask.
-taskset -c 12-15,28-31 "$VMM" --config "$WORLD" --seed 7 --out "$OUT" --digest --machine-workers 4 --machine-cpus 12,13,14,15
+# Four workers: optionally constrain the complete process externally.
+taskset -c 12-15,28-31 "$VMM" --config "$WORLD" --seed 7 --out "$OUT" --digest --machine-workers 4
 # Profile separately from timing.
 perf record -e cpu-clock -F 997 --call-graph dwarf,16384 -o "$PERF_DATA" -- taskset -c 14,15,30,31 "$VMM" --config "$WORLD" --seed 7 --out "$OUT" --digest
 perf kvm --host --guest report --stdio --no-children -g none --sort dso -i "$PERF_DATA"

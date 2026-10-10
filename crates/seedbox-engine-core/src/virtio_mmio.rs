@@ -7,14 +7,16 @@ pub const QUEUE_SIZE: u16 = 256;
 pub(crate) const DRIVER_OK: u32 = 4;
 const FEATURES_OK: u32 = 8;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Spec {
     pub device_id: u32,
     pub features: [u32; 2],
 }
 
 /// Existing register behavior; see docs/virtio-transport.md before converging profiles.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Policy {
     Application,
     Console,
@@ -43,6 +45,20 @@ pub struct Transport {
     pub status: u32,
     pub isr: u32,
 }
+/// Owned checkpoint metadata; constructor-owned policy is verified on restore.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    spec: Spec,
+    policy: Policy,
+    dev_sel: u32,
+    drv_sel: u32,
+    features: [u32; 2],
+    queue_sel: u32,
+    queues: Vec<Queue>,
+    status: u32,
+    isr: u32,
+}
 
 /// Preserve the existing ARM retained-state field names and order explicitly.
 #[derive(Serialize)]
@@ -57,6 +73,41 @@ pub struct Projection<'a> {
 }
 
 impl Transport {
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            spec: self.spec,
+            policy: self.policy,
+            dev_sel: self.dev_sel,
+            drv_sel: self.drv_sel,
+            features: self.features,
+            queue_sel: self.queue_sel,
+            queues: self.queues.clone(),
+            status: self.status,
+            isr: self.isr,
+        }
+    }
+
+    /// Consume a configured model; failure never publishes partially restored state.
+    pub fn restore_snapshot(self, snapshot: Snapshot) -> std::result::Result<Self, String> {
+        if snapshot.spec != self.spec
+            || snapshot.policy != self.policy
+            || snapshot.queues.len() != self.queues.len()
+        {
+            return Err("virtio snapshot configuration mismatch".into());
+        }
+        Ok(Self {
+            spec: snapshot.spec,
+            policy: snapshot.policy,
+            dev_sel: snapshot.dev_sel,
+            drv_sel: snapshot.drv_sel,
+            features: snapshot.features,
+            queue_sel: snapshot.queue_sel,
+            queues: snapshot.queues,
+            status: snapshot.status,
+            isr: snapshot.isr,
+        })
+    }
+
     pub fn new(spec: Spec, queues: usize, policy: Policy) -> Self {
         Self {
             spec,

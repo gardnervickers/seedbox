@@ -18,16 +18,70 @@ fn u32_at(m: &[u8], offset: usize) -> u32 {
 use seedbox_engine_core::virtio_mmio::{
     Effect as MmioEffect, Policy as MmioPolicy, Spec, Transport,
 };
+#[derive(Clone)]
 pub enum Model {
     Net(Network),
     Console(Console),
     Block(Block),
 }
+#[derive(Clone)]
 pub struct Virtio {
     transport: Transport,
     model: Model,
 }
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    transport: seedbox_engine_core::virtio_mmio::Snapshot,
+    model: ModelSnapshot,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "state",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum ModelSnapshot {
+    Net(seedbox_engine_core::virtio_network::Snapshot),
+    Console(seedbox_engine_core::virtio_console::Snapshot),
+    Block(seedbox_engine_core::virtio_block::Snapshot),
+}
+
 impl Virtio {
+    /// Disk sectors are streamed separately through `Disk::write_checkpoint`.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            transport: self.transport.snapshot(),
+            model: match &self.model {
+                Model::Net(net) => ModelSnapshot::Net(net.snapshot()),
+                Model::Console(console) => ModelSnapshot::Console(console.snapshot()),
+                Model::Block(block) => ModelSnapshot::Block(block.snapshot()),
+            },
+        }
+    }
+
+    /// Restore into a configured device. A block device must already contain
+    /// the restored disk; its digest binds the separate sectors to this metadata.
+    pub fn restore_snapshot(self, snapshot: Snapshot) -> Result<Self> {
+        let transport = self.transport.restore_snapshot(snapshot.transport)?;
+        let model = match (self.model, snapshot.model) {
+            (Model::Net(net), ModelSnapshot::Net(saved)) => {
+                Model::Net(net.restore_snapshot(saved)?)
+            }
+            (Model::Console(console), ModelSnapshot::Console(saved)) => {
+                Model::Console(console.restore_snapshot(saved)?)
+            }
+            (Model::Block(block), ModelSnapshot::Block(saved)) => {
+                Model::Block(block.restore_snapshot(saved)?)
+            }
+            _ => return Err("virtio checkpoint device kind mismatch".into()),
+        };
+        Ok(Self { transport, model })
+    }
+
     pub fn net(mac: [u8; 6]) -> Self {
         Self::new(Model::Net(Network::new(mac, NetworkPolicy::Application)), 2)
     }

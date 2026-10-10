@@ -5,6 +5,150 @@
 `seedbox run` with no arguments runs the Compose project in the current
 directory. Every runtime input has a default, so no flags are required:
 
+The primary client commands use positional resource names:
+
+```sh
+seedbox run [COMPOSE_OR_SIMULATION_YAML] [--seed N] [--detach] [--json]
+seedbox explore [COMPOSE_OR_SIMULATION_YAML] [--seed N] [--count N] [--detach] [--json]
+seedbox get simulations [--json]
+seedbox get simulation ID [--watch] [--json]
+seedbox describe simulation ID [--json]
+seedbox delete simulation ID
+seedbox delete checkpoint ID NAME
+seedbox rerun ID [--detach] [--json]
+seedbox replay ID [--json]
+seedbox compare BASELINE_ID SIMULATION_ID [--json]
+seedbox stop ID
+seedbox events ID
+seedbox playback ID [REQUEST_ID] [--json]
+seedbox pause ID [--request-id REQUEST_ID] [--json]
+seedbox resume ID [--request-id REQUEST_ID] [--json]
+seedbox step ID [--request-id REQUEST_ID] [--json]
+seedbox rate ID RATE [--request-id REQUEST_ID] [--json]
+seedbox inject ID ACTION_FILE [--request-id REQUEST_ID] [--json]
+seedbox heal ID HANDLE [--request-id REQUEST_ID] [--json]
+seedbox logs ID [MACHINE] [--stream stdout|stderr] [--json]
+seedbox serve [--state DIRECTORY] [RUNTIME_INPUT_OPTIONS]
+```
+
+`run` starts or connects to the local server and follows status over its API.
+`get simulation ID --watch` attaches a status observer until completion or Ctrl-C.
+It emits a YAML document stream, or newline-delimited JSON with `--json`.
+Detaching never cancels the simulation.
+Submit saved simulation documents positionally: `seedbox run simulation.yaml`.
+
+`seedbox replay ID` submits a server-owned rerun of a completed simulation and
+compares its retained results. It prints `MATCH`, `MISMATCH` or `NOT_COMPARABLE`
+and exits 0, 1 or 2 respectively. Use `--json` for the comparison document.
+`seedbox rerun ID` instead reports the workload oracle verdict.
+`seedbox compare BASELINE_ID SIMULATION_ID` compares two completed simulations
+without executing either. Comparisons never change either simulation's verdict.
+Replay accepts simulation IDs; importing old offline run bundles into the server
+catalogue is still pending.
+
+
+Oracle exit zero passes; any nonzero exit fails. `x-seedbox.check.exit_code`
+is not configurable and must be omitted from Compose files.
+
+Simulation preparation has a 15-minute server deadline, separate from execution
+limits. On expiry the server cancels preparation and waits for cleanup. Without
+an oracle exit, a preparation or execution timeout reports `TIMEOUT` (exit 124)
+and the simulation's test verdict remains incomplete.
+
+`events` streams typed observations as newline-delimited JSON until completion
+or Ctrl-C. Disconnecting this observer does not stop the simulation. Delivery
+gaps are explicit records; reconnecting starts from the current position with
+no history. Use `describe` to recover current status after a gap. A completed
+simulation's event stream immediately returns a closure record.
+
+Each event includes its `simulation` ID and revision. `simulatedTimeNs` is
+optional and omitted before execution; `position` carries an exact committed
+position when known, including control acknowledgements. `preparationProgress`
+events identify a `machine` and `stage`: `image` covers image build, pull and
+export; `guest` covers guest image assembly; `ready` marks readiness.
+`executionTerminated` carries typed `termination` information, including errors,
+separately from the workload oracle verdict.
+
+Pending deletion emits `deletionRequested` and sets
+`metadata.deletionRequestedAtUnixMs` once. Describe and watch expose that pending
+state while the server stops the simulation and its descendants.
+
+`logs` streams application bytes without decoration. Omission diagnostics go to
+stderr; `--json` instead emits newline-delimited records with stream, incarnation,
+simulated time and lossless byte arrays. There is no backlog on reconnect.
+The former run-directory console reader is now `seedbox retained-logs`.
+Logs and events follow live output by default; neither needs a `--follow` flag.
+`playback` returns the server's latest observation: `state` contains committed
+position, requested rate, measured `achievedRate`, pending step and terminal state;
+`ageNs` says how long ago the server received it. The server samples independently
+of clients, normally every 250 ms, and never invents progress during an unavailable
+worker interval. `achievedRate` carries exact `simulatedTimeNs` and `wallTimeNs`
+since the rate was selected (or the first boundary); dividing them gives achieved
+simulated seconds per wall second. It is absent before a measurable interval.
+The command returns YAML by default. A simulation without a
+running worker reports an unavailable endpoint; inspection never starts a worker
+or advances simulated time. `pause`, `resume`, `step` and `rate` submit durable
+requests. Rate is `0` (pause), a positive integer or fraction such as `1/100`, or
+`unlimited`. Step requires a paused simulation and admits exactly one committed
+round, then remains paused.
+
+Mutation commands print their request ID to stderr and one receipt as YAML or
+JSON to stdout. They briefly wait for acknowledgement; an `accepted` receipt
+means the server is still driving the request. `acknowledged` identifies the
+boundary and any worker rejection. For step, `stepping: true` means its admitted
+round has not committed yet. Read `playback ID` to observe completion.
+Reusing `--request-id` with the same command returns the original receipt; a
+different command conflicts. `playback ID REQUEST_ID` reads that receipt after
+completion or restart. IDs are scoped to a simulation and retained for its
+lifetime, with a limit of 4096 control requests per simulation. A lost client
+connection never cancels an accepted action. `interrupted` means execution ended
+before the acknowledgement was durably recorded; the action may have occurred,
+and is never resent to a replacement worker.
+
+The API uses `POST /v1/simulations/ID/controls` for mutations and
+`GET /v1/simulations/ID/controls/REQUEST_ID` for their durable receipts.
+`GET /v1/simulations/ID/playback` remains the cached playback observation.
+Playback and fault controls share request identity and one pending mutation per
+simulation. Fault admission uses a prepared worker proposal, durable intervention
+history, then worker commit; an acknowledgement means admitted, while fault events
+report its eventual effect. `inject ID ACTION_FILE` reads one typed YAML or JSON
+action (use `-` for standard input); `heal ID HANDLE` removes a healable fault.
+Input files are bounded to 64 KiB and the serialized control request to 4096 bytes.
+Machine names, handles, parameters and backend capabilities are checked at the
+committed boundary. A rejected action is reported in the receipt and exits 2.
+
+For example, save this as `partition.yaml`:
+
+```yaml
+action: partition
+handle: isolate-db
+left: [api]
+right: [db]
+```
+
+Then use `seedbox inject ID partition.yaml`, followed by
+`seedbox heal ID isolate-db`. Process actions use `action: stop`, `restart`,
+`pause_process` or `resume_process` with `machine: NAME`. Whole-machine actions
+use `pause`, `resume`, `crash` or `reboot`; the file schema also supports shape,
+connection drop, clock skew/drift and throttle. Application process pause is
+distinct from `seedbox pause ID`, which pauses the whole simulation.
+
+`rerun ID` requires a completed simulation and reproduces retained fault inputs
+at their original boundaries. Playback remains available during rerun, but new
+fault injection is rejected to preserve the recorded history.
+
+The run-directory controls are now `retained-pause RUN` and `retained-resume RUN`.
+Describe defaults to YAML; JSON mode produces one document. IDs replace retained
+directory paths in run output. Kernel/helper/CPU/watchdog/full-state/checkpoint
+flags are no longer run options. Server asset discovery and the remaining
+advanced/offline command migration are tracked in the
+[configuration audit](simulation-configuration-audit.md).
+
+The table distinguishes project settings, server startup options and offline
+artifact commands. Runtime input options belong to `serve` and `prepare`;
+`doctor` accepts kernel and VMM selection. They are not submission
+options for `run`, `explore`, `rerun` or `replay`.
+
 | Input | Default | Override |
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
@@ -12,28 +156,33 @@ directory. Every runtime input has a default, so no flags are required:
 | Link bandwidth and queue | infinite bandwidth, unbounded queue | `x-seedbox.network.bandwidth_bps`, `queue_bound`, or the same keys in `links` |
 | Runtime network impairments | off | `world.shape`: reorder, duplicate, burst loss, latency spike and TCP reset parameters |
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
-| Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Seed | Project seed, otherwise allocated once by the server | `--seed` on `run` or `explore` |
 | Guest wall clock | latest `created` time in the prepared images (at least 86400) | `x-seedbox.wall_clock_epoch` (no CLI flag) |
 | Guest RAM per service | 1024 MiB | `x-seedbox.machine.memory_mb` (64..65536; Mac 64..3072) |
-| Deferred TX kicks (Linux KVM) | off; service TX as in the current engine | `x-seedbox.machine.deferred_tx: true` |
-| Runtime checkpoint (Linux KVM) | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; B=P continues without reseeding; no environment backing) |
-| Page timer (Linux KVM) | off; ABI-4 clockevent stores, aimed at PV | `x-seedbox.machine.page_timer: true` |
+| Deferred TX kicks (Linux KVM) | off; service TX as in the current engine | none; internal engine setting |
+| Runtime checkpoint | absent; ordinary execution | `checkpoint ID --request-id NAME`, then `branch ID NAME` |
+| Page timer (Linux KVM) | off; ABI-4 clockevent stores, aimed at PV | none; internal engine setting |
 | Exploration count | `1` | `--count` |
-| Exploration workers | `1`, sequential execution | `--workers` (1..32; Linux reserves one physical core per worker, Mac lets HVF schedule) |
+| Exploration concurrency | server-owned execution capacity | No per-submission option |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `x-seedbox.disk.torn_writes: true` |
-| CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
+| Host CPU scheduling | Normal operating-system scheduling | External affinity tools such as Linux `taskset` |
 | Guest kernel | `kernel` beside the executable | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
 | Guest helper archive | embedded by the complete build; explicit archive for plain Cargo builds | `--runtime-assets`, `SEEDBOX_RUNTIME_ASSETS` |
 | Guest supervisor | from the helper archive | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | mke2fs (only for named volumes) | from the helper archive | `--mke2fs`, `SEEDBOX_MKE2FS` |
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
-| State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
+| Server state | `$XDG_STATE_HOME/seedbox`, otherwise `$HOME/.local/state/seedbox` | `serve --state`, `SEEDBOX_STATE` |
+| Offline preparation and artifact state | `.seedbox/` | `--state`, `SEEDBOX_ARTIFACT_STATE` on `prepare`, `export` and `import` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
 | Witness log (Linux) | always; retain `output/machines/NAME.witness-log` for diff and replay to locate the first diverging 1 ms interval | none |
-| Per-page RAM evidence (Linux) | off; under `--full-state`, retain `output/machines/NAME.pages` beside machine traces | existing `--full-state` |
-| Log selection | All indexed machines and both streams, with no time bounds; raw bytes on stdout (`--json` for metadata) | `logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
+| Per-page RAM evidence (Linux) | off; full-state capture retains `output/machines/NAME.pages` beside machine traces | `serve --full-state` or `prepare --full-state` |
+| Log selection | All indexed machines and both streams, with no time bounds; raw bytes on stdout (`--json` for metadata) | `retained-logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
+
+The server socket must fit the host's Unix socket path limit. If a custom state
+path is too long, startup fails before creating state and asks you to choose a
+shorter `SEEDBOX_STATE` directory.
 
 Settings that describe the simulated world live in the Compose file's
 `x-seedbox` section; flags choose only how a run executes. Every key below is
@@ -41,7 +190,7 @@ optional and shows its non-default form:
 
 ```yaml
 x-seedbox:
-  machine: {memory_mb: 2048, page_timer: true, deferred_tx: true}
+  machine: {memory_mb: 2048}
   disk: {torn_writes: true}
 ```
 
@@ -107,8 +256,8 @@ use the shared world coordinator, including connection selectors and committed
 console triggers; ARM arbitrary snapshot/fork reuse remains unsupported. Its PV world identity,
 boot-layout evidence and HVF host admission are distinct from the existing ARM
 fixture and x86 KVM profiles. Mac defaults use locally built Image, supervisor,
-and mke2fs, with `linux/arm64` as the image platform. `--cpu` and `--vmm`
-remain Linux-only; Mac exploration is serial.
+and mke2fs, with `linux/arm64` as the image platform. the standalone `--vmm` override
+remains Linux-only. Exploration concurrency belongs to the server.
 
 `x-seedbox.disk.torn_writes: true` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
@@ -119,99 +268,88 @@ Virtual time and automatic application progress follow the
 
 `seedbox help run` lists every option. The guest Python API supports
 [bounded committed console triggers](triggers.md) for future stop/partition
-faults in the development engine; see that contract and host validation handoff. A run prints `OUTCOME: run-directory`;
+faults in the development engine; see that contract and host validation handoff. A run prints `OUTCOME: simulation-id`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT. A cancelled or incomplete replay exits 2
 (NOT_COMPARABLE). Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
 
-`seedbox run --full-state` also retains per-page RAM hashes with each machine's
+Starting the server with `seedbox serve --full-state` also retains per-page RAM hashes with each machine's
 final state. Replay inherits that mode. On RAM-only state-digest differences,
-plain `diff` and MISMATCH replay print the differing PFN count and first eight
-PFNs on stderr. The files travel in bundles under the ordinary retention policy
+offline `diff` prints the differing PFN count and first eight PFNs on stderr.
+Server comparison documents report aggregate witness and full-state equality. The files travel in bundles under the ordinary retention policy
 and are excluded from run identity, witnesses and replay verdicts. See the
 [binary format and diagnostic fields](runtime.md#compare-retained-runs).
 
-Pause a running world from another terminal with `seedbox pause RUN`, then
-continue it with `seedbox resume RUN`. Use the executing attempt directory
+For legacy retained attempts, pause a running world from another terminal with
+`seedbox retained-pause RUN`, then
+continue it with `seedbox retained-resume RUN`. Use the executing attempt directory
 (for replay, its new attempt), identifiable by `RUN/output/host-control`. Both
 commands wait for a boundary acknowledgement. All guests and virtual time freeze;
-wall-time limits and cancellation remain active. See [host pause](runtime.md#host-pause)
+wall-time limits and cancellation remain active. See [host pause](runtime.md#retained-host-pause)
 for the mechanism and development-engine verification requirements.
 
-On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
-also prints up to five non-empty lines from the final 8 KiB of that attempt's
+For legacy retained attempts, text output from `inspect`
+prints up to five non-empty lines from the final 8 KiB of that attempt's
 `output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable
 logs do not change the outcome. Retained records and `--json` output are unchanged.
 `inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 [Draft format and runtime scope](compatibility.md) distinguishes inspection
-and transfer from qualified execution. Same software versions, seed and exact
-retained inputs must replay on a qualified compatible profile; changing versions
-may change execution. Release compatibility remains a V0 qualification gate.
+and transfer from execution compatibility. Retained inputs replay with their
+retained engine; changing engines may change execution. Development execution
+has no version or qualification allowlist.
 
-Experimental runtime forks use `seedbox run examples/redis --checkpoint-at-ns
-1000000000 --branch-seed 42` with the newly built VMM. The
-ordinary seed drives the prefix; the full branch identity keys future simulator
-randomness and guest CRNG entropy after one simulated second. Build the VMM and
-current K2/ABI-3 guest kernel from this checkout. A branch seed
-equal to the parent seed continues without any reseeding. Replay reads these
-semantic settings from the retained run. Application-owned PRNG state remains
-captured. Each public branch has its own retained attempt with the normal
-`output/machines/` layout: `logs` includes its prefix and post-checkpoint chunks,
-and `diff` reads page hashes retained by `run --full-state`.
-See the [checkpoint design](runtime.md#runtime-checkpoint-design-experimental)
-for state coverage, engine-only multiple checkpoints/branches and unverified KVM behavior.
+Capture a paused simulation with `seedbox checkpoint ID --request-id NAME`,
+then continue from that capture with `seedbox branch ID NAME`. See
+[checkpoint and branch operations](#checkpoint-branches-in-development) below.
+The older seed-reseeding checkpoint design is documented as historical engine
+behavior in [runtime checkpoint design](runtime.md#runtime-checkpoint-design-experimental).
+
+## Delete simulations
+
+Delete a simulation with `seedbox delete simulation ID`
+(`DELETE /v1/simulations/ID`). Deletion cascades to its descendants, including
+reruns, branches and seed-range members. The server stops the source and all
+descendants, waits for termination, then removes their catalogue resources,
+checkpoints, retained input descriptors and private execution state. New
+descendants are blocked while deletion is in progress. Active simulations can
+be deleted; no separate stop or dependent deletion is required. Shared
+content-addressed objects remain available to other simulations; object garbage
+collection is deferred. Repeating deletion succeeds.
+
+Completed seed-range members may be deleted. `seedbox get simulations SOURCE_ID`
+omits deleted members and reports their count as `deletedMembers`.
 
 ## Finite exploration
 
-`seedbox explore [COMPOSE] --seed FIRST --count COUNT` runs consecutive seeds
-with one worker by default, preparing the complete input closure once. Compose
-defaults to `.`, the first seed to the Compose seed, and count to 1.
-`--workers N` (1..32) permits at most N owned attempts at once; on Linux, parallel
-exploration requires automatic CPU selection, so omit `--cpu` and `SEEDBOX_CPU`.
-Before preparation, the Linux executor must be able to reserve and admit N
-distinct eligible physical cores together, including their SMT siblings;
-insufficient capacity is ERROR. The Mac executor reserves nothing: each attempt
-is its own engine process and HVF VM, scheduled by the host. Those transient reservations are released before OCI work. Each running
-world still owns its ordinary core/sibling lease. Contention afterward is an
-infrastructure error, with no retry or waiting-for-capacity policy. Empty/overflowing ranges fail
-before state creation or preparation. Immutable runtime inputs and host admission are
-checked before the sole preparation; refusal retains batch ERROR without dispatch.
-Each seed uses the ordinary retained-input and leased host rechecks. Application FAIL
-and witnessed simulated TIMEOUT continue; ERROR, INCOMPLETE and cancellation stop
-dispatch. No seed is retried.
+`seedbox explore [COMPOSE] --seed FIRST --count COUNT` submits consecutive seeds
+to the local server. Count defaults to one and is bounded at 4096; the first seed
+comes from the explicit option, the project, or one server allocation. Overflow
+is rejected before execution. The server runs the first simulation, freezes its
+preparation inputs, and queues the remaining seeds against that same closure.
+Each seed has its own simulation ID, logs, events, status and oracle verdict.
+Interactive changes to one simulation are not inherited by other seeds.
 
-Each exploration retains `exploration.json`, preparation diagnostics and ordinary
-per-seed run directories under `attempts/SEED/`. Inspect and replay those run paths
-with the existing commands. An unfinished checkpoint remains INCOMPLETE, including
-when a process dies after committing a run but before updating the batch. The final
-exit precedence is ERROR (2), INCOMPLETE (3), TIMEOUT (124), FAIL (1), PASS (0). `--json` emits one
-report with per-attempt outcomes, undispatched count, elapsed time and CLI process-family
-resource measurements; application logs remain arbitrary bytes. Checkpoint version 2
-records seed indexes in ascending dispatch order regardless of completion order,
-with `finished: false` for dispatched attempts whose terminal result is not yet
-checkpointed. The pending suffix remains undispatched. Infrastructure or retention
-uncertainty cancels only the batch's owned attempts and joins them before returning;
-a backend blocked in cleanup prevents a prompt completion claim. Version 1 batch
-checkpoints need their prior reader; their bytes and ordinary run manifests remain
-unchanged.
+`--detach` returns the source simulation ID after acceptance. Use
+`seedbox get simulations SOURCE_ID` to inspect the range and its current members,
+and `seedbox stop SOURCE_ID --all-seeds` to stop it. Closing the client leaves
+accepted work owned by the server; foreground Ctrl-C requests a range stop.
+The server owns concurrency and uses normal host scheduling; there is no `--workers`,
+`--cpu`, asset override, or watchdog option on `explore`.
 
-`peak_running` counts active orchestration attempts. `active_attempt_seconds` sums
-their whole wall intervals, including admission, materialization and cleanup; it is
-not exact lease time or measured CPU time. Once all owned attempts return, this
-one-world-per-worker backend can use the sum as a conservative guest-core charge.
-An unfinished checkpoint omits still-running/uncheckpointed intervals and is not
-a complete cumulative charge. CLI process-family CPU totals include
-preparation and reaped children. Parallel scheduling and chosen cores are performance
-choices excluded from run identity; actual serial/parallel and per-core equality
-remain runtime qualification gates.
+Accepted range intent and member identities survive restart. Interrupted active
+simulations remain incomplete; undispatched seeds continue against retained
+inputs. Failed initial preparation ends the range without repeating preparation.
+`--json` prints one status document containing member summaries and any range
+error. No CLI process-resource measurements or separate exploration archive are
+produced. Inspect each simulation with the ordinary describe/log/event commands.
 
 ## How execution is controlled
 
 - **Progress and time.** Guest progress is charged at guest exits, syscalls
   and clock reads; idle machines jump to their next event. A host watchdog
-  (`--watchdog-ms`) interrupts a guest that makes no exits to report where it
+  interrupts a guest that makes no exits to report where it
   is stuck, then resumes it without advancing its time.
 - **Stops.** Events (timer deadlines, frames, scenario commands) are delivered
   at deterministic points only: natural VM exits. A timer interrupt fires at the
@@ -228,34 +366,31 @@ remain runtime qualification gates.
   first stop up to that long before they are due: early by a bounded amount,
   never late, and never before they were sent.
 - **Witness.** A network hash covers pending frames, link streams and active policies.
-  Each machine hashes every deterministic exit; `--digest` adds
-  a hash of registers and all guest RAM; `--trace` writes every exit.
+  Each machine hashes every deterministic exit. Full-state capture adds
+  a hash of registers and all guest RAM; the standalone engine also supports
+  `--digest` and `--trace` diagnostics.
 
 ## Host requirements
 
 - Any Linux x86-64 host with KVM, including cloud VMs with nested KVM, or an
   Apple Silicon Mac. Root is not needed unless the host's `/dev/kvm`
-  permissions require it. On Linux the executor acquires the shared CPU/SMT
-  leases for the selected core and holds them until its child is reaped; the
-  legacy `batch.sh` runner uses the same lease protocol.
+  permissions require it. Seedbox does not pin workers or reserve cores; Linux
+  operators can apply `taskset` externally if desired.
 
 Host admission checks the KVM capabilities the engine needs. CPU model,
-microcode, CPUID and host-kernel bytes are not checked. Before image
-preparation, it temporarily reserves an eligible core and checks each
-online/allowed SMT sibling; affinity and reservations restore before
-preparation. This is readiness admission; it does not prove cross-host
-determinism. Run identities carry no host-policy proof; host-policy fields in
-older records are kept as data and do not block replay.
+microcode, CPUID and host-kernel bytes are not pinned. These readiness checks do
+not prove cross-host determinism. Historical host-policy fields remain data and
+do not block replay.
 
 ## Check execution compatibility
 
-`seedbox doctor` checks the installed engine, guest kernel and selected host core
+`seedbox doctor` checks the installed engine, guest kernel and host capabilities
 with the same readiness checks used by execution. It needs a Linux
 KVM host with `/dev/kvm` access, uses the normal
-`--cpu`, `--kernel` and `--vmm` defaults, and
+`--kernel` and `--vmm` defaults, and
 never builds a missing VMM, prepares images or starts guests. `--json` prints the
-exact admitted observations. Success prints `VALID` after probe resources and
-thread affinity are verified cleaned up; problems use the ordinary error and
+exact admitted observations. Success prints `VALID` after probe resources are
+cleaned up; problems use the ordinary error and
 exit status 2. This is compatibility readiness, not cross-host replay qualification.
 
 ## Applications
@@ -271,9 +406,9 @@ now lives with its Compose example. Generated projects include their own source.
 Each attempt retains exact image manifests/layers, kernel, guest archives,
 configuration, engine, logs and result. Replay uses the retained content store
 without registry pulls or builds. PASS, FAIL, ERROR, TIMEOUT and INCOMPLETE are
-separate results; a reproduced FAIL is a successful MATCH. `--full-state` adds
-per-machine RAM/register comparisons. `--watchdog-ms` changes performance without
-changing semantic identity. Each run has private application storage: image filesystems are RAM-backed,
+separate results; a reproduced FAIL is a successful MATCH. Server startup with
+`--full-state` adds per-machine RAM/register comparisons. The server owns
+performance settings, which do not change semantic identity. Each run has private application storage: image filesystems are RAM-backed,
 and named volumes use retained ext4 disks that survive guest crash/reboot.
 The default RAM allocation is 1024 MiB per service. See [runtime instructions](runtime.md)
 for compatibility, memory sizing, root access, cancellation and the supported subset.
@@ -301,7 +436,7 @@ See [comparison details](runtime.md#compare-retained-runs).
 
 ## Read committed-time logs
 
-`seedbox logs RUN [--machine NAME] [--stream console|mgmt] [--since-ns N]
+`seedbox retained-logs RUN [--machine NAME] [--stream console|mgmt] [--since-ns N]
 [--until-ns N] [--json]` reads checksum-verified retained output on Linux or macOS.
 Each chunk coalesces consecutive bytes from one machine/incarnation/stream within
 a world slice, ending when another stream writes or the slice returns. Its time
@@ -331,14 +466,14 @@ state on Linux or macOS:
 seedbox export .seedbox/runs/ATTEMPT -o failure.seedbox.tar
 seedbox import failure.seedbox.tar --state imported
 seedbox inspect IMPORTED_RUN
-seedbox replay IMPORTED_RUN --state imported
 ```
 
 Use the run directory printed by `import` as `IMPORTED_RUN`. Import executes
-nothing. Replay uses the bundled engine and inputs without image preparation,
-registry access or the original checkout, and requires a compatible installed
-Seedbox release and a compatible Linux KVM host. Transfer does not qualify a new
-host. A reproduced application FAIL is replay MATCH.
+nothing. These are offline artifact operations. Importing a bundle into the
+simulation server catalogue is not implemented yet, so the imported directory
+cannot currently be passed to `replay ID`. Server replay uses retained engine
+inputs without image preparation or registry access. A reproduced application
+FAIL can still be a replay MATCH.
 
 Bundles include only retained logs. Any capture omissions remain visible and
 are printed as `omitted files: N`; omitted local output is not transferred.
@@ -346,8 +481,8 @@ Existing files/runs are never replaced. `--max-bytes` changes the local transfer
 cap without changing run identity. See [runtime instructions](runtime.md#bundles)
 for bounds and supported formats.
 
-`x-seedbox.machine.page_timer: true` in the world file (off by default)
-enables the page timer. An ABI-4 kernel arms one-shot clockevents by writing
+The page timer is an internal KVM mode, disabled for new simulations.
+Retained runs preserve their recorded mode. An ABI-4 kernel arms one-shot clockevents by writing
 an absolute deadline into the shared time page, avoiding port `0x530` exits.
 The VMM advertises the capability only after the guest announces ABI 4;
 with the option enabled, older kernels fail at boot with a rebuild/drop-option error.
@@ -369,3 +504,29 @@ preventing checkpoint reuse across timer modes while preserving feature-off hash
 This composes with deferred TX's `+deferred-tx` identity suffix: all four option
 combinations have distinct parent and branch identities, and both off retains
 the original encoding.
+
+### Checkpoint branches (in development)
+
+`seedbox checkpoint ID --request-id NAME` captures a paused simulation at a
+committed boundary. List captures with `seedbox get checkpoints ID` and inspect
+one with `seedbox describe checkpoint ID NAME` (both accept `--json`). Wait
+for `checkpoint.state: captured` before running
+`seedbox branch ID NAME --detach`. The branch gets a new simulation ID, preserving
+its source seed, configuration and fault history up to the checkpoint. Its
+metadata names the parent simulation and checkpoint. Follow its application
+output with `seedbox logs BRANCH_ID [MACHINE]` and its internal events with
+`seedbox events BRANCH_ID`. Historical application logs are not replayed.
+
+Both Linux KVM and Apple Silicon HVF have native validation for capture, branch
+logs, matching source results, fault isolation, and branch rerun after a server
+restart.
+`seedbox resume ID` continues a paused simulation; it does not create a branch.
+After admitting a fault, step through one committed round before capturing a
+checkpoint so the snapshot includes its effects.
+
+Delete an unused capture with `seedbox delete checkpoint ID NAME`
+(`DELETE /v1/simulations/ID/checkpoints/NAME`). The source simulation must be
+completed, and deletion is rejected if any branch references the checkpoint.
+Deletion hides the capture from discovery and removes its captured metadata,
+machine files and frozen intervention copy. The control receipt remains for
+history and idempotent retries. Deletion during active execution is deferred.

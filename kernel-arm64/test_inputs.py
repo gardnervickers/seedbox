@@ -187,7 +187,7 @@ int main(void) {
     def test_poll_yield_preserves_caller_mask_and_retries_after_irq(self):
         source = (HERE / "seedbox.c").read_text()
         read = source[source.index("u64 notrace seedbox_read(void)"):
-                      source.index("static u64 cs_read")]
+                      source.index("/* Charge syscall work")]
         fixture = r"""
 #include <assert.h>
 #include <stdint.h>
@@ -250,6 +250,100 @@ int main(void) {
             c.write_text(fixture)
             subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
                 "-Wall", "-Wextra", "-Werror", str(c), "-o", str(exe)
+            ], check=True, capture_output=True)
+            subprocess.run([str(exe)], check=True, capture_output=True, timeout=10)
+
+    def test_syscall_charge_scales_and_survives_mid_charge_throttle_and_heal(self):
+        source = (HERE / "seedbox.c").read_text()
+        page = source[source.index("struct seedbox_page {"):
+                      source.index("static struct seedbox_page *page;")]
+        helpers = source[source.index("u64 notrace seedbox_read(void)"):
+                         source.index("static u64 cs_read")]
+        fixture = r"""
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+typedef uint64_t u64;
+#define notrace
+#define unlikely(x) (x)
+#define panic(...) abort()
+""" + page + r"""
+_Static_assert(offsetof(struct seedbox_page, syscall_ns) == 48, "PV syscall cost ABI");
+static struct seedbox_page storage, *page = &storage;
+static u64 early_last, next_cost, window;
+static unsigned long irq_flags;
+static unsigned int writes;
+static char registers[64];
+static void *event = registers;
+#define local_irq_save(saved) do { (saved) = irq_flags; irq_flags |= 128; } while (0)
+#define local_irq_enable() do { irq_flags &= ~128UL; } while (0)
+#define local_irq_disable() do { irq_flags |= 128; } while (0)
+#define local_irq_restore(saved) do { irq_flags = (saved); } while (0)
+#define irqs_disabled_flags(saved) ((saved) & 128)
+#define isb() ((void)0)
+#define READ_ONCE(x) (assert(&(x) == &page->syscall_ns || (irq_flags & 128)), (x))
+#define WRITE_ONCE(x, v) do { assert(irq_flags & 128); (x) = (v); } while (0)
+static void writeq(unsigned long value, void *address) {
+    assert(value == 1 && address == registers + 24);
+    assert(irq_flags == 0);
+    assert(page->last == page->bound);
+    ++writes;
+    page->now = page->last;
+    page->bound += window;
+    if (next_cost) page->syscall_ns = next_cost;
+}
+""" + helpers + r"""
+static void reset(u64 cost, u64 bound, u64 span, u64 replacement) {
+    storage = (struct seedbox_page){.syscall_ns = cost, .bound = bound};
+    window = span;
+    next_cost = replacement;
+    writes = 0;
+}
+int main(void) {
+    /* Ordinary clock reads still cost one, independently of CPU throttle. */
+    for (u64 cost = 1000; cost <= 4000; cost *= 4) {
+        reset(cost, UINT64_MAX, 0, 0);
+        assert(seedbox_read() == 1);
+        seedbox_syscall_progress();
+        assert(page->last == cost + 1 && writes == 0);
+        assert(irq_flags == 0);
+    }
+    reset(1000000, UINT64_MAX, 0, 0);
+    seedbox_syscall_progress();
+    assert(page->last == 1000000 && writes == 0);
+
+    /* Throttling halfway through affects the next syscall, not owed work. */
+    reset(1000, 500, 500, 4000);
+    seedbox_syscall_progress();
+    assert(page->last == 1000 && writes == 1 && page->syscall_ns == 4000);
+    seedbox_syscall_progress();
+    assert(page->last == 5000 && writes == 9);
+
+    /* Healing halfway through likewise preserves the original charge. */
+    reset(4000, 2000, 2000, 1000);
+    seedbox_syscall_progress();
+    assert(page->last == 4000 && writes == 1 && page->syscall_ns == 1000);
+    seedbox_syscall_progress();
+    assert(page->last == 5000 && writes == 2);
+
+    /* Multiple bounded rendezvous neither lose nor duplicate work. */
+    reset(1000, 250, 250, 0);
+    seedbox_syscall_progress();
+    assert(page->last == 1000 && writes == 3 && irq_flags == 0);
+
+    /* Preserve the pre-initialization syscall behavior. */
+    page = NULL;
+    seedbox_syscall_progress();
+    assert(early_last == 1000 && irq_flags == 0);
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            c = Path(directory) / "syscall.c"
+            exe = Path(directory) / "syscall"
+            c.write_text(fixture)
+            subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+                "-Wall", "-Wextra", "-Werror", "-O2", str(c), "-o", str(exe)
             ], check=True, capture_output=True)
             subprocess.run([str(exe)], check=True, capture_output=True, timeout=10)
 

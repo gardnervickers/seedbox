@@ -152,9 +152,11 @@ impl Captures {
 /// One machine's slice horizons and causal events, in its own order. Each
 /// machine hashes only what it did, so the world witness does not depend on
 /// which thread ran it or when; the world combines them in machine order.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Transcript {
+    #[serde(with = "seedbox_engine_core::checkpoint::sha256")]
     pub horizons: Sha256,
+    #[serde(with = "seedbox_engine_core::checkpoint::sha256")]
     pub events: Sha256,
 }
 impl Transcript {
@@ -168,21 +170,49 @@ impl Transcript {
 
 /// Process and output resources; contains no world scheduling policy.
 pub struct Factory {
+    observations: Option<Arc<seedbox_engine_core::observation::Publisher>>,
     executable: PathBuf,
     output: PathBuf,
     names: BTreeMap<String, usize>,
     /// Shared by a machine and its crash successor; only the live one writes.
-    captures: Vec<Arc<Mutex<Captures>>>,
+    captures: Vec<Option<Arc<Mutex<Captures>>>>,
     generation: Cell<u64>,
     full_state: bool,
 }
 impl Factory {
+    pub(crate) fn with_observations(
+        mut self,
+        observations: Option<Arc<seedbox_engine_core::observation::Publisher>>,
+    ) -> Self {
+        self.observations = observations;
+        self
+    }
     pub fn new(
         executable: PathBuf,
         output: PathBuf,
         names: &[String],
         console_limit: usize,
         full_state: bool,
+    ) -> Result<Self> {
+        Self::build(executable, output, names, console_limit, full_state, true)
+    }
+
+    pub(crate) fn live(
+        executable: PathBuf,
+        output: PathBuf,
+        names: &[String],
+        full_state: bool,
+    ) -> Result<Self> {
+        Self::build(executable, output, names, 0, full_state, false)
+    }
+
+    fn build(
+        executable: PathBuf,
+        output: PathBuf,
+        names: &[String],
+        console_limit: usize,
+        full_state: bool,
+        retain: bool,
     ) -> Result<Self> {
         let mut indexes = BTreeMap::new();
         for (index, name) in names.iter().enumerate() {
@@ -200,11 +230,15 @@ impl Factory {
             std::fs::canonicalize(&output).map_err(|e| format!("world output path: {e}"))?;
         let mut captures = Vec::new();
         for name in names {
+            if !retain {
+                captures.push(None);
+                continue;
+            }
             let console = File::create(output.join(format!("{name}.console")))
                 .map_err(|e| format!("console output: {e}"))?;
             let management = File::create(output.join(format!("{name}.mgmt")))
                 .map_err(|e| format!("management output: {e}"))?;
-            captures.push(Arc::new(Mutex::new(Captures {
+            captures.push(Some(Arc::new(Mutex::new(Captures {
                 console: Capture::new(
                     console,
                     IndexFile::open(output.join(format!("{name}.console.chunks"))),
@@ -218,10 +252,11 @@ impl Factory {
                     log_capture::stream_limit(names.len()),
                 ),
                 order: 0,
-            })));
+            }))));
         }
         Ok(Self {
             executable,
+            observations: None,
             output,
             names: indexes,
             captures,
@@ -231,6 +266,7 @@ impl Factory {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Retired {
     pub evidence: Evidence,
     pub incarnation: u32,
@@ -238,10 +274,12 @@ pub(crate) struct Retired {
 }
 /// One scheduler-visible record and one owned, stopped physical worker.
 pub struct ArmMachine {
+    observations: Option<Arc<seedbox_engine_core::observation::Publisher>>,
+    log_decoder: seedbox_engine_core::observation::Decoder,
     world: MachineState,
     worker: OwnedWorker,
     physical: StoppedObservation,
-    captures: Arc<Mutex<Captures>>,
+    captures: Option<Arc<Mutex<Captures>>>,
     transcript: Transcript,
     index: usize,
     output: PathBuf,
@@ -249,6 +287,8 @@ pub struct ArmMachine {
     framer: ManagementFramer,
     pub(crate) crashed: Vec<Value>,
     pub(crate) retired: Option<Retired>,
+    snapshot_sequence: u64,
+    ram_pages: u64,
 }
 impl Deref for ArmMachine {
     type Target = MachineState;
@@ -311,8 +351,19 @@ impl ArmMachine {
     }
 }
 
-/// No complete arbitrary ARM CPU/device snapshot has been qualified.
-pub enum UnsupportedSnapshot {}
+/// A physical artifact plus adapter-owned semantic state. Delivery sockets and
+/// their sequence numbers remain owned by the destination timeline.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    checkpoint: super::worker::Checkpoint,
+    world: MachineState,
+    transcript: Transcript,
+    framer: ManagementFramer,
+    log_decoder: seedbox_engine_core::observation::Decoder,
+    crashed: Vec<Value>,
+    retired: Option<Retired>,
+}
 struct TransferGuard(PathBuf);
 impl TransferGuard {
     fn cleanup(&mut self) -> Result<()> {
@@ -333,7 +384,7 @@ impl WorldMachine for ArmMachine {
     type Factory = Factory;
     type Boot = Boot;
     type Clock = ();
-    type Snapshot = UnsupportedSnapshot;
+    type Snapshot = Snapshot;
 
     fn restore_boundary(_: &mut Self::Clock) -> Result<()> {
         // The ARM adapter has no host clock state to discard at a fork point.
@@ -369,6 +420,7 @@ impl WorldMachine for ArmMachine {
         if barrier {
             boot.command_line.push_str(" seedbox.barrier=1");
         }
+        let ram_pages = boot.memory_bytes.div_ceil(4096);
         if !matches!(worker.call(Operation::Boot(boot))?, Answer::Ready) {
             worker.invalidate("invalid ARM boot response");
             return Err("invalid ARM boot response".into());
@@ -387,8 +439,12 @@ impl WorldMachine for ArmMachine {
             output: factory.output.clone(),
             full_state: factory.full_state,
             framer: ManagementFramer::default(),
+            observations: factory.observations.clone(),
+            log_decoder: seedbox_engine_core::observation::Decoder::default(),
             crashed: Vec::new(),
             retired: None,
+            snapshot_sequence: 0,
+            ram_pages,
         })
     }
     fn has_pending_irq(&self) -> bool {
@@ -556,6 +612,12 @@ impl WorldMachine for ArmMachine {
     fn supports_speed_reseed(&self) -> bool {
         false
     }
+    fn supports_throttle(&self) -> bool {
+        true
+    }
+    fn throttle(&mut self, factor_permille: u64) -> Result<()> {
+        self.ready(Operation::Throttle { factor_permille })
+    }
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<()> {
         Err("ARM machine speed reseeding is unsupported".into())
     }
@@ -568,11 +630,63 @@ impl WorldMachine for ArmMachine {
     fn exit_witness(&mut self) -> Result<String> {
         Ok(self.evidence()?.witness)
     }
-    fn snapshot(&mut self) -> Result<Self::Snapshot> {
-        Err("ARM arbitrary machine snapshots are unsupported".into())
+    fn checkpoint_boundary(_: &()) -> Result<()> {
+        // ARM has no coordinator-owned host clock to quiesce. Snapshot RPCs
+        // validate each stopped worker before reading its native state.
+        Ok(())
     }
-    fn restore(&mut self, _: &Self::Snapshot) -> Result<u64> {
-        Err("ARM arbitrary machine restore is unsupported".into())
+    fn snapshot(&mut self) -> Result<Self::Snapshot> {
+        self.snapshot_sequence = self
+            .snapshot_sequence
+            .checked_add(1)
+            .ok_or("ARM checkpoint sequence overflow")?;
+        let artifact = self.output.join(format!(
+            ".arm-checkpoint-{}-{}-{}",
+            std::process::id(),
+            self.worker.identity().generation,
+            self.snapshot_sequence
+        ));
+        let artifact =
+            std::path::absolute(artifact).map_err(|e| format!("checkpoint path: {e}"))?;
+        let Answer::Snapshot(checkpoint) = self.worker.call(Operation::Snapshot { artifact })?
+        else {
+            return self.reject("invalid ARM checkpoint response".into());
+        };
+        Ok(Snapshot {
+            checkpoint,
+            world: self.world.clone(),
+            transcript: self.transcript.clone(),
+            framer: self.framer.clone(),
+            log_decoder: self.log_decoder.clone(),
+            crashed: self.crashed.clone(),
+            retired: self.retired.clone(),
+        })
+    }
+    fn restore(&mut self, snapshot: &Self::Snapshot) -> Result<u64> {
+        if self.name != snapshot.world.name {
+            return Err("ARM checkpoint machine name mismatch".into());
+        }
+        if !matches!(
+            self.worker
+                .call(Operation::Restore(snapshot.checkpoint.clone()))?,
+            Answer::Restored(_)
+        ) {
+            return self.reject("invalid ARM checkpoint restore response".into());
+        }
+        self.physical = self
+            .worker
+            .observation()
+            .cloned()
+            .ok_or("missing restored ARM observation")?;
+        self.world = snapshot.world.clone();
+        self.transcript = snapshot.transcript.clone();
+        self.framer = snapshot.framer.clone();
+        self.log_decoder = snapshot.log_decoder.clone();
+        self.crashed = snapshot.crashed.clone();
+        self.retired = snapshot.retired.clone();
+        // ARM restoration copies its complete RAM mapping; expose the same page
+        // accounting unit as the shared coordinator's x86 adapter.
+        Ok(self.ram_pages)
     }
 
     fn advance(
@@ -701,14 +815,19 @@ impl WorldMachine for ArmMachine {
             };
         let capture_result = self
             .captures
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .append(
-                &log_chunks,
-                &console,
-                &management,
-                self.worker.identity().incarnation,
-            );
+            .as_ref()
+            .map(|captures| {
+                captures
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .append(
+                        &log_chunks,
+                        &console,
+                        &management,
+                        self.worker.identity().incarnation,
+                    )
+            })
+            .transpose();
         if let Err(error) = capture_result {
             return self.reject(error);
         }
@@ -731,6 +850,13 @@ impl WorldMachine for ArmMachine {
         self.world.fault_effects = effects;
         self.world.control_requests = control;
         self.world.committed_console = observed;
+        let output_time = time_ns;
+        self.log_decoder.commit(
+            &mut self.world,
+            self.observations.as_deref(),
+            output_time,
+            &management,
+        );
         frames.extend(sent);
         Ok(semantic)
     }

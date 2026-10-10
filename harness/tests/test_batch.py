@@ -1,6 +1,4 @@
 """Lifecycle controls use real disposable processes, never hardware."""
-import contextlib
-import fcntl
 import importlib.util
 import os
 from pathlib import Path
@@ -21,26 +19,41 @@ spec.loader.exec_module(batch)
 
 
 class BatchTests(unittest.TestCase):
-    def test_cpu_ranges(self):
-        self.assertEqual(batch.cpu_list('14,30-31'), {14,30,31})
-
-    def test_overlap_lock_fails_and_releases_acquired_locks(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            with batch.cpu_locks({30}, directory):
-                with self.assertRaises(RuntimeError):
-                    with batch.cpu_locks({14,30}, directory):
-                        self.fail('overlap was accepted')
-                with batch.cpu_locks({14}, directory):
-                    pass
-            with batch.cpu_locks({14,30}, directory):
-                pass
-
-    @unittest.skipUnless(sys.platform == "linux", "Linux batch admission")
     def test_invalid_timeout_is_rejected_before_mutation(self):
         for timeout in (0, -1, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
-                batch.run_batch(Path("."),"world","control",[1],[],[14],timeout,"unused")
+                batch.run_batch(Path("."),"world","control",[1],[],timeout,"unused")
+
+    def test_batch_launches_all_workers_without_cpu_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            children = []
+            commands = []
+            def launch(command, **kwargs):
+                child = unittest.mock.Mock(returncode=None)
+                children.append(child)
+                commands.append(command)
+                self.assertTrue(kwargs['start_new_session'])
+                return child
+            def status(child):
+                # Every seed starts before waiting for any seed to finish.
+                self.assertEqual(len(children), 3)
+                return 0
+            def reap(child):
+                child.returncode = 0
+            with patch.object(batch.os, 'WNOWAIT', 0, create=True), \
+                 patch.object(batch, 'enable_subreaper'), \
+                 patch.object(batch.subprocess, 'Popen', side_effect=launch), \
+                 patch.object(batch, 'exit_status', side_effect=status), \
+                 patch.object(batch, 'stop_owned_group', side_effect=reap):
+                result = batch.run_batch(root, 'world.json', 'batch', [7,8,9], ['--digest'], 1, 'vmm')
+            self.assertEqual(result, 0)
+            self.assertTrue(all(child.returncode == 0 for child in children))
+            for i, seed in enumerate([7,8,9]):
+                self.assertEqual(commands[i], ['vmm', '--config', 'world.json', '--seed', str(seed),
+                    '--out', str(root/f'runs/batch-s{seed}-r{i}'), '--digest'])
+                self.assertEqual((root/f'runs/batch-s{seed}-r{i}.status').read_text(), '0\n')
+            self.assertFalse(list(root.glob('*.lock')))
 
     def exercise_lifecycle(self, interrupt=False, count=1):
         with tempfile.TemporaryDirectory() as tmp:
@@ -54,23 +67,6 @@ class BatchTests(unittest.TestCase):
                 if len(children) == count:
                     spawned.set()
                 return children[-1]
-            released = []
-            real_locks = batch.cpu_locks
-            @contextlib.contextmanager
-            def locks(cpus, directory):
-                # The leases must outlive every owned child.
-                with real_locks(cpus, directory):
-                    yield
-                    self.assertTrue(spawned.is_set())
-                    self.assertTrue(all(child.returncode is not None for child in children))
-                    for child in children:
-                        with self.assertRaises(ProcessLookupError):
-                            os.killpg(child.pid, 0)
-                    for cpu in cpus:
-                        with self.assertRaises(RuntimeError):
-                            with real_locks({cpu}, root):
-                                pass
-                    released.append(True)
             sender = None
             if interrupt:
                 def signal_after_start():
@@ -78,29 +74,28 @@ class BatchTests(unittest.TestCase):
                         os.kill(os.getpid(), signal.SIGTERM)
                 sender = threading.Thread(target=signal_after_start)
                 sender.start()
-            with patch.object(batch, 'siblings', side_effect=lambda cpu:{cpu,cpu+16}), \
-                 patch.object(batch.subprocess, 'Popen', side_effect=launch), \
-                 patch.object(batch, 'cpu_locks', side_effect=locks):
-                result = batch.run_batch(root,'world.json','control',list(range(count)),[],
-                                         list(range(14,14+count)),.08,'unused',root)
+            with patch.object(batch.subprocess, 'Popen', side_effect=launch):
+                result = batch.run_batch(root,'world.json','control',list(range(count)),[],.08,'unused')
             if sender:
                 sender.join(2)
-            self.assertEqual(released, [True])
+            self.assertTrue(spawned.is_set())
+            self.assertTrue(all(child.returncode is not None for child in children))
+            for child in children:
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(child.pid, 0)
             self.assertEqual(result,143 if interrupt else 0)
             for i in range(count):
                 self.assertEqual((root/f'runs/control-s{i}-r{i}.status').read_text().strip(),
                                  '143' if interrupt else '124')
-            with batch.cpu_locks({14,30}, root):
-                pass
 
     @unittest.skipUnless(sys.platform == 'linux' and hasattr(os,"WNOWAIT"),
                          "Linux waitid lifecycle control")
-    def test_timeout_reaps_before_restore_and_preserves_cpu_locks(self):
+    def test_timeout_reaps_every_owned_child(self):
         self.exercise_lifecycle()
 
     @unittest.skipUnless(sys.platform == 'linux' and hasattr(os,"WNOWAIT"),
                          "Linux waitid lifecycle control")
-    def test_interruption_reaps_every_concurrent_child_before_restore(self):
+    def test_interruption_reaps_every_concurrent_child(self):
         self.exercise_lifecycle(interrupt=True,count=2)
 
     @unittest.skipUnless(sys.platform == 'linux', 'Linux subreaper control')

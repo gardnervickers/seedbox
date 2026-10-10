@@ -1,0 +1,9 @@
+[package]
+name = "seedbox-spec"
+description = "Resolved simulation configuration shared by preparation and the public API"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true

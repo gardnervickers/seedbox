@@ -251,7 +251,7 @@ fn passive_tracking_preserves_legacy_bytes_and_partition_rng_and_snapshot_state(
         },
         10,
     );
-    let snapshot = (f.connections.clone(), f.links.clone());
+    let snapshot = serde_json::to_vec(&f).unwrap();
     let before = hash(&f);
     let mut link_hash = Sha256::new();
     f.links.witness(&mut link_hash);
@@ -275,7 +275,7 @@ fn passive_tracking_preserves_legacy_bytes_and_partition_rng_and_snapshot_state(
     expected_links.witness(&mut expected);
     assert_eq!(expected.finalize(), after.finalize());
     assert_ne!(before, hash(&f));
-    (f.connections, f.links) = snapshot;
+    f = serde_json::from_slice(&snapshot).unwrap();
     assert_eq!(before, hash(&f));
     assert_eq!(f.connections("client", "server", 0), vec![c]);
     apply(&mut f, Action::Heal { handle: "s".into() }, 13);

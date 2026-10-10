@@ -9,6 +9,8 @@
 //! it. This is durability against a simulated machine crash, not host
 //! power loss: nothing here is written to host storage.
 
+mod checkpoint;
+
 use crate::rng::Rng;
 use serde::Deserialize;
 use serde_json::Value;
@@ -379,7 +381,7 @@ impl Disk {
                 h.update(&data[..]);
             }
         }
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 }
 

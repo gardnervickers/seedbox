@@ -323,7 +323,7 @@ To compare an engine change, make independent fresh runs with matching inputs
 and compare their witnesses and full state; replaying an old retained engine
 alone does not test the new one.
 
-See [image-time parsing and tests](../crates/seedbox/src/oci.rs), [the
+See [image-time parsing and tests](../crates/seedbox-application/src/oci.rs), [the
 supervisor](../guest/compose-init.c), and [the runtime guide](runtime.md).
 Rebuilt images may intentionally change the default epoch.
 

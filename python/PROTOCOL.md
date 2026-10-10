@@ -14,7 +14,7 @@ Select one controller service in Compose:
 x-seedbox:
   version: 1
   control: {service: scenario}
-  check: {service: scenario, exit_code: 0}
+  check: {service: scenario}
   # ...seed, limits, network and schedule settings...
 ```
 

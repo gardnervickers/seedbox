@@ -381,20 +381,24 @@ fn process_lifecycle_rejections_are_admission_errors_without_new_faults() {
 }
 #[test]
 fn target_exit_between_request_and_admission_is_recoverable() {
-    for op in ["stop", "restart"] {
+    for (op, parameters) in [
+        ("stop", json!({})),
+        ("restart", json!({})),
+        ("clock_skew", json!({"offset_ns": 100})),
+        ("clock_drift", json!({"rate_ppb": 100})),
+    ] {
         let mut c = control();
         let mut f = faults::Faults::new(
             vec![],
             vec!["scenario".into(), "client".into(), "server".into()],
         )
         .unwrap();
-        request(
-            &mut c,
-            1,
-            100,
-            json!({"version":1,"id":1,"op":op,"target":{"service":"server"}}),
-        )
-        .unwrap();
+        let mut payload = json!({"version":1,"id":1,"op":op,"target":{"service":"server"}});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(parameters.as_object().unwrap().clone());
+        request(&mut c, 1, 100, payload).unwrap();
         c.reject_unavailable(&["server".into()]);
         c.apply_boundary(&mut f, 120).unwrap();
         c.apply_boundary(&mut f, 140).unwrap();
@@ -1259,7 +1263,7 @@ fn unsupported_operations_reply_without_planning_handles_or_faults() {
         let pending = c.pending.as_ref().unwrap();
         assert!(pending.plan.is_none());
         assert_eq!(pending.result, json!({}));
-        assert_eq!(pending.error_code, Some("unsupported"));
+        assert_eq!(pending.error_code.as_deref(), Some("unsupported"));
         assert!(c.triggers.records.is_empty());
         assert!(c.apply_boundary(&mut f, 120).unwrap().is_none());
         let bytes = c.apply_boundary(&mut f, 140).unwrap().unwrap();

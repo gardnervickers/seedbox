@@ -25,7 +25,8 @@ pub struct Chunk {
     pub length: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Pending {
     chunks: Vec<Chunk>,
     console: u64,

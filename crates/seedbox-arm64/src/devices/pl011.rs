@@ -1,7 +1,8 @@
 use super::{Effect, MmioDevice};
 use crate::Result;
 /// Synchronous transmit, permanently empty receive FIFO, level TX interrupt.
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pl011 {
     pub console: Vec<u8>,
     regs: [u32; 16],

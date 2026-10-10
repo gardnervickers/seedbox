@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub type Pair = (usize, usize);
 /// Global link latency when the network config names none: one millisecond.
 pub use seedbox_engine_protocol::world_config::DEFAULT_LATENCY_NS;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Policy {
     pub latency_ns: u64,
     pub jitter_ns: u64,
@@ -56,7 +56,7 @@ impl Policy {
         network_faults.validate(self.latency_ns, self.jitter_ns)
     }
 }
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueueCounts {
     pub matched: u64,
     pub queue_dropped: u64,
@@ -74,7 +74,7 @@ impl QueueCounts {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Layer {
     pub handle: String,
     pub pairs: BTreeSet<Pair>,
@@ -82,21 +82,28 @@ pub struct Layer {
     pub queue_counts: QueueCounts,
     pub network_faults: NetworkFaults,
     pub network_counts: Counts,
+    #[serde(with = "crate::checkpoint::ordered_map")]
     burst_remaining: BTreeMap<Pair, u64>,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Links {
     pub global: Policy,
+    #[serde(with = "crate::checkpoint::ordered_map")]
     pub baselines: BTreeMap<Pair, Policy>,
     pub layers: BTreeMap<u32, Layer>,
+    #[serde(with = "crate::checkpoint::ordered_map")]
     pub last: BTreeMap<Pair, u64>,
+    #[serde(with = "crate::checkpoint::ordered_map")]
     pub last_depart: BTreeMap<Pair, u64>,
+    #[serde(with = "crate::checkpoint::ordered_map")]
     pub queue_counts: BTreeMap<Pair, QueueCounts>,
     /// Retained after healing, including a bandwidth shape with no traffic.
     bandwidth_used: bool,
     /// A shape layer has been applied at some point in this run.
     pub shaped: bool,
+    #[serde(with = "crate::checkpoint::ordered_map")]
     loss: BTreeMap<Pair, Rng>,
+    #[serde(with = "crate::checkpoint::ordered_map")]
     jitter: BTreeMap<Pair, Rng>,
     network_streams: Streams,
     network_used: bool,
@@ -1006,7 +1013,7 @@ mod tests {
         )
         .unwrap();
         l.decide(0, 1, 10, 1500, false);
-        let snapshot = l.clone();
+        let snapshot: Links = serde_json::from_slice(&serde_json::to_vec(&l).unwrap()).unwrap();
         let expected = l.decide(0, 1, 11, 1500, false);
         l.decide(0, 1, 12, 1500, false);
         l = snapshot;
@@ -1196,7 +1203,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(l.decide(0, 1, 0, 1500, false), Outcome::Deliver(19_000_000));
-        let snapshot = l.clone();
+        let snapshot: Links = serde_json::from_slice(&serde_json::to_vec(&l).unwrap()).unwrap();
         l.heal("fast");
         assert_eq!(l.decide(0, 1, 0, 1500, false), Outcome::Deliver(31_000_000));
         let expected = hash(&l);

@@ -1,8 +1,9 @@
 //! Bounded split-ring DMA shared by the platform device adapters.
 //! Addresses are guest physical addresses; segments and dirty ranges are RAM offsets.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Queue {
     pub num: u16,
     pub ready: bool,

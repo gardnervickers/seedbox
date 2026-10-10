@@ -1,5 +1,5 @@
 //! Platform selection stays at the command-line boundary.
-use seedbox::{
+use seedbox_application::{
     config::Simulation,
     execution::{
         CancellationToken, ExecutionBackend, ExecutionProfile, ExecutionReport, ExecutionRequest,
@@ -19,24 +19,9 @@ use std::{
 pub enum Executor {
     Linux(VmmExecutor),
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    Mac(seedbox::mac::MacExecutor),
+    Mac(seedbox_application::mac::MacExecutor),
 }
 impl Executor {
-    pub fn with_checkpoint(self, at_ns: u64, branch_seed: u64) -> Result<Self> {
-        match self {
-            Self::Linux(executor) => Ok(Self::Linux(executor.with_checkpoint(at_ns, branch_seed))),
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(_) => Err(seedbox::Error::Setup(super::CHECKPOINT_REQUIRES_KVM.into())),
-        }
-    }
-    /// Watchdog interval is a Linux setting; the Mac engine ignores it.
-    pub fn performance(self, watchdog_ms: u64) -> Result<Self> {
-        match self {
-            Self::Linux(e) => Ok(Self::Linux(e.with_watchdog_ms(watchdog_ms)?)),
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(e) => Ok(Self::Mac(e)),
-        }
-    }
     fn backend(&self) -> &dyn ExecutionBackend {
         match self {
             Self::Linux(e) => e,
@@ -64,7 +49,7 @@ impl ExecutionBackend for Executor {
     fn runtime_inputs<'a>(
         &self,
         inputs: &'a PreparedInputs,
-    ) -> Vec<&'a seedbox::store::ContentDigest> {
+    ) -> Vec<&'a seedbox_application::store::ContentDigest> {
         self.backend().runtime_inputs(inputs)
     }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
@@ -84,7 +69,7 @@ impl ExecutionBackend for Executor {
 pub struct Preparer {
     pub inputs: OciPreparer,
     // Package extraction must outlive preparation and retention of its bytes.
-    pub _helpers: Option<seedbox::guest_assets::Runtime>,
+    pub _helpers: Option<seedbox_application::guest_assets::Runtime>,
     pub cancellation: CancellationToken,
 }
 impl Deref for Preparer {
@@ -121,7 +106,7 @@ impl PreparationBackend for Preparer {
             simulation,
             store,
             context,
-            &seedbox::container_images::ContainerTransport {
+            &seedbox_application::container_images::ContainerTransport {
                 docker: self.inputs.docker.clone(),
                 cancellation: context.cancellation.clone(),
                 progress: preparation_progress,
@@ -152,21 +137,21 @@ fn assets_beside(
 }
 pub fn guest_assets(
     explicit: Option<std::path::PathBuf>,
-) -> Result<seedbox::guest_assets::Runtime> {
+) -> Result<seedbox_application::guest_assets::Runtime> {
     if explicit.is_none() {
-        if let Some(bytes) = seedbox::guest_assets::EMBEDDED {
-            return seedbox::guest_assets::Runtime::from_bytes(bytes);
+        if let Some(bytes) = seedbox_application::guest_assets::EMBEDDED {
+            return seedbox_application::guest_assets::Runtime::from_bytes(bytes);
         }
     }
     let path = explicit.unwrap_or_else(|| asset_directory().join("runtime.tar.gz"));
     let path = local_asset("--runtime-assets", path)?;
-    seedbox::guest_assets::Runtime::from_archive(&path).map_err(|error| seedbox::Error::Setup(format!("runtime assets {}: {error}; rebuild with `python3 tools/build.py` or select a valid --runtime-assets archive", path.display())))
+    seedbox_application::guest_assets::Runtime::from_archive(&path).map_err(|error| seedbox_application::Error::Setup(format!("runtime assets {}: {error}; rebuild with `python3 tools/build.py` or select a valid --runtime-assets archive", path.display())))
 }
 fn local_asset(flag: &str, path: std::path::PathBuf) -> Result<std::path::PathBuf> {
     if path.is_file() {
         Ok(path)
     } else {
-        Err(seedbox::Error::Setup(format!("{flag} {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass {flag} PATH", path.display())))
+        Err(seedbox_application::Error::Setup(format!("{flag} {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass {flag} PATH", path.display())))
     }
 }
 pub fn guest_kernel(explicit: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
@@ -240,7 +225,7 @@ pub fn container_engine() -> Result<bollard::Docker> {
         }
         bollard::Docker::connect_with_podman_defaults()
     };
-    connect().map_err(|error| seedbox::Error::Setup(format!(
+    connect().map_err(|error| seedbox_application::Error::Setup(format!(
         "cannot configure a Docker-compatible engine: {error}; start Docker or Podman and set DOCKER_HOST to its socket")))
 }
 

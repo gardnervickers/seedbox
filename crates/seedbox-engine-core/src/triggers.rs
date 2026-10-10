@@ -7,10 +7,88 @@ use seedbox_control::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Default)]
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    #[test]
+    fn restored_partial_match_uses_rebuilt_failure_table() {
+        let mut original = Triggers::default();
+        original
+            .arm(
+                "a".into(),
+                b"ABABAC".to_vec(),
+                0,
+                100,
+                Action::Heal {
+                    handle: "cut".into(),
+                },
+            )
+            .unwrap();
+        for byte in b"ABA" {
+            original.committed("a", 1, *byte, 10, 1).unwrap();
+        }
+        let saved = serde_json::to_value(&original).unwrap();
+        let mut restored: Triggers = serde_json::from_value(saved.clone()).unwrap();
+        for byte in b"BABAC" {
+            original.committed("a", 2, *byte, 10, 2).unwrap();
+            restored.committed("a", 2, *byte, 10, 2).unwrap();
+        }
+        assert_eq!(original.records, restored.records);
+        assert_eq!(restored.records[0].status, TriggerStatus::Matched);
+        let matched: Triggers =
+            serde_json::from_slice(&serde_json::to_vec(&restored).unwrap()).unwrap();
+        assert_eq!(matched.records, restored.records);
+        for (field, value) in [("prefix", 6), ("id", 2), ("match_deadline_ns", 0)] {
+            let mut invalid = saved.clone();
+            invalid[0][field] = serde_json::json!(value);
+            assert!(serde_json::from_value::<Triggers>(invalid).is_err());
+        }
+    }
+}
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "Vec<TriggerRecord>", into = "Vec<TriggerRecord>")]
 pub struct Triggers {
     pub records: Vec<TriggerRecord>,
     failure: Vec<Vec<usize>>,
+}
+impl From<Triggers> for Vec<TriggerRecord> {
+    fn from(triggers: Triggers) -> Self {
+        triggers.records
+    }
+}
+impl TryFrom<Vec<TriggerRecord>> for Triggers {
+    type Error = String;
+    fn try_from(records: Vec<TriggerRecord>) -> Result<Self, Self::Error> {
+        let mut restored = Self::default();
+        for record in records {
+            if record.prefix > record.marker.len()
+                || (record.status == TriggerStatus::Armed && record.prefix == record.marker.len())
+                || record.prefix as u64 > record.seen
+            {
+                return Err("invalid checkpoint trigger prefix".into());
+            }
+            let timeout = record
+                .match_deadline_ns
+                .checked_sub(record.armed_at_ns)
+                .ok_or("invalid checkpoint trigger deadline")?;
+            // Rebuild the derived matcher table with the same admission checks
+            // used for new triggers; persisted tables must never drive indexing.
+            let id = restored.arm(
+                record.source.clone(),
+                record.marker.clone(),
+                record.armed_at_ns,
+                timeout,
+                record.action.clone(),
+            )?;
+            if record.id != id {
+                return Err("invalid checkpoint trigger sequence".into());
+            }
+            restored.records[id as usize - 1] = record;
+        }
+        Ok(restored)
+    }
 }
 impl Triggers {
     pub fn arm(
@@ -154,14 +232,17 @@ impl Triggers {
                     continue;
                 }
                 r.fault_id = Some(
-                    faults.append(Plan {
-                        id: 0,
-                        at_ns: now,
-                        deadline_ns: now
-                            .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
-                            .ok_or("trigger effect deadline overflow")?,
-                        action: r.action.clone(),
-                    })?,
+                    faults.admit(
+                        Plan {
+                            id: 0,
+                            at_ns: now,
+                            deadline_ns: now
+                                .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
+                                .ok_or("trigger effect deadline overflow")?,
+                            action: r.action.clone(),
+                        },
+                        now,
+                    )?,
                 );
                 r.status = TriggerStatus::Fired;
             }

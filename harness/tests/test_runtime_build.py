@@ -13,7 +13,7 @@ class RuntimeBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='seedbox-runtime-build-') as directory:
             root = Path(directory)
             script = root / 'build-script'
-            subprocess.run(['rustc', str(ROOT / 'crates/seedbox/build-runtime.rs'), '-o', str(script)],
+            subprocess.run(['rustc', str(ROOT / 'crates/seedbox-application/build-runtime.rs'), '-o', str(script)],
                            check=True, capture_output=True, timeout=120)
             tools = root / 'forbidden-tools'
             tools.mkdir()
@@ -26,7 +26,7 @@ class RuntimeBuildTests(unittest.TestCase):
             helpers = root / 'helpers.tar.gz'
             helpers.write_bytes(b'build-only fixture')
             environment['SEEDBOX_BUILD_HELPERS'] = str(helpers)
-            environment.update(CARGO_MANIFEST_DIR=str(ROOT / 'crates/seedbox'),
+            environment.update(CARGO_MANIFEST_DIR=str(ROOT / 'crates/seedbox-application'),
                                OUT_DIR=str(root), PROFILE='release', PATH=str(tools),
                                SEEDBOX_STATIC_CC=str(tools / 'cc'),
                                SEEDBOX_BUILDER=str(tools / 'docker'))
@@ -45,9 +45,9 @@ class RuntimeBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             script = root / 'build-script'
-            subprocess.run(['rustc', str(ROOT / 'crates/seedbox/build-runtime.rs'), '-o', str(script)],
+            subprocess.run(['rustc', str(ROOT / 'crates/seedbox-application/build-runtime.rs'), '-o', str(script)],
                            check=True, capture_output=True, timeout=120)
-            environment = dict(os.environ, CARGO_MANIFEST_DIR=str(ROOT / 'crates/seedbox'),
+            environment = dict(os.environ, CARGO_MANIFEST_DIR=str(ROOT / 'crates/seedbox-application'),
                                OUT_DIR=str(root), PROFILE='release', CARGO_CFG_TARGET_ARCH='aarch64',
                                SEEDBOX_BUILD_HELPERS=str(root / 'missing.tar.gz'))
             result = subprocess.run([str(script)], env=environment, text=True, capture_output=True)
@@ -59,8 +59,8 @@ class RuntimeBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             script = root / 'build-script'
-            subprocess.run(['rustc', str(ROOT / 'crates/seedbox/build-runtime.rs'), '-o', str(script)], check=True, capture_output=True)
-            environment = dict(os.environ, CARGO_MANIFEST_DIR=str(ROOT / 'crates/seedbox'), OUT_DIR=str(root), PROFILE='release', CARGO_CFG_TARGET_ARCH='aarch64', SEEDBOX_ASSET_DIR=str(root / 'missing'))
+            subprocess.run(['rustc', str(ROOT / 'crates/seedbox-application/build-runtime.rs'), '-o', str(script)], check=True, capture_output=True)
+            environment = dict(os.environ, CARGO_MANIFEST_DIR=str(ROOT / 'crates/seedbox-application'), OUT_DIR=str(root), PROFILE='release', CARGO_CFG_TARGET_ARCH='aarch64', SEEDBOX_ASSET_DIR=str(root / 'missing'))
             stale = root / 'missing/aarch64/runtime.tar.gz'
             stale.parent.mkdir(parents=True)
             stale.write_bytes(b'stale archive')

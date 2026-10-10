@@ -1,5 +1,5 @@
 //! Portable CLI path resolution; complete builds keep guest inputs beside the executable.
-use seedbox::{Error, Result};
+use seedbox_application::{Error, Result};
 use std::{
     env,
     path::{Path, PathBuf},

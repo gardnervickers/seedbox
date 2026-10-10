@@ -10,8 +10,8 @@ runs its launch barrier and main segment through it too; each ARM machine
 is a stopped worker process, so the pool threads carry no clock. The legacy
 loop (`world::simulate`) remains in `engine-core` only for its tests; no
 backend calls it. `vmm.json` names the scheduler under `scheduler.name`.
-There is no flag to choose. `--machine-workers N` (both engines) and
-`--machine-cpus` (x86) set the thread count and pinning (performance only).
+There is no flag to choose. `--machine-workers N` sets the engine thread count
+(performance only). Workers use normal host scheduling without CPU pinning.
 On x86 they are fields of the worker launch request
 (`seedbox_engine_core::launch::WorkerRequest`); the `seedbox` CLI leaves
 them at their defaults, so CLI runs are windowed on one thread.
@@ -106,7 +106,7 @@ windows.
 
 ### Linux KVM host (5950X, `nixos`)
 
-`harness/windowed-matrix.sh KERNEL VMM CPUS` reproduces the thread-count
+`harness/windowed-matrix.sh KERNEL VMM WORKERS` reproduces the thread-count
 agreement as root in the dev shell, with the worlds in
 `harness/worlds/window2.json` and `window4.json`. It exits nonzero if any
 witness disagrees. The old-scheduler rows below are from the engine before
@@ -117,8 +117,8 @@ this one became the default.
 Guest `a` then exits. The world uses 1 ms latency with 100 µs jitter and a
 2 ms stop tolerance, so windows are 0.5 ms. The guest kernel is built from
 `kernel/` at this revision. Each world ran with seed 7 and `--digest`, with
-the VMM pinned by `taskset` and workers pinned with `--machine-cpus` to CPUs
-4–7.
+historical CPU affinity settings on CPUs 4–7. That measurement predates removal
+of engine-managed affinity; current operators can use external `taskset`.
 
 | Old scheduler | Windowed, 1 worker | 2 workers | 3 workers | 4 workers | 4 workers, reversed |
 | --- | --- | --- | --- | --- | --- |
@@ -213,8 +213,7 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
   `world.strict_events`, so the report's network witness covers them.
 - **x86 VMM.**
   - `Machine` is `Send`, and the disk's shared base image is now an `Arc`.
-  - Each pool thread opens its own `PvClock` and pins itself to its
-    `--machine-cpus` entry.
+  - Each pool thread opens its own `PvClock` and uses normal host scheduling.
   - The thread's `PvClock` keeps only the watchdog timer and per-run
     scratch; the stall counter the watchdog reports from belongs to each
     `Machine`, and `Machine::restore` resets it.
@@ -222,18 +221,15 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
     are `Send`, through the `SendPtr` newtype, so `Machine`
     is `Send` by derivation. A future non-`Send` field still fails to
     compile.
-- **Scope.** `--machine-workers` and `--machine-cpus` apply to every run.
+- **Scope.** `--machine-workers` applies to every run.
   A delivery that fails (a control frame the guest cannot take) fails the
   run instead of ending it as `fault_failed`.
 
 ## Remaining plan
 
-1. **CLI.** `--machine-workers N` is performance-only and
-   overridable on replay. The executor leases `N` CPUs and sets
-   `machine_cpus` in the launch request.
-   Neither can be combined with `explore --workers > 1` or with the
-   unsupported features. Update help, README, runtime docs and the project
-   template.
+1. **Performance configuration.** Worker concurrency remains server-owned;
+   there is no CPU binding option or core lease. Operators can constrain host
+   scheduling externally when desired.
 2. **Reports.** Show the end machine's exit time beside the committed end in
    the CLI report. Today they appear only in `vmm.json`, under `scheduler`.
 3. **Sticky placement.** Linux 6.18.54 made no `synchronize_rcu` calls on

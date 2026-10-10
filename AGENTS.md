@@ -6,7 +6,12 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 
 ## Workspace
 
-- `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
+- `crates/seedbox` is the default executable package: `cargo run -- <command>` runs the CLI.
+  `crates/seedbox-application` owns configuration, preparation and orchestration.
+  `seedbox-api` and `seedbox-spec` own transport-independent public types;
+  `seedbox-client` owns the local HTTP client; `seedbox-server` owns the catalogue,
+  resource lifecycle and execution service. Keep the application library independent
+  of the server and CLI. Native worker dispatch remains in the executable.
   Use `build/current/seedbox` for guest runs;
   the bundled engine uses the CLI build profile.
 - Build the complete CLI and guest inputs with `python3 tools/build.py` inside
@@ -49,8 +54,8 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 
 ## Crate and test boundaries
 
-`seedbox-engine-protocol` owns worker launch/configuration and retained evidence
-formats. It has no CPU backend, scheduler or device policy. `seedbox-artifacts`
+`seedbox-engine-protocol` owns worker launch/configuration, the private shared
+host-wait clock transport, and retained evidence formats. It has no CPU backend, scheduler or device policy. `seedbox-artifacts`
 owns offline records, content storage, logs, comparison and bundles; it depends
 on protocol types, never engine-core, a hypervisor, Bollard or Tokio. The
 application crate reexports retained APIs and owns parsing, preparation,
@@ -123,15 +128,15 @@ which resolves the canonical source through the wrapper's link. Build scripts tr
 to invalidate a reused target when switching checkouts, even if source timestamps
 predate the cache. Run Cargo from the checkout root for caching; missing or unrelated
 config safely forces a source rebuild on every invocation, including older checkouts.
-The CLI `build-runtime.rs` uses the same invalidation and resolves guest
-inputs from the runtime package directory. Keep inherited package and
+The application `build-runtime.rs` uses the same invalidation and embeds explicitly
+supplied guest inputs. The executable build script owns native signing. Keep inherited package and
 dependency keys aligned across workspaces. Portable tests import
 the canonical crate; do not restore sibling source inclusion for these policies.
 
 ## Determinism
 
 - A run's witness and a `seedbox replay` MATCH are how determinism is checked.
-  Performance settings (`--watchdog-ms`, `--machine-workers`) must never change results.
+  Server-owned performance settings (watchdog interval and machine workers) must never change results.
 - Determinism is about results, not source or build bytes. Don't hash or
   stamp the source tree, Git revision, build flags or compiled binaries, and
   don't add compiler wrappers, reproducible-build checks, or formatting
@@ -152,7 +157,7 @@ Run the suites for your platform inside `nix develop` before committing:
 
 ```sh
 bash harness/check.sh                 # portable
-bash harness/check.sh linux --cpu 14  # Linux KVM host
+bash harness/check.sh linux           # Linux KVM host
 bash harness/check.sh mac             # Apple Silicon
 ```
 
@@ -169,8 +174,8 @@ See [docs/testing.md](docs/testing.md) for features, discovery and fixture input
 Keep VMM engine tests compiled by default; conditional `ignore` attributes enable
 hardware execution through features. Other feature-gated tests must be built by
 the portable `--no-run` checks. Add no per-test registration lists. The runner
-builds as the current user, signs disposable HVF test copies, and leases a
-CPU/SMT pair for application tests. Check other revisions in a Git worktree;
+builds as the current user and signs disposable HVF test copies. Workers use
+normal host scheduling; Seedbox does not reserve cores or pin CPUs. Check other revisions in a Git worktree;
 do not stamp Git revisions or checkout cleanliness in the runner.
 
 ## CLI
@@ -183,6 +188,9 @@ The CLI lives in `crates/seedbox/src/cli/`:
 - `backends.rs`: platform backend selection and guest-asset lookup.
 - `diagnostics.rs`: excerpts of local execution diagnostics for text output.
 - `signals.rs`: cancellation.
+- `simulations.rs`: server-client commands and durable control receipts.
+- `faults.rs`: bounded YAML/JSON fault input before connecting to the server.
+- `playback_args.rs`: positional playback-control arguments and rate validation.
 
 `src/main.rs` dispatches the private retained worker before calling `cli::main()`.
 `engine_worker.rs` is a process boundary alongside the public CLI. The library
@@ -200,18 +208,21 @@ deliberately change one.
   host. The only required inputs are those with no possible default (`init
   DIRECTORY`, `prepare --output`, `diff RUN_A RUN_B`).
 - A command's main object is positional: the Compose path (default `.`,
-  and a directory resolves to its `compose.yaml`) or the run directory.
+  and a directory resolves to its `compose.yaml`), a simulation ID, or an offline run directory.
+  `run`, `explore`, `rerun` and `replay` submit through the server; clients never
+  launch execution directly. `replay ID` reruns then compares; `rerun ID` reports
+  the oracle verdict. Offline bundle catalogue import is still pending.
 - Flags are long kebab-case. Don't add short flags except `-o`/`-h`/`-V`.
-  Boolean flags are presence-only (`--json`, `--full-state`).
+  Boolean flags are presence-only (`--json`, `--detach`).
 - A choice from a fixed set uses `#[derive(ValueEnum)]` with a doc comment on
   each variant. Never use string matching followed by `unreachable!`.
 - Validate ranges and formats in a `value_parser`, so a bad value is a
   clap usage error that names the flag, not a runtime error later.
-- Reuse the shared `#[derive(Args)]` groups (`ComposeArg`, `CpuArg`,
-  `StateArg`, `RuntimeInputs`, `Performance`) instead of redeclaring flags.
+- Reuse the shared `#[derive(Args)]` groups (`ComposeArg`,
+  `StateArg`, `RuntimeInputs`) instead of redeclaring flags.
   When several commands need a new option, add a group.
-- Environment variables (`env = "SEEDBOX_<NAME>"`) say where things are: paths,
-  CPU, state directory. Never back a parameter that changes results (seed,
+- Environment variables (`env = "SEEDBOX_<NAME>"`) say where things are: paths
+  and state directory. Never back a parameter that changes results (seed,
   memory, full-state, faults, schedule) with an environment variable; it would
   change a run's identity without appearing on the command line.
 
@@ -224,10 +235,9 @@ deliberately change one.
 3. On failure, return `missing(what, &searched, fix)`, which lists every
    location tried and one way to fix it.
 4. Resolve it in `RuntimeInputs::backends` or earlier, before any slow work
-   (image pulls, builds, CPU leases). Fail fast. `run` and `explore` check immutable runtime
+   (image pulls and builds). Fail fast. `run` and `explore` check immutable runtime
    inputs and backend host admission before
-   preparation; no transient affinity or CPU reservation survives
-   that check.
+   preparation.
 5. Add it to the defaults table in README.md's quick start.
 
 ### Help text
@@ -241,25 +251,30 @@ deliberately change one.
 - Group flags under the existing `next_help_heading` sections: the default
   options, "Runtime inputs", and "Performance (never changes results)". A flag
   takes the heading of the group declared before it, so flatten
-  general-purpose groups (`CpuArg`, `StateArg`) before `RuntimeInputs`.
+  general-purpose groups (`StateArg`) before `RuntimeInputs`.
 - `run`, `replay` and `diff` show `EXIT_CODES` in `after_help`.
 - Check the result with `cargo run -- help <command>`.
 
 ### Output
 
+- Resource inspection commands (`get`, `describe`, `playback`) print one YAML
+  document, or one JSON document with `--json`, without a status-line prefix.
 - stdout carries results only. A command prints one status line
   `WORD: detail`, where `WORD` is the SCREAMING_SNAKE_CASE serde name
   produced by `word()` (`PASS`, `MATCH`, `VALID`, `CREATED`, ...). Any
   further lines are lowercase `key: value` (`replay: MATCH`, `error: ...`).
   Print both through `cli::output` rather than `println!`.
-- `logs` without `--json` writes only the selected raw bytes to stdout, with no
-  decoration or added newlines. Its lowercase `logs:` status and `omission:`
-  diagnostics go to stderr; `--json` includes chunk metadata and `bytes_hex`,
-  and the library's `logs::Reader::write_json` writes that document.
-- Scripts find the run directory with `sed -n 's/^[A-Z]*: //p'` over both
-  output streams of `run` and `replay`. Exactly one line may match
-  `^[A-Z]*: `, and it must be `OUTCOME: run-directory`.
-- `--json` prints exactly one pretty JSON document to stdout and nothing else.
+- `logs ID MACHINE` writes selected application bytes to stdout with no decoration
+  or added newlines. Omission diagnostics go to stderr; `--json` emits live
+  newline-delimited records with stream, time, incarnation and byte arrays.
+  `events ID` also emits newline-delimited records. Neither has a replay backlog.
+  The legacy `retained-logs RUN` reader retains its single JSON document contract.
+- `run` and `rerun` print `OUTCOME: simulation-id`; detached submission prints
+  `CREATED: simulation-id`. `replay` and `compare` print
+  `MATCH|MISMATCH|NOT_COMPARABLE: simulation-id`. Exactly one status line is
+  printed. Comparison does not change the stored oracle verdict. Scripts should
+  prefer `--json` and resource metadata instead of relying on host run paths.
+- Apart from live streaming commands, `--json` prints exactly one pretty JSON document to stdout and nothing else.
   Its field names come from the library's serde types; don't rename them in
   the CLI.
 - Progress and diagnostics go to stderr: lowercase, plain text, no colour,
@@ -292,14 +307,14 @@ deliberately change one.
   for the key phrase is enough.
 - Pure resolution logic gets unit tests in `defaults.rs`.
 - When behaviour changes, update `seedbox help`, README.md (quick start and
-  defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.
+  defaults table), docs/runtime.md, and `crates/seedbox-application/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
 
-`doctor` checks KVM device access, the CPU reservation and the guest
+`doctor` checks KVM device access and the guest
 kernel/VMM/runtime inputs. It uses guest-kernel/VMM defaults; host-kernel
 bytes are not checked. VMM resolution is lookup-only and must never invoke a
 compiler or launch the worker. Success reports
-only the exact cleaned-up probe observations and selected core; the library does
+only the exact cleaned-up probe observations; the library does
 not read arguments/environment or print. It creates no state/run and never prepares
 images or executes guests. Compatibility readiness is not replay qualification.
 

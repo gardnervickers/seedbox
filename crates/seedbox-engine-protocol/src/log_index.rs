@@ -11,7 +11,7 @@ pub fn index_name(raw: &str) -> String {
 }
 
 /// One burst of raw stream bytes. Encoded as five little-endian u64s in field order.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChunkRecord {
     /// Virtual time of the burst's first byte.
     pub time_ns: u64,

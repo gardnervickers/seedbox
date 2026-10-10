@@ -99,6 +99,9 @@ fn successful_disk_operations_and_snapshot_restore_keep_layers_and_stats() {
         let mut g = Guest::new(policy);
         g.request(1, 1, &[7; 512], false);
         g.notify().unwrap();
+        let metadata = serde_json::to_vec(&g.b.snapshot()).unwrap();
+        let mut disk_bytes = Vec::new();
+        g.b.disk().write_checkpoint(&mut disk_bytes).unwrap();
         let saved = (
             g.b.clone(),
             g.t.clone(),
@@ -123,7 +126,17 @@ fn successful_disk_operations_and_snapshot_restore_keep_layers_and_stats() {
         );
         let expected = g.b.disk().digest();
         let stats = g.b.stats().clone();
-        g.b = saved.0;
+        // The durable path must preserve the same continuation as a live model.
+        let base = Guest::new(policy).b.into_disk();
+        let restored_disk = Disk::read_checkpoint(base, disk_bytes.as_slice()).unwrap();
+        assert!(Block::new(Guest::new(policy).b.into_disk(), policy)
+            .restore_snapshot(serde_json::from_slice(&metadata).unwrap())
+            .is_err());
+        g.b = Block::new(restored_disk, policy)
+            .restore_snapshot(serde_json::from_slice(&metadata).unwrap())
+            .unwrap();
+        assert_eq!(g.b.disk().digest(), saved.0.disk().digest());
+        assert_eq!(g.b.stats(), saved.0.stats());
         g.t = saved.1;
         g.m = saved.2;
         g.next = saved.3;
