@@ -1130,6 +1130,11 @@ fn report(
                 mach.page_hashes(),
             )
             .map_err(|e| e.to_string())?;
+            // DIAGNOSTIC ONLY (not for merge): the first 64 MiB of guest RAM.
+            let path = format!("{out}/{}.ram64", mach.world.name);
+            let ram = mach.memory();
+            std::fs::write(path, &ram[..ram.len().min(64 << 20)])
+                .map_err(|e| e.to_string())?;
             let parts: serde_json::Map<String, Value> = parts
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), json!(v)))
