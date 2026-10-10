@@ -1,22 +1,14 @@
 # Automatic application progress
 
-Seedbox has one engine mode. Guest time is a PV clock: compute between exits
-costs no virtual time, and time advances at guest exits, syscalls and clock
-reads. Application code that computes without exiting would never advance the
-clock, so every application process runs under a binary translator that
-charges progress for it. Nothing is recompiled, and no application flags,
-environment overrides or `GOMAXPROCS` settings are required or applied.
+The [determinism catalogue](determinism-catalogue.md) explains virtual clocks,
+automatic application progress, kernel polling and ARM software reservations.
+This guide records their runtime integration and validation evidence.
+
+Seedbox has one engine mode. Applications run under the translator without
+recompilation or application-specific flags, environment overrides or
+`GOMAXPROCS` settings.
 
 ## Mechanism
-
-`guest/progress/progress.c` is a DynamoRIO 11.3.0 client. It keeps a per-thread
-counter in raw TLS and decrements it at the entry of each translated basic
-block, including shared libraries and JIT code. Every 10,000 block entries it
-issues one raw `getpid` syscall, which the kernel charges as PV progress like
-any other syscall. This counts block entries, not retired instructions; the
-translator's own code and the guest kernel are outside the client's coverage.
-x86 preserves flags through drreg; ARM uses non-flag-setting arithmetic and
-`CBNZ` with a reserved scratch register.
 
 `nix/progress.nix` packages DynamoRIO, drmgr, drreg, the client and a private
 launcher libc. The archive is retained with the prepared inputs and mounted
@@ -24,87 +16,52 @@ read-only under `/seedbox/progress`. The supervisor (`guest/compose-init.c`)
 resolves ordinary ELF and script entrypoints and runs them under `drrun` with
 `-opt_speed -disable_traces` and their original arguments.
 
-The guest kernel covers what the client cannot: the existing syscall hook
-charges each syscall, the x86 `cpu_relax` hook charges bounded clock reads in
-kernel polling loops, and the arm64 kernel charges 1,000 bounded clock reads at
-syscall entry. A loop none of these cover never exits and stalls virtual time
-until the world's wall-time limit; the host watchdog (`--watchdog-ms`)
-interrupts such a run to report on stderr where the guest is stuck, then
-resumes it, so it changes only how soon the report appears, never a result.
+The kernel charges each syscall; arm64 adds 1,000 bounded clock reads at syscall
+entry. See [application progress](determinism-catalogue.md#progress-from-translated-blocks),
+[kernel polling coverage](determinism-catalogue.md#progress-inside-kernel-polling),
+and [watchdog behavior](determinism-catalogue.md#observation-without-guest-progress)
+for the time model and uncovered loops.
 
-## ARM limitations and partial mitigation
+## ARM software reservations
 
-**General ARM determinism is not established.** A single guest CPU does not
-prevent host interruptions from causing spurious `STXR` failures. An application
-can observe those failures directly through an LL/SC retry counter, weak CAS or
-backoff. Even an otherwise invisible retry can change the client's TLS budget
-and the placement of progress charges. The translator's own code and kernel
-LL/SC sequences also remain outside the client's coverage.
+The [reservation protocol](determinism-catalogue.md#software-exclusive-reservations)
+is documented in the catalogue, including epoch publication, commit retries,
+fault restoration and the single-CPU assumption.
 
-The supervisor uses `-no_ldstex2cas -unsafe_build_ldstex`. Packing keeps supported
-exclusive sequences together and reduces instrumentation-induced failures.
-DynamoRIO cannot pack every sequence: PC-relative instructions, long regions and
-register pressure can prevent it. Its alternative exclusive-to-CAS conversion
-remains disabled because of correctness problems described below.
+`nix/dynamorio.nix` builds the ARM core and register-management extensions with
+`guest/progress/dynamorio-exclusives.patch`; x86 uses the upstream SDK core.
+The supervisor enables `-ldstex2cas` on ARM. Packing and the client's block-local
+retry exclusions are no longer used: every application block is charged,
+including split exclusive sequences and polling loops.
 
-The client applies a limited, block-local mitigation:
+[The exclusive acceptance workload](../harness/acceptance/workloads/exclusives.yaml)
+exercises a weak-CAS counter on both architectures and ARM-specific reservation
+and fault cases. Acceptance runs it twice, compares full state, then replays it.
+The [assembly fixtures](../guest/progress/fixtures/) include those cases; their
+older `run.sh` remains a native upstream packing diagnostic, not the acceptance
+gate for the protocol. The investigation is tracked in
+[#241](https://github.com/gardnervickers/seedbox/issues/241).
 
-- It skips the entry charge when a block starts with an exclusive load or a
-  packed `ldstex` instruction, or contains a store-exclusive or `CLREX` before
-  any exclusive load. Ordinary successor blocks retain their entry charge.
-- If an unpacked load-starting block branches backward before any exclusive
-  store, it charges the taken branch. That allows simple abandoned-reservation
-  polls to advance time.
-- A packed poll may loop internally without a charge. The client reports
-  recognized cases on stderr, but cannot make the owner wake on virtual time.
+The patch adds no option of its own: an unpatched DynamoRIO core accepts
+`-ldstex2cas` and simply lacks the epoch check, so swapping the translator
+build brings the host-timing leak back without any error. The ARM core must
+come from `nix/dynamorio.nix`; nothing at run time verifies this.
 
-This is not a control-flow proof. An intermediate block in a split sequence,
-retry work outside the recognized blocks, or a different retry target can still
-change accounting or insert instrumentation inside a reservation. Looking back
-sixteen adjacent instructions cannot establish the incoming control flow, so
-that heuristic has been removed. Neither a successful workload nor equal syscall
-counts proves these cases safe. A loop outside progress coverage can stall until
-the wall-time limit; the diagnostic watchdog does not advance guest time.
+### Wait hints
 
-The fixtures under `guest/progress/fixtures/` are native ARM Linux diagnostics
-for packed/unpacked polls, split sequences and observable weak-CAS failures.
-They do not assert replay determinism. In particular, their native owner thread
-can wake on host time even when a Seedbox guest owner would remain asleep.
+The exclusive monitor is not the only guest state a host interruption touches.
+A host exception also wakes `WFE` and `WFI`, so an application spin loop that
+waits would iterate, and be charged, a host-dependent number of times. With one
+guest CPU and interrupts delivered at deterministic rendezvous points, waiting
+gains the guest nothing. The progress client rewrites application `WFE`, `WFI`,
+`WFET` and `WFIT` to `NOP` before translation, keeping the original translation
+so faults in the block still map to the application PC. When HVF traps a `WFE`
+that no translator saw, from the kernel or an untranslated guest process, the
+VMM skips the instruction without idling; a trapped `WFI` remains the kernel's
+idle rendezvous. The `wait` fixture in `exclusives.yaml` spins on both hints
+until a thread wakes it after a virtual-time sleep.
 
-## Independent ARM follow-up
-
-Tracked in [#241](https://github.com/gardnervickers/seedbox/issues/241).
-
-Two concrete DynamoRIO 11.3.0-1 conversion problems have been reproduced on
-Apple Silicon using minimal static ARM programs:
-
-1. For an overlapping load such as `LDAXR W3, [X3]`, the converter saves the
-   reservation address after the load overwrites X3. Static musl's exit lock
-   uses this shape and retries forever. Saving the address before the load
-   fixes the minimal reproducer and lets the static-musl program finish. A
-   same-compiler rebuild without the patch still hangs.
-2. After a successful store-exclusive, a second store-exclusive without a new
-   load must fail. The converter can reuse its saved reservation and succeed.
-   The minimal test passes natively and fails under stock conversion.
-
-The first repair is small and confirmed; it is not a general determinism fix.
-Value comparison alone also cannot represent reservation loss across a guest
-interrupt or an ABA write. A software reservation must be consumed, honor
-`CLREX`, and be invalidated at the relevant guest exception and scheduling
-boundaries. Checking an epoch before a CAS has a race if the guest switches
-between the check and the store. The eventual commit operation must close that
-race, preserve fault behavior and memory ordering, and hide host retries from
-both the application and the progress budget.
-
-Controlling the guest kernel gives us places to implement that contract without
-translating the entire kernel. A kernel exception/return hook plus a protected
-commit sequence is a candidate, not yet a validated design. Linux 6.12.112 also
-contains explicit LL/SC in `arch/arm64/include/asm/futex.h`, including bounded
-retries that can return `-EAGAIN`; enabling LSE alone does not replace that inline
-assembly. Kernel coverage and translator-internal atomics need separate audits.
-No application-specific flags or environment changes are an acceptable fix.
-
-## Reproducer
+## Original reproducer and baseline evidence
 
 This fixture removes Node, JIT and threads from the question. It increments one
 integer with `LDXR`/`STXR` and counts failed stores; the conditional branch
@@ -205,10 +162,8 @@ bit in a kernel task's saved XSAVE header: zero YMM state was marked present
 in one run and absent in the other. The 256-byte YMM payload was zero in both.
 This is distinct from the observable ARM store-exclusive failures.
 
-The guest kernel now canonicalizes YMM after successful task-state saves.
-It zeroes ignored payload for an absent component and clears the presence bit
-for a present all-zero component. Nonzero state is preserved. Full-state
-comparison remains unchanged.
+The repair and its scope are explained in
+[canonical saved vector state](determinism-catalogue.md#canonical-saved-vector-state).
 
 With that repair, four atomic fresh runs matched across alternating watchdog
 settings, as did replay. A vector-preservation control passed 4,000 nonzero

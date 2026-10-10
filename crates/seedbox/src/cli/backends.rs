@@ -26,9 +26,7 @@ impl Executor {
         match self {
             Self::Linux(executor) => Ok(Self::Linux(executor.with_checkpoint(at_ns, branch_seed))),
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(_) => Err(seedbox::Error::Setup(
-                "--checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac".into(),
-            )),
+            Self::Mac(_) => Err(seedbox::Error::Setup(super::CHECKPOINT_REQUIRES_KVM.into())),
         }
     }
     /// Watchdog interval is a Linux setting; the Mac engine ignores it.
@@ -138,6 +136,7 @@ pub fn asset_directory() -> std::path::PathBuf {
     std::env::var_os("SEEDBOX_ASSET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
+            // SAFETY: geteuid takes no arguments and cannot fail.
             default_asset_root(unsafe { libc::geteuid() }, std::env::var_os("SUDO_UID"))
         })
         .join(std::env::consts::ARCH)
@@ -205,6 +204,7 @@ pub fn container_engine() -> Result<bollard::Docker> {
             // Use macOS's user temporary directory even inside a Nix shell,
             // which gives TMPDIR a different, per-shell value.
             let mut buffer = vec![0u8; 4096];
+            // SAFETY: confstr writes at most `buffer.len()` bytes into `buffer`.
             let length = unsafe {
                 libc::confstr(
                     libc::_CS_DARWIN_USER_TEMP_DIR,

@@ -24,7 +24,7 @@ fn duplicate_receiver_rejection_does_not_erase_an_accepted_copys_fifo_reservatio
         } else {
             // The original takes the final paused slot, then its copy drops.
             w.machines[1].paused = true;
-            w.paused_ingress[1] = PAUSED_INGRESS_FRAMES - 1;
+            w.paused_ingress[1] = crate::world_events::PAUSED_INGRESS_FRAMES - 1;
         }
         let mut frame = vec![0; 60];
         frame[5] = 1;
@@ -55,7 +55,10 @@ fn queue_drops_count_at_send_time_and_receiver_rejection_still_uses_bandwidth() 
         w.route(0, 5, frame.clone());
         w.route(0, 5, frame);
         assert_eq!(w.dropped, if down { 2 } else { 1 });
-        assert_eq!(w.link_counts[&(0, 1)][4], 1);
+        assert_eq!(
+            w.link_counts[&(0, 1)][crate::network_counters::QUEUE_DROPPED],
+            1
+        );
         assert_eq!(w.faults.links.last_depart[&(0, 1)], 17);
         assert_eq!(
             w.faults.links.last.get(&(0, 1)),
@@ -358,6 +361,40 @@ fn partition(handle: &str) -> seedbox_control::Action {
 }
 #[test]
 fn admission_rejects_invalid_worlds_before_execution() {
+    fn construct(w: World<Mock>) -> Result<World<Mock>, String> {
+        World::new(WorldInputs {
+            machines: w.machines,
+            factory: w.factory,
+            boot: w.boot,
+            clock: w.clock,
+            barrier: w.barrier,
+            boot_seed: w.boot_seed,
+            run_seed: w.run_seed,
+            lookahead: w.lookahead,
+            early: w.early,
+            latency: w.latency,
+            faults: w.faults,
+            control: w.control,
+            macs: w.macs,
+        })
+    }
+    assert!(construct(world(&[]))
+        .err()
+        .unwrap()
+        .contains("at least one"));
+    let mut inputs = world(&["a"]);
+    inputs.boot.clear();
+    assert!(construct(inputs).err().unwrap().contains("lengths"));
+    let mut inputs = world(&["a"]);
+    inputs.early = inputs.lookahead;
+    assert!(construct(inputs).err().unwrap().contains("slack"));
+    let fresh = construct(world(&["a", "b"])).unwrap();
+    assert_eq!(fresh.events().len(), 2);
+    assert!(fresh.events().iter().all(BTreeMap::is_empty));
+    assert_eq!(
+        (fresh.delivered(), fresh.dropped(), fresh.slices()),
+        (0, 0, 0)
+    );
     let mut w = world(&[]);
     assert_eq!(
         simulate(&mut w, &Value::Null, 20, &None, None, &mut || Ok(())).unwrap_err(),
@@ -503,7 +540,7 @@ fn control_then_trigger_then_fault_at_equal_time() {
     assert_eq!(w.control.log[0]["delivered_at_ns"], 100);
     assert_eq!(w.control.triggers.records[0].fault_id, Some(2));
     assert_eq!(w.faults.active_handles(), ["scheduled", "trigger"]);
-    assert!(w.faults.log.iter().all(|row| row["applied_at_ns"] == 50));
+    assert!(w.faults.log.iter().all(|row| row.applied_at_ns == Some(50)));
 }
 #[test]
 fn equal_time_control_allocates_fault_before_trigger() {
@@ -531,7 +568,7 @@ fn equal_time_control_allocates_fault_before_trigger() {
     assert_eq!(w.control.log[0]["fault_id"], 2);
     assert_eq!(w.control.triggers.records[0].fault_id, Some(3));
     assert_eq!(w.faults.log.len(), 3);
-    assert!(w.faults.log.iter().all(|row| row["applied_at_ns"] == 50));
+    assert!(w.faults.log.iter().all(|row| row.applied_at_ns == Some(50)));
 }
 #[test]
 fn pending_error_still_delivers_strict_reply_before_stopping() {
@@ -818,7 +855,7 @@ fn runtime_checkpoint_precedes_exact_time_fault_and_preserves_active_plan() {
         .unwrap(),
         "checkpoint"
     );
-    assert_eq!(w.faults.log[0]["status"], "unrequested");
+    assert_eq!(w.faults.log[0].json()["status"], "unrequested");
     assert!(!w.faults.blocked(0, 1));
     let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
     for _ in 0..2 {

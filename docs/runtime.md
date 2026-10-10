@@ -112,17 +112,13 @@ results and witness traces generated from main.
 
 `x-seedbox.disk.torn_writes: true` enables torn writes (off by default). Off retains the
 `flush-stable/drop-all-unflushed/v1` model: crashes drop all unflushed sectors.
-The omitted setting adds no profile or world JSON field and leaves the existing
-disk digest and witness inputs unchanged. Building the modified VMM still changes
-the engine binary hash, as every VMM source change does.
+Off adds no world JSON field and leaves the existing disk digest and witness
+inputs unchanged.
 
-When enabled, the profile retains semantic parameters
-`disk_loss_sector_bytes = "512"` and
-`disk_loss_survival_probability = "0.5"`; each disk report carries the same
-numeric policy under `disk.fault_model`. Replay restores this policy from the
-retained profile; there is no replay override or environment variable. A retained
-legacy profile containing the old `disk_loss` semantic parameter is rejected as
-not replay-compatible by this CLI. The low-level world JSON uses a top-level
+The profile records the choice as `torn_writes: true|false`; each disk report
+carries the numeric policy (512-byte sectors, survival probability 0.5) under
+`disk.fault_model`. Replay restores this policy from the retained profile; there
+is no replay override or environment variable. The low-level world JSON uses a top-level
 `disk_loss` object, for example
 `{"sector_bytes": 512, "survival_probability": 0.5}`. Unknown or non-object
 parameters are rejected.
@@ -325,14 +321,10 @@ does not establish hardware witness invariance or qualify the new engine.
 
 ## Execution settings
 
-Guest time is a PV clock that advances at guest exits, syscalls and clock
-reads, with automatic binary instrumentation for application progress: the
-client charges progress every 10,000 translated block entries per thread,
-including shared libraries and JIT code, without recompiling applications.
-ARM exclusive-store retries can still change application state and progress
-accounting, and uncovered polling loops can stall virtual time. The current
-mitigation does not provide general ARM determinism. See
-[automatic progress](progress.md) for coverage and the follow-up investigation.
+Seedbox uses PV time with automatic application instrumentation, including
+shared libraries and JIT code. See the [determinism catalogue](determinism-catalogue.md)
+for the mechanisms and limits, and [progress integration and evidence](progress.md)
+for packaging and regression coverage.
 
 ### Seed diversity defaults
 
@@ -379,11 +371,9 @@ uses page disarm and avoids PIT mode port writes.
 The VMM report includes `machines[].pio_total`: all KVM PIO exits across incarnations, including
 `0x52c` yields, outside witnesses. The existing `pio` count
 excludes yields.
-The requested semantic parameter is retained
-as `page_timer: true` only when enabled. Replay restores it without an override.
-Timer jitter uses the existing seeded stream. This changes enabled-run timing
-and witnesses; omission preserves the existing identity encoding for the same
-engine and kernel inputs.
+The profile records `page_timer: true|false`. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. Enabling it changes run timing
+and witnesses.
 Checkpoint parent identities also bind the page timer only when enabled,
 preventing checkpoint reuse across timer modes while preserving feature-off hashes.
 This composes with deferred TX's `+deferred-tx` identity suffix: all four option
@@ -419,8 +409,8 @@ identity.
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY`
 permits a fresh identity and witness comparison with it.
 The replacement is probed once for its launch contract: a combined Seedbox CLI
-uses its internal worker entrypoint, while a standalone VMM receives worker flags
-directly. The new run retains that contract; ordinary replay uses it without
+uses its internal worker entrypoint, while a standalone VMM is started directly.
+Both read the same JSON launch request, `output/worker-request.json`. The new run retains that contract; ordinary replay uses it without
 probing. Memory, clock, fault and other simulation settings remain unchanged.
 Replay does not require registry access, a builder, or the original Compose files.
 
@@ -594,6 +584,9 @@ preparation explicitly. Unknown users, missing executables or shared libraries,
 and unsupported guest syscalls are compatibility failures, never workload PASS.
 
 `output/world.json` is generated execution input, not user-authored configuration.
+`output/worker-request.json` is the x86 engine's launch request: the world path,
+seed, output limits, the recorded page-timer and deferred-TX features, and the
+`--watchdog-ms` performance setting.
 `output/vmm.json` contains the engine report; `output/vmm.stderr` and streamed
 `output/machines/*.console` / `*.mgmt` files preserve diagnostics on cancellation
 and timeouts. Serial output is capped at 1 GiB total divided equally between the
@@ -610,9 +603,9 @@ delivery, slice boundaries and halt, so suppressed kicks do not stall queues.
 Without negotiation, the existing NO_INTERRUPT/NO_NOTIFY path is retained.
 
 `x-seedbox.machine.deferred_tx: true` (off by default) enables deferred TX; the raw
-VMM accepts `--deferred-tx`. This is a semantic option: enabling it records
-`deferred_tx=true` in the profile and changes packet timing and run identity.
-Off omits the parameter and retains the behavior at `13b7f85`, including legacy
+VMM accepts `--deferred-tx`. This is a semantic option: the profile records
+`deferred_tx: true|false`, and enabling it changes packet timing and run identity.
+Off retains the behavior at `13b7f85`, including legacy
 kick-driven TX. Replay uses the retained setting with no override, including
 when changing engines. The engine report declares the setting; an older report
 without it means off. This change builds a new engine hash in either mode.

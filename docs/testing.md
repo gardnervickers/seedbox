@@ -89,8 +89,18 @@ The runner does not check or stamp Git revisions or checkout cleanliness.
 
 ## Adding a test
 
-1. Add ordinary Rust `#[test]` functions to the appropriate crate. They run by
-   default when no special host suite is required.
+1. Give each assertion one owning layer. Unit tests exercise one component and
+   live beside it in `src/`, inline or in a sibling test module. Integration
+   tests exercise public interfaces across components or process/hardware
+   boundaries and live in the owning crate's `tests/` directory. A mock does
+   not make a multi-component scenario a unit test. Shared policy tests belong
+   to engine-core, not the CLI or a CPU adapter. Keep edge-case matrices in
+   unit tests and test wiring and propagation in integration tests; do not copy
+   the same matrix into both. Native execution and portable policy checks have
+   different responsibilities even when they traverse similar behavior.
+   Add ordinary Rust `#[test]` functions; they run by default when no special
+   host suite is required. Avoid making implementation details public solely
+   to move a unit test into `tests/`.
 2. Keep VMM engine test bodies compiled by default and use conditional
    `ignore` attributes for hardware execution. Other suites may gate hardware
    modules with their existing feature, for example `kvm-tests`; the portable

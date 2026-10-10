@@ -10,27 +10,14 @@ import shutil
 import shlex
 import subprocess
 
-from run import HERE, KERNEL_SHA256, digest, seed_bytes
+from run import HERE, KERNEL_SHA256, archive, digest, save, seed_bytes
 
-from service_process import execute, save
+from service_process import execute
 from service_audit import valid_witness
 
 ROOT = HERE.parent.parent
 BASE_SHA256 = "4a926d378fb651676a1c4f208fa0be0c13a098f5d94bffcbde1d6f55b1f61220"
 MODULES = ["veth", "act_gact", "sch_ingress", "sch_netem", "cls_u32", "cls_matchall"]
-
-
-def archive(entries):
-    data = bytearray()
-    for ino, (name, mode, body) in enumerate(entries + [("TRAILER!!!", 0, b"")], 1):
-        name = name.encode() + b"\0"
-        fields = [ino, mode, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name), 0]
-        data.extend(b"070701" + "".join(f"{n:08x}" for n in fields).encode() + name)
-        data.extend(b"\0" * (-len(data) % 4))
-        data.extend(body)
-        data.extend(b"\0" * (-len(data) % 4))
-    data.extend(b"\0" * (-len(data) % 512))
-    return bytes(data)
 
 
 def contents(data):

@@ -248,6 +248,15 @@ def features_for(package, machine, suites):
     return features
 
 
+def feature_test_targets(metadata, package, features):
+    """Integration targets whose declared required features are selected."""
+    selected = set(features)
+    targets = next(p["targets"] for p in metadata["packages"] if p["name"] == package)
+    return sorted(t["name"] for t in targets if "test" in t["kind"]
+                  and t.get("required-features")
+                  and set(t["required-features"]) <= selected)
+
+
 def test_artifacts(output):
     return sorted({item["executable"]: item["target"]["name"]
                    for line in output.splitlines() if line.strip()
@@ -373,8 +382,8 @@ def main(argv=None):
     if args.list:
         return 0
     checks = Checks(environment)
-    checks.run("fmt", ["cargo", "fmt", "-p", "seedbox", "--check"])
-    checks.run("clippy", ["cargo", "clippy", "-p", "seedbox", "--all-targets", "--locked", "--", "-D", "warnings"])
+    checks.run("fmt", ["cargo", "fmt", "--all", "--check"])
+    checks.run("clippy", ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"])
     checks.run("portable", ["bash", "harness/acceptance.sh", "portable"])
     # acceptance.sh already ran the root and native backend without hardware.
     if not hardware or checks.failed:
@@ -405,10 +414,18 @@ def main(argv=None):
     packages = [("seedbox-arm64", ["cargo", "test-arm64"])]
     if system == "Linux" and machine == "x86_64":
         packages.append(("seedbox-vmm", ["cargo", "test-vmm"]))
-    packages.append(("seedbox", ["cargo", "test", "--workspace", "--locked"]))
+    packages.append(("seedbox", ["cargo", "test", "-p", "seedbox", "--locked"]))
     for package, command in packages:
         features = features_for(package, machine, suites)
         if features:
+            if package == "seedbox":
+                metadata = checks.run("test-targets", ["cargo", "metadata", "--no-deps", "--format-version=1", "--locked"], capture=True)
+                if metadata is None:
+                    return 1
+                targets = feature_test_targets(json.loads(metadata), package, features)
+                if not targets:
+                    raise ValueError(f"{package}: no integration targets require {features}")
+                command = [*command, *(arg for target in targets for arg in ("--test", target))]
             checks.cargo_tests(package, command, features, prefix,
                                sign=package == "seedbox-arm64" and "hvf-tests" in features)
     return int(checks.failed)

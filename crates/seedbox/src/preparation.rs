@@ -1,14 +1,17 @@
 //! OCI-backed preparation. Runtime binaries are explicit inputs, so library
 //! callers do not depend on CLI environment or a particular checkout layout.
 
+use crate::limits::read_bounded;
 use crate::{
     config::Simulation,
-    execution::{ExecutionProfile, PreparationBackend, PreparedInputs},
+    execution::{Backend, ExecutionProfile, PreparationBackend, PreparedInputs},
     guest::{build_initramfs_with, launch_recipe, minimum_memory_mb},
     store::ContentStore,
     Error, Result,
 };
-use std::{collections::BTreeMap, fs, io::Read, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
+
+const CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct OciPreparer {
@@ -32,7 +35,7 @@ impl PreparationBackend for OciPreparer {
             &self.progress,
             crate::guest::Architecture::from_profile(&self.profile)?,
         )?;
-        if self.profile.backend == "seedbox-kvm" {
+        if self.profile.backend == Backend::Kvm {
             crate::admission::validate_profile(&self.profile)?;
             if crate::admission::file_digest(&self.engine)? != self.profile.engine {
                 return Err(Error::Integrity(
@@ -111,7 +114,7 @@ impl OciPreparer {
             context.check()?;
         }
         let kernel = store.put_file(&self.kernel)?;
-        if self.profile.backend == "seedbox-kvm" {
+        if self.profile.backend == Backend::Kvm {
             crate::admission::validate_profile(&self.profile)?;
         }
         let engine = store.put_file(&self.engine)?;
@@ -145,13 +148,12 @@ impl OciPreparer {
         }
         let mut configs = BTreeMap::new();
         for (name, path) in &simulation.configs {
-            let mut data = Vec::new();
-            fs::File::open(path)?
-                .take(16 * 1024 * 1024 + 1)
-                .read_to_end(&mut data)?;
-            if data.len() > 16 * 1024 * 1024 {
-                return Err(Error::Execution(format!("config {name} exceeds 16 MiB")));
-            }
+            let data = read_bounded(
+                fs::File::open(path)?,
+                CONFIG_LIMIT,
+                format_args!("config {name}"),
+            )
+            .map_err(|e| e.or_too_large(Error::Execution))?;
             auxiliary.insert(format!("config/{name}"), store.put(&data)?);
             configs.insert(name, data);
         }
@@ -269,12 +271,7 @@ impl OciPreparer {
                     )?
                 }
             }
-            let memory_mb = self
-                .profile
-                .semantic_parameters
-                .get("memory_mb")
-                .and_then(|value| value.parse::<u32>().ok())
-                .ok_or_else(|| Error::Integrity("OCI profile missing memory_mb".into()))?;
+            let memory_mb = self.profile.semantic_parameters.memory_mb;
             let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
             if memory_mb < minimum {
                 return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase x-seedbox.machine.memory_mb (application memory may require more)")));

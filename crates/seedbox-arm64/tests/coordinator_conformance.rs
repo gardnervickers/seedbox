@@ -1072,8 +1072,7 @@ fn installed_ack_must_echo_the_complete_transaction_before_identity_publication(
 fn actual_arm_proxy_obeys_core_strict_reply_boundary_despite_fatal_control() {
     use seedbox_engine_core::{
         control, links,
-        network_counters::NetworkCounters,
-        world::{self, World},
+        world::{self, World, WorldInputs},
     };
     let fixture = Fixture::new();
     let mut at50 = advance_reply(50, json!({"Horizon":{"time_ns":50}}), b"", json!([]));
@@ -1097,43 +1096,14 @@ fn actual_arm_proxy_obeys_core_strict_reply_boundary_despite_fatal_control() {
         links::Links::from_config(1, &names, &json!({"latency_ns":10})).unwrap(),
     )
     .unwrap();
-    let control = control::Control::new(
+    let mut control = control::Control::new(
         &json!({"machine":"a","latency_ns":50,"placement":{}}),
         names,
         10,
         3,
     )
     .unwrap();
-    let mut world = World {
-        failure: None,
-        machines: vec![machine],
-        factory,
-        boot: vec![boot],
-        barrier: false,
-        boot_seed: 1,
-        run_seed: 2,
-        branch_identity: None,
-        incarnations: vec![vec![]],
-        paused_ingress: vec![0],
-        clock: (),
-        events: vec![BTreeMap::new()],
-        seq: 0,
-        lookahead: 10,
-        early: 3,
-        latency: 10,
-        partitioned: BTreeMap::new(),
-        faults,
-        control,
-        strict_events: vec![BTreeMap::new()],
-        macs: vec![[2, 0, 0, 0, 0, 1]],
-        dropped: 0,
-        delivered: 0,
-        link_counts: BTreeMap::new(),
-        semantic_counts: NetworkCounters::default(),
-        slices: 0,
-    };
-    world
-        .control
+    control
         .request(
             0,
             0,
@@ -1141,14 +1111,30 @@ fn actual_arm_proxy_obeys_core_strict_reply_boundary_despite_fatal_control() {
             0,
         )
         .unwrap();
-    world.control.pending.as_mut().unwrap().fatal = true;
-    world.control.pending.as_mut().unwrap().error = Some("effect failed".into());
+    control.pending.as_mut().unwrap().fatal = true;
+    control.pending.as_mut().unwrap().error = Some("effect failed".into());
+    let mut world = World::new(WorldInputs {
+        machines: vec![machine],
+        factory,
+        boot: vec![boot],
+        barrier: false,
+        boot_seed: 1,
+        run_seed: 2,
+        clock: (),
+        lookahead: 10,
+        early: 3,
+        latency: 10,
+        faults,
+        control,
+        macs: vec![[2, 0, 0, 0, 0, 1]],
+    })
+    .unwrap();
     assert_eq!(
         world::simulate(&mut world, &Value::Null, 150, &None, None, &mut || Ok(())).unwrap(),
         "fault_failed"
     );
-    assert_eq!(world.control.log[0]["delivered_at_ns"], 100);
-    assert!(!world.control.has_undelivered_reply());
+    assert_eq!(world.control().log[0]["delivered_at_ns"], 100);
+    assert!(!world.control().has_undelivered_reply());
     // Replies are preloaded; wait for the fixture to consume the queued requests
     // before dropping the transport and terminating the recording process.
     fixture.wait_for_operations(5);

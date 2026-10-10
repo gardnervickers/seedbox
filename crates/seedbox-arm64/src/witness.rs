@@ -43,6 +43,7 @@ impl Record {
                 r.data = imm as u64;
             }
             Exit::Wfi => r.kind = 3,
+            Exit::Wfe => r.kind = 5,
             Exit::SysReg {
                 reg,
                 write,

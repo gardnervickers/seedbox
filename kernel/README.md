@@ -1,22 +1,10 @@
 # Guest kernel releases
 
-On x86 PV, kernel `cpu_relax()`/`rep_nop()` calls charge one bounded virtual
-clock read (100 ns) after PAUSE. This allows polling loops to reach virtual
-timer and scheduler boundaries with application locks held. The hook preserves
-interrupt masking and does not schedule or acquire locks. It is inactive before
-PV activation. The decompressor, setup code and userspace
-vDSO retain raw PAUSE. Handwritten assembly and userspace runtime internals are
-not covered; an uncovered loop can stall virtual time until the wall-time
-limit. The watchdog reports the stall without advancing time. This changes the new kernel's
-PV execution semantics; old runs continue using their retained kernel.
-
-Kernel task-state saves canonicalize the x86 YMM component: an absent component
-has its ignored payload zeroed, and a present all-zero component becomes absent.
-Both forms restore the same architectural values, but hardware can choose between
-them across host interruptions. Nonzero YMM contents and other components are
-unchanged. This removes a reproduced full-RAM replay mismatch without weakening
-state comparison. Signal-frame saves, direct application XSAVE and other
-components remain outside this repair; see [#242](https://github.com/gardnervickers/seedbox/issues/242).
+For the kernel's determinism mechanisms and limitations, see the catalogue's
+[kernel polling](../docs/determinism-catalogue.md#progress-inside-kernel-polling),
+[ARM reservations](../docs/determinism-catalogue.md#software-exclusive-reservations),
+[idle interrupt delivery](../docs/determinism-catalogue.md#interrupt-delivery-at-an-idle-rendezvous),
+and [saved vector state](../docs/determinism-catalogue.md#canonical-saved-vector-state).
 
 The `Guest assets` GitHub Actions workflow builds native ARM64 and x86-64 Linux
 kernels and publishes ordinary files in this repository's Releases. It runs on
@@ -71,4 +59,4 @@ fully offline builds need those inputs already present.
 
 The guest helper archive is released separately. Without private release access,
 also build `nix build .#runtimeArchive` and pass its output through
-`--runtime-assets`; see [the complete manual workflow](../tools/runtime/README.md#build-without-private-release-access).
+`--runtime-assets`; see [the complete manual workflow](../tools/runtime/README.md#build-outputs-separately).

@@ -2,7 +2,7 @@
 use seedbox::{
     bundle::{self, Options},
     config::{self, Simulation},
-    execution::*,
+    execution::{self, *},
     image::Launch,
     orchestration::*,
     store::{ContentDigest, ContentStore},
@@ -92,10 +92,10 @@ impl Fixture {
         let config = store.put(b"fixture image config").unwrap();
         let layer = store.put(b"fixture layer").unwrap();
         let profile = ExecutionProfile {
-            backend: "test-only".into(),
+            backend: execution::Backend::Other("test-only".into()),
             engine,
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: BTreeMap::from([("kernel_abi".into(), "v1".into())]),
+            semantic_parameters: SemanticParameters::new(512),
         };
         let inputs = PreparedInputs {
             wall_clock_epoch: None,
@@ -744,10 +744,10 @@ fn portable_cli_default_export_import_and_inspect_need_no_tools_or_original_stat
 }
 
 #[test]
-fn envelope_missing_unrelated_and_over_count_objects_fail_before_opening_state() {
+fn envelope_missing_unrelated_over_count_and_unknown_fields_fail_before_opening_state() {
     let f = Fixture::new();
     let archive = export(&f, &f.run());
-    for case in 0..3 {
+    for case in 0..4 {
         let mut e = entries(&archive);
         let mut envelope: serde_json::Value = serde_json::from_slice(&e[0].bytes).unwrap();
         match case {
@@ -758,10 +758,11 @@ fn envelope_missing_unrelated_and_over_count_objects_fail_before_opening_state()
                 envelope["objects"][0]["digest"] =
                     serde_json::to_value(ContentDigest::of(b"unrelated")).unwrap();
             }
-            _ => {
+            2 => {
                 let object = envelope["objects"][0].clone();
                 envelope["objects"] = serde_json::Value::Array(vec![object; 8193]);
             }
+            _ => envelope["future_fixed_field"] = true.into(),
         }
         e[0].bytes = serde_json::to_vec(&envelope).unwrap();
         let path = f.directory.path().join(format!("inventory-{case}.tar"));
@@ -835,20 +836,13 @@ fn timed_indexes_and_explicit_omissions_round_trip_without_original_output() {
 #[test]
 fn kvm_profile_round_trips_with_identity_and_report_then_replays() {
     let mut f = Fixture::new();
-    f.backend.profile.backend = "seedbox-kvm".into();
+    f.backend.profile.backend = execution::Backend::Kvm;
     f.preparer.inputs.profile = f.backend.profile.clone();
     let run = f.run();
     let archive = export(&f, &run);
     let state = f.directory.path().join("imported");
     let imported = bundle::import(&archive, &state, &Options::default()).unwrap();
     assert_eq!(imported.record, run.record);
-    assert!(!imported
-        .record
-        .identity
-        .inputs
-        .profile
-        .semantic_parameters
-        .contains_key("timebase"));
     let replay = Orchestrator::new(ContentStore::new(state.join("objects")), state.join("runs"))
         .replay(
             &imported.directory,

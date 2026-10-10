@@ -511,12 +511,9 @@ static pid_t start(void) {
         instrumented[prefix++] = "-opt_speed";
         instrumented[prefix++] = "-disable_traces";
 #if defined(__aarch64__)
-        /* Pack supported exclusive sequences to reduce instrumentation-induced
-         * retries. This does not hide every retry or make ARM deterministic;
-         * see docs/progress.md. DynamoRIO 11.3's CAS conversion also hangs in
-         * static musl's exit locks, so it remains disabled pending repair. */
-        instrumented[prefix++] = "-no_ldstex2cas";
-        instrumented[prefix++] = "-unsafe_build_ldstex";
+        /* The patched ARM translator implements guest-epoch reservations and
+         * hides host-only exclusive-store retries from application execution. */
+        instrumented[prefix++] = "-ldstex2cas";
 #endif
         instrumented[prefix++] = "-c";
         instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
