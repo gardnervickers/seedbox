@@ -28,6 +28,25 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[test]
+fn relocated_cli_looks_for_kernel_beside_itself_without_build_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let binary = root.join("seedbox");
+    fs::copy(env!("CARGO_BIN_EXE_seedbox"), &binary).unwrap();
+    let output = Command::new(binary)
+        .arg("doctor")
+        .current_dir(&root)
+        .env_clear()
+        .env("HOME", &root)
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --kernel PATH\n", root.join("kernel").display()));
+    assert!(!root.join(".seedbox").exists());
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
@@ -131,7 +150,7 @@ fn internal_dispatch_rejects_missing_and_unknown_contracts_before_cli_state_setu
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn internal_worker_requires_config_without_state_or_external_tools() {
+fn internal_worker_requires_a_request_without_state_or_external_tools() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -164,7 +183,7 @@ fn internal_worker_requires_config_without_state_or_external_tools() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(output.stdout.is_empty());
     assert!(
-        stderr(&output).contains("--config required"),
+        stderr(&output).contains("internal world worker requires --request PATH"),
         "{}",
         stderr(&output)
     );
@@ -489,7 +508,7 @@ fn run_without_a_kernel_lists_where_it_looked() {
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("kernel");
-    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `bash tools/build-assets.sh`, or pass --kernel PATH\n", kernel.display()));
+    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --kernel PATH\n", kernel.display()));
     assert!(!directory.path().join(".seedbox/runs").exists());
 }
 
@@ -518,7 +537,7 @@ fn missing_helpers_explain_the_asset_build_without_searching_path() {
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("runtime.tar.gz");
-    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `bash tools/build-assets.sh`, or pass --runtime-assets PATH\n", archive.display()));
+    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --runtime-assets PATH\n", archive.display()));
 }
 
 #[cfg(target_os = "linux")]
@@ -613,7 +632,7 @@ fn explore_resolves_assets_before_host_or_preparation() {
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("runtime.tar.gz");
-    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `bash tools/build-assets.sh`, or pass --runtime-assets PATH\n", archive.display()));
+    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --runtime-assets PATH\n", archive.display()));
     assert!(output.stdout.is_empty());
     assert!(!directory.path().join(".seedbox/runs").exists());
 }
@@ -756,10 +775,10 @@ fn old_records_stay_inspectable_and_transferable() {
         wall_clock_epoch: None,
         kernel: object.clone(),
         profile: ExecutionProfile {
-            backend: "seedbox-kvm".into(),
+            backend: Backend::Kvm,
             engine: object.clone(),
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: BTreeMap::from([("memory_mb".into(), "512".into())]),
+            semantic_parameters: SemanticParameters::new(512),
         },
         placement: BTreeMap::from([("workload".into(), "workload".into())]),
         guests: BTreeMap::from([("workload".into(), object.clone())]),
@@ -903,7 +922,7 @@ fn doctor_reports_missing_temporary_assets_without_downloads() {
         .unwrap();
     let kernel = root.join("aarch64/kernel");
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `bash tools/build-assets.sh`, or pass --kernel PATH\n", kernel.display()));
+    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --kernel PATH\n", kernel.display()));
     assert!(!root.join(".seedbox").exists());
 }
 
@@ -992,7 +1011,7 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
 mod diff_tests {
     use super::*;
     use seedbox as sb;
-    include!("support/diff_fixture.rs");
+    include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
 
     #[test]
     fn ram_only_page_diagnostics_preserve_stdout_json_and_exit_contracts() {
@@ -1072,7 +1091,7 @@ mod diff_tests {
             if update_digest {
                 right.logs.insert("machines/server.pages".into(), sb::store::ContentDigest::of(b"broken"));
             }
-            if remove_memory { right.identity.inputs.profile.semantic_parameters.remove("memory_mb"); }
+            if remove_memory { right.identity.inputs.profile.semantic_parameters.memory_mb = 0; }
             write_fixture(&root.join("b"), &mut right, Some(&b), None);
             let output = seedbox(&["diff", "a", "b", "--json"], root);
             assert_eq!(output.status.code(), Some(2));
@@ -1216,7 +1235,8 @@ mod diff_tests {
         let mut record = fixture();
         record.outcome = sb::orchestration::Outcome::Error;
         record.report = None;
-        let error = sb::Error::Execution(sb::vmm::VMM_FAILURE_MESSAGE.into()).to_string();
+        let error =
+            sb::Error::Execution(sb::engine_adapter::VMM_FAILURE_MESSAGE.into()).to_string();
         record.error = Some(error.clone());
         write_fixture(&run, &mut record, None, None);
         let manifest = fs::read(run.join("manifest.json")).unwrap();
@@ -1502,8 +1522,8 @@ mod diff_tests {
 mod timed_logs {
     use super::*;
     use seedbox as sb;
-    include!("support/diff_fixture.rs");
-    include!("support/logs_fixture.rs");
+    include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
+    include!("../../seedbox-artifacts/tests/support/logs_fixture.rs");
 
     #[test]
     fn logs_defaults_filters_and_binary_json() {
@@ -1640,25 +1660,24 @@ mod timed_logs {
 }
 
 #[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/output_layout.rs"]
-mod checkpoint_layout;
-#[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/log_index.rs"]
-mod checkpoint_log_producer;
-
-#[allow(dead_code)]
 mod checkpoint_evidence {
     use super::*;
-    use super::{checkpoint_layout as checkpoint, checkpoint_log_producer as producer};
     use seedbox as sb;
+    use seedbox_engine_core::{log_index as producer, output_layout as checkpoint};
     use std::io::Write;
-    include!("support/diff_fixture.rs");
+    include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
 
     fn branch_record(seed: u64) -> sb::orchestration::RunRecord {
         let mut record = fixture();
-        let parameters = &mut record.identity.inputs.profile.semantic_parameters;
-        parameters.insert("checkpoint_at_ns".into(), "20".into());
-        parameters.insert("checkpoint_branch_seed".into(), seed.to_string());
+        record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .checkpoint = Some(sb::execution::Checkpoint {
+            at_ns: 20,
+            branch_seed: seed,
+        });
         record
     }
 
@@ -1923,12 +1942,21 @@ fn timebase_is_no_longer_a_public_mode() {
     }
 }
 
+#[allow(dead_code)]
+mod record_fixture {
+    use seedbox as sb;
+    include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
+
+    pub(super) fn record() -> sb::orchestration::RunRecord {
+        fixture()
+    }
+}
+
+/// A retained KVM run.
 fn kvm_record(directory: &Path) {
-    use seedbox::{orchestration::RunRecord, store::ContentDigest};
-    let fixture: serde_json::Value =
-        serde_json::from_slice(include_bytes!("fixtures/formats/synthetic-c84-v2.json")).unwrap();
-    let mut record: RunRecord = serde_json::from_value(fixture["record"].clone()).unwrap();
-    record.identity.inputs.profile.backend = "seedbox-kvm".into();
+    use seedbox::{execution::Backend, store::ContentDigest};
+    let mut record = record_fixture::record();
+    record.identity.inputs.profile.backend = Backend::Kvm;
     record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
     let checksum = ContentDigest::of(&serde_json::to_vec(&record).unwrap());
     fs::write(
@@ -1961,11 +1989,9 @@ fn inspect_prints_no_timebase_and_json_preserves_library_fields() {
     let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(record["report"].get("timebase").is_none());
     assert!(record["report"]["reason"].is_string());
-    assert!(
-        record["identity"]["inputs"]["profile"]["semantic_parameters"]
-            .get("timebase")
-            .is_none()
-    );
+    let parameters = &record["identity"]["inputs"]["profile"]["semantic_parameters"];
+    assert!(parameters.get("timebase").is_none());
+    assert!(parameters.get("clock").is_none());
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2000,24 +2026,19 @@ fn mac_linux_only_runtime_modes_fail_before_state_or_preparation() {
 fn replay_rejects_an_unknown_recorded_deferred_tx_mode() {
     let directory = tempfile::tempdir().unwrap();
     kvm_record(directory.path());
-    let mut record = seedbox::orchestration::inspect(directory.path()).unwrap();
-    record
-        .identity
-        .inputs
-        .profile
-        .semantic_parameters
-        .insert("deferred_tx".into(), "future".into());
-    record.run_id =
-        seedbox::store::ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
-    let checksum = seedbox::store::ContentDigest::of(&serde_json::to_vec(&record).unwrap());
-    fs::write(
-        directory.path().join("manifest.json"),
-        serde_json::to_vec(&serde_json::json!({"sha256": checksum, "record": record})).unwrap(),
-    )
-    .unwrap();
+    let path = directory.path().join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["record"]["identity"]["inputs"]["profile"]["semantic_parameters"]["deferred_tx"] =
+        "future".into();
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     let output = seedbox(&["replay", "."], directory.path());
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("recorded --deferred-tx future"));
+    assert!(
+        stderr(&output).contains("invalid type: string \"future\", expected a boolean"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -2032,10 +2053,7 @@ fn runtime_assets_override_is_documented_and_missing_paths_fail_before_preparati
         let help = String::from_utf8_lossy(&help.stdout);
         assert!(help.contains("--runtime-assets"), "{help}");
         assert!(help.contains("SEEDBOX_RUNTIME_ASSETS"), "{help}");
-        assert!(
-            help.contains("local assets in the OS temporary directory"),
-            "{help}"
-        );
+        assert!(help.contains("kernel beside the executable"), "{help}");
         let mut args = vec![command, "--runtime-assets", "missing.tar.gz"];
         if command == "prepare" {
             args.extend(["--output", "prepared.json"]);

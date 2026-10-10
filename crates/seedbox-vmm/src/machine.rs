@@ -328,6 +328,8 @@ pub struct Machine {
     /// Shadow RAM with a dirty log: a fork restore copies back only the
     /// pages written since the fork point.
     pub shadow: Box<Shadow>,
+    /// Whether slot 0 carries KVM's dirty log, which only forks need.
+    dirty_log: bool,
     /// The initial guest uses the launch-barrier boot protocol.
     barrier: bool,
     /// Per-seed words the guest reads after its release.
@@ -494,7 +496,9 @@ impl Machine {
         unsafe {
             vm.set_user_memory_region(kvm_userspace_memory_region {
                 slot: 0,
-                flags: KVM_MEM_LOG_DIRTY_PAGES,
+                // The dirty log starts at the first fork point. Until then
+                // KVM can map guest RAM with huge pages.
+                flags: 0,
                 guest_phys_addr: 0,
                 memory_size: mem_size as u64,
                 userspace_addr: mem as u64,
@@ -593,6 +597,7 @@ impl Machine {
             stall_ticks: 0,
             timer_rng: None,
             shadow: Box::new(shadow),
+            dirty_log: false,
             barrier: spec.barrier,
             entropy: [0; ENTROPY_WORDS],
             entropy_read: 0,
@@ -709,7 +714,7 @@ impl Machine {
     /// Take a machine built for a reboot to its first instruction at `at`.
     pub fn boot_at(&mut self, at: u64) -> Result<(), String> {
         self.world.boot_at(at)?;
-        self.record(b'N', self.world.incarnation as u64);
+        self.record(b'N', self.world.incarnation() as u64);
         Ok(())
     }
 
@@ -746,7 +751,7 @@ impl Machine {
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
             let (disk, lost) =
                 blk.disk()
-                    .crashed_branch(seed, identity, &old.world.name, old.world.incarnation);
+                    .crashed_branch(seed, identity, &old.world.name, old.world.incarnation());
             *new = VirtioBlk::new(disk);
             Some(lost)
         } else {
@@ -785,7 +790,7 @@ impl Machine {
             size: self.mem_size,
         };
         unsafe { std::ptr::copy_nonoverlapping(self.mem.0, ram.ptr.0, self.mem_size) };
-        self.shadow.fork_point(&self._vm, self.mem.0)?;
+        self.hold_fork_point()?;
         let mut page = Box::new([0u8; 4096]);
         unsafe { std::ptr::copy_nonoverlapping(self.page.0 as *const u8, page.as_mut_ptr(), 4096) };
         Ok(MachineSnapshot {
@@ -826,6 +831,28 @@ impl Machine {
         })
     }
 
+    /// Hold a fork point in the shadow, starting KVM's dirty log first if
+    /// this machine has not forked before. Nothing was logged until then, so
+    /// every page is copied once.
+    fn hold_fork_point(&mut self) -> Result<(), String> {
+        if !self.dirty_log {
+            unsafe {
+                self._vm
+                    .set_user_memory_region(kvm_userspace_memory_region {
+                        slot: 0,
+                        flags: KVM_MEM_LOG_DIRTY_PAGES,
+                        guest_phys_addr: 0,
+                        memory_size: self.mem_size as u64,
+                        userspace_addr: self.mem.0 as u64,
+                    })
+                    .map_err(|e| format!("ram slot dirty log: {e}"))?;
+            }
+            self.dirty_log = true;
+            self.shadow.mark(0, self.mem_size);
+        }
+        self.shadow.fork_point(&self._vm, self.mem.0)
+    }
+
     /// Put the machine back to a snapshot taken by `snapshot`, from wherever
     /// the last run left it. Returns the number of RAM pages copied back.
     pub fn restore(&mut self, s: &MachineSnapshot) -> Result<u64, String> {
@@ -840,7 +867,7 @@ impl Machine {
             // held no fork point yet: copy everything, then hold one here.
             unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr.0, self.mem.0, self.mem_size) };
             self.shadow.mark(0, self.mem_size);
-            self.shadow.fork_point(&self._vm, self.mem.0)?;
+            self.hold_fork_point()?;
             (self.mem_size / 4096) as u64
         } else {
             self.shadow
@@ -931,7 +958,7 @@ impl Machine {
             uart.chunks.capture(
                 uart.out.len() as u64,
                 self.world.time,
-                self.world.incarnation,
+                self.world.incarnation(),
                 &mut self.log_order,
             );
         }
@@ -1532,13 +1559,13 @@ impl Machine {
                             return Ok(Stop::Exited);
                         }
                         BARRIER_PORT if self.barrier => {
-                            if self.world.parked || self.entropy_read != 0 {
+                            if self.world.is_parked() || self.entropy_read != 0 {
                                 return Err(format!(
                                     "{}: launch barrier reached twice",
                                     self.world.name
                                 ));
                             }
-                            self.world.parked = true;
+                            self.world.commit_park();
                             self.record(b'B', 0);
                             // Finish the port write now, so the machine is
                             // parked in a state a fork can save and restore.
@@ -1763,7 +1790,9 @@ impl Machine {
         }
         parts.push(("regs", hex(h)));
         let mut h = Sha256::new();
-        for w in self.vcpu.get_xsave().unwrap().region {
+        let mut xsave = self.vcpu.get_xsave().unwrap();
+        crate::xsave::canonicalize_ymm(&mut xsave.region);
+        for w in xsave.region {
             h.update(w.to_le_bytes());
         }
         parts.push(("xsave", hex(h)));
@@ -2403,9 +2432,9 @@ mod fork_tests {
         let saved = m.snapshot().unwrap();
         let before = m.published_entropy();
         m.reseed_time_page([42; ENTROPY_WORDS]).unwrap();
-        assert!(m.paused);
+        assert!(m.is_paused());
         assert_eq!(m.time, 0);
-        assert!(!m.parked);
+        assert!(!m.is_parked());
         assert_eq!(m.page_get(PAGE_ENTROPY_GEN), 1);
         let page = page_entropy(&[42; ENTROPY_WORDS]);
         for (i, word) in page.into_iter().enumerate() {

@@ -213,7 +213,7 @@ impl Console {
         bytes: &[u8],
         mut dirty: impl FnMut(usize, usize),
     ) -> Result<bool> {
-        if self.policy == Policy::Console && transport.status & 4 == 0 {
+        if self.policy == Policy::Console && transport.status & crate::virtio_mmio::DRIVER_OK == 0 {
             return Err("console driver not ready".into());
         }
         if self

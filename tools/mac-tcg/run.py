@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded fresh-process TCG probe; no network, disks, KVM or replay log."""
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -12,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -24,22 +26,28 @@ def digest(data):
 
 
 def save(path, value):
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    """Replace a complete JSON document; failed writes preserve the old file."""
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(value, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
 
 
 def seed_bytes(seed, domain):
     return hashlib.sha256(f"{PROFILE}/{domain}/{seed}".encode()).digest()
 
 
-def initramfs(probe, seed, control):
+def archive(entries):
     """Canonical newc archive, including fixed ownership, times and inode order."""
-    entries = [("dev", 0o040755, b""), ("proc", 0o040755, b""),
-               ("init", 0o100755, probe), ("probe", 0o100755, probe),
-               ("seed", 0o100400, seed_bytes(seed, "linux-pool")),
-               ("mode", 0o100400, {"none": b"s", "no-entropy": b"n", "plant": b"p"}[control]),
-               ("TRAILER!!!", 0, b"")]
     data = bytearray()
-    for ino, (name, mode, body) in enumerate(entries, 1):
+    for ino, (name, mode, body) in enumerate(entries + [("TRAILER!!!", 0, b"")], 1):
         name = name.encode() + b"\0"
         fields = [ino, mode, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name), 0]
         data.extend(b"070701" + "".join(f"{n:08x}" for n in fields).encode() + name)
@@ -48,6 +56,13 @@ def initramfs(probe, seed, control):
         data.extend(b"\0" * (-len(data) % 4))
     data.extend(b"\0" * (-len(data) % 512))
     return bytes(data)
+
+
+def initramfs(probe, seed, control):
+    return archive([("dev", 0o040755, b""), ("proc", 0o040755, b""),
+                    ("init", 0o100755, probe), ("probe", 0o100755, probe),
+                    ("seed", 0o100400, seed_bytes(seed, "linux-pool")),
+                    ("mode", 0o100400, {"none": b"s", "no-entropy": b"n", "plant": b"p"}[control])])
 
 
 def classify(console, returncode, timed_out):

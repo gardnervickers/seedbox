@@ -1,4 +1,4 @@
-//! Experimental windowed world scheduler: several machines execute the same
+//! The windowed world scheduler: several machines execute the same
 //! simulated interval concurrently, with results that do not depend on how
 //! many host workers run them.
 //!

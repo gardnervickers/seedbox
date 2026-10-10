@@ -15,10 +15,15 @@
 
 #define TIME_IPA 0x0a000000UL
 #define EVENT_IPA 0x0a010000UL
-struct seedbox_page { u64 now, last, bound, abi, deferred_irq_pending; };
+struct seedbox_page {
+	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
+};
 static struct seedbox_page *page;
 static void __iomem *event;
 static u64 early_last;
+/* Shared with the stopped VMM, which invalidates reservations on guest exits
+ * and device writes. Initialized before the first return to userspace. */
+u64 *seedbox_exclusive_epoch;
 static struct clock_event_device ce;
 
 u64 notrace seedbox_read(void)
@@ -137,6 +142,7 @@ void __init seedbox_time_init(void)
 	page = memremap(TIME_IPA, SZ_16K, MEMREMAP_WB);
 	if (!event || !page || READ_ONCE(page->abi) != 2)
 		panic("seedbox: PV ABI 2 page unavailable");
+	seedbox_exclusive_epoch = &page->exclusive_epoch;
 	WRITE_ONCE(page->last, early_last);
 	writeq(2, event + 32);
 	node = of_find_compatible_node(NULL, NULL, "seedbox,pv-time-v2");

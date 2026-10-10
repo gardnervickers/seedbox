@@ -35,6 +35,49 @@ def counter_access(text):
         "\t\t/* Seedbox: PR_TSC_ENABLE means PV emulation, not hardware access. */\n"
         "\t\tsysreg_clear_set(cntkctl_el1, ARCH_TIMER_USR_VCT_ACCESS_EN, 0);")
 
+def futex_retries(text):
+    # With one guest CPU and PREEMPT_NONE, exclusive-store failures cannot
+    # represent contention from another guest task. Retry host-induced failures
+    # locally instead of exposing -EAGAIN and its cond_resched/PV clock path.
+    text = replace(text,
+        "#define FUTEX_MAX_LOOPS\t128 /* What's the largest number you can think of? */\n\n",
+        "/* Seedbox retries host-induced exclusive failures on its single guest CPU. */\n\n")
+    text = replace(text,
+        "\tunsigned int loops = FUTEX_MAX_LOOPS;\t\t\t\t\\\n"
+        "\t\t\t\t\t\t\t\t\t\\\n", "")
+    text = replace(text,
+        '"\tcbz\t%w0, 3f\\n"\t\t\t\t\t\t\\\n'
+        '"\tsub\t%w4, %w4, %w0\\n"\t\t\t\t\t\\\n'
+        '"\tcbnz\t%w4, 1b\\n"\t\t\t\t\t\t\\\n'
+        '"\tmov\t%w0, %w6\\n"\t\t\t\t\t\t\\\n',
+        '"\tcbnz\t%w0, 1b\\n"\t\t\t\t\t\t\\\n')
+    text = replace(text,
+        '\t: "=&r" (ret), "=&r" (oldval), "+Q" (*uaddr), "=&r" (tmp),\t\\\n'
+        '\t  "+r" (loops)\t\t\t\t\t\t\t\\\n'
+        '\t: "r" (oparg), "Ir" (-EAGAIN)\t\t\t\t\t\\\n',
+        '\t: "=&r" (ret), "=&r" (oldval), "+Q" (*uaddr), "=&r" (tmp)\t\\\n'
+        '\t: "r" (oparg)\t\t\t\t\t\t\t\\\n')
+    for instruction in ["mov\t%w3, %w5", "add\t%w3, %w1, %w5",
+                        "orr\t%w3, %w1, %w5", "and\t%w3, %w1, %w5",
+                        "eor\t%w3, %w1, %w5"]:
+        text = replace(text, instruction, instruction.replace("%w5", "%w4"))
+    text = replace(text, "\tunsigned int loops = FUTEX_MAX_LOOPS;\n", "")
+    text = replace(text, '"\tsub\t%w3, %w1, %w5\\n"',
+                   '"\tsub\t%w3, %w1, %w4\\n"')
+    text = replace(text,
+        '"2:\tstlxr\t%w3, %w6, %2\\n"\n'
+        '"\tcbz\t%w3, 3f\\n"\n'
+        '"\tsub\t%w4, %w4, %w3\\n"\n'
+        '"\tcbnz\t%w4, 1b\\n"\n'
+        '"\tmov\t%w0, %w7\\n"\n',
+        '"2:\tstlxr\t%w3, %w5, %2\\n"\n'
+        '"\tcbnz\t%w3, 1b\\n"\n')
+    return replace(text,
+        '\t: "+r" (ret), "=&r" (val), "+Q" (*uaddr), "=&r" (tmp), "+r" (loops)\n'
+        '\t: "r" (oldval), "r" (newval), "Ir" (-EAGAIN)\n',
+        '\t: "+r" (ret), "=&r" (val), "+Q" (*uaddr), "=&r" (tmp)\n'
+        '\t: "r" (oldval), "r" (newval)\n')
+
 def changes(root, application=False):
     edits = {}
     def edit(path, fn):
@@ -46,6 +89,28 @@ def changes(root, application=False):
         return body(s, "time_init", "\tof_clk_init(NULL);\n\tseedbox_time_init();\n\ttick_setup_hrtimer_broadcast();\n\tlpj_fine = 1000000000UL / HZ;")
     edit("arch/arm64/kernel/time.c", time)
     edit("arch/arm64/kernel/process.c", counter_access)
+    edit("arch/arm64/include/asm/futex.h", futex_retries)
+    # Every return to EL0 crosses a guest exception/scheduling boundary, unlike
+    # a host-only interruption. Publish its epoch and clear the physical
+    # reservation before restoring user x0/x1; EL1 returns do not publish one.
+    # Keep the restore instructions in the anchor so source drift fails closed.
+    edit("arch/arm64/kernel/entry.S", lambda s: replace(s,
+        "\tmsr\telr_el1, x21\t\t\t// set up the return data\n"
+        "\tmsr\tspsr_el1, x22\n"
+        "\tldp\tx0, x1, [sp, #16 * 0]\n",
+        "\t.if \\el == 0\n"
+        "\tadrp\tx0, seedbox_exclusive_epoch\n"
+        "\tadd\tx0, x0, :lo12:seedbox_exclusive_epoch\n"
+        "\tldr\tx0, [x0]\n"
+        "\tldr\tx1, [x0]\n"
+        "\tadd\tx1, x1, #1\n"
+        "\tstr\tx1, [x0]\n"
+        "\tmsr\ttpidrro_el0, x1\n"
+        "\tclrex\n"
+        "\t.endif\n"
+        "\tmsr\telr_el1, x21\t\t\t// set up the return data\n"
+        "\tmsr\tspsr_el1, x22\n"
+        "\tldp\tx0, x1, [sp, #16 * 0]\n"))
     def syscall(s):
         s = replace(s, "#include <asm/syscall.h>",
                     "#include <asm/syscall.h>\n#include <asm/seedbox.h>")

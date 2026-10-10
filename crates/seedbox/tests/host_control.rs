@@ -1,6 +1,6 @@
-// Exercise the actual slice-boundary gate on Darwin as well as Linux.
-#[path = "../../seedbox-vmm/src/host_control.rs"]
-mod engine;
+//! The CLI's host-control client against the engine's slice-boundary gate.
+#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use seedbox_vmm::host_control as engine;
 
 use std::{fs, os::unix::net::UnixDatagram, sync::mpsc, time::Duration};
 

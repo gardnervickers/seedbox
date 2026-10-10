@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compatibility entrypoint. Cargo builds the CLI; build guest assets separately with tools/build-assets.sh.
+# Compatibility entrypoint for the complete native build.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-cargo build -p seedbox --release --locked
+exec python3 tools/build.py "$@"

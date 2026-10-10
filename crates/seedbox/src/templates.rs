@@ -60,7 +60,9 @@ pub fn init(destination: &Path, template: Template) -> Result<()> {
     let write = (|| -> Result<()> {
         for (name, contents) in files {
             let path = destination.join(name);
-            fs::create_dir_all(path.parent().unwrap())?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
             fs::write(path, contents)?;
         }
         fs::write(destination.join(".gitignore"), ".seedbox/\n")?;

@@ -1,20 +1,4 @@
-# Linux x86-64
+# Build the native CLI
 
-Install Nix and grant your user read/write access to `/dev/kvm`. From the checkout:
-
-```sh
-nix develop
-bash tools/build-assets.sh
-cargo build --release
-```
-
-The asset command builds the kernel and static helpers directly with Nix. Linux
-asset builds need no container engine. Seedbox prepares application images through your Docker or Podman engine, then
-runs guests through KVM; see the [quick start](../../README.md#quick-start).
-
-Ordinary runs need only access to `/dev/kvm`. Setup errors explain any missing
-capability and how to resolve it.
-
-The kernel lives under the OS temporary directory; `--kernel` overrides it.
-Release builds embed the guest helpers. Seedbox never downloads guest assets or
-starts an engine daemon. Replay uses retained inputs without contacting an engine.
+Use `nix develop --command python3 tools/build.py`, then run
+`build/current/seedbox` directly. See [complete builds](../runtime/README.md).

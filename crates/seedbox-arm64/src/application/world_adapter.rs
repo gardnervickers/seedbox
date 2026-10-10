@@ -295,7 +295,7 @@ impl ArmMachine {
         &self.transcript
     }
     pub(crate) fn exit(&self) -> Option<(u8, bool)> {
-        if self.down {
+        if self.is_down() {
             return None;
         }
         let observation = &self.physical;
@@ -449,7 +449,7 @@ impl WorldMachine for ArmMachine {
                 name: self.name.clone(),
                 generation: self.worker.identity().generation,
                 incarnation: old
-                    .incarnation
+                    .incarnation()
                     .checked_add(1)
                     .ok_or("incarnation overflow")?,
             };
@@ -500,11 +500,11 @@ impl WorldMachine for ArmMachine {
             self.transcript = old.transcript.clone();
             let disk_loss = transfer.disk_digest.as_ref().map(|_| lost_sectors);
             self.crashed = old.crashed.clone();
-            self.crashed.push(json!({"incarnation":old.incarnation,"crashed_at_ns":at,"time_ns":evidence.time_ns,"witness":evidence.witness,"retired_state_digest":evidence.state_digest,"disk_lost_sectors":lost_sectors,"surviving_disk":transfer.disk_digest}));
+            self.crashed.push(json!({"incarnation":old.incarnation(),"crashed_at_ns":at,"time_ns":evidence.time_ns,"witness":evidence.witness,"retired_state_digest":evidence.state_digest,"disk_lost_sectors":lost_sectors,"surviving_disk":transfer.disk_digest}));
             self.retired = Some(Retired {
                 evidence,
-                incarnation: old.incarnation,
-                booted_at: old.booted_at,
+                incarnation: old.incarnation(),
+                booted_at: old.booted_at(),
             });
             Ok(disk_loss)
         })();

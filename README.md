@@ -14,44 +14,38 @@ You need **Nix** for the build tools and a running **Docker-compatible engine**
 (such as Docker or Podman) for application images. Apple Silicon Macs also need
 Apple's Command Line Tools. Linux x86-64 needs read/write access to `/dev/kvm`.
 
-Build the guest assets and Seedbox once:
+Build Seedbox and its current guest inputs together:
 
 ```sh
 nix develop
-bash tools/build-assets.sh
-cargo build --release
+python3 tools/build.py
 ```
 
-Then run the etcd example:
+Then run the etcd example directly, without Nix:
 
 ```sh
-./target/release/seedbox --kernel /path/to/kernel examples/etcd/compose.yaml
+./build/current/seedbox examples/etcd
 ```
 
-The asset command prints the directory containing `kernel`. You can also omit
-`--kernel` to use that locally built kernel automatically:
-
-```sh
-./target/release/seedbox examples/etcd
-```
+The command publishes a complete build only after the guest inputs and native
+CLI succeed. The CLI finds its kernel beside the executable. Separate worktrees
+have independent builds; Nix reuses unchanged guest dependencies.
 
 Seedbox finds your Docker or Podman socket, builds the example's workload oracle
 with the engine's normal cache, prepares the images, and runs the Linux guests.
 Progress appears on stderr. Set `DOCKER_HOST` if your engine uses a custom socket.
 Application progress comes from automatic binary instrumentation on both
-platforms. ARM exclusive-store retries can still cause replay mismatches or
-stalled progress; see [automatic progress and its limitations](docs/progress.md).
+platforms; see the [determinism catalogue](docs/determinism-catalogue.md).
 
 On Linux, `--watchdog-ms 200` raises the host CPU interval (default 20 ms)
 after which a guest that makes no exits is interrupted so the engine can
 report where it is stuck. It changes performance only and can also be set on
 `replay` or `explore`.
 
-**The kernel is the only separate guest asset.** The release executable embeds
-its supervisor and filesystem tool. No private GitHub access or runtime guest
-build is needed. Locally built kernels live under `/tmp/seedbox-UID/ARCH` (the invoking user's UID, even under `sudo`); rebuild
-if the OS removes them. Seedbox never downloads kernels automatically.
-
+**The kernel is the only separate guest asset.** The complete build embeds
+its supervisor, filesystem tool and progress runtime in the executable. Copy
+`seedbox` and `kernel` together to run elsewhere. Running or replaying Seedbox
+never invokes Nix, Cargo, or an asset builder.
 
 Guest time starts at the latest build time recorded in the prepared images, so
 independent fresh runs of the same images start at the same time and can be
@@ -87,13 +81,13 @@ A run prints its result and directory. Replay needs neither the container engine
 nor the original kernel, source files or image registry:
 
 ```sh
-./target/release/seedbox replay .seedbox/runs/ATTEMPT
-./target/release/seedbox logs .seedbox/runs/ATTEMPT
-./target/release/seedbox inspect .seedbox/runs/ATTEMPT
+./build/current/seedbox replay .seedbox/runs/ATTEMPT
+./build/current/seedbox logs .seedbox/runs/ATTEMPT
+./build/current/seedbox inspect .seedbox/runs/ATTEMPT
 ```
 
 Retained runs keep their own inputs. Delete run directories when you no longer
-need them; clearing temporary build assets does not remove run data.
+need them; removing build outputs does not remove run data.
 
 ## Learn more
 
@@ -104,6 +98,7 @@ need them; clearing temporary build assets does not remove run data.
 | Build or replace guest assets | [Asset builds](tools/runtime/README.md) |
 | Platform requirements | [Mac](tools/mac-runtime/README.md) · [Linux](tools/linux-runtime/README.md) |
 | Design and direction | [Vision](docs/vision.md) |
+| Determinism mechanisms and their invariants | [Technique catalogue](docs/determinism-catalogue.md) |
 
 Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
 prepared inputs and each `SBXLAUNCH4` boot recipe. `x-seedbox.wall_clock_epoch`
@@ -125,6 +120,8 @@ entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
 | `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
+| `crates/seedbox-engine-protocol/` | Worker requests, world configuration and retained evidence formats; no execution policy |
+| `crates/seedbox-artifacts/` | Offline records, content storage, logs, comparison and bundles; no container engine or hypervisor dependency |
 | `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, the shared world coordinator and the [windowed scheduler](docs/windowed-scheduler.md) |
 | `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
 | [`crates/seedbox-scope/`](crates/seedbox-scope/README.md) | Terminal viewer for a run's faults, link policies and traffic over simulated time; reads run directories only |

@@ -2,6 +2,10 @@
 pub const PROCESS_EFFECT_TIMEOUT_NS: u64 = 5_000_000_000;
 /// Largest wall-clock skew, fixed or seeded, in either direction: one year.
 pub const MAX_CLOCK_OFFSET_NS: u64 = 365 * 86_400 * 1_000_000_000;
+/// Probabilities are in parts per million: this is certainty.
+pub const MAX_PPM: u64 = 1_000_000;
+/// Largest total delay a link policy or shape may add to a frame: one hour.
+pub const MAX_LINK_DELAY_NS: u64 = 3_600_000_000_000;
 /// Largest clock rate error, fixed or seeded, in either direction: 10% (in
 /// parts per billion). Linux slews at most about 10% through `adjtimex`.
 pub const MAX_CLOCK_RATE_PPB: u64 = 100_000_000;
@@ -38,8 +42,8 @@ impl NetworkFaults {
             ("latency_spike_ppm", self.latency_spike_ppm),
             ("tcp_reset_ppm", self.tcp_reset_ppm),
         ] {
-            if ppm > 1_000_000 {
-                return Err(format!("{name} exceeds 1000000"));
+            if ppm > MAX_PPM {
+                return Err(format!("{name} exceeds {MAX_PPM}"));
             }
         }
         for (name, ppm, amount) in [
@@ -69,7 +73,7 @@ impl NetworkFaults {
             .checked_add(jitter_ns)
             .and_then(|n| n.checked_add(reorder))
             .and_then(|n| n.checked_add(spike))
-            .is_none_or(|n| n > 3_600_000_000_000)
+            .is_none_or(|n| n > MAX_LINK_DELAY_NS)
         {
             return Err("latency, jitter and fault delays exceed one hour".into());
         }
@@ -193,6 +197,18 @@ pub enum Operation {
 pub const MAX_TRIGGERS: usize = 64;
 pub const MAX_TRIGGER_MARKER: usize = 256;
 
+/// A trigger marker holds 1..=[`MAX_TRIGGER_MARKER`] bytes.
+pub fn valid_trigger_marker(marker: &[u8]) -> bool {
+    !marker.is_empty() && marker.len() <= MAX_TRIGGER_MARKER
+}
+/// Refuse another trigger once [`MAX_TRIGGERS`] have been armed in a run.
+pub fn check_trigger_budget(armed: usize) -> Result<(), String> {
+    if armed >= MAX_TRIGGERS {
+        return Err(format!("trigger budget exhausted ({MAX_TRIGGERS} per run)"));
+    }
+    Ok(())
+}
+
 /// The initial trigger surface intentionally has only process stop and partition.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -237,9 +253,48 @@ pub struct TriggerRecord {
     pub fault_id: Option<u32>,
     pub cancelled_at_ns: Option<u64>,
     pub cut_off_at_ns: Option<u64>,
-    pub status: String,
+    pub status: TriggerStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejection_reason: Option<String>,
+}
+
+/// Where a trigger is in its life, serialized as its snake_case name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerStatus {
+    /// Watching its source's console for the marker.
+    Armed,
+    /// Cancelled before it matched.
+    Cancelled,
+    /// The marker was seen; the effect waits for its time.
+    Matched,
+    /// The match deadline passed without the marker.
+    Expired,
+    /// The effect was refused at its time.
+    Rejected,
+    /// The effect was appended as a fault.
+    Fired,
+    /// The run ended while it was armed or matched.
+    CutOff,
+}
+impl TriggerStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Armed => "armed",
+            Self::Cancelled => "cancelled",
+            Self::Matched => "matched",
+            Self::Expired => "expired",
+            Self::Rejected => "rejected",
+            Self::Fired => "fired",
+            Self::CutOff => "cut_off",
+        }
+    }
+}
+/// Compares with the serialized name, as checks of recorded evidence do.
+impl PartialEq<&str> for TriggerStatus {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,6 +449,13 @@ impl Action {
                 | Self::Restart { .. }
                 | Self::PauseProcess { .. }
                 | Self::ResumeProcess { .. }
+        )
+    }
+    /// Whole-machine lifecycle effects, which the world applies at admission.
+    pub fn is_lifecycle(&self) -> bool {
+        matches!(
+            self,
+            Self::Pause { .. } | Self::Resume { .. } | Self::Crash { .. } | Self::Reboot { .. }
         )
     }
 }

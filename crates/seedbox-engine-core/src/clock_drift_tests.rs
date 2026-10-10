@@ -38,7 +38,7 @@ fn crash(id: u32, at: u64, machine: &str) -> Value {
     json!({"id":id,"at_ns":at,"deadline_ns":at,"action":"crash","machine":machine})
 }
 fn detail(f: &Faults, row: usize) -> &str {
-    f.log[row]["detail"].as_str().unwrap()
+    &f.log[row].detail
 }
 
 #[test]
@@ -61,13 +61,13 @@ fn fixed_drift_sets_an_absolute_rate_and_heal_restores_nominal() {
     );
     f.effect(1, 1, 12, true);
     assert_eq!(f.outcome(1).unwrap().0, Status::Applied(12));
-    assert_eq!(f.log[0]["rate_ppb"], -250_000);
-    assert!(f.log[0].get("offset_ns").is_none());
+    assert_eq!(f.log[0].rate_ppb, Some(-250_000));
+    assert!(f.log[0].offset_ns.is_none());
     assert!(detail(&f, 0).contains("rate set to -250000 ppb"));
     assert_eq!(f.apply_due(20), vec![(1, b"clock_rate 2 0\n".to_vec())]);
     f.effect(1, 2, 25, true);
     assert_eq!(f.outcome(2).unwrap().0, Status::Applied(25));
-    assert_eq!(f.log[1]["rate_ppb"], 0);
+    assert_eq!(f.log[1].rate_ppb, Some(0));
     assert!(f.active_handles().is_empty());
     assert!(f.error.is_none() && f.rejected_effects.is_empty());
 }
@@ -80,13 +80,7 @@ fn seeded_drift_shares_the_clock_stream_and_draws_only_when_used() {
         f.apply_due(100);
         f.log
             .iter()
-            .map(|row| {
-                row.get("rate_ppb")
-                    .or(row.get("offset_ns"))
-                    .unwrap()
-                    .as_i64()
-                    .unwrap()
-            })
+            .map(|row| row.rate_ppb.or(row.offset_ns).unwrap())
             .collect::<Vec<_>>()
     };
     let first = values(1, vec![drift(1, 10, "d", "b", json!({"max_rate_ppb":max}))]);
@@ -250,7 +244,7 @@ fn drift_admission_and_bounds() {
         )],
     );
     f.apply_due(10);
-    assert!(f.log[0]["rate_ppb"].as_i64().unwrap().unsigned_abs() <= MAX_CLOCK_RATE_PPB);
+    assert!(f.log[0].rate_ppb.unwrap().unsigned_abs() <= MAX_CLOCK_RATE_PPB);
     // A guest that refuses the rate fails the fault and frees the machine.
     let mut f = seeded(0, vec![drift(1, 10, "d", "a", json!({"rate_ppb":-1}))]);
     f.apply_due(10);
@@ -295,7 +289,7 @@ fn control_returns_handle_then_rate_and_heal_waits_for_the_guest() {
         100,
         json!({"version":1,"id":1,"op":"clock_drift","target":{"service":"svc"},"max_rate_ppb":1000}),
     );
-    let rate = f.log[0]["rate_ppb"].as_i64().unwrap();
+    let rate = f.log[0].rate_ppb.unwrap();
     assert_eq!(
         commands,
         vec![(1, format!("clock_rate 1 {rate}\n").into_bytes())]

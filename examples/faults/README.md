@@ -69,7 +69,7 @@ To invoke the harness directly after building the CLI, VMM, and guest supervisor
 
 ```sh
 python3 examples/faults/run.py \
-  --seedbox "$PWD/target/release/seedbox" \
+  --seedbox "$PWD/build/current/seedbox" \
   --vmm "$PWD/crates/seedbox-vmm/target/release/seedbox-vmm" \
   --kernel /absolute/bzImage --guest-init /absolute/guest-init \
   --cpu 14 --state /absolute/fault-state --output /absolute/fault-evidence

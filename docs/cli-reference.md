@@ -22,9 +22,9 @@ directory. Every runtime input has a default, so no flags are required:
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; Linux reserves one physical core per worker, Mac lets HVF schedule) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `x-seedbox.disk.torn_writes: true` |
 | CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
-| Guest kernel | built locally in the OS temporary directory | `--kernel`, `SEEDBOX_KERNEL` |
+| Guest kernel | `kernel` beside the executable | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
-| Guest helper archive | embedded in release builds; local temporary archive for debug builds | `--runtime-assets`, `SEEDBOX_RUNTIME_ASSETS` |
+| Guest helper archive | embedded by the complete build; explicit archive for plain Cargo builds | `--runtime-assets`, `SEEDBOX_RUNTIME_ASSETS` |
 | Guest supervisor | from the helper archive | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | mke2fs (only for named volumes) | from the helper archive | `--mke2fs`, `SEEDBOX_MKE2FS` |
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
@@ -114,10 +114,8 @@ remain Linux-only; Mac exploration is serial.
 512-byte disk sectors on crash. It is recorded in run identity and replayed
 automatically. It applies to retained disks, including Compose named volumes. See [disk semantics](runtime.md#disk-crash-policy).
 
-Virtual time is a PV clock: compute between exits costs no virtual time; time
-advances at guest exits, syscalls and clock reads, and instrumented application
-code charges a syscall every 10,000 translated blocks
-([automatic progress](progress.md)).
+Virtual time and automatic application progress follow the
+[determinism catalogue](determinism-catalogue.md#progress-from-translated-blocks).
 
 `seedbox help run` lists every option. The guest Python API supports
 [bounded committed console triggers](triggers.md) for future stop/partition
@@ -363,11 +361,9 @@ yields) and world slice boundaries, after the
 exit clock is accounted. A halted machine wakes from the adopted deadline
 (including its seeded jitter), never from a raw page store. One-shot stop/restart
 uses page disarm and avoids PIT mode port writes.
-The requested semantic parameter is retained
-as `page_timer: true` only when enabled. Replay restores it without an override.
-Timer jitter uses the existing seeded stream. This changes enabled-run timing
-and witnesses; omission preserves the existing identity encoding for the same
-engine and kernel inputs.
+The profile records `page_timer: true|false`. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. Enabling it changes run timing
+and witnesses.
 Checkpoint parent identities also bind the page timer only when enabled,
 preventing checkpoint reuse across timer modes while preserving feature-off hashes.
 This composes with deferred TX's `+deferred-tx` identity suffix: all four option

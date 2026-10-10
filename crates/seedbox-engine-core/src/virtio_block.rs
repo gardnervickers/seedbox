@@ -5,6 +5,15 @@ use crate::virtqueue::{Chain, Diagnostics, Direction, Policy as QueuePolicy};
 
 type Result<T> = std::result::Result<T, String>;
 const ID: &[u8; 20] = b"seedbox-disk\0\0\0\0\0\0\0\0";
+/// Request kinds (VIRTIO_BLK_T_*).
+const T_IN: u32 = 0;
+const T_OUT: u32 = 1;
+const T_FLUSH: u32 = 4;
+const T_GET_ID: u32 = 8;
+/// Completion status bytes (VIRTIO_BLK_S_*).
+const S_OK: u8 = 0;
+const S_IOERR: u8 = 1;
+const S_UNSUPP: u8 = 2;
 
 /// Existing descriptor and effect policies, preserved during extraction.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,22 +84,22 @@ impl Request {
                 let data = &segments[1..segments.len() - 1];
                 let len = data.iter().map(|s| s.len).sum::<usize>();
                 match kind {
-                    0 | 1
+                    T_IN | T_OUT
                         if !len.is_multiple_of(SECTOR)
-                            || data.iter().any(|s| s.writable != (kind == 0)) =>
+                            || data.iter().any(|s| s.writable != (kind == T_IN)) =>
                     {
                         return Err("invalid block data descriptors".into())
                     }
-                    4 if !data.is_empty() => {
+                    T_FLUSH if !data.is_empty() => {
                         return Err("block flush includes data descriptors".into())
                     }
-                    8 if data.iter().any(|s| !s.writable) => {
+                    T_GET_ID if data.iter().any(|s| !s.writable) => {
                         return Err("block ID buffer is not writable".into())
                     }
                     _ => (),
                 }
                 let mut input = Vec::new();
-                if kind == 1 {
+                if kind == T_OUT {
                     for span in data {
                         input.extend_from_slice(&memory[span.offset..span.offset + span.len]);
                     }
@@ -207,46 +216,46 @@ impl Block {
             let request = Request::decode(memory, &chain, self.policy)?;
             let mut data = Vec::new();
             let status = match request.kind {
-                0 => {
+                T_IN => {
                     data = vec![0; request.room];
                     if self.disk.read(request.sector, &mut data).is_ok() {
                         if self.policy == Policy::Block {
                             self.stats.reads += 1;
                             self.stats.sectors_read += (request.room / SECTOR) as u64;
                         }
-                        0
+                        S_OK
                     } else {
                         data.clear();
-                        1
+                        S_IOERR
                     }
                 }
-                1 => {
+                T_OUT => {
                     if self.disk.write(request.sector, &request.input).is_ok() {
                         if self.policy == Policy::Block {
                             self.stats.writes += 1;
                             self.stats.sectors_written += (request.input.len() / SECTOR) as u64;
                         }
-                        0
+                        S_OK
                     } else {
-                        1
+                        S_IOERR
                     }
                 }
-                4 => {
+                T_FLUSH => {
                     let n = self.disk.flush();
                     if self.policy == Policy::Block {
                         self.stats.flushes += 1;
                         self.stats.sectors_flushed += n;
                         out.flushed += n;
                     }
-                    0
+                    S_OK
                 }
-                8 => {
+                T_GET_ID => {
                     data = ID[..request.room.min(ID.len())].to_vec();
-                    0
+                    S_OK
                 }
-                _ => 2,
+                _ => S_UNSUPP,
             };
-            if self.policy == Policy::Block && status != 0 {
+            if self.policy == Policy::Block && status != S_OK {
                 self.stats.errors += 1;
             }
             let mut done = 0;

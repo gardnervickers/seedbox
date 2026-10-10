@@ -26,9 +26,7 @@ impl Executor {
         match self {
             Self::Linux(executor) => Ok(Self::Linux(executor.with_checkpoint(at_ns, branch_seed))),
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(_) => Err(seedbox::Error::Setup(
-                "--checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac".into(),
-            )),
+            Self::Mac(_) => Err(seedbox::Error::Setup(super::CHECKPOINT_REQUIRES_KVM.into())),
         }
     }
     /// Watchdog interval is a Linux setting; the Mac engine ignores it.
@@ -133,22 +131,24 @@ impl PreparationBackend for Preparer {
     }
 }
 
-/// Shared with tools/build-assets.sh. The OS may reclaim this directory.
+/// Complete builds keep the kernel beside the executable. Explicit asset
+/// directories retain the architecture subdirectory layout.
 pub fn asset_directory() -> std::path::PathBuf {
-    std::env::var_os("SEEDBOX_ASSET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            default_asset_root(unsafe { libc::geteuid() }, std::env::var_os("SUDO_UID"))
-        })
-        .join(std::env::consts::ARCH)
+    assets_beside(
+        std::env::var_os("SEEDBOX_ASSET_DIR"),
+        std::env::current_exe().ok(),
+    )
 }
-/// Assets are built as the user, so `sudo seedbox` reads the invoking user's slot.
-fn default_asset_root(euid: u32, sudo_uid: Option<std::ffi::OsString>) -> std::path::PathBuf {
-    let uid = sudo_uid
-        .filter(|_| euid == 0)
-        .and_then(|uid| uid.to_str()?.parse::<u32>().ok())
-        .unwrap_or(euid);
-    std::path::PathBuf::from(format!("/tmp/seedbox-{uid}"))
+fn assets_beside(
+    root: Option<std::ffi::OsString>,
+    executable: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    if let Some(root) = root {
+        return std::path::PathBuf::from(root).join(std::env::consts::ARCH);
+    }
+    executable
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_default()
 }
 pub fn guest_assets(
     explicit: Option<std::path::PathBuf>,
@@ -160,13 +160,13 @@ pub fn guest_assets(
     }
     let path = explicit.unwrap_or_else(|| asset_directory().join("runtime.tar.gz"));
     let path = local_asset("--runtime-assets", path)?;
-    seedbox::guest_assets::Runtime::from_archive(&path).map_err(|error| seedbox::Error::Setup(format!("runtime assets {}: {error}; rebuild with `bash tools/build-assets.sh` or select a valid --runtime-assets archive", path.display())))
+    seedbox::guest_assets::Runtime::from_archive(&path).map_err(|error| seedbox::Error::Setup(format!("runtime assets {}: {error}; rebuild with `python3 tools/build.py` or select a valid --runtime-assets archive", path.display())))
 }
 fn local_asset(flag: &str, path: std::path::PathBuf) -> Result<std::path::PathBuf> {
     if path.is_file() {
         Ok(path)
     } else {
-        Err(seedbox::Error::Setup(format!("{flag} {}: not found; from the Seedbox checkout run `bash tools/build-assets.sh`, or pass {flag} PATH", path.display())))
+        Err(seedbox::Error::Setup(format!("{flag} {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass {flag} PATH", path.display())))
     }
 }
 pub fn guest_kernel(explicit: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
@@ -205,6 +205,7 @@ pub fn container_engine() -> Result<bollard::Docker> {
             // Use macOS's user temporary directory even inside a Nix shell,
             // which gives TMPDIR a different, per-shell value.
             let mut buffer = vec![0u8; 4096];
+            // SAFETY: confstr writes at most `buffer.len()` bytes into `buffer`.
             let length = unsafe {
                 libc::confstr(
                     libc::_CS_DARWIN_USER_TEMP_DIR,
@@ -245,17 +246,18 @@ pub fn container_engine() -> Result<bollard::Docker> {
 
 #[cfg(test)]
 mod tests {
-    use super::default_asset_root;
+    use super::assets_beside;
     use std::path::Path;
 
     #[test]
-    fn sudo_reads_the_invoking_users_asset_slot() {
-        let root = |euid, sudo: Option<&str>| default_asset_root(euid, sudo.map(Into::into));
-        assert_eq!(root(1000, None), Path::new("/tmp/seedbox-1000"));
-        assert_eq!(root(0, None), Path::new("/tmp/seedbox-0"));
-        assert_eq!(root(0, Some("1000")), Path::new("/tmp/seedbox-1000"));
-        // Only root follows SUDO_UID; a malformed value keeps the effective user.
-        assert_eq!(root(1001, Some("1000")), Path::new("/tmp/seedbox-1001"));
-        assert_eq!(root(0, Some("bob")), Path::new("/tmp/seedbox-0"));
+    fn bundled_kernel_follows_executable_and_explicit_assets_override_it() {
+        assert_eq!(
+            assets_beside(None, Some("/build/complete/seedbox".into())),
+            Path::new("/build/complete")
+        );
+        assert_eq!(
+            assets_beside(Some("/custom".into()), Some("/build/seedbox".into())),
+            Path::new("/custom").join(std::env::consts::ARCH)
+        );
     }
 }

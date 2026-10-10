@@ -1,7 +1,7 @@
 //! Contract tests use a test-only backend. No hardware qualification is implied.
 use seedbox::{
     config::{self, Simulation},
-    execution::*,
+    execution::{self, *},
     image::Launch,
     orchestration::*,
     store::{ContentDigest, ContentStore},
@@ -86,7 +86,37 @@ impl ExecutionBackend for Backend {
     }
 }
 
+/// The fixture's backend with only `execute` replaced, so profile and
+/// performance parameters stay those of the fixture.
+struct Executing<'a, F> {
+    backend: &'a Backend,
+    execute: F,
+}
+impl<F> ExecutionBackend for Executing<'_, F>
+where
+    F: Fn(ExecutionRequest<'_>) -> Result<ExecutionReport> + Send + Sync,
+{
+    fn profile(&self) -> ExecutionProfile {
+        self.backend.profile()
+    }
+    fn performance_parameters(&self) -> BTreeMap<String, String> {
+        self.backend.performance_parameters()
+    }
+    fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+        (self.execute)(request)
+    }
+}
+
 impl Fixture {
+    fn executing<F>(&self, execute: F) -> Executing<'_, F>
+    where
+        F: Fn(ExecutionRequest<'_>) -> Result<ExecutionReport> + Send + Sync,
+    {
+        Executing {
+            backend: &self.backend,
+            execute,
+        }
+    }
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("compose.yaml");
@@ -100,10 +130,10 @@ impl Fixture {
         let config = store.put(b"fixture image config").unwrap();
         let layer = store.put(b"fixture layer").unwrap();
         let profile = ExecutionProfile {
-            backend: "test-only".into(),
+            backend: execution::Backend::Other("test-only".into()),
             engine,
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: BTreeMap::from([("kernel_abi".into(), "v1".into())]),
+            semantic_parameters: SemanticParameters::new(512),
         };
         let inputs = PreparedInputs {
             wall_clock_epoch: None,
@@ -261,15 +291,11 @@ mod page_evidence_tests {
     fn full_state_fixture() -> (Fixture, serde_json::Value) {
         let mut f = Fixture::new();
         f.backend.profile.witness_mode = WitnessMode::FullState;
-        f.backend
-            .profile
-            .semantic_parameters
-            .insert("memory_mb".into(), "512".into());
         f.preparer.inputs.profile = f.backend.profile.clone();
         let raw = serde_json::json!({
             "report_version": 1, "seed": 1009, "outcome": "end_machine_exited",
             "world_witness": ContentDigest::of(b"world"),
-            "machines": [{"name": "workload", "infrastructure_error": false,
+            "machines": [{"name": "workload", "state": "Exited(0)", "time_ns": 100, "infrastructure_error": false,
                 "guest_exit_code": 0, "witness": ContentDigest::of(b"machine"),
                 "state_digest": ContentDigest::of(b"state"),
                 "state_digest_parts": {"ram": ContentDigest::of(b"RAM"), "regs": ContentDigest::of(b"regs"), "events": "none"}}]
@@ -484,11 +510,7 @@ fn corruption_missing_artifacts_and_profile_drift_prevent_execution() {
 
     let mut fixture = Fixture::new();
     let first = fixture.run();
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .insert("witness".into(), "changed".into());
+    fixture.backend.profile.semantic_parameters.page_timer = true;
     assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
     assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 1);
 }
@@ -707,15 +729,10 @@ fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witne
         .put(b"new engine")
         .unwrap();
     fixture.backend.profile.engine = engine.clone();
-    fixture.backend.profile.semantic_parameters.insert(
-        "engine_executable_kind".into(),
-        seedbox::engine::INTERNAL_WORKER_V1.into(),
-    );
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .insert("simulator_version".into(), "0.2.0-replacement".into());
+    fixture.backend.profile.semantic_parameters.engine = Some(seedbox::engine::kvm_descriptor(
+        seedbox::engine::ExecutableKind::InternalWorker,
+        "0.2.0-replacement".into(),
+    ));
     assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
     let options = ReplayOptions {
         allow_engine_change: true,
@@ -735,16 +752,7 @@ fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witne
     assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
     // Switching back removes stale combined-worker dispatch metadata.
     let combined_run = replay.directory;
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .remove("engine_executable_kind");
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .remove("simulator_version");
+    fixture.backend.profile.semantic_parameters.engine = None;
     let standalone_replay = fixture
         .orchestrator
         .replay_with_options(&combined_run, &fixture.backend, options.clone())
@@ -769,11 +777,7 @@ fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witne
             .status,
         ReplayStatus::Mismatch
     );
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .insert("kernel_abi".into(), "changed".into());
+    fixture.backend.profile.semantic_parameters.memory_mb = 1024;
     assert_eq!(
         fixture
             .orchestrator
@@ -947,35 +951,26 @@ fn machine_lifecycle_effects_pass_and_replay_with_their_service() {
 #[test]
 fn exploration_freezes_full_closure_and_continues_failure_and_witnessed_timeout() {
     use seedbox::exploration::ExploreOptions;
-    struct Sequence<'a>(&'a Fixture);
-    impl ExecutionBackend for Sequence<'_> {
-        fn profile(&self) -> ExecutionProfile {
-            self.0.backend.profile()
-        }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.0.backend.performance_parameters()
-        }
-        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
-            let seed = request.seed;
-            // Sources disappear after preparation. Every next run must materialize
-            // the original complete closure and keep its provenance unchanged.
-            if seed == 10 {
-                fs::remove_file(&self.0.simulation.source)?;
-            }
-            let mut report = self.0.backend.execute(request)?;
-            if seed == 11 {
-                report.workload_exit.as_mut().unwrap().code = 3;
-            }
-            if seed == 12 {
-                report.reason = StopReason::SimulatedTimeLimit;
-            }
-            if seed == 13 {
-                return Err(Error::Execution("real retained backend error".into()));
-            }
-            Ok(report)
-        }
-    }
     let fixture = Fixture::new();
+    let sequence = fixture.executing(|request| {
+        let seed = request.seed;
+        // Sources disappear after preparation. Every next run must materialize
+        // the original complete closure and keep its provenance unchanged.
+        if seed == 10 {
+            fs::remove_file(&fixture.simulation.source)?;
+        }
+        let mut report = fixture.backend.execute(request)?;
+        if seed == 11 {
+            report.workload_exit.as_mut().unwrap().code = 3;
+        }
+        if seed == 12 {
+            report.reason = StopReason::SimulatedTimeLimit;
+        }
+        if seed == 13 {
+            return Err(Error::Execution("real retained backend error".into()));
+        }
+        Ok(report)
+    });
     let batch = fixture
         .orchestrator
         .explore(
@@ -986,7 +981,7 @@ fn exploration_freezes_full_closure_and_continues_failure_and_witnessed_timeout(
                 ..Default::default()
             },
             &fixture.preparer,
-            &Sequence(&fixture),
+            &sequence,
         )
         .unwrap();
     assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 1);
@@ -1079,28 +1074,19 @@ fn exploration_bounds_fail_before_state_and_huge_count_is_lazy() {
 #[test]
 fn exploration_corrupt_frozen_blob_retains_error_without_repreparing() {
     use seedbox::exploration::ExploreOptions;
-    struct Corrupt<'a>(&'a Fixture);
-    impl ExecutionBackend for Corrupt<'_> {
-        fn profile(&self) -> ExecutionProfile {
-            self.0.backend.profile()
-        }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.0.backend.performance_parameters()
-        }
-        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
-            let report = self.0.backend.execute(request)?;
-            fs::write(
-                self.0
-                    .directory
-                    .path()
-                    .join("store/sha256")
-                    .join(self.0.preparer.inputs.kernel.hex()),
-                b"corrupted actual retained bytes",
-            )?;
-            Ok(report)
-        }
-    }
     let fixture = Fixture::new();
+    let corrupt = fixture.executing(|request| {
+        let report = fixture.backend.execute(request)?;
+        fs::write(
+            fixture
+                .directory
+                .path()
+                .join("store/sha256")
+                .join(fixture.preparer.inputs.kernel.hex()),
+            b"corrupted actual retained bytes",
+        )?;
+        Ok(report)
+    });
     let batch = fixture
         .orchestrator
         .explore(
@@ -1110,7 +1096,7 @@ fn exploration_corrupt_frozen_blob_retains_error_without_repreparing() {
                 ..Default::default()
             },
             &fixture.preparer,
-            &Corrupt(&fixture),
+            &corrupt,
         )
         .unwrap();
     assert_eq!(batch.outcome, Outcome::Error);
@@ -1126,35 +1112,18 @@ fn exploration_corrupt_frozen_blob_retains_error_without_repreparing() {
 fn exploration_active_run_is_durable_incomplete_then_cancellation_stops_dispatch() {
     use seedbox::exploration::ExploreOptions;
     use std::sync::{mpsc, Mutex};
-    struct Blocked<'a> {
-        fixture: &'a Fixture,
-        ready: mpsc::Sender<std::path::PathBuf>,
-        resume: Mutex<mpsc::Receiver<()>>,
-    }
-    impl ExecutionBackend for Blocked<'_> {
-        fn profile(&self) -> ExecutionProfile {
-            self.fixture.backend.profile()
-        }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.fixture.backend.performance_parameters()
-        }
-        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
-            self.ready
-                .send(request.output.parent().unwrap().to_owned())
-                .unwrap();
-            self.resume.lock().unwrap().recv().unwrap();
-            self.fixture.backend.execute(request)
-        }
-    }
     let fixture = Fixture::new();
     let token = CancellationToken::default();
     let (ready_tx, ready_rx) = mpsc::channel();
-    let (resume_tx, resume_rx) = mpsc::channel();
-    let backend = Blocked {
-        fixture: &fixture,
-        ready: ready_tx,
-        resume: Mutex::new(resume_rx),
-    };
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let resume = Mutex::new(resume_rx);
+    let backend = fixture.executing(|request| {
+        ready_tx
+            .send(request.output.parent().unwrap().to_owned())
+            .unwrap();
+        resume.lock().unwrap().recv().unwrap();
+        fixture.backend.execute(request)
+    });
     std::thread::scope(|scope| {
         let cancellation = token.clone();
         let task = scope.spawn(|| {
@@ -1175,14 +1144,7 @@ fn exploration_active_run_is_durable_incomplete_then_cancellation_stops_dispatch
         let directory = ready_rx.recv().unwrap();
         let before = inspect(&directory).unwrap();
         assert_eq!(before.outcome, Outcome::Incomplete);
-        let exploration = directory
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
-        let partial = seedbox::exploration::inspect(exploration).unwrap();
+        let partial = seedbox::exploration::inspect(batch_of(&directory)).unwrap();
         assert!(!partial.finished);
         assert_eq!(partial.outcome, Outcome::Incomplete);
         assert_eq!(partial.attempts.len(), 1);
@@ -1198,34 +1160,16 @@ fn exploration_active_run_is_durable_incomplete_then_cancellation_stops_dispatch
 #[test]
 fn exploration_checkpoint_failure_leaves_real_committed_run_and_no_later_dispatch() {
     use seedbox::exploration::ExploreOptions;
-    struct BreakCheckpoint<'a>(&'a Fixture);
-    impl ExecutionBackend for BreakCheckpoint<'_> {
-        fn profile(&self) -> ExecutionProfile {
-            self.0.backend.profile()
-        }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.0.backend.performance_parameters()
-        }
-        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
-            let exploration = request
-                .output
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap();
-            fs::rename(
-                exploration.join("exploration.json"),
-                exploration.join("before.json"),
-            )?;
-            fs::create_dir(exploration.join("exploration.json"))?;
-            self.0.backend.execute(request)
-        }
-    }
     let fixture = Fixture::new();
+    let break_checkpoint = fixture.executing(|request| {
+        let exploration = batch_of(request.output.parent().unwrap());
+        fs::rename(
+            exploration.join("exploration.json"),
+            exploration.join("before.json"),
+        )?;
+        fs::create_dir(exploration.join("exploration.json"))?;
+        fixture.backend.execute(request)
+    });
     assert!(fixture
         .orchestrator
         .explore(
@@ -1235,7 +1179,7 @@ fn exploration_checkpoint_failure_leaves_real_committed_run_and_no_later_dispatc
                 ..Default::default()
             },
             &fixture.preparer,
-            &BreakCheckpoint(&fixture)
+            &break_checkpoint
         )
         .is_err());
     assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 1);
@@ -1313,7 +1257,10 @@ fn rejected_preflight_never_prepares_and_post_preparation_drift_never_executes()
 
 #[test]
 fn actual_vmm_admission_rejects_an_invalid_retained_profile_before_execution() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
+    // The test backend records memory the VMM cannot admit.
+    fixture.backend.profile.semantic_parameters.memory_mb = 32;
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
     let original = fixture.run();
     let manifest = fs::read(original.directory.join("manifest.json")).unwrap();
     let engine = fixture.directory.path().join("retained-engine");
@@ -1339,7 +1286,10 @@ fn actual_vmm_admission_rejects_an_invalid_retained_profile_before_execution() {
             ReplayStatus::NotComparable
         );
         let e = rejected.record.error.unwrap();
-        assert!(e.contains("unsupported guest_abi"), "{e}");
+        assert!(
+            e.contains("admitted profile requires memory_mb in 64..65536"),
+            "{e}"
+        );
         assert!(!rejected.directory.join("output").exists());
         assert_eq!(
             fs::read(original.directory.join("manifest.json")).unwrap(),
@@ -1663,16 +1613,7 @@ impl ExecutionBackend for ControlledWorkers<'_> {
                 }
             }
             WorkerControl::BreakCheckpoint => {
-                let batch = request
-                    .output
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap();
+                let batch = batch_of(request.output.parent().unwrap());
                 fs::rename(batch.join("exploration.json"), batch.join("before.json"))?;
                 fs::create_dir(batch.join("exploration.json"))?;
             }
@@ -1724,6 +1665,7 @@ fn worker_ready(
         .recv_timeout(WORKER_WAIT)
         .expect("worker did not start")
 }
+/// The exploration directory three levels above one of its run directories.
 fn batch_of(run: &std::path::Path) -> &std::path::Path {
     run.parent().unwrap().parent().unwrap().parent().unwrap()
 }
@@ -2120,16 +2062,7 @@ fn checkpoint_version_refusal_preserves_old_bytes_and_ordinary_run_inspection() 
 fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() {
     let mut fixture = Fixture::new();
     let off = fixture.run();
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .insert("disk_loss_sector_bytes".into(), "512".into());
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .insert("disk_loss_survival_probability".into(), "0.5".into());
+    fixture.backend.profile.semantic_parameters.torn_writes = true;
     fixture.preparer.inputs.profile = fixture.backend.profile.clone();
     let on = fixture.run();
     assert_ne!(on.record.run_id, off.record.run_id);
@@ -2138,16 +2071,7 @@ fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() 
         ReplayStatus::Match
     );
     assert_eq!(fixture.replay(&off).record.outcome, Outcome::Error);
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .remove("disk_loss_sector_bytes");
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .remove("disk_loss_survival_probability");
+    fixture.backend.profile.semantic_parameters.torn_writes = false;
     assert_eq!(fixture.replay(&on).record.outcome, Outcome::Error);
     assert_eq!(
         fixture.replay(&off).record.replay.unwrap().status,
@@ -2159,16 +2083,10 @@ fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() 
 fn checkpoint_identity_replays_retained_semantics() {
     let mut fixture = Fixture::new();
     let parent = fixture.run();
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .insert("checkpoint_at_ns".into(), "500".into());
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .insert("checkpoint_branch_seed".into(), "42".into());
+    fixture.backend.profile.semantic_parameters.checkpoint = Some(Checkpoint {
+        at_ns: 500,
+        branch_seed: 42,
+    });
     fixture.preparer.inputs.profile = fixture.backend.profile.clone();
     let branch = fixture.run();
     assert_eq!(branch.record.outcome, Outcome::Pass);
@@ -2176,51 +2094,33 @@ fn checkpoint_identity_replays_retained_semantics() {
     let replay = fixture.replay(&branch);
     assert_eq!(replay.record.run_id, branch.record.run_id);
     assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
-    fixture
-        .backend
-        .profile
-        .semantic_parameters
-        .insert("checkpoint_branch_seed".into(), "43".into());
+    fixture.backend.profile.semantic_parameters.checkpoint = Some(Checkpoint {
+        at_ns: 500,
+        branch_seed: 43,
+    });
     fixture.preparer.inputs.profile = fixture.backend.profile.clone();
     let other = fixture.run();
     assert_ne!(other.record.run_id, branch.record.run_id);
 }
 
 #[test]
-fn kvm_executor_profile_records_no_timebase_and_matches_legacy_identity_bytes() {
+fn kvm_executor_profile_records_only_its_settings_and_replays() {
     use seedbox::vmm::VmmExecutor;
     let mut f = Fixture::new();
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
-    // The exact profile of a run with no mode parameters in its identity.
-    let legacy = ExecutionProfile {
-        backend: "seedbox-kvm".into(),
-        engine: f.backend.profile.engine.clone(),
-        witness_mode: WitnessMode::Exits,
-        semantic_parameters: BTreeMap::from([
-            ("guest_abi".into(), "oci-init-v1".into()),
-            ("control_channel".into(), "virtio-console-v1".into()),
-            ("memory_mb".into(), "1024".into()),
-        ]),
-    };
-    f.backend.profile = legacy.clone();
-    f.preparer.inputs.profile = legacy;
-    let before = f.run();
     let executor = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
-    assert_eq!(executor.profile(), before.record.identity.inputs.profile);
-    assert!(!executor
-        .profile()
-        .semantic_parameters
-        .contains_key("timebase"));
+    assert_eq!(
+        executor.profile().semantic_parameters,
+        SemanticParameters::new(1024)
+    );
     f.backend.profile = executor.profile();
     f.preparer.inputs.profile = executor.profile();
-    let run = f.run();
-    assert_eq!(run.record.run_id, before.record.run_id);
-    assert_eq!(
-        serde_json::to_vec(&run.record.identity).unwrap(),
-        serde_json::to_vec(&before.record.identity).unwrap()
-    );
+    let before = f.run();
+    let json = serde_json::to_value(&before.record.identity.inputs.profile).unwrap();
+    assert!(json["semantic_parameters"].get("timebase").is_none());
+    assert!(json["semantic_parameters"].get("clock").is_none());
     let replay = f
         .orchestrator
         .replay(&before.directory, &f.backend, &CancellationToken::default())
@@ -2230,8 +2130,59 @@ fn kvm_executor_profile_records_no_timebase_and_matches_legacy_identity_bytes() 
 }
 
 #[test]
+fn replay_refuses_settings_drift_before_execution() {
+    let page_timer = |p: &mut SemanticParameters| p.page_timer = true;
+    let torn = |p: &mut SemanticParameters| p.torn_writes = true;
+    let none = |_: &mut SemanticParameters| {};
+    type Edit<'a> = &'a dyn Fn(&mut SemanticParameters);
+    let cases: [(Edit, Edit, &str); 2] = [
+        (
+            &page_timer,
+            &none,
+            "executor page_timer does not match the recorded run",
+        ),
+        (
+            &none,
+            &torn,
+            "executor torn_writes does not match the recorded run",
+        ),
+    ];
+    for (recorded, requested, expected) in cases {
+        let mut f = Fixture::new();
+        f.backend.profile.backend = execution::Backend::Kvm;
+        recorded(&mut f.backend.profile.semantic_parameters);
+        f.preparer.inputs.profile = f.backend.profile.clone();
+        let run = f.run();
+        f.backend.profile.semantic_parameters = SemanticParameters::new(512);
+        requested(&mut f.backend.profile.semantic_parameters);
+        for allow_engine_change in [false, true] {
+            let error = f
+                .orchestrator
+                .replay_with_options(
+                    &run.directory,
+                    &f.backend,
+                    ReplayOptions {
+                        allow_engine_change,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(f.backend.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                fs::read_dir(f.directory.path().join("runs"))
+                    .unwrap()
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
 fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
-    use seedbox::vmm::{recorded_page_timer, VmmExecutor};
+    use seedbox::{engine_adapter::recorded_page_timer, vmm::VmmExecutor};
     let mut f = Fixture::new();
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
@@ -2256,16 +2207,19 @@ fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
             serde_json::to_vec(&before.record.identity).unwrap()
         );
         assert!(!recorded_page_timer(&off.profile()));
-        assert!(!off.profile().semantic_parameters.contains_key("page_timer"));
     }
     let on = executor.with_page_timer(true);
     f.backend.profile = on.profile();
     f.preparer.inputs.profile = on.profile();
     let run = f.run();
     assert_ne!(run.record.run_id, before.record.run_id);
-    assert_eq!(
-        run.record.identity.inputs.profile.semantic_parameters["page_timer"],
-        "true"
+    assert!(
+        run.record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .page_timer
     );
     assert!(recorded_page_timer(
         &inspect(&run.directory).unwrap().identity.inputs.profile
@@ -2286,7 +2240,7 @@ fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
     let off = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
     assert_eq!(off.profile(), off.clone().with_deferred_tx(false).profile());
     let on = off.clone().with_deferred_tx(true);
-    assert_eq!(on.profile().semantic_parameters["deferred_tx"], "true");
+    assert!(on.profile().semantic_parameters.deferred_tx);
     assert_eq!(on.clone().with_deferred_tx(false).profile(), off.profile());
     let mut ids = Vec::new();
     for recorded in [off.clone(), on.clone()] {
@@ -2300,7 +2254,7 @@ fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
         assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
         assert_eq!(replay.record.run_id, run.record.run_id);
         ids.push(run.record.run_id);
-        let enabled = seedbox::vmm::recorded_deferred_tx(&recorded.profile()).unwrap();
+        let enabled = seedbox::engine_adapter::recorded_deferred_tx(&recorded.profile()).unwrap();
         f.backend.profile = off.clone().with_deferred_tx(!enabled).profile();
         for allow_engine_change in [false, true] {
             let error = f

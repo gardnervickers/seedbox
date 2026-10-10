@@ -4,10 +4,10 @@ From the repository root:
 
 ```sh
 nix develop
-cargo build --release
+python3 tools/build.py
 # Start Docker/Podman for application preparation.
-./target/release/seedbox run examples/etcd
-./target/release/seedbox replay .seedbox/runs/ATTEMPT
+./build/current/seedbox run examples/etcd
+./build/current/seedbox replay .seedbox/runs/ATTEMPT
 ```
 
 These are the canonical application definitions. Run either `etcd/compose.yaml`
@@ -29,8 +29,8 @@ For intentional failure controls, set the Redis client's
 command list. Run and replay these explicitly to check FAIL plus replay MATCH.
 
 Each service gets a controlled Linux VM and private RAM-backed root filesystem;
-application data does not persist across fresh runs. Build guest assets explicitly
-with `bash tools/build-assets.sh` and use the release executable; runtime commands
+application data does not persist across fresh runs. Build the CLI and current guest inputs
+with `python3 tools/build.py` and use `build/current/seedbox`; runtime commands
 never download guest assets. See [asset build instructions](../tools/runtime/README.md). Run on
 Apple Silicon HVF or Linux KVM, with at least the tested 1024 MiB per service.
 The image supplies userspace dependencies. Image versions, launch metadata and

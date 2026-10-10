@@ -31,22 +31,21 @@ copies, after their Cargo build has finished.
 | `linux-kvm` | Linux x86-64 or ARM64, usable `/dev/kvm` | Native backend `kvm-tests`; no root required |
 | `linux-guests` | Linux KVM plus fixture kernel/initrd | Backend `guest-tests`; real guest determinism/checkpoint controls. Implies `linux-kvm` |
 | `linux-oci` | Linux x86-64, running Docker-compatible engine, registry access | CLI `oci-tests`; real image import and Dockerfile behavior. No KVM required; runs under sudo when available, as the CLI does for application runs |
-| `linux-apps` | Linux x86-64 KVM, root, Docker-compatible engine, built guest assets | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state |
+| `linux-apps` | Linux x86-64 KVM, root, Docker-compatible engine, Nix guest builder | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state |
 | `linux-pause` | Linux x86-64 KVM, root, supplied retained run/store | CLI `retained-run-tests`; pause/resume replay |
 | `mac-hvf` | Apple Silicon, macOS 15+, HVF and codesign | ARM `hvf-tests`; native CPU/state and cancellation primitives |
 | `mac-guests` | `mac-hvf` plus ARM fixture kernel/initrd | ARM `guest-tests`. Implies `mac-hvf` |
-| `mac-apps` | `mac-hvf` plus Docker-compatible engine, built guest assets | CLI `application-tests` on ARM PV. Implies `mac-hvf` |
+| `mac-apps` | `mac-hvf` plus Docker-compatible engine, Nix guest builder | CLI `application-tests` on ARM PV. Implies `mac-hvf` |
 
 Groups: `linux` is `linux-kvm linux-oci linux-apps`; `mac` is
 `mac-hvf mac-apps`. Groups hold only suites that need no hand-built fixtures, so
 the guest suites (fixture kernel and initrd, see `harness/worlds/README.md`) and
 `linux-pause` (a retained run) are always named explicitly. `--cpu` applies to `linux-apps`.
-A Docker-compatible engine means `DOCKER_HOST` is set or `docker` or `podman` is
-installed. Both apps suites need the guest kernel and helper archive that
-`bash tools/build-assets.sh` writes to `/tmp/seedbox-$UID/<arch>/` (or
-`$SEEDBOX_ASSET_DIR/<arch>/`), or explicit `SEEDBOX_KERNEL` and
-`SEEDBOX_RUNTIME_ASSETS` files. Seedbox never downloads them; otherwise the
-suites report unavailable.
+Both application suites require a running Docker-compatible engine and guest
+build tools (Nix on Linux, a Podman or Docker CLI on Mac). After portable checks,
+they call `python3 tools/build.py` and select that exact completed directory.
+Ambient kernel, helper, and legacy VMM overrides cannot replace those inputs.
+The runtime itself never invokes this build command.
 
 The test supervisor leases a free core and its SMT siblings for application
 runs and releases them after reaping every owned process. This test selection
@@ -59,18 +58,16 @@ are invoked separately, using their existing aliases, lockfiles and target direc
 
 ## Guest and application inputs
 
-Application coverage needs no local kernel or runtime bundle: the release CLI
-Application coverage needs the guest kernel and helpers from
-`bash tools/build-assets.sh`; run it before the release CLI is built, which
-embeds the helpers. The low-level guest and pause suites
-fail with exit 2 when their fixture inputs are missing. Every hardware run prints a fresh report directory
-under `target/check-reports/`, which survives development-shell cleanup.
+Application coverage builds its kernel and helpers automatically through the
+explicit developer build command. Low-level guest and pause suites still fail
+with exit 2 when their fixture inputs are missing. Every hardware run prints a
+fresh report directory under `target/check-reports/`, which survives shell cleanup.
 
 | Suite | Input variables | Checkout defaults |
 | --- | --- | --- |
 | x86 entropy checkpoint | `SEEDBOX_TEST_KERNEL`, `SEEDBOX_TEST_INITRD` | `artifacts/bzImage`, `artifacts/entropy-fork.cpio` |
 | ARM guest fixture | `SEEDBOX_ARM64_KERNEL`, `SEEDBOX_ARM64_INITRD` | `artifacts/arm64-hres/Image`, `artifacts/arm64-hres/init.cpio` |
-| Applications | Build guest assets first; optional CLI overrides remain supported | Release CLI, Docker-compatible API |
+| Applications | Complete build runs automatically; tests use its exact output directory | Release CLI, Docker-compatible API |
 | Pause/resume | `SEEDBOX_HOST_PAUSE_RUN`, `SEEDBOX_HOST_PAUSE_STATE` | No default retained run |
 
 Applications use a release CLI built from the current checkout.
@@ -89,8 +86,18 @@ The runner does not check or stamp Git revisions or checkout cleanliness.
 
 ## Adding a test
 
-1. Add ordinary Rust `#[test]` functions to the appropriate crate. They run by
-   default when no special host suite is required.
+1. Give each assertion one owning layer. Unit tests exercise one component and
+   live beside it in `src/`, inline or in a sibling test module. Integration
+   tests exercise public interfaces across components or process/hardware
+   boundaries and live in the owning crate's `tests/` directory. A mock does
+   not make a multi-component scenario a unit test. Shared policy tests belong
+   to engine-core, not the CLI or a CPU adapter. Keep edge-case matrices in
+   unit tests and test wiring and propagation in integration tests; do not copy
+   the same matrix into both. Native execution and portable policy checks have
+   different responsibilities even when they traverse similar behavior.
+   Add ordinary Rust `#[test]` functions; they run by default when no special
+   host suite is required. Avoid making implementation details public solely
+   to move a unit test into `tests/`.
 2. Keep VMM engine test bodies compiled by default and use conditional
    `ignore` attributes for hardware execution. Other suites may gate hardware
    modules with their existing feature, for example `kvm-tests`; the portable

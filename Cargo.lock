@@ -1217,9 +1217,9 @@ dependencies = [
 
 [[package]]
 name = "indoc"
-version = "2.0.7"
+version = "2.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
+checksum = "a37b2691796cffeb8a8cd305ac66e65841559f147f4e63231d0eafa4db5384d1"
 dependencies = [
  "rustversion",
 ]
@@ -2027,8 +2027,10 @@ dependencies = [
  "libc",
  "ocirender",
  "seedbox-arm64",
+ "seedbox-artifacts",
  "seedbox-control",
  "seedbox-engine-core",
+ "seedbox-engine-protocol",
  "seedbox-vmm",
  "serde",
  "serde_json",
@@ -2038,7 +2040,6 @@ dependencies = [
  "signal-hook",
  "tar",
  "tempfile",
- "thiserror",
  "tokio",
  "tokio-util",
  "walkdir",
@@ -2074,9 +2075,34 @@ version = "0.1.0"
 dependencies = [
  "rayon",
  "seedbox-arm64-control",
+ "seedbox-arm64-protocol",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "seedbox-arm64-protocol"
+version = "0.1.0"
+dependencies = [
+ "seedbox-arm64-control",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "seedbox-artifacts"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "seedbox-engine-protocol",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -2093,9 +2119,20 @@ version = "0.1.0"
 dependencies = [
  "rayon",
  "seedbox-control",
+ "seedbox-engine-protocol",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
+name = "seedbox-engine-protocol"
+version = "0.1.0"
+dependencies = [
+ "seedbox-control",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2111,6 +2148,7 @@ dependencies = [
 name = "seedbox-vmm"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "iced-x86",
  "kvm-bindings",
  "kvm-ioctls 0.25.0",
@@ -2136,9 +2174,19 @@ version = "0.1.0"
 dependencies = [
  "rayon",
  "seedbox-vmm-control",
+ "seedbox-vmm-protocol",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "seedbox-vmm-protocol"
+version = "0.1.0"
+dependencies = [
+ "seedbox-vmm-control",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

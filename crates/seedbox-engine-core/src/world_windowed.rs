@@ -11,13 +11,23 @@
 //! Worker count and host completion order never enter a decision.
 
 use crate::links;
+use crate::network_counters::{
+    self, DELIVERED, LOSS_DROPPED, PARTITION_DROPPED, QUEUE_DROPPED, RECEIVER_DROPPED,
+};
 use crate::window as sw;
-use crate::world::{self, Payload, SliceRequest, State, Stop, World, WorldMachine};
+use crate::world::{self, Crash, Payload, SliceRequest, State, Stop, World, WorldMachine};
 use crate::world_events as events;
-use crate::{control, faults, network_counters};
+use crate::{control, faults};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+
+/// The coordinator's errors are plain messages, like the machines' own.
+impl From<sw::Error> for String {
+    fn from(e: sw::Error) -> Self {
+        e.to_string()
+    }
+}
 
 /// What travels between the coordinator and a machine.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -42,20 +52,42 @@ impl Msg {
 
 /// One segment of a run: to its end, to a fork point, or to a checkpoint.
 pub struct Run<'a> {
-    /// The world's configuration, for runtime inspection results.
-    pub cfg: &'a Value,
     pub duration: u64,
-    pub end_on: &'a Option<String>,
-    /// Stop with `barrier` once every machine is parked: at the guest's
-    /// launch barrier, or with `Some(Some(t))` at its first deterministic
-    /// point at or after `t`.
-    pub fork: Option<Option<u64>>,
+    /// End the run when this machine exits.
+    pub end_on: Option<&'a str>,
+    /// Stop with `barrier` once every machine is parked at this fork point.
+    pub fork: Option<Fork>,
     /// Stop with `checkpoint` once every machine and world boundary is at
     /// or after this time, before anything happens at it.
     pub checkpoint: Option<u64>,
     /// With `fork`, any other end is an error.
     pub require_barrier: bool,
 }
+
+/// Where every machine parks when a segment boots to a fork point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fork {
+    /// At the guest's launch barrier.
+    Barrier,
+    /// At each machine's first deterministic point at or after this time.
+    At(u64),
+}
+impl Fork {
+    fn at(self) -> Option<u64> {
+        match self {
+            Self::Barrier => None,
+            Self::At(t) => Some(t),
+        }
+    }
+}
+/// `boot.fork_at_ns`: a time, or the launch barrier when absent.
+impl From<Option<u64>> for Fork {
+    fn from(at: Option<u64>) -> Self {
+        at.map_or(Self::Barrier, Self::At)
+    }
+}
+
+pub use seedbox_engine_protocol::report::RunOutcome;
 
 /// Performance settings. None of them changes a run's results.
 #[derive(Clone, Debug, Default)]
@@ -227,7 +259,9 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
         clock: &mut M::Clock,
         a: &sw::Assignment<Msg>,
     ) -> Result<sw::Report<Msg>, String> {
-        std::thread::sleep(self.skew);
+        if !self.skew.is_zero() {
+            std::thread::sleep(self.skew);
+        }
         let slice_end = a.slice_end();
         let mut outputs = Vec::new();
         let mut frames = Vec::new();
@@ -348,8 +382,6 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
     }
 }
 
-const PAUSED_INGRESS_FRAMES: u64 = 256;
-
 /// The coordinator: the world's policies and their randomness, applied on
 /// the calling thread in commit order, and the between-rounds hook.
 struct Coord<'a, M: WorldMachine> {
@@ -367,13 +399,13 @@ struct Coord<'a, M: WorldMachine> {
     macs: &'a [[u8; 6]],
     dropped: &'a mut u64,
     delivered: &'a mut u64,
-    link_counts: &'a mut BTreeMap<(usize, usize), [u64; 5]>,
+    link_counts: &'a mut network_counters::LinkCounts,
     semantic: &'a mut network_counters::NetworkCounters,
     latency: u64,
     /// Each machine's committed lifecycle: (paused, down).
     life: Vec<(bool, bool)>,
     /// Why the hook stopped the run.
-    stopped: Option<&'static str>,
+    stopped: Option<RunOutcome>,
     /// A failed crash transaction: the world is terminal.
     failure: Option<String>,
     host: &'a mut dyn FnMut() -> Result<(), String>,
@@ -386,24 +418,7 @@ impl<M: WorldMachine> Coord<'_, M> {
     }
 
     fn counter_snapshot(&self) -> Value {
-        let snapshot: BTreeMap<_, _> = self
-            .semantic
-            .counts()
-            .iter()
-            .map(|(&(from, to), counts)| {
-                (format!("{}->{}", self.names[from], self.names[to]), {
-                    let mut c = json!({"delivered":counts[0],"partition_dropped":counts[1],"receiver_dropped":counts[2]});
-                    if counts[3] > 0 {
-                        c["loss_dropped"] = json!(counts[3]);
-                    }
-                    if counts[4] > 0 {
-                        c["queue_dropped"] = json!(counts[4]);
-                    }
-                    c
-                })
-            })
-            .collect();
-        json!(snapshot)
+        network_counters::snapshot_value(|m| &self.names[m], self.semantic.counts())
     }
 
     fn fault_failed(&self) -> bool {
@@ -446,10 +461,10 @@ impl<M: WorldMachine> Coord<'_, M> {
         for (at, from, to, accepted) in received {
             if accepted {
                 *self.delivered += 1;
-                self.count(at, from, to, 0);
+                self.count(at, from, to, DELIVERED);
             } else {
                 *self.dropped += 1;
-                self.count(at, from, to, 2);
+                self.count(at, from, to, RECEIVER_DROPPED);
             }
         }
         effects.sort();
@@ -497,14 +512,10 @@ impl<M: WorldMachine> Coord<'_, M> {
         requests.sort();
         for (at, m, _, line) in requests {
             if self.run.fork.is_some() {
-                return Err(format!(
-                    "{}: runtime control request at {at} ns, before the fork point; fork earlier (boot.fork_at_ns)",
-                    self.names[m]
-                ));
+                return Err(world::control_before_fork(&self.names[m], at));
             }
             if let Err(e) = self.control.request(m, at, &line, committed) {
-                self.control.log.push(json!({"status":"rejected","machine":self.names[m],"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
-                self.control.error = Some(e);
+                self.control.reject_request(&self.names[m], at, &line, e);
             }
         }
         self.control.observe_faults(self.faults, committed)?;
@@ -544,21 +555,19 @@ impl<M: WorldMachine> Coord<'_, M> {
                     .sum();
                 let result = world::crash_machine(
                     guests[m].m,
-                    self.factory,
-                    &self.boot[m],
-                    self.run_seed,
-                    self.branch_identity.as_deref(),
-                    &mut self.control.triggers,
-                    discarded,
-                    &mut self.incarnations[m],
-                    t,
+                    Crash {
+                        factory: self.factory,
+                        boot: &self.boot[m],
+                        run_seed: self.run_seed,
+                        branch_identity: self.branch_identity.as_deref(),
+                        triggers: &mut self.control.triggers,
+                        discarded,
+                        incarnations: &mut self.incarnations[m],
+                        at: t,
+                    },
                 );
                 if let Err(mut error) = result {
-                    for g in guests.iter_mut() {
-                        if let Err(cleanup) = g.m.terminate_worker() {
-                            error.push_str(&format!("; {} worker cleanup: {cleanup}", g.m.name));
-                        }
-                    }
+                    world::terminate_workers(guests.iter_mut().map(|g| &mut *g.m), &mut error);
                     self.failure = Some(error.clone());
                     return Err(error);
                 }
@@ -574,7 +583,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                     match p {
                         Msg::Frame { from, .. } => {
                             *self.dropped += 1;
-                            self.count(key.at, from, m, 2);
+                            self.count(key.at, from, m, RECEIVER_DROPPED);
                         }
                         Msg::Serial(_) | Msg::Control(_) => {}
                         Msg::Partition { from, to, on } => {
@@ -587,9 +596,7 @@ impl<M: WorldMachine> Coord<'_, M> {
         }
         let g = &guests[m];
         self.life[m] = (g.m.paused, g.m.down);
-        let s = g.state();
-        plan.sync(m, s.time, s.next, s.exited, s.suspended)
-            .map_err(|e| e.to_string())
+        sync(plan, m, g)
     }
 
     /// The hook: absorb the last round, then apply every world boundary no
@@ -606,12 +613,12 @@ impl<M: WorldMachine> Coord<'_, M> {
         let n = guests.len();
         self.absorb(guests, committed)?;
         if self.fault_failed() {
-            self.stopped = Some("fault_failed");
+            self.stopped = Some(RunOutcome::FaultFailed);
             return Ok(sw::Flow::Stop);
         }
         (self.host)()?;
         let until_barrier = self.run.fork.is_some();
-        let fork_at = self.run.fork.flatten();
+        let fork_at = self.run.fork.and_then(Fork::at);
         loop {
             let start = (0..n).map(|m| plan.key(m)).min().unwrap_or(sw::NEVER);
             let control_boundary = self.control.boundary();
@@ -621,32 +628,17 @@ impl<M: WorldMachine> Coord<'_, M> {
             if self.run.checkpoint.is_some_and(|t| {
                 start >= t && control_boundary >= t && fault_boundary >= t && trigger_boundary >= t
             }) {
-                self.stopped = Some("checkpoint");
+                self.stopped = Some(RunOutcome::Checkpoint);
                 return Ok(sw::Flow::Stop);
             }
             if let Some(t) = fork_at {
-                // A machine that cannot act before the fork time parks where
-                // it is; one owing I/O settles it first, in its own run.
-                for (m, g) in guests.iter_mut().enumerate() {
-                    if !g.m.parked
-                        && !g.m.paused
-                        && !g.m.down
-                        && g.exited_at().is_none()
-                        && plan.key(m) >= t
-                        && g.m.owed_io().is_none()
-                    {
-                        g.m.park()?;
-                        let s = g.state();
-                        plan.sync(m, s.time, s.next, s.exited, s.suspended)
-                            .map_err(|e| e.to_string())?;
-                    }
-                }
+                park_for_fork(plan, guests, t)?;
             }
             if until_barrier && guests.iter().all(|g| g.m.parked || g.exited_at().is_some()) {
                 if let Some(g) = guests.iter().find(|g| !g.m.parked) {
                     return Err(format!("{} exited before the fork point", g.m.name));
                 }
-                self.stopped = Some("barrier");
+                self.stopped = Some(RunOutcome::Barrier);
                 return Ok(sw::Flow::Stop);
             }
             self.semantic.advance(
@@ -660,49 +652,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 && control_boundary <= trigger_boundary
                 && control_boundary < duration
             {
-                if guests.iter().any(|g| g.m.time > control_boundary) {
-                    return Err("control boundary is in committed machine past".into());
-                }
-                let exited: Vec<String> = guests
-                    .iter()
-                    .filter(|g| g.exited_at().is_some())
-                    .map(|g| g.m.name.clone())
-                    .collect();
-                self.control.reject_unavailable(&exited);
-                let unthrottleable: Vec<String> = guests
-                    .iter()
-                    .filter(|g| !g.m.supports_throttle())
-                    .map(|g| g.m.name.clone())
-                    .collect();
-                self.control.reject_unthrottleable(&unthrottleable);
-                if self.control.pending.as_ref().is_some_and(|p| {
-                    !p.admitted_done
-                        && matches!(p.operation, Some(seedbox_control::Operation::Inspect {}))
-                }) {
-                    let machines: Vec<Value> = guests
-                        .iter()
-                        .enumerate()
-                        .map(|(i, g)| {
-                            json!({"name":g.m.name,"state":if g.exited_at().is_some() {format!("{:?}",g.m.state)} else {self.faults.process_state(i).to_owned()}})
-                        })
-                        .collect();
-                    let result = json!({"services":self.run.cfg["control"]["placement"],"machines":machines,"active_handles":self.faults.active_handles(),"network_counters":self.counter_snapshot()});
-                    let pending = self.control.pending.as_mut().unwrap();
-                    pending.result = result;
-                    if let Some(evidence) = self.control.triggers.evidence()? {
-                        self.control.pending.as_mut().unwrap().result["triggers"] = evidence;
-                    }
-                }
-                if let Some(bytes) = self.control.apply_boundary(self.faults, control_boundary)? {
-                    let target = self
-                        .control
-                        .controller
-                        .ok_or("control reply without a controller")?;
-                    plan.schedule(target, control_boundary, Msg::Control(bytes))
-                        .map_err(|e| e.to_string())?;
-                    plan.add_boundary(control_boundary)
-                        .map_err(|e| e.to_string())?;
-                }
+                self.apply_control(plan, guests, control_boundary)?;
                 continue;
             }
             if trigger_boundary <= start
@@ -718,28 +668,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                 continue;
             }
             if fault_boundary <= start && fault_boundary < duration {
-                if guests.iter().any(|g| g.m.time > fault_boundary) {
-                    return Err("fault boundary is in committed machine past".into());
-                }
-                let commands = self.faults.apply_due(fault_boundary);
-                for i in self.faults.take_changed_network() {
-                    let snapshot = self.counter_snapshot();
-                    self.faults.log[i]["network_counters"] = snapshot;
-                }
-                for (target, command) in commands {
-                    plan.schedule(target, fault_boundary, Msg::Control(command))
-                        .map_err(|e| e.to_string())?;
-                    plan.add_boundary(fault_boundary)
-                        .map_err(|e| e.to_string())?;
-                }
-                // After the commands, so a crash at this boundary discards
-                // those its machine was just sent.
-                for (target, op) in self.faults.take_lifecycle() {
-                    self.lifecycle(plan, guests, target, op, fault_boundary)?;
-                }
-                self.control.observe_faults(self.faults, fault_boundary)?;
+                self.apply_faults(plan, guests, fault_boundary)?;
                 if self.faults.error.is_some() && self.control.pending.is_none() {
-                    self.stopped = Some("fault_failed");
+                    self.stopped = Some(RunOutcome::FaultFailed);
                     return Ok(sw::Flow::Stop);
                 }
                 continue;
@@ -754,7 +685,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 fork_at.unwrap_or(sw::NEVER),
             ] {
                 if b != sw::NEVER && b >= committed {
-                    plan.add_boundary(b).map_err(|e| e.to_string())?;
+                    plan.add_boundary(b)?;
                 }
             }
             break;
@@ -765,6 +696,94 @@ impl<M: WorldMachine> Coord<'_, M> {
         }
         Ok(sw::Flow::Continue)
     }
+
+    /// The control barrier at `at`: refuse what the machines can no longer
+    /// do, answer an inspection, then admit or reply.
+    fn apply_control(
+        &mut self,
+        plan: &mut sw::World<Msg>,
+        guests: &[Guest<'_, M>],
+        at: u64,
+    ) -> Result<(), String> {
+        if guests.iter().any(|g| g.m.time > at) {
+            return Err("control boundary is in committed machine past".into());
+        }
+        let names = |keep: fn(&Guest<'_, M>) -> bool| -> Vec<String> {
+            (guests.iter().filter(|g| keep(g)))
+                .map(|g| g.m.name.clone())
+                .collect()
+        };
+        self.control
+            .reject_unavailable(&names(|g| g.exited_at().is_some()));
+        self.control
+            .reject_unthrottleable(&names(|g| !g.m.supports_throttle()));
+        if self.control.wants_inspect() {
+            let machines = (guests.iter().enumerate())
+                .map(|(i, g)| world::inspect_machine(&g.m.name, g.m.state, self.faults, i))
+                .collect();
+            let counters = self.counter_snapshot();
+            (self.control).answer_inspect(machines, self.faults, counters)?;
+        }
+        if let Some(bytes) = self.control.apply_boundary(self.faults, at)? {
+            let target = self
+                .control
+                .controller
+                .ok_or("control reply without a controller")?;
+            plan.schedule(target, at, Msg::Control(bytes))?;
+            plan.add_boundary(at)?;
+        }
+        Ok(())
+    }
+
+    /// The fault boundary at `at`: apply due faults, send their commands,
+    /// then carry out lifecycle transitions.
+    fn apply_faults(
+        &mut self,
+        plan: &mut sw::World<Msg>,
+        guests: &mut [Guest<'_, M>],
+        at: u64,
+    ) -> Result<(), String> {
+        if guests.iter().any(|g| g.m.time > at) {
+            return Err("fault boundary is in committed machine past".into());
+        }
+        let commands = self.faults.apply_due(at);
+        for i in self.faults.take_changed_network() {
+            let snapshot = self.counter_snapshot();
+            self.faults.set_network_counters(i, snapshot);
+        }
+        for (target, command) in commands {
+            plan.schedule(target, at, Msg::Control(command))?;
+            plan.add_boundary(at)?;
+        }
+        // After the commands, so a crash at this boundary discards
+        // those its machine was just sent.
+        for (target, op) in self.faults.take_lifecycle() {
+            self.lifecycle(plan, guests, target, op, at)?;
+        }
+        self.control.observe_faults(self.faults, at)
+    }
+}
+
+/// A machine that cannot act before the fork time `t` parks where it is;
+/// one owing I/O settles it first, in its own run.
+fn park_for_fork<M: WorldMachine>(
+    plan: &mut sw::World<Msg>,
+    guests: &mut [Guest<'_, M>],
+    t: u64,
+) -> Result<(), String> {
+    for (m, g) in guests.iter_mut().enumerate() {
+        if !g.m.parked
+            && !g.m.paused
+            && !g.m.down
+            && g.exited_at().is_none()
+            && plan.key(m) >= t
+            && g.m.owed_io().is_none()
+        {
+            g.m.park()?;
+            sync(plan, m, g)?;
+        }
+    }
+    Ok(())
 }
 
 impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
@@ -780,24 +799,25 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
         if frame.len() < 14 {
             return;
         }
-        let dst_mac: [u8; 6] = frame[0..6].try_into().expect("a 14-byte header");
+        let mut dst_mac = [0; 6];
+        dst_mac.copy_from_slice(&frame[0..6]);
         for dst in links::candidates(src, dst_mac, self.macs) {
             let last = self.faults.links.last.get(&(src, dst)).copied();
             let cut = *self.partitioned.get(&(src, dst)).unwrap_or(&false);
             let at = match self.faults.route(src, dst, sent_at, &frame, cut) {
                 links::Outcome::Cut => {
                     *self.dropped += 1;
-                    self.count(sent_at, src, dst, 1);
+                    self.count(sent_at, src, dst, PARTITION_DROPPED);
                     continue;
                 }
                 links::Outcome::Lost => {
                     *self.dropped += 1;
-                    self.count(sent_at, src, dst, 3);
+                    self.count(sent_at, src, dst, LOSS_DROPPED);
                     continue;
                 }
                 links::Outcome::QueueDropped => {
                     *self.dropped += 1;
-                    self.count(sent_at, src, dst, 4);
+                    self.count(sent_at, src, dst, QUEUE_DROPPED);
                     continue;
                 }
                 links::Outcome::Deliver(at) => at,
@@ -813,13 +833,13 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
                     down,
                     paused,
                     self.paused_ingress[dst],
-                    PAUSED_INGRESS_FRAMES,
+                    events::PAUSED_INGRESS_FRAMES,
                 ) {
                     events::Arrival::Queue => {}
                     events::Arrival::Held => self.paused_ingress[dst] += 1,
                     events::Arrival::Drop => {
                         *self.dropped += 1;
-                        self.count(at, src, dst, 2);
+                        self.count(at, src, dst, RECEIVER_DROPPED);
                         continue;
                     }
                 }
@@ -846,6 +866,16 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
     }
 }
 
+/// Tell the plan where guest `g`, machine `m`, now stands.
+fn sync<M: WorldMachine>(
+    plan: &mut sw::World<Msg>,
+    m: usize,
+    g: &Guest<'_, M>,
+) -> Result<(), String> {
+    let s = g.state();
+    Ok(plan.sync(m, s.time, s.next, s.exited, s.suspended)?)
+}
+
 fn hook<M: WorldMachine>(
     plan: &mut sw::World<Msg>,
     guests: &mut [Guest<'_, M>],
@@ -863,7 +893,7 @@ pub fn simulate<M: WorldMachine>(
     run: &Run,
     skew: Duration,
     boundary: &mut dyn FnMut() -> Result<(), String>,
-) -> Result<(&'static str, Value), String> {
+) -> Result<(RunOutcome, Value), String> {
     windowed(
         world,
         run,
@@ -882,7 +912,7 @@ pub fn simulate_parallel<M, F>(
     workers: Workers,
     make_clock: F,
     boundary: &mut dyn FnMut() -> Result<(), String>,
-) -> Result<(&'static str, Value), String>
+) -> Result<(RunOutcome, Value), String>
 where
     M: WorldMachine + Send,
     F: Fn(usize) -> Result<M::Clock, String> + Sync,
@@ -910,7 +940,7 @@ fn windowed<M, X>(
     workers: usize,
     boundary: &mut dyn FnMut() -> Result<(), String>,
     execute: X,
-) -> Result<(&'static str, Value), String>
+) -> Result<(RunOutcome, Value), String>
 where
     M: WorldMachine,
     X: FnOnce(
@@ -930,7 +960,7 @@ where
             world
                 .machines
                 .iter()
-                .position(|m| &m.name == name)
+                .position(|m| m.name == name)
                 .ok_or(format!("end_on_exit: unknown machine {name}"))?,
         ),
         None => None,
@@ -978,14 +1008,13 @@ where
         g.drain();
     }
     let states = guests.iter().map(Guest::state).collect();
-    let mut plan = sw::World::<Msg>::with_machines(states, params).map_err(|e| e.to_string())?;
+    let mut plan = sw::World::<Msg>::with_machines(states, params)?;
     // Events queued by an earlier segment or the plan keep their order:
     // management first at equal times, as strict delivery has it.
     for (m, q) in strict_events.iter_mut().enumerate() {
         for ((at, _), bytes) in std::mem::take(q) {
-            plan.schedule(m, at, Msg::Control(bytes))
-                .map_err(|e| e.to_string())?;
-            plan.add_boundary(at).map_err(|e| e.to_string())?;
+            plan.schedule(m, at, Msg::Control(bytes))?;
+            plan.add_boundary(at)?;
         }
     }
     for (m, q) in events.iter_mut().enumerate() {
@@ -995,7 +1024,7 @@ where
                 Payload::Serial(bytes) => Msg::Serial(bytes),
                 Payload::Partition { from, to, on } => Msg::Partition { from, to, on },
             };
-            plan.schedule(m, at, msg).map_err(|e| e.to_string())?;
+            plan.schedule(m, at, msg)?;
         }
     }
     let life = guests.iter().map(|g| (g.m.paused, g.m.down)).collect();
@@ -1070,26 +1099,26 @@ where
     *slices += stats.rounds;
     let committed = plan.committed();
     let (word, exit) = match outcome {
-        sw::Outcome::Duration { .. } => ("duration", None),
+        sw::Outcome::Duration { .. } => (RunOutcome::Duration, None),
         // Paused or down machines with nothing left to resume or reboot
         // them sit out the rest of the run.
         sw::Outcome::Quiescent { .. } => (
             if machines.iter().any(|m| m.paused || m.down) {
-                "duration"
+                RunOutcome::Duration
             } else {
-                "quiescent"
+                RunOutcome::Quiescent
             },
             None,
         ),
         sw::Outcome::Exited {
             machine, exit_at, ..
         } => (
-            "end_machine_exited",
+            RunOutcome::EndMachineExited,
             Some(json!({"machine": machines[machine].name, "exit_ns": exit_at})),
         ),
         sw::Outcome::Stopped { .. } => (stopped.ok_or("stopped without a reason")?, None),
     };
-    if run.require_barrier && run.fork.is_some() && word != "barrier" {
+    if run.require_barrier && run.fork.is_some() && word != RunOutcome::Barrier {
         return Err(format!("launch barrier not reached: {word}"));
     }
     let rounds = plan.rounds();

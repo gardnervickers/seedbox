@@ -35,6 +35,13 @@ carries before/after identity and a physical stopped observation. A malformed,
 stale or unexpected response poisons the transport before effects are published.
 Poisoning closes, kills and reaps the process; later calls send no requests.
 
+Both adapters construct worlds with `World::new(WorldInputs { ... })`. The
+constructor owns queue, counter and incarnation-bookkeeping initialization and
+validates admission before returning. Coordinator policy fields are private;
+report projection uses immutable accessors and `machine_with_history` for split
+borrows. Lifecycle fields in `MachineState` are private to the core; adapters use
+its guarded commit methods and read-only accessors.
+
 World admission rejects empty machine sets, mismatched parallel inputs and early
 slack greater than or equal to lookahead. Raw worker inputs preserve main's
 handling of empty or duplicate names and MACs; Compose supplies unique names.

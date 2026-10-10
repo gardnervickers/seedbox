@@ -30,6 +30,8 @@ impl SysReg {
     pub const MPIDR: Self = Self(0xc005);
     pub const CNTKCTL: Self = Self(0xc708);
     pub const CNTV_CTL: Self = Self(0xdf19);
+    /// Read-only EL0 thread ID register (S3_3_C13_C0_3).
+    pub const TPIDRRO_EL0: Self = Self(0xde83);
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Exit {
@@ -44,6 +46,10 @@ pub enum Exit {
         imm: u16,
     },
     Wfi,
+    /// A trapped WFE (or WFET). The guest gains nothing from waiting: no other
+    /// CPU exists and interrupts arrive at deterministic rendezvous points, so
+    /// the VMM skips the instruction without idling.
+    Wfe,
     SysReg {
         reg: u16,
         write: bool,
