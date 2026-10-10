@@ -14,15 +14,11 @@ case "$cpu" in ''|*[!0-9]*) echo 'CPU must be an integer' >&2; exit 2 ;; esac
 test -f "$kernel"
 test ! -e "$output"
 mkdir "$output"
-cargo build --release -p seedbox --locked
+complete=$(python3 tools/build.py)
 cargo build-vmm
 bash guest/build-compose.sh "$output/compose-init"
-cli="$root/target/release/seedbox"
+cli="$complete/seedbox"
 vmm="$root/crates/seedbox-vmm/target/release/seedbox-vmm"
-if test -n "${CARGO_TARGET_DIR:-}"; then
-  target=$(realpath "$CARGO_TARGET_DIR")
-  cli="$target/release/seedbox"
-fi
 if test "${4:-}" = faults; then
   "$SEEDBOX_STATIC_CC" -O2 -static -Wall -Wextra -Werror -DSEEDBOX_DROP_EFFECTS \
     guest/compose-init.c -o "$output/compose-init-missing"
