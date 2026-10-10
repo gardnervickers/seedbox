@@ -1,5 +1,8 @@
 # Seedbox
 
+> **⚠️ Early, buggy software.** 
+> I vibe-coded the vast majority of this so temper your expectations. Expect slop, bugs, and dead code. Nothing api-wise is stable yet. 
+
 Seedbox runs Linux applications in virtual machines with controlled time,
 networking, and disk faults. A seed and recorded inputs let you repeat a
 simulation and compare its results.
