@@ -46,6 +46,10 @@ pub enum Exit {
         imm: u16,
     },
     Wfi,
+    /// A trapped WFE (or WFET). The guest gains nothing from waiting: no other
+    /// CPU exists and interrupts arrive at deterministic rendezvous points, so
+    /// the VMM skips the instruction without idling.
+    Wfe,
     SysReg {
         reg: u16,
         write: bool,

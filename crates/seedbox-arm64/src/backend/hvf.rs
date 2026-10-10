@@ -323,6 +323,7 @@ impl Backend for Hvf {
                     Exit::Hvc { imm: esr as u16 }
                 }
                 0x01 if esr & 1 == 0 => Exit::Wfi,
+                0x01 => Exit::Wfe,
                 0x18 => {
                     let rt = ((esr >> 5) & 31) as u8;
                     let write = esr & 1 == 0;
@@ -374,7 +375,7 @@ impl Backend for Hvf {
                 }
                 self.set_reg(CoreReg::Pc, p.pc + 4)
             }
-            Exit::Wfi => self.set_reg(CoreReg::Pc, p.pc + 4),
+            Exit::Wfi | Exit::Wfe => self.set_reg(CoreReg::Pc, p.pc + 4),
             Exit::SysReg { write, rt, .. } => {
                 if !write {
                     let value = read.ok_or("missing sysreg read response")?;

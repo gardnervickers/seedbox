@@ -42,6 +42,25 @@ older `run.sh` remains a native upstream packing diagnostic, not the acceptance
 gate for the protocol. The investigation is tracked in
 [#241](https://github.com/gardnervickers/seedbox/issues/241).
 
+The patch adds no option of its own: an unpatched DynamoRIO core accepts
+`-ldstex2cas` and simply lacks the epoch check, so swapping the translator
+build brings the host-timing leak back without any error. The ARM core must
+come from `nix/dynamorio.nix`; nothing at run time verifies this.
+
+### Wait hints
+
+The exclusive monitor is not the only guest state a host interruption touches.
+A host exception also wakes `WFE` and `WFI`, so an application spin loop that
+waits would iterate, and be charged, a host-dependent number of times. With one
+guest CPU and interrupts delivered at deterministic rendezvous points, waiting
+gains the guest nothing. The progress client rewrites application `WFE`, `WFI`,
+`WFET` and `WFIT` to `NOP` before translation, keeping the original translation
+so faults in the block still map to the application PC. When HVF traps a `WFE`
+that no translator saw, from the kernel or an untranslated guest process, the
+VMM skips the instruction without idling; a trapped `WFI` remains the kernel's
+idle rendezvous. The `wait` fixture in `exclusives.yaml` spins on both hints
+until a thread wakes it after a virtual-time sleep.
+
 ## Original reproducer and baseline evidence
 
 This fixture removes Node, JIT and threads from the question. It increments one
