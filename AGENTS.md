@@ -7,15 +7,16 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 ## Workspace
 
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
-  Use `cargo run --release -- <command>` or the release executable for guest runs;
+  Use `build/current/seedbox` for guest runs;
   the bundled engine uses the CLI build profile.
-- Build the native CLI with `cargo build --release`; guest assets are built
-  explicitly with `bash tools/build-assets.sh`. Linux uses Nix; Mac uses a
-  Docker-compatible Linux build container. Assets occupy one slot per architecture
-  in the OS temporary directory. Release builds embed available static guest helpers;
-  without them, they warn and leave helper resolution to runtime.
-  Seedbox never starts an engine daemon or automatically downloads guest assets. CLI lookup owns environment access;
-  library callers supply paths and cancellation explicitly.
+- Build the complete CLI and guest inputs with `python3 tools/build.py` inside
+  `nix develop`. Linux uses Nix directly; Mac uses a Docker-compatible Linux
+  builder with a persistent Nix store. Outputs live together under `build/`;
+  `build/current` changes atomically only after a successful complete build.
+  Plain Cargo builds embed helpers only with explicit `SEEDBOX_BUILD_HELPERS`.
+  The CLI finds its kernel beside the executable. Runtime commands never run
+  Nix, Cargo or asset builders. Replay uses retained inputs. CLI lookup owns
+  environment access; library callers supply paths and cancellation explicitly.
 - Application images are built/pulled/exported using Bollard through the user's
   Docker-compatible engine socket. The CLI resolves connections; library callers
   supply an explicit client. The engine owns build caching; `ocirender` merges
@@ -272,7 +273,7 @@ deliberately change one.
   tool, the wrong host, a permission). It prints without a category prefix.
   Its message starts lowercase, names the path, flag or value involved, and
   says how to fix it: `--kernel /x/bzImage: not found`, or `guest assets missing;
-  run bash tools/build-assets.sh`.
+  run python3 tools/build.py`.
 - Never let a bare `io::Error` from a user-supplied path or a spawned program
   reach the user. Check the path first (`existing`), or add context as
   `WorkerLaunch::spawn` (`worker_process.rs`) and `host::msr_error` do.

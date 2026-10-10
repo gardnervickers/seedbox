@@ -79,7 +79,7 @@ enum Command {
     },
     /// Check execution-profile compatibility without images or guests (Linux KVM host; or Apple Silicon Mac).
     #[command(
-        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run `bash tools/build-assets.sh` or pass --kernel."
+        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run `python3 tools/build.py` or pass --kernel."
     )]
     Doctor {
         #[command(flatten)]
@@ -354,7 +354,7 @@ impl StateArg {
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
 struct KvmInputs {
-    /// Guest kernel Image on Mac, or bzImage on Linux [default: local assets in the OS temporary directory].
+    /// Guest kernel Image on Mac, or bzImage on Linux [default: kernel beside the executable].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
     /// Override with a legacy standalone VMM [default: the engine built into seedbox].
@@ -367,7 +367,7 @@ struct KvmInputs {
 struct RuntimeInputs {
     #[command(flatten)]
     kvm: KvmInputs,
-    /// Guest helper archive override [default: embedded in release builds].
+    /// Guest helper archive override [default: embedded by the complete build].
     #[arg(long, env = "SEEDBOX_RUNTIME_ASSETS")]
     runtime_assets: Option<PathBuf>,
     /// Static guest supervisor [default: embedded guest helper].
@@ -425,7 +425,7 @@ impl RuntimeInputs {
                 .map(|assets| assets.input(name))
                 .ok_or_else(|| {
                     Error::Setup(format!(
-                        "{flag}: missing guest helper; run `bash tools/build-assets.sh`"
+                        "{flag}: missing guest helper; run `python3 tools/build.py`"
                     ))
                 }),
         };

@@ -150,19 +150,18 @@ disk fixtures, including the ext4 fsync ledger, are documented in
 
 ```sh
 nix develop
-bash tools/build-assets.sh
-cargo build --release
+python3 tools/build.py
 ```
 
-The explicit asset build uses Nix on Linux and a Docker-compatible Linux build
-container on Mac. It builds the patched kernel and static guest helpers into
-the OS temporary directory. See [asset builds](../tools/runtime/README.md).
-Cargo builds the native CLI, embeds the prebuilt helper archive in release builds,
-and signs it on Mac. It never builds Linux helpers or starts a container.
-With helpers embedded, the kernel is the only separate guest asset needed by
-a release executable. If the default helper archive is missing at build time,
-Cargo warns and builds without embedding; runtime then requires a local archive
-and reports the asset-build command when it cannot find one.
+The complete build resolves current guest inputs through Nix, then embeds the
+exact helper archive in the native CLI. On Mac the guest build uses a Linux
+container with a persistent Nix store. Each checkout publishes its own complete
+`build/current` directory atomically; failed builds leave it unchanged.
+Run `build/current/seedbox` directly. The kernel lives beside that executable.
+Nix and Cargo are never invoked by `run` or `replay`.
+See [build outputs and explicit overrides](../tools/runtime/README.md).
+
+## Preparation, execution, and replay
 
 Preparation uses Bollard and the Docker-compatible engine API for registry/local
 images and Compose `build:` contexts. The engine owns build caching.
@@ -181,8 +180,6 @@ ignored; the image is exported again.
 Exported Linux ownership, modes, links and case-sensitive paths are processed as
 archive metadata without extracting guest paths on the host. Unsupported extended
 attributes, special files and metadata outside the boot format fail explicitly.
-
-## Preparation, execution, and replay
 
 Apple Silicon uses the native HVF application backend. Linux x86-64 uses KVM.
 Both consume embedded guest helpers, a supplied kernel and engine-prepared images. Replay uses
@@ -218,7 +215,7 @@ After the release build, run as your current user with KVM device access on
 Linux:
 
 ```sh
-seedbox=./target/release/seedbox
+seedbox=./build/current/seedbox
 
 "$seedbox" prepare examples/redis --output prepared.json
 "$seedbox" run examples/redis
@@ -228,15 +225,15 @@ seedbox=./target/release/seedbox
 
 Every input has a default; `seedbox help run` lists them with their overrides.
 On Linux, explicit flags and their `SEEDBOX_*` path overrides take precedence.
-Guest assets are looked up under `/tmp/seedbox-UID/ARCH` on both platforms; under `sudo`, UID is the invoking user (`SUDO_UID`), matching where `tools/build-assets.sh` wrote them. `SEEDBOX_ASSET_DIR` overrides the parent directory. The default files are `kernel` and `runtime.tar.gz`. Explicit
-`--kernel` / `SEEDBOX_KERNEL` and `--runtime-assets` / `SEEDBOX_RUNTIME_ASSETS`
-paths override them. Missing assets report the local build command. Runtime
-commands never download them automatically. CI release publishing remains
-available for future public distribution.
+The default kernel is `kernel` beside the executable; complete builds embed
+helpers. Explicit `--kernel` / `SEEDBOX_KERNEL` and `--runtime-assets` /
+`SEEDBOX_RUNTIME_ASSETS` select other inputs. `SEEDBOX_ASSET_DIR` explicitly
+selects the legacy `ARCH/kernel` and `ARCH/runtime.tar.gz` layout. Missing assets
+report the build command. Runtime commands never build or download them.
 
 `doctor` uses only the selected kernel, without extracting helpers or creating
 run state. Replay uses the retained executable, kernel and boot archives; it
-never substitutes files from the temporary asset directory.
+never substitutes files from the build directory.
 
 The VMM defaults to the engine linked into `seedbox`; `--vmm` explicitly selects
 the legacy standalone contract. A missing input fails before preparation starts

@@ -25,11 +25,11 @@ SUITES = {
     "linux-kvm": "Linux x86-64 or ARM64 with /dev/kvm: native backend KVM tests; no root needed.",
     "linux-guests": "Fixture kernel and initrd on Linux KVM: real guest determinism and checkpoints.",
     "linux-oci": "Linux x86-64 with a running Docker-compatible engine: real image import and Dockerfile builds.",
-    "linux-apps": "Linux x86-64 KVM, root, a Docker-compatible engine and built guest assets: every acceptance workload run twice, diffed and replayed.",
+    "linux-apps": "Linux x86-64 KVM, root, a Docker-compatible engine and Nix guest builds: every acceptance workload run twice, diffed and replayed.",
     "linux-pause": "Linux x86-64 KVM, root and a supplied retained run: pause/resume replay.",
     "mac-hvf": "Apple Silicon with macOS 15+, Hypervisor.framework and codesign: native CPU/state and cancellation primitives.",
     "mac-guests": "mac-hvf plus the ARM fixture kernel and initrd: real guest controls.",
-    "mac-apps": "mac-hvf plus a Docker-compatible engine and built guest assets: every acceptance workload on ARM PV.",
+    "mac-apps": "mac-hvf plus a Docker-compatible engine and Nix guest builds: every acceptance workload on ARM PV.",
 }
 # Groups hold the suites a set-up host can run with no hand-built fixtures;
 # the guest and pause suites are always named explicitly.
@@ -85,27 +85,24 @@ def privileged(prefix, command, environment):
     return [*prefix, *inputs, *command]
 
 
-def asset_directory(environment, machine):
-    """The guest asset slot the CLI and tools/build-assets.sh share (cli/backends.rs)."""
-    root = environment.get("SEEDBOX_ASSET_DIR") or f"/tmp/seedbox-{os.geteuid()}"
-    return Path(root) / ("aarch64" if machine == "arm64" else machine)
+def build_requirements(environment, system):
+    """Admission for the explicit build, never existence of an old output."""
+    if system == "Linux":
+        return [] if shutil.which("nix") else ["nix is required to build current guest inputs"]
+    candidates = [environment["SEEDBOX_ASSET_BUILDER"]] if environment.get("SEEDBOX_ASSET_BUILDER") else ["podman", "docker"]
+    return [] if any(shutil.which(tool) for tool in candidates) else ["Podman or Docker CLI is required to build Mac guest inputs"]
 
 
-def guest_assets(environment, machine):
-    """Unmet guest kernel and helper inputs for the release CLI; it never downloads them."""
-    slot = asset_directory(environment, machine)
-    missing = []
-    # The release CLI embeds helpers from SEEDBOX_BUILD_HELPERS or the slot (build-runtime.rs).
-    helpers = environment.get("SEEDBOX_RUNTIME_ASSETS") or environment.get("SEEDBOX_BUILD_HELPERS")
-    for key, name, explicit in (("SEEDBOX_KERNEL", "kernel", environment.get("SEEDBOX_KERNEL")),
-                                ("SEEDBOX_RUNTIME_ASSETS", "runtime.tar.gz", helpers)):
-        path = Path(explicit) if explicit else slot / name
-        if not path.is_file():
-            missing.append(f"{key} or {path}")
-    if missing:
-        return ["guest assets missing (" + ", ".join(missing) + "); "
-                "run bash tools/build-assets.sh, or set the paths"]
-    return []
+def select_build(environment, directory):
+    """Use a completed bundle, independent of ambient runtime overrides."""
+    directory = Path(directory)
+    if not directory.is_absolute() or not all((directory / name).is_file() for name in ("seedbox", "kernel", "runtime.tar.gz")):
+        raise ValueError("complete build did not return its executable and guest inputs")
+    for key in ("SEEDBOX_ASSET_DIR", "SEEDBOX_BUILD_HELPERS", "SEEDBOX_GUEST_INIT", "SEEDBOX_MKE2FS", "SEEDBOX_VMM"):
+        environment.pop(key, None)
+    environment["SEEDBOX_TEST_CLI"] = str(directory / "seedbox")
+    environment["SEEDBOX_KERNEL"] = str(directory / "kernel")
+    environment["SEEDBOX_RUNTIME_ASSETS"] = str(directory / "runtime.tar.gz")
 
 
 def engine_sockets(environment):
@@ -206,7 +203,7 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
                  "the engine socket is not writable by this user; join its group, or allow passwordless sudo")
         elif suite == "linux-apps":
             engine()
-            missing.extend(guest_assets(environment, machine))
+            missing.extend(build_requirements(environment, system))
         elif suite == "linux-pause":
             for key in ("SEEDBOX_HOST_PAUSE_RUN", "SEEDBOX_HOST_PAUSE_STATE"):
                 need(environment.get(key), f"set {key}")
@@ -225,7 +222,7 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
         inputs("SEEDBOX_ARM64_KERNEL", "SEEDBOX_ARM64_INITRD")
     elif suite == "mac-apps":
         engine()
-        missing.extend(guest_assets(environment, machine))
+        missing.extend(build_requirements(environment, system))
     return missing
 
 
@@ -403,14 +400,12 @@ def main(argv=None):
             environment[key] = str(path)
     environment["SEEDBOX_ARM64_REPORT_DIR"] = str(reports / "arm64")
     if {"linux-apps", "mac-apps"} & set(suites):
-        output = checks.run("application-cli", ["cargo", "build", "--release", "--locked", "-p", "seedbox", "--message-format=json"], capture=True)
+        # The build's stdout is one completed directory. Pin every test to it;
+        # never resolve a mutable current pointer or ambient asset override later.
+        output = checks.run("application-build", [sys.executable, "tools/build.py"], capture=True)
         if output is None:
             return 1
-        binaries = [json.loads(line) for line in output.splitlines() if line.strip()]
-        binary = next(item["executable"] for item in binaries if item.get("executable") and item.get("target", {}).get("name") == "seedbox")
-        environment["SEEDBOX_TEST_CLI"] = binary
-        # Under sudo the CLI's default slot would be root's; keep the one checked above.
-        environment.setdefault("SEEDBOX_ASSET_DIR", str(asset_directory(environment, machine).parent))
+        select_build(environment, output.strip())
     packages = [("seedbox-arm64", ["cargo", "test-arm64"])]
     if system == "Linux" and machine == "x86_64":
         packages.append(("seedbox-vmm", ["cargo", "test-vmm"]))

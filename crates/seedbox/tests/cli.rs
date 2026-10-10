@@ -28,6 +28,25 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[test]
+fn relocated_cli_looks_for_kernel_beside_itself_without_build_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let binary = root.join("seedbox");
+    fs::copy(env!("CARGO_BIN_EXE_seedbox"), &binary).unwrap();
+    let output = Command::new(binary)
+        .arg("doctor")
+        .current_dir(&root)
+        .env_clear()
+        .env("HOME", &root)
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --kernel PATH\n", root.join("kernel").display()));
+    assert!(!root.join(".seedbox").exists());
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
@@ -489,7 +508,7 @@ fn run_without_a_kernel_lists_where_it_looked() {
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("kernel");
-    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `bash tools/build-assets.sh`, or pass --kernel PATH\n", kernel.display()));
+    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --kernel PATH\n", kernel.display()));
     assert!(!directory.path().join(".seedbox/runs").exists());
 }
 
@@ -518,7 +537,7 @@ fn missing_helpers_explain_the_asset_build_without_searching_path() {
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("runtime.tar.gz");
-    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `bash tools/build-assets.sh`, or pass --runtime-assets PATH\n", archive.display()));
+    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --runtime-assets PATH\n", archive.display()));
 }
 
 #[cfg(target_os = "linux")]
@@ -613,7 +632,7 @@ fn explore_resolves_assets_before_host_or_preparation() {
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("runtime.tar.gz");
-    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `bash tools/build-assets.sh`, or pass --runtime-assets PATH\n", archive.display()));
+    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --runtime-assets PATH\n", archive.display()));
     assert!(output.stdout.is_empty());
     assert!(!directory.path().join(".seedbox/runs").exists());
 }
@@ -903,7 +922,7 @@ fn doctor_reports_missing_temporary_assets_without_downloads() {
         .unwrap();
     let kernel = root.join("aarch64/kernel");
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `bash tools/build-assets.sh`, or pass --kernel PATH\n", kernel.display()));
+    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `python3 tools/build.py`, or pass --kernel PATH\n", kernel.display()));
     assert!(!root.join(".seedbox").exists());
 }
 
@@ -2034,10 +2053,7 @@ fn runtime_assets_override_is_documented_and_missing_paths_fail_before_preparati
         let help = String::from_utf8_lossy(&help.stdout);
         assert!(help.contains("--runtime-assets"), "{help}");
         assert!(help.contains("SEEDBOX_RUNTIME_ASSETS"), "{help}");
-        assert!(
-            help.contains("local assets in the OS temporary directory"),
-            "{help}"
-        );
+        assert!(help.contains("kernel beside the executable"), "{help}");
         let mut args = vec![command, "--runtime-assets", "missing.tar.gz"];
         if command == "prepare" {
             args.extend(["--output", "prepared.json"]);
