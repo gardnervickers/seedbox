@@ -1790,7 +1790,9 @@ impl Machine {
         }
         parts.push(("regs", hex(h)));
         let mut h = Sha256::new();
-        for w in self.vcpu.get_xsave().unwrap().region {
+        let mut xsave = self.vcpu.get_xsave().unwrap();
+        crate::xsave::canonicalize_ymm(&mut xsave.region);
+        for w in xsave.region {
             h.update(w.to_le_bytes());
         }
         parts.push(("xsave", hex(h)));

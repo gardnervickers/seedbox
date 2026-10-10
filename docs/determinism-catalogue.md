@@ -27,7 +27,7 @@ implementation; their relevant behavior is explained where they appear.
 | [Observation without guest progress](#observation-without-guest-progress) | Both backends | Keep watchdog frequency out of execution results |
 | [Software exclusive reservations](#software-exclusive-reservations) | ARM applications and guest kernel | Hide host monitor loss while preserving guest invalidation |
 | [Interrupt delivery at an idle rendezvous](#interrupt-delivery-at-an-idle-rendezvous) | ARM kernel and VMM | Avoid variable interrupt landing locations |
-| [Canonical saved vector state](#canonical-saved-vector-state) | x86 kernel task saves | Give equivalent YMM states identical bytes |
+| [Canonical saved vector state](#canonical-saved-vector-state) | x86 kernel task saves and live vCPU evidence | Give equivalent YMM states one representation |
 | [Independent random streams](#independent-random-streams) | Shared engine | Keep unrelated random decisions from consuming each other's stream |
 | [Reseeding after a fork](#reseeding-after-a-fork) | x86 runtime checkpoints | Give a restored guest the branch's entropy |
 | [Time and replay inputs retained together](#time-and-replay-inputs-retained-together) | Public CLI | Make a run independent of today's host clock and installed engine |
@@ -260,6 +260,16 @@ After successful kernel task-state saves, Seedbox zeroes the payload of an
 absent YMM component and marks a present all-zero YMM component absent. Nonzero
 values and other components remain unchanged. The guest itself writes one
 representation; full-state comparison continues to inspect the actual bytes.
+
+The live vCPU digest applies the same YMM normalization to a local copy of
+`KVM_GET_XSAVE`'s standard-format buffer. Host FPU save/restore can report zero
+YMM state as present or absent even when guest RAM, register values and execution
+agree. Nonzero YMM values, other components and all guest RAM still participate
+in full-state comparison. Reading the digest never writes the vCPU; checkpoints
+continue to save and restore the raw KVM state. The
+[normalizer](../crates/seedbox-vmm/src/xsave.rs) has unit coverage for every YMM
+payload bit, and the [KVM test](../crates/seedbox-vmm/tests/xsave.rs) checks actual
+guest register values after restoring absent, present-zero and nonzero states.
 
 This repair does not cover signal-frame saves, direct application XSAVE, or all
 other state components. See [the kernel patch](../kernel/apply.py) and the

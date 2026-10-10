@@ -19,6 +19,7 @@ mod virtio_console_tests;
 mod virtio_net;
 mod witness_log;
 mod world_adapter;
+mod xsave;
 
 use machine::pv::PvClock;
 use machine::{
