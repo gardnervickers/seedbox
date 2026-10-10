@@ -39,8 +39,7 @@ Seedbox finds your Docker or Podman socket, builds the example's workload oracle
 with the engine's normal cache, prepares the images, and runs the Linux guests.
 Progress appears on stderr. Set `DOCKER_HOST` if your engine uses a custom socket.
 Application progress comes from automatic binary instrumentation on both
-platforms. ARM software reservations hide host-induced exclusive-store retries
-while preserving guest interruptions; see [automatic progress](docs/progress.md).
+platforms; see the [determinism catalogue](docs/determinism-catalogue.md).
 
 On Linux, `--watchdog-ms 200` raises the host CPU interval (default 20 ms)
 after which a guest that makes no exits is interrupted so the engine can
@@ -104,6 +103,7 @@ need them; clearing temporary build assets does not remove run data.
 | Build or replace guest assets | [Asset builds](tools/runtime/README.md) |
 | Platform requirements | [Mac](tools/mac-runtime/README.md) · [Linux](tools/linux-runtime/README.md) |
 | Design and direction | [Vision](docs/vision.md) |
+| Determinism mechanisms and their invariants | [Technique catalogue](docs/determinism-catalogue.md) |
 
 Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
 prepared inputs and each `SBXLAUNCH4` boot recipe. `x-seedbox.wall_clock_epoch`

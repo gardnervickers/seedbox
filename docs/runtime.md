@@ -321,14 +321,10 @@ does not establish hardware witness invariance or qualify the new engine.
 
 ## Execution settings
 
-Guest time is a PV clock that advances at guest exits, syscalls and clock
-reads, with automatic binary instrumentation for application progress: the
-client charges progress every 10,000 translated block entries per thread,
-including shared libraries and JIT code, without recompiling applications.
-ARM software reservations hide host-induced exclusive-store retries and retain
-reservation invalidation at guest boundaries. Kernel polling without a PV
-operation can still stall virtual time. See [automatic progress](progress.md)
-for the protocol and its regression coverage.
+Seedbox uses PV time with automatic application instrumentation, including
+shared libraries and JIT code. See the [determinism catalogue](determinism-catalogue.md)
+for the mechanisms and limits, and [progress integration and evidence](progress.md)
+for packaging and regression coverage.
 
 `x-seedbox.machine.page_timer: true` in the world file (off by default)
 enables the page timer. An ABI-4 kernel arms one-shot clockevents by writing
