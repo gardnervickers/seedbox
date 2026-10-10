@@ -6,6 +6,7 @@ mod daemon;
 mod defaults;
 mod diagnostics;
 mod faults;
+mod observe;
 mod output;
 mod playback_args;
 mod signals;
@@ -209,10 +210,28 @@ enum Command {
         #[arg(long)]
         all_seeds: bool,
     },
-    /// Stream live structured events as newline-delimited JSON.
+    /// Print retained structured events as newline-delimited JSON.
     Events {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
+        /// Keep printing new events until the simulation completes or Ctrl-C.
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Wait until a simulation meets a condition.
+    #[command(after_help = WAIT_HELP)]
+    Wait {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Condition to wait for (see below).
+        #[arg(long = "for", value_name = "CONDITION", value_parser = observe::condition)]
+        condition: observe::Condition,
+        /// Give up after this much host time, such as 30s or 5m [default: unlimited].
+        #[arg(long, value_parser = wall_time)]
+        timeout: Option<u64>,
+        /// Print exactly one result document as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Open the interactive simulation console.
     Tui {
@@ -342,12 +361,27 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Stream live application output.
+    /// Print retained application output.
     Logs {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
         /// Machine name [default: all machines].
         machine: Option<String>,
+        /// Keep printing new output until the simulation completes or Ctrl-C.
+        #[arg(long)]
+        follow: bool,
+        /// Print only the last N lines (records with --json) of retained output.
+        #[arg(long, value_name = "N")]
+        tail: Option<usize>,
+        /// Only output committed at or after this simulated time, such as 12s [default: start].
+        #[arg(long, value_name = "TIME", value_parser = sim_time)]
+        since: Option<u64>,
+        /// Only output committed before this simulated time, such as 20s [default: end].
+        #[arg(long, value_name = "TIME", value_parser = sim_time)]
+        until: Option<u64>,
+        /// Only output from this machine incarnation; 0 is the first boot [default: all].
+        #[arg(long, value_name = "N")]
+        incarnation: Option<u32>,
         /// Select stdout or stderr [default: both].
         #[arg(long, value_enum)]
         stream: Option<ApplicationLogStream>,
@@ -468,6 +502,24 @@ struct ExecutionArgs {
 fn wall_time(value: &str) -> std::result::Result<u64, String> {
     config::duration_ns(value).map_err(|error| error.to_string())
 }
+
+/// A simulated time such as 250ms, 12s or 1m.
+fn sim_time(value: &str) -> std::result::Result<u64, String> {
+    config::duration_ns(value).map_err(|error| error.to_string())
+}
+
+const WAIT_HELP: &str = "Conditions:
+  completed                    the simulation has completed, for any reason
+  executing                    guest execution has started
+  paused                       playback is paused
+  sim-time=DURATION            simulated time has reached DURATION, such as 30s
+  machine/NAME=CONDITION       starting, ready, paused, crashed or exited
+  fault/ID-OR-HANDLE=STATUS    unrequested, requested, applied, failed or unavailable
+
+Exit status:
+  0    the condition was met
+  2    the simulation completed first, or a usage or setup error
+  124  TIMEOUT before the condition was met";
 
 #[derive(Args)]
 struct StateArg {
@@ -749,6 +801,8 @@ fn run(cli: Cli) -> Result<u8> {
                 None => simulations::list(json),
             },
             CollectionArg::Checkpoints { id, json } => simulations::checkpoints(&id, None, json),
+            CollectionArg::World { id, json } => observe::world(&id, json),
+            CollectionArg::Timeline { id, json } => observe::timeline(&id, json),
         },
         Command::Describe { resource } => match resource {
             ResourceArg::Simulation { id, json } => simulations::describe(&id, json),
@@ -763,7 +817,13 @@ fn run(cli: Cli) -> Result<u8> {
                 simulations::stop(&id)
             }
         }
-        Command::Events { id } => simulations::events(&id),
+        Command::Events { id, follow } => observe::events(&id, follow),
+        Command::Wait {
+            id,
+            condition,
+            timeout,
+            json,
+        } => observe::wait(&id, &condition, timeout, json),
         Command::Tui { id } => simulations::tui(id),
         Command::Playback {
             id,
@@ -813,9 +873,28 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Logs {
             id,
             machine,
+            follow,
+            tail,
+            since,
+            until,
+            incarnation,
             stream,
             json,
-        } => simulations::logs(&id, machine.as_deref(), stream, json),
+        } => observe::logs(
+            &id,
+            observe::LogRequest {
+                machine: machine.as_deref(),
+                filter: observe::LogFilter {
+                    stream: stream.map(Into::into),
+                    since_ns: since,
+                    until_ns: until,
+                    incarnation,
+                },
+                follow,
+                tail,
+                json,
+            },
+        ),
         Command::RetainedLogs {
             run,
             machine,
@@ -1158,6 +1237,22 @@ enum CollectionArg {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
         /// Print JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a simulation's machines, altered links and faults as observed now.
+    World {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Print the world document as JSON instead of tables.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List a simulation's recorded and scheduled faults and what became of each.
+    Timeline {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Print the timeline document as JSON instead of a table.
         #[arg(long)]
         json: bool,
     },

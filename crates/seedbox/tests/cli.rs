@@ -2070,6 +2070,73 @@ fn playback_mutations_reject_invalid_rates_and_request_ids_before_connecting() {
 }
 
 #[test]
+fn observation_flags_are_validated_before_connecting() {
+    let directory = tempfile::tempdir().unwrap();
+    for (args, phrase) in [
+        (
+            vec!["wait", "k7m2p9qx", "--for", "bogus"],
+            "unknown condition",
+        ),
+        (
+            vec!["wait", "k7m2p9qx", "--for", "machine/n3=up"],
+            "unknown machine condition",
+        ),
+        (
+            vec!["wait", "k7m2p9qx", "--for", "fault/p1=done"],
+            "unknown fault status",
+        ),
+        (vec!["wait", "k7m2p9qx"], "--for <CONDITION>"),
+        (
+            vec!["wait", "k7m2p9qx", "--for", "paused", "--timeout", "soon"],
+            "--timeout",
+        ),
+        (vec!["logs", "k7m2p9qx", "--since", "soon"], "--since"),
+        (vec!["logs", "k7m2p9qx", "--until", "later"], "--until"),
+        (vec!["logs", "k7m2p9qx", "--tail", "many"], "--tail"),
+        (
+            vec!["logs", "k7m2p9qx", "--incarnation", "first"],
+            "--incarnation",
+        ),
+        (
+            vec!["get", "world", "invalid"],
+            "simulation ID must contain",
+        ),
+        (
+            vec!["get", "timeline", "invalid"],
+            "simulation ID must contain",
+        ),
+        (
+            vec!["events", "invalid", "--follow"],
+            "simulation ID must contain",
+        ),
+    ] {
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            stderr(&output).contains(phrase),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn observation_commands_document_following_and_conditions() {
+    let directory = tempfile::tempdir().unwrap();
+    let logs = seedbox(&["help", "logs"], directory.path());
+    let text = String::from_utf8_lossy(&logs.stdout);
+    for flag in ["--follow", "--tail", "--since", "--until", "--incarnation"] {
+        assert!(text.contains(flag), "logs help lacks {flag}:\n{text}");
+    }
+    let wait = seedbox(&["help", "wait"], directory.path());
+    let text = String::from_utf8_lossy(&wait.stdout);
+    for phrase in ["machine/NAME=CONDITION", "fault/ID-OR-HANDLE=STATUS", "124"] {
+        assert!(text.contains(phrase), "wait help lacks {phrase}:\n{text}");
+    }
+}
+
+#[test]
 fn fault_input_errors_are_reported_before_connecting() {
     let directory = tempfile::tempdir().unwrap();
     let cwd = directory.path();
@@ -2086,6 +2153,15 @@ fn fault_input_errors_are_reported_before_connecting() {
     assert!(invalid.stdout.is_empty());
     assert!(stderr(&invalid)
         .contains("error: fault invalid.yaml: action: unknown variant `nonexistent`"));
+    fs::write(cwd.join("empty.yaml"), "").unwrap();
+    let empty = seedbox(&["inject", "k7m2p9qx", "empty.yaml"], cwd);
+    assert_eq!(empty.status.code(), Some(2));
+    assert!(empty.stdout.is_empty());
+    assert!(
+        stderr(&empty).starts_with("error: fault empty.yaml: "),
+        "{}",
+        stderr(&empty)
+    );
     fs::write(cwd.join("large.yaml"), vec![b' '; 65537]).unwrap();
     let large = seedbox(&["inject", "k7m2p9qx", "large.yaml"], cwd);
     assert_eq!(large.status.code(), Some(2));

@@ -140,14 +140,16 @@ another client:
 ./target/release/seedbox describe simulation SIM_ID
 ./target/release/seedbox rerun SIM_ID
 ./target/release/seedbox stop SIM_ID
-./target/release/seedbox events SIM_ID
+./target/release/seedbox events SIM_ID            # Add --follow to stream.
+./target/release/seedbox get world SIM_ID         # Machines, links and faults.
+./target/release/seedbox wait SIM_ID --for machine/n3=ready
 ./target/release/seedbox playback SIM_ID
 ./target/release/seedbox pause SIM_ID
 ./target/release/seedbox step SIM_ID
 ./target/release/seedbox rate SIM_ID 1/10
 ./target/release/seedbox resume SIM_ID
-./target/release/seedbox logs SIM_ID              # All machines.
-./target/release/seedbox logs SIM_ID MACHINE_NAME # One machine.
+./target/release/seedbox logs SIM_ID              # All machines, then exit.
+./target/release/seedbox logs SIM_ID MACHINE_NAME --follow # One machine, live.
 ./target/release/seedbox tui [SIM_ID]             # Interactive console.
 ```
 

@@ -209,10 +209,16 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
         "{}",
         String::from_utf8_lossy(&events.stderr)
     );
-    assert_eq!(
-        serde_json::from_slice::<seedbox_api::EventDelivery>(&events.stdout).unwrap(),
-        seedbox_api::EventDelivery::Closed
-    );
+    // A completed simulation's retained events print in order, then the
+    // command exits without following.
+    let deliveries: Vec<seedbox_api::EventDelivery> = String::from_utf8_lossy(&events.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(!deliveries.is_empty());
+    assert!(deliveries
+        .iter()
+        .all(|d| matches!(d, seedbox_api::EventDelivery::Event { .. })));
     assert_eq!(
         runtime.block_on(client.info()).unwrap().process_id,
         info.process_id
@@ -226,10 +232,9 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
         "{}",
         String::from_utf8_lossy(&logs.stderr)
     );
-    assert_eq!(
-        serde_json::from_slice::<seedbox_api::LogDelivery>(&logs.stdout).unwrap(),
-        seedbox_api::LogDelivery::Closed
-    );
+    // Nothing was retained for a setup failure; without --follow the command
+    // prints nothing and exits rather than waiting.
+    assert!(logs.stdout.is_empty());
     let playback = cli(root)
         .args(["playback", simulation.metadata.id.as_str(), "--json"])
         .output()

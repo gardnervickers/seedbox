@@ -293,10 +293,19 @@ impl Client {
             .await
     }
 
+    /// Retained event history, then live events until the simulation completes.
     pub async fn events(&self, id: &SimulationId) -> Result<EventStream, Error> {
+        self.events_with(id, true).await
+    }
+
+    /// Without `follow`, the stream ends after the retained history.
+    pub async fn events_with(&self, id: &SimulationId, follow: bool) -> Result<EventStream, Error> {
         Ok(sse::events(
-            self.event_response(&format!("/v1/simulations/{id}/events"))
-                .await?,
+            self.event_response(&format!(
+                "/v1/simulations/{id}/events{}",
+                follow_query(follow)
+            ))
+            .await?,
         ))
     }
 
@@ -315,13 +324,31 @@ impl Client {
     }
 
     pub async fn all_logs(&self, id: &SimulationId) -> Result<LogStream, Error> {
+        self.all_logs_with(id, true).await
+    }
+
+    /// Without `follow`, the stream ends after the retained history.
+    pub async fn all_logs_with(&self, id: &SimulationId, follow: bool) -> Result<LogStream, Error> {
         Ok(sse::logs(
-            self.event_response(&format!("/v1/simulations/{id}/logs"))
-                .await?,
+            self.event_response(&format!(
+                "/v1/simulations/{id}/logs{}",
+                follow_query(follow)
+            ))
+            .await?,
         ))
     }
 
     pub async fn logs(&self, id: &SimulationId, machine: &str) -> Result<LogStream, Error> {
+        self.logs_with(id, machine, true).await
+    }
+
+    /// Without `follow`, the stream ends after the retained history.
+    pub async fn logs_with(
+        &self,
+        id: &SimulationId,
+        machine: &str,
+        follow: bool,
+    ) -> Result<LogStream, Error> {
         // URL-encode the machine as one path segment, never as API syntax.
         let mut url = reqwest::Url::parse("http://seedbox.local/v1/simulations/")
             .map_err(|e| Error::Stream(e.to_string()))?;
@@ -331,7 +358,10 @@ impl Client {
             .push(&id.to_string())
             .push("logs")
             .push(machine);
-        Ok(sse::logs(self.event_response(url.path()).await?))
+        Ok(sse::logs(
+            self.event_response(&format!("{}{}", url.path(), follow_query(follow)))
+                .await?,
+        ))
     }
 
     async fn event_response(&self, path: &str) -> Result<reqwest::Response, Error> {
@@ -396,5 +426,13 @@ impl Client {
             });
         }
         Ok(serde_json::from_slice(&bytes)?)
+    }
+}
+
+fn follow_query(follow: bool) -> &'static str {
+    if follow {
+        ""
+    } else {
+        "?follow=false"
     }
 }

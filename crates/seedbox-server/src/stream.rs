@@ -99,6 +99,21 @@ impl<T: Payload> Stream<T> {
         })
     }
 
+    /// Retained history up to now, then Closed: a reader that does not follow.
+    /// A stream without history has nothing to replay and closes at once.
+    pub fn snapshot(&self) -> Result<Subscription<T>, PublishError> {
+        let state = self.state.lock().map_err(|_| PublishError::Poisoned)?;
+        Ok(Subscription {
+            history: self
+                .history
+                .as_ref()
+                .map(|(history, id)| (history.clone(), *id, state.next_sequence)),
+            history_next: 1,
+            receiver: None,
+            next_sequence: state.next_sequence,
+        })
+    }
+
     pub fn publish(&self, payload: T) -> Result<u64, PublishError> {
         if payload.payload_bytes() > self.max_payload_bytes.get() {
             return Err(PublishError::TooLarge {
@@ -281,6 +296,31 @@ mod history_tests {
         };
         assert_eq!(record.payload, vec![3]);
         assert!(matches!(subscriber.recv().await, Delivery::Closed));
+    }
+
+    #[tokio::test]
+    async fn snapshot_replays_history_then_closes_without_waiting_for_live_records() {
+        let history = Arc::new(History::new(4096));
+        let stream = Stream::new(NonZeroUsize::new(4).unwrap(), NonZeroUsize::new(8).unwrap())
+            .with_history(history);
+        stream.publish(vec![1]).unwrap();
+        stream.publish(vec![2]).unwrap();
+        let mut snapshot = stream.snapshot().unwrap();
+        stream.publish(vec![3]).unwrap();
+        for expected in [1, 2] {
+            let Delivery::Record(record) = snapshot.recv().await else {
+                panic!("missing history");
+            };
+            assert_eq!(record.sequence, expected);
+        }
+        assert!(matches!(snapshot.recv().await, Delivery::Closed));
+        let plain =
+            Stream::<Vec<u8>>::new(NonZeroUsize::new(4).unwrap(), NonZeroUsize::new(8).unwrap());
+        plain.publish(vec![1]).unwrap();
+        assert!(matches!(
+            plain.snapshot().unwrap().recv().await,
+            Delivery::Closed
+        ));
     }
 
     #[tokio::test]

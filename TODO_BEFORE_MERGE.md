@@ -11,11 +11,11 @@ item says what it does instead.
   healthy machine whose application is stopped. Expose an application state
   (running, stopped, paused, exited) on `MachineState`. The console currently
   shows the newest fault on the machine's node instead.
-- **Machine transitions have no history.** `MachineState.last_transition` has no
-  time and the event stream has no replay backlog, so downtime spans (crashed →
-  rebooted, exited) exist only for transitions seen while the console was open.
-  Expose timestamped transitions in `WorldState`, or replay events from the start
-  of the simulation.
+- **Machine transitions are not on the world.** `MachineState.last_transition`
+  has no time. Events now keep a bounded server-side history, so the console
+  recovers downtime spans when reopened, but that history is evicted under load
+  and lost on server restart. Timestamped transitions on `WorldState` would be
+  authoritative.
 - **`active` covers only network, clock and throttle faults.** An application
   stop stays in effect until `restart`/`resume_process`, but the API reports it
   as a one-shot fault. Either mark it active until closed or say which action

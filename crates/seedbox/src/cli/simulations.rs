@@ -10,51 +10,6 @@ use seedbox_application::{execution::CancellationToken, Error, Result};
 use seedbox_client::Client;
 use std::{io::Read, time::Duration};
 
-pub(super) fn logs(
-    id: &SimulationId,
-    machine: Option<&str>,
-    selected: Option<super::ApplicationLogStream>,
-    json: bool,
-) -> Result<u8> {
-    let client = daemon::connect(None)?;
-    let cancellation = CancellationToken::default();
-    let _signals = super::signals::Signals::interrupt(&cancellation)?;
-    runtime()?.block_on(async {
-        let mut stream = match machine {
-            Some(machine) => client.logs(id, machine).await,
-            None => client.all_logs(id).await,
-        }.map_err(client_error)?;
-        loop {
-            tokio::select! {
-                next = stream.next() => match next {
-                    Some(Ok(delivery)) => {
-                        use seedbox_api::{LogDelivery, LogEntry};
-                        if let LogDelivery::Entry { entry: LogEntry::Bytes { stream, .. }, .. } = &delivery {
-                            if selected.is_some_and(|s| seedbox_api::LogStream::from(s) != *stream) { continue; }
-                        }
-                        if json { output::json_line(&delivery)?; }
-                        else {
-                            match delivery {
-                                LogDelivery::Entry { entry: LogEntry::Bytes { bytes, .. }, .. } => output::bytes(&bytes)?,
-                                LogDelivery::Entry { entry: LogEntry::MachineGap { machine, records, .. }, .. } => eprintln!("omission: {records} application output records from {machine} were lost"),
-                                LogDelivery::Entry { entry: LogEntry::SourceGap { first, last }, .. } => eprintln!("omission: worker observations {first}..{last} were lost"),
-                                LogDelivery::Entry { entry: LogEntry::SourceUnavailable, .. } => eprintln!("omission: application output is unavailable or incomplete"),
-                                LogDelivery::Gap { first, last } => eprintln!("omission: client log entries {first}..{last} were lost"),
-                                LogDelivery::Closed => {},
-                            }
-                        }
-                    }
-                    Some(Err(error)) => return Err(client_error(error)),
-                    None => return Ok(0),
-                },
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                    if cancellation.is_cancelled() { return Ok(0); }
-                }
-            }
-        }
-    })
-}
-
 pub(super) fn tui(id: Option<SimulationId>) -> Result<u8> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -70,27 +25,6 @@ pub(super) fn tui(id: Option<SimulationId>) -> Result<u8> {
             .map_err(|e| Error::Setup(format!("terminal: {e}")))
     })?;
     Ok(0)
-}
-
-pub(super) fn events(id: &SimulationId) -> Result<u8> {
-    let client = daemon::connect(None)?;
-    let cancellation = CancellationToken::default();
-    let _signals = super::signals::Signals::interrupt(&cancellation)?;
-    runtime()?.block_on(async {
-        let mut stream = client.events(id).await.map_err(client_error)?;
-        loop {
-            tokio::select! {
-                next = stream.next() => match next {
-                    Some(Ok(delivery)) => output::json_line(&delivery)?,
-                    Some(Err(error)) => return Err(client_error(error)),
-                    None => return Ok(0),
-                },
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                    if cancellation.is_cancelled() { return Ok(0); }
-                }
-            }
-        }
-    })
 }
 
 fn load_spec(
@@ -520,7 +454,7 @@ pub(super) fn watch(id: &SimulationId, json: bool) -> Result<u8> {
                             output::json_line(&resource)?;
                         } else {
                             if table.is_none() {
-                                table = Some(output::Table::new(SIMULATION_HEADERS, [8, 10, 10, 10, resource.spec.configuration.check.service.chars().count().max(24), 10, 8])?);
+                                table = Some(output::Table::new(SIMULATION_HEADERS, [8, 10, 10, 9, 10, resource.spec.configuration.check.service.chars().count().max(24), 10, 8])?);
                             }
                             if let Some(table) = &table {
                                 table.row(simulation_row(&resource))?;
@@ -635,15 +569,15 @@ pub(super) fn get(id: &SimulationId, json: bool) -> Result<u8> {
     Ok(0)
 }
 
-const SIMULATION_HEADERS: [&str; 7] = [
-    "ID", "PHASE", "STAGE", "VERDICT", "ORACLE", "SIM-TIME", "AGE",
+const SIMULATION_HEADERS: [&str; 8] = [
+    "ID", "PHASE", "STAGE", "PLAYBACK", "VERDICT", "ORACLE", "SIM-TIME", "AGE",
 ];
 
-fn simulation_table(rows: Vec<[String; 7]>) -> Result<()> {
+fn simulation_table(rows: Vec<[String; 8]>) -> Result<()> {
     output::table(SIMULATION_HEADERS, rows)
 }
 
-fn simulation_row(resource: &Simulation) -> [String; 7] {
+fn simulation_row(resource: &Simulation) -> [String; 8] {
     resource_row(
         &resource.metadata,
         &resource.status,
@@ -651,7 +585,7 @@ fn simulation_row(resource: &Simulation) -> [String; 7] {
     )
 }
 
-fn summary_row(resource: &seedbox_api::SimulationSummary) -> [String; 7] {
+fn summary_row(resource: &seedbox_api::SimulationSummary) -> [String; 8] {
     resource_row(&resource.metadata, &resource.status, &resource.oracle)
 }
 
@@ -659,7 +593,7 @@ fn resource_row(
     metadata: &seedbox_api::Metadata,
     status: &seedbox_api::SimulationStatus,
     oracle: &str,
-) -> [String; 7] {
+) -> [String; 8] {
     let age_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|now| {
@@ -675,11 +609,37 @@ fn resource_row(
             .as_ref()
             .map(output::word)
             .unwrap_or_else(|| "-".into()),
+        playback_cell(status),
         output::word(&status.verdict()),
         oracle.into(),
         format!("{:.3}s", status.simulated_time_ns as f64 / 1_000_000_000.0),
         age(age_ms / 1000),
     ]
+}
+
+/// Requested playback while running: paused, stepping, unlimited or a rate.
+fn playback_cell(status: &seedbox_api::SimulationStatus) -> String {
+    use seedbox_api::PlaybackRate;
+    match &status.playback {
+        Some(p) if status.phase == Phase::Running && !p.state.terminal => {
+            if p.state.stepping {
+                return "stepping".into();
+            }
+            match p.state.rate {
+                PlaybackRate::Paused => "paused".into(),
+                PlaybackRate::Unlimited => "unlimited".into(),
+                PlaybackRate::Limited {
+                    numerator,
+                    denominator,
+                } if denominator.get() == 1 => format!("{numerator}x"),
+                PlaybackRate::Limited {
+                    numerator,
+                    denominator,
+                } => format!("{numerator}/{denominator}x"),
+            }
+        }
+        _ => "-".into(),
+    }
 }
 
 fn age(seconds: u128) -> String {
@@ -846,13 +806,13 @@ fn report(resource: &Simulation, json: bool) -> Result<u8> {
     Ok(code)
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
+pub(super) fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| Error::Setup(format!("client runtime: {e}")))
 }
 
-fn client_error(error: seedbox_client::Error) -> Error {
+pub(super) fn client_error(error: seedbox_client::Error) -> Error {
     Error::Setup(error.to_string())
 }

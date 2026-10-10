@@ -491,15 +491,29 @@ async fn watch(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+/// `follow=false` replays retained history and closes; the default follows.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FollowQuery {
+    #[serde(default = "following")]
+    follow: bool,
+}
+
+fn following() -> bool {
+    true
+}
+
 async fn events(
     State(state): State<ApiState>,
     id: Result<Path<SimulationId>, PathRejection>,
+    query: Result<Query<FollowQuery>, QueryRejection>,
 ) -> Result<impl IntoResponse, HttpError> {
     use crate::stream::Delivery;
     use axum::response::sse::{Event, KeepAlive, Sse};
     use seedbox_api::EventDelivery;
     let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
-    let receiver = tokio::task::spawn_blocking(move || state.manager.events(&id))
+    let Query(FollowQuery { follow }) = query.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let receiver = tokio::task::spawn_blocking(move || state.manager.events(&id, follow))
         .await
         .map_err(|_| HttpError::internal("event subscription task failed"))??;
     let stream = futures_util::stream::unfold(Some(receiver), |state| async move {
@@ -577,9 +591,11 @@ async fn frames(
 async fn logs(
     State(state): State<ApiState>,
     id: Result<Path<(SimulationId, String)>, PathRejection>,
+    query: Result<Query<FollowQuery>, QueryRejection>,
 ) -> Result<impl IntoResponse, HttpError> {
     let Path((id, machine)) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
-    let receiver = tokio::task::spawn_blocking(move || state.manager.logs(&id, &machine))
+    let Query(FollowQuery { follow }) = query.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let receiver = tokio::task::spawn_blocking(move || state.manager.logs(&id, &machine, follow))
         .await
         .map_err(|_| HttpError::internal("event subscription task failed"))??;
     Ok(log_response(receiver))
@@ -588,9 +604,11 @@ async fn logs(
 async fn all_logs(
     State(state): State<ApiState>,
     id: Result<Path<SimulationId>, PathRejection>,
+    query: Result<Query<FollowQuery>, QueryRejection>,
 ) -> Result<impl IntoResponse, HttpError> {
     let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
-    let receiver = tokio::task::spawn_blocking(move || state.manager.all_logs(&id))
+    let Query(FollowQuery { follow }) = query.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let receiver = tokio::task::spawn_blocking(move || state.manager.all_logs(&id, follow))
         .await
         .map_err(|_| HttpError::internal("log subscription task failed"))??;
     Ok(log_response(receiver))

@@ -89,7 +89,11 @@ impl Payload for SimulationEvent {
 }
 
 impl Live {
-    fn new(resource: &Simulation, history: &Arc<History<LogEntry>>) -> Self {
+    fn new(
+        resource: &Simulation,
+        history: &Arc<History<LogEntry>>,
+        event_history: &Arc<History<SimulationEvent>>,
+    ) -> Self {
         Self {
             worker: None,
             all_logs: Stream::new(
@@ -124,7 +128,8 @@ impl Live {
             events: Stream::new(
                 NonZeroUsize::MIN.saturating_add(255),
                 NonZeroUsize::MIN.saturating_add(8191),
-            ),
+            )
+            .with_history(event_history.clone()),
         }
     }
 
@@ -216,10 +221,13 @@ impl Live {
 struct RetainedLogs {
     machines: BTreeMap<String, Stream<LogEntry>>,
     all: Stream<LogEntry>,
+    events: Stream<SimulationEvent>,
 }
 
 struct State {
     log_history: Arc<History<LogEntry>>,
+    /// Events share their own budget so a chatty log never evicts them.
+    event_history: Arc<History<SimulationEvent>>,
     retained_logs: BTreeMap<SimulationId, RetainedLogs>,
     catalogue: Catalogue,
     live: BTreeMap<SimulationId, Live>,
@@ -283,6 +291,7 @@ impl State {
         if resource.status.phase == Phase::Completed {
             if let Some(live) = self.live.remove(&id) {
                 let _ = live.all_logs.close();
+                let _ = live.events.close();
                 for logs in live.logs.values() {
                     let _ = logs.close();
                 }
@@ -291,6 +300,7 @@ impl State {
                     RetainedLogs {
                         machines: live.logs,
                         all: live.all_logs,
+                        events: live.events,
                     },
                 );
             }
@@ -553,14 +563,21 @@ impl Manager {
     }
     pub fn new(catalogue: Catalogue) -> Self {
         let log_history = Arc::new(History::new(64 * 1024 * 1024));
+        let event_history = Arc::new(History::new(16 * 1024 * 1024));
         let live = catalogue
             .list()
             .filter(|s| s.status.phase != Phase::Completed)
-            .map(|s| (s.metadata.id.clone(), Live::new(s, &log_history)))
+            .map(|s| {
+                (
+                    s.metadata.id.clone(),
+                    Live::new(s, &log_history, &event_history),
+                )
+            })
             .collect();
         Self(Mutex::new(State {
             catalogue,
             log_history,
+            event_history,
             retained_logs: BTreeMap::new(),
             live,
             accepting: true,
@@ -651,7 +668,7 @@ impl Manager {
         }
         let (resource, created) = state.catalogue.submit(request)?;
         if created {
-            let live = Live::new(&resource, &state.log_history);
+            let live = Live::new(&resource, &state.log_history, &state.event_history);
             state.live.insert(resource.metadata.id.clone(), live);
         }
         Ok((state.project(resource, Instant::now()), created))
@@ -667,7 +684,7 @@ impl Manager {
         }
         let (resource, created) = state.catalogue.submit_seeds(request)?;
         if created {
-            let live = Live::new(&resource, &state.log_history);
+            let live = Live::new(&resource, &state.log_history, &state.event_history);
             state.live.insert(resource.metadata.id.clone(), live);
         }
         Ok((resource, created))
@@ -682,7 +699,7 @@ impl Manager {
             return Ok(None);
         };
         if created {
-            let live = Live::new(&resource, &state.log_history);
+            let live = Live::new(&resource, &state.log_history, &state.event_history);
             state.live.insert(resource.metadata.id.clone(), live);
         }
         Ok((resource.status.phase == Phase::Queued).then_some(resource.metadata.id))
@@ -740,16 +757,31 @@ impl Manager {
             .ok_or_else(|| Error::NotFound(id.clone()))
     }
 
-    pub fn events(&self, id: &SimulationId) -> Result<Subscription<SimulationEvent>, Error> {
+    /// Live events after retained history; without `follow`, only the history.
+    pub fn events(
+        &self,
+        id: &SimulationId,
+        follow: bool,
+    ) -> Result<Subscription<SimulationEvent>, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         state.catalogue.get(id)?;
-        match state.live.get(id) {
-            Some(live) => live.events.subscribe().map_err(|_| Error::StorageFailed),
+        match state
+            .live
+            .get(id)
+            .map(|live| &live.events)
+            .or_else(|| state.retained_logs.get(id).map(|logs| &logs.events))
+        {
+            Some(events) => open(events, follow),
             None => Ok(Subscription::closed()),
         }
     }
 
-    pub fn logs(&self, id: &SimulationId, machine: &str) -> Result<Subscription<LogEntry>, Error> {
+    pub fn logs(
+        &self,
+        id: &SimulationId,
+        machine: &str,
+        follow: bool,
+    ) -> Result<Subscription<LogEntry>, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         let resource = state.catalogue.get(id)?;
         if !resource.spec.configuration.services.contains_key(machine) {
@@ -765,13 +797,17 @@ impl Manager {
                     .get(id)
                     .and_then(|logs| logs.machines.get(machine))
             }) {
-            Some(logs) => logs.subscribe().map_err(|_| Error::StorageFailed),
+            Some(logs) => open(logs, follow),
             None => Ok(Subscription::closed()),
         }
     }
 
     /// All machines share one delivery sequence in committed publication order.
-    pub fn all_logs(&self, id: &SimulationId) -> Result<Subscription<LogEntry>, Error> {
+    pub fn all_logs(
+        &self,
+        id: &SimulationId,
+        follow: bool,
+    ) -> Result<Subscription<LogEntry>, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         state.catalogue.get(id)?;
         match state
@@ -780,7 +816,7 @@ impl Manager {
             .map(|live| &live.all_logs)
             .or_else(|| state.retained_logs.get(id).map(|logs| &logs.all))
         {
-            Some(logs) => logs.subscribe().map_err(|_| Error::StorageFailed),
+            Some(logs) => open(logs, follow),
             None => Ok(Subscription::closed()),
         }
     }
@@ -1017,6 +1053,19 @@ impl Manager {
     }
 }
 
+/// Subscribe to history and live records, or to retained history alone.
+fn open<T: crate::stream::Payload>(
+    stream: &Stream<T>,
+    follow: bool,
+) -> Result<Subscription<T>, Error> {
+    if follow {
+        stream.subscribe()
+    } else {
+        stream.snapshot()
+    }
+    .map_err(|_| Error::StorageFailed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1118,7 +1167,19 @@ mod tests {
                 s.status.phase = Phase::Running;
             })
             .unwrap();
-        let mut events = manager.events(&id).unwrap();
+        let mut events = manager.events(&id, true).unwrap();
+        // Skip the retained history so this reader sees only what follows.
+        let backlog = {
+            let mut history = manager.events(&id, false).unwrap();
+            let mut count = 0;
+            while let Delivery::Record(_) = history.recv().await {
+                count += 1;
+            }
+            count
+        };
+        for _ in 0..backlog {
+            events.recv().await;
+        }
         let request = ControlRequest {
             request_id: "step".into(),
             command: seedbox_api::ControlCommand::Step,
@@ -1185,18 +1246,35 @@ mod tests {
             panic!("oversized lifecycle event closed stream")
         };
         assert_eq!(record.payload.event, EventKind::SourceUnavailable);
-        let mut newcomer = manager.events(&id).unwrap();
+        let mut newcomer = manager.events(&id, true).unwrap();
         let ready = EventKind::MachineReady {
             machine: "oracle".into(),
             incarnation: 0,
         };
         manager.publish_engine_event(&id, 11, ready.clone());
-        for reader in [&mut events, &mut newcomer] {
-            let Delivery::Record(record) = reader.recv().await else {
+        let Delivery::Record(record) = events.recv().await else {
+            panic!("later event unavailable")
+        };
+        assert_eq!(record.payload.event, ready);
+        // A late subscriber replays retained history before the live event.
+        let mut replayed = Vec::new();
+        loop {
+            let Delivery::Record(record) = newcomer.recv().await else {
                 panic!("later event unavailable")
             };
-            assert_eq!(record.payload.event, ready);
+            if record.payload.event == ready {
+                break;
+            }
+            replayed.push(record.payload.event.clone());
         }
+        assert!(replayed.contains(&EventKind::SourceUnavailable));
+        // Without following, the history ends instead of waiting for more.
+        let mut history = manager.events(&id, false).unwrap();
+        let mut count = 0;
+        while let Delivery::Record(_) = history.recv().await {
+            count += 1;
+        }
+        assert_eq!(count, replayed.len() + 1);
         assert!(!manager.cancellation(&id).unwrap().is_cancelled());
     }
 

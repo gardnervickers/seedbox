@@ -186,6 +186,8 @@ pub struct Focus {
     pub events: VecDeque<SimulationEvent>,
     pub logs: BTreeMap<String, MachineLog>,
     log_sequence: u64,
+    /// Newest event delivery applied; reopened streams replay history.
+    event_sequence: u64,
     pending_heals: BTreeMap<String, Option<u32>>,
     pub selected: Option<String>,
     pub checkpoints: Vec<Checkpoint>,
@@ -311,6 +313,7 @@ impl Focus {
             events: VecDeque::new(),
             logs: BTreeMap::new(),
             log_sequence: 0,
+            event_sequence: 0,
             pending_heals: BTreeMap::new(),
             selected: None,
             checkpoints: Vec::new(),
@@ -1267,7 +1270,11 @@ impl App {
             Update::Event(delivery) => {
                 if let Some(focus) = self.focus.as_mut() {
                     match delivery {
-                        EventDelivery::Event { observation, .. } => {
+                        EventDelivery::Event {
+                            sequence,
+                            observation,
+                        } if sequence > focus.event_sequence => {
+                            focus.event_sequence = sequence;
                             let at = observation
                                 .simulated_time_ns
                                 .unwrap_or_else(|| focus.now_ns(Instant::now()));
@@ -1316,7 +1323,13 @@ impl App {
                                 focus.events.pop_front();
                             }
                         }
-                        EventDelivery::Gap { first, last } => focus.lost += last - first + 1,
+                        EventDelivery::Event { .. } => {}
+                        EventDelivery::Gap { first, last } if last > focus.event_sequence => {
+                            let first = first.max(focus.event_sequence + 1);
+                            focus.lost += last - first + 1;
+                            focus.event_sequence = last;
+                        }
+                        EventDelivery::Gap { .. } => {}
                         EventDelivery::Closed => {}
                     }
                 }

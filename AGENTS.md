@@ -207,6 +207,7 @@ The CLI lives in `crates/seedbox/src/cli/`:
 - `diagnostics.rs`: excerpts of local execution diagnostics for text output.
 - `signals.rs`: cancellation.
 - `simulations.rs`: server-client commands and durable control receipts.
+- `observe.rs`: read-only observation (`logs`, `events`, `get world`, `get timeline`, `wait`).
 - `faults.rs`: bounded YAML/JSON fault input before connecting to the server.
 - `playback_args.rs`: positional playback-control arguments and rate validation.
 
@@ -284,10 +285,13 @@ deliberately change one.
   further lines are lowercase `key: value` (`replay: MATCH`, `error: ...`).
   Print both through `cli::output` rather than `println!`.
 - `logs ID MACHINE` writes selected application bytes to stdout with no decoration
-  or added newlines. Omission diagnostics go to stderr; `--json` emits live
+  or added newlines. Omission diagnostics go to stderr; `--json` emits
   newline-delimited records with stream, time, incarnation and byte arrays.
-  `events ID` also emits newline-delimited records. Events have no replay backlog. Logs replay bounded in-memory history from
-  the shared 64 MiB server budget, then follow live output.
+  `events ID` also emits newline-delimited records. Both print retained history
+  and exit; `--follow` keeps streaming until completion, like `kubectl logs`.
+  Logs keep bounded history in a shared 64 MiB server budget and events in their
+  own 16 MiB budget, for completed simulations too. Observation commands never
+  block by default; `wait ID --for CONDITION` is the explicit way to block.
   The legacy `retained-logs RUN` reader retains its single JSON document contract.
 - `run` and `rerun` print `OUTCOME: simulation-id`; detached submission prints
   `CREATED: simulation-id`. `replay` and `compare` print

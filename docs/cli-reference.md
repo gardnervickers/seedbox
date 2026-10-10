@@ -23,7 +23,10 @@ seedbox rerun ID [--detach] [--json]
 seedbox replay ID [--json]
 seedbox compare BASELINE_ID SIMULATION_ID [--json]
 seedbox stop ID
-seedbox events ID
+seedbox get world ID [--json]
+seedbox get timeline ID [--json]
+seedbox events ID [--follow]
+seedbox wait ID --for CONDITION [--timeout DURATION] [--json]
 seedbox tui [ID]
 seedbox playback ID [REQUEST_ID] [--json]
 seedbox pause ID [--request-id REQUEST_ID] [--json]
@@ -32,7 +35,8 @@ seedbox step ID [--request-id REQUEST_ID] [--json]
 seedbox rate ID RATE [--request-id REQUEST_ID] [--json]
 seedbox inject ID ACTION_FILE [--request-id REQUEST_ID] [--json]
 seedbox heal ID HANDLE [--request-id REQUEST_ID] [--json]
-seedbox logs ID [MACHINE] [--stream stdout|stderr] [--json]
+seedbox logs ID [MACHINE] [--follow] [--tail N] [--since TIME] [--until TIME]
+             [--incarnation N] [--stream stdout|stderr] [--json]
 seedbox serve [--state DIRECTORY] [RUNTIME_INPUT_OPTIONS]
 seedbox shutdown [--state DIRECTORY]
 ```
@@ -617,6 +621,31 @@ annotations may name the source simulation and checkpoint; the new definition
 is independent of that source. Follow its application
 output with `seedbox logs BRANCH_ID [MACHINE]` and its internal events with
 `seedbox events BRANCH_ID`. Historical application logs are not replayed.
+
+### Observing without blocking
+
+`logs` and `events` print what the server has retained and exit; add `--follow`
+to keep streaming until the simulation completes. `logs` narrows output by
+simulated time (`--since 12s --until 20s`), by machine incarnation
+(`--incarnation 1` is the first reboot) and to the last `--tail N` lines.
+`get world ID` shows machines, cut or shaped links and faults as observed now;
+`get timeline ID` lists recorded and scheduled faults and what became of each.
+`get simulations` includes each running simulation's requested playback.
+
+`wait ID --for CONDITION` blocks until the condition holds and prints
+`MET: ID`. Conditions are `completed`, `executing`, `paused`,
+`sim-time=DURATION`, `machine/NAME=CONDITION` (starting, ready, paused, crashed,
+exited) and `fault/ID-OR-HANDLE=STATUS` (unrequested, requested, applied,
+failed, unavailable). `--timeout` bounds host time and exits 124 with
+`TIMEOUT: ID`; a simulation that completes first exits 2.
+
+```sh
+seedbox run --detach
+seedbox wait SIM_ID --for executing
+printf '{"action":"crash","machine":"n3"}' | seedbox inject SIM_ID -
+seedbox wait SIM_ID --for machine/n3=crashed --timeout 1m
+seedbox logs SIM_ID n3 --since 10s --tail 20
+```
 
 Both Linux KVM and Apple Silicon HVF have native validation for capture, branch
 logs, matching source results, fault isolation, and branch rerun after a server

@@ -170,11 +170,20 @@ async fn unix_client_submits_describes_and_retries_without_duplicate_work() {
         ]
     );
     assert!(events.next().await.is_none());
+    // A completed simulation keeps its event history: a late reader replays
+    // it in order, then sees Closed.
     let mut late = client.events(&simulation.metadata.id).await.unwrap();
-    assert_eq!(
-        late.next().await.unwrap().unwrap(),
-        seedbox_api::EventDelivery::Closed
-    );
+    let mut replayed = Vec::new();
+    loop {
+        match late.next().await.unwrap().unwrap() {
+            seedbox_api::EventDelivery::Event { observation, .. } => {
+                replayed.push(observation.event)
+            }
+            seedbox_api::EventDelivery::Closed => break,
+            other => panic!("unexpected delivery {other:?}"),
+        }
+    }
+    assert!(replayed.ends_with(&observed));
     assert!(late.next().await.is_none());
 
     shutdown.send(()).unwrap();

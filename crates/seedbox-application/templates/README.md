@@ -17,10 +17,13 @@ ID. Use `seedbox get simulations`, `seedbox describe simulation ID`, or
 contacting the container engine. Add `--detach` to return immediately, and use
 `seedbox stop ID` to stop it later. The server stays running between commands. Use `seedbox shutdown` to stop it;
 noninteractive callers must start `seedbox serve` explicitly.
-Use `seedbox logs ID [MACHINE]` for live application output and `seedbox events ID`
-for structured internal events. Logs replay recent output from a shared 64 MiB in-memory buffer before following
-live output. Oldest records are evicted; deletion or server restart clears logs.
-Events have no historical backlog.
+Use `seedbox logs ID [MACHINE]` for application output and `seedbox events ID`
+for structured internal events. Both print what the server has retained and exit;
+add `--follow` to keep streaming. Logs keep recent output in a shared 64 MiB
+in-memory buffer and events in their own 16 MiB buffer; oldest records are
+evicted, and deletion or server restart clears both. `seedbox get world ID` and
+`seedbox get timeline ID` show machines, links and faults; `seedbox wait ID --for
+machine/NAME=ready` blocks until a condition holds.
 `seedbox get simulation ID --watch` follows status until completion; Ctrl-C only detaches.
 `seedbox tui [ID]` opens an interactive console with a live network map, logs,
 events and fault controls.
