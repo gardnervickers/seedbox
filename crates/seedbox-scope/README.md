@@ -5,8 +5,13 @@
 A terminal viewer for a finished (or running) seedbox run. Move a cursor through
 simulated time and see, at each moment:
 
+- a network map: a box per machine, laid out to fit the panel, with arrows
+  between them colored by link state (green traffic, yellow shaped, magenta
+  dropping, dashed red cut) and labelled with latency and frames per second.
+  With more than four machines the map focuses on the selected machine's links
+  and shows other pairs only when they are cut, shaped or dropping;
 - each directed link's effective policy (baseline, the winning shape, or a
-  partition cut) and its delivered and dropped frames per second;
+  partition cut) and its delivered and dropped frames per second, as a table (`v`);
 - each machine's state (running, down, paused, frozen, killed, incarnation, and
   active clock skews or throttles);
 - the fault list, with what has been applied so far;
@@ -16,11 +21,14 @@ simulated time and see, at each moment:
 cargo run -p seedbox-scope -- .seedbox/runs/RUN
 cargo run -p seedbox-scope                        # newest run in $SEEDBOX_STATE or .seedbox
 cargo run -p seedbox-scope -- RUN --snapshot --at-ns 4300000000   # one plain-text frame
+cargo run -p seedbox-scope -- RUN --snapshot --color --table      # ANSI colors, table view
 ```
 
 Keys: `←`/`→` jump between fault boundaries, `[`/`]` step 1% of the run,
-`↑`/`↓` select a machine, `g`/`G` start/end, `f` follow a live run, `r` reload,
+`↑`/`↓` select a machine, `v` switch between map and table, `g`/`G` start/end, `f` follow a live run, `r` reload,
 `q` quit.
+
+![a seven-machine world focused on etcd-0, with its partition and a crashed machine](docs/scope-focus.png)
 
 ## Separation from the engine
 

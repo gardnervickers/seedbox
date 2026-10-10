@@ -1,5 +1,6 @@
 //! `seedbox-scope`: browse a run's faults, link policies and traffic over
 //! simulated time. Reads only the files in a run directory.
+mod map;
 mod model;
 #[cfg(test)]
 mod tests;
@@ -44,6 +45,12 @@ struct Args {
     /// Frame height for --snapshot.
     #[arg(long, default_value_t = 44)]
     height: u16,
+    /// Keep colors in --snapshot output as ANSI escapes.
+    #[arg(long, requires = "snapshot")]
+    color: bool,
+    /// Show links as a policy table instead of the network map.
+    #[arg(long)]
+    table: bool,
 }
 
 fn newest_run(state: &Path) -> Result<PathBuf, String> {
@@ -84,6 +91,7 @@ fn run(args: Args) -> Result<(), String> {
     };
     let mut app = App::new(Run::load(&path)?, args.at_ns);
     app.follow = args.follow;
+    app.grid = args.table;
     if app.follow {
         app.at_ns = app.run.end_ns;
     }
@@ -96,11 +104,18 @@ fn run(args: Args) -> Result<(), String> {
         let buffer = terminal.backend().buffer();
         let mut out = std::io::stdout().lock();
         for y in 0..buffer.area.height {
-            let line: String = (0..buffer.area.width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect();
+            let cells = (0..buffer.area.width).map(|x| &buffer[(x, y)]);
+            let line = if args.color {
+                ansi_line(cells)
+            } else {
+                cells
+                    .map(|c| c.symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            };
             // A closed pipe (`| head`) just ends the output.
-            if writeln!(out, "{}", line.trim_end()).is_err() {
+            if writeln!(out, "{line}").is_err() {
                 break;
             }
         }
@@ -138,6 +153,7 @@ fn interact(
                     KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => app.select(1),
                     KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => app.select(-1),
                     KeyCode::Char('f') => app.follow = !app.follow,
+                    KeyCode::Char('v') => app.grid = !app.grid,
                     KeyCode::Char('r') => reload(app, path),
                     _ => {}
                 }
@@ -161,4 +177,51 @@ fn reload(app: &mut App, path: &Path) {
         }
         Err(e) => app.error = Some(e),
     }
+}
+
+/// One buffer row with SGR escapes for its colors, bold and reverse video.
+fn ansi_line<'a>(cells: impl Iterator<Item = &'a ratatui::buffer::Cell>) -> String {
+    use ratatui::style::{Color, Modifier};
+    fn sgr(color: Color, base: u8) -> String {
+        let named = |i: u8| format!("{}", if i < 8 { base + i } else { base + 60 + i - 8 });
+        match color {
+            Color::Reset => format!("{}", base + 9),
+            Color::Black => named(0),
+            Color::Red => named(1),
+            Color::Green => named(2),
+            Color::Yellow => named(3),
+            Color::Blue => named(4),
+            Color::Magenta => named(5),
+            Color::Cyan => named(6),
+            Color::Gray => named(7),
+            Color::DarkGray => named(8),
+            Color::LightRed => named(9),
+            Color::LightGreen => named(10),
+            Color::LightYellow => named(11),
+            Color::LightBlue => named(12),
+            Color::LightMagenta => named(13),
+            Color::LightCyan => named(14),
+            Color::White => named(15),
+            Color::Indexed(i) => format!("{};5;{i}", base + 8),
+            Color::Rgb(r, g, b) => format!("{};2;{r};{g};{b}", base + 8),
+        }
+    }
+    let mut out = String::new();
+    let mut last = None;
+    for cell in cells {
+        let style = (cell.fg, cell.bg, cell.modifier);
+        if last != Some(style) {
+            let mut codes = vec!["0".to_owned(), sgr(cell.fg, 30), sgr(cell.bg, 40)];
+            if cell.modifier.contains(Modifier::BOLD) {
+                codes.push("1".into());
+            }
+            if cell.modifier.contains(Modifier::REVERSED) {
+                codes.push("7".into());
+            }
+            out += &format!("\x1b[{}m", codes.join(";"));
+            last = Some(style);
+        }
+        out += cell.symbol();
+    }
+    out + "\x1b[0m"
 }

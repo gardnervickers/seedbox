@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, Cell, List, ListItem, Paragraph, Row, Table, Wrap},
+    widgets::{Block, BorderType, Cell, List, ListItem, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
@@ -14,6 +14,8 @@ pub struct App {
     pub selected: usize,
     /// Keep the cursor at the end and reload as the run directory changes.
     pub follow: bool,
+    /// Show links as a policy table instead of the network map.
+    pub grid: bool,
     pub error: Option<String>,
 }
 
@@ -25,6 +27,7 @@ impl App {
             at_ns,
             selected: 0,
             follow: false,
+            grid: false,
             error: None,
         }
     }
@@ -66,8 +69,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let [header, timeline, main, console, help] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(3),
-        Constraint::Min(8),
-        Constraint::Percentage(30),
+        Constraint::Min(12),
+        Constraint::Percentage(25),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -75,7 +78,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_timeline(frame, timeline, app);
     let [links, side] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(main);
-    draw_links(frame, links, app, &snap);
+    if app.grid {
+        draw_links(frame, links, app, &snap);
+    } else {
+        crate::map::draw(frame, links, &app.run, &snap, app.selected);
+    }
     let machine_rows = app.run.machines.len() as u16 + 2;
     let [machines, faults] = Layout::vertical([
         Constraint::Length(machine_rows.min(side.height / 2)),
@@ -86,7 +93,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_faults(frame, faults, app);
     draw_console(frame, console, app);
     let mut keys =
-        "←/→ fault boundary  [/] step 1%  ↑/↓ machine  g/G start/end  f follow  r reload  q quit"
+        "←/→ fault boundary  [/] step 1%  ↑/↓ machine  v map/table  g/G start/end  f follow  r reload  q quit"
             .to_owned();
     if app.follow {
         keys = format!("FOLLOWING  {keys}");
@@ -123,7 +130,9 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::bordered().title(" faults over simulated time ");
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(" faults over simulated time ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
@@ -173,7 +182,9 @@ fn draw_links(frame: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         ),
         None => " links: policy (no traffic counters at this time) ".into(),
     };
-    let block = Block::bordered().title(title);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(title);
     let n = run.machines.len();
     let mut grid: Vec<Vec<Text>> = Vec::new();
     for (from, name) in run.machines.iter().enumerate() {
@@ -262,7 +273,11 @@ fn draw_machines(frame: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             ListItem::new(Line::from(spans))
         });
     frame.render_widget(
-        List::new(items).block(Block::bordered().title(" machines ")),
+        List::new(items).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .title(" machines "),
+        ),
         area,
     );
 }
@@ -306,7 +321,14 @@ fn draw_faults(frame: &mut Frame, area: Rect, app: &App) {
             .count(),
         run.faults.len()
     );
-    frame.render_widget(List::new(items).block(Block::bordered().title(title)), area);
+    frame.render_widget(
+        List::new(items).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .title(title),
+        ),
+        area,
+    );
 }
 
 fn draw_console(frame: &mut Frame, area: Rect, app: &App) {
@@ -330,7 +352,9 @@ fn draw_console(frame: &mut Frame, area: Rect, app: &App) {
             (format!(" {name} console, {timed} "), body)
         }
     };
-    let block = Block::bordered().title(title);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(title);
     let height = block.inner(area).height as usize;
     let lines: Vec<&str> = body.lines().collect();
     let tail = lines[lines.len().saturating_sub(height)..].join("\n");

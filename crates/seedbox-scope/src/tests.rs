@@ -1,5 +1,7 @@
+use crate::map;
 use crate::model::{parse_chunks, Chunk, Counts, LinkState, Policy, Run};
 use crate::ui::{self, App};
+use ratatui::layout::Rect;
 use ratatui::{backend::TestBackend, Terminal};
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
@@ -219,8 +221,9 @@ fn chunk_index_rejects_other_formats() {
 }
 
 #[test]
-fn a_frame_shows_the_cut_and_the_fault_list() {
-    let app = App::new(link60(), Some(4_300_000_000));
+fn the_table_view_shows_the_cut_and_the_fault_list() {
+    let mut app = App::new(link60(), Some(4_300_000_000));
+    app.grid = true;
     let mut terminal = Terminal::new(TestBackend::new(140, 44)).unwrap();
     terminal.draw(|f| ui::draw(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -253,7 +256,8 @@ fn stops_walk_fault_boundaries_in_order() {
 
 #[test]
 fn link_columns_fit_long_shaped_policies() {
-    let app = App::new(link60(), Some(4_000_000_000));
+    let mut app = App::new(link60(), Some(4_000_000_000));
+    app.grid = true;
     let mut terminal = Terminal::new(TestBackend::new(140, 44)).unwrap();
     terminal.draw(|f| ui::draw(f, &app)).unwrap();
     let text: String = terminal
@@ -264,4 +268,90 @@ fn link_columns_fit_long_shaped_policies() {
         .map(|c| c.symbol())
         .collect();
     assert!(text.contains("1ms±500us 50% [lossmid]"));
+}
+
+fn frame_text(app: &App) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(140, 44)).unwrap();
+    terminal.draw(|f| ui::draw(f, app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn the_map_draws_a_box_per_machine_and_labels_each_link() {
+    let text = frame_text(&App::new(link60(), Some(4_300_000_000)));
+    // The selected machine (a) gets a heavy border.
+    for name in ["━ a ━", "─ b ─", "─ c ─"] {
+        assert!(text.contains(name), "{name}\n{text}");
+    }
+    // Both directions of the partitioned pair are labelled cut; the total-loss shape shows drops.
+    assert_eq!(text.matches("cut ").count(), 3, "{text}"); // two links plus the legend
+    assert!(text.contains("1ms 100% 0/s ✗14.5k/s"), "{text}");
+}
+
+#[test]
+fn map_boxes_stay_inside_the_panel_and_never_overlap() {
+    // Each panel holds 16 boxes of 20x4 in some grid.
+    for (w, h) in [(84, 20), (63, 32), (168, 16)] {
+        let area = Rect::new(3, 5, w, h);
+        for n in 1..=16 {
+            let boxes = map::layout(area, n, 20);
+            assert_eq!(boxes.len(), n);
+            for (i, a) in boxes.iter().enumerate() {
+                assert!(
+                    area.contains(a.as_position())
+                        && a.right() <= area.right()
+                        && a.bottom() <= area.bottom()
+                );
+                for b in &boxes[i + 1..] {
+                    assert!(!a.intersects(*b), "{w}x{h} n={n}: {a:?} overlaps {b:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn larger_worlds_focus_the_map_on_the_selected_machine() {
+    let names: Vec<String> = (0..6).map(|i| format!("m{i}")).collect();
+    let counters = |frames: u64| {
+        let mut all = serde_json::Map::new();
+        for a in &names {
+            for b in names.iter().filter(|b| *b != a) {
+                all.insert(
+                    format!("{a}->{b}"),
+                    serde_json::json!({"delivered": frames, "partition_dropped": 0, "receiver_dropped": 0}),
+                );
+            }
+        }
+        serde_json::Value::Object(all)
+    };
+    let request = serde_json::json!({"id": 1, "at_ns": 10, "action": "partition", "handle": "p", "left": ["m0"], "right": ["m1"]});
+    let dir = write_report(serde_json::json!({
+        "seed": 1, "outcome": "end_machine_exited",
+        "machines": names.iter().map(|n| serde_json::json!({"name": n, "time_ns": 1_000_000_000u64, "state": "Running"})).collect::<Vec<_>>(),
+        "faults": [{"id": 1, "action": "partition", "status": "applied", "applied_at_ns": 10, "request": request, "network_counters": counters(0)}],
+        "network_counters": counters(1000),
+    }));
+    let mut app = App::new(Run::load(&dir).unwrap(), Some(20));
+    app.selected = 2;
+    let text = frame_text(&app);
+    // One label per pair with the selected machine, each showing both directions.
+    assert_eq!(text.matches(" →1.0k/s ←1.0k/s").count(), 5, "{text}");
+    // The cut between two other machines is drawn but not labelled: only the legend says cut.
+    assert_eq!(text.matches("cut").count(), 1, "{text}");
+    // Labels never cover a box.
+    for name in &names {
+        assert!(text.contains(&format!(" {name} ")), "{name}\n{text}");
+    }
+    app.selected = 0;
+    assert_eq!(frame_text(&app).matches("cut").count(), 2);
+    fs::remove_dir_all(dir).unwrap();
 }
