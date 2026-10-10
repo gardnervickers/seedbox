@@ -13,6 +13,9 @@ pkgs.stdenv.mkDerivation {
   postPatch = ''
     substituteInPlace ext/CMakeLists.txt \
       --replace-fail 'add_subdirectory(drsyms)' '# drsyms is not packaged'
+    # The AArch64 codec order check executes codecsort.py by its
+    # /usr/bin/env shebang, which the Linux build sandbox does not provide.
+    patchShebangs core/ir/aarch64/codecsort.py
   '';
   nativeBuildInputs = with pkgs; [ cmake ninja perl python3 ];
   cmakeFlags = [
