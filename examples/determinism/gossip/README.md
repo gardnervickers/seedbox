@@ -47,14 +47,16 @@ directories. Any differing line is a D2 violation.
 **Control knob: 1 versus 4 machine workers.** `seedbox run` always uses one
 worker, so take a retained run's `output/worker-request.json`, copy it with
 `machine_workers` set to 4 (and `machine_cpus` listing four host CPUs, `out`
-pointing at a fresh directory), and run the retained engine on it directly:
+pointing at a fresh directory, `host_control` null because the original run's
+socket is gone), and run the retained engine on it directly:
 
 ```sh
 seedbox run examples/determinism/gossip --full-state           # baseline, 1 worker
 python3 - RUN/output/worker-request.json req4.json <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1])); r["machine_workers"] = 4
-r["machine_cpus"] = [4, 5, 6, 7]; r["out"] = "out4"; json.dump(r, open(sys.argv[2], "w"))
+r["machine_cpus"] = [4, 5, 6, 7]; r["out"] = "out4"; r["host_control"] = None
+json.dump(r, open(sys.argv[2], "w"))
 PY
 build/current/seedbox __engine seedbox-internal-worker-v1 --request req4.json
 ```

@@ -20,10 +20,14 @@ Checking one probe:
 ./build/current/seedbox run examples/determinism/timer-races --full-state
 ./build/current/seedbox run examples/determinism/timer-races --full-state
 ./build/current/seedbox diff .seedbox/runs/A .seedbox/runs/B
-./build/current/seedbox replay .seedbox/runs/A
+./build/current/seedbox replay .seedbox/runs/A --state .seedbox
 ./build/current/seedbox run examples/determinism/timer-races --full-state --watchdog-ms 1
 ```
 
 Compare the `digest:` lines in `output/machines/*.console` across the runs as
 well as the `diff` verdict: the digest is the app-level result. The reasoning
 behind the selection is in the project note `determinism-counterexamples/cases.md`.
+
+First evidence (2026-10-10, Linux x86-64 KVM host, AMD): all five probes gave
+identical consoles, `diff` MATCH and replay MATCH across two fresh runs, across
+`--watchdog-ms 1` and `1000`, and for gossip across 1 and 4 machine workers.
