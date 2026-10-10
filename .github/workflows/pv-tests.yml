@@ -28,9 +28,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Reclaim unused hosted SDK space
+      # Deleting these takes about 90 s; let it overlap the Nix restore and the
+      # first builds instead of blocking them.
+      - name: Reclaim unused hosted SDK space in the background
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
+          sudo -b sh -c 'rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift' \
+            </dev/null >/dev/null 2>&1
           df -h /
       - name: Verify usable KVM before building
         run: |

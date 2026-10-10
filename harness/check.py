@@ -25,7 +25,7 @@ SUITES = {
     "linux-kvm": "Linux x86-64 or ARM64 with /dev/kvm: native backend KVM tests; no root needed.",
     "linux-guests": "Fixture kernel and initrd on Linux KVM: real guest determinism and checkpoints.",
     "linux-oci": "Linux x86-64 with a running Docker-compatible engine: real image import and Dockerfile builds.",
-    "linux-apps": "Linux x86-64 KVM, root, a Docker-compatible engine and built guest assets: every acceptance workload run twice, diffed and replayed.",
+    "linux-apps": "Linux x86-64 KVM, root, a Docker-compatible engine and built guest assets: every acceptance workload run and replayed; one also run twice and diffed.",
     "linux-pause": "Linux x86-64 KVM, root and a supplied retained run: pause/resume replay.",
     "mac-hvf": "Apple Silicon with macOS 15+, Hypervisor.framework and codesign: native CPU/state and cancellation primitives.",
     "mac-guests": "mac-hvf plus the ARM fixture kernel and initrd: real guest controls.",
@@ -229,6 +229,11 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
     return missing
 
 
+# The seedbox test target each test feature gates (crates/seedbox/Cargo.toml).
+FEATURE_TESTS = {"oci-tests": "oci", "application-tests": "applications",
+                 "retained-run-tests": "host_pause"}
+
+
 def features_for(package, machine, suites):
     """Cargo test features for one package; selection depends only on the suites."""
     def pick(pairs):
@@ -405,9 +410,13 @@ def main(argv=None):
     packages = [("seedbox-arm64", ["cargo", "test-arm64"])]
     if system == "Linux" and machine == "x86_64":
         packages.append(("seedbox-vmm", ["cargo", "test-vmm"]))
-    packages.append(("seedbox", ["cargo", "test", "--workspace", "--locked"]))
+    packages.append(("seedbox", ["cargo", "test", "-p", "seedbox", "--locked"]))
     for package, command in packages:
         features = features_for(package, machine, suites)
+        if package == "seedbox":
+            # Portable already ran every other test; build only the gated ones.
+            command = [*command, *(argument for feature in features
+                                   for argument in ("--test", FEATURE_TESTS[feature]))]
         if features:
             checks.cargo_tests(package, command, features, prefix,
                                sign=package == "seedbox-arm64" and "hvf-tests" in features)

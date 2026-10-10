@@ -56,8 +56,16 @@ fn run_directory(output: &str) -> Result<&str, String> {
         .ok_or_else(|| format!("missing PASS run directory: {output}"))
 }
 
+/// Whether a workload also gets a second fresh run diffed against the first.
+/// Replay already re-executes every run; on x86 one fresh pair covers what
+/// replay reuses from the recording (image builds, disk images). ARM keeps a
+/// pair per workload while its determinism work is open.
+fn fresh_pair(workload: &Path) -> bool {
+    cfg!(target_os = "macos") || workload.file_stem().is_some_and(|stem| stem == "runtime")
+}
+
 #[test]
-fn every_application_runs_twice_and_replays() {
+fn every_application_runs_and_replays() {
     let cli = std::env::var_os("SEEDBOX_TEST_CLI")
         .expect("harness/check.sh supplies the current release CLI");
     let reports =
@@ -83,15 +91,17 @@ fn every_application_runs_twice_and_replays() {
         let check = || -> Result<(), String> {
             let run = ["run", workload.to_str().unwrap(), "--full-state"];
             let first = invoke(Path::new(&cli), &directory, "first", &run)?;
-            let second = invoke(Path::new(&cli), &directory, "second", &run)?;
             let first = run_directory(&first)?;
-            let second = run_directory(&second)?;
-            invoke(
-                Path::new(&cli),
-                &directory,
-                "diff",
-                &["diff", first, second],
-            )?;
+            if fresh_pair(&workload) {
+                let second = invoke(Path::new(&cli), &directory, "second", &run)?;
+                let second = run_directory(&second)?;
+                invoke(
+                    Path::new(&cli),
+                    &directory,
+                    "diff",
+                    &["diff", first, second],
+                )?;
+            }
             invoke(Path::new(&cli), &directory, "replay", &["replay", first])?;
             Ok(())
         };

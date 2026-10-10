@@ -58,6 +58,14 @@ class SelectionTests(unittest.TestCase):
                          ["hvf-tests", "guest-tests"])
         self.assertEqual(check.features_for("seedbox-vmm", "arm64", check.expand(["mac"], "arm64")), [])
 
+    def test_every_seedbox_test_feature_names_its_test_target(self):
+        manifest = (HARNESS.parent / "crates/seedbox/Cargo.toml").read_text()
+        features = manifest.split("[features]\n", 1)[1].split("\n\n", 1)[0]
+        self.assertEqual(sorted(line.split(" =")[0] for line in features.splitlines()),
+                         sorted(check.FEATURE_TESTS))
+        for target in check.FEATURE_TESTS.values():
+            self.assertTrue((HARNESS.parent / f"crates/seedbox/tests/{target}.rs").is_file(), target)
+
     def test_kvm_suite_needs_no_root(self):
         self.assertEqual(self.linux("linux-kvm", {"kvm": ""}, root=False), [])
 
