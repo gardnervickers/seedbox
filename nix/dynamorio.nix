@@ -9,6 +9,7 @@ pkgs.stdenv.mkDerivation {
   patches = [
     ../guest/progress/dynamorio-exclusives.patch
     ../guest/progress/dynamorio-sigreturn.patch
+    ../guest/progress/dynamorio-synch-signal.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build
