@@ -206,6 +206,7 @@ impl Submission {
             services.insert(
                 name,
                 seedbox_spec::Service {
+                    memory_mb: machine.memory_mib.map(|memory| memory.get()),
                     cpu: machine.cpu,
                     source,
                     platform: self.architecture.map(platform).unwrap_or_default().into(),
@@ -371,6 +372,13 @@ impl Submission {
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(Machine {
+                memory_mib: service
+                    .memory_mb
+                    .map(|memory| {
+                        std::num::NonZeroU32::new(memory)
+                            .ok_or_else(|| "memoryMiB must be positive".to_owned())
+                    })
+                    .transpose()?,
                 cpu: service.cpu.clone(),
                 image,
                 build,
@@ -454,6 +462,16 @@ impl SimulationSpec {
                     service.platform
                 ));
             }
+            if let Some(memory) = service.memory_mb {
+                let maximum = if architecture == Architecture::Aarch64 {
+                    3072
+                } else {
+                    65536
+                };
+                if !(64..=maximum).contains(&memory) {
+                    return Err(format!("machine {name}: memoryMiB must be 64..{maximum}"));
+                }
+            }
             service.platform = expected.into();
         }
         Ok(())
@@ -469,6 +487,35 @@ mod tests {
             "oracle":{"image":"example/oracle@sha256:abc"}
         })
     }
+    #[test]
+    fn partial_submissions_preserve_machine_memory_until_server_architecture_is_known() {
+        let mut raw = partial();
+        raw["machines"]["app"]["memoryMiB"] = 2048.into();
+        raw["machines"]["app"]["cpu"] = serde_json::json!({"speed": "800MHz", "jitter": "5%"});
+        raw["oracle"]["memoryMiB"] = 256.into();
+        let mut spec: SimulationSpec = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(spec.configuration.services["app"].memory_mb, Some(2048));
+        assert_eq!(spec.configuration.services["oracle"].memory_mb, Some(256));
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(wire["machines"]["app"]["memoryMiB"], 2048);
+        assert_eq!(
+            wire["machines"]["app"]["cpu"],
+            raw["machines"]["app"]["cpu"]
+        );
+        assert_eq!(wire["oracle"]["memoryMiB"], 256);
+        spec.resolve_project_architecture(Architecture::Aarch64)
+            .unwrap();
+        raw["machines"]["app"]["memoryMiB"] = 4096.into();
+        let mut too_large: SimulationSpec = serde_json::from_value(raw).unwrap();
+        assert!(too_large
+            .resolve_project_architecture(Architecture::Aarch64)
+            .unwrap_err()
+            .contains("memoryMiB"));
+        too_large
+            .resolve_project_architecture(Architecture::X86_64)
+            .unwrap();
+    }
+
     #[test]
     fn cpu_round_trips_and_jitter_is_omitted_when_off() {
         let spec: SimulationSpec = serde_json::from_value(partial()).unwrap();

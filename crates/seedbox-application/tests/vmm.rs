@@ -26,6 +26,7 @@ fn typed(world: &serde_json::Value) -> WorldConfig {
 fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
     let hash = ContentDigest::of(b"retained input");
     let prepared = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: None,
         kernel: hash.clone(),
         images: BTreeMap::new(),
@@ -2270,5 +2271,75 @@ fn reports_correlate_retained_interventions_with_guest_faults_and_oracle_exit() 
         let result = parse(&raw, &request).unwrap();
         assert_eq!(result.workload_exit.unwrap().code, 7);
         assert_eq!(result.faults.len(), 2);
+    });
+}
+
+#[test]
+fn machine_memory_crosses_worker_config_and_binds_checkpoint_identity() {
+    fixture(|request| {
+        let original = engine_adapter::world(request).unwrap();
+        let mut prepared = request.prepared.clone();
+        prepared
+            .machine_memory_mb
+            .insert("server-machine".into(), 2048);
+        let changed = ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        };
+        let world = engine_adapter::world(&changed).unwrap();
+        assert_eq!(world.mem_mb, 512);
+        assert_eq!(
+            world
+                .machines
+                .iter()
+                .find(|m| m.name == "server-machine")
+                .unwrap()
+                .memory_mb(&world),
+            2048
+        );
+        assert_eq!(
+            world
+                .machines
+                .iter()
+                .find(|m| m.name == "client-machine")
+                .unwrap()
+                .memory_mb(&world),
+            512
+        );
+        let identity = |world: &WorldConfig| {
+            checkpoint_protocol::parent_identity(world, 1, "engine", false, false, |_| {
+                Ok("content".into())
+            })
+            .unwrap()
+        };
+        assert_ne!(identity(&world), identity(&original));
+        prepared.machine_memory_mb.insert("missing".into(), 256);
+        assert!(engine_adapter::world(&ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("unknown machine"));
+        prepared.machine_memory_mb.remove("missing");
+        prepared
+            .machine_memory_mb
+            .insert("server-machine".into(), 63);
+        assert!(engine_adapter::world(&ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        })
+        .is_err());
+        prepared.profile.backend = Backend::Hvf;
+        prepared
+            .machine_memory_mb
+            .insert("server-machine".into(), 4096);
+        assert!(engine_adapter::world(&ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("64..3072"));
     });
 }

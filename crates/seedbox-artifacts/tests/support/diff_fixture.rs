@@ -6,6 +6,7 @@ fn fixture() -> sb::record::RunRecord {
     let configuration = config::Simulation {
         name: "diff".into(), source: "/fixture/compose.yaml".into(),
         services: BTreeMap::from([("workload".into(), config::Service {
+            memory_mb: None,
             cpu: Default::default(),
             source: config::ImageSource::Registry { reference: "fixture:v1".into() },
             platform: "linux/amd64".into(), entrypoint: None, command: None,
@@ -27,6 +28,7 @@ fn fixture() -> sb::record::RunRecord {
         seed: 0,
         configuration,
         inputs: PreparedInputs {
+            machine_memory_mb: Default::default(),
             wall_clock_epoch: None,
             kernel: digest.clone(),
             images: BTreeMap::new(),

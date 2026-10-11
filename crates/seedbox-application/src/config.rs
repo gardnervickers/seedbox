@@ -295,6 +295,7 @@ pub fn parse_for_architecture(
         services.insert(
             key,
             Service {
+                memory_mb: None,
                 cpu: Default::default(),
                 source: image_source,
                 platform,

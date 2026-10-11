@@ -35,16 +35,27 @@ pub(crate) fn project(
                 .as_ref()
                 .is_some_and(|p| p.state.rate == PlaybackRate::Paused && !p.state.terminal);
             result.paused += usize::from(paused);
-            let memory = match &resource.spec.inputs {
-                seedbox_api::InputSource::Resolved { definition } => definition
-                    .machines
-                    .values()
-                    .chain(std::iter::once(&definition.oracle))
-                    .fold(0u64, |total, m| total.saturating_add(m.memory_bytes)),
-                _ => u64::from(resource.spec.configuration.machine.memory_mb)
-                    .saturating_mul(1024 * 1024)
-                    .saturating_mul(resource.spec.configuration.services.len() as u64),
-            };
+            let memory =
+                match &resource.spec.inputs {
+                    seedbox_api::InputSource::Resolved { definition } => definition
+                        .machines
+                        .values()
+                        .chain(std::iter::once(&definition.oracle))
+                        .fold(0u64, |total, m| total.saturating_add(m.memory_bytes)),
+                    _ => resource.spec.configuration.services.values().fold(
+                        0u64,
+                        |total, service| {
+                            total.saturating_add(
+                                u64::from(
+                                    service
+                                        .memory_mb
+                                        .unwrap_or(resource.spec.configuration.machine.memory_mb),
+                                ) * 1024
+                                    * 1024,
+                            )
+                        },
+                    ),
+                };
             *occupant = ExecutionOccupant {
                 simulation: id,
                 phase: Some(resource.status.phase),
@@ -99,6 +110,31 @@ mod tests {
                 program: Vec::new(),
             },
         )
+    }
+
+    #[test]
+    fn capacity_sums_machine_memory_overrides_and_uniform_defaults() {
+        let mut resource = resource("aaaaaaaa");
+        let mut app = resource.spec.configuration.services["oracle"].clone();
+        app.memory_mb = Some(2048);
+        resource
+            .spec
+            .configuration
+            .services
+            .insert("app".into(), app);
+        resource
+            .spec
+            .configuration
+            .services
+            .get_mut("oracle")
+            .unwrap()
+            .memory_mb = Some(256);
+        let ids = BTreeSet::from([resource.metadata.id.clone()]);
+        let capacity = project(1, &ids, std::iter::once(resource));
+        assert_eq!(
+            capacity.occupying[0].guest_memory_bytes,
+            Some((2048 + 256) * 1024 * 1024)
+        );
     }
 
     #[test]

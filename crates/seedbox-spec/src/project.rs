@@ -2,7 +2,7 @@
 //!
 //! This format deliberately excludes execution options and retained recordings.
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, num::NonZeroU32, path::PathBuf};
 
 /// Application machines and the independently declared oracle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +24,10 @@ pub struct Project {
     try_from = "MachineFields"
 )]
 pub struct Machine {
+    /// Guest RAM in MiB; omission uses the backend default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "memoryMiB")]
+    pub memory_mib: Option<NonZeroU32>,
     pub cpu: Cpu,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -45,6 +49,8 @@ pub struct Machine {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MachineFields {
+    #[serde(rename = "memoryMiB")]
+    memory_mib: Option<NonZeroU32>,
     #[serde(default)]
     cpu: Cpu,
     image: Option<String>,
@@ -76,6 +82,7 @@ impl TryFrom<MachineFields> for Machine {
             );
         }
         Ok(Self {
+            memory_mib: fields.memory_mib,
             cpu: fields.cpu,
             image: fields.image,
             build: fields.build,

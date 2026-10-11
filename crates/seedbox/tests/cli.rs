@@ -703,6 +703,7 @@ fn old_records_stay_inspectable_and_transferable() {
     let store = ContentStore::new(root.join("state/objects"));
     let object = store.put(b"opaque retained fixture").unwrap();
     let inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: None,
         kernel: object.clone(),
         profile: ExecutionProfile {
