@@ -1866,13 +1866,22 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
         .unwrap_or(4)
         .clamp(4, 14)
         + 1;
-    let show_drop = width >= name_width + 2 + 14 + 14 + 6;
-    let show_spark = width >= name_width + 2 + 14 + 14 + 6 + 8;
+    // Every state carries the machine's CPU speed, so size the column to the
+    // longest one rather than cutting a speed short.
+    let states: Vec<(String, Color)> = world.machines.iter().map(|m| condition(focus, m)).collect();
+    let state_width = states
+        .iter()
+        .map(|(state, _)| state.chars().count() + 1)
+        .max()
+        .unwrap_or(14)
+        .clamp(14, 24);
+    let show_drop = width >= name_width + 2 + state_width + 14 + 6;
+    let show_spark = width >= name_width + 2 + state_width + 14 + 6 + 8;
     let mut header = vec![Span::styled(
         format!(
             "  {}{}{}{}",
             pad("NAME", name_width),
-            pad("STATE", 14),
+            pad("STATE", state_width),
             pad_left("TX/S", 7),
             pad_left("RX/S", 7)
         ),
@@ -1888,10 +1897,9 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
         header.push(Span::styled("  ACTIVITY", Style::new().fg(FAINT_TEXT)));
     }
     let mut lines = vec![Line::from(header)];
-    let spark_width = width.saturating_sub(name_width + 2 + 14 + 14 + 6 + 2);
-    for (index, m) in world.machines.iter().enumerate() {
+    let spark_width = width.saturating_sub(name_width + 2 + state_width + 14 + 6 + 2);
+    for (index, (m, (state, color))) in world.machines.iter().zip(states).enumerate() {
         let selected = focus.selected.as_deref() == Some(m.name.as_str());
-        let (state, color) = condition(focus, m);
         let dropped: u64 = world
             .links
             .iter()
@@ -1924,7 +1932,7 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
                         Modifier::empty()
                     }),
             ),
-            Span::styled(pad(&state, 14), Style::new().fg(color)),
+            Span::styled(pad(&state, state_width), Style::new().fg(color)),
             Span::styled(
                 pad_left(&rate(focus.traffic.sent_rate(&m.name)), 7),
                 Style::new().fg(TEXT),
@@ -3267,11 +3275,23 @@ mod tests {
             assert!(text.contains(&format!("● ready {label}")), "{text}");
             assert!(text.contains("● ready 1GHz"), "{text}");
         }
-        app.apply(Update::World(baseline));
+        app.apply(Update::World(baseline.clone()));
         let text = render(&app);
         assert!(text.contains("● ready 2GHz"), "{text}");
         assert!(text.contains("● ready 1GHz"), "{text}");
         assert!(!text.contains("2MHz"), "{text}");
+        // The machines table widens its state column instead of cutting a
+        // longer state's speed short.
+        let mut exited = baseline.clone();
+        exited.machines[1].condition = MachineCondition::Exited;
+        exited.machines[1].exit_code = Some(0);
+        app.apply(Update::World(exited));
+        let text = render(&app);
+        let row = text
+            .lines()
+            .find(|line| line.contains("oracle") && line.contains("exited"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(row.contains("exited 0 1GHz "), "{row}");
     }
 
     #[test]
