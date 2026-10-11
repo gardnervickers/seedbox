@@ -196,7 +196,7 @@ pub struct Control {
     pub log: Vec<Value>,
     pub error: Option<String>,
     pub triggers: crate::triggers::Triggers,
-    names: Vec<String>,
+    pub(crate) names: Vec<String>,
     placement: BTreeMap<String, String>,
     last_relay: u32,
     last_session: u32,
@@ -258,6 +258,13 @@ impl Control {
             lookahead,
             undelivered_reply: false,
         })
+    }
+    /// A machine spawned at runtime: a target by machine or service name.
+    pub fn add_machine(&mut self, name: &str) {
+        self.names.push(name.to_owned());
+        if self.controller.is_some() {
+            self.placement.insert(name.to_owned(), name.to_owned());
+        }
     }
     fn target(&self, target: &Target) -> Result<String, String> {
         let name = match target {
@@ -471,6 +478,37 @@ impl Control {
                 None
             }
             Operation::CancelTrigger { .. } => None,
+            Operation::Spawn {
+                from,
+                name,
+                env,
+                argv,
+            } => {
+                let from = self.target(from)?;
+                let index = self.names.len();
+                if index >= crate::faults::MAX_MACHINES {
+                    return Err("spawn would exceed 254 machines".into());
+                }
+                let machine = match name {
+                    Some(name) => name.clone(),
+                    None => (2..)
+                        .map(|k| format!("{from}-{k}"))
+                        .find(|n| !self.names.contains(n) && !self.placement.contains_key(n))
+                        .unwrap(),
+                };
+                seedbox_control::validate_spawn(&machine, env, argv.as_deref())?;
+                if self.names.contains(&machine) || self.placement.contains_key(&machine) {
+                    return Err("spawn name is already in use".into());
+                }
+                // Preparation numbers services' addresses the same way.
+                result = json!({"machine":machine,"address":crate::world::machine_address(index)});
+                Some(Action::Spawn {
+                    machine,
+                    from,
+                    env: env.clone(),
+                    argv: argv.clone(),
+                })
+            }
         };
         let plan = action
             .map(|action| {

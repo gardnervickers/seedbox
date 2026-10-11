@@ -100,6 +100,16 @@ impl WorldMachine for Machine {
         self.timer_rng = Some(Rng::branch(seed, identity, domain));
         Ok(())
     }
+    fn spawn_boot(
+        _factory: &Self::Factory,
+        base: &BootInputs,
+        spec: &seedbox_engine_core::world::SpawnSpec<'_>,
+    ) -> Result<BootInputs, String> {
+        base.spawned(spec)
+    }
+    fn attach_spawned(&mut self, boot: &BootInputs) -> Result<(), String> {
+        crate::attach_outputs(self, &boot.outputs)
+    }
     fn supports_speed_reseed(&self) -> bool {
         true
     }

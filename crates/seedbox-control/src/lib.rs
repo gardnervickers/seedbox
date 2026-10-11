@@ -142,6 +142,16 @@ pub enum Operation {
     Reboot {
         target: Target,
     },
+    /// Add a machine running a copy of `from`'s prepared program.
+    Spawn {
+        from: Target,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        argv: Option<Vec<String>>,
+    },
     Partition {
         left: Vec<Target>,
         right: Vec<Target>,
@@ -404,6 +414,15 @@ pub enum Action {
     Reboot {
         machine: String,
     },
+    /// Add `machine` as a copy of `from` with launch overrides.
+    Spawn {
+        machine: String,
+        from: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        argv: Option<Vec<String>>,
+    },
 }
 impl Action {
     pub fn name(&self) -> &'static str {
@@ -423,6 +442,7 @@ impl Action {
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
             Self::Reboot { .. } => "reboot",
+            Self::Spawn { .. } => "spawn",
         }
     }
     pub fn machine(&self) -> Option<&str> {
@@ -437,7 +457,8 @@ impl Action {
             | Self::Reboot { machine }
             | Self::ClockSkew { machine, .. }
             | Self::ClockDrift { machine, .. }
-            | Self::Throttle { machine, .. } => Some(machine),
+            | Self::Throttle { machine, .. }
+            | Self::Spawn { machine, .. } => Some(machine),
             _ => None,
         }
     }
@@ -486,6 +507,34 @@ pub fn validate_clock_drift(
             "clock_drift needs exactly one of a nonzero rate_ppb or a positive max_rate_ppb, each at most {MAX_CLOCK_RATE_PPB}"
         )),
     }
+}
+
+/// Validate launch overrides before either a control operation or an interactive fault
+/// can admit a new machine.
+pub fn validate_spawn(
+    name: &str,
+    env: &BTreeMap<String, String>,
+    argv: Option<&[String]>,
+) -> Result<(), String> {
+    if name.is_empty()
+        || name.len() > 63
+        || name.starts_with('-')
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err("spawn name must be a lowercase DNS label".into());
+    }
+    if env
+        .keys()
+        .any(|k| k.is_empty() || k.contains('=') || k.contains('\0'))
+        || env.values().any(|v| v.contains('\0'))
+        || argv
+            .is_some_and(|a| a.is_empty() || a[0].is_empty() || a.iter().any(|x| x.contains('\0')))
+    {
+        return Err("invalid spawn environment or argv".into());
+    }
+    Ok(())
 }
 
 /// Throttled CPU speeds, in Hz: from a thousandth of the slowest configured CPU
@@ -548,6 +597,28 @@ mod tests {
             assert_eq!(effective_throttle_speed(2_000_000_000, factor), effective);
         }
     }
+
+    #[test]
+    fn spawn_launch_values_match_both_admission_paths() {
+        let mut env = BTreeMap::new();
+        assert!(validate_spawn("node-2", &env, Some(&["/bin/app".into()])).is_ok());
+        for bad in ["", "-node", "Node", "n.old", &"a".repeat(64)] {
+            assert!(validate_spawn(bad, &env, None).is_err(), "accepted {bad}");
+        }
+        for (key, value) in [("", "ok"), ("A=B", "ok"), ("A\0B", "ok"), ("A", "x\0y")] {
+            env.insert(key.to_string(), value.to_string());
+            assert!(validate_spawn("node", &env, None).is_err());
+            env.clear();
+        }
+        for argv in [
+            vec![],
+            vec!["".into()],
+            vec!["/bin/app".into(), "x\0y".into()],
+        ] {
+            assert!(validate_spawn("node", &env, Some(&argv)).is_err());
+        }
+    }
+
     #[test]
     fn strict_wire_rejects_unknown_fields_bad_targets_and_duplicate_identity() {
         for bad in [

@@ -55,6 +55,23 @@ impl Streams {
             }
         }
     }
+    pub fn add_machine(&mut self, seed: u64, identity: Option<&str>, names: &[String]) {
+        let new = names.len() - 1;
+        for (streams, domain) in self.0.iter_mut().zip(DOMAINS) {
+            for other in 0..new {
+                for (a, b) in [(new, other), (other, new)] {
+                    streams.insert(
+                        (a, b),
+                        Rng::branch(
+                            seed,
+                            identity,
+                            &format!("{domain}/{}/{}", names[a], names[b]),
+                        ),
+                    );
+                }
+            }
+        }
+    }
     /// Every ordered pair of distinct machines has a stream of each kind
     /// from the last reseed.
     fn stream(&mut self, pair: Pair, kind: usize) -> &mut Rng {

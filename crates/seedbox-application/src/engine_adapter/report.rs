@@ -161,6 +161,48 @@ struct HistoryCheck<'a> {
     down: BTreeSet<String>,
     /// Clock skew handles, whose heals wait for their guest effect.
     clocks: BTreeSet<String>,
+    /// Machines the scenario spawned, with their applied time and fault ID.
+    spawned: &'a BTreeMap<String, (u64, u32)>,
+}
+
+/// The fault evidence, not the reply, says which machines actually booted.
+/// A spawn can apply before the run ends even when its reply is cut off.
+fn spawned_machines(faults: &[FaultRecord]) -> BTreeMap<String, (u64, u32)> {
+    faults
+        .iter()
+        .filter_map(
+            |row| match (&row.request.action, row.status, row.applied_at_ns) {
+                (Action::Spawn { machine, .. }, RowStatus::Applied, Some(at)) => {
+                    Some((machine.clone(), (at, row.id)))
+                }
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+fn spawned_before(
+    spawned: &BTreeMap<String, (u64, u32)>,
+    name: &str,
+    requested: u64,
+    before_id: u32,
+) -> bool {
+    spawned
+        .get(name)
+        .is_some_and(|&(effect, id)| effect <= requested && id < before_id)
+}
+
+fn service_target<'a>(
+    placement: &'a BTreeMap<String, String>,
+    spawned: &BTreeMap<String, (u64, u32)>,
+    service: &'a str,
+    requested: u64,
+    before_id: u32,
+) -> Option<&'a str> {
+    placement
+        .get(service)
+        .map(String::as_str)
+        .or_else(|| spawned_before(spawned, service, requested, before_id).then_some(service))
 }
 
 /// Correlate guest-originated requests to responses and applied engine actions.
@@ -170,6 +212,7 @@ pub(super) fn validate_control_history(
     request: &ExecutionRequest<'_>,
     failed: bool,
     external_plans: Vec<Plan>,
+    spawned: &BTreeMap<String, (u64, u32)>,
 ) -> Result<ValidatedControlHistory> {
     if latency != control_latency(request)? {
         return Err(Error::Integrity("control latency mismatch".into()));
@@ -190,6 +233,7 @@ pub(super) fn validate_control_history(
         next_fault_id: 1,
         down: BTreeSet::new(),
         clocks: BTreeSet::new(),
+        spawned,
     };
     for (i, row) in history.iter().enumerate() {
         if row.status == Some(ControlStatus::Rejected) && failed {
@@ -379,18 +423,20 @@ impl HistoryCheck<'_> {
     }
 
     /// The machine a fault target names; never the controller.
-    fn resolve(&self, target: &Target) -> Result<String> {
+    fn resolve(&self, target: &Target, at: u64) -> Result<String> {
+        let spawned = |name: &str| spawned_before(self.spawned, name, at, self.next_fault_id);
         let machine = match target {
-            Target::Service(service) => self
-                .request
-                .prepared
-                .placement
-                .get(service)
-                .map(String::as_str),
+            Target::Service(service) => service_target(
+                &self.request.prepared.placement,
+                self.spawned,
+                service,
+                at,
+                self.next_fault_id,
+            ),
             Target::Machine(machine) => Some(machine.as_str()),
         }
         .ok_or_else(|| Error::Integrity("invalid control target".into()))?;
-        if !self.request.prepared.guests.contains_key(machine)
+        if !(self.request.prepared.guests.contains_key(machine) || spawned(machine))
             || self.controller.is_some_and(|name| name == machine)
         {
             return Err(Error::Integrity(
@@ -400,8 +446,8 @@ impl HistoryCheck<'_> {
         Ok(machine.to_owned())
     }
 
-    fn resolve_all(&self, targets: &[Target]) -> Result<Vec<String>> {
-        targets.iter().map(|t| self.resolve(t)).collect()
+    fn resolve_all(&self, targets: &[Target], at: u64) -> Result<Vec<String>> {
+        targets.iter().map(|t| self.resolve(t, at)).collect()
     }
 
     /// The fault action a request planned, or `None` for an operation that
@@ -416,6 +462,7 @@ impl HistoryCheck<'_> {
         let bad = correlation_mismatch;
         let response = row.response.is_some();
         let (a, e) = (times.admitted, times.effect);
+        let requested = row.timing().requested_at_ns.ok_or_else(bad)?;
         // A handle allocated at admission, applied at once when answered.
         let handle = || -> Result<String> {
             let handle = row.planned_handle().ok_or_else(bad)?;
@@ -426,33 +473,33 @@ impl HistoryCheck<'_> {
         };
         let action = match operation {
             Operation::Stop { target } => Action::Stop {
-                machine: self.resolve(&target)?,
+                machine: self.resolve(&target, requested)?,
             },
             Operation::Restart { target } => Action::Restart {
-                machine: self.resolve(&target)?,
+                machine: self.resolve(&target, requested)?,
             },
             Operation::PauseProcess { target } => Action::PauseProcess {
-                machine: self.resolve(&target)?,
+                machine: self.resolve(&target, requested)?,
             },
             Operation::ResumeProcess { target } => Action::ResumeProcess {
-                machine: self.resolve(&target)?,
+                machine: self.resolve(&target, requested)?,
             },
             Operation::Pause { target } => Action::Pause {
-                machine: self.resolve(&target)?,
+                machine: self.resolve(&target, requested)?,
             },
             Operation::Resume { target } => Action::Resume {
-                machine: self.resolve(&target)?,
+                machine: self.resolve(&target, requested)?,
             },
             Operation::Crash { target } => Action::Crash {
-                machine: self.resolve(&target)?,
+                machine: self.resolve(&target, requested)?,
             },
             Operation::Reboot { target } => Action::Reboot {
-                machine: self.resolve(&target)?,
+                machine: self.resolve(&target, requested)?,
             },
             Operation::Partition { left, right } => Action::Partition {
                 handle: handle()?,
-                left: self.resolve_all(&left)?,
-                right: self.resolve_all(&right)?,
+                left: self.resolve_all(&left, requested)?,
+                right: self.resolve_all(&right, requested)?,
             },
             Operation::Shape {
                 from,
@@ -477,8 +524,8 @@ impl HistoryCheck<'_> {
                 {
                     return Err(bad());
                 }
-                let from = self.resolve_all(&from)?;
-                let to = self.resolve_all(&to)?;
+                let from = self.resolve_all(&from, requested)?;
+                let to = self.resolve_all(&to, requested)?;
                 if from.is_empty()
                     || to.is_empty()
                     || from.iter().chain(&to).collect::<BTreeSet<_>>().len()
@@ -503,15 +550,17 @@ impl HistoryCheck<'_> {
                 if connection.incarnation == 0
                     || connection.src_port == 0
                     || connection.dst_port == 0
-                    || self.resolve(&Target::Machine(connection.from.clone()))?
-                        == self.resolve(&Target::Machine(connection.to.clone()))?
+                    || self.resolve(&Target::Machine(connection.from.clone()), requested)?
+                        == self.resolve(&Target::Machine(connection.to.clone()), requested)?
                 {
                     return Err(bad());
                 }
                 Action::DropConnection { handle, connection }
             }
             Operation::Connections { from, to, .. } => {
-                if e != Some(a) || self.resolve(&from)? == self.resolve(&to)? {
+                if e != Some(a)
+                    || self.resolve(&from, requested)? == self.resolve(&to, requested)?
+                {
                     return Err(bad());
                 }
                 return Ok(None);
@@ -535,7 +584,7 @@ impl HistoryCheck<'_> {
                 }
                 Action::ClockSkew {
                     handle,
-                    machine: self.resolve(&target)?,
+                    machine: self.resolve(&target, requested)?,
                     offset_ns,
                     max_offset_ns,
                 }
@@ -559,7 +608,7 @@ impl HistoryCheck<'_> {
                 }
                 Action::ClockDrift {
                     handle,
-                    machine: self.resolve(&target)?,
+                    machine: self.resolve(&target, requested)?,
                     rate_ppb,
                     max_rate_ppb,
                 }
@@ -571,7 +620,7 @@ impl HistoryCheck<'_> {
                 }
                 Action::Throttle {
                     handle,
-                    machine: self.resolve(&target)?,
+                    machine: self.resolve(&target, requested)?,
                     speed_hz,
                 }
             }
@@ -581,6 +630,31 @@ impl HistoryCheck<'_> {
                     return Err(bad());
                 }
                 Action::Heal { handle }
+            }
+            Operation::Spawn {
+                from,
+                name,
+                env,
+                argv,
+            } => {
+                let machine = if response {
+                    row.result().and_then(|r| r.get("machine"))
+                } else {
+                    row.plan.as_ref().and_then(|p| p.get("machine"))
+                };
+                let machine = machine.and_then(Value::as_str).ok_or_else(bad)?.to_owned();
+                if self.request.prepared.guests.contains_key(&machine)
+                    || name.is_some_and(|name| name != machine)
+                    || (response && e != Some(a))
+                {
+                    return Err(bad());
+                }
+                Action::Spawn {
+                    machine,
+                    from: self.resolve(&from, requested)?,
+                    env,
+                    argv,
+                }
             }
             Operation::Now {} => {
                 let now = row
@@ -689,6 +763,7 @@ pub(super) fn validate_triggers(
     records: Option<&[TriggerRecord]>,
     history: &[ControlRecord],
     request: &ExecutionRequest<'_>,
+    spawned: &BTreeMap<String, (u64, u32)>,
 ) -> Result<Vec<Plan>> {
     let bad = invalid_trigger_evidence;
     if records.is_some_and(|r| r.is_empty() || r.len() > MAX_TRIGGERS) {
@@ -696,7 +771,7 @@ pub(super) fn validate_triggers(
     }
     let records = records.unwrap_or_default();
     let latency = control_latency(request)?;
-    let cancellations = correlate_trigger_requests(records, history, request)?;
+    let cancellations = correlate_trigger_requests(records, history, request, spawned)?;
     let mut plans = Vec::new();
     for r in records {
         if let Some(plan) = trigger_fault(r, &cancellations, latency, request)? {
@@ -716,23 +791,27 @@ fn correlate_trigger_requests(
     records: &[TriggerRecord],
     history: &[ControlRecord],
     request: &ExecutionRequest<'_>,
+    spawned: &BTreeMap<String, (u64, u32)>,
 ) -> Result<BTreeMap<u32, u64>> {
     let bad = invalid_trigger_evidence;
     let controller = request
         .control
         .and_then(|c| request.prepared.placement.get(&c.service));
-    let resolve = |target: &Target, fault: bool| -> Result<String> {
+    let resolve = |target: &Target, fault: bool, requested: u64| -> Result<String> {
+        let spawned_before = |name: &str| spawned_before(spawned, name, requested, u32::MAX);
         let name = match target {
-            Target::Service(s) => request.prepared.placement.get(s).ok_or_else(bad)?,
-            Target::Machine(m) => m,
-        };
-        if !request.prepared.guests.contains_key(name) || (fault && Some(name) == controller) {
+            Target::Service(s) => {
+                service_target(&request.prepared.placement, spawned, s, requested, u32::MAX)
+            }
+            Target::Machine(m) => Some(m.as_str()),
+        }
+        .ok_or_else(bad)?;
+        if !(request.prepared.guests.contains_key(name) || spawned_before(name))
+            || (fault && Some(name) == controller.map(String::as_str))
+        {
             return Err(bad());
         }
-        Ok(name.clone())
-    };
-    let resolve_faults = |targets: &[Target]| -> Result<Vec<String>> {
-        targets.iter().map(|t| resolve(t, true)).collect()
+        Ok(name.to_owned())
     };
     let mut arms = 0;
     let mut cancellations = BTreeMap::new();
@@ -747,6 +826,13 @@ fn correlate_trigger_requests(
         }
         let call: Request = serde_json::from_value(row.request.clone()).map_err(|_| bad())?;
         let at = row.timing().admitted_at_ns.ok_or_else(bad)?;
+        let requested = row.timing().requested_at_ns.ok_or_else(bad)?;
+        let resolve_faults = |targets: &[Target]| -> Result<Vec<String>> {
+            targets
+                .iter()
+                .map(|t| resolve(t, true, requested))
+                .collect()
+        };
         let result = |key: &str| row.result().and_then(|r| r.get(key));
         match call.operation {
             Operation::CancelTrigger { trigger_id } => {
@@ -767,7 +853,7 @@ fn correlate_trigger_requests(
                 arms += 1;
                 if r.id as usize != arms
                     || result("trigger_id").and_then(Value::as_u64) != Some(u64::from(r.id))
-                    || r.source != resolve(&source, false)?
+                    || r.source != resolve(&source, false, requested)?
                     || r.marker != marker
                     || marker.is_empty()
                     || marker.len() > MAX_TRIGGER_MARKER
@@ -779,7 +865,7 @@ fn correlate_trigger_requests(
                 }
                 let action = match fault {
                     TriggerFault::Stop { target } => Action::Stop {
-                        machine: resolve(&target, true)?,
+                        machine: resolve(&target, true, requested)?,
                     },
                     TriggerFault::Partition { left, right } => {
                         let handle = result("handle")
@@ -1007,7 +1093,14 @@ pub(super) fn checked_report(
             .transpose()?;
     }
     let names: BTreeSet<_> = machines.iter().map(|machine| &machine.name).collect();
-    if names.len() != machines.len() || names != request.prepared.guests.keys().collect() {
+    let spawned = spawned_machines(&raw.faults);
+    let expected: BTreeSet<_> = request
+        .prepared
+        .guests
+        .keys()
+        .chain(spawned.keys())
+        .collect();
+    if names.len() != machines.len() || names != expected {
         return Err(Error::Integrity("VMM report machine set mismatch".into()));
     }
     let workload = request
@@ -1034,7 +1127,7 @@ pub(super) fn checked_report(
             RunOutcome::Duration => StopReason::SimulatedTimeLimit,
             RunOutcome::Quiescent => StopReason::Quiescent,
             RunOutcome::FaultFailed => StopReason::Error,
-            other @ (RunOutcome::Checkpoint | RunOutcome::Barrier) => {
+            other @ (RunOutcome::Checkpoint | RunOutcome::Barrier | RunOutcome::Spawn) => {
                 return Err(Error::Integrity(format!("unknown VMM outcome {other}")))
             }
         }
@@ -1062,8 +1155,12 @@ pub(super) fn checked_report(
         return Err(Error::Integrity("unexpected control transcript".into()));
     }
     let program = external_program(request)?;
-    let mut external_plans =
-        validate_triggers(raw.triggers.as_deref(), &raw.control_history, request)?;
+    let mut external_plans = validate_triggers(
+        raw.triggers.as_deref(),
+        &raw.control_history,
+        request,
+        &spawned,
+    )?;
     let scheduled = validate_input_admissions(
         &program,
         &raw.input_admissions,
@@ -1078,6 +1175,7 @@ pub(super) fn checked_report(
             request,
             raw.fault_error.is_some(),
             external_plans,
+            &spawned,
         )?
     } else {
         external_plans.sort_by_key(|plan| plan.id);
@@ -1139,6 +1237,9 @@ pub(super) fn checked_report(
     if fault_failure.is_some() {
         reason = StopReason::Error;
     }
+    let mut spawned_by_id: Vec<_> = spawned.into_iter().collect();
+    spawned_by_id.sort_by_key(|(_, (_, id))| *id);
+    let spawned = spawned_by_id.into_iter().map(|(name, _)| name).collect();
     Ok(ExecutionReport {
         host_wait_ns: 0,
         simulated_time_ns: machines.iter().map(|machine| machine.time_ns).max(),
@@ -1147,6 +1248,7 @@ pub(super) fn checked_report(
         witness: Some(world_witness),
         full_state,
         faults,
+        spawned,
         detail: fault_failure.or_else(|| {
             infrastructure_error
                 .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name))
@@ -1292,6 +1394,12 @@ impl FaultCheck<'_> {
                             .iter()
                             .find(|(_, m)| *m == machine)
                             .map(|(s, _)| s.clone())
+                            // A spawned machine runs under its own name.
+                            .or_else(|| {
+                                spawned_machines(&self.raw.faults)
+                                    .contains_key(machine)
+                                    .then(|| machine.clone())
+                            })
                     })
                     .unwrap_or_default();
                 Ok(FaultEffect::Applied(crate::execution::FaultEvent {
@@ -1409,6 +1517,65 @@ mod tests {
         rejections[0].at_ns += 1;
         assert!(super::validate_input_admissions(&program, &admissions, &rejections, 100).is_err());
         assert!(super::validate_input_admissions(&program, &admissions, &[], 100).is_err());
+    }
+
+    #[test]
+    fn applied_spawn_without_reply_is_reported_and_alias_requires_prior_effect() {
+        use serde_json::json;
+        let plan = Plan {
+            id: 1,
+            at_ns: 90,
+            deadline_ns: 100,
+            action: Action::Spawn {
+                machine: "joiner".into(),
+                from: "server".into(),
+                env: BTreeMap::new(),
+                argv: None,
+            },
+        };
+        let fault: FaultRecord = serde_json::from_value(json!({
+            "action": "spawn",
+            "applied_at_ns": 90,
+            "detail": "machine joiner spawned",
+            "id": 1,
+            "machine": "joiner",
+            "request": plan,
+            "requested_at_ns": 90,
+            "status": "applied"
+        }))
+        .unwrap();
+        let cut_off: ControlRecord = serde_json::from_value(json!({
+            "status": "cut_off",
+            "relay_id": 1,
+            "session_id": 1,
+            "request": {"version": 1, "id": 1, "op": "spawn", "from": {"machine": "server"}},
+            "admitted_at_ns": 90,
+            "admitted_done": true,
+            "effect_at_ns": 90,
+            "replied_at_ns": 110,
+            "cut_off_at_ns": 100,
+            "fault_id": 1,
+            "plan": plan,
+            "fatal": false
+        }))
+        .unwrap();
+        assert!(cut_off.response.is_none());
+        let spawned = spawned_machines(std::slice::from_ref(&fault));
+        assert_eq!(spawned["joiner"], (90, 1));
+        let placement = BTreeMap::from([("server".into(), "server".into())]);
+        assert_eq!(service_target(&placement, &spawned, "joiner", 89, 2), None);
+        assert_eq!(service_target(&placement, &spawned, "joiner", 90, 1), None);
+        assert_eq!(
+            service_target(&placement, &spawned, "joiner", 90, 2),
+            Some("joiner")
+        );
+        assert_eq!(
+            service_target(&placement, &spawned, "server", 0, 1),
+            Some("server")
+        );
+        let mut unrequested = fault;
+        unrequested.status = RowStatus::Requested;
+        assert!(spawned_machines(&[unrequested]).is_empty());
     }
 
     #[test]

@@ -83,8 +83,17 @@ impl Reader {
         }
         let record = orchestration::inspect(directory)
             .map_err(|e| bad(&directory.join("manifest.json"), e))?;
+        let prepared = record.identity.inputs.guests.keys();
+        let machines: Vec<String> = match &record.report {
+            Some(report) => report
+                .machines(prepared)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            None => prepared.cloned().collect(),
+        };
         if let Some(machine) = &filter.machine {
-            if !record.identity.inputs.guests.contains_key(machine) {
+            if !machines.contains(machine) {
                 return Err(Error::Setup(format!(
                     "--machine {machine}: unknown machine; use a machine from inspect --json"
                 )));
@@ -100,7 +109,7 @@ impl Reader {
             directory: directory.to_owned(),
         };
         let mut total = 0;
-        for machine in record.identity.inputs.guests.keys() {
+        for machine in &machines {
             let mut orders = BTreeMap::new();
             for stream in [Stream::Console, Stream::Mgmt] {
                 let name = format!("machines/{machine}.{}", stream.extension());

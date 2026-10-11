@@ -48,6 +48,7 @@ pub(super) struct FormContext {
 #[derive(Clone, Debug, PartialEq)]
 enum Entry {
     Heal(String, String),
+    SpawnCopy(String),
     Fault(usize),
 }
 
@@ -160,6 +161,17 @@ impl FaultForm {
         let filter = self.filter.to_lowercase();
         let matches = |text: &str| filter.is_empty() || text.to_lowercase().contains(&filter);
         let mut out = Vec::new();
+        if let Some(source) = &self.context.selected {
+            if self.catalogue.faults.iter().any(|fault| {
+                fault.name == "spawn"
+                    && choices(&fault.schema["properties"]["from"])
+                        .iter()
+                        .any(|choice| choice.as_str() == Some(source))
+            }) && matches(&format!("spawn a copy {source}"))
+            {
+                out.push(Entry::SpawnCopy(source.clone()));
+            }
+        }
         if self.heal_schema().is_some() {
             for (handle, description) in &self.context.active {
                 if matches(&format!("heal {handle} {description}")) {
@@ -173,6 +185,39 @@ impl FaultForm {
             }
         }
         out
+    }
+
+    /// The immediate spawn action must be valid against the current catalogue.
+    pub(super) fn quick_spawn_action(&self) -> Option<Value> {
+        let source = self.context.selected.as_ref()?;
+        let schema = &self
+            .catalogue
+            .faults
+            .iter()
+            .find(|fault| fault.name == "spawn")?
+            .schema;
+        let action = serde_json::json!({
+            "action": "spawn",
+            "from": source,
+            "machine": self.fresh_machine(source),
+        });
+        validate(schema, &action, "spawn").ok()?;
+        Some(action)
+    }
+
+    /// Follow the oracle's `source-2` convention, within the DNS-label limit.
+    fn fresh_machine(&self, source: &str) -> String {
+        (2..)
+            .map(|number| {
+                let suffix = format!("-{number}");
+                let prefix: String = source
+                    .chars()
+                    .take(63usize.saturating_sub(suffix.len()))
+                    .collect();
+                format!("{}{suffix}", prefix.trim_end_matches('-'))
+            })
+            .find(|name| !self.context.machines.contains(name))
+            .unwrap_or_else(|| "machine-2".into())
     }
 
     /// A handle not yet used in this world, from the action's initial.
@@ -243,6 +288,11 @@ impl FaultForm {
         flatten(&fault.schema, &mut Vec::new(), true, None, &mut self.fields);
         let name = fault.name.clone();
         let fresh = self.fresh_handle(&name);
+        let machine = self
+            .context
+            .selected
+            .as_ref()
+            .map(|source| self.fresh_machine(source));
         for field in &mut self.fields {
             if !field.text.is_empty() {
                 continue;
@@ -256,6 +306,11 @@ impl FaultForm {
                         field.text = selected.clone();
                     }
                     continue;
+                }
+            }
+            if name == "spawn" && field.path == ["machine"] {
+                if let Some(machine) = &machine {
+                    field.text.clone_from(machine);
                 }
             }
             let is_handle = field.path.last().is_some_and(|last| last == "handle");
@@ -279,6 +334,11 @@ impl FaultForm {
                     self.cursor = (self.cursor + 1) % count
                 }
                 KeyCode::Enter if count > 0 => match &entries[self.cursor.min(count - 1)] {
+                    Entry::SpawnCopy(_) => {
+                        return self
+                            .quick_spawn_action()
+                            .map_or(FormOutcome::None, FormOutcome::Submit);
+                    }
                     Entry::Fault(index) => {
                         self.selected = *index;
                         self.editing = true;
@@ -520,6 +580,7 @@ impl FaultForm {
             let mut section = "";
             for (index, entry) in entries.iter().enumerate().skip(start).take(visible) {
                 let heading = match entry {
+                    Entry::SpawnCopy(_) => "QUICK ACTION",
                     Entry::Heal(..) => "HEAL",
                     Entry::Fault(_) => "INJECT",
                 };
@@ -542,6 +603,16 @@ impl FaultForm {
                 let on = index == self.cursor;
                 let marker = if on { "›" } else { " " };
                 let line = match entry {
+                    Entry::SpawnCopy(source) => Line::from(vec![
+                        Span::styled(
+                            format!("{marker} ✚ Spawn a copy of {source}  "),
+                            Style::default().fg(if on { ICE } else { TEXT }),
+                        ),
+                        Span::styled(
+                            format!("→ {} · Enter to spawn", self.fresh_machine(source)),
+                            Style::default().fg(DIM),
+                        ),
+                    ]),
                     Entry::Heal(handle, description) => Line::from(vec![
                         Span::styled(
                             format!("{marker} ✚ heal {handle}  "),
@@ -566,11 +637,20 @@ impl FaultForm {
                     line
                 });
             }
-            if let Some(Entry::Fault(i)) = entries.get(self.cursor) {
-                lines.push(Line::raw(""));
-                for text in wrap_text(&self.catalogue.faults[*i].description, text_width, 3) {
-                    lines.push(Line::styled(text, Style::default().fg(DIM)));
+            match entries.get(self.cursor) {
+                Some(Entry::Fault(i)) => {
+                    lines.push(Line::raw(""));
+                    for text in wrap_text(&self.catalogue.faults[*i].description, text_width, 3) {
+                        lines.push(Line::styled(text, Style::default().fg(DIM)));
+                    }
                 }
+                Some(Entry::SpawnCopy(_)) => {
+                    lines.push(Line::styled(
+                        "Use Spawn machine below to customize the name, env or argv.",
+                        Style::default().fg(DIM),
+                    ));
+                }
+                _ => {}
             }
         } else if let Some(fault) = self.catalogue.faults.get(self.selected) {
             lines.push(Line::styled(
@@ -673,6 +753,17 @@ impl FaultForm {
                     for text in wrap_text(description, text_width, 2) {
                         lines.push(Line::styled(text, Style::default().fg(DIM)));
                     }
+                }
+                if field.schema["type"] == "object" {
+                    lines.push(Line::styled(
+                        "Enter a JSON object, for example {\"MODE\":\"test\"}.",
+                        Style::default().fg(DIM),
+                    ));
+                } else if field.path == ["argv"] && field.schema["type"] == "array" {
+                    lines.push(Line::styled(
+                        "Use JSON for exact arguments, for example [\"--key=one,two\"].",
+                        Style::default().fg(DIM),
+                    ));
                 }
                 if let Some(example) = field.schema["x-input-example"].as_str() {
                     let units = field.schema["x-input-units"]
@@ -902,20 +993,27 @@ fn flatten(
                 );
                 path.pop();
             }
+            if !properties.is_empty() {
+                return;
+            }
         }
-    } else {
-        fields.push(Field {
-            path: path.clone(),
-            schema: schema.clone(),
-            required,
-            text: default
-                .map(|value| display_field_value(schema, value))
-                .unwrap_or_default(),
-            choice: default
-                .and_then(|value| choices(schema).iter().position(|choice| choice == value))
-                .unwrap_or(0),
-        });
+        // An object with dynamic keys has no child fields to render; edit it
+        // as JSON instead of silently losing its values.
+        if !schema["additionalProperties"].is_object() && schema["additionalProperties"] != true {
+            return;
+        }
     }
+    fields.push(Field {
+        path: path.clone(),
+        schema: schema.clone(),
+        required,
+        text: default
+            .map(|value| display_field_value(schema, value))
+            .unwrap_or_default(),
+        choice: default
+            .and_then(|value| choices(schema).iter().position(|choice| choice == value))
+            .unwrap_or(0),
+    });
 }
 
 fn choices(schema: &Value) -> Vec<Value> {
@@ -1076,11 +1174,18 @@ fn parse(schema: &Value, text: &str) -> Result<Value, String> {
         Some("integer") if schema.get("x-input-units").is_some() => parse_quantity(schema, text),
         Some("integer" | "number" | "boolean") => serde_json::from_str(text)
             .map_err(|_| "Enter a valid JSON number or boolean.".to_owned()),
-        Some("array") if schema["items"]["type"] == "string" => Ok(Value::Array(
-            text.split(',')
-                .map(|s| Value::String(s.trim().to_owned()))
-                .collect(),
-        )),
+        Some("array") if schema["items"]["type"] == "string" => {
+            if text.trim_start().starts_with('[') {
+                serde_json::from_str(text)
+                    .map_err(|_| "Enter a valid JSON array of strings.".to_owned())
+            } else {
+                Ok(Value::Array(
+                    text.split(',')
+                        .map(|s| Value::String(s.trim().to_owned()))
+                        .collect(),
+                ))
+            }
+        }
         Some("array" | "object") => {
             serde_json::from_str(text).map_err(|_| "Enter valid JSON.".to_owned())
         }
@@ -1130,9 +1235,35 @@ fn apply_constants(schema: &Value, value: &mut Value) {
 /// Deliberately bounded schema support; the server performs final action validation.
 pub(super) fn validate(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
     let fail = |message: &str| Err(format!("{path}: {message}"));
-    for keyword in ["$ref", "pattern", "patternProperties"] {
+    for keyword in ["$ref", "patternProperties"] {
         if schema.get(keyword).is_some() {
             return fail("Unsupported schema; use the CLI for this fault.");
+        }
+    }
+    if let Some(pattern) = schema.get("pattern") {
+        let Some(pattern) = pattern.as_str() else {
+            return fail("Unsupported schema; use the CLI for this fault.");
+        };
+        let valid = match pattern {
+            "^[a-z0-9][a-z0-9-]{0,62}$" => value.as_str().is_none_or(|text| {
+                !text.is_empty()
+                    && text.len() <= 63
+                    && text
+                        .bytes()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    && text
+                        .bytes()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+            }),
+            r"^[^=\u0000]+$" => value
+                .as_str()
+                .is_none_or(|text| !text.is_empty() && !text.contains('=') && !text.contains('\0')),
+            r"^[^\u0000]*$" => value.as_str().is_none_or(|text| !text.contains('\0')),
+            _ => return fail("Unsupported schema; use the CLI for this fault."),
+        };
+        if !valid {
+            return fail("Text does not match the required format.");
         }
     }
     if schema == &Value::Bool(false) {
@@ -1229,6 +1360,30 @@ pub(super) fn validate(schema: &Value, value: &Value, path: &str) -> Result<(), 
                     }
                 }
             }
+            if let Some(fields) = value.as_object() {
+                for (name, item) in fields {
+                    if let Some(rule) = schema.get("propertyNames") {
+                        validate(
+                            rule,
+                            &Value::String(name.clone()),
+                            &format!("{path}.{name}"),
+                        )?;
+                    }
+                    if schema["properties"].get(name).is_some() {
+                        continue;
+                    }
+                    if schema["additionalProperties"] == false {
+                        return Err(format!("{path}.{name}: Unknown field."));
+                    }
+                    if schema["additionalProperties"].is_object() {
+                        validate(
+                            &schema["additionalProperties"],
+                            item,
+                            &format!("{path}.{name}"),
+                        )?;
+                    }
+                }
+            }
         }
         Some("array") if value.is_array() => {
             if let Some(items) = value.as_array() {
@@ -1248,7 +1403,11 @@ pub(super) fn validate(schema: &Value, value: &Value, path: &str) -> Result<(), 
                     if schema["uniqueItems"] == true && items[..index].contains(item) {
                         return fail("Items must be unique.");
                     }
-                    validate(&schema["items"], item, &format!("{path}[{index}]"))?;
+                    let rule = schema["prefixItems"]
+                        .as_array()
+                        .and_then(|prefix| prefix.get(index))
+                        .unwrap_or(&schema["items"]);
+                    validate(rule, item, &format!("{path}[{index}]"))?;
                 }
             }
         }
@@ -1589,6 +1748,165 @@ mod tests {
         assert!(validate(&json!({"$ref":"future"}), &json!("x"), "fault")
             .expect_err("unsupported")
             .contains("Unsupported"));
+    }
+
+    fn spawn_catalogue() -> FaultCatalogue {
+        FaultCatalogue {
+            simulation: "k7m2p9qx".parse().expect("id"),
+            faults: vec![seedbox_api::FaultDescriptor {
+                name: "spawn".into(),
+                title: "Spawn machine".into(),
+                description: String::new(),
+                schema: json!({"type":"object","additionalProperties":false,
+                "required":["action","from","machine"],"properties":{
+                    "action":{"type":"string","const":"spawn"},
+                    "from":{"type":"string","enum":["alpha","beta"]},
+                    "machine":{"type":"string","minLength":1},
+                    "env":{"type":"object","additionalProperties":{"type":"string"}},
+                    "argv":{"type":"array","items":{"type":"string"}}
+                }}),
+            }],
+        }
+    }
+
+    fn spawn_context() -> FormContext {
+        FormContext {
+            machines: vec!["alpha".into(), "alpha-2".into(), "beta".into()],
+            selected: Some("alpha".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn quick_spawn_is_first_and_names_a_fresh_copy() {
+        let mut form = FaultForm::new(spawn_catalogue()).with_context(spawn_context());
+        assert_eq!(form.entries()[0], Entry::SpawnCopy("alpha".into()));
+        let action = json!({"action":"spawn","from":"alpha","machine":"alpha-3"});
+        assert_eq!(form.quick_spawn_action(), Some(action.clone()));
+        assert_eq!(
+            form.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            FormOutcome::Submit(action)
+        );
+        assert!(!form.editing);
+        form.context.selected = None;
+        assert_eq!(form.quick_spawn_action(), None);
+        assert_eq!(form.entries(), vec![Entry::Fault(0)]);
+        form.context.selected = Some("removed".into());
+        assert_eq!(form.quick_spawn_action(), None);
+        assert_eq!(form.entries(), vec![Entry::Fault(0)]);
+    }
+
+    #[test]
+    fn quick_spawn_keeps_long_names_within_the_dns_limit() {
+        let mut form = FaultForm::new(spawn_catalogue()).with_context(spawn_context());
+        let long = format!("{}z", "a".repeat(62));
+        form.context.selected = Some(long.clone());
+        form.catalogue.faults[0].schema["properties"]["from"]["enum"] = json!([long]);
+        let name = form.quick_spawn_action().unwrap()["machine"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(name.len(), 63);
+        assert!(name.ends_with("-2"));
+        form.context.machines.push(name);
+        assert!(form.quick_spawn_action().unwrap()["machine"]
+            .as_str()
+            .unwrap()
+            .ends_with("-3"));
+    }
+
+    #[test]
+    fn customized_spawn_accepts_json_environment_and_exact_arguments() {
+        let mut form = FaultForm::new(spawn_catalogue()).with_context(spawn_context());
+        form.input(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        form.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(form.editing);
+        let text = |path: &str, form: &FaultForm| -> String {
+            form.fields
+                .iter()
+                .find(|field| field.path == [path])
+                .expect("field")
+                .text
+                .clone()
+        };
+        assert_eq!(text("from", &form), "alpha");
+        assert_eq!(text("machine", &form), "alpha-3");
+        form.fields
+            .iter_mut()
+            .find(|field| field.path == ["env"])
+            .unwrap()
+            .text = r#"{"MODE":"try,it"}"#.into();
+        form.fields
+            .iter_mut()
+            .find(|field| field.path == ["argv"])
+            .unwrap()
+            .text = r#"["--key=one,two","plain"]"#.into();
+        assert_eq!(
+            form.value(),
+            Ok(
+                json!({"action":"spawn","from":"alpha","machine":"alpha-3","env":{"MODE":"try,it"},"argv":["--key=one,two","plain"]})
+            )
+        );
+        form.fields
+            .iter_mut()
+            .find(|field| field.path == ["env"])
+            .unwrap()
+            .text = r#"{"MODE":2}"#.into();
+        assert!(form.value().unwrap_err().contains("env.MODE"));
+        form.fields
+            .iter_mut()
+            .find(|field| field.path == ["env"])
+            .unwrap()
+            .text = "".into();
+        form.fields
+            .iter_mut()
+            .find(|field| field.path == ["argv"])
+            .unwrap()
+            .text = "[]".into();
+        assert_eq!(form.value().unwrap()["argv"], json!([]));
+    }
+
+    #[test]
+    fn spawn_schema_rejects_bad_names_env_and_argv_in_form() {
+        let mut schema = spawn_catalogue().faults.remove(0).schema;
+        schema["properties"]["machine"]["pattern"] = json!("^[a-z0-9][a-z0-9-]{0,62}$");
+        schema["properties"]["env"]["propertyNames"] = json!({"pattern":r"^[^=\u0000]+$"});
+        schema["properties"]["env"]["additionalProperties"]["pattern"] = json!(r"^[^\u0000]*$");
+        schema["properties"]["argv"]["minItems"] = json!(1);
+        schema["properties"]["argv"]["prefixItems"] =
+            json!([{"type":"string", "minLength":1, "pattern":r"^[^\u0000]*$"}]);
+        schema["properties"]["argv"]["items"]["pattern"] = json!(r"^[^\u0000]*$");
+        let base = json!({"action":"spawn","from":"alpha","machine":"alpha-2"});
+        assert!(validate(&schema, &base, "fault").is_ok());
+        for (property, bad, path) in [
+            ("machine", json!("-bad"), "fault.machine"),
+            ("machine", json!("A"), "fault.machine"),
+            ("env", json!({"A=B":"yes"}), "fault.env.A=B"),
+            ("env", json!({"A":"bad\u{0000}value"}), "fault.env.A"),
+            ("argv", json!([]), "fault.argv"),
+            ("argv", json!([""]), "fault.argv[0]"),
+            ("argv", json!(["bin", "bad\u{0000}value"]), "fault.argv[1]"),
+        ] {
+            let mut action = base.clone();
+            action[property] = bad;
+            assert!(validate(&schema, &action, "fault")
+                .unwrap_err()
+                .contains(path));
+        }
+    }
+
+    #[test]
+    fn dynamic_object_editor_does_not_replace_nested_property_fields() {
+        let mut fields = Vec::new();
+        flatten(&schema(), &mut Vec::new(), true, None, &mut fields);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].path, ["settings", "machines"]);
+        assert!(validate(
+            &json!({"type":"object","additionalProperties":false}),
+            &json!({"surprise":1}),
+            "fault"
+        )
+        .is_err());
     }
 }
 

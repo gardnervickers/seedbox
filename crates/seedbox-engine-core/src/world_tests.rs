@@ -768,6 +768,26 @@ fn failed_restore_terminates_every_worker_and_refuses_retry_before_activity() {
 }
 
 #[test]
+fn malformed_spawn_checkpoint_is_rejected_before_physical_restore() {
+    let mut w = world(&["a", "b"]);
+    let mut saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    let before = w.factory.lock().unwrap().clone();
+    saved.spawned.push(faults::Spawn {
+        machine: 0,
+        from: 0,
+        env: Default::default(),
+        argv: None,
+        at: 0,
+    });
+    assert!(saved
+        .restore_checkpoint(&mut w)
+        .unwrap_err()
+        .contains("spawn"));
+    assert!(w.failure.is_none());
+    assert_eq!(*w.factory.lock().unwrap(), before);
+}
+
+#[test]
 fn snapshot_restore_resets_clock_boundary_once_for_boot_and_runtime_forks() {
     let mut w = world(&["a"]);
     w.machines[0].park().unwrap();

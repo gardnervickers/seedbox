@@ -40,7 +40,8 @@ faults and submit a new simulation.
 
 ## Run your application
 
-Start with [the etcd example](examples/etcd/seedbox.yaml), or generate a project:
+Start with [the etcd example](examples/etcd/seedbox.yaml), try the
+[Python machine-spawn example](examples/spawn/README.md), or generate a project:
 
 ```sh
 ./target/release/seedbox init my-test --template etcd
