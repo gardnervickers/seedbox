@@ -724,8 +724,12 @@ impl<B: Backend> Machine<B> {
                         Effect::Yield => {
                             // A deferred IRQ requests a rendezvous independently
                             // of the deadline. Do not advance to a future timer
-                            // when the guest is yielding just to deliver it.
-                            if self.deferred_spis.is_empty() {
+                            // when the guest is yielding just to deliver it. A
+                            // masked guest cannot take it and yields only at its
+                            // bound, which its unpublished read step crosses.
+                            if self.deferred_spis.is_empty()
+                                || self.backend.get_reg(CoreReg::Pstate)? & (1 << 7) != 0
+                            {
                                 self.clock.at_bound()?;
                             }
                         }

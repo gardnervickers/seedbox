@@ -103,6 +103,10 @@ bound without allocating, acquiring another lock, scheduling or enabling
 interrupts. Interrupt delivery stays deferred until the guest permits it.
 
 Each hook charges a 100 ns read and is inactive before PV activation.
+A read that would cross the published bound yields instead. With interrupts
+masked it yields only for the bound, so the VMM advances to the bound even
+while an interrupt waits for delivery; otherwise the read would yield at the
+same time forever.
 This covers the patched kernel `cpu_relax`/`rep_nop` paths. It does not cover
 arbitrary assembly `PAUSE`/`YIELD`, early decompression or the vDSO. ARM
 `cpu_relax()` uses the same bounded read. Its raw exclusive-store retry loops
