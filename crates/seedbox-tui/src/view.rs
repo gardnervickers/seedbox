@@ -1801,7 +1801,7 @@ fn condition(focus: &Focus, m: &MachineState) -> (String, Color) {
             if m.exit_code == Some(0) { DIM } else { RED },
         ),
     };
-    if let Some(hz) = m.throttle_speed_hz {
+    if let Some(hz) = m.throttle_speed_hz.or(m.cpu_speed_hz) {
         text.0.push_str(&format!(" {}", frequency(hz)));
     }
     text
@@ -3241,7 +3241,7 @@ mod tests {
     }
 
     #[test]
-    fn a_throttled_machine_shows_its_speed() {
+    fn every_machine_shows_its_configured_or_throttled_speed() {
         assert_eq!(frequency(2_000_000_000), "2GHz");
         assert_eq!(frequency(1_500_000_000), "1.5GHz");
         assert_eq!(frequency(333_000_000), "333MHz");
@@ -3249,16 +3249,29 @@ mod tests {
         assert_eq!(frequency(800_000), "800kHz");
         assert_eq!(frequency(999), "999Hz");
         let mut app = app(&["app", "oracle"]);
-        assert!(!render(&app).contains("500MHz"));
+        let text = render(&app);
+        assert!(text.matches("● ready 1GHz").count() >= 2, "{text}");
+        let mut baseline = world(&["app", "oracle"]);
+        baseline.machines[0].cpu_speed_hz = Some(2_000_000_000);
+        app.apply(Update::World(baseline.clone()));
+        let text = render(&app);
+        assert!(text.contains("● ready 2GHz"), "{text}");
+        assert!(text.contains("● ready 1GHz"), "{text}");
         // Observations carry the effective speed, including a saturated
         // throttle: a 2 GHz CPU requested at 1 kHz actually runs at 2 MHz.
         for (effective, label) in [(500_000_000, "500MHz"), (2_000_000, "2MHz")] {
-            let mut w = world(&["app", "oracle"]);
+            let mut w = baseline.clone();
             w.machines[0].throttle_speed_hz = Some(effective);
             app.apply(Update::World(w));
             let text = render(&app);
             assert!(text.contains(&format!("● ready {label}")), "{text}");
+            assert!(text.contains("● ready 1GHz"), "{text}");
         }
+        app.apply(Update::World(baseline));
+        let text = render(&app);
+        assert!(text.contains("● ready 2GHz"), "{text}");
+        assert!(text.contains("● ready 1GHz"), "{text}");
+        assert!(!text.contains("2MHz"), "{text}");
     }
 
     #[test]

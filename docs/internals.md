@@ -43,11 +43,21 @@ next window. Translator-internal work and kernel execution are outside the
 count.
 
 The kernel recognizes the mark and charges the call the time those
-instructions take on the project's virtual CPU. The speed is `cpu.speed` in
-`seedbox.yaml`, 2 GHz unless set, so a call costs 25 µs by default. The
+instructions take on that machine's virtual CPU. Each machine and the oracle
+has its own `cpu.speed` and `cpu.jitter` in `seedbox.yaml`. Speed defaults to
+1 GHz and jitter to zero, so a call nominally costs 50 µs by default. The
 instructions per call is a constant of the instrumentation, carried in the
 launch recipe so the guest and the simulator agree on what a call stands for.
-A project chooses a speed, not a mechanism.
+Saved definitions retain these settings on each machine.
+
+```yaml
+machines:
+  worker:
+    image: example/worker
+    cpu: {speed: 800MHz, jitter: 5%}
+oracle:
+  image: example/oracle # Defaults to 1 GHz with zero jitter.
+```
 
 Equal work interleaves the same way on every seed. `cpu.jitter`, a percentage,
 makes each call cost a seeded amount more or less than nominal, within that
@@ -74,9 +84,10 @@ retained with the machine and drained while the vCPU is stopped, before guest
 execution resumes. Timers can become pending during that interval; checkpoints
 preserve the remainder.
 
-Throttle observations report the effective nominal CPU speed after the backend
-rounds and clamps the requested speed. The fault's recorded input keeps the
-original request.
+The TUI shows each machine's configured nominal speed by default. While
+throttled it shows the effective nominal speed after backend rounding and
+clamping; healing restores that machine's configured speed. The fault's
+recorded input keeps the original request.
 
 ## Progress inside kernel polling
 

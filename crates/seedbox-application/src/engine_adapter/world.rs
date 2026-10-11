@@ -82,9 +82,6 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<WorldConfig> {
         end_on_exit: Some(workload_machine.clone()),
         timer_jitter_ns: request.schedule.timer_jitter_ns,
         stop_tolerance_ns: request.schedule.stop_tolerance_ns,
-        cpu_speed_hz: request.cpu.speed_hz,
-        progress_ns: request.cpu.progress_ns(),
-        progress_jitter_ns: request.cpu.progress_jitter_ns(),
         exact_timer_ppm: None,
         network: Some(network),
         machines,
@@ -138,7 +135,20 @@ fn machine(
                 .get(service)
                 .is_some_and(|image| !image.launch.disk_volumes.is_empty())
     });
+    let cpu = request
+        .prepared
+        .placement
+        .iter()
+        .find_map(|(service, machine)| {
+            (machine == name)
+                .then(|| request.cpus.get(service))
+                .flatten()
+        })
+        .ok_or_else(|| Error::Integrity(format!("missing CPU configuration for machine {name}")))?;
     Ok(MachineConfig {
+        cpu_speed_hz: cpu.speed_hz,
+        progress_ns: cpu.progress_ns(),
+        progress_jitter_ns: cpu.progress_jitter_ns(),
         name: name.clone(),
         initrd: artifact(request, digest)?,
         disk: volumes.then_some(DiskConfig {

@@ -285,7 +285,7 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     fn supports_throttle(&self) -> bool {
         false
     }
-    /// Run the CPU at `speed_hz` instead of the project's speed, charging CPU
+    /// Run the CPU at `speed_hz` instead of the machine's configured speed, charging CPU
     /// work by the ratio; `None` restores it. Takes effect from the machine's
     /// next slice. Returns the effective nominal speed after backend rounding
     /// and clamping, or `None` when healed.

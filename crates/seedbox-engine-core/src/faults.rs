@@ -164,7 +164,7 @@ pub enum Lifecycle {
     Resume,
     Crash,
     Reboot,
-    /// Run the CPU at this speed in Hz, or at the project's speed again.
+    /// Run the CPU at this speed in Hz, or at the machine's configured speed again.
     Throttle(Option<u64>),
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]

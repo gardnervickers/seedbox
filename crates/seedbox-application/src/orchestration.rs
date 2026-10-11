@@ -349,7 +349,13 @@ impl Orchestrator {
                 program: &record.identity.program,
                 limits: &limits,
                 network: &record.identity.configuration.network,
-                cpu: &record.identity.configuration.cpu,
+                cpus: &record
+                    .identity
+                    .configuration
+                    .services
+                    .iter()
+                    .map(|(name, service)| (name.clone(), service.cpu.clone()))
+                    .collect(),
                 schedule: &record.identity.configuration.schedule,
                 control: record.identity.configuration.control.as_ref(),
                 check: &record.identity.configuration.check,

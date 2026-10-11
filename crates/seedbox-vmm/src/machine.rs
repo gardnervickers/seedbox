@@ -358,7 +358,7 @@ pub struct Machine {
     /// PV clock: virtual time the guest's counted syscalls already owe past
     /// the last hard stop, charged at the start of the next run.
     pub pv_debt_ns: u64,
-    /// The project's CPU speed, which a throttle is a fraction of.
+    /// The machine's configured CPU speed, which a throttle is a fraction of.
     pub cpu_speed_hz: u64,
     /// Consecutive watchdog interruptions since the last natural exit.
     stall_ticks: u64,

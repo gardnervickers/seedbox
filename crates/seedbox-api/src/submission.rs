@@ -24,9 +24,6 @@ pub struct Submission {
     pub oracle: Machine,
     #[serde(default)]
     pub network: Network,
-    /// The virtual CPU: `speed` as a frequency, `jitter` as a percentage.
-    #[serde(default)]
-    pub cpu: project::CpuDefaults,
     #[serde(default)]
     pub simulator: Simulator,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -209,6 +206,7 @@ impl Submission {
             services.insert(
                 name,
                 seedbox_spec::Service {
+                    cpu: machine.cpu,
                     source,
                     platform: self.architecture.map(platform).unwrap_or_default().into(),
                     entrypoint: machine.entrypoint,
@@ -257,7 +255,6 @@ impl Submission {
             services,
             configs,
             network,
-            cpu: self.cpu,
             schedule: Default::default(),
             control: self
                 .simulator
@@ -374,6 +371,7 @@ impl Submission {
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(Machine {
+                cpu: service.cpu.clone(),
                 image,
                 build,
                 entrypoint: service.entrypoint.clone(),
@@ -426,7 +424,6 @@ impl Submission {
                     })
                     .collect(),
             },
-            cpu: config.cpu.clone(),
             simulator: Simulator {
                 oracle_control: config.control.is_some(),
             },
@@ -475,26 +472,40 @@ mod tests {
     #[test]
     fn cpu_round_trips_and_jitter_is_omitted_when_off() {
         let spec: SimulationSpec = serde_json::from_value(partial()).unwrap();
-        assert_eq!(spec.configuration.cpu, project::CpuDefaults::default());
-        let wire = serde_json::to_value(&spec).unwrap();
-        assert_eq!(wire["cpu"], serde_json::json!({"speed": "2GHz"}));
-        let mut value = partial();
-        value["cpu"] = serde_json::json!({"speed": "800MHz", "jitter": "5%"});
-        let spec: SimulationSpec = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(spec.configuration.cpu.speed_hz, 800_000_000);
-        assert_eq!(spec.configuration.cpu.jitter_percent, 5);
+        assert_eq!(
+            spec.configuration.services["app"].cpu,
+            project::Cpu::default()
+        );
         let wire = serde_json::to_value(&spec).unwrap();
         assert_eq!(
-            wire["cpu"],
+            wire["machines"]["app"]["cpu"],
+            serde_json::json!({"speed": "1GHz"})
+        );
+        let mut value = partial();
+        value["machines"]["app"]["cpu"] = serde_json::json!({"speed": "800MHz", "jitter": "5%"});
+        value["oracle"]["cpu"] = serde_json::json!({"speed": "2GHz", "jitter": "10%"});
+        let spec: SimulationSpec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(spec.configuration.services["app"].cpu.speed_hz, 800_000_000);
+        assert_eq!(spec.configuration.services["app"].cpu.jitter_percent, 5);
+        assert_eq!(
+            spec.configuration.services["oracle"].cpu.speed_hz,
+            2_000_000_000
+        );
+        assert_eq!(spec.configuration.services["oracle"].cpu.jitter_percent, 10);
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            wire["machines"]["app"]["cpu"],
             serde_json::json!({"speed": "800MHz", "jitter": "5%"})
         );
+        assert_eq!(wire["oracle"]["cpu"], value["oracle"]["cpu"]);
+        assert!(wire.get("cpu").is_none());
         for bad in [
             serde_json::json!({"speed": "2"}),
             serde_json::json!({"speed": "999kHz"}),
             serde_json::json!({"jitter": "101%"}),
             serde_json::json!({"jitter": 5}),
         ] {
-            value["cpu"] = bad.clone();
+            value["machines"]["app"]["cpu"] = bad.clone();
             assert!(
                 serde_json::from_value::<SimulationSpec>(value.clone()).is_err(),
                 "{bad}"
@@ -510,8 +521,8 @@ mod tests {
             .values()
             .all(|s| s.platform.is_empty()));
         assert_eq!(
-            spec.configuration.cpu,
-            seedbox_spec::project::CpuDefaults::default()
+            spec.configuration.services["app"].cpu,
+            seedbox_spec::project::Cpu::default()
         );
         assert_eq!(spec.configuration.network.latency_ns, 1_000_000);
         let wire = serde_json::to_value(&spec).unwrap();

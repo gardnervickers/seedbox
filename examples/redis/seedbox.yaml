@@ -11,5 +11,3 @@ oracle:
     SEEDBOX_PLANT_FAILURE: "0"
 network:
   latency: 1ms
-cpu:
-  speed: 2GHz

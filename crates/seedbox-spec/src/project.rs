@@ -14,8 +14,6 @@ pub struct Project {
     pub oracle: Machine,
     #[serde(default)]
     pub network: NetworkDefaults,
-    #[serde(default)]
-    pub cpu: CpuDefaults,
 }
 
 /// Launch inputs shared by application machines and the oracle.
@@ -26,6 +24,7 @@ pub struct Project {
     try_from = "MachineFields"
 )]
 pub struct Machine {
+    pub cpu: Cpu,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,6 +45,8 @@ pub struct Machine {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MachineFields {
+    #[serde(default)]
+    cpu: Cpu,
     image: Option<String>,
     build: Option<Build>,
     entrypoint: Option<Vec<String>>,
@@ -75,6 +76,7 @@ impl TryFrom<MachineFields> for Machine {
             );
         }
         Ok(Self {
+            cpu: fields.cpu,
             image: fields.image,
             build: fields.build,
             entrypoint: fields.entrypoint,
@@ -132,14 +134,14 @@ impl Default for NetworkDefaults {
     }
 }
 
-/// The virtual CPU every machine runs on. Application compute is charged
+/// One machine's virtual CPU. Application compute is charged
 /// through the guest's progress instrumentation (guest/progress): every
 /// `PROGRESS_INSTRUCTIONS` executed instructions a thread makes a progress
 /// call, and the guest kernel charges it the time those instructions take at
 /// `speed`, give or take `jitter`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CpuDefaults {
+pub struct Cpu {
     /// Instructions per virtual second, authored as a frequency
     /// (`speed: 2GHz`, `speed: 800MHz`).
     #[serde(default = "speed_hz", rename = "speed", with = "frequency")]
@@ -171,7 +173,7 @@ pub const MIN_SPEED_HZ: u64 = 1_000_000;
 /// The fastest CPU: a progress call then costs 50 ns.
 pub const MAX_SPEED_HZ: u64 = 1_000_000_000_000;
 
-impl CpuDefaults {
+impl Cpu {
     /// Nominal virtual time one progress call costs at this speed.
     pub fn progress_ns(&self) -> u64 {
         (u64::from(PROGRESS_INSTRUCTIONS) * 1_000_000_000).div_ceil(self.speed_hz)
@@ -184,10 +186,10 @@ impl CpuDefaults {
 }
 
 fn speed_hz() -> u64 {
-    2_000_000_000
+    1_000_000_000
 }
 
-impl Default for CpuDefaults {
+impl Default for Cpu {
     fn default() -> Self {
         Self {
             speed_hz: speed_hz(),
@@ -330,9 +332,9 @@ mod tests {
             project.oracle.build.unwrap().dockerfile,
             PathBuf::from("Dockerfile")
         );
-        assert_eq!(project.cpu, CpuDefaults::default());
-        assert_eq!(project.cpu.speed_hz, 2_000_000_000);
-        assert_eq!(project.cpu.progress_ns(), 25_000);
+        assert_eq!(project.oracle.cpu, Cpu::default());
+        assert_eq!(project.oracle.cpu.speed_hz, 1_000_000_000);
+        assert_eq!(project.oracle.cpu.progress_ns(), 50_000);
         assert_eq!(project.network.latency, "1ms");
     }
 
@@ -348,6 +350,7 @@ mod tests {
         for extra in [
             "limits: {wallTime: 5m}",
             "seed: 1",
+            "cpu: {speed: 2GHz}",
             "startPaused: true",
             "network: {jitter: 1ms}",
         ] {
@@ -362,10 +365,7 @@ mod tests {
             "progressPointsPerBlock: 1",
             "progressJitter: 5us",
         ] {
-            assert!(
-                serde_yaml_ng::from_str::<CpuDefaults>(cpu).is_err(),
-                "{cpu}"
-            );
+            assert!(serde_yaml_ng::from_str::<Cpu>(cpu).is_err(), "{cpu}");
         }
         assert!(serde_yaml_ng::from_str::<Project>(
             "name: test\noracle: {image: oracle}\nsimulator: {instructionsPerProgressCall: 7}\n"
@@ -375,8 +375,8 @@ mod tests {
 
     #[test]
     fn cpu_speed_is_a_bounded_frequency() {
-        let parse = |yaml: &str| serde_yaml_ng::from_str::<CpuDefaults>(yaml);
-        assert_eq!(parse("{}").unwrap().speed_hz, 2_000_000_000);
+        let parse = |yaml: &str| serde_yaml_ng::from_str::<Cpu>(yaml);
+        assert_eq!(parse("{}").unwrap().speed_hz, 1_000_000_000);
         for (text, hz) in [
             ("2GHz", 2_000_000_000),
             ("1.5GHz", 1_500_000_000),
@@ -417,19 +417,19 @@ mod tests {
             (1_000_000_000_000, "1THz"),
             (1_234_567, "1234567Hz"),
         ] {
-            let cpu = CpuDefaults {
+            let cpu = Cpu {
                 speed_hz: hz,
                 jitter_percent: 0,
             };
             let value = serde_json::to_value(&cpu).unwrap();
             assert_eq!(value, serde_json::json!({"speed": text}));
-            assert_eq!(serde_json::from_value::<CpuDefaults>(value).unwrap(), cpu);
+            assert_eq!(serde_json::from_value::<Cpu>(value).unwrap(), cpu);
         }
     }
 
     #[test]
     fn cpu_jitter_is_an_optional_percentage() {
-        let parse = |yaml: &str| serde_yaml_ng::from_str::<CpuDefaults>(yaml);
+        let parse = |yaml: &str| serde_yaml_ng::from_str::<Cpu>(yaml);
         assert_eq!(parse("{}").unwrap().jitter_percent, 0);
         assert_eq!(parse("jitter: 5%").unwrap().jitter_percent, 5);
         assert_eq!(parse("jitter: '0'").unwrap().jitter_percent, 0);
@@ -437,21 +437,18 @@ mod tests {
         for bad in ["101%", "5", "-1%", "1.5%", "5 %", "5us", "%", "''"] {
             assert!(parse(&format!("jitter: '{bad}'")).is_err(), "{bad}");
         }
-        let jitter = CpuDefaults {
+        let jitter = Cpu {
             speed_hz: 2_000_000_000,
             jitter_percent: 5,
         };
         let value = serde_json::to_value(&jitter).unwrap();
         assert_eq!(value, serde_json::json!({"speed": "2GHz", "jitter": "5%"}));
-        assert_eq!(
-            serde_json::from_value::<CpuDefaults>(value).unwrap(),
-            jitter
-        );
+        assert_eq!(serde_json::from_value::<Cpu>(value).unwrap(), jitter);
     }
 
     #[test]
     fn progress_charge_follows_speed_and_jitter() {
-        let cpu = |speed_hz, jitter_percent| CpuDefaults {
+        let cpu = |speed_hz, jitter_percent| Cpu {
             speed_hz,
             jitter_percent,
         };

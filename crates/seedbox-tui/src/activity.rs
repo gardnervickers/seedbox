@@ -600,6 +600,7 @@ mod tests {
             incarnation: 0,
             condition: seedbox_api::MachineCondition::Ready,
             exit_code: None,
+            cpu_speed_hz: Some(1_000_000_000),
             throttle_speed_hz: None,
             oracle: false,
             last_transition: None,

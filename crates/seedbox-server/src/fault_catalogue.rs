@@ -244,7 +244,7 @@ pub(crate) fn discover(world: &WorldState, minimum_latency_ns: u64) -> FaultCata
         fault.schema["oneOf"] = json!([{"required":[fixed],"not":{"required":[bound]}},{"required":[bound],"not":{"required":[fixed]}}]);
         faults.push(fault);
     }
-    faults.push(descriptor("throttle","Throttle CPU","Run the machine's CPU at a lower speed than the project's until healed. A speed at or above the project's leaves it at full speed; one below a thousandth of it runs at a thousandth.",json!({"handle":handle,"machine":machine,"speed_hz":integer("CPU speed in Hz",*THROTTLE_SPEED_HZ.start() as i128,*THROTTLE_SPEED_HZ.end(),Some(500_000_000),"Hz")}),&["handle","machine","speed_hz"]));
+    faults.push(descriptor("throttle","Throttle CPU","Run the machine's CPU at a lower speed than the machine's configured until healed. A speed at or above the machine's configured leaves it at full speed; one below a thousandth of it runs at a thousandth.",json!({"handle":handle,"machine":machine,"speed_hz":integer("CPU speed in Hz",*THROTTLE_SPEED_HZ.start() as i128,*THROTTLE_SPEED_HZ.end(),Some(500_000_000),"Hz")}),&["handle","machine","speed_hz"]));
     faults.push(descriptor("drop_connection", "Drop TCP connection", "Drop future packets in one direction of an observed IPv4 TCP incarnation until healed. Supply the exact addresses, ports and incarnation from connection observations; this world view does not enumerate live connections.", json!({"handle":handle, "connection":{
         "type":"object", "description":"Exact directed TCP connection identity", "additionalProperties":false,
         "properties":{

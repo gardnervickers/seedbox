@@ -196,7 +196,7 @@ pub(crate) fn preview(
                 .preconditions
                 .push("The machine must not already be throttled.".into());
             format!(
-                "Run the machine's CPU at {speed_hz} Hz, below the project's speed, until healed."
+                "Run the machine's CPU at {speed_hz} Hz, below the machine's configured speed, until healed."
             )
         }
     };

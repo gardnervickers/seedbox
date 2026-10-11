@@ -380,8 +380,8 @@ class World:
         """Run the target's machine at `speed` until healed.
 
         `speed` is a frequency such as "500MHz" or "1.5GHz", or a whole number
-        of Hz, below the project's CPU speed (`cpu.speed` in seedbox.yaml): CPU
-        work then costs more by the ratio. A speed at or above the project's
+        of Hz, below that machine's configured `cpu.speed` in seedbox.yaml: CPU
+        work then costs more by the ratio. A speed at or above the configured speed
         leaves the machine at full speed; one below a thousandth of it runs at
         a thousandth.
         """

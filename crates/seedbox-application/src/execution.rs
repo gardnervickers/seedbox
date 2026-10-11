@@ -57,7 +57,8 @@ pub struct ExecutionRequest<'a> {
     pub program: &'a [seedbox_engine_protocol::input_program::TimedInput],
     pub limits: &'a Limits,
     pub network: &'a Network,
-    pub cpu: &'a seedbox_spec::project::CpuDefaults,
+    /// Resolved virtual CPUs by service, mapped through prepared placement.
+    pub cpus: &'a BTreeMap<String, seedbox_spec::project::Cpu>,
     pub schedule: &'a Schedule,
     pub control: Option<&'a crate::config::Control>,
     pub check: &'a Check,

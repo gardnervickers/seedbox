@@ -32,18 +32,6 @@ pub struct WorldConfig {
     pub timer_jitter_ns: u64,
     #[serde(default)]
     pub stop_tolerance_ns: u64,
-    /// The project's CPU speed in Hz; a throttle is a lower speed than this.
-    #[serde(default = "default_cpu_speed_hz")]
-    pub cpu_speed_hz: u64,
-    /// Nominal virtual time the guest kernel charges each PV progress call:
-    /// the instructions between calls at the configured CPU speed. Zero
-    /// charges a call like one syscall.
-    #[serde(default)]
-    pub progress_ns: u64,
-    /// Bound on the seeded variation of that charge, each way, drawn from a
-    /// per-machine stream; zero charges every call the same.
-    #[serde(default)]
-    pub progress_jitter_ns: u64,
     /// Exact timer frequency error in parts per million; absent is zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact_timer_ppm: Option<u64>,
@@ -83,7 +71,7 @@ pub struct WorldConfig {
 
 /// The spec's default CPU speed, for world documents written before it existed.
 fn default_cpu_speed_hz() -> u64 {
-    2_000_000_000
+    1_000_000_000
 }
 
 fn default_mem_mb() -> u64 {
@@ -145,6 +133,18 @@ pub struct LinkConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineConfig {
+    /// This machine's CPU speed in Hz; a throttle is a lower speed than this.
+    #[serde(default = "default_cpu_speed_hz")]
+    pub cpu_speed_hz: u64,
+    /// Nominal virtual time the guest kernel charges each PV progress call:
+    /// the instructions between calls at the configured CPU speed. Zero
+    /// charges a call like one syscall.
+    #[serde(default)]
+    pub progress_ns: u64,
+    /// Bound on the seeded variation of that charge, each way, drawn from a
+    /// per-machine stream; zero charges every call the same.
+    #[serde(default)]
+    pub progress_jitter_ns: u64,
     pub name: String,
     pub initrd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -389,9 +389,6 @@ mod tests {
             end_on_exit: None,
             timer_jitter_ns: 0,
             stop_tolerance_ns: 0,
-            cpu_speed_hz: 2_000_000_000,
-            progress_ns: 0,
-            progress_jitter_ns: 0,
             exact_timer_ppm: None,
             network: None,
             machines: vec![],
@@ -409,7 +406,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&cfg).unwrap(),
             serde_json::json!({"kernel":"k","mem_mb":512,"duration_ns":1,"timer_jitter_ns":0,
-                "stop_tolerance_ns":0,"cpu_speed_hz":2000000000,"progress_ns":0,"progress_jitter_ns":0,"machines":[],"control":null})
+                "stop_tolerance_ns":0,"machines":[],"control":null})
         );
     }
 

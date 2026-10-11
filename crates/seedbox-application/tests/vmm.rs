@@ -67,10 +67,22 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             bandwidth_bps: None,
             queue_bound_ns: None,
         },
-        cpu: &seedbox_spec::project::CpuDefaults {
-            speed_hz: 2_000_000_000,
-            jitter_percent: 5,
-        },
+        cpus: &BTreeMap::from([
+            (
+                "client".into(),
+                seedbox_spec::project::Cpu {
+                    speed_hz: 2_000_000_000,
+                    jitter_percent: 5,
+                },
+            ),
+            (
+                "server".into(),
+                seedbox_spec::project::Cpu {
+                    speed_hz: 800_000_000,
+                    jitter_percent: 10,
+                },
+            ),
+        ]),
         schedule: &Schedule {
             timer_jitter_ns: 50_000,
             stop_tolerance_ns: 40_000,
@@ -223,9 +235,13 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         assert_eq!(world["machines"][0]["initrd"], "/verified/retained-input");
         assert_eq!(world["timer_jitter_ns"], 50_000);
         assert_eq!(world["stop_tolerance_ns"], 40_000);
-        assert_eq!(world["cpu_speed_hz"], 2_000_000_000u64);
-        assert_eq!(world["progress_ns"], 25_000);
-        assert_eq!(world["progress_jitter_ns"], 1_250);
+        assert_eq!(world["machines"][0]["cpu_speed_hz"], 2_000_000_000u64);
+        assert_eq!(world["machines"][0]["progress_ns"], 25_000);
+        assert_eq!(world["machines"][0]["progress_jitter_ns"], 1_250);
+        assert_eq!(world["machines"][1]["cpu_speed_hz"], 800_000_000u64);
+        assert_eq!(world["machines"][1]["progress_ns"], 62_500);
+        assert_eq!(world["machines"][1]["progress_jitter_ns"], 6_250);
+        assert!(world.get("cpu_speed_hz").is_none());
         assert_eq!(world["duration_ns"], 1_000_000_000);
         assert!(world["machines"]
             .as_array()
@@ -726,6 +742,8 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
         let control = seedbox_application::config::Control {
             service: "client".into(),
         };
+        let mut cpus = base.cpus.clone();
+        cpus.insert("peer".into(), Default::default());
         let mut prepared = base.prepared.clone();
         prepared
             .guests
@@ -734,6 +752,7 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
             .placement
             .insert("peer".into(), "peer-machine".into());
         let request = ExecutionRequest {
+            cpus: &cpus,
             program: &[],
             intervention_history: None,
             start_paused: false,
@@ -848,6 +867,8 @@ fn baseline_links_resolve_service_names_to_prepared_machines() {
 fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides() {
     fixture(|base| {
         // Use a third machine as controller so both sides are in the failure model.
+        let mut cpus = base.cpus.clone();
+        cpus.insert("scenario".into(), Default::default());
         let mut prepared = base.prepared.clone();
         let hash = prepared.kernel.clone();
         prepared
@@ -864,6 +885,7 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            cpus: &cpus,
             program: &[],
             intervention_history: None,
             start_paused: false,
@@ -956,6 +978,8 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
 #[test]
 fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
     fixture(|base| {
+        let mut cpus = base.cpus.clone();
+        cpus.insert("scenario".into(), Default::default());
         let mut prepared = base.prepared.clone();
         let hash = prepared.kernel.clone();
         prepared
@@ -972,6 +996,7 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            cpus: &cpus,
             program: &[],
             intervention_history: None,
             start_paused: false,
@@ -1058,6 +1083,8 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
 #[test]
 fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
     fixture(|base| {
+        let mut cpus = base.cpus.clone();
+        cpus.insert("scenario".into(), Default::default());
         let mut prepared = base.prepared.clone();
         let hash = prepared.kernel.clone();
         prepared
@@ -1074,6 +1101,7 @@ fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            cpus: &cpus,
             program: &[],
             intervention_history: None,
             start_paused: false,
@@ -1138,6 +1166,8 @@ fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
 #[test]
 fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time() {
     fixture(|base| {
+        let mut cpus = base.cpus.clone();
+        cpus.insert("scenario".into(), Default::default());
         let mut prepared = base.prepared.clone();
         let hash = prepared.kernel.clone();
         prepared
@@ -1154,6 +1184,7 @@ fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            cpus: &cpus,
             program: &[],
             intervention_history: None,
             start_paused: false,

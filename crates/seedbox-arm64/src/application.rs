@@ -123,7 +123,7 @@ pub struct TimerPolicy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Progress {
-    /// The project's CPU speed in Hz, which a throttle is a fraction of.
+    /// The machine's configured CPU speed in Hz, which a throttle is a fraction of.
     pub speed_hz: u64,
     /// Nominal charge per progress call; zero charges a call like a syscall.
     pub ns: u64,

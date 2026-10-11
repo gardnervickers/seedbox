@@ -6,6 +6,7 @@ fn fixture() -> sb::record::RunRecord {
     let configuration = config::Simulation {
         name: "diff".into(), source: "/fixture/compose.yaml".into(),
         services: BTreeMap::from([("workload".into(), config::Service {
+            cpu: Default::default(),
             source: config::ImageSource::Registry { reference: "fixture:v1".into() },
             platform: "linux/amd64".into(), entrypoint: None, command: None,
             environment: BTreeMap::new(), working_dir: None, user: None,
@@ -13,7 +14,6 @@ fn fixture() -> sb::record::RunRecord {
         })]), configs: BTreeMap::new(),
         network: config::Network { name: "default".into(), latency_ns: 1_000_000,
             jitter_ns: 0, bandwidth_bps: None, queue_bound_ns: None, links: vec![] },
-        cpu: Default::default(),
         schedule: config::Schedule::default(), control: None,
         limits: config::Limits { simulated_time_ns: 1_000_000_000, wall_time_ns: 60_000_000_000 },
         check: config::Check { service: "workload".into(), exit_code: 0 },

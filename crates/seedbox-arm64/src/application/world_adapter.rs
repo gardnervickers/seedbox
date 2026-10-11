@@ -289,7 +289,7 @@ pub struct ArmMachine {
     pub(crate) retired: Option<Retired>,
     snapshot_sequence: u64,
     ram_pages: u64,
-    /// The project's CPU speed, which a throttle is a fraction of.
+    /// The machine's configured CPU speed, which a throttle is a fraction of.
     cpu_speed_hz: u64,
 }
 impl Deref for ArmMachine {

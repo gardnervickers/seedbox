@@ -175,7 +175,7 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_rate_ppb: Option<u64>,
     },
-    /// Run the machine's CPU at `speed_hz` instead of the project's CPU
+    /// Run the machine's CPU at `speed_hz` instead of the machine's configured CPU
     /// speed until healed: every charge for CPU work scales by the ratio.
     Throttle {
         target: Target,
@@ -488,7 +488,7 @@ pub fn validate_clock_drift(
     }
 }
 
-/// Throttled CPU speeds, in Hz: from a thousandth of the slowest project CPU
+/// Throttled CPU speeds, in Hz: from a thousandth of the slowest configured CPU
 /// (1 MHz) to the fastest (1 THz). How far a given machine can slow follows
 /// from its own speed; see `throttle_permille`.
 pub const THROTTLE_SPEED_HZ: std::ops::RangeInclusive<u64> = 1_000..=1_000_000_000_000;

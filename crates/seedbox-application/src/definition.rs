@@ -31,6 +31,12 @@ pub fn resolve(
             .get(name)
             .ok_or_else(|| Error::Integrity(format!("missing resolved launch for {name}")))?;
         Ok(Machine {
+            cpu: configuration
+                .services
+                .get(name)
+                .ok_or_else(|| Error::Integrity(format!("missing CPU configuration for {name}")))?
+                .cpu
+                .clone(),
             image: Some(Image {
                 tag: configuration
                     .services
@@ -96,7 +102,6 @@ pub fn resolve(
         oracle,
         network: configuration.network.clone(),
         simulator: Simulator {
-            cpu: configuration.cpu.clone(),
             schedule: configuration.schedule.clone(),
             disk: configuration.disk.clone(),
             oracle_control: configuration.control.is_some(),
@@ -645,13 +650,23 @@ mod tests {
         store.verify(&original).unwrap();
         // The CPU is the VMM's input, not the guest's: the recipe and the
         // prepared guests do not change with it.
-        definition.simulator.cpu.speed_hz = 800_000_000;
-        definition.simulator.cpu.jitter_percent = 5;
+        definition.oracle.cpu.speed_hz = 800_000_000;
+        definition.oracle.cpu.jitter_percent = 5;
+        let mut worker = definition.oracle.clone();
+        worker.cpu = Default::default();
+        definition.machines.insert("worker".into(), worker);
+        let restored: Definition =
+            serde_json::from_value(serde_json::to_value(&definition).unwrap()).unwrap();
+        let configuration = restored.configuration("roundtrip");
+        assert_eq!(configuration.services["oracle"].cpu, definition.oracle.cpu);
+        assert_eq!(configuration.services["worker"].cpu.speed_hz, 1_000_000_000);
+        assert_eq!(configuration.services["worker"].cpu.jitter_percent, 0);
+        definition.machines.remove("worker");
         assert_eq!(
             prepared(&definition, &store).unwrap().guests,
             changed.guests
         );
-        definition.simulator.cpu = Default::default();
+        definition.oracle.cpu = Default::default();
     }
     #[test]
     fn checkpoint_binary_closure_survives_source_deletion_and_preserves_guest_paths() {

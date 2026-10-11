@@ -199,8 +199,13 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
         .unwrap();
     assert_eq!(prepared.wall_clock_epoch, Some(1_791_518_733));
     // The CPU is the simulator's input, not the guest's.
-    simulation.cpu.speed_hz = 800_000_000;
-    simulation.cpu.jitter_percent = 5;
+    simulation.services.get_mut("app").unwrap().cpu.speed_hz = 800_000_000;
+    simulation
+        .services
+        .get_mut("app")
+        .unwrap()
+        .cpu
+        .jitter_percent = 5;
     let cpu_context = PreparationContext::new(
         root.path().join("changed-cpu"),
         CancellationToken::default(),
@@ -210,7 +215,7 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
         .prepare_with_transport(&simulation, &store, &cpu_context, &Transport)
         .unwrap();
     assert_eq!(changed_cpu, prepared);
-    simulation.cpu = Default::default();
+    simulation.services.get_mut("app").unwrap().cpu = Default::default();
     let json = serde_json::to_vec(&prepared).unwrap();
     let retained: seedbox_application::execution::PreparedInputs =
         serde_json::from_slice(&json).unwrap();

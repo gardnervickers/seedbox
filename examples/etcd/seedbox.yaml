@@ -60,5 +60,3 @@ oracle:
   command: [--endpoints, "n1:2379,n2:2379,n3:2379", --duration, 100000s, --concurrency, "8", --writes, "20000"]
 network:
   latency: 1ms
-cpu:
-  speed: 2GHz
