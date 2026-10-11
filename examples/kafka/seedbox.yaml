@@ -1,0 +1,24 @@
+name: kafka-demo
+# Three combined KRaft broker/controllers; no ZooKeeper or injected faults.
+machines:
+  k1:
+    memoryMiB: 2048
+    build: {context: ./broker}
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://k1:9092
+  k2:
+    memoryMiB: 2048
+    build: {context: ./broker}
+    environment:
+      KAFKA_NODE_ID: "2"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://k2:9092
+  k3:
+    memoryMiB: 2048
+    build: {context: ./broker}
+    environment:
+      KAFKA_NODE_ID: "3"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://k3:9092
+oracle:
+  build: {context: ./workload}
+  command: [--brokers, "k1:9092,k2:9092,k3:9092"]

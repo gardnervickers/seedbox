@@ -114,6 +114,21 @@ pub(crate) fn incomplete(reason: StopReason) -> ExecutionReport {
     }
 }
 
+fn launch_machine_workers(parameters: &BTreeMap<String, String>) -> Result<usize> {
+    match parameters.get("machine_workers") {
+        None => Ok(1),
+        Some(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=32).contains(n))
+            .ok_or_else(|| {
+                Error::Integrity(format!(
+                    "invalid performance parameter machine_workers={value}"
+                ))
+            }),
+    }
+}
+
 /// The x86 worker's performance settings from a run's recorded performance
 /// parameters (`SEEDBOX_WATCHDOG_MS`); absent ones take defaults.
 pub(crate) fn launch_performance(parameters: &BTreeMap<String, String>) -> Result<Performance> {
@@ -127,6 +142,9 @@ pub(crate) fn launch_performance(parameters: &BTreeMap<String, String>) -> Resul
                     .ok()
                     .filter(|ms| *ms != 0)
                     .ok_or_else(invalid)?
+            }
+            "machine_workers" => {
+                launch_machine_workers(parameters)?;
             }
             _ => return Err(invalid()),
         }
@@ -173,6 +191,7 @@ impl WorkerLaunch {
                 .as_ref()
                 .is_some_and(|e| e.live_observations)
         });
+        let machine_workers = launch_machine_workers(request.performance_parameters)?;
         let mut command = crate::engine_adapter::engine_command(engine, &request.prepared.profile)?;
         if request
             .prepared
@@ -230,6 +249,13 @@ impl WorkerLaunch {
                 .arg(endpoint.socket())
                 .arg("--console-limit")
                 .arg(console_limit.to_string());
+            // Keep default replay compatible with retained ARM engines that
+            // predate parallel machine execution.
+            if machine_workers != 1 {
+                command
+                    .arg("--machine-workers")
+                    .arg(machine_workers.to_string());
+            }
             if digest {
                 command.arg("--digest");
             }
@@ -246,6 +272,7 @@ impl WorkerLaunch {
             worker.log_chunk_limit = Some((1_048_576 / streams).min(65_536));
             worker.stream_console = true;
             worker.features = crate::engine_adapter::recorded_features(&request.prepared.profile)?;
+            worker.machine_workers = machine_workers;
             worker.performance = launch_performance(request.performance_parameters)?;
             let path = request.output.join(WORKER_REQUEST_FILE);
             fs::write(&path, serde_json::to_vec_pretty(&worker)?)?;
@@ -664,10 +691,10 @@ mod tests {
                 artifacts: &artifacts,
                 output: directory.path(),
                 cancellation: &CancellationToken::default(),
-                performance_parameters: &BTreeMap::from([(
-                    "SEEDBOX_WATCHDOG_MS".into(),
-                    "50".into(),
-                )]),
+                performance_parameters: &BTreeMap::from([
+                    ("SEEDBOX_WATCHDOG_MS".into(), "50".into()),
+                    ("machine_workers".into(), "4".into()),
+                ]),
             };
             let original = serde_json::to_vec(&prepared.profile).unwrap();
             let launch = WorkerLaunch::prepare(&request).unwrap();
@@ -715,6 +742,8 @@ mod tests {
                     socket.to_str().unwrap(),
                     "--console-limit",
                     "268435456",
+                    "--machine-workers",
+                    "4",
                     "--digest",
                 ];
                 assert_eq!(&args[dispatch.len()..], expected);
@@ -729,7 +758,7 @@ mod tests {
                 let mut expected =
                     WorkerRequest::new(directory.path().join("world.json"), 1009, out);
                 expected.start_paused = true;
-                expected.interventions = Some(history);
+                expected.interventions = Some(history.clone());
                 expected.resume_checkpoint = Some(checkpoint.clone());
                 expected.digest = true;
                 expected.host_control = Some(launch.endpoint.socket());
@@ -737,11 +766,30 @@ mod tests {
                 expected.log_chunk_limit = Some(65536);
                 expected.stream_console = true;
                 expected.performance.watchdog_ms = 50;
+                expected.machine_workers = 4;
                 assert_eq!(worker, expected);
             }
             assert_eq!(serde_json::to_vec(&prepared.profile).unwrap(), original);
             drop(launch);
             assert!(!directory.path().join("host-control").exists());
+            let defaults = BTreeMap::new();
+            let default_request = ExecutionRequest {
+                performance_parameters: &defaults,
+                ..request
+            };
+            let default_launch = WorkerLaunch::prepare(&default_request).unwrap();
+            if kind == ExecutableKind::ArmWorld {
+                assert!(!default_launch
+                    .command
+                    .get_args()
+                    .any(|arg| arg == "--machine-workers"));
+            } else {
+                let worker: WorkerRequest = serde_json::from_slice(
+                    &fs::read(directory.path().join(WORKER_REQUEST_FILE)).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(worker.machine_workers, 1);
+            }
         }
     }
 
@@ -760,7 +808,17 @@ mod tests {
             decode(&[("SEEDBOX_WATCHDOG_MS", "50")]).unwrap(),
             Performance { watchdog_ms: 50 }
         );
+        assert_eq!(launch_machine_workers(&BTreeMap::new()).unwrap(), 1);
+        assert_eq!(
+            launch_machine_workers(&BTreeMap::from([("machine_workers".into(), "4".into())]))
+                .unwrap(),
+            4
+        );
+        assert!(decode(&[("machine_workers", "4")]).is_ok());
         for bad in [
+            ("machine_workers", "0"),
+            ("machine_workers", "33"),
+            ("machine_workers", "four"),
             ("SEEDBOX_WATCHDOG_MS", "0"),
             ("SEEDBOX_WATCHDOG_MS", "fast"),
             ("SEEDBOX_MARGIN", "64"),

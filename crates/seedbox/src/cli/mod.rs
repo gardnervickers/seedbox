@@ -89,6 +89,9 @@ enum Command {
         /// Report startup to the launching client.
         #[arg(long, hide = true)]
         startup_handshake: bool,
+        /// Host threads for concurrent machine execution; never changes simulation results.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32), help_heading = "Performance (never changes results)")]
+        machine_workers: u32,
         /// Server state directory [default: user state directory].
         #[arg(long, env = "SEEDBOX_STATE")]
         state: Option<PathBuf>,
@@ -723,7 +726,8 @@ fn run(cli: Cli) -> Result<u8> {
             state,
             inputs,
             startup_handshake,
-        } => daemon::serve(state, inputs, startup_handshake),
+            machine_workers,
+        } => daemon::serve(state, inputs, startup_handshake, machine_workers),
         Command::RetainedPause { run } => host_control(&run, true),
         Command::Inject { mutation, action } => faults::inject(mutation, &action),
         Command::Heal { mutation, handle } => simulations::mutate_control(

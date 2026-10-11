@@ -24,7 +24,7 @@ use std::{
 mod startup;
 pub(super) use startup::connect;
 
-struct NativeBackends(RuntimeInputs);
+struct NativeBackends(RuntimeInputs, u32);
 
 impl BackendProvider for NativeBackends {
     fn project(
@@ -37,7 +37,7 @@ impl BackendProvider for NativeBackends {
         let (preparation, execution) = self.0.backends(store, configuration, cancellation)?;
         Ok(Backends {
             preparation: Box::new(preparation),
-            execution: Box::new(execution),
+            execution: Box::new(execution.with_machine_workers(self.1)?),
         })
     }
 
@@ -70,7 +70,7 @@ impl BackendProvider for NativeBackends {
                 inputs.profile.clone(),
             )?)
         };
-        Ok(Box::new(executor))
+        Ok(Box::new(executor.with_machine_workers(self.1)?))
     }
 }
 
@@ -101,9 +101,10 @@ pub(super) fn serve(
     state: Option<PathBuf>,
     inputs: RuntimeInputs,
     startup_handshake: bool,
+    machine_workers: u32,
 ) -> Result<u8> {
     let mut ready = false;
-    let result = serve_inner(state, inputs, || {
+    let result = serve_inner(state, inputs, machine_workers, || {
         if startup_handshake {
             startup::ready()?;
         }
@@ -142,6 +143,7 @@ fn prepare_directory(root: &Path) -> Result<()> {
 fn serve_inner(
     state: Option<PathBuf>,
     inputs: RuntimeInputs,
+    machine_workers: u32,
     ready: impl FnOnce() -> Result<()>,
 ) -> Result<u8> {
     let root = state_directory(state)?;
@@ -173,7 +175,7 @@ fn serve_inner(
             manager.clone(),
             session.clone(),
             store,
-            Arc::new(NativeBackends(inputs)),
+            Arc::new(NativeBackends(inputs, machine_workers)),
         )
         .map_err(setup)?,
     );

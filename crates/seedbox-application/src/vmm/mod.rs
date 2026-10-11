@@ -137,6 +137,16 @@ impl VmmExecutor {
         })
     }
 
+    /// Set host machine threads without changing the execution profile.
+    pub fn with_machine_workers(mut self, workers: u32) -> Result<Self> {
+        if !(1..=32).contains(&workers) {
+            return Err(Error::Setup("--machine-workers: use 1..32".into()));
+        }
+        self.performance
+            .insert("machine_workers".into(), workers.to_string());
+        Ok(self)
+    }
+
     /// Defer virtio-net TX kicks to deterministic polls (semantic, off by default).
     pub fn with_deferred_tx(mut self, enabled: bool) -> Self {
         self.profile.semantic_parameters.deferred_tx = enabled;
