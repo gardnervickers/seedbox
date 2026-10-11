@@ -135,8 +135,9 @@ void __init seedbox_time_init(void)
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscall_ns) != 16 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscalls0) != 17 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, plan_time) != 18 * sizeof(u64));
-	BUILD_BUG_ON(offsetof(struct seedbox_time_page, progress_jitter_ns) != 19 * sizeof(u64));
-	BUILD_BUG_ON(offsetof(struct seedbox_time_page, progress_jitter_seed) != 20 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, progress_ns) != 19 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, progress_jitter_ns) != 20 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, progress_jitter_seed) != 21 * sizeof(u64));
 	BUILD_BUG_ON(SEEDBOX_ABI != 4);
 	BUILD_BUG_ON(SEEDBOX_CAP_PAGE_TIMER != 1);
 
