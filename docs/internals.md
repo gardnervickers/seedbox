@@ -29,21 +29,65 @@ Code: [x86 clock](../kernel/seedbox.c), [ARM clock](../kernel-arm64/seedbox.c).
 ## Progress from translated blocks
 
 A computation or spin loop that never reads the clock still needs to let other
-guest threads and machines make progress. The DynamoRIO client decrements a
-per-thread budget at every translated basic-block entry and issues a raw
-`getpid` syscall when the configured budget expires (10,000 entries by default).
-The kernel charges that syscall as PV progress. Existing executable code, shared libraries and JIT code go through the
+guest threads and machines make progress. The DynamoRIO client counts the
+instructions each thread executes. Every 50,000 instructions it issues a raw
+`getpid` syscall with a fixed first argument, which marks it as a progress
+call. Existing executable code, shared libraries and JIT code go through the
 translator without application-specific flags or recompilation.
 
-The budget measures block entries, not individual executed instructions. A basic
-block is a sequence of instructions with one entry and no internal control-flow
-branch. Translator-internal work and kernel execution are outside that counter.
+The count is taken per basic block: a sequence of instructions with one entry
+and no internal control-flow branch. Each block is charged its length at its
+entry, so a tight loop and straight-line code advance time at the same rate
+per instruction. A charge can cross the budget; the remainder carries into the
+next window. Translator-internal work and kernel execution are outside the
+count.
+
+The kernel recognizes the mark and charges the call the time those
+instructions take on that machine's virtual CPU. Each machine and the oracle
+has its own `cpu.speed` and `cpu.jitter` in `seedbox.yaml`. Speed defaults to
+1 GHz and jitter to zero, so a call nominally costs 50 µs by default. The
+instructions per call is a constant of the instrumentation, carried in the
+launch recipe so the guest and the simulator agree on what a call stands for.
+Saved definitions retain these settings on each machine.
+
+```yaml
+machines:
+  worker:
+    image: example/worker
+    cpu: {speed: 800MHz, jitter: 5%}
+oracle:
+  image: example/oracle # Defaults to 1 GHz with zero jitter.
+```
+
+Equal work interleaves the same way on every seed. `cpu.jitter`, a percentage,
+makes each call cost a seeded amount more or less than nominal, within that
+percentage. The kernel draws it from a stream the VMM seeds per machine on the
+time page. A run replays exactly, and a reboot or a time fork reseeds the
+stream with the others. The client itself draws nothing.
+
+On x86 the charge is counted in whole syscall costs, so the count-based plan
+stays linear. The remainder carries to the next call, and a count the hard
+stop cuts off stays owed to the next run. On ARM the charge advances the
+bounded clock in bulk, with the same rendezvous at every bound as single clock
+reads. A throttle fault scales the compute charge like every syscall's.
+
 Instrumentation must leave the application's registers and comparison flags
 intact. On ARM, the client uses arithmetic that leaves those flags alone and a
-branch that tests a register directly (`CBNZ`, compare and branch if nonzero).
-DynamoRIO's drreg extension manages the temporary registers.
+branch that tests the sign bit directly (`TBZ`). DynamoRIO's drreg extension
+manages the temporary registers.
 
-Code: [progress client](../guest/progress/progress.c).
+Code: [progress client](../guest/progress/progress.c),
+[x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c).
+
+On x86 a charge can span several scheduling boundaries. Its unpaid time is
+retained with the machine and drained while the vCPU is stopped, before guest
+execution resumes. Timers can become pending during that interval; checkpoints
+preserve the remainder.
+
+The TUI shows each machine's configured nominal speed by default. While
+throttled it shows the effective nominal speed after backend rounding and
+clamping; healing restores that machine's configured speed. The fault's
+recorded input keeps the original request.
 
 ## Progress inside kernel polling
 

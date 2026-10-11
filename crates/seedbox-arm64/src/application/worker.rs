@@ -32,6 +32,8 @@ pub struct Boot {
     pub disk_fault_model: DiskFaultModel,
     #[serde(default)]
     pub timer_policy: Option<super::TimerPolicy>,
+    #[serde(default)]
+    pub progress: Option<super::Progress>,
 }
 impl Boot {
     fn machine<B: Backend>(&self, disk: Option<Disk>) -> Result<Machine<B>> {
@@ -50,6 +52,10 @@ impl Boot {
             self.mac,
             disk,
         )?;
+        let machine = match &self.progress {
+            Some(progress) => machine.with_progress(progress)?,
+            None => machine,
+        };
         match &self.timer_policy {
             Some(policy) => machine.with_timer_policy(policy.clone()),
             None => Ok(machine),
@@ -154,6 +160,9 @@ pub enum Operation {
     SeedTimer {
         seed: u64,
         domain: String,
+    },
+    SeedProgressJitter {
+        seed: u64,
     },
     Throttle {
         factor_permille: u64,
@@ -416,6 +425,10 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 }
                 Operation::SeedTimer { seed, domain } => {
                     vm.seed_timer(seed, &domain)?;
+                    Ok(Answer::Ready)
+                }
+                Operation::SeedProgressJitter { seed } => {
+                    vm.seed_progress_jitter(seed)?;
                     Ok(Answer::Ready)
                 }
                 Operation::Throttle { factor_permille } => {
@@ -757,6 +770,7 @@ impl OwnedWorker {
                     | Operation::ResumeAt(_)
                     | Operation::Park
                     | Operation::SeedTimer { .. }
+                    | Operation::SeedProgressJitter { .. }
                     | Operation::Throttle { .. },
                 Answer::Ready
             ) | (Operation::Advance { .. }, Answer::Advanced { .. })
@@ -878,6 +892,7 @@ impl OwnedWorker {
                             | Operation::Control(_)
                             | Operation::Park
                             | Operation::SeedTimer { .. }
+                            | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
                             | Operation::Evidence { .. }
                     );
@@ -885,6 +900,7 @@ impl OwnedWorker {
                         operation,
                         Operation::Park
                             | Operation::SeedTimer { .. }
+                            | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
                             | Operation::Evidence { .. }
                     );
@@ -1146,6 +1162,7 @@ mod tests {
                 disk_sectors: Some(2),
                 disk_fault_model: model,
                 timer_policy: None,
+                progress: None,
             };
             let boot: Boot = serde_json::from_slice(&serde_json::to_vec(&boot).unwrap()).unwrap();
             let mut disk = boot.disk().unwrap().unwrap();

@@ -135,6 +135,9 @@ void __init seedbox_time_init(void)
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscall_ns) != 16 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscalls0) != 17 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, plan_time) != 18 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, progress_ns) != 19 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, progress_jitter_ns) != 20 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, progress_jitter_seed) != 21 * sizeof(u64));
 	BUILD_BUG_ON(SEEDBOX_ABI != 4);
 	BUILD_BUG_ON(SEEDBOX_CAP_PAGE_TIMER != 1);
 
@@ -153,6 +156,51 @@ void __init seedbox_time_init(void)
 	outl(SEEDBOX_ABI, SEEDBOX_PORT_TIME_READY);
 	WRITE_ONCE(seedbox_page, p);
 	pr_info("seedbox: deterministic time page active\n");
+}
+
+/* splitmix64 on the page-seeded state. */
+static u64 seedbox_jitter_next(u64 *state)
+{
+	u64 z = (*state += 0x9e3779b97f4a7c15ULL);
+
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+	return z ^ (z >> 31);
+}
+
+/*
+ * A progress call charges the compute it stands for: the VMM publishes the
+ * nominal cost of one call (the instructions between calls at the configured
+ * CPU speed) and a jitter bound, and the call costs the nominal charge plus a
+ * seeded draw within the bound either way, so equal work takes a little
+ * longer on some seeds than on others while the count-based plan stays
+ * linear. The charge is counted in whole syscall costs; the remainder
+ * carries to the next call, so the total charged converges on the total
+ * owed. The VMM seeds the stream per machine at boot, at a reboot and at a
+ * time fork; the state lives here, in guest RAM, so a restored snapshot
+ * continues its own stream until it is reseeded. Called only from the
+ * syscall hook on the one guest CPU.
+ */
+u64 seedbox_progress_syscalls(struct seedbox_time_page *p)
+{
+	static u64 state, seeded, carry;
+	u64 base = READ_ONCE(p->progress_ns) ?: SEEDBOX_SYSCALL_NS;
+	u64 bound = READ_ONCE(p->progress_jitter_ns);
+	u64 charge = base + carry;
+
+	if (bound > base)
+		bound = base;
+	if (bound) {
+		u64 seed = READ_ONCE(p->progress_jitter_seed);
+
+		if (seed != seeded) {
+			state = seed;
+			seeded = seed;
+		}
+		charge += seedbox_jitter_next(&state) % (2 * bound + 1) - bound;
+	}
+	carry = charge % SEEDBOX_SYSCALL_NS;
+	return charge / SEEDBOX_SYSCALL_NS;
 }
 
 bool seedbox_set_next_event(unsigned long ticks)

@@ -424,14 +424,11 @@ impl Control {
                     max_rate_ppb: *max_rate_ppb,
                 })
             }
-            Operation::Throttle {
-                target,
-                factor_permille,
-            } => {
-                let range = seedbox_control::THROTTLE_PERMILLE;
-                if !range.contains(factor_permille) {
+            Operation::Throttle { target, speed_hz } => {
+                let range = seedbox_control::THROTTLE_SPEED_HZ;
+                if !range.contains(speed_hz) {
                     return Err(format!(
-                        "factor_permille must be in [{}, {}]",
+                        "speed_hz must be in [{}, {}]",
                         range.start(),
                         range.end()
                     ));
@@ -441,7 +438,7 @@ impl Control {
                 Some(Action::Throttle {
                     handle,
                     machine,
-                    factor_permille: *factor_permille,
+                    speed_hz: *speed_hz,
                 })
             }
             Operation::Heal { handle } => {

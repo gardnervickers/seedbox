@@ -18,9 +18,6 @@ pub struct Simulation {
     pub services: BTreeMap<String, Service>,
     pub configs: BTreeMap<String, PathBuf>,
     pub network: Network,
-    /// PV instrumentation semantics retained with the simulation.
-    #[serde(default)]
-    pub simulator: project::SimulatorDefaults,
     pub schedule: Schedule,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<Control>,
@@ -85,6 +82,8 @@ pub struct Service {
     /// Guest RAM override in MiB; omission inherits MachineOptions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mb: Option<u32>,
+    #[serde(default)]
+    pub cpu: project::Cpu,
     pub source: ImageSource,
     pub platform: String,
     /// None inherits image defaults; Some([]) explicitly clears them.

@@ -34,15 +34,12 @@ pub struct Submission {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Simulator {
-    pub blocks_per_progress_call: std::num::NonZeroU32,
     /// Expose world controls to the oracle process.
     pub oracle_control: bool,
 }
 impl Default for Simulator {
     fn default() -> Self {
         Self {
-            blocks_per_progress_call: project::SimulatorDefaults::default()
-                .blocks_per_progress_call,
             oracle_control: true,
         }
     }
@@ -210,6 +207,7 @@ impl Submission {
                 name,
                 seedbox_spec::Service {
                     memory_mb: machine.memory_mib.map(|memory| memory.get()),
+                    cpu: machine.cpu,
                     source,
                     platform: self.architecture.map(platform).unwrap_or_default().into(),
                     entrypoint: machine.entrypoint,
@@ -258,9 +256,6 @@ impl Submission {
             services,
             configs,
             network,
-            simulator: project::SimulatorDefaults {
-                blocks_per_progress_call: self.simulator.blocks_per_progress_call,
-            },
             schedule: Default::default(),
             control: self
                 .simulator
@@ -384,6 +379,7 @@ impl Submission {
                             .ok_or_else(|| "memoryMiB must be positive".to_owned())
                     })
                     .transpose()?,
+                cpu: service.cpu.clone(),
                 image,
                 build,
                 entrypoint: service.entrypoint.clone(),
@@ -437,7 +433,6 @@ impl Submission {
                     .collect(),
             },
             simulator: Simulator {
-                blocks_per_progress_call: config.simulator.blocks_per_progress_call,
                 oracle_control: config.control.is_some(),
             },
             overrides: spec
@@ -496,12 +491,17 @@ mod tests {
     fn partial_submissions_preserve_machine_memory_until_server_architecture_is_known() {
         let mut raw = partial();
         raw["machines"]["app"]["memoryMiB"] = 2048.into();
+        raw["machines"]["app"]["cpu"] = serde_json::json!({"speed": "800MHz", "jitter": "5%"});
         raw["oracle"]["memoryMiB"] = 256.into();
         let mut spec: SimulationSpec = serde_json::from_value(raw.clone()).unwrap();
         assert_eq!(spec.configuration.services["app"].memory_mb, Some(2048));
         assert_eq!(spec.configuration.services["oracle"].memory_mb, Some(256));
         let wire = serde_json::to_value(&spec).unwrap();
         assert_eq!(wire["machines"]["app"]["memoryMiB"], 2048);
+        assert_eq!(
+            wire["machines"]["app"]["cpu"],
+            raw["machines"]["app"]["cpu"]
+        );
         assert_eq!(wire["oracle"]["memoryMiB"], 256);
         spec.resolve_project_architecture(Architecture::Aarch64)
             .unwrap();
@@ -517,6 +517,49 @@ mod tests {
     }
 
     #[test]
+    fn cpu_round_trips_and_jitter_is_omitted_when_off() {
+        let spec: SimulationSpec = serde_json::from_value(partial()).unwrap();
+        assert_eq!(
+            spec.configuration.services["app"].cpu,
+            project::Cpu::default()
+        );
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            wire["machines"]["app"]["cpu"],
+            serde_json::json!({"speed": "1GHz"})
+        );
+        let mut value = partial();
+        value["machines"]["app"]["cpu"] = serde_json::json!({"speed": "800MHz", "jitter": "5%"});
+        value["oracle"]["cpu"] = serde_json::json!({"speed": "2GHz", "jitter": "10%"});
+        let spec: SimulationSpec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(spec.configuration.services["app"].cpu.speed_hz, 800_000_000);
+        assert_eq!(spec.configuration.services["app"].cpu.jitter_percent, 5);
+        assert_eq!(
+            spec.configuration.services["oracle"].cpu.speed_hz,
+            2_000_000_000
+        );
+        assert_eq!(spec.configuration.services["oracle"].cpu.jitter_percent, 10);
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            wire["machines"]["app"]["cpu"],
+            serde_json::json!({"speed": "800MHz", "jitter": "5%"})
+        );
+        assert_eq!(wire["oracle"]["cpu"], value["oracle"]["cpu"]);
+        assert!(wire.get("cpu").is_none());
+        for bad in [
+            serde_json::json!({"speed": "2"}),
+            serde_json::json!({"speed": "999kHz"}),
+            serde_json::json!({"jitter": "101%"}),
+            serde_json::json!({"jitter": 5}),
+        ] {
+            value["machines"]["app"]["cpu"] = bad.clone();
+            assert!(
+                serde_json::from_value::<SimulationSpec>(value.clone()).is_err(),
+                "{bad}"
+            );
+        }
+    }
+    #[test]
     fn omitted_architecture_uses_server_and_partial_wire_has_no_project_wrapper() {
         let mut spec: SimulationSpec = serde_json::from_value(partial()).unwrap();
         assert!(spec
@@ -525,8 +568,8 @@ mod tests {
             .values()
             .all(|s| s.platform.is_empty()));
         assert_eq!(
-            spec.configuration.simulator.blocks_per_progress_call.get(),
-            10_000
+            spec.configuration.services["app"].cpu,
+            seedbox_spec::project::Cpu::default()
         );
         assert_eq!(spec.configuration.network.latency_ns, 1_000_000);
         let wire = serde_json::to_value(&spec).unwrap();
@@ -603,8 +646,10 @@ mod tests {
         let disabled: SimulationSpec = serde_json::from_value(value).unwrap();
         assert!(disabled.configuration.control.is_none());
         let wire = serde_json::to_value(&disabled).unwrap();
-        assert_eq!(wire["simulator"]["oracleControl"], false);
-        assert_eq!(wire["simulator"]["blocksPerProgressCall"], 10000);
+        assert_eq!(
+            wire["simulator"],
+            serde_json::json!({"oracleControl": false})
+        );
         let restored: SimulationSpec = serde_json::from_value(wire).unwrap();
         assert!(restored.configuration.control.is_none());
     }
@@ -614,7 +659,12 @@ mod tests {
         for (field, value) in [
             ("source", serde_json::json!("/project")),
             ("platform", serde_json::json!("linux/arm64")),
-            ("simulator", serde_json::json!({"blocksPerProgressCall":0})),
+            (
+                "simulator",
+                serde_json::json!({"instructionsPerProgressCall":50000}),
+            ),
+            ("simulator", serde_json::json!({"progressJitterNs":0})),
+            ("cpu", serde_json::json!({"progressPointsPerBlock":1})),
             (
                 "machines",
                 serde_json::json!({"oracle":{"image":"example/app"}}),

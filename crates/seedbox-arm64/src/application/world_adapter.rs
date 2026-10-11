@@ -289,6 +289,8 @@ pub struct ArmMachine {
     pub(crate) retired: Option<Retired>,
     snapshot_sequence: u64,
     ram_pages: u64,
+    /// The machine's configured CPU speed, which a throttle is a fraction of.
+    cpu_speed_hz: u64,
 }
 impl Deref for ArmMachine {
     type Target = MachineState;
@@ -411,6 +413,10 @@ impl WorldMachine for ArmMachine {
             incarnation: 0,
         };
         let mut worker = OwnedWorker::spawn(&factory.executable, identity)?;
+        let cpu_speed_hz = boot
+            .progress
+            .as_ref()
+            .map_or(0, |progress| progress.speed_hz);
         let mut boot = boot.clone();
         boot.seed = u64::from_le_bytes(
             entropy[..8]
@@ -445,6 +451,7 @@ impl WorldMachine for ArmMachine {
             retired: None,
             snapshot_sequence: 0,
             ram_pages,
+            cpu_speed_hz,
         })
     }
     fn has_pending_irq(&self) -> bool {
@@ -609,14 +616,34 @@ impl WorldMachine for ArmMachine {
             domain: domain.into(),
         })
     }
+    fn seed_progress_jitter(&mut self, seed: u64, domain: &str) -> Result<()> {
+        self.ready(Operation::SeedProgressJitter {
+            seed: crate::rng::Rng::new(seed, domain).next(),
+        })
+    }
+    fn seed_progress_jitter_branch(
+        &mut self,
+        seed: u64,
+        identity: Option<&str>,
+        domain: &str,
+    ) -> Result<()> {
+        self.ready(Operation::SeedProgressJitter {
+            seed: crate::rng::Rng::branch(seed, identity, domain).next(),
+        })
+    }
     fn supports_speed_reseed(&self) -> bool {
         false
     }
     fn supports_throttle(&self) -> bool {
         true
     }
-    fn throttle(&mut self, factor_permille: u64) -> Result<()> {
-        self.ready(Operation::Throttle { factor_permille })
+    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<Option<u64>> {
+        let factor_permille = speed_hz.map_or(1000, |speed_hz| {
+            seedbox_control::throttle_permille(self.cpu_speed_hz, speed_hz)
+        });
+        self.ready(Operation::Throttle { factor_permille })?;
+        Ok(speed_hz
+            .map(|_| seedbox_control::effective_throttle_speed(self.cpu_speed_hz, factor_permille)))
     }
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<()> {
         Err("ARM machine speed reseeding is unsupported".into())

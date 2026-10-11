@@ -31,6 +31,12 @@ pub fn resolve(
             .get(name)
             .ok_or_else(|| Error::Integrity(format!("missing resolved launch for {name}")))?;
         Ok(Machine {
+            cpu: configuration
+                .services
+                .get(name)
+                .ok_or_else(|| Error::Integrity(format!("missing CPU configuration for {name}")))?
+                .cpu
+                .clone(),
             image: Some(Image {
                 tag: configuration
                     .services
@@ -96,7 +102,6 @@ pub fn resolve(
         oracle,
         network: configuration.network.clone(),
         simulator: Simulator {
-            blocks_per_progress_call: configuration.simulator.blocks_per_progress_call,
             schedule: configuration.schedule.clone(),
             disk: configuration.disk.clone(),
             oracle_control: configuration.control.is_some(),
@@ -430,14 +435,13 @@ fn resolved_boot(
             })
             .collect(),
     };
-    let mut recipe = crate::guest::launch_recipe_with_progress(
+    let mut recipe = crate::guest::launch_recipe(
         &launch,
         &format!("10.0.0.{}/24", index + 1),
         &hosts,
         name,
         &BTreeMap::new(),
         definition.clock.epoch_seconds,
-        definition.simulator.blocks_per_progress_call,
     )?;
     let mut input = tempfile::tempfile()?;
     store.copy_to(&digest(&machine.boot_archive)?, &mut input)?;
@@ -530,7 +534,7 @@ fn launch_configs(bytes: &[u8]) -> Result<&[u8]> {
             .ok_or_else(fail)?;
     }
     cursor = cursor
-        .checked_add(12)
+        .checked_add(16)
         .filter(|n| *n <= bytes.len())
         .ok_or_else(fail)?;
     for _ in 0..4 {
@@ -689,7 +693,6 @@ mod tests {
         );
         definition.oracle.process.argv.push("--changed".into());
         definition.clock.epoch_seconds += 1;
-        definition.simulator.blocks_per_progress_call = std::num::NonZeroU32::new(5000).unwrap();
         let changed = prepared(&definition, &store).unwrap();
         assert_ne!(changed.guests["oracle"], original);
         assert_eq!(
@@ -702,6 +705,25 @@ mod tests {
             .any(|v| v == b"preserve me"));
         assert!(bytes.windows(b"--changed".len()).any(|v| v == b"--changed"));
         store.verify(&original).unwrap();
+        // The CPU is the VMM's input, not the guest's: the recipe and the
+        // prepared guests do not change with it.
+        definition.oracle.cpu.speed_hz = 800_000_000;
+        definition.oracle.cpu.jitter_percent = 5;
+        let mut worker = definition.oracle.clone();
+        worker.cpu = Default::default();
+        definition.machines.insert("worker".into(), worker);
+        let restored: Definition =
+            serde_json::from_value(serde_json::to_value(&definition).unwrap()).unwrap();
+        let configuration = restored.configuration("roundtrip");
+        assert_eq!(configuration.services["oracle"].cpu, definition.oracle.cpu);
+        assert_eq!(configuration.services["worker"].cpu.speed_hz, 1_000_000_000);
+        assert_eq!(configuration.services["worker"].cpu.jitter_percent, 0);
+        definition.machines.remove("worker");
+        assert_eq!(
+            prepared(&definition, &store).unwrap().guests,
+            changed.guests
+        );
+        definition.oracle.cpu = Default::default();
     }
     #[test]
     fn checkpoint_binary_closure_survives_source_deletion_and_preserves_guest_paths() {

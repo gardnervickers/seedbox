@@ -12,7 +12,8 @@ checks results. Its exit code determines the test verdict. Execution errors and
 replay mismatches are reported separately from that verdict.
 
 `seedbox.yaml` describes machines, the oracle, initial files and volumes,
-baseline network latency, and the application progress budget. Complex test
+baseline network latency, and each machine's CPU speed and jitter. Each CPU
+defaults to 1 GHz with zero jitter, including the oracle. Complex test
 logic belongs in the oracle. The oracle can use the guest control API; the TUI
 can inject faults through the server API.
 

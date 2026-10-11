@@ -76,23 +76,26 @@ class ControlTests(unittest.TestCase):
                             getattr(world, op)(target)
         self.assertEqual(peer.requests, [])
 
-    def test_throttle_sends_permille_and_heals_its_handle(self):
-        peer = Peer(reply(result={"handle": "p3"}) + reply(2))
+    def test_throttle_sends_a_speed_in_hz_and_heals_its_handle(self):
+        peer = Peer(reply(result={"handle": "p3"}) + reply(2) + reply(3, result={"handle": "p4"}))
         with World(peer) as world:
-            slow = world.throttle("server", 2.5)
+            slow = world.throttle("server", "800MHz")
             self.assertEqual(slow, Throttle("p3", slow.effect))
             self.assertEqual(world.heal(slow).effect_at_ns, 30)
+            world.throttle("server", 1_500_000_000)
         self.assertEqual(peer.requests, [
             {"version": 1, "id": 1, "op": "throttle", "target": {"service": "server"},
-             "factor_permille": 2500},
-            {"version": 1, "id": 2, "op": "heal", "handle": "p3"}])
+             "speed_hz": 800_000_000},
+            {"version": 1, "id": 2, "op": "heal", "handle": "p3"},
+            {"version": 1, "id": 3, "op": "throttle", "target": {"service": "server"},
+             "speed_hz": 1_500_000_000}])
         with World(Peer(b"")) as world:
-            for factor in (0.5, 1000.5, 1.0001, True, "x", float("inf")):
-                with self.subTest(factor=factor), self.assertRaises(ValueError):
-                    world.throttle("server", factor)
+            for speed in ("2", "2ghz", "999Hz", "1.1THz", "0.5Hz", 2.5, True, "x", 0):
+                with self.subTest(speed=speed), self.assertRaises(ValueError):
+                    world.throttle("server", speed)
         peer = Peer(reply(result={}))
         with World(peer) as world, self.assertRaises(ProtocolError):
-            world.throttle(Machine("server-vm"), 1)
+            world.throttle(Machine("server-vm"), "1GHz")
 
     def test_process_pause_and_resume_wire_and_errors(self):
         for op in ("pause_process", "resume_process"):

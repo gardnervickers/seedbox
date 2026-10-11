@@ -191,7 +191,7 @@ do not stamp Git revisions or checkout cleanliness in the runner.
 ## Native project and resolved simulation definitions
 
 The current authoring format is `seedbox.yaml`, with `machines` and a dedicated
-`oracle`. Keep network latency and PV block budget optional; advanced behavior
+`oracle`. Keep network latency and each machine's virtual CPU (`cpu.speed`, `cpu.jitter` on that machine or the oracle) optional; advanced behavior
 belongs in the oracle/control API. Do not add execution wall-time or simulated-time
 limits to either definition. Host timeouts are request options (`--wall-time`).
 The server resolves omitted defaults and image references before execution.

@@ -149,7 +149,20 @@ fn machine(
                 .get(service)
                 .is_some_and(|image| !image.launch.disk_volumes.is_empty())
     });
+    let cpu = request
+        .prepared
+        .placement
+        .iter()
+        .find_map(|(service, machine)| {
+            (machine == name)
+                .then(|| request.cpus.get(service))
+                .flatten()
+        })
+        .ok_or_else(|| Error::Integrity(format!("missing CPU configuration for machine {name}")))?;
     Ok(MachineConfig {
+        cpu_speed_hz: cpu.speed_hz,
+        progress_ns: cpu.progress_ns(),
+        progress_jitter_ns: cpu.progress_jitter_ns(),
         name: name.clone(),
         mem_mb: request
             .prepared
@@ -328,7 +341,7 @@ mod program_tests {
             action: Action::Throttle {
                 handle: "slow".into(),
                 machine: "db".into(),
-                factor_permille: 2000,
+                speed_hz: 1_000_000_000,
             },
         };
         let heal = TimedInput {
