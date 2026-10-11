@@ -1,27 +1,26 @@
 name: mac-capabilities
-services:
+machines:
   server:
     image: docker.io/library/busybox:1.37
-    command: [sleep, "3600"]
+    command:
+    - sleep
+    - '3600'
   client:
     image: docker.io/library/busybox:1.37
-    command: [sleep, "3600"]
-  scenario:
-    image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/mac_capabilities.py]
-    configs:
-      - {source: driver, target: /scenario/mac_capabilities.py}
-      - {source: api-package, target: /scenario/seedbox/__init__.py}
-      - {source: api-control, target: /scenario/seedbox/control.py}
-configs:
-  driver: {file: ../driver/mac_capabilities.py}
-  api-package: {file: ../../../python/seedbox/__init__.py}
-  api-control: {file: ../../../python/seedbox/control.py}
-x-seedbox:
-  version: 1
-  seed: 61
-  limits: {simulated_time: 30s, wall_time: 10m}
-  network: {latency: 1ms, jitter: 200us}
-  schedule: {timer_jitter: 1ms}
-  control: {service: scenario}
-  check: {service: scenario}
+    command:
+    - sleep
+    - '3600'
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/mac_capabilities.py"
+  files:
+  - source: "../driver/mac_capabilities.py"
+    target: "/scenario/mac_capabilities.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

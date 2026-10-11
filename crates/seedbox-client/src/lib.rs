@@ -20,6 +20,8 @@ pub enum Error {
     Random(String),
     #[error("server connection: {0}")]
     Transport(#[from] reqwest::Error),
+    #[error("server request: {0}")]
+    Request(serde_json::Error),
     #[error("server response: {0}")]
     Protocol(#[from] serde_json::Error),
     #[error("server response exceeds {RESPONSE_LIMIT} bytes")]
@@ -53,12 +55,18 @@ impl Client {
         })
     }
 
+    /// Explain resident execution reservations and queued work.
+    pub async fn capacity(&self) -> Result<seedbox_api::ExecutionCapacity, Error> {
+        self.document(self.request(Method::GET, "/v1/capacity"))
+            .await
+    }
+
     pub async fn info(&self) -> Result<ServerInfo, Error> {
         self.document(self.request(Method::GET, "/v1")).await
     }
 
     pub async fn submit(&self, request: &SubmitRequest) -> Result<Simulation, Error> {
-        self.document(self.request(Method::POST, "/v1/simulations").json(request))
+        self.document(self.json_request("/v1/simulations", request)?)
             .await
     }
 
@@ -121,7 +129,7 @@ impl Client {
         &self,
         request: &seedbox_api::SeedRangeRequest,
     ) -> Result<seedbox_api::SeedRangeStatus, Error> {
-        self.document(self.request(Method::POST, "/v1/seed-ranges").json(request))
+        self.document(self.json_request("/v1/seed-ranges", request)?)
             .await
     }
     pub async fn seed_range(
@@ -225,6 +233,19 @@ impl Client {
     ) -> Result<seedbox_api::FaultCatalogue, Error> {
         self.document(self.request(Method::GET, &format!("/v1/simulations/{id}/fault-types")))
             .await
+    }
+
+    /// Explain an action without preparing it or allocating a fault ID.
+    pub async fn preview_fault(
+        &self,
+        id: &SimulationId,
+        action: &serde_json::Value,
+    ) -> Result<seedbox_api::FaultPreview, Error> {
+        self.document(
+            self.request(Method::POST, &format!("/v1/simulations/{id}/fault-preview"))
+                .json(&serde_json::json!({"action": action})),
+        )
+        .await
     }
 
     /// Submit a schema-generated control without decoding its action locally.
@@ -394,6 +415,18 @@ impl Client {
         self.document(request).await
     }
 
+    fn json_request(
+        &self,
+        path: &str,
+        value: &impl serde::Serialize,
+    ) -> Result<RequestBuilder, Error> {
+        let body = serde_json::to_vec(value).map_err(Error::Request)?;
+        Ok(self
+            .request(Method::POST, path)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body))
+    }
+
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
         // The authority is syntactic only; every connection uses the explicit
         // Unix socket, with ambient proxies and redirects disabled.
@@ -434,5 +467,23 @@ fn follow_query(follow: bool) -> &'static str {
         ""
     } else {
         "?follow=false"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submission_serialization_errors_are_reported_before_connecting() {
+        let mut spec: seedbox_api::SimulationSpec = serde_json::from_value(serde_json::json!({
+            "machines": {}, "oracle": {"image":"example/oracle"}
+        }))
+        .unwrap();
+        spec.configuration.machine.memory_mb = 512;
+        let client = Client::connect_to(Path::new("/nonexistent-seedbox-test.sock")).unwrap();
+        let error = client.json_request("/v1/simulations", &spec).unwrap_err();
+        assert!(matches!(error, Error::Request(_)));
+        assert_eq!(error.to_string(), "server request: partial simulation submissions do not support custom machine (memory_mb, page_timer or deferred_tx); submit a complete resolved Simulation definition instead");
     }
 }

@@ -278,7 +278,13 @@ impl ContentStore {
         fs::File::open(self.object_path(digest)).context(Error::Integrity, digest.hex())
     }
 
+    /// Reuse a verification only while the retained file's identity and metadata
+    /// match the bytes this process hashed. Replacement or mutation rehashes it.
     pub fn verify(&self, digest: &ContentDigest) -> Result<()> {
+        let file = self.open(digest)?;
+        if self.trusted(digest, &file)?.is_some() {
+            return Ok(());
+        }
         self.copy_to(digest, &mut io::sink())
     }
 

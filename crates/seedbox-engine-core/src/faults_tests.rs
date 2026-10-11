@@ -404,3 +404,58 @@ fn link_layers_and_cuts_survive_machine_lifecycle_and_heal_independently() {
 fn lifecycle(plans: Vec<serde_json::Value>) -> engine::Faults {
     engine::Faults::new(plans, vec!["a".into(), "b".into()]).unwrap()
 }
+
+#[test]
+fn target_preview_preserves_all_fault_state_rng_and_next_identity() {
+    use seedbox_control::{Action, Plan};
+    let mut faults = fixture();
+    faults.apply_due(11);
+    let before = serde_json::to_value(&faults).unwrap();
+    let untouched = faults.clone();
+    let partition = Action::Partition {
+        handle: "preview-only".into(),
+        left: vec!["n1".into()],
+        right: vec!["n2".into(), "client".into()],
+    };
+    for _ in 0..20 {
+        let targets = faults.action_targets(&partition).unwrap();
+        assert_eq!(targets.machines, ["client", "n1", "n2"]);
+        assert_eq!(targets.links.len(), 4);
+        assert!(targets.links.contains(&("client".into(), "n1".into())));
+        faults
+            .action_targets(&Action::ClockSkew {
+                handle: "random-clock".into(),
+                machine: "n1".into(),
+                offset_ns: None,
+                max_offset_ns: Some(100),
+            })
+            .unwrap();
+    }
+    assert!(faults
+        .action_targets(&Action::Partition {
+            handle: "invalid".into(),
+            left: vec!["n1".into()],
+            right: vec!["n1".into()],
+        })
+        .is_err());
+    assert_eq!(serde_json::to_value(&faults).unwrap(), before);
+    let plan = Plan {
+        id: 0,
+        at_ns: 30,
+        deadline_ns: 40,
+        action: partition,
+    };
+    assert_eq!(
+        faults.propose(plan.clone(), 11).unwrap(),
+        untouched.propose(plan, 11).unwrap()
+    );
+    let mut untouched = untouched;
+    assert_eq!(
+        faults.links.clock_offset(0, 100).unwrap(),
+        untouched.links.clock_offset(0, 100).unwrap()
+    );
+    assert_eq!(
+        faults.links.stream_sample((0, 1)),
+        untouched.links.stream_sample((0, 1))
+    );
+}

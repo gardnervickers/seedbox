@@ -38,7 +38,6 @@ struct Field {
 /// heal shortcuts and the map preview. The schema still decides validity.
 #[derive(Clone, Debug, Default)]
 pub(super) struct FormContext {
-    pub machines: Vec<String>,
     pub selected: Option<String>,
     /// Every handle the world has used, so new ones stay unique.
     pub handles: Vec<String>,
@@ -64,6 +63,9 @@ pub(super) struct FaultForm {
     fields: Vec<Field>,
     focus: usize,
     error: Option<String>,
+    preview_scroll: std::cell::Cell<usize>,
+    preview_request: Option<(Value, u64)>,
+    preview: Option<Result<seedbox_api::FaultPreview, String>>,
     hitboxes: std::cell::RefCell<Vec<(Rect, usize)>>,
 }
 
@@ -79,6 +81,9 @@ impl FaultForm {
             fields: Vec::new(),
             focus: 0,
             error: None,
+            preview_scroll: std::cell::Cell::new(0),
+            preview_request: None,
+            preview: None,
             hitboxes: Default::default(),
         }
     }
@@ -88,21 +93,59 @@ impl FaultForm {
         self
     }
 
-    /// Machines named by the values entered so far, for the map preview.
+    /// Only the server determines map targets; partial text is not evidence.
     pub(super) fn targets(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        if !self.editing {
-            return out;
+        self.preview
+            .as_ref()
+            .and_then(|p| p.as_ref().ok())
+            .map(|p| p.machines.clone())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn targets_link(&self, from: &str, to: &str) -> bool {
+        self.preview
+            .as_ref()
+            .and_then(|p| p.as_ref().ok())
+            .is_some_and(|p| {
+                p.links
+                    .iter()
+                    .any(|link| link.from == from && link.to == to)
+            })
+    }
+
+    pub(super) fn request_preview(&mut self, revision: u64) -> Option<Value> {
+        let action = self.editing.then(|| self.value().ok()).flatten();
+        let next = action.map(|action| (action, revision));
+        if self.preview_request == next {
+            return None;
         }
-        for field in &self.fields {
-            for part in field.text.split(',').map(str::trim) {
-                if self.context.machines.iter().any(|m| m == part) && !out.iter().any(|m| m == part)
-                {
-                    out.push(part.to_owned());
-                }
+        self.preview = None;
+        self.preview_scroll.set(0);
+        self.preview_request = next.clone();
+        next.map(|(action, _)| action)
+    }
+
+    pub(super) fn accept_preview(
+        &mut self,
+        action: Value,
+        revision: u64,
+        result: Result<seedbox_api::FaultPreview, String>,
+    ) {
+        if self.preview_request.as_ref() == Some(&(action, revision)) {
+            if self.error.as_deref()
+                == Some("Review the effect preview before pressing Enter to submit.")
+            {
+                self.error = None;
             }
+            self.preview = Some(result);
         }
-        out
+    }
+
+    pub(super) fn preview_ready(&self, action: &Value) -> bool {
+        self.preview_request
+            .as_ref()
+            .is_some_and(|(requested, _)| requested == action)
+            && matches!(self.preview, Some(Ok(_)))
     }
 
     fn heal_schema(&self) -> Option<&Value> {
@@ -125,7 +168,7 @@ impl FaultForm {
             }
         }
         for (index, fault) in self.catalogue.faults.iter().enumerate() {
-            if matches(&fault.name) || matches(&fault.title) {
+            if matches(&fault.name) || matches(&fault.title) || matches(fault.category.label()) {
                 out.push(Entry::Fault(index));
             }
         }
@@ -244,15 +287,25 @@ impl FaultForm {
                         self.build_fields();
                     }
                     Entry::Heal(handle, _) => {
-                        let action = serde_json::json!({"action": "heal", "handle": handle});
-                        let schema = self.heal_schema().cloned().unwrap_or(Value::Bool(true));
-                        return match validate(&schema, &action, "heal") {
-                            Ok(()) => FormOutcome::Submit(action),
-                            Err(error) => {
-                                self.error = Some(error);
-                                FormOutcome::None
+                        if let Some(index) = self
+                            .catalogue
+                            .faults
+                            .iter()
+                            .position(|fault| fault.name == "heal")
+                        {
+                            self.selected = index;
+                            self.editing = true;
+                            self.error = None;
+                            self.build_fields();
+                            if let Some(field) = self
+                                .fields
+                                .iter_mut()
+                                .find(|field| field.path == ["handle"])
+                            {
+                                field.text = handle.clone();
                             }
-                        };
+                            self.focus = self.fields.len();
+                        }
                     }
                 },
                 KeyCode::Backspace => {
@@ -275,6 +328,25 @@ impl FaultForm {
                 _ => {}
             }
             return FormOutcome::None;
+        }
+        if self.focus == self.fields.len() {
+            match key.code {
+                KeyCode::Char('r') if matches!(self.preview, Some(Err(_))) => {
+                    self.preview_request = None;
+                    return FormOutcome::None;
+                }
+                KeyCode::PageDown => {
+                    self.preview_scroll
+                        .set(self.preview_scroll.get().saturating_add(4));
+                    return FormOutcome::None;
+                }
+                KeyCode::PageUp => {
+                    self.preview_scroll
+                        .set(self.preview_scroll.get().saturating_sub(4));
+                    return FormOutcome::None;
+                }
+                _ => {}
+            }
         }
         if key.code == KeyCode::Enter && self.focus == self.fields.len() {
             return match self.value() {
@@ -482,7 +554,7 @@ impl FaultForm {
                                 format!("{marker}   {:<26}", fault.title),
                                 Style::default().fg(if on { ICE } else { TEXT }),
                             ),
-                            Span::styled(fault.name.clone(), Style::default().fg(FAINT)),
+                            Span::styled(fault.category.label(), Style::default().fg(FAINT)),
                         ])
                     }
                 };
@@ -500,7 +572,7 @@ impl FaultForm {
             }
         } else if let Some(fault) = self.catalogue.faults.get(self.selected) {
             lines.push(Line::styled(
-                fault.title.clone(),
+                format!("{} · {}", fault.category.label(), fault.title),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
@@ -512,15 +584,20 @@ impl FaultForm {
                 "⇥ next field · ← → choose · space toggles a list · ⏎ next / submit · esc cancel",
                 Style::default().fg(FAINT),
             ));
-            let visible = usize::from(height.saturating_sub(12)).max(1);
-            let start = self.focus.saturating_sub(visible - 1);
+            let visible = if self.focus == self.fields.len() {
+                0
+            } else {
+                usize::from(height.saturating_sub(18)).max(1)
+            };
+            let start = self.focus.saturating_sub(visible.saturating_sub(1));
             let name_width = self
                 .fields
                 .iter()
                 .map(|f| f.path.join(".").chars().count() + if f.required { 2 } else { 0 })
                 .max()
                 .unwrap_or(10)
-                .clamp(10, usize::from(width) / 2)
+                .max(10)
+                .min(usize::from(width) / 2)
                 + 2;
             for (index, field) in self.fields.iter().enumerate().skip(start).take(visible) {
                 let unit = field.schema["x-unit"].as_str().unwrap_or("");
@@ -630,6 +707,82 @@ impl FaultForm {
                 if !constraints.is_empty() {
                     lines.push(Line::from(constraints));
                 }
+            }
+        }
+        if self.editing {
+            let reviewing = self.focus == self.fields.len();
+            let budget = usize::from(height).saturating_sub(lines.len() + 5);
+            let mut explanation = Vec::new();
+            match &self.preview {
+                Some(Ok(preview)) => {
+                    explanation.push(format!("{} effect preview", preview.category.label()));
+                    explanation.push(format!("Expected targets: {}", preview.machines.join(", ")));
+                    if !preview.links.is_empty() {
+                        explanation.push(format!(
+                            "Directed links: {}",
+                            preview
+                                .links
+                                .iter()
+                                .map(|l| format!("{} → {}", l.from, l.to))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    explanation.push(preview.expected_effect.clone());
+                    if reviewing {
+                        explanation.extend(preview.observations.clone());
+                        explanation.extend(
+                            preview
+                                .preconditions
+                                .iter()
+                                .map(|text| format!("Requires: {text}")),
+                        );
+                        explanation.extend(preview.limitations.clone());
+                        explanation.push(format!(
+                            "Observed revision {} at {} ns",
+                            preview.revision, preview.simulated_time_ns
+                        ));
+                    } else {
+                        explanation.push(
+                            "Expected effects; submission rechecks state. Tab to Submit to review."
+                                .into(),
+                        );
+                    }
+                }
+                Some(Err(error)) => explanation.push(format!(
+                    "Preview unavailable: {error}. Focus Submit and press r to retry."
+                )),
+                None if self.preview_request.is_some() => {
+                    explanation.push("Loading effect preview…".into())
+                }
+                None => explanation.push("Complete the fields to preview expected effects.".into()),
+            }
+            let wrapped: Vec<_> = explanation
+                .iter()
+                .flat_map(|text| wrap_text(text, text_width, usize::MAX))
+                .collect();
+            let overflow = wrapped.len() > budget;
+            let visible = budget.saturating_sub(usize::from(overflow));
+            let start = if reviewing {
+                self.preview_scroll
+                    .get()
+                    .min(wrapped.len().saturating_sub(visible.max(1)))
+            } else {
+                0
+            };
+            self.preview_scroll.set(start);
+            for text in wrapped.iter().skip(start).take(visible) {
+                lines.push(Line::styled(text.clone(), Style::default().fg(ICE)));
+            }
+            if overflow && budget > 0 {
+                lines.push(Line::styled(
+                    if reviewing {
+                        "PgUp/PgDn scroll effect preview"
+                    } else {
+                        "Tab to Submit to review the full preview"
+                    },
+                    Style::default().fg(DIM),
+                ));
             }
         }
         if let Some(error) = &self.error {
@@ -1208,6 +1361,7 @@ mod tests {
         FaultCatalogue {
             simulation: "k7m2p9qx".parse().expect("id"),
             faults: vec![seedbox_api::FaultDescriptor {
+                category: seedbox_api::FaultCategory::Machine,
                 name: "future_server_fault".into(),
                 title: "Future fault".into(),
                 description: "Supplied by server".into(),
@@ -1256,6 +1410,71 @@ mod tests {
     }
 
     #[test]
+    fn preview_renders_server_effects_and_scrolls_to_the_last_line() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut form = FaultForm::new(catalogue(json!({"type":"object", "properties":{
+            "action":{"const":"future_server_fault"}, "machine":{"type":"string","default":"beta"}
+        }})));
+        form.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let action = form.request_preview(7).unwrap();
+        let preview = seedbox_api::FaultPreview {
+            simulation: "k7m2p9qx".parse().unwrap(),
+            revision: 7,
+            simulated_time_ns: 42,
+            category: seedbox_api::FaultCategory::Network,
+            machines: vec!["beta".into(), "gamma".into()],
+            links: vec![seedbox_api::FaultPreviewLink {
+                from: "beta".into(),
+                to: "gamma".into(),
+            }],
+            expected_effect: "Server supplied expected effect".into(),
+            observations: Vec::new(),
+            preconditions: (0..20)
+                .map(|n| format!("Condition {n} required before admission"))
+                .collect(),
+            limitations: vec!["Effects are not guaranteed.".into()],
+        };
+        form.accept_preview(action.clone(), 7, Ok(preview));
+        assert!(form.preview_ready(&action));
+        assert_eq!(form.targets(), ["beta", "gamma"]);
+        assert!(form.targets_link("beta", "gamma"));
+        assert!(!form.targets_link("gamma", "beta"));
+        form.focus = form.fields.len();
+        let render = |form: &FaultForm, width, height| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| form.draw(frame, frame.area()))
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        let first = render(&form, 100, 40);
+        assert!(first.contains("Machine · Future fault"));
+        assert!(first.contains("Expected targets: beta, gamma"));
+        assert!(first.contains("beta → gamma"));
+        assert!(first.contains("Server supplied expected effect"));
+        for _ in 0..20 {
+            form.input(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        let last = render(&form, 100, 40);
+        assert!(last.contains("Observed revision 7 at 42 ns"), "{last}");
+        form.input(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_ne!(
+            render(&form, 100, 40),
+            last,
+            "Scrolling up from the end must respond immediately"
+        );
+        for (width, height) in [(40, 12), (20, 6)] {
+            render(&form, width, height);
+        }
+    }
+
+    #[test]
     fn context_fills_selected_machine_fresh_handles_and_heal_shortcuts() {
         let schema = json!({"type":"object","required":["machine","handle"],"properties":{
             "action":{"const":"partition"},
@@ -1265,23 +1484,28 @@ mod tests {
             "action":{"const":"heal"},"handle":{"type":"string","enum":["p1"]}}});
         let mut catalogue = catalogue(schema);
         catalogue.faults.push(seedbox_api::FaultDescriptor {
+            category: seedbox_api::FaultCategory::Machine,
             name: "heal".into(),
             title: "Heal fault".into(),
             description: String::new(),
             schema: heal,
         });
         let context = FormContext {
-            machines: vec!["alpha".into(), "beta".into()],
             selected: Some("beta".into()),
             handles: vec!["p1".into()],
             active: vec![("p1".into(), "partition alpha┃beta".into())],
         };
         let mut form = FaultForm::new(catalogue.clone()).with_context(context.clone());
-        // The live heal is offered first and submits directly.
+        // The live heal opens a review before Enter can submit.
         assert_eq!(
             form.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            FormOutcome::Submit(json!({"action":"heal","handle":"p1"}))
+            FormOutcome::None
         );
+        assert_eq!(
+            form.value().unwrap(),
+            json!({"action":"heal","handle":"p1"})
+        );
+        assert_eq!(form.focus, form.fields.len());
         let mut form = FaultForm::new(catalogue).with_context(context);
         for c in "future".chars() {
             form.input(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -1297,7 +1521,10 @@ mod tests {
         };
         assert_eq!(text("machine"), "beta");
         assert_eq!(text("handle"), "f1");
-        assert_eq!(form.targets(), ["beta"]);
+        assert!(
+            form.targets().is_empty(),
+            "Only a server preview may highlight targets"
+        );
     }
 
     #[test]
@@ -1424,6 +1651,7 @@ mod quantity_tests {
         let mut form = FaultForm::new(FaultCatalogue {
             simulation: "k7m2p9qx".parse().unwrap(),
             faults: vec![seedbox_api::FaultDescriptor {
+                category: seedbox_api::FaultCategory::Machine,
                 name: "future".into(),
                 title: "Future".into(),
                 description: String::new(),
