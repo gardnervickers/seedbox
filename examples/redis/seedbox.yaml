@@ -12,4 +12,5 @@ oracle:
 network:
   latency: 1ms
 simulator:
-  blocksPerProgressCall: 10000
+  instructionsPerProgressCall: 50000
+  progressPointsPerBlock: 1

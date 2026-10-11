@@ -1053,7 +1053,7 @@ mod tests {
             "machines":{}, "oracle":{"bootArchive":asset,"memoryBytes":1073741824_u64,
                 "process":{"argv":["/test"],"environment":{},"workingDirectory":"/","user":"0"},"volumes":{}},
             "network":{"name":"default","latency_ns":1000000,"jitter_ns":0},
-            "simulator":{"blocksPerProgressCall":17,"schedule":{"timer_jitter_ns":0,"stop_tolerance_ns":0},
+            "simulator":{"instructionsPerProgressCall":17,"progressPointsPerBlock":2,"schedule":{"timer_jitter_ns":0,"stop_tolerance_ns":0},
                 "disk":{"torn_writes":false},"oracleControl":false},
             "start":{"kind":"fresh"},
             "overrides":[{"id":"external","atNs":42,"action":{"action":"future"}}]

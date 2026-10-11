@@ -29,19 +29,36 @@ Code: [x86 clock](../kernel/seedbox.c), [ARM clock](../kernel-arm64/seedbox.c).
 ## Progress from translated blocks
 
 A computation or spin loop that never reads the clock still needs to let other
-guest threads and machines make progress. The DynamoRIO client decrements a
-per-thread budget at every translated basic-block entry and issues a raw
-`getpid` syscall when the configured budget expires (10,000 entries by default).
-The kernel charges that syscall as PV progress. Existing executable code, shared libraries and JIT code go through the
-translator without application-specific flags or recompilation.
+guest threads and machines make progress. The DynamoRIO client charges each
+translated basic block its application instruction count against a per-thread
+budget and issues a raw `getpid` syscall each time the budget is used up
+(`simulator.instructionsPerProgressCall`, 50,000 by default). The kernel
+charges that syscall as PV progress, so a machine's virtual time grows with the
+instructions it executes, whether they run in a tight loop of short blocks or in
+long straight-line code. Existing executable code, shared libraries and JIT code
+go through the translator without application-specific flags or recompilation.
 
-The budget measures block entries, not individual executed instructions. A basic
-block is a sequence of instructions with one entry and no internal control-flow
-branch. Translator-internal work and kernel execution are outside that counter.
+A charge that crosses the budget leaves it negative. The checkpoint then adds
+the budget back once per progress call until it is positive again, so the
+overshoot carries into the next window and a block longer than the budget makes
+as many calls as its instructions are worth.
+
+`simulator.progressPointsPerBlock` (default 1) sets how many charge points each
+block gets. One point charges the whole block at its entry, which is fastest.
+With more, a block is split into that many nearly equal runs (never more than
+its instruction count), each charged where it starts, so progress calls can
+land inside long blocks rather than only at their entries. Both settings change
+results and are part of the simulation definition.
+
+A basic block is a sequence of instructions with one entry and no internal
+control-flow branch. Instructions count equally; translator-internal work and
+kernel execution are outside that counter.
 Instrumentation must leave the application's registers and comparison flags
-intact. On ARM, the client uses arithmetic that leaves those flags alone and a
-branch that tests a register directly (`CBNZ`, compare and branch if nonzero).
-DynamoRIO's drreg extension manages the temporary registers.
+intact. On x86 the charge is a `sub` on the thread's budget word followed by a
+sign test, with drreg preserving live flags. On ARM, the client uses arithmetic
+that leaves the flags alone and a branch that tests the sign bit directly
+(`TBZ`, test bit and branch if zero). DynamoRIO's drreg extension manages the
+temporary registers.
 
 Code: [progress client](../guest/progress/progress.c).
 

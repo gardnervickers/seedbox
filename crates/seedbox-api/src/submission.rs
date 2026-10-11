@@ -34,15 +34,17 @@ pub struct Submission {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Simulator {
-    pub blocks_per_progress_call: std::num::NonZeroU32,
+    pub instructions_per_progress_call: std::num::NonZeroU32,
+    pub progress_points_per_block: std::num::NonZeroU32,
     /// Expose world controls to the oracle process.
     pub oracle_control: bool,
 }
 impl Default for Simulator {
     fn default() -> Self {
+        let progress = project::SimulatorDefaults::default();
         Self {
-            blocks_per_progress_call: project::SimulatorDefaults::default()
-                .blocks_per_progress_call,
+            instructions_per_progress_call: progress.instructions_per_progress_call,
+            progress_points_per_block: progress.progress_points_per_block,
             oracle_control: true,
         }
     }
@@ -258,7 +260,8 @@ impl Submission {
             configs,
             network,
             simulator: project::SimulatorDefaults {
-                blocks_per_progress_call: self.simulator.blocks_per_progress_call,
+                instructions_per_progress_call: self.simulator.instructions_per_progress_call,
+                progress_points_per_block: self.simulator.progress_points_per_block,
             },
             schedule: Default::default(),
             control: self
@@ -429,7 +432,8 @@ impl Submission {
                     .collect(),
             },
             simulator: Simulator {
-                blocks_per_progress_call: config.simulator.blocks_per_progress_call,
+                instructions_per_progress_call: config.simulator.instructions_per_progress_call,
+                progress_points_per_block: config.simulator.progress_points_per_block,
                 oracle_control: config.control.is_some(),
             },
             overrides: spec
@@ -483,8 +487,8 @@ mod tests {
             .values()
             .all(|s| s.platform.is_empty()));
         assert_eq!(
-            spec.configuration.simulator.blocks_per_progress_call.get(),
-            10_000
+            spec.configuration.simulator,
+            seedbox_spec::project::SimulatorDefaults::default()
         );
         assert_eq!(spec.configuration.network.latency_ns, 1_000_000);
         let wire = serde_json::to_value(&spec).unwrap();
@@ -562,7 +566,8 @@ mod tests {
         assert!(disabled.configuration.control.is_none());
         let wire = serde_json::to_value(&disabled).unwrap();
         assert_eq!(wire["simulator"]["oracleControl"], false);
-        assert_eq!(wire["simulator"]["blocksPerProgressCall"], 10000);
+        assert_eq!(wire["simulator"]["instructionsPerProgressCall"], 50000);
+        assert_eq!(wire["simulator"]["progressPointsPerBlock"], 1);
         let restored: SimulationSpec = serde_json::from_value(wire).unwrap();
         assert!(restored.configuration.control.is_none());
     }
@@ -572,7 +577,15 @@ mod tests {
         for (field, value) in [
             ("source", serde_json::json!("/project")),
             ("platform", serde_json::json!("linux/arm64")),
-            ("simulator", serde_json::json!({"blocksPerProgressCall":0})),
+            (
+                "simulator",
+                serde_json::json!({"instructionsPerProgressCall":0}),
+            ),
+            ("simulator", serde_json::json!({"progressPointsPerBlock":0})),
+            (
+                "simulator",
+                serde_json::json!({"blocksPerProgressCall":10000}),
+            ),
             (
                 "machines",
                 serde_json::json!({"oracle":{"image":"example/app"}}),

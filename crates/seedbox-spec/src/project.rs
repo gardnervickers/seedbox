@@ -135,18 +135,30 @@ impl Default for NetworkDefaults {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SimulatorDefaults {
+    /// Application instructions each guest thread executes per PV progress
+    /// call. Each call advances that machine's virtual time by one syscall.
     #[serde(default = "progress_budget")]
-    pub blocks_per_progress_call: NonZeroU32,
+    pub instructions_per_progress_call: NonZeroU32,
+    /// Charge points per translated block. Each point charges the
+    /// instructions up to the next one and may make a progress call there, so
+    /// more points spread the calls more evenly at some speed cost.
+    #[serde(default = "progress_points")]
+    pub progress_points_per_block: NonZeroU32,
 }
 
 fn progress_budget() -> NonZeroU32 {
-    NonZeroU32::new(10_000).expect("the default progress budget is nonzero")
+    NonZeroU32::new(50_000).expect("the default progress budget is nonzero")
+}
+
+fn progress_points() -> NonZeroU32 {
+    NonZeroU32::MIN
 }
 
 impl Default for SimulatorDefaults {
     fn default() -> Self {
         Self {
-            blocks_per_progress_call: progress_budget(),
+            instructions_per_progress_call: progress_budget(),
+            progress_points_per_block: progress_points(),
         }
     }
 }
@@ -169,7 +181,11 @@ mod tests {
             project.oracle.build.unwrap().dockerfile,
             PathBuf::from("Dockerfile")
         );
-        assert_eq!(project.simulator.blocks_per_progress_call.get(), 10_000);
+        assert_eq!(
+            project.simulator.instructions_per_progress_call.get(),
+            50_000
+        );
+        assert_eq!(project.simulator.progress_points_per_block.get(), 1);
         assert_eq!(project.network.latency, "1ms");
     }
 
@@ -194,6 +210,20 @@ mod tests {
                 "{extra}"
             );
         }
-        assert!(serde_yaml_ng::from_str::<SimulatorDefaults>("blocksPerProgressCall: 0").is_err());
+        for simulator in [
+            "instructionsPerProgressCall: 0",
+            "progressPointsPerBlock: 0",
+            "blocksPerProgressCall: 10000",
+        ] {
+            assert!(
+                serde_yaml_ng::from_str::<SimulatorDefaults>(simulator).is_err(),
+                "{simulator}"
+            );
+        }
+        let simulator: SimulatorDefaults =
+            serde_yaml_ng::from_str("instructionsPerProgressCall: 7\nprogressPointsPerBlock: 3")
+                .unwrap();
+        assert_eq!(simulator.instructions_per_progress_call.get(), 7);
+        assert_eq!(simulator.progress_points_per_block.get(), 3);
     }
 }

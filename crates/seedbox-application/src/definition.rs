@@ -96,7 +96,8 @@ pub fn resolve(
         oracle,
         network: configuration.network.clone(),
         simulator: Simulator {
-            blocks_per_progress_call: configuration.simulator.blocks_per_progress_call,
+            instructions_per_progress_call: configuration.simulator.instructions_per_progress_call,
+            progress_points_per_block: configuration.simulator.progress_points_per_block,
             schedule: configuration.schedule.clone(),
             disk: configuration.disk.clone(),
             oracle_control: configuration.control.is_some(),
@@ -419,7 +420,7 @@ fn resolved_boot(
         name,
         &BTreeMap::new(),
         definition.clock.epoch_seconds,
-        definition.simulator.blocks_per_progress_call,
+        &definition.simulator.progress(),
     )?;
     let mut input = tempfile::tempfile()?;
     store.copy_to(&digest(&machine.boot_archive)?, &mut input)?;
@@ -512,7 +513,7 @@ fn launch_configs(bytes: &[u8]) -> Result<&[u8]> {
             .ok_or_else(fail)?;
     }
     cursor = cursor
-        .checked_add(12)
+        .checked_add(16)
         .filter(|n| *n <= bytes.len())
         .ok_or_else(fail)?;
     for _ in 0..4 {
@@ -632,7 +633,8 @@ mod tests {
         );
         definition.oracle.process.argv.push("--changed".into());
         definition.clock.epoch_seconds += 1;
-        definition.simulator.blocks_per_progress_call = std::num::NonZeroU32::new(5000).unwrap();
+        definition.simulator.instructions_per_progress_call =
+            std::num::NonZeroU32::new(5000).unwrap();
         let changed = prepared(&definition, &store).unwrap();
         assert_ne!(changed.guests["oracle"], original);
         assert_eq!(

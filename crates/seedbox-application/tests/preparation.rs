@@ -198,7 +198,7 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
         .prepare_with_transport(&simulation, &store, &context, &Transport)
         .unwrap();
     assert_eq!(prepared.wall_clock_epoch, Some(1_791_518_733));
-    simulation.simulator.blocks_per_progress_call = std::num::NonZeroU32::new(1).unwrap();
+    simulation.simulator.instructions_per_progress_call = std::num::NonZeroU32::new(1).unwrap();
     let budget_context = PreparationContext::new(
         root.path().join("changed-budget"),
         CancellationToken::default(),
@@ -209,6 +209,18 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
         .unwrap();
     assert_eq!(changed_budget.wall_clock_epoch, prepared.wall_clock_epoch);
     assert_ne!(changed_budget.guests, prepared.guests);
+    simulation.simulator = Default::default();
+    simulation.simulator.progress_points_per_block = std::num::NonZeroU32::new(4).unwrap();
+    let points_context = PreparationContext::new(
+        root.path().join("changed-points"),
+        CancellationToken::default(),
+    )
+    .unwrap();
+    let changed_points = preparer
+        .prepare_with_transport(&simulation, &store, &points_context, &Transport)
+        .unwrap();
+    assert_ne!(changed_points.guests, prepared.guests);
+    assert_ne!(changed_points.guests, changed_budget.guests);
     simulation.simulator = Default::default();
     let json = serde_json::to_vec(&prepared).unwrap();
     let retained: seedbox_application::execution::PreparedInputs =
@@ -227,11 +239,14 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
         .as_object()
         .unwrap()
         .contains_key("wall_clock_epoch"));
-    for (requested, budget) in [None, Some(86400), Some(1_800_000_000), Some(u32::MAX)]
+    for ((requested, budget), points) in [None, Some(86400), Some(1_800_000_000), Some(u32::MAX)]
         .into_iter()
-        .zip([10_000, 1, 17, u32::MAX])
+        .zip([50_000, 1, 17, u32::MAX])
+        .zip([1, 2, 3, u32::MAX])
     {
-        simulation.simulator.blocks_per_progress_call = std::num::NonZeroU32::new(budget).unwrap();
+        simulation.simulator.instructions_per_progress_call =
+            std::num::NonZeroU32::new(budget).unwrap();
+        simulation.simulator.progress_points_per_block = std::num::NonZeroU32::new(points).unwrap();
         simulation.wall_clock_epoch = requested;
         let label = requested.map_or("derived".into(), |epoch| epoch.to_string());
         let context = PreparationContext::new(
@@ -258,7 +273,7 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
             let archive = store.read(digest).unwrap();
             let start = archive
                 .windows(10)
-                .position(|bytes| bytes == b"SBXLAUNCH5")
+                .position(|bytes| bytes == b"SBXLAUNCH6")
                 .unwrap();
             let mut cursor = start + 10;
             for _ in 0..5 {
@@ -275,6 +290,11 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
             assert_eq!(
                 u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()),
                 budget
+            );
+            cursor += 4;
+            assert_eq!(
+                u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()),
+                points
             );
         }
     }

@@ -164,11 +164,21 @@ impl Start {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Simulator {
-    pub blocks_per_progress_call: std::num::NonZeroU32,
+    pub instructions_per_progress_call: std::num::NonZeroU32,
+    pub progress_points_per_block: std::num::NonZeroU32,
     pub schedule: crate::Schedule,
     pub disk: crate::DiskOptions,
     /// The oracle exposes the world control API.
     pub oracle_control: bool,
+}
+impl Simulator {
+    /// The PV progress settings the guest launch recipe carries.
+    pub fn progress(&self) -> crate::project::SimulatorDefaults {
+        crate::project::SimulatorDefaults {
+            instructions_per_progress_call: self.instructions_per_progress_call,
+            progress_points_per_block: self.progress_points_per_block,
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -259,9 +269,7 @@ impl Definition {
                 ..Default::default()
             },
             disk: self.simulator.disk.clone(),
-            simulator: crate::project::SimulatorDefaults {
-                blocks_per_progress_call: self.simulator.blocks_per_progress_call,
-            },
+            simulator: self.simulator.progress(),
         }
     }
 }
