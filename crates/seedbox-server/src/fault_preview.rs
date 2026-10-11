@@ -199,6 +199,12 @@ pub(crate) fn preview(
                 .push("The machine must not already be throttled.".into());
             format!("Scale the machine's seeded CPU cost to {factor_permille} thousandths until healed.")
         }
+        // A scenario's controller spawns machines; it is not an operator fault.
+        Action::Spawn { .. } => {
+            return Err(Error::Invalid(
+                "spawn is issued by a scenario controller and has no fault preview".into(),
+            ))
+        }
     };
     if action.is_process() || action.is_lifecycle() {
         for name in &result.machines {

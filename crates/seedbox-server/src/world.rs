@@ -333,6 +333,9 @@ impl Tracker {
             | FaultAction::DropConnection { handle, .. } => {
                 self.healable.insert(handle.clone(), id);
             }
+            FaultAction::Spawn { machine, .. } => {
+                self.machine(machine);
+            }
             FaultAction::Heal { handle } => {
                 self.healable.remove(handle);
                 self.partitions.remove(handle);
