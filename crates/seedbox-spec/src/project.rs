@@ -157,11 +157,12 @@ pub struct SimulatorDefaults {
     pub progress_jitter_ns: u64,
 }
 
-/// The largest progress jitter: each nominal microsecond costs the guest one
-/// extra progress call, so the bound also bounds the added work per call.
+/// The largest progress jitter. A progress call nominally costs a microsecond,
+/// so a larger bound would make the jitter, not the work, set the pace.
 pub const MAX_PROGRESS_JITTER_NS: u64 = 1_000_000;
 
-pub(crate) fn is_zero(value: &u64) -> bool {
+/// Serde helper for optional durations that are off at zero.
+pub fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 

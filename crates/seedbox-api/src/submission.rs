@@ -37,15 +37,11 @@ pub struct Simulator {
     pub instructions_per_progress_call: std::num::NonZeroU32,
     pub progress_points_per_block: std::num::NonZeroU32,
     /// Bound on the seeded extra charge per progress call; zero is off.
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(skip_serializing_if = "project::is_zero")]
     pub progress_jitter_ns: u64,
     /// Expose world controls to the oracle process.
     pub oracle_control: bool,
 }
-fn is_zero(value: &u64) -> bool {
-    *value == 0
-}
-
 impl Default for Simulator {
     fn default() -> Self {
         let progress = project::SimulatorDefaults::default();

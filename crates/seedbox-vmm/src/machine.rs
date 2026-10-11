@@ -802,7 +802,11 @@ impl Machine {
             crate::rng::Rng::branch(
                 seed,
                 identity,
-                &format!("progress-jitter/{}/{}", old.world.name, self.world.incarnation()),
+                &format!(
+                    "progress-jitter/{}/{}",
+                    old.world.name,
+                    self.world.incarnation()
+                ),
             )
             .next(),
         );

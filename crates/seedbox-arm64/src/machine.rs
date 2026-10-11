@@ -335,8 +335,10 @@ impl<B: Backend> Machine<B> {
             return Err("progress jitter must be set before the machine runs".into());
         }
         unsafe {
-            self.page.set_word(PROGRESS_JITTER_NS_OFFSET, jitter.bound_ns)?;
-            self.page.set_word(PROGRESS_JITTER_SEED_OFFSET, jitter.seed)?;
+            self.page
+                .set_word(PROGRESS_JITTER_NS_OFFSET, jitter.bound_ns)?;
+            self.page
+                .set_word(PROGRESS_JITTER_SEED_OFFSET, jitter.seed)?;
         }
         Ok(self)
     }
