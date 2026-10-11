@@ -71,9 +71,6 @@ fn replay_preserves_historical_policy_data_without_current_defaults() {
 
 #[test]
 fn explicit_override_uses_replacement_contract_in_both_directions() {
-    let _lock = crate::preparation_command::PROCESS_TEST_LOCK
-        .lock()
-        .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let combined = directory.path().join("combined");
     let standalone = directory.path().join("standalone");
