@@ -2,7 +2,7 @@
 //! there is no implicit project directory, environment lookup or remote upload.
 use crate::{InputSource, ProgramInput, SimulationSpec};
 use seedbox_spec::{
-    definition::{Architecture, Override},
+    definition::{Architecture, Clock, Override},
     project::{self, Machine},
 };
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,9 @@ pub struct Submission {
     pub network: Network,
     #[serde(default)]
     pub simulator: Simulator,
+    /// Omission uses the execution server's default guest wall-clock epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<Clock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<Override>,
 }
@@ -37,6 +40,13 @@ pub struct Simulator {
     pub blocks_per_progress_call: std::num::NonZeroU32,
     /// Expose world controls to the oracle process.
     pub oracle_control: bool,
+    /// Guest RAM per machine, in MiB.
+    #[serde(skip_serializing_if = "is_default_memory")]
+    pub memory_mb: u32,
+    #[serde(skip_serializing_if = "is_default")]
+    pub schedule: seedbox_spec::Schedule,
+    #[serde(skip_serializing_if = "is_default")]
+    pub disk: seedbox_spec::DiskOptions,
 }
 impl Default for Simulator {
     fn default() -> Self {
@@ -44,8 +54,20 @@ impl Default for Simulator {
             blocks_per_progress_call: project::SimulatorDefaults::default()
                 .blocks_per_progress_call,
             oracle_control: true,
+            memory_mb: default_memory(),
+            schedule: Default::default(),
+            disk: Default::default(),
         }
     }
+}
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+fn default_memory() -> u32 {
+    seedbox_spec::MachineOptions::default().memory_mb
+}
+fn is_default_memory(memory_mb: &u32) -> bool {
+    *memory_mb == default_memory()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,7 +282,7 @@ impl Submission {
             simulator: project::SimulatorDefaults {
                 blocks_per_progress_call: self.simulator.blocks_per_progress_call,
             },
-            schedule: Default::default(),
+            schedule: self.simulator.schedule,
             control: self
                 .simulator
                 .oracle_control
@@ -276,9 +298,12 @@ impl Submission {
                 exit_code: 0,
             },
             seed: self.seed,
-            wall_clock_epoch: None,
-            machine: Default::default(),
-            disk: Default::default(),
+            wall_clock_epoch: self.clock.map(|clock| clock.epoch_seconds),
+            machine: seedbox_spec::MachineOptions {
+                memory_mb: self.simulator.memory_mb,
+                ..Default::default()
+            },
+            disk: self.simulator.disk,
         };
         Ok(SimulationSpec {
             start_paused: false,
@@ -302,21 +327,9 @@ impl Submission {
         if config.check.exit_code != 0 {
             return Err("oracle success exit code must be zero; custom success exit codes are not supported".into());
         }
-        for (nondefault, setting) in [
-            (
-                config.machine != seedbox_spec::MachineOptions::default(),
-                "machine (memory_mb, page_timer or deferred_tx)",
-            ),
-            (
-                config.schedule != seedbox_spec::Schedule::default(),
-                "schedule",
-            ),
-            (config.disk != seedbox_spec::DiskOptions::default(), "disk"),
-            (config.wall_clock_epoch.is_some(), "wall_clock_epoch"),
-        ] {
-            if nondefault {
-                return Err(format!("partial simulation submissions do not support custom {setting}; submit a complete resolved Simulation definition instead"));
-            }
+        // Resolved definitions have no fields for these Linux KVM options.
+        if config.machine.page_timer || config.machine.deferred_tx {
+            return Err("partial simulation submissions do not support custom machine (page_timer or deferred_tx); submit a complete resolved Simulation definition instead".into());
         }
         if config
             .control
@@ -431,7 +444,13 @@ impl Submission {
             simulator: Simulator {
                 blocks_per_progress_call: config.simulator.blocks_per_progress_call,
                 oracle_control: config.control.is_some(),
+                memory_mb: config.machine.memory_mb,
+                schedule: config.schedule.clone(),
+                disk: config.disk.clone(),
             },
+            clock: config
+                .wall_clock_epoch
+                .map(|epoch_seconds| Clock { epoch_seconds }),
             overrides: spec
                 .program
                 .iter()
@@ -525,21 +544,43 @@ mod tests {
             .unwrap();
     }
     #[test]
-    fn custom_internal_semantics_are_rejected_instead_of_dropped() {
+    fn linux_only_machine_options_are_rejected_instead_of_dropped() {
         let baseline: SimulationSpec = serde_json::from_value(partial()).unwrap();
-        for field in ["machine", "schedule", "disk", "wall_clock_epoch"] {
+        for field in ["page_timer", "deferred_tx"] {
             let mut spec = baseline.clone();
             match field {
-                "machine" => spec.configuration.machine.memory_mb = 512,
-                "schedule" => spec.configuration.schedule.timer_jitter_ns = 10,
-                "disk" => spec.configuration.disk.torn_writes = true,
-                "wall_clock_epoch" => spec.configuration.wall_clock_epoch = Some(86400),
+                "page_timer" => spec.configuration.machine.page_timer = true,
+                "deferred_tx" => spec.configuration.machine.deferred_tx = true,
                 _ => unreachable!(),
             }
             let error = serde_json::to_value(&spec).unwrap_err().to_string();
             assert!(error.contains(field), "{error}");
             assert!(error.contains("complete resolved Simulation"), "{error}");
         }
+    }
+    #[test]
+    fn result_affecting_settings_roundtrip_and_defaults_stay_off_the_wire() {
+        let baseline: SimulationSpec = serde_json::from_value(partial()).unwrap();
+        let wire = serde_json::to_value(&baseline).unwrap();
+        for omitted in ["memoryMb", "schedule", "disk"] {
+            assert!(wire["simulator"].get(omitted).is_none(), "{omitted}");
+        }
+        assert!(wire.get("clock").is_none());
+        let mut spec = baseline;
+        spec.configuration.machine.memory_mb = 2048;
+        spec.configuration.schedule.timer_jitter_ns = 10;
+        spec.configuration.disk.torn_writes = true;
+        spec.configuration.wall_clock_epoch = Some(86400);
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(wire["simulator"]["memoryMb"], 2048);
+        assert_eq!(wire["simulator"]["schedule"]["timer_jitter_ns"], 10);
+        assert_eq!(wire["simulator"]["disk"]["torn_writes"], true);
+        assert_eq!(wire["clock"]["epochSeconds"], 86400);
+        let restored: SimulationSpec = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored.configuration.machine, spec.configuration.machine);
+        assert_eq!(restored.configuration.schedule, spec.configuration.schedule);
+        assert_eq!(restored.configuration.disk, spec.configuration.disk);
+        assert_eq!(restored.configuration.wall_clock_epoch, Some(86400));
     }
     #[test]
     fn nonzero_oracle_success_code_is_rejected_instead_of_normalized() {
