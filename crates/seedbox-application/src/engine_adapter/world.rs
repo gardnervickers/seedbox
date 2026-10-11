@@ -237,6 +237,29 @@ pub fn validate_input_program(
     if program.is_empty() {
         return Ok(());
     }
+    let faults = configured_faults(configuration)?;
+    for input in program {
+        faults
+            .validate_action_shape(&input.action)
+            .map_err(|error| Error::Setup(format!("program {}: {error}", input.key)))?;
+    }
+    Ok(())
+}
+
+/// Pure target selection using the same shape compiler as engine admission.
+/// This does not contact a worker or touch a simulation's RNG, state or IDs.
+pub fn fault_action_targets(
+    configuration: &crate::config::Simulation,
+    action: &seedbox_control::Action,
+) -> Result<seedbox_engine_core::faults::ActionTargets> {
+    configured_faults(configuration)?
+        .action_targets(action)
+        .map_err(Error::Setup)
+}
+
+fn configured_faults(
+    configuration: &crate::config::Simulation,
+) -> Result<seedbox_engine_core::faults::Faults> {
     let names: Vec<_> = configuration.services.keys().cloned().collect();
     let network = NetworkConfig {
         latency_ns: configuration.network.latency_ns,
@@ -262,12 +285,7 @@ pub fn validate_input_program(
         .map_err(Error::Setup)?;
     let faults = seedbox_engine_core::faults::Faults::with_plans(Vec::new(), names, links)
         .map_err(Error::Setup)?;
-    for input in program {
-        faults
-            .validate_action_shape(&input.action)
-            .map_err(|error| Error::Setup(format!("program {}: {error}", input.key)))?;
-    }
-    Ok(())
+    Ok(faults)
 }
 
 #[cfg(test)]

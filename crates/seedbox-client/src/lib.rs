@@ -229,6 +229,19 @@ impl Client {
             .await
     }
 
+    /// Explain an action without preparing it or allocating a fault ID.
+    pub async fn preview_fault(
+        &self,
+        id: &SimulationId,
+        action: &serde_json::Value,
+    ) -> Result<seedbox_api::FaultPreview, Error> {
+        self.document(
+            self.request(Method::POST, &format!("/v1/simulations/{id}/fault-preview"))
+                .json(&serde_json::json!({"action": action})),
+        )
+        .await
+    }
+
     /// Submit a schema-generated control without decoding its action locally.
     pub async fn request_control_json(
         &self,

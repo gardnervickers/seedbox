@@ -937,6 +937,21 @@ impl Manager {
         ))
     }
 
+    /// Explain a proposed action from one observation without worker admission.
+    pub fn preview_fault(
+        &self,
+        id: &SimulationId,
+        action: &seedbox_api::FaultAction,
+    ) -> Result<seedbox_api::FaultPreview, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let resource = state.catalogue.get(id)?;
+        let world = match state.worlds.get(id) {
+            Some(world) => world.snapshot(),
+            None => crate::world::Tracker::new(id.clone(), &resource.spec.configuration).snapshot(),
+        };
+        crate::fault_preview::preview(&world, &resource.spec.configuration, action)
+    }
+
     /// The observed world, or the configured one before any observation.
     pub fn world(&self, id: &SimulationId) -> Result<seedbox_api::WorldState, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
