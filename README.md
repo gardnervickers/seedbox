@@ -30,7 +30,9 @@ For scripts, start `seedbox serve` explicitly. `seedbox shutdown` stops the serv
 and its simulations.
 
 In the TUI, press **Space** to resume. Press **f**, choose **Partition network**,
-put `n1` on one side and `n2` / `n3` on the other, and submit with **Enter**.
+put `n1` on one side and `n2` / `n3` on the other, review the expected targets
+and effects, and submit with **Enter**. The form shows the action category and
+highlights previewed machines and links on the map.
 Choose **Heal fault** to restore communication. Fault menus pause the simulation
 and restore its previous playback state when closed. Click a pane to focus it;
 use the mouse wheel to scroll logs. The **3 timeline** tab lets you edit recorded

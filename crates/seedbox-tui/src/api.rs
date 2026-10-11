@@ -92,6 +92,20 @@ impl Api {
                     let _ = tx.send(Update::Focused(id, Box::new(update))).await;
                 });
             }
+            Request::PreviewFault(id, action, revision) => {
+                tokio::spawn(async move {
+                    let result = client
+                        .preview_fault(&id, &action)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx
+                        .send(Update::Focused(
+                            id,
+                            Box::new(Update::FaultPreview(action, revision, result)),
+                        ))
+                        .await;
+                });
+            }
             Request::BeginFaultMenu(id) => {
                 tokio::spawn(async move {
                     let result = begin_fault_menu(&client, &tx, &id).await;

@@ -76,6 +76,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/simulations/{id}/events", get(events))
         .route("/v1/simulations/{id}/world", get(world))
         .route("/v1/simulations/{id}/fault-types", get(fault_types))
+        .route("/v1/simulations/{id}/fault-preview", post(fault_preview))
         .route("/v1/simulations/{id}/frames", get(frames))
         .route("/v1/simulations/{id}/logs/{machine}", get(logs))
         .route("/v1/simulations/{id}/logs", get(all_logs))
@@ -533,6 +534,24 @@ async fn events(
         ))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn fault_preview(
+    State(state): State<ApiState>,
+    id: Result<Path<SimulationId>, PathRejection>,
+    request: Result<Json<seedbox_api::FaultPreviewRequest>, JsonRejection>,
+) -> Result<Json<seedbox_api::FaultPreview>, HttpError> {
+    let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let Json(request) = request.map_err(|e| HttpError::invalid(e.body_text()))?;
+    tokio::task::spawn_blocking(move || {
+        state
+            .manager
+            .preview_fault(&id, &request.action)
+            .map(Json)
+            .map_err(Into::into)
+    })
+    .await
+    .map_err(|_| HttpError::internal("fault preview task failed"))?
 }
 
 async fn fault_types(

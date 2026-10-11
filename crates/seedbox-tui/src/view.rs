@@ -1365,7 +1365,13 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
         let is_down = machine(a).is_some_and(down) || machine(b).is_some_and(down);
         let involved = selected.is_some_and(|s| s == a || s == b);
         let traffic = focus.traffic.link_rate(a, b) + focus.traffic.link_rate(b, a);
-        let (color, pattern, weight) = if cut.is_some() {
+        let previewed = app
+            .fault_form
+            .as_ref()
+            .is_some_and(|form| form.targets_link(a, b) || form.targets_link(b, a));
+        let (color, pattern, weight) = if previewed {
+            (ICE, Pattern::Dotted, 2)
+        } else if cut.is_some() {
             (if pulse { RED } else { RED_SOFT }, Pattern::Marching, 1)
         } else if is_down {
             (FAINT, Pattern::Dotted, 1)

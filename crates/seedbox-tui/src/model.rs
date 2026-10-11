@@ -43,6 +43,11 @@ pub enum Update {
     Resource(Simulation),
     World(WorldState),
     FaultTypes(FaultCatalogue),
+    FaultPreview(
+        serde_json::Value,
+        u64,
+        Result<seedbox_api::FaultPreview, String>,
+    ),
     Timeline(seedbox_api::FaultTimeline),
     FaultReceipt {
         title: String,
@@ -88,6 +93,7 @@ pub enum Request {
     Close,
     Control(SimulationId, ControlCommand),
     BeginFaultMenu(SimulationId),
+    PreviewFault(SimulationId, serde_json::Value, u64),
     EndFaultMenu(SimulationId, PlaybackRate),
     Fault(SimulationId, serde_json::Value, PlaybackRate),
     PauseThenStep(SimulationId),
@@ -363,7 +369,6 @@ impl Focus {
             })
             .unwrap_or_default();
         crate::fault_form::FormContext {
-            machines: self.machines(),
             selected: self.selected.clone(),
             handles,
             active: activity
@@ -1039,6 +1044,23 @@ impl App {
         out
     }
 
+    /// Refresh the current form when its action or observed world revision changes.
+    fn fault_preview_requests(&mut self) -> Vec<Request> {
+        if !matches!(self.fault_menu, Some(FaultMenu::Editing(_))) {
+            return Vec::new();
+        }
+        let Some(focus) = &self.focus else {
+            return Vec::new();
+        };
+        let revision = focus.world.as_ref().map_or(0, |world| world.revision);
+        self.fault_form
+            .as_mut()
+            .and_then(|form| form.request_preview(revision))
+            .map(|action| Request::PreviewFault(focus.id.clone(), action, revision))
+            .into_iter()
+            .collect()
+    }
+
     /// Fetch the selected catalogue row and its source for the detail pane,
     /// at most every couple of seconds; completed runs are fetched once.
     fn preview_requests(&mut self) -> Vec<Request> {
@@ -1109,6 +1131,7 @@ impl App {
         };
         let mut requests = self.apply_update(update);
         requests.extend(self.preview_requests());
+        requests.extend(self.fault_preview_requests());
         if self.logs_scroll > 0 {
             let after = self
                 .focus
@@ -1458,6 +1481,11 @@ impl App {
                     }
                 }
             }
+            Update::FaultPreview(action, revision, result) => {
+                if let Some(form) = self.fault_form.as_mut() {
+                    form.accept_preview(action, revision, result);
+                }
+            }
             Update::FaultTypes(catalogue) => {
                 if self
                     .focus
@@ -1646,6 +1674,7 @@ impl App {
     pub fn input(&mut self, event: Event) -> Vec<Request> {
         let mut requests = self.input_raw(event);
         requests.extend(self.preview_requests());
+        requests.extend(self.fault_preview_requests());
         let mut blocked = false;
         let mut requests: Vec<_> = requests
             .into_iter()
@@ -1791,6 +1820,12 @@ impl App {
                     return self.cancel_fault_menu();
                 }
                 FormOutcome::Submit(action) => {
+                    if !form.preview_ready(&action) {
+                        form.set_error(
+                            "Review the effect preview before pressing Enter to submit.",
+                        );
+                        return Vec::new();
+                    }
                     return self
                         .focus
                         .as_ref()
@@ -2826,6 +2861,7 @@ pub(crate) mod tests {
         FaultCatalogue {
             simulation: "k7m2p9qx".parse().unwrap(),
             faults: vec![seedbox_api::FaultDescriptor {
+                category: seedbox_api::FaultCategory::Machine,
                 name: action.into(),
                 title: "Server fault".into(),
                 description: "Future behavior".into(),
@@ -2836,15 +2872,39 @@ pub(crate) mod tests {
         }
     }
 
+    fn respond_previews(app: &mut App, requests: Vec<Request>) {
+        for request in requests {
+            if let Request::PreviewFault(id, action, revision) = request {
+                app.apply(Update::FaultPreview(
+                    action,
+                    revision,
+                    Ok(seedbox_api::FaultPreview {
+                        simulation: id,
+                        revision,
+                        simulated_time_ns: 0,
+                        category: seedbox_api::FaultCategory::Application,
+                        machines: vec!["a".into()],
+                        links: Vec::new(),
+                        expected_effect: "Server expected effect".into(),
+                        observations: Vec::new(),
+                        preconditions: Vec::new(),
+                        limitations: vec!["Effects are not guaranteed.".into()],
+                    }),
+                ));
+            }
+        }
+    }
+
     fn submit_fault(app: &mut App) -> Vec<Request> {
         app.input(key('f'));
         if app.fault_menu == Some(FaultMenu::Opening) {
             app.apply(Update::FaultMenuReady(Ok(PlaybackRate::Paused)));
         }
-        app.input(Event::Key(KeyEvent::new(
+        let requests = app.input(Event::Key(KeyEvent::new(
             KeyCode::Enter,
             KeyModifiers::NONE,
         )));
+        respond_previews(app, requests);
         app.input(Event::Key(KeyEvent::new(
             KeyCode::BackTab,
             KeyModifiers::SHIFT,
@@ -2853,6 +2913,35 @@ pub(crate) mod tests {
             KeyCode::Enter,
             KeyModifiers::NONE,
         )))
+    }
+
+    #[test]
+    fn preview_is_required_and_stale_responses_cannot_authorize_edited_values() {
+        let mut app = app(&["a"]);
+        app.apply(Update::FaultTypes(fault_catalogue("future_server_fault")));
+        app.input(key('f'));
+        app.apply(Update::FaultMenuReady(Ok(PlaybackRate::Unlimited)));
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let first = app.input(enter.clone());
+        assert!(matches!(first.as_slice(), [Request::PreviewFault(..)]));
+        let second = app.input(key('x'));
+        respond_previews(&mut app, first);
+        app.input(Event::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
+        assert!(
+            app.input(enter.clone()).is_empty(),
+            "Old response must not submit changed values"
+        );
+        assert_eq!(
+            app.fault_menu,
+            Some(FaultMenu::Editing(PlaybackRate::Unlimited))
+        );
+        respond_previews(&mut app, second);
+        assert!(
+            matches!(app.input(enter).as_slice(), [Request::Fault(_, action, _)] if action["handle"] == "splitx")
+        );
     }
 
     #[test]
@@ -2866,7 +2955,8 @@ pub(crate) mod tests {
             KeyCode::Enter,
             KeyModifiers::NONE,
         )));
-        app.input(key('x'));
+        let requests = app.input(key('x'));
+        respond_previews(&mut app, requests);
         app.input(Event::Key(KeyEvent::new(
             KeyCode::BackTab,
             KeyModifiers::SHIFT,
@@ -3225,6 +3315,7 @@ pub(crate) mod tests {
         FaultCatalogue {
             simulation: "k7m2p9qx".parse().unwrap(),
             faults: vec![seedbox_api::FaultDescriptor {
+                category: seedbox_api::FaultCategory::Machine,
                 name: "heal".into(),
                 title: "Heal fault".into(),
                 description: String::new(),

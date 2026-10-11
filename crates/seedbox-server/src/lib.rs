@@ -14,6 +14,8 @@ pub mod execution;
 #[cfg(unix)]
 mod fault_catalogue;
 #[cfg(unix)]
+mod fault_preview;
+#[cfg(unix)]
 pub mod http;
 #[cfg(unix)]
 pub mod manager;
