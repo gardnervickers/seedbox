@@ -15,7 +15,7 @@ use std::{collections::BTreeSet, rc::Rc, time::Instant};
 
 const EXCLUSIVE_EPOCH_OFFSET: usize = 40;
 const SYSCALL_NS_OFFSET: usize = 48;
-const SYSCALL_NS: u64 = 1_000;
+use seedbox_engine_core::cpu_charge::{throttled_ns, SYSCALL_NS};
 /// A progress call's nominal charge, jitter bound and stream seed
 /// (kernel-arm64/seedbox.c).
 const PROGRESS_NS_OFFSET: usize = 56;
@@ -250,8 +250,10 @@ impl<B: Backend> Machine<B> {
         if !seedbox_control::THROTTLE_PERMILLE.contains(&factor_permille) {
             return Err("invalid ARM throttle factor".into());
         }
-        // The default charge is 1000 ns, so permille maps exactly to ns.
-        unsafe { self.page.set_word(SYSCALL_NS_OFFSET, factor_permille) }
+        unsafe {
+            self.page
+                .set_word(SYSCALL_NS_OFFSET, throttled_ns(SYSCALL_NS, factor_permille))
+        }
     }
 
     /// Restart the progress jitter stream from `seed` while the vCPU is

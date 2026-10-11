@@ -98,17 +98,18 @@ length, direction and diagnostic policy. ARM queue field names and serialization
 order remain part of retained state evidence. KVM console and block completion
 feed every used-ring write to their existing dirty-range journals; do not drop
 or reorder those entries. The shared MMIO transport serves ARM devices and KVM
-console/block/network; its compatibility profiles are defined in
-`crates/seedbox-engine-core/src/virtio_mmio.rs`. Preserve error precedence, cursor resets and the
+console/block/network; its adapter identities and common register contract are
+defined in `crates/seedbox-engine-core/src/virtio_mmio.rs`. Preserve error
+precedence, cursor resets and the
 explicit ARM state projection. Adapters handle typed Notify/Reset effects and
 retain model-reset ownership. The shared console owns handshake, backlogs, counters
 and queue processing; adapters supply GPA base, dirty callbacks and event projection.
 Preserve partial-error mutation and IRQ timing in `virtio_console.rs`.
-The shared block model owns request decoding, disk effects and DMA, with descriptor
-profiles and partial-error semantics in `virtio_block.rs`. Use explicit disk
+The shared block model owns request decoding, disk effects and DMA, with shared
+descriptor admission and completed-prefix semantics in `virtio_block.rs`. Use explicit disk
 and statistics accessors in platform callers.
-The shared network model owns packet DMA, backlogs and counters; preserve the
-profile-specific admission, partial-error and IRQ order in `virtio_network.rs`.
+The shared network model owns packet DMA, backlogs and counters; use the common
+admission and completed-prefix contract in `virtio_network.rs`.
 The x86 PV watchdog (`machine/pv.rs`) is a diagnostic: it interrupts a run
 with no exit to report where the guest is and resumes it, and must never
 publish a plan, inject an interrupt or adopt guest time at that landing.
@@ -365,7 +366,8 @@ images or executes guests. Compatibility readiness is not replay qualification.
   ARM uses guest-epoch software exclusive reservations; host interruptions and
   backend maintenance must not advance their epoch. Keep the shared PV word,
   kernel EL0 return hook and translator commit checks aligned. Kernel polling
-  without PV progress remains a limitation documented in `docs/internals.md`.
+  through `cpu_relax` makes bounded PV progress on both architectures; raw
+  assembly retry loops remain outside that coverage (see `docs/internals.md`).
   `.github/workflows/pv-tests.yml` runs its checks on GitHub-hosted Ubuntu
   x86-64 runners.
 - `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers

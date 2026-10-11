@@ -267,12 +267,8 @@ impl Network {
             base,
             QueuePolicy {
                 limit: CHAIN_LIMIT,
-                direction: if self.policy == Policy::Application {
-                    Direction::Any
-                } else {
-                    Direction::Uniform(writable)
-                },
-                reject_empty: self.policy == Policy::Application,
+                direction: Direction::Uniform(writable),
+                reject_empty: true,
                 diagnostics: Diagnostics::Virtio,
             },
         )
@@ -290,7 +286,6 @@ impl Network {
             out.irq = self.drain(transport, memory, base, &mut dirty)?;
             return Ok(out);
         }
-        let old_used = transport.queues[index].used_idx;
         let event_idx = self.event_idx(transport);
         if self.policy == Policy::Network {
             while transport.queues[index].pending(memory, base)? {
@@ -299,7 +294,11 @@ impl Network {
                 }
                 while let Some(chain) = self.chain(&transport.queues[index], memory, base, false)? {
                     let bytes = chain.read(memory)?;
+                    Self::validate_header(&bytes)?;
+                    let previous = transport.queues[index].used_idx;
                     transport.queues[index].complete_chain(memory, &chain, 0, &mut dirty);
+                    // Publish the completed prefix before decoding the next request.
+                    out.irq |= self.interrupt(transport, memory, base, index, previous)?;
                     if bytes.len() > HEADER {
                         out.frames.push(bytes[HEADER..].to_vec());
                         self.stats.tx_frames += 1;
@@ -316,17 +315,11 @@ impl Network {
                 }
                 break;
             }
-            out.irq = self.interrupt(transport, memory, base, index, old_used)?;
             return Ok(out);
         }
         while let Some(chain) = self.chain(&transport.queues[index], memory, base, false)? {
             let bytes = chain.read(memory)?;
-            if bytes.len() < HEADER {
-                return Err("short virtio network header".into());
-            }
-            if bytes[..10].iter().any(|b| *b != 0) {
-                return Err("unnegotiated virtio network offload".into());
-            }
+            Self::validate_header(&bytes)?;
             transport.queues[index].complete_chain(memory, &chain, 0, &mut dirty);
             if bytes.len() > HEADER {
                 out.frames.push(bytes[HEADER..].to_vec());
@@ -348,20 +341,13 @@ impl Network {
         let Some(chain) = self.chain(&transport.queues[0], memory, base, true)? else {
             return Ok(false);
         };
-        if (self.policy == Policy::Application && chain.len < HEADER + frame.len())
-            || chain.segments.iter().any(|s| !s.writable)
-        {
-            return Err(if self.policy == Policy::Application {
-                "invalid/short virtio receive chain"
-            } else {
-                "network receive buffer too small"
-            }
-            .into());
+        if chain.len < HEADER + frame.len() {
+            return Err("network receive buffer too small".into());
         }
         let mut packet = vec![0; HEADER];
         packet[10] = 1;
         packet.extend_from_slice(frame);
-        let packet_len = packet.len().min(chain.len);
+        let packet_len = packet.len();
         let mut written = 0;
         for segment in &chain.segments {
             let n = segment.len.min(packet_len - written);
@@ -387,7 +373,6 @@ impl Network {
         dirty: &mut impl FnMut(usize, usize),
     ) -> Result<bool, String> {
         let mut any = false;
-        let old_used = transport.queues[0].used_idx;
         let event_idx = self.event_idx(transport);
         if self.policy == Policy::Network {
             while !self.backlog.is_empty() && transport.queues[0].pending(memory, base)? {
@@ -395,11 +380,12 @@ impl Network {
                     transport.queues[0].suppress_notify(memory, base, true, &mut *dirty)?;
                 }
                 while let Some(frame) = self.backlog.front().cloned() {
+                    let previous = transport.queues[0].used_idx;
                     if !self.put_frame(transport, memory, base, &frame, dirty)? {
                         break;
                     }
                     self.backlog.pop_front();
-                    any = true;
+                    any |= self.interrupt(transport, memory, base, 0, previous)?;
                 }
                 if !transport.queues[0].arm_notify(memory, base, event_idx, false, &mut *dirty)? {
                     break;
@@ -415,9 +401,6 @@ impl Network {
                 transport.isr |= 1;
             }
         }
-        if self.policy == Policy::Network {
-            return self.interrupt(transport, memory, base, 0, old_used);
-        }
         Ok(any)
     }
     pub fn receive(
@@ -428,49 +411,45 @@ impl Network {
         frame: &[u8],
         mut dirty: impl FnMut(usize, usize),
     ) -> Result<Received, String> {
-        if self.policy == Policy::Application {
-            if !transport.queues[0].ready || self.backlog.len() >= BACKLOG {
-                return Ok(Received::default());
-            }
-            if frame.len() > 65536 {
-                return Err("network frame too large".into());
-            }
-            self.backlog.push_back(frame.to_vec());
-            let irq = self.drain(transport, memory, base, &mut dirty)?;
-            return Ok(Received {
-                accepted: true,
-                irq,
-            });
+        if frame.len() > 65536 {
+            return Err("network frame too large".into());
         }
-        if !transport.queues[0].ready {
-            self.stats.rx_dropped += 1;
+        if !transport.queues[0].ready || self.backlog.len() >= BACKLOG {
+            if self.policy == Policy::Network {
+                self.stats.rx_dropped += 1;
+            }
             return Ok(Received::default());
         }
-        if frame.len() > CHAIN_LIMIT - HEADER {
-            return Err("network frame exceeds DMA limit".into());
-        }
-        let old_used = transport.queues[0].used_idx;
-        if !self.backlog.is_empty()
-            || !self.put_frame(transport, memory, base, frame, &mut dirty)?
-        {
-            if self.backlog.len() >= BACKLOG {
-                self.stats.rx_dropped += 1;
-                return Ok(Received::default());
+        // Own ingress before attempting DMA so failures retain the same backlog.
+        let waiting = !self.backlog.is_empty();
+        self.backlog.push_back(frame.to_vec());
+        let mut irq = false;
+        let previous = transport.queues[0].used_idx;
+        if !waiting && self.put_frame(transport, memory, base, frame, &mut dirty)? {
+            self.backlog.pop_front();
+            if self.policy == Policy::Network {
+                irq = self.interrupt(transport, memory, base, 0, previous)?;
+                if self.event_idx(transport) {
+                    transport.queues[0].arm_notify(memory, base, true, false, &mut dirty)?;
+                }
+            } else {
+                transport.isr |= 1;
+                irq = true;
             }
-            self.backlog.push_back(frame.to_vec());
-            return Ok(Received {
-                accepted: true,
-                irq: false,
-            });
         }
-        if self.event_idx(transport) {
-            transport.queues[0].arm_notify(memory, base, true, false, &mut dirty)?;
-        }
-        let irq = self.interrupt(transport, memory, base, 0, old_used)?;
         Ok(Received {
             accepted: true,
             irq,
         })
+    }
+    fn validate_header(bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() < HEADER {
+            return Err("short virtio network header".into());
+        }
+        if bytes[..10].iter().any(|b| *b != 0) {
+            return Err("unnegotiated virtio network offload".into());
+        }
+        Ok(())
     }
 }
 

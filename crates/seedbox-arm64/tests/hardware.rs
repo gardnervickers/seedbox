@@ -113,6 +113,25 @@ mod guest {
             .unwrap();
         save("seed1-b", &b);
         same(&a, &b);
+        // Replay from retained inputs and the serialized report's seed.
+        let retained_kernel = output.join(format!("{name}-Image"));
+        let retained_initrd = output.join(format!("{name}-init.cpio"));
+        std::fs::write(&retained_kernel, &kernel).unwrap();
+        std::fs::write(&retained_initrd, &initrd).unwrap();
+        let retained: Report = serde_json::from_slice(
+            &std::fs::read(output.join(format!("{name}-seed1-a.json"))).unwrap(),
+        )
+        .unwrap();
+        let replay = Machine::<B>::new(
+            &std::fs::read(retained_kernel).unwrap(),
+            &std::fs::read(retained_initrd).unwrap(),
+            retained.seed,
+        )
+        .unwrap()
+        .run(|| {})
+        .unwrap();
+        save("seed1-replay", &replay);
+        same(&retained, &replay);
         let c = Machine::<B>::new(&kernel, &initrd, 2)
             .unwrap()
             .run(|| {})
@@ -145,7 +164,11 @@ mod guest {
             "guest must verify a 1s sleep: {}",
             a.console
         );
-        for report in [&a, &b, &c, &d] {
+        for report in [&a, &b, &c, &d, &replay] {
+            assert!(
+                report.console.contains("kernel polling PASS"),
+                "fixture kernel must validate IRQ-masked cpu_relax and its negative control"
+            );
             assert!(
             busy_wait_elapsed(&report.console).is_some(),
             "guest must complete the 200us timerfd spin within 300us; rebuild kernel-arm64/init.c: {}",
