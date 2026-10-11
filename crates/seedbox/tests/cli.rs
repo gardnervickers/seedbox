@@ -3,6 +3,8 @@ use std::{
     path::Path,
     process::{Command, Output},
 };
+#[path = "support/process.rs"]
+mod process;
 
 /// Run the CLI with a scrubbed environment: no `SEEDBOX_*`, `CARGO*` or
 /// `SUDO_USER` variables, `HOME` and scratch storage at `cwd`, and `PATH` set to
@@ -83,6 +85,12 @@ fn long_server_state_path_fails_before_creating_state() {
 
 #[test]
 fn explicit_asset_directory_overrides_bundled_kernel_without_build_tools() {
+    if !process::isolated(concat!(
+        module_path!(),
+        "::explicit_asset_directory_overrides_bundled_kernel_without_build_tools"
+    )) {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let binary = root.join("seedbox");

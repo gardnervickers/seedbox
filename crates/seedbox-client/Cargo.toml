@@ -14,3 +14,6 @@ tokio.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+
+[dev-dependencies]
+tempfile.workspace = true

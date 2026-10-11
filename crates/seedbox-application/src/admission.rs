@@ -195,7 +195,6 @@ pub(crate) fn observe() -> Result<CoreObservation> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     fn static_observation() -> CoreObservation {
         let p = required_policy();
         CoreObservation {
@@ -254,52 +253,5 @@ mod tests {
         .to_string();
         assert!(bounded.len() < 8400);
         assert!(bounded.contains("[truncated]"));
-    }
-    #[test]
-    fn preflight_refusal_is_before_application_preparation_or_execution() {
-        use crate::{
-            config,
-            execution::*,
-            orchestration::{Orchestrator, RunOptions},
-            store::ContentStore,
-        };
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        struct Refused;
-        impl ExecutionBackend for Refused {
-            fn profile(&self) -> ExecutionProfile {
-                ExecutionProfile {
-                    backend: Backend::Other("fixture".into()),
-                    engine: ContentDigest::of(b"synthetic"),
-                    witness_mode: WitnessMode::Exits,
-                    semantic_parameters: SemanticParameters::new(512),
-                }
-            }
-            fn preflight(&self, _: Option<&Path>) -> Result<()> {
-                Err(Error::Setup("cannot open /dev/kvm: EACCES (13)".into()))
-            }
-            fn execute(&self, _: ExecutionRequest<'_>) -> Result<ExecutionReport> {
-                panic!("must not execute after host refusal")
-            }
-        }
-        struct Prepare(AtomicUsize);
-        impl PreparationBackend for Prepare {
-            fn prepare(&self, _: &config::Simulation, _: &ContentStore) -> Result<PreparedInputs> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                panic!("must not prepare after host refusal")
-            }
-        }
-        let root = tempfile::tempdir().unwrap();
-        let prepare = Prepare(AtomicUsize::new(0));
-        let simulation=config::parse("name: host-refusal\nservices:\n  app: {image: fixture:synthetic}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n",&root.path().join("compose.yaml"),&BTreeMap::new()).unwrap();
-        let orchestrator = Orchestrator::new(
-            ContentStore::new(root.path().join("objects")),
-            root.path().join("runs"),
-        );
-        let error = orchestrator
-            .run(&simulation, RunOptions::default(), &prepare, &Refused)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("EACCES (13)"));
-        assert_eq!(prepare.0.load(Ordering::SeqCst), 0);
     }
 }

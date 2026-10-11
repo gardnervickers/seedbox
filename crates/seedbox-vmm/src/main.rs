@@ -212,7 +212,8 @@ mod tests {
 
     #[test]
     fn a_request_file_replaces_every_flag() {
-        let directory = std::env::temp_dir().join(format!("seedbox-vmm-{}", std::process::id()));
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("directory");
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("request.json");
         let mut request = WorkerRequest::new("w.json".into(), 3, "o".into());

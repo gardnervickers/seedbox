@@ -493,3 +493,146 @@ fn state_dependent_heal_can_be_submitted_for_deterministic_runtime_rejection() {
     let (accepted, _) = catalogue.submit(submission).unwrap();
     assert_eq!(accepted.spec.program[0].key, "heal-removed-prior-action");
 }
+
+mod seed_ranges {
+    use super::*;
+    use seedbox_api::{InputSource, SeedRangeRequest, Simulation, SimulationSpec, SubmitRequest};
+    use std::path::Path;
+
+    fn request(name: &str) -> SeedRangeRequest {
+        SeedRangeRequest {
+            metadata: Default::default(),
+            options: Default::default(),
+            request_id: name.into(),
+            count: 3,
+            spec: SimulationSpec {
+                program: Vec::new(),
+                start_paused: false,
+                seed: Some(123),
+                inputs: InputSource::Project,
+                configuration: seedbox_application::config::parse(
+                    "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+                    Path::new("/project/compose.yaml"),
+                    &Default::default(),
+                )
+                .unwrap(),
+            },
+        }
+    }
+
+    fn complete(catalogue: &mut Catalogue, mut source: Simulation) -> Simulation {
+        source.status.phase = Phase::Preparing;
+        source = catalogue.update(source).unwrap();
+        source.spec.inputs = InputSource::Retained {
+            simulation: source.metadata.id.clone(),
+        };
+        source.status.phase = Phase::Completed;
+        catalogue.update(source).unwrap()
+    }
+
+    #[test]
+    fn member_namespace_is_reserved_and_range_failure_is_durable_and_isolated() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("catalogue");
+        let mut catalogue = Catalogue::open(&directory).unwrap();
+        let (source, _) = catalogue.submit_seeds(request("broken-range")).unwrap();
+        let id = source.metadata.id.clone();
+        let collision = SubmitRequest {
+            metadata: Default::default(),
+            options: Default::default(),
+            request_id: format!("seeds-{id}-1"),
+            spec: request("unused").spec,
+        };
+        assert!(matches!(
+            catalogue.submit(collision.clone()),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            catalogue.submit_seeds(SeedRangeRequest {
+                metadata: Default::default(),
+                options: Default::default(),
+                request_id: collision.request_id.clone(),
+                spec: collision.spec.clone(),
+                count: 3,
+            }),
+            Err(Error::Invalid(_))
+        ));
+        // Model a conflicting retained entry from before namespace reservation.
+        let mut legacy = collision.clone();
+        legacy.request_id = "legacy".into();
+        let legacy = catalogue.submit(legacy).unwrap().0;
+        let source = complete(&mut catalogue, source);
+        drop(catalogue);
+        let path = directory.join(format!("{}.json", legacy.metadata.id));
+        let mut retained: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        retained["request"]["requestId"] = serde_json::json!(collision.request_id);
+        std::fs::write(path, serde_json::to_vec(&retained).unwrap()).unwrap();
+        let mut catalogue = Catalogue::open(&directory).unwrap();
+        assert_eq!(source.status.phase, Phase::Completed);
+        assert!(catalogue.advance_seeds().unwrap().is_none());
+        assert!(catalogue
+            .seed_range(&id)
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("request ID"));
+        let peer = catalogue.submit_seeds(request("healthy-range")).unwrap().0;
+        let peer = complete(&mut catalogue, peer);
+        drop(catalogue);
+        let mut catalogue = Catalogue::open(&directory).unwrap();
+        assert!(catalogue.seed_range(&id).unwrap().error.is_some());
+        let (member, _) = catalogue.advance_seeds().unwrap().unwrap();
+        assert_eq!(member.metadata.parent, None);
+        assert_eq!(member.spec.seed, Some(124));
+        assert_eq!(catalogue.seed_range(&id).unwrap().members.len(), 1);
+        assert_eq!(
+            catalogue
+                .seed_range(&peer.metadata.id)
+                .unwrap()
+                .members
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn retained_execution_keeps_seed_while_prepared_inputs_allow_exploration() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut catalogue = Catalogue::open(&temp.path().join("catalogue")).unwrap();
+        let base = request("source");
+        let source = catalogue
+            .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
+                request_id: base.request_id,
+                spec: base.spec,
+            })
+            .unwrap()
+            .0;
+        let source = complete(&mut catalogue, source);
+        let mut rerun = SubmitRequest {
+            metadata: Default::default(),
+            options: Default::default(),
+            request_id: "rerun".into(),
+            spec: source.spec.clone(),
+        };
+        rerun.spec.seed = Some(124);
+        assert!(matches!(
+            catalogue.submit(rerun.clone()),
+            Err(Error::Invalid(_))
+        ));
+        rerun.spec.inputs = InputSource::Prepared {
+            simulation: source.metadata.id.clone(),
+        };
+        assert_eq!(catalogue.submit(rerun).unwrap().0.spec.seed, Some(124));
+        assert!(catalogue
+            .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
+                request_id: "same-seed".into(),
+                spec: source.spec,
+            })
+            .is_ok());
+    }
+}

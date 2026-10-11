@@ -137,7 +137,7 @@ continue to save and restore the raw KVM state.
 
 This does not cover direct application XSAVE or every signal-frame save path.
 
-Code: [normalizer](../crates/seedbox-vmm/src/xsave.rs), [KVM restore tests](../crates/seedbox-vmm/tests/xsave.rs).
+Code: [normalizer](../crates/seedbox-vmm/src/xsave.rs), [KVM restore tests](../crates/seedbox-system-tests/tests/system/x86_xsave.rs).
 
 ## Independent random streams
 
@@ -304,17 +304,33 @@ bash harness/check.sh linux       # Linux hardware and applications.
 bash harness/check.sh --help      # Individual suites and requirements.
 ```
 
-Portable checks run before hardware suites and compile hardware test features.
+Portable checks run before system suites and compile their ignored test bodies.
 The runner reports missing host requirements before building. Reports are written
 under `target/check-reports/`; they are local output, not documentation.
 The VMM and ARM backends have separate Cargo workspaces and lockfiles; use the
 root Cargo aliases when building them directly. ARM guest fixtures read
-`SEEDBOX_ARM64_KERNEL` and `SEEDBOX_ARM64_INITRD`; `harness/check.py` defines
+`SEEDBOX_ARM64_KERNEL` and `SEEDBOX_ARM64_INITRD`; `crates/xtask/src/checks.rs` defines
 their checkout defaults and the other suite requirements.
 
-Unit tests live beside their component under `src/`. Integration tests live in
-the owning crate's `tests/` and exercise public boundaries. Give each scenario
-one owner. Check determinism with independent fresh runs as well as replay;
-use identical resolved inputs, including the initial clock.
+Unit tests live beside their component under `src/` and cover a small unit of
+behavior. Integration tests compose components through public boundaries in the
+owning crate's `tests/`. Each test owns its mutable resources, including files,
+sockets, processes and threads, so ordinary tests run in parallel. All repository
+test suites are Rust; guest programs and the Python SDK retain their own language.
 
-Code: [test runner](../harness/check.py), [Cargo aliases](../.cargo/config.toml).
+On Linux, pause/resume acceptance shares the key-value workload’s resolved baseline
+and server; `linux-pause` selects just that application cohort.
+
+System tests live in a single ignored [test binary](../crates/seedbox-system-tests/tests/system.rs).
+Use them only for contracts that need a native kernel API or a real container
+engine. Hypervisor cohorts take an exclusive cross-process lease before creating
+any VM or application server and hold it until owned workers have stopped. The
+lease path is stable across checkouts and Nix shells and is forwarded through
+sudo. Each cohort owns its scratch data; related assertions share expensive
+setup within that cohort. Prefer unit coverage, then integration coverage, before
+adding a system scenario. Give each scenario one owner and deduplicate setup.
+Check determinism with independent fresh runs as well as replay; use identical
+resolved inputs, including the initial clock.
+
+Code: [test runner](../crates/xtask/src/checks.rs), [kernel lease](../crates/seedbox-system-tests/src/lib.rs),
+[Cargo aliases](../.cargo/config.toml).

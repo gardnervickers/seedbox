@@ -183,6 +183,13 @@ fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
     }
     Ok(())
 }
+fn validate_workers(workers: u32) -> Result<()> {
+    if !(1..=32).contains(&workers) {
+        return Err(Error::Setup("--workers: use 1..32".into()));
+    }
+    Ok(())
+}
+
 impl ExecutionBackend for MacExecutor {
     fn profile(&self) -> ExecutionProfile {
         self.profile.clone()
@@ -193,9 +200,7 @@ impl ExecutionBackend for MacExecutor {
     /// Every attempt is its own signed engine process with its own HVF VM, so
     /// the Mac needs no core reservation: admit the range, then probe HVF once.
     fn preflight_workers(&self, workers: u32) -> Result<()> {
-        if !(1..=32).contains(&workers) {
-            return Err(Error::Setup("--workers: use 1..32".into()));
-        }
+        validate_workers(workers)?;
         self.preflight(None)
     }
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
@@ -482,24 +487,15 @@ mod process_tests {
         }
     }
     #[test]
-    fn preflight_workers_admits_the_linux_range_without_core_reservation() {
-        let executor = MacExecutor {
-            profile: profile(),
-            performance: BTreeMap::new(),
-        };
+    fn worker_count_range_is_validated_without_host_access() {
         for workers in [0, 33] {
             assert_eq!(
-                executor.preflight_workers(workers).unwrap_err().to_string(),
+                validate_workers(workers).unwrap_err().to_string(),
                 "--workers: use 1..32"
             );
         }
-        // In range, admission is the ordinary HVF probe; a host without HVF
-        // access reports that, never a worker-count refusal.
         for workers in [1, 2, 32] {
-            match executor.preflight_workers(workers) {
-                Ok(()) => {}
-                Err(error) => assert!(!error.to_string().contains("--workers"), "{error}"),
-            }
+            validate_workers(workers).unwrap();
         }
     }
     #[test]
@@ -574,24 +570,5 @@ mod process_tests {
         let mut json = serde_json::to_value(&complete).unwrap();
         json["semantic_parameters"]["hvf"]["guest_kernel"] = "not-a-hash".into();
         assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
-    }
-    #[test]
-    fn retained_constructor_preserves_descriptive_metadata() {
-        let temp = tempfile::tempdir().expect("temp");
-        let engine = temp.path().join("engine");
-        fs::write(&engine, b"new executable").expect("engine");
-        let store = ContentStore::new(temp.path().join("objects"));
-        let previous = profile();
-        let executor =
-            MacExecutor::from_retained(&engine, &store, previous.clone()).expect("retain");
-        assert_eq!(
-            executor.profile.semantic_parameters,
-            previous.semantic_parameters
-        );
-        assert_eq!(
-            executor.profile.engine,
-            ContentDigest::of(b"new executable")
-        );
-        validate_profile(&executor.profile).unwrap();
     }
 }

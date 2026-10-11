@@ -2008,6 +2008,7 @@ dependencies = [
  "seedbox-api",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
 ]
@@ -2018,6 +2019,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2076,6 +2078,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-system-tests"
+version = "0.1.0"
+dependencies = [
+ "bollard",
+ "kvm-bindings",
+ "kvm-ioctls 0.25.0",
+ "libc",
+ "seedbox-api",
+ "seedbox-application",
+ "seedbox-arm64",
+ "seedbox-client",
+ "seedbox-vmm",
+ "seedbox-vmm-engine-core",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "seedbox-tui"
 version = "0.1.0"
 dependencies = [
@@ -2088,6 +2110,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "tempfile",
  "tokio",
 ]
 
@@ -3024,7 +3047,13 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "flate2",
+ "hex",
  "libc",
+ "seedbox-system-tests",
+ "serde_json",
+ "tar",
  "tempfile",
 ]
 

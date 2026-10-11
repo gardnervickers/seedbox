@@ -3,7 +3,8 @@ use crate::{devices, virtio_net};
 
 #[test]
 fn uart_output_is_persisted_before_completion_and_limited_without_truncation() {
-    let path = std::env::temp_dir().join(format!("seedbox-uart-retention-{}", std::process::id()));
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("path");
     let mut uart = devices::Uart::default();
     uart.output_file = Some(std::fs::File::create(&path).unwrap());
     uart.output_limit = Some(2);

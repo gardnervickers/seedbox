@@ -1,0 +1,464 @@
+//! A scripted `WorldMachine` for coordinator tests: the legacy loop's and the
+//! windowed scheduler's. Shared, so both run the same scripts.
+use seedbox_engine_core::world::*;
+use seedbox_engine_core::{control, links, world::boot_faults};
+use serde_json::{json, Value};
+use std::collections::VecDeque;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex};
+
+/// Every machine's trace, in the order it happened. `Arc` so a world can
+/// run on a thread pool.
+pub(crate) type Trace = Arc<Mutex<Vec<String>>>;
+
+#[derive(Default)]
+pub(crate) struct MockClock(pub(crate) Arc<Mutex<ClockState>>);
+#[derive(Default)]
+pub(crate) struct ClockState {
+    pub(crate) pv_backoff: u64,
+    pub(crate) watchdog_deadline: Option<u64>,
+    pub(crate) restore_calls: usize,
+}
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Step {
+    pub(crate) at: u64,
+    pub(crate) stop: Stop,
+    pub(crate) console: Option<u8>,
+    pub(crate) output: Vec<u8>,
+    pub(crate) observations: Vec<seedbox_engine_protocol::observation::Kind>,
+    pub(crate) requests: Vec<Vec<u8>>,
+    pub(crate) effects: Vec<(u32, bool)>,
+    pub(crate) frames: Vec<Vec<u8>>,
+}
+impl Step {
+    pub(crate) fn new(at: u64, stop: Stop) -> Self {
+        Self {
+            at,
+            stop,
+            console: None,
+            output: Vec::new(),
+            observations: Vec::new(),
+            requests: vec![],
+            effects: vec![],
+            frames: vec![],
+        }
+    }
+}
+pub(crate) struct Mock {
+    pub(crate) common: MachineState,
+    pub(crate) trace: Trace,
+    pub(crate) steps: VecDeque<Step>,
+    pub(crate) owed: Option<u64>,
+    pub(crate) irq: bool,
+    pub(crate) timer: u64,
+    pub(crate) bad: Option<&'static str>,
+    pub(crate) throttleable: bool,
+    publisher: Option<Arc<seedbox_engine_core::observation::Publisher>>,
+}
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Saved {
+    common: MachineState,
+    steps: VecDeque<Step>,
+    irq: bool,
+    timer: u64,
+}
+impl Deref for Mock {
+    type Target = MachineState;
+    fn deref(&self) -> &MachineState {
+        &self.common
+    }
+}
+impl DerefMut for Mock {
+    fn deref_mut(&mut self) -> &mut MachineState {
+        &mut self.common
+    }
+}
+impl Mock {
+    pub(crate) fn new(name: &str, trace: Trace) -> Self {
+        Self {
+            common: MachineState::new(name.into()),
+            trace,
+            steps: VecDeque::new(),
+            owed: None,
+            irq: false,
+            timer: u64::MAX,
+            bad: None,
+            throttleable: true,
+            publisher: None,
+        }
+    }
+    fn record(&self, kind: &str) {
+        self.trace
+            .lock()
+            .unwrap()
+            .push(format!("{}:{kind}:{}", self.name, self.time));
+    }
+}
+impl WorldMachine for Mock {
+    type Factory = Trace;
+    type Boot = ();
+    type Clock = MockClock;
+    type Snapshot = Saved;
+    fn boot(trace: &Trace, name: &str, _: &(), _: bool, _: [u8; 32]) -> Result<Self, String> {
+        if trace.lock().unwrap().iter().any(|x| x == "fail/boot") {
+            trace.lock().unwrap().push("partial-boot-cleanup".into());
+            return Err("boot failed".into());
+        }
+        let mut machine = Self::new(name, trace.clone());
+        if trace.lock().unwrap().iter().any(|x| x == "fail/timer") {
+            machine.bad = Some("timer");
+        }
+        if trace.lock().unwrap().iter().any(|x| x == "fail/throttle") {
+            machine.bad = Some("throttle");
+        }
+        if trace.lock().unwrap().iter().any(|x| x == "fail/install") {
+            machine.bad = Some("install");
+        }
+        Ok(machine)
+    }
+    fn has_pending_irq(&self) -> bool {
+        self.irq
+    }
+    fn next_deadline(&self) -> u64 {
+        self.timer
+    }
+    fn owed_io(&self) -> Option<u64> {
+        self.owed
+    }
+    fn has_control(&self) -> bool {
+        true
+    }
+    fn deliver_control(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.record(&format!("control/{}", String::from_utf8_lossy(bytes)));
+        Ok(())
+    }
+    fn deliver_serial(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.record(&format!("serial/{}", String::from_utf8_lossy(bytes)));
+        Ok(())
+    }
+    fn deliver_frame(&mut self, _: &[u8]) -> Result<bool, String> {
+        self.record("frame");
+        Ok(true)
+    }
+    fn pause(&mut self) -> Result<(), String> {
+        self.common.pause()?;
+        self.record("pause");
+        Ok(())
+    }
+    fn resume(&mut self, at: u64) -> Result<(), String> {
+        self.common.resume(at)?;
+        self.record("resume");
+        Ok(())
+    }
+    fn boot_at(&mut self, at: u64) -> Result<(), String> {
+        self.common.boot_at(at)?;
+        Ok(())
+    }
+    fn succeed(&mut self, old: &mut Self, at: u64, _: u64) -> Result<Option<u64>, String> {
+        if self.bad == Some("install") {
+            return Err("install ACK lost".into());
+        }
+        self.common.succeed(&old.common, at)?;
+        Ok(Some(0))
+    }
+    fn park(&mut self) -> Result<(), String> {
+        self.common.check_park(self.owed.is_some())?;
+        self.common.commit_park();
+        self.record("park");
+        Ok(())
+    }
+    fn wake(&mut self, at: u64) -> Result<(), String> {
+        self.common.time = self.common.time.max(at);
+        self.common.wake();
+        self.record("wake");
+        Ok(())
+    }
+    fn release(&mut self, at: u64, _: [u32; 8]) -> Result<Reseed, String> {
+        self.common.begin_release()?;
+        self.common.time = self.common.time.max(at);
+        self.record("release");
+        Ok(Reseed::Barrier)
+    }
+    fn abi(&self) -> u64 {
+        3
+    }
+    fn seed_timer(&mut self, _: u64, _: &str) -> Result<(), String> {
+        if self.bad == Some("timer") {
+            Err("timer ACK lost".into())
+        } else {
+            Ok(())
+        }
+    }
+    fn checkpoint_boundary(_: &MockClock) -> Result<(), String> {
+        Ok(())
+    }
+    fn restore_boundary(clock: &mut MockClock) -> Result<(), String> {
+        let mut clock = clock.0.lock().unwrap();
+        clock.restore_calls += 1;
+        clock.pv_backoff = 0;
+        clock.watchdog_deadline = None;
+        Ok(())
+    }
+    fn seed_timer_branch(
+        &mut self,
+        seed: u64,
+        identity: Option<&str>,
+        domain: &str,
+    ) -> Result<(), String> {
+        if let Some(identity) = identity {
+            self.record(&format!("branch/{seed}/{identity}/{domain}"));
+        }
+        self.seed_timer(seed, domain)
+    }
+    fn reseed_guest(&mut self, _: [u32; 8]) -> Result<(), String> {
+        self.record("reseed-guest");
+        Ok(())
+    }
+    fn supports_speed_reseed(&self) -> bool {
+        true
+    }
+    fn seed_speed(&mut self, _: u64, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn supports_throttle(&self) -> bool {
+        self.throttleable
+    }
+    fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
+        self.record(&format!("throttle/{factor_permille}"));
+        if self.bad == Some("throttle") {
+            return Err("throttle ACK lost".into());
+        }
+        Ok(())
+    }
+    fn exits(&self) -> u64 {
+        0
+    }
+    fn exit_witness(&mut self) -> Result<String, String> {
+        if self.bad == Some("witness") {
+            return Err("witness ACK lost".into());
+        }
+        Ok(String::new())
+    }
+    fn terminate_worker(&mut self) -> Result<(), String> {
+        self.record("terminate");
+        Ok(())
+    }
+    fn snapshot(&mut self) -> Result<Saved, String> {
+        if self.owed.is_some() {
+            return Err("owed I/O".into());
+        }
+        Ok(Saved {
+            common: self.common.clone(),
+            steps: self.steps.clone(),
+            irq: self.irq,
+            timer: self.timer,
+        })
+    }
+    fn restore(&mut self, s: &Saved) -> Result<u64, String> {
+        if self.bad == Some("restore") {
+            self.time = 999;
+            return Err("partial restore failed".into());
+        }
+        self.common = s.common.clone();
+        self.steps = s.steps.clone();
+        self.owed = None;
+        self.irq = s.irq;
+        self.timer = s.timer;
+        self.common.clear_effects();
+        Ok(1)
+    }
+    fn advance(
+        &mut self,
+        _: &mut MockClock,
+        request: SliceRequest,
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<Stop, String> {
+        assert!(request.hard_limit >= self.time);
+        assert_eq!(request.observe_console, self.observe_console);
+        let step = if self
+            .steps
+            .front()
+            .is_some_and(|s| s.at <= request.hard_limit)
+        {
+            self.steps.pop_front().unwrap()
+        } else {
+            Step::new(request.hard_limit, Stop::Reached)
+        };
+        let paid = step.at.saturating_sub(self.time);
+        self.owed = self
+            .owed
+            .and_then(|owed| owed.checked_sub(paid))
+            .filter(|&owed| owed > 0);
+        self.common.time = step.at;
+        for kind in step.observations {
+            let seedbox_engine_protocol::observation::Kind::Log(chunk) = kind else {
+                panic!("fixture expects application log frames")
+            };
+            let stream = match chunk.stream {
+                seedbox_engine_protocol::application_log::Stream::Stdout => 1,
+                seedbox_engine_protocol::application_log::Stream::Stderr => 2,
+            };
+            let bytes = format!("SBX_LOG1 {stream} {}\n", hex::encode(chunk.bytes));
+            seedbox_engine_core::observation::Decoder::default().commit(
+                &mut self.common,
+                self.publisher.as_deref(),
+                step.at,
+                bytes.as_bytes(),
+            );
+        }
+        if request.observe_console && !step.output.is_empty() {
+            self.common.committed_output.push((step.at, step.output));
+        }
+        self.common.committed_console = step
+            .console
+            .filter(|_| request.observe_console)
+            .map(|byte| (step.at, byte));
+        self.common
+            .control_requests
+            .extend(step.requests.into_iter().map(|bytes| (step.at, bytes)));
+        self.common
+            .fault_effects
+            .extend(step.effects.into_iter().map(|(id, ok)| (id, step.at, ok)));
+        frames.extend(step.frames);
+        match self.bad.take() {
+            Some("past") => self.common.time = paid.saturating_sub(paid + 1),
+            Some("future") => self.common.time = request.hard_limit + 1,
+            Some("identity") => self.common.name = "wrong".into(),
+            Some("incarnation") => {
+                let old = self.common.clone();
+                self.common.succeed(&old, step.at).unwrap();
+                self.common.boot_at(step.at).unwrap();
+            }
+            Some("lifecycle") => self.common.pause().unwrap(),
+            Some("state") => self.common.state = State::Halted,
+            Some("console") => self.common.committed_console = Some((request.hard_limit + 1, b'X')),
+            Some("request") => self
+                .common
+                .control_requests
+                .push((request.hard_limit + 1, b"bad".to_vec())),
+            Some("effect") => self
+                .common
+                .fault_effects
+                .push((0, request.hard_limit + 1, true)),
+            Some("order") => self
+                .common
+                .fault_effects
+                .extend([(0, step.at, true), (0, 0, true)]),
+            None => (),
+            Some(other) => panic!("unknown test mutation {other}"),
+        }
+        match step.stop {
+            Stop::Exited => self.common.state = State::Exited(0),
+            Stop::Halted => self.common.state = State::Halted,
+            Stop::Barrier => self.common.commit_park(),
+            _ => (),
+        }
+        self.record("advance");
+        Ok(step.stop)
+    }
+}
+
+// Every scenario owns its trace, machines, policy and clock.
+pub(crate) struct Inputs(
+    WorldInputs<Mock>,
+    Option<Arc<seedbox_engine_core::observation::Publisher>>,
+    Vec<(usize, u64, Payload)>,
+    Vec<(usize, (u64, u64), Vec<u8>)>,
+);
+impl Deref for Inputs {
+    type Target = WorldInputs<Mock>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for Inputs {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Inputs {
+    pub(crate) fn build(mut self) -> World<Mock> {
+        for machine in &mut self.0.machines {
+            machine.publisher = self.1.clone();
+        }
+        let mut world = World::new(self.0).unwrap().with_observations(self.1);
+        // Strict ingress is seeded through the retained checkpoint format,
+        // including its validation, rather than mutable coordinator internals.
+        if !self.3.is_empty() {
+            let owed: Vec<_> = world
+                .machines_mut()
+                .iter_mut()
+                .map(|m| m.owed.take())
+                .collect();
+            let mut saved =
+                serde_json::to_value(WorldSnapshot::take_checkpoint(&mut world).unwrap()).unwrap();
+            for (machine, key, bytes) in self.3 {
+                saved["strict_events"][machine]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!([key, bytes]));
+                saved["seq"] = json!(saved["seq"].as_u64().unwrap().max(key.1));
+            }
+            let saved: WorldSnapshot<Mock> = serde_json::from_value(saved).unwrap();
+            saved.restore(&mut world).unwrap();
+            for (machine, owed) in world.machines_mut().iter_mut().zip(owed) {
+                machine.owed = owed;
+            }
+        }
+        for (machine, time, payload) in self.2 {
+            world.schedule(machine, time, payload);
+        }
+        world
+    }
+    pub(crate) fn schedule(&mut self, machine: usize, time: u64, payload: Payload) {
+        self.2.push((machine, time, payload));
+    }
+    pub(crate) fn strict(&mut self, machine: usize, key: (u64, u64), bytes: Vec<u8>) {
+        self.3.push((machine, key, bytes));
+    }
+
+    pub(crate) fn with_observations(
+        mut self,
+        publisher: Option<Arc<seedbox_engine_core::observation::Publisher>>,
+    ) -> Self {
+        self.1 = publisher;
+        self
+    }
+}
+pub(crate) fn inputs(names: &[&str]) -> Inputs {
+    let names: Vec<String> = names.iter().map(|name| (*name).into()).collect();
+    let trace = Trace::default();
+    let n = names.len();
+    Inputs(
+        WorldInputs {
+            machines: names
+                .iter()
+                .map(|name| Mock::new(name, trace.clone()))
+                .collect(),
+            factory: trace,
+            boot: vec![(); n],
+            clock: MockClock::default(),
+            barrier: false,
+            boot_seed: 1,
+            run_seed: 2,
+            lookahead: 10,
+            early: 3,
+            latency: 10,
+            faults: boot_faults(
+                &names,
+                &[],
+                10,
+                links::Links::from_config(1, &names, &json!({"latency_ns":10})).unwrap(),
+            )
+            .unwrap(),
+            control: control::Control::new(&Value::Null, names, 10, 3).unwrap(),
+            macs: (0..n).map(|i| [0, 0, 0, 0, 0, i as u8]).collect(),
+        },
+        None,
+        vec![],
+        vec![],
+    )
+}
+pub(crate) fn world(names: &[&str]) -> World<Mock> {
+    inputs(names).build()
+}

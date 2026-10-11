@@ -28,9 +28,9 @@
             packages = with pkgs; [
               rustc cargo rustfmt clippy pkg-config stdenv.cc git
               cpio gzip curl jq python3 gnumake bc bison flex perl
-              docker-client podman
+              docker-client podman go
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-              elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 go util-linux
+              elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 util-linux
             ];
           } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux linuxEnvironment);
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

@@ -416,18 +416,9 @@ mod tests {
     }
 
     #[test]
-    fn save_failure_remains_visible_without_claiming_saved() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-timeline-view-save-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::write(&directory, b"block directory creation").unwrap();
-        let mut draft = TimelineDraft::new("k7m2p9qx".parse().unwrap(), 123);
-        assert!(draft.save(&directory).is_err());
+    fn unsaved_draft_remains_visible_without_claiming_saved() {
+        let directory = Path::new("/drafts");
+        let draft = TimelineDraft::new("k7m2p9qx".parse().unwrap(), 123);
         let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
         terminal
             .draw(|frame| {
@@ -436,7 +427,7 @@ mod tests {
                     frame.area(),
                     &draft,
                     0,
-                    &directory,
+                    directory,
                     None,
                     (true, &Default::default()),
                 )
@@ -452,6 +443,5 @@ mod tests {
         assert!(text.contains("UNSAVED"));
         assert!(text.contains("w save definition"));
         assert!(!text.contains("Saved:"));
-        std::fs::remove_file(directory).unwrap();
     }
 }

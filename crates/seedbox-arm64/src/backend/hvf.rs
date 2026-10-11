@@ -145,6 +145,16 @@ pub struct Hvf {
     _thread: PhantomData<Rc<()>>,
 }
 impl Hvf {
+    /// Request a host interruption, including before the next vCPU entry.
+    /// This does not complete or advance any guest instruction.
+    pub fn request_exit(&self) -> Result<()> {
+        unsafe extern "C" {
+            fn hv_vcpus_exit(cpus: *const u64, count: u32) -> i32;
+        }
+        let cpu = self.cpu()?;
+        // SAFETY: the vCPU belongs to this live, thread-confined backend.
+        unsafe { check("hv_vcpus_exit", hv_vcpus_exit(&cpu, 1)) }
+    }
     fn cpu(&self) -> Result<u64> {
         self.cpu.ok_or("HVF vCPU has not been created".into())
     }
@@ -595,48 +605,5 @@ mod tests {
         assert_eq!(std::mem::size_of::<HvExit>(), 32);
         assert_eq!(std::mem::offset_of!(HvExit, exception), 8);
         assert_eq!(std::mem::size_of::<Exception>(), 24);
-    }
-    // The platform runner signs discovered HVF test executables before running.
-    #[test]
-    #[cfg(feature = "hvf-tests")]
-    fn canceled_entry_holds_no_instruction_and_preserves_pc() {
-        unsafe extern "C" {
-            fn hv_vcpus_exit(cpus: *const u64, count: u32) -> i32;
-        }
-        let mut backend = Hvf::create().unwrap();
-        let memory = Rc::new(Memory::new(crate::PAGE_SIZE).unwrap());
-        // HVC #0 is a guaranteed finite natural exit once the queued cancel
-        // has returned. It must still execute at the original PC.
-        unsafe {
-            memory.write(0, &0xd400_0002u32.to_le_bytes()).unwrap();
-        }
-        backend.map_memory(0, crate::RAM_BASE, memory).unwrap();
-        backend.create_vcpu().unwrap();
-        backend.set_reg(CoreReg::Pstate, 0x3c5).unwrap();
-        backend.set_reg(CoreReg::Pc, crate::RAM_BASE).unwrap();
-        let cpu = backend.cpu().unwrap();
-        for _ in 0..3 {
-            unsafe {
-                check("test hv_vcpus_exit", hv_vcpus_exit(&cpu, 1)).unwrap();
-            }
-            assert!(matches!(backend.run().unwrap(), RunStop::Interrupted));
-            assert_eq!(backend.get_reg(CoreReg::Pc).unwrap(), crate::RAM_BASE);
-            assert_eq!(
-                backend.complete(None).unwrap_err(),
-                "no HVF exit to complete"
-            );
-        }
-        let RunStop::Guest(stop) = backend.run().unwrap() else {
-            panic!("stale cancellation survived its observed stop");
-        };
-        assert_eq!(stop.pc, crate::RAM_BASE);
-        assert!(matches!(stop.exit, Exit::Hvc { imm: 0 }));
-        assert_eq!(backend.get_reg(CoreReg::Pc).unwrap(), crate::RAM_BASE + 4);
-        assert!(backend
-            .run()
-            .unwrap_err()
-            .contains("before completing held HVF exit"));
-        backend.complete(None).unwrap();
-        assert_eq!(backend.get_reg(CoreReg::Pc).unwrap(), crate::RAM_BASE + 4);
     }
 }

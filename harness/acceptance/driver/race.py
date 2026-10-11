@@ -3,9 +3,9 @@ import re
 import subprocess
 
 
-def main():
+def main(executable="/race"):
     for mode, extra in (("racy", []), ("atomic", ["atomic"])):
-        result = subprocess.run(["/race", "3000000", *extra], capture_output=True, text=True, check=True)
+        result = subprocess.run([executable, "3000000", *extra], capture_output=True, text=True, check=True)
         print(result.stdout, end="", flush=True)
         found = re.findall(r"RACE mode=(\w+) counter=(-?\d+) expected=(-?\d+) lost=(-?\d+)", result.stdout)
         if len(found) != 1 or found[0][0] != mode:

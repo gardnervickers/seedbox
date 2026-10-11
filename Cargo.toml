@@ -23,6 +23,7 @@ seedbox-spec = { path = "crates/seedbox-spec" }
 tokio = { version = "1", features = ["rt", "time", "fs", "macros", "sync"] }
 thiserror = "2"
 futures-util = "0.3"
+flate2 = "1"
 getrandom = "0.4"
 tempfile = "3"
 tar = "0.4"

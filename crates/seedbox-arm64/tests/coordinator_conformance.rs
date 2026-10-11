@@ -6,24 +6,22 @@ use std::{
     io::Cursor,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
 
-static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
     root: PathBuf,
+    _temporary: tempfile::TempDir,
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "seedbox-arm-conformance-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&root).unwrap();
-        Self { root }
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().to_path_buf();
+        Self {
+            root,
+            _temporary: temporary,
+        }
     }
     fn path(&self, name: &str) -> PathBuf {
         self.root.join(name)
@@ -130,11 +128,6 @@ with open({:?}, 'wb', buffering=0) as requests:
             );
             thread::sleep(Duration::from_millis(5));
         }
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 

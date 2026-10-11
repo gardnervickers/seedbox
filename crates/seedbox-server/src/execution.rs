@@ -442,15 +442,11 @@ impl ExecutionService {
                 self.manager.update(&id, |s| {
                     s.status.phase = Phase::Completed;
                     s.status.stage = None;
-                    s.status.termination = Some(if cancellation.is_cancelled() {
-                        ExecutionTermination::Stopped
-                    } else if preparation_expired.load(Ordering::Acquire) {
-                        ExecutionTermination::PreparationTimeLimit
-                    } else {
-                        ExecutionTermination::Error {
-                            message: error.to_string(),
-                        }
-                    });
+                    s.status.termination = Some(failed_termination(
+                        &error,
+                        cancellation.is_cancelled(),
+                        preparation_expired.load(Ordering::Acquire),
+                    ));
                 })?;
             }
         }
@@ -743,6 +739,22 @@ fn save_inputs(
     Ok(())
 }
 
+fn failed_termination(
+    error: &seedbox_application::Error,
+    cancelled: bool,
+    preparation_expired: bool,
+) -> ExecutionTermination {
+    if cancelled {
+        ExecutionTermination::Stopped
+    } else if preparation_expired {
+        ExecutionTermination::PreparationTimeLimit
+    } else {
+        ExecutionTermination::Error {
+            message: error.to_string(),
+        }
+    }
+}
+
 // Committed observations may be ahead of a late final report. Neither the
 // oracle's first exit nor the public timeline may move backwards during cleanup.
 fn merge_report_observation(
@@ -759,333 +771,43 @@ fn merge_report_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seedbox_api::{SimulationSpec, SubmitRequest, TestVerdict};
-
-    struct WaitingProvider(AtomicBool);
-    impl BackendProvider for WaitingProvider {
-        fn project(
-            &self,
-            _: &Simulation,
-            _: &ContentStore,
-            cancellation: &CancellationToken,
-        ) -> seedbox_application::Result<Backends> {
-            let limit = std::time::Instant::now() + Duration::from_secs(2);
-            while !cancellation.is_cancelled() && std::time::Instant::now() < limit {
-                std::thread::sleep(Duration::from_millis(1));
+    #[test]
+    fn preparation_deadline_is_distinct_from_stop_and_execution_error() {
+        let error = seedbox_application::Error::PreparationCancelled;
+        for expired in [false, true] {
+            assert_eq!(
+                failed_termination(&error, true, expired),
+                ExecutionTermination::Stopped
+            );
+        }
+        assert_eq!(
+            failed_termination(&error, false, true),
+            ExecutionTermination::PreparationTimeLimit
+        );
+        assert_eq!(
+            failed_termination(&error, false, false),
+            ExecutionTermination::Error {
+                message: error.to_string()
             }
-            self.0.store(cancellation.is_cancelled(), Ordering::Release);
-            Err(seedbox_application::Error::PreparationCancelled)
-        }
-        fn retained(
-            &self,
-            _: &PreparedInputs,
-            _: &ContentStore,
-        ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
-            panic!("the preparation timeout must not launch retained execution")
-        }
+        );
     }
-
     #[test]
     fn final_report_cannot_regress_a_committed_oracle_observation() {
-        let directory = tempfile::tempdir().unwrap();
-        let manager =
-            Manager::new(catalogue::Catalogue::open(&directory.path().join("catalogue")).unwrap());
-        let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
-            &Default::default(),
-        )
-        .unwrap();
-        let id = manager
-            .submit(SubmitRequest {
-                metadata: Default::default(),
-                options: Default::default(),
-                request_id: "late-report".into(),
-                spec: SimulationSpec {
-                    program: Vec::new(),
-                    start_paused: false,
-                    seed: Some(1),
-                    inputs: InputSource::Project,
-                    configuration,
-                },
-            })
-            .unwrap()
-            .0
-            .metadata
-            .id;
-        manager.begin(&id).unwrap().unwrap();
-        manager
-            .update(&id, |s| {
-                s.status.phase = Phase::Running;
-            })
-            .unwrap();
-        manager.publish_engine_event(
-            &id,
-            100,
-            seedbox_api::EventKind::MachineExited {
-                machine: "oracle".into(),
-                incarnation: 0,
-                code: 0,
-            },
-        );
+        let mut status = seedbox_api::SimulationStatus {
+            simulated_time_ns: 100,
+            oracle_exit_code: Some(0),
+            ..Default::default()
+        };
         for phase in [Phase::Finalizing, Phase::Completed] {
-            manager
-                .update(&id, |s| {
-                    merge_report_observation(&mut s.status, Some(7), Some(50));
-                    s.status.phase = phase;
-                })
-                .unwrap();
-            let status = manager.describe(&id).unwrap().status;
+            merge_report_observation(&mut status, Some(7), Some(50));
+            status.phase = phase;
             assert_eq!(status.simulated_time_ns, 100);
             assert_eq!(status.oracle_exit_code, Some(0));
         }
-    }
-
-    #[test]
-    fn deletion_drains_control_io_and_retires_stale_handles_before_removing_files() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
-        let service = Arc::new(
-            ExecutionService::new(
-                manager.clone(),
-                root.into(),
-                ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
-            )
-            .unwrap(),
-        );
-        let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
-            &Default::default(),
-        )
-        .unwrap();
-        let resource = manager
-            .submit(SubmitRequest {
-                metadata: Default::default(),
-                options: Default::default(),
-                request_id: "delete-control-io".into(),
-                spec: SimulationSpec {
-                    program: Vec::new(),
-                    start_paused: false,
-                    seed: Some(1),
-                    inputs: InputSource::Project,
-                    configuration,
-                },
-            })
-            .unwrap()
-            .0;
-        let id = resource.metadata.id;
-        manager.begin(&id).unwrap().unwrap();
-        manager
-            .update(&id, |resource| {
-                resource.status.phase = Phase::Running;
-            })
-            .unwrap();
-        let attempt = root.join("runs").join(id.as_str()).join("attempt");
-        fs::create_dir_all(&attempt).unwrap();
-        manager.attach_worker(&id, &attempt).unwrap();
-        let stale = manager.worker(&id).unwrap().unwrap();
-        // Hold the same mutex that drive owns throughout RPC and checkpoint I/O.
-        let active_operation = stale.lock().unwrap();
-        let (finished, completion) = std::sync::mpsc::channel();
-        let owner = service.clone();
-        let deleting_id = id.clone();
-        let deletion = std::thread::spawn(move || {
-            finished.send(owner.delete(&deleting_id)).unwrap();
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !manager.describe(&id).unwrap().status.stop_requested {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "deletion never requested stop"
-            );
-            std::thread::yield_now();
-        }
-        // Execution can complete before the held control operation finishes.
-        manager
-            .update(&id, |resource| {
-                resource.status.phase = Phase::Completed;
-            })
-            .unwrap();
-        assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
-        assert!(attempt.is_dir());
-        fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
-        drop(active_operation);
-        completion
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap()
-            .unwrap();
-        deletion.join().unwrap();
-        assert!(!attempt.exists());
-        assert!(matches!(
-            manager.describe(&id),
-            Err(catalogue::Error::NotFound(_))
-        ));
-        let mut worker = stale.lock().unwrap();
-        assert!(worker.is_retired());
-        assert!(matches!(
-            worker.apply(&seedbox_api::ControlRequest {
-                request_id: "stale".into(),
-                command: seedbox_api::ControlCommand::Checkpoint,
-            }),
-            Err(crate::worker::Error::Retired)
-        ));
-        assert!(worker.inspect().is_err());
-        assert!(!attempt.exists());
-    }
-
-    #[test]
-    fn completion_retires_control_handles_before_later_deletion() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
-        let service = Arc::new(
-            ExecutionService::new(
-                manager.clone(),
-                root.into(),
-                ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
-            )
-            .unwrap(),
-        );
-        let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
-            &Default::default(),
-        )
-        .unwrap();
-        let resource = manager
-            .submit(SubmitRequest {
-                metadata: Default::default(),
-                options: Default::default(),
-                request_id: "delete-control-io".into(),
-                spec: SimulationSpec {
-                    program: Vec::new(),
-                    start_paused: false,
-                    seed: Some(1),
-                    inputs: InputSource::Project,
-                    configuration,
-                },
-            })
-            .unwrap()
-            .0;
-        let id = resource.metadata.id;
-        manager.begin(&id).unwrap().unwrap();
-        manager
-            .update(&id, |resource| {
-                resource.status.phase = Phase::Running;
-            })
-            .unwrap();
-        let attempt = root.join("runs").join(id.as_str()).join("attempt");
-        fs::create_dir_all(&attempt).unwrap();
-        manager.attach_worker(&id, &attempt).unwrap();
-        let stale = manager.worker(&id).unwrap().unwrap();
-        // Hold the same mutex that drive owns throughout RPC and checkpoint I/O.
-        let active_operation = stale.lock().unwrap();
-        let (finished, completion) = std::sync::mpsc::channel();
-        let owner = manager.clone();
-        let completing_id = id.clone();
-        let finalization = std::thread::spawn(move || {
-            // ExecutionService::execute uses this order after its receiver drains.
-            owner.retire_worker(&completing_id).unwrap();
-            owner
-                .update(&completing_id, |resource| {
-                    resource.status.phase = Phase::Completed;
-                })
-                .unwrap();
-            finished.send(()).unwrap();
-        });
-        assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
-        assert_eq!(manager.describe(&id).unwrap().status.phase, Phase::Running);
-        fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
-        drop(active_operation);
-        completion.recv_timeout(Duration::from_secs(2)).unwrap();
-        finalization.join().unwrap();
-        assert_eq!(
-            manager.describe(&id).unwrap().status.phase,
-            Phase::Completed
-        );
-        assert!(manager.worker(&id).unwrap().is_none());
-        // Deletion begins after completion has dropped Live and its worker handle.
-        service.delete(&id).unwrap();
-        assert!(!attempt.exists());
-        assert!(matches!(
-            manager.describe(&id),
-            Err(catalogue::Error::NotFound(_))
-        ));
-        let mut worker = stale.lock().unwrap();
-        assert!(worker.is_retired());
-        assert!(matches!(
-            worker.apply(&seedbox_api::ControlRequest {
-                request_id: "stale".into(),
-                command: seedbox_api::ControlCommand::Checkpoint,
-            }),
-            Err(crate::worker::Error::Retired)
-        ));
-        assert!(worker.inspect().is_err());
-        assert!(!attempt.exists());
-    }
-
-    #[test]
-    fn preparation_timeout_waits_for_cleanup_and_finishes_without_an_oracle_exit() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
-        let provider = Arc::new(WaitingProvider(AtomicBool::new(false)));
-        let mut service = ExecutionService::new(
-            manager.clone(),
-            root.into(),
-            ContentStore::new(root.join("store")),
-            provider.clone(),
-        )
-        .unwrap();
-        service.preparation_limit = Duration::from_millis(10);
-        let mut configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
-            &Default::default(),
-        )
-        .unwrap();
-        for service in configuration.services.values_mut() {
-            service.platform.clear();
-        }
-        let resource = manager
-            .submit(SubmitRequest {
-                metadata: Default::default(),
-                options: Default::default(),
-                request_id: "timeout".into(),
-                spec: SimulationSpec {
-                    program: Vec::new(),
-                    start_paused: false,
-                    seed: Some(1),
-                    inputs: InputSource::Project,
-                    configuration,
-                },
-            })
-            .unwrap()
-            .0;
-        service.execute(resource.metadata.id.clone()).unwrap();
-        assert!(provider.0.load(Ordering::Acquire));
-        let completed = manager.describe(&resource.metadata.id).unwrap();
-        assert_eq!(completed.status.phase, Phase::Completed);
-        assert_eq!(
-            completed.status.termination,
-            Some(ExecutionTermination::PreparationTimeLimit)
-        );
-        assert_eq!(completed.status.verdict(), TestVerdict::Incomplete);
-        assert!(!completed.status.stop_requested);
-        assert!(completed.status.stage_timings[&Stage::Preparing].complete);
-        assert!(!root
-            .join("inputs")
-            .join(format!("{}.json", resource.metadata.id))
-            .exists());
+        merge_report_observation(&mut status, None, Some(101));
+        assert_eq!(status.simulated_time_ns, 101);
+        let mut empty = seedbox_api::SimulationStatus::default();
+        merge_report_observation(&mut empty, Some(7), None);
+        assert_eq!(empty.oracle_exit_code, Some(7));
     }
 }

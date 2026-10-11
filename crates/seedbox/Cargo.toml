@@ -34,15 +34,3 @@ seedbox-arm64 = { path = "../seedbox-arm64" }
 [dev-dependencies]
 seedbox-engine-core.workspace = true
 tar.workspace = true
-
-[features]
-application-tests = []
-retained-run-tests = []
-
-[[test]]
-name = "applications"
-required-features = ["application-tests"]
-
-[[test]]
-name = "host_pause"
-required-features = ["retained-run-tests"]

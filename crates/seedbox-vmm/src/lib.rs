@@ -11,7 +11,8 @@ use seedbox_engine_core::{checkpoint, control, disk, links, output_layout, rng};
 mod device_tests;
 mod devices;
 pub use seedbox_engine_core::host_control;
-mod machine;
+/// Native stopped-machine construction, execution and retained state.
+pub mod machine;
 mod shadow;
 mod virtio_blk;
 mod virtio_console;

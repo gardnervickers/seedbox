@@ -66,17 +66,10 @@ jobs:
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
           df -h /
-      - name: Verify usable KVM before building
+      - name: Enable KVM and inspect the container engine
         run: |
           sudo chmod a+rw /dev/kvm
-          python3 - <<'PYTHON'
-          import fcntl, os
-          with open('/dev/kvm', 'rb') as kvm:
-              assert fcntl.ioctl(kvm, 0xAE00, 0) == 12, 'unsupported KVM API'
-              vm = fcntl.ioctl(kvm, 0xAE01, 0)
-              os.close(vm)
-          print('KVM VM creation succeeded')
-          PYTHON
+          test -c /dev/kvm && test -r /dev/kvm && test -w /dev/kvm
           docker info
       - uses: cachix/install-nix-action@v31
         with:
@@ -101,6 +94,8 @@ jobs:
             crates/seedbox-vmm -> target
             crates/seedbox-arm64 -> target
           cache-bin: false
+      - name: Check system suite requirements before building guests
+        run: nix develop --command cargo xtask check linux-apps --list
       - name: Build and root guest assets from the checkout
         run: |
           nix build .#guestKernel .#runtimeArchive --out-link "$RUNNER_TEMP/pv-assets"

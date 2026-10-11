@@ -607,6 +607,18 @@ impl<M: WorldMachine> World<M> {
     pub fn slices(&self) -> u64 {
         self.slices
     }
+    pub fn boundaries(&self) -> u64 {
+        self.boundaries
+    }
+    pub fn sequence(&self) -> u64 {
+        self.seq
+    }
+    pub fn incarnations(&self) -> &[Vec<Value>] {
+        &self.incarnations
+    }
+    pub fn paused_ingress(&self) -> &[u64] {
+        &self.paused_ingress
+    }
     /// Split physical report access from the immutable retired-incarnation evidence.
     pub fn machine_with_history(&mut self, index: usize) -> (&mut M, &[Value]) {
         (&mut self.machines[index], &self.incarnations[index])

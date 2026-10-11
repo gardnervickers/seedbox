@@ -53,7 +53,8 @@ fn missing_input_is_contextual() {
 
 #[test]
 fn ram_pages_refuses_existing_file_before_opening_hypervisor() {
-    let path = std::env::temp_dir().join(format!("seedbox-pages-{}", std::process::id()));
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("path");
     std::fs::write(&path, b"preserve me").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_seedbox-arm64"))
         .args([

@@ -14,7 +14,7 @@ use std::{
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
-pub(super) struct TimelineMetadata {
+pub struct TimelineMetadata {
     pub name: String,
     pub application: String,
     pub seed: Option<u64>,
@@ -23,7 +23,7 @@ pub(super) struct TimelineMetadata {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct TimelineDraft {
+pub struct TimelineDraft {
     version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     definition: Option<serde_json::Value>,
@@ -51,7 +51,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 impl TimelineDraft {
-    pub(super) fn new(source: SimulationId, created_at_unix_ms: u64) -> Self {
+    pub fn new(source: SimulationId, created_at_unix_ms: u64) -> Self {
         Self {
             version: 2,
             definition: None,
@@ -73,7 +73,7 @@ impl TimelineDraft {
     }
 
     /// Observations refresh the immutable base only until editing begins.
-    pub(super) fn attach_definition(&mut self, resource: &seedbox_api::Simulation) {
+    pub fn attach_definition(&mut self, resource: &seedbox_api::Simulation) {
         let Ok(mut document) = serde_json::to_value(resource) else {
             return;
         };
@@ -146,13 +146,13 @@ impl TimelineDraft {
         document["metadata"]["name"] = self.metadata.name.clone().into();
     }
 
-    pub(super) fn submission_snapshot(&self) -> Option<serde_json::Value> {
+    pub fn submission_snapshot(&self) -> Option<serde_json::Value> {
         self.working.as_ref().or(self.definition.as_ref()).cloned()
     }
 
     /// Explicit save publishes a new immutable full definition. Edits continue
     /// in the same working copy; an existing saved file is never replaced.
-    pub(super) fn save_definition(&mut self, directory: &Path) -> io::Result<PathBuf> {
+    pub fn save_definition(&mut self, directory: &Path) -> io::Result<PathBuf> {
         let document = self
             .submission_snapshot()
             .ok_or_else(|| invalid("complete prepared definition unavailable"))?;
@@ -179,10 +179,10 @@ impl TimelineDraft {
         Ok(path)
     }
 
-    pub(super) fn metadata(&self) -> &TimelineMetadata {
+    pub fn metadata(&self) -> &TimelineMetadata {
         &self.metadata
     }
-    pub(super) fn set_metadata(&mut self, metadata: TimelineMetadata) -> bool {
+    pub fn set_metadata(&mut self, metadata: TimelineMetadata) -> bool {
         if self.metadata == metadata {
             return false;
         }
@@ -193,15 +193,15 @@ impl TimelineDraft {
         self.unsaved = true;
         true
     }
-    pub(super) fn rename(&mut self, name: String) {
+    pub fn rename(&mut self, name: String) {
         self.metadata.name = name;
         self.edit_definition();
         self.unsaved = true;
     }
-    pub(super) fn is_unsaved(&self) -> bool {
+    pub fn is_unsaved(&self) -> bool {
         self.unsaved
     }
-    pub(super) fn save_error(&self) -> Option<&str> {
+    pub fn save_error(&self) -> Option<&str> {
         self.save_error.as_deref()
     }
     fn fill_legacy_metadata(&mut self) {
@@ -213,16 +213,16 @@ impl TimelineDraft {
         }
     }
 
-    pub(super) fn source(&self) -> &SimulationId {
+    pub fn source(&self) -> &SimulationId {
         &self.source
     }
-    pub(super) fn created_at_unix_ms(&self) -> u64 {
+    pub fn created_at_unix_ms(&self) -> u64 {
         self.created_at_unix_ms
     }
 
     /// Load saved recordings even when their server catalogue is gone. Files
     /// that cannot be read are skipped and described, never replaced.
-    pub(super) fn load_all(directory: &Path) -> io::Result<(Vec<Self>, Vec<String>)> {
+    pub fn load_all(directory: &Path) -> io::Result<(Vec<Self>, Vec<String>)> {
         let files = match fs::read_dir(directory) {
             Ok(files) => files,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -275,7 +275,7 @@ impl TimelineDraft {
         Ok(draft)
     }
 
-    pub(super) fn path(&self, directory: &Path) -> PathBuf {
+    pub fn path(&self, directory: &Path) -> PathBuf {
         directory.join(format!("{}-{}.json", self.source, self.created_at_unix_ms))
     }
 
@@ -347,7 +347,7 @@ impl TimelineDraft {
         Ok(())
     }
 
-    pub(super) fn save(&mut self, directory: &Path) -> io::Result<()> {
+    pub fn save(&mut self, directory: &Path) -> io::Result<()> {
         let result = self.write(directory);
         match &result {
             Ok(()) => {
@@ -362,7 +362,7 @@ impl TimelineDraft {
         }
         result
     }
-    pub(super) fn retry_save(&mut self, directory: &Path) -> io::Result<()> {
+    pub fn retry_save(&mut self, directory: &Path) -> io::Result<()> {
         self.save(directory)
     }
     fn write(&self, directory: &Path) -> io::Result<()> {
@@ -388,7 +388,7 @@ impl TimelineDraft {
     }
 
     /// Merge a full or partial server observation by stable request identity.
-    pub(super) fn merge(&mut self, history: &[TimelineEntry]) -> io::Result<bool> {
+    pub fn merge(&mut self, history: &[TimelineEntry]) -> io::Result<bool> {
         let mut next = self.clone();
         for entry in history {
             if let Some(previous) = next
@@ -418,10 +418,10 @@ impl TimelineDraft {
         Ok(changed)
     }
 
-    pub(super) fn entries(&self) -> &[TimelineEntry] {
+    pub fn entries(&self) -> &[TimelineEntry] {
         &self.original
     }
-    pub(super) fn next_upcoming(&self, world: &seedbox_api::WorldState) -> Option<usize> {
+    pub fn next_upcoming(&self, world: &seedbox_api::WorldState) -> Option<usize> {
         self.entries().iter().position(|entry| {
             match world
                 .faults
@@ -438,15 +438,15 @@ impl TimelineDraft {
         })
     }
 
-    pub(super) fn included_entry(&self, entry: &TimelineEntry) -> bool {
+    pub fn included_entry(&self, entry: &TimelineEntry) -> bool {
         !self.excluded.contains(&entry.id)
     }
 
-    pub(super) fn modified_count(&self) -> usize {
+    pub fn modified_count(&self) -> usize {
         self.excluded.len()
     }
 
-    pub(super) fn toggle(&mut self, index: usize) -> bool {
+    pub fn toggle(&mut self, index: usize) -> bool {
         let Some(entry) = self.original.get(index) else {
             return false;
         };
@@ -464,7 +464,7 @@ impl TimelineDraft {
     }
 
     /// Excludes only faults already observed, so future injections stay visible.
-    pub(super) fn clear(&mut self) -> bool {
+    pub fn clear(&mut self) -> bool {
         let excluded = self
             .entries()
             .iter()
@@ -476,7 +476,7 @@ impl TimelineDraft {
         self.set_excluded(excluded)
     }
 
-    pub(super) fn reset(&mut self) -> bool {
+    pub fn reset(&mut self) -> bool {
         self.set_excluded(BTreeSet::new())
     }
 
@@ -490,7 +490,7 @@ impl TimelineDraft {
         true
     }
 
-    pub(super) fn undo(&mut self) -> bool {
+    pub fn undo(&mut self) -> bool {
         let Some(previous) = self.undo.take() else {
             return false;
         };
@@ -518,43 +518,6 @@ mod tests {
         TimelineDraft::new("k7m2p9qx".parse().unwrap(), 123)
     }
     #[test]
-    fn one_working_copy_saves_immutable_full_definitions_and_snapshots_submission() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-definition-{}",
-            seedbox_client::Client::request_id().unwrap()
-        ));
-        let mut draft = draft();
-        let base = serde_json::json!({"apiVersion":"seedbox/v1", "kind":"Simulation", "metadata":{"name":"test"},
-            "spec":{"architecture":"aarch64","overrides":[
-                {"id":"entry-1","atNs":1,"action":{"action":"future"}},
-                {"id":"entry-2","atNs":2,"action":{"action":"future"}}]}});
-        draft.definition = Some(base.clone());
-        draft.merge(&[entry(1), entry(2)]).unwrap();
-        assert!(draft.working.is_none());
-        draft.toggle(0);
-        assert_eq!(draft.definition.as_ref(), Some(&base));
-        draft.rename("reproduction".into());
-        let submitted = draft.submission_snapshot().unwrap();
-        assert_eq!(submitted["metadata"]["name"], "reproduction");
-        assert_eq!(submitted["spec"]["overrides"].as_array().unwrap().len(), 1);
-        let first = draft.save_definition(&directory).unwrap();
-        let saved_bytes = fs::read(&first).unwrap();
-        draft.toggle(1);
-        assert_eq!(submitted["spec"]["overrides"].as_array().unwrap().len(), 1);
-        assert_eq!(fs::read(&first).unwrap(), saved_bytes);
-        let second = draft.save_definition(&directory).unwrap();
-        assert_ne!(first, second);
-        assert_eq!(fs::read(&first).unwrap(), saved_bytes);
-        let (restored, _) = TimelineDraft::load_all(&directory).unwrap();
-        assert_eq!(restored.len(), 1);
-        assert_eq!(
-            restored[0].submission_snapshot().unwrap()["spec"]["overrides"],
-            serde_json::json!([])
-        );
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn unknown_actions_survive_edits_refresh_and_roundtrip() {
         let mut draft = draft();
         draft.merge(&[entry(1), entry(2)]).unwrap();
@@ -579,47 +542,6 @@ mod tests {
         changed.action["new"] = true.into();
         assert!(draft.merge(&[entry(2), changed]).is_err());
         assert_eq!(draft.entries(), &[entry(1)]);
-    }
-    #[test]
-    fn persistence_and_failed_save_retry_preserve_unknown_actions_and_metadata() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-timeline-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::write(&directory, b"blocked").unwrap();
-        let mut draft = draft();
-        draft.merge(&[entry(1)]).unwrap();
-        draft.toggle(0);
-        draft.set_metadata(TimelineMetadata {
-            name: "Failure".into(),
-            application: "test".into(),
-            seed: Some(42),
-            recorded_at_unix_ms: 123,
-        });
-        assert!(draft.save(&directory).is_err());
-        assert!(draft.is_unsaved());
-        assert!(draft.save_error().is_some());
-        fs::remove_file(&directory).unwrap();
-        draft.retry_save(&directory).unwrap();
-        assert!(!draft.is_unsaved());
-        assert!(draft.save_error().is_none());
-        let restored = TimelineDraft::load_all(&directory).unwrap().0.remove(0);
-        assert_eq!(restored.entries(), draft.entries());
-        assert_eq!(restored.metadata(), draft.metadata());
-        assert_eq!(restored.modified_count(), 1);
-        fs::write(draft.path(&directory), b"broken").unwrap();
-        let (loaded, skipped) = TimelineDraft::load_all(&directory).unwrap();
-        assert!(loaded.is_empty());
-        assert_eq!(skipped.len(), 1);
-        let mut fresh = TimelineDraft::new("k7m2p9qx".parse().unwrap(), 123);
-        assert!(fresh.save(&directory).is_err());
-        assert!(fresh.save_error().unwrap().contains("move it aside"));
-        assert_eq!(fs::read(draft.path(&directory)).unwrap(), b"broken");
-        fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn observation_enrichment_retains_removals_and_new_fault_identity() {

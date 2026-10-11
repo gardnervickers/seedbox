@@ -82,7 +82,7 @@ Unit tests live alongside their component under `src/`; integration tests live
 in the owning crate's `tests/` and exercise public boundaries or interactions.
 Give each scenario one owner. Keep format and offline artifact tests out of the
 application crate unless they specifically exercise application composition.
-Hardware tests remain feature-controlled and compiled by portable checks.
+System tests live in `crates/seedbox-system-tests/tests/system.rs`, compile during portable checks and are ignored unless explicitly selected.
 
 ## Shared engine policies, queues and transport
 
@@ -174,16 +174,22 @@ bash harness/check.sh mac             # Apple Silicon
 Suites are named, never auto-detected: `portable`, `linux-kvm`,
 `linux-guests`, `linux-oci`, `linux-apps`, `linux-pause`, `mac-hvf`,
 `mac-guests`, `mac-apps`, plus the `linux` and `mac` groups. `portable` compiles
-every feature-gated test with `--no-run` and executes only portable tests; it
+the ignored system test bodies and executes only portable tests; it
 opens no KVM/HVF device and needs no root or registry access. It always runs
 first and must pass before hardware execution. A named suite whose host
 requirements are missing exits 2 before any build. `--list` checks requirements
 without building.
 
-See `harness/check.py` for suite requirements, discovery and fixture inputs.
-Keep VMM engine tests compiled by default; conditional `ignore` attributes enable
-hardware execution through features. Other feature-gated tests must be built by
-the portable `--no-run` checks. Add no per-test registration lists. The runner
+See `crates/xtask/src/checks.rs` for suite requirements and fixture inputs.
+All test suites are Rust. Guest Python programs and the shipped Python SDK may
+be exercised by Rust integration tests. Unit tests cover one component; tests
+composing real components belong in the owning crate’s `tests/`. Each test owns
+its files, sockets, processes and threads and can run concurrently.
+System tests require a native kernel or external engine contract that ordinary
+tests cannot exercise. Acquire the system crate’s cross-process kernel lease
+before starting a hypervisor or application server and retain it through worker
+cleanup. Combine related native checks and reuse setup within one cohort.
+System tests are always compiled and explicitly ignored. Add no per-test registration lists. The runner
 builds as the current user and signs disposable HVF test copies. Workers use
 normal host scheduling; Seedbox does not reserve cores or pin CPUs. Check other revisions in a Git worktree;
 do not stamp Git revisions or checkout cleanliness in the runner.
@@ -370,8 +376,8 @@ images or executes guests. Compatibility readiness is not replay qualification.
   x86-64 runners.
 - `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers
   none of it. A VMM change needs `cargo build-vmm` and
-  `cargo test-vmm --features kvm-tests` on a Linux KVM host. Without the
-  feature, KVM tests compile but remain ignored.
+  `bash harness/check.sh linux-kvm` on a Linux KVM host. Native checks run
+  through the system crate after portable checks pass.
 
 If no local server is running, an interactive client asks before starting one.
 The server stays running for subsequent commands. Noninteractive callers must
