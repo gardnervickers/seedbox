@@ -458,6 +458,16 @@ pub fn check(root: &Path, args: Args) -> Result<i32> {
     if args.list {
         return Ok(0);
     }
+    if hardware {
+        // Create the file as this user before any sudo child can own it.
+        // Keep the same inode across checkouts and privilege changes.
+        let leases = seedbox_system_tests::KernelLease::directory();
+        seedbox_system_tests::KernelLease::prepare(&leases)?;
+        environment.insert(
+            "SEEDBOX_TEST_RESOURCE_DIR".into(),
+            leases.to_string_lossy().into_owned(),
+        );
+    }
     portable(root)?;
     if !hardware {
         return Ok(0);
@@ -482,14 +492,6 @@ pub fn check(root: &Path, args: Args) -> Result<i32> {
     environment.insert(
         "SEEDBOX_ARM64_REPORT_DIR".into(),
         reports.join("arm64").to_string_lossy().into_owned(),
-    );
-    // Deliberately independent of the checkout/run: concurrent binaries and
-    // sudo executions must contend for the same kernel lease.
-    let leases = seedbox_system_tests::KernelLease::directory();
-    fs::create_dir_all(&leases)?;
-    environment.insert(
-        "SEEDBOX_TEST_RESOURCE_DIR".into(),
-        leases.to_string_lossy().into_owned(),
     );
     if suites.iter().any(|s| s.applications()) {
         let assets = crate::assets::build(root)?;

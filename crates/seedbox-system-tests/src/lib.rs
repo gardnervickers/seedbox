@@ -28,16 +28,26 @@ impl KernelLease {
             })
     }
 
-    pub fn acquire(directory: &Path) -> io::Result<Self> {
+    /// Create the stable lock as the invoking user before a runner uses sudo.
+    /// Initialization does not wait for an active cohort or replace its inode.
+    pub fn prepare(directory: &Path) -> io::Result<()> {
+        Self::open(directory).map(drop)
+    }
+
+    fn open(directory: &Path) -> io::Result<File> {
         fs::create_dir_all(directory)?;
-        let file = OpenOptions::new()
+        OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(directory.join("hypervisor.lock"))?;
+            .open(directory.join("hypervisor.lock"))
+    }
+
+    pub fn acquire(directory: &Path) -> io::Result<Self> {
+        let file = Self::open(directory)?;
         loop {
             // SAFETY: the owned descriptor stays open for the whole lease.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
