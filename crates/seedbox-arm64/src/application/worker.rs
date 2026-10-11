@@ -161,6 +161,9 @@ pub enum Operation {
         seed: u64,
         domain: String,
     },
+    SeedProgressJitter {
+        seed: u64,
+    },
     Throttle {
         factor_permille: u64,
     },
@@ -422,6 +425,10 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 }
                 Operation::SeedTimer { seed, domain } => {
                     vm.seed_timer(seed, &domain)?;
+                    Ok(Answer::Ready)
+                }
+                Operation::SeedProgressJitter { seed } => {
+                    vm.seed_progress_jitter(seed)?;
                     Ok(Answer::Ready)
                 }
                 Operation::Throttle { factor_permille } => {
@@ -763,6 +770,7 @@ impl OwnedWorker {
                     | Operation::ResumeAt(_)
                     | Operation::Park
                     | Operation::SeedTimer { .. }
+                    | Operation::SeedProgressJitter { .. }
                     | Operation::Throttle { .. },
                 Answer::Ready
             ) | (Operation::Advance { .. }, Answer::Advanced { .. })
@@ -884,6 +892,7 @@ impl OwnedWorker {
                             | Operation::Control(_)
                             | Operation::Park
                             | Operation::SeedTimer { .. }
+                            | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
                             | Operation::Evidence { .. }
                     );
@@ -891,6 +900,7 @@ impl OwnedWorker {
                         operation,
                         Operation::Park
                             | Operation::SeedTimer { .. }
+                            | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
                             | Operation::Evidence { .. }
                     );

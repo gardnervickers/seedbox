@@ -252,6 +252,12 @@ impl<B: Backend> Machine<B> {
         unsafe { self.page.set_word(SYSCALL_NS_OFFSET, factor_permille) }
     }
 
+    /// Restart the progress jitter stream from `seed` while the vCPU is
+    /// stopped; the guest kernel picks it up at its next progress call.
+    pub fn seed_progress_jitter(&mut self, seed: u64) -> Result<()> {
+        unsafe { self.page.set_word(PROGRESS_JITTER_SEED_OFFSET, seed) }
+    }
+
     pub fn seed_timer(&mut self, seed: u64, domain: &str) -> Result<()> {
         if domain.is_empty() {
             return Err("empty application timer domain".into());

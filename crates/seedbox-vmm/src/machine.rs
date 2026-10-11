@@ -730,10 +730,6 @@ impl Machine {
         self.page_set(PAGE_PROGRESS_JITTER_SEED, seed);
     }
 
-    pub fn progress_jitter_ns(&self) -> u64 {
-        self.page_get(PAGE_PROGRESS_JITTER_NS)
-    }
-
     #[cfg(test)]
     pub fn published_entropy(&self) -> [u64; 5] {
         std::array::from_fn(|i| self.page_get(PAGE_ENTROPY_GEN + i))
@@ -796,20 +792,6 @@ impl Machine {
         // The same machine: under the PV clock it keeps its speed, or members
         // restarted together would run in lockstep again.
         self.syscall_ns = old.syscall_ns;
-        // And its progress jitter bound, drawn from the incarnation's own stream.
-        self.set_progress_jitter(
-            old.progress_jitter_ns(),
-            crate::rng::Rng::branch(
-                seed,
-                identity,
-                &format!(
-                    "progress-jitter/{}/{}",
-                    old.world.name,
-                    self.world.incarnation()
-                ),
-            )
-            .next(),
-        );
         // Flushed data survives; the disk policy chooses unflushed survivors.
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
             let (disk, lost) =

@@ -609,6 +609,21 @@ impl WorldMachine for ArmMachine {
             domain: domain.into(),
         })
     }
+    fn seed_progress_jitter(&mut self, seed: u64, domain: &str) -> Result<()> {
+        self.ready(Operation::SeedProgressJitter {
+            seed: crate::rng::Rng::new(seed, domain).next(),
+        })
+    }
+    fn seed_progress_jitter_branch(
+        &mut self,
+        seed: u64,
+        identity: Option<&str>,
+        domain: &str,
+    ) -> Result<()> {
+        self.ready(Operation::SeedProgressJitter {
+            seed: crate::rng::Rng::branch(seed, identity, domain).next(),
+        })
+    }
     fn supports_speed_reseed(&self) -> bool {
         false
     }
