@@ -564,18 +564,15 @@ impl HistoryCheck<'_> {
                     max_rate_ppb,
                 }
             }
-            Operation::Throttle {
-                target,
-                factor_permille,
-            } => {
+            Operation::Throttle { target, speed_hz } => {
                 let handle = handle()?;
-                if !seedbox_control::THROTTLE_PERMILLE.contains(&factor_permille) {
+                if !seedbox_control::THROTTLE_SPEED_HZ.contains(&speed_hz) {
                     return Err(bad());
                 }
                 Action::Throttle {
                     handle,
                     machine: self.resolve(&target)?,
-                    factor_permille,
+                    speed_hz,
                 }
             }
             Operation::Heal { handle } => {

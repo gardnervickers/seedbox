@@ -223,6 +223,7 @@ pub struct BootInputs {
     disk: Option<disk::Disk>,
     tolerance: u64,
     timer_jitter: u64,
+    cpu_speed_hz: u64,
     progress_ns: u64,
     progress_jitter: u64,
     exact_timer_ppm: u64,
@@ -298,6 +299,7 @@ fn boot_machine(
     // The charge and its bound; the jitter stream's seed follows from the
     // boot seed (first boot) or the incarnation (`succeed`).
     mach.set_progress(b.progress_ns, b.progress_jitter, 0);
+    mach.cpu_speed_hz = b.cpu_speed_hz;
     Ok(mach)
 }
 
@@ -656,6 +658,7 @@ pub fn run(
             disk,
             tolerance: cfg.stop_tolerance_ns,
             timer_jitter: cfg.timer_jitter_ns,
+            cpu_speed_hz: cfg.cpu_speed_hz,
             progress_ns: cfg.progress_ns,
             progress_jitter: cfg.progress_jitter_ns,
             exact_timer_ppm: cfg.exact_timer_ppm.unwrap_or(0),

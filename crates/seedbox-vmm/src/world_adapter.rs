@@ -123,8 +123,12 @@ impl WorldMachine for Machine {
     fn supports_throttle(&self) -> bool {
         true
     }
-    fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
-        self.throttle_permille = Some(factor_permille);
+    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<(), String> {
+        // Healed is a factor of one, not `None`: the first throttle switches
+        // this machine to planned costs for good (see `PvClock::prepare`).
+        self.throttle_permille = Some(speed_hz.map_or(1000, |speed_hz| {
+            seedbox_control::throttle_permille(self.cpu_speed_hz, speed_hz)
+        }));
         Ok(())
     }
     fn exits(&self) -> u64 {

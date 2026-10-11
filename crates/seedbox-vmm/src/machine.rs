@@ -200,6 +200,8 @@ pub struct SnapshotState {
     throttle_permille: Option<u64>,
     #[serde(default)]
     pv_debt_ns: u64,
+    #[serde(default)]
+    cpu_speed_hz: u64,
     abi: u64,
     page_timer: PageTimer,
     pit_exact: bool,
@@ -356,6 +358,8 @@ pub struct Machine {
     /// PV clock: virtual time the guest's counted syscalls already owe past
     /// the last hard stop, charged at the start of the next run.
     pub pv_debt_ns: u64,
+    /// The project's CPU speed, which a throttle is a fraction of.
+    pub cpu_speed_hz: u64,
     /// Consecutive watchdog interruptions since the last natural exit.
     stall_ticks: u64,
     pub timer_rng: Option<crate::rng::Rng>,
@@ -631,6 +635,7 @@ impl Machine {
             syscall_ns: pv::SYSCALL_NS,
             throttle_permille: None,
             pv_debt_ns: 0,
+            cpu_speed_hz: 0,
             stall_ticks: 0,
             timer_rng: None,
             shadow: Box::new(shadow),
@@ -802,6 +807,7 @@ impl Machine {
         // The same machine: under the PV clock it keeps its speed, or members
         // restarted together would run in lockstep again.
         self.syscall_ns = old.syscall_ns;
+        self.cpu_speed_hz = old.cpu_speed_hz;
         // Flushed data survives; the disk policy chooses unflushed survivors.
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
             let (disk, lost) =
@@ -880,6 +886,7 @@ impl Machine {
                 syscall_ns: self.syscall_ns,
                 throttle_permille: self.throttle_permille,
                 pv_debt_ns: self.pv_debt_ns,
+                cpu_speed_hz: self.cpu_speed_hz,
                 abi: self.abi,
                 page_timer: self.page_timer,
                 pit_exact: self.pit_exact,
@@ -980,6 +987,9 @@ impl Machine {
         self.syscall_ns = s.syscall_ns;
         self.throttle_permille = s.throttle_permille;
         self.pv_debt_ns = s.pv_debt_ns;
+        if s.cpu_speed_hz != 0 {
+            self.cpu_speed_hz = s.cpu_speed_hz;
+        }
         self.abi = s.abi;
         self.page_timer = s.page_timer;
         self.pit_exact = s.pit_exact;

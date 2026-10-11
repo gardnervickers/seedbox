@@ -229,8 +229,11 @@ impl WorldMachine for Mock {
     fn supports_throttle(&self) -> bool {
         self.throttleable
     }
-    fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
-        self.record(&format!("throttle/{factor_permille}"));
+    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<(), String> {
+        match speed_hz {
+            Some(speed_hz) => self.record(&format!("throttle/{speed_hz}")),
+            None => self.record("throttle/full"),
+        }
         if self.bad == Some("throttle") {
             return Err("throttle ACK lost".into());
         }

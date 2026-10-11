@@ -223,6 +223,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         assert_eq!(world["machines"][0]["initrd"], "/verified/retained-input");
         assert_eq!(world["timer_jitter_ns"], 50_000);
         assert_eq!(world["stop_tolerance_ns"], 40_000);
+        assert_eq!(world["cpu_speed_hz"], 2_000_000_000u64);
         assert_eq!(world["progress_ns"], 25_000);
         assert_eq!(world["progress_jitter_ns"], 1_250);
         assert_eq!(world["duration_ns"], 1_000_000_000);

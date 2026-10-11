@@ -82,6 +82,7 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<WorldConfig> {
         end_on_exit: Some(workload_machine.clone()),
         timer_jitter_ns: request.schedule.timer_jitter_ns,
         stop_tolerance_ns: request.schedule.stop_tolerance_ns,
+        cpu_speed_hz: request.cpu.speed_hz,
         progress_ns: request.cpu.progress_ns(),
         progress_jitter_ns: request.cpu.progress_jitter_ns(),
         exact_timer_ppm: None,
@@ -292,7 +293,7 @@ mod program_tests {
             action: Action::Throttle {
                 handle: "slow".into(),
                 machine: "db".into(),
-                factor_permille: 2000,
+                speed_hz: 1_000_000_000,
             },
         };
         let heal = TimedInput {

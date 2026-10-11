@@ -1086,7 +1086,7 @@ fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across
         for (at, action) in [
             (
                 10,
-                json!({"action":"throttle","handle":"t","machine":"b","factor_permille":4000}),
+                json!({"action":"throttle","handle":"t","machine":"b","speed_hz":500_000_000}),
             ),
             (20, json!({"action":"crash","machine":"b"})),
             (25, json!({"action":"reboot","machine":"b"})),
@@ -1131,7 +1131,7 @@ fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across
                     "b".into(),
                     0,
                     MachineTransition::Throttled {
-                        factor_permille: 4000
+                        speed_hz: Some(500_000_000)
                     }
                 ),
                 (20, "b".into(), 0, MachineTransition::Crashed),
@@ -1140,9 +1140,7 @@ fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across
                     30,
                     "b".into(),
                     1,
-                    MachineTransition::Throttled {
-                        factor_permille: 1000
-                    }
+                    MachineTransition::Throttled { speed_hz: None }
                 ),
             ]
         );
@@ -1155,9 +1153,9 @@ fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across
         assert_eq!(
             throttles,
             [
-                "b:throttle/4000:10",
-                "b:throttle/4000:20",
-                "b:throttle/1000:30"
+                "b:throttle/500000000:10",
+                "b:throttle/500000000:20",
+                "b:throttle/full:30"
             ]
         );
         assert!(w.faults.active_handles().is_empty());
@@ -1182,7 +1180,7 @@ fn failed_successor_throttle_terminates_workers_and_prevents_world_reuse() {
         for (at, action) in [
             (
                 5,
-                json!({"action":"throttle","handle":"t","machine":"b","factor_permille":4000}),
+                json!({"action":"throttle","handle":"t","machine":"b","speed_hz":500_000_000}),
             ),
             (10, json!({"action":"crash","machine":"b"})),
         ] {
@@ -1203,7 +1201,7 @@ fn failed_successor_throttle_terminates_workers_and_prevents_world_reuse() {
         assert_eq!(
             failed_trace
                 .iter()
-                .filter(|line| line.contains(":throttle/4000:"))
+                .filter(|line| line.contains(":throttle/500000000:"))
                 .count(),
             2
         );
@@ -1224,8 +1222,7 @@ fn throttle_of_an_unsupported_machine_is_a_recoverable_unsupported_error() {
     let mut w = world(&["a", "b"]);
     configure_control(&mut w);
     w.machines[1].throttleable = false;
-    let request =
-        json!({"version":1,"id":1,"op":"throttle","target":{"machine":"b"},"factor_permille":2000});
+    let request = json!({"version":1,"id":1,"op":"throttle","target":{"machine":"b"},"speed_hz":1_000_000_000});
     w.control
         .request(0, 0, format!("SBX_RPC1 1 1 {request}").as_bytes(), 0)
         .unwrap();

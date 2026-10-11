@@ -1310,12 +1310,12 @@ fn throttle_call(
 fn throttle_is_a_healable_admission_effect_with_one_handle_per_machine() {
     let mut c = control();
     let mut f = faults::Faults::new(vec![], names()).unwrap();
-    for factor in [999, 1_000_001] {
+    for speed_hz in [999, 1_000_000_000_001u64] {
         let (response, _) = throttle_call(
             &mut c,
             &mut f,
-            1 + u32::from(factor > 1000),
-            json!({"op":"throttle","target":{"service":"server"},"factor_permille":factor}),
+            1 + u32::from(speed_hz > 1000),
+            json!({"op":"throttle","target":{"service":"server"},"speed_hz":speed_hz}),
         );
         assert_eq!(response["error"]["code"], "invalid_request");
     }
@@ -1323,19 +1323,22 @@ fn throttle_is_a_healable_admission_effect_with_one_handle_per_machine() {
         &mut c,
         &mut f,
         3,
-        json!({"op":"throttle","target":{"service":"server"},"factor_permille":4000}),
+        json!({"op":"throttle","target":{"service":"server"},"speed_hz":500_000_000}),
     );
     assert_eq!(response["result"]["handle"], "p1");
     assert_eq!(response["effect_at_ns"], response["admitted_at_ns"]);
-    assert_eq!(lifecycle, vec![(2, faults::Lifecycle::Throttle(4000))]);
-    assert_eq!(f.throttle(2), Some(4000));
+    assert_eq!(
+        lifecycle,
+        vec![(2, faults::Lifecycle::Throttle(Some(500_000_000)))]
+    );
+    assert_eq!(f.throttle(2), Some(500_000_000));
     assert_eq!(f.active_handles(), vec!["p1"]);
     assert_eq!(f.log[0].json()["action"], "throttle");
     let (response, lifecycle) = throttle_call(
         &mut c,
         &mut f,
         4,
-        json!({"op":"throttle","target":{"machine":"server"},"factor_permille":2000}),
+        json!({"op":"throttle","target":{"machine":"server"},"speed_hz":1_000_000_000}),
     );
     assert_eq!(response["error"]["code"], "invalid_state");
     assert_eq!(
@@ -1346,14 +1349,14 @@ fn throttle_is_a_healable_admission_effect_with_one_handle_per_machine() {
     let (response, lifecycle) =
         throttle_call(&mut c, &mut f, 5, json!({"op":"heal","handle":"p1"}));
     assert_eq!(response["ok"], true);
-    assert_eq!(lifecycle, vec![(2, faults::Lifecycle::Throttle(1000))]);
+    assert_eq!(lifecycle, vec![(2, faults::Lifecycle::Throttle(None))]);
     assert_eq!(f.throttle(2), None);
     assert!(f.active_handles().is_empty());
     let (response, _) = throttle_call(
         &mut c,
         &mut f,
         6,
-        json!({"op":"throttle","target":{"service":"scenario"},"factor_permille":2000}),
+        json!({"op":"throttle","target":{"service":"scenario"},"speed_hz":1_000_000_000}),
     );
     assert_eq!(
         response["error"]["message"],

@@ -32,6 +32,9 @@ pub struct WorldConfig {
     pub timer_jitter_ns: u64,
     #[serde(default)]
     pub stop_tolerance_ns: u64,
+    /// The project's CPU speed in Hz; a throttle is a lower speed than this.
+    #[serde(default = "default_cpu_speed_hz")]
+    pub cpu_speed_hz: u64,
     /// Nominal virtual time the guest kernel charges each PV progress call:
     /// the instructions between calls at the configured CPU speed. Zero
     /// charges a call like one syscall.
@@ -76,6 +79,11 @@ pub struct WorldConfig {
     /// A seeded unclean stop/restart schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kill_restart: Option<KillRestart>,
+}
+
+/// The spec's default CPU speed, for world documents written before it existed.
+fn default_cpu_speed_hz() -> u64 {
+    2_000_000_000
 }
 
 fn default_mem_mb() -> u64 {
@@ -381,6 +389,7 @@ mod tests {
             end_on_exit: None,
             timer_jitter_ns: 0,
             stop_tolerance_ns: 0,
+            cpu_speed_hz: 2_000_000_000,
             progress_ns: 0,
             progress_jitter_ns: 0,
             exact_timer_ppm: None,
@@ -400,7 +409,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&cfg).unwrap(),
             serde_json::json!({"kernel":"k","mem_mb":512,"duration_ns":1,"timer_jitter_ns":0,
-                "stop_tolerance_ns":0,"progress_ns":0,"progress_jitter_ns":0,"machines":[],"control":null})
+                "stop_tolerance_ns":0,"cpu_speed_hz":2000000000,"progress_ns":0,"progress_jitter_ns":0,"machines":[],"control":null})
         );
     }
 

@@ -175,11 +175,11 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_rate_ppb: Option<u64>,
     },
-    /// Charge the machine's simulated CPU work `factor_permille / 1000` times
-    /// its seeded cost until healed.
+    /// Run the machine's CPU at `speed_hz` instead of the project's CPU
+    /// speed until healed: every charge for CPU work scales by the ratio.
     Throttle {
         target: Target,
-        factor_permille: u64,
+        speed_hz: u64,
     },
     Heal {
         handle: String,
@@ -382,11 +382,11 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_rate_ppb: Option<u64>,
     },
-    /// Scale the machine's seeded CPU cost until the handle is healed.
+    /// Run the machine's CPU at `speed_hz` until the handle is healed.
     Throttle {
         handle: String,
         machine: String,
-        factor_permille: u64,
+        speed_hz: u64,
     },
     /// Freeze the machine's CPU and devices; the world goes on.
     Pause {
@@ -488,8 +488,28 @@ pub fn validate_clock_drift(
     }
 }
 
-/// Throttle factors, in thousandths: from unchanged to a thousand times slower.
+/// Throttled CPU speeds, in Hz: from a thousandth of the slowest project CPU
+/// (1 MHz) to the fastest (1 THz). How far a given machine can slow follows
+/// from its own speed; see `throttle_permille`.
+pub const THROTTLE_SPEED_HZ: std::ops::RangeInclusive<u64> = 1_000..=1_000_000_000_000;
+/// Throttle factors a backend charges, in thousandths: from unchanged to a
+/// thousand times slower.
 pub const THROTTLE_PERMILLE: std::ops::RangeInclusive<u64> = 1_000..=1_000_000;
+
+/// The factor, in thousandths, a backend charges CPU work to run a
+/// `speed_hz` CPU at `throttled_hz`: rounded up, so a throttle never speeds a
+/// machine up, and clamped to `THROTTLE_PERMILLE`, so a speed at or above the
+/// machine's runs it at full speed and one below a thousandth of it at a
+/// thousandth.
+pub fn throttle_permille(speed_hz: u64, throttled_hz: u64) -> u64 {
+    if throttled_hz == 0 {
+        return *THROTTLE_PERMILLE.end();
+    }
+    let permille = (u128::from(speed_hz) * 1000).div_ceil(u128::from(throttled_hz));
+    u64::try_from(permille)
+        .unwrap_or(u64::MAX)
+        .clamp(*THROTTLE_PERMILLE.start(), *THROTTLE_PERMILLE.end())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
@@ -502,6 +522,18 @@ pub struct Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn throttle_factor_rounds_up_and_clamps_to_the_backend_range() {
+        assert_eq!(throttle_permille(2_000_000_000, 500_000_000), 4000);
+        assert_eq!(throttle_permille(2_000_000_000, 2_000_000_000), 1000);
+        assert_eq!(throttle_permille(2_000_000_000, 333_000_000), 6007);
+        assert_eq!(throttle_permille(2_000_000_000, 3_000_000_000), 1000);
+        assert_eq!(throttle_permille(2_000_000_000, 1_000_000), 1_000_000);
+        assert_eq!(throttle_permille(2_000_000_000, 1_000), 1_000_000);
+        assert_eq!(throttle_permille(2_000_000_000, 0), 1_000_000);
+        assert_eq!(throttle_permille(0, 500_000_000), 1000);
+    }
     #[test]
     fn strict_wire_rejects_unknown_fields_bad_targets_and_duplicate_identity() {
         for bad in [

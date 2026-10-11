@@ -127,5 +127,8 @@ pub enum MachineTransition {
     Resumed,
     Crashed,
     Rebooted,
-    Throttled { factor_permille: u64 },
+    /// The CPU runs at this speed in Hz, or at the project's speed again.
+    Throttled {
+        speed_hz: Option<u64>,
+    },
 }

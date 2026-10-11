@@ -2401,7 +2401,7 @@ pub(crate) mod tests {
                 incarnation: 0,
                 condition: MachineCondition::Ready,
                 exit_code: None,
-                throttle_permille: None,
+                throttle_speed_hz: None,
                 oracle: *n == "oracle",
                 last_transition: None,
                 last_transition_at_ns: None,

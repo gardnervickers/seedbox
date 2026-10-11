@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import json
+import re
 import socket
 from typing import Optional
 
@@ -80,6 +81,30 @@ class ClockDrift:
     handle: str
     rate_ppb: int
     effect: Effect
+
+
+_FREQUENCY_UNITS = {"Hz": 1, "kHz": 10**3, "MHz": 10**6, "GHz": 10**9, "THz": 10**12}
+
+
+def _speed_hz(speed):
+    """A CPU speed as whole Hz, from a frequency string or an int."""
+    if isinstance(speed, bool):
+        raise ValueError("throttle speed must be a frequency such as 500MHz or whole Hz")
+    if isinstance(speed, int):
+        hz = speed
+    elif isinstance(speed, str):
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)([kMGT]?Hz)", speed.strip())
+        if match is None:
+            raise ValueError("throttle speed must be a frequency such as 500MHz or 1.5GHz")
+        hz = Decimal(match.group(1)) * _FREQUENCY_UNITS[match.group(2)]
+        if hz != hz.to_integral_value():
+            raise ValueError("throttle speed must be a whole number of Hz")
+        hz = int(hz)
+    else:
+        raise ValueError("throttle speed must be a frequency such as 500MHz or whole Hz")
+    if not 1000 <= hz <= 10**12:
+        raise ValueError("throttle speed must be from 1kHz to 1THz")
+    return hz
 
 
 def _target(value):
@@ -351,21 +376,16 @@ class World:
             raise ProtocolError("clock_drift response lacks an opaque handle or rate")
         return ClockDrift(result["handle"], result["rate_ppb"], effect)
 
-    def throttle(self, target, factor):
-        """Make the target's machine `factor` times slower until healed (x86 pv timebase).
+    def throttle(self, target, speed):
+        """Run the target's machine at `speed` until healed.
 
-        Simulated CPU work (each syscall's charge) costs `factor` times the
-        machine's seeded speed; factors run from 1 to 1000 in steps of 0.001.
+        `speed` is a frequency such as "500MHz" or "1.5GHz", or a whole number
+        of Hz, below the project's CPU speed (`cpu.speed` in seedbox.yaml): CPU
+        work then costs more by the ratio. A speed at or above the project's
+        leaves the machine at full speed; one below a thousandth of it runs at
+        a thousandth.
         """
-        if isinstance(factor, bool):
-            raise ValueError("throttle factor must be a number from 1 to 1000")
-        try:
-            permille = Decimal(str(factor)) * 1000
-        except InvalidOperation as error:
-            raise ValueError("invalid throttle factor") from error
-        if not permille.is_finite() or permille != permille.to_integral_value() or not 1000 <= permille <= 1_000_000:
-            raise ValueError("throttle factor must be from 1 to 1000 in steps of 0.001")
-        result, effect = self._call("throttle", target=_target(target), factor_permille=int(permille))
+        result, effect = self._call("throttle", target=_target(target), speed_hz=_speed_hz(speed))
         if not isinstance(result.get("handle"), str) or not result["handle"]:
             self.close()
             raise ProtocolError("throttle response lacks an opaque handle")

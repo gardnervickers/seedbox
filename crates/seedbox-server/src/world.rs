@@ -94,7 +94,7 @@ impl Tracker {
                     incarnation: 0,
                     condition: MachineCondition::Starting,
                     exit_code: None,
-                    throttle_permille: None,
+                    throttle_speed_hz: None,
                     oracle: name == self.oracle,
                     last_transition: None,
                     last_transition_at_ns: None,
@@ -198,9 +198,8 @@ impl Tracker {
                             exit_code: None,
                         };
                     }
-                    MachineTransition::Throttled { factor_permille } => {
-                        m.throttle_permille =
-                            (*factor_permille != 1000).then_some(*factor_permille);
+                    MachineTransition::Throttled { speed_hz } => {
+                        m.throttle_speed_hz = *speed_hz;
                     }
                 }
                 if matches!(
@@ -761,7 +760,7 @@ mod tests {
                 FaultAction::Throttle {
                     handle: "slow".into(),
                     machine: "a".into(),
-                    factor_permille: 2000,
+                    speed_hz: 1_000_000_000,
                 },
             ),
         ] {

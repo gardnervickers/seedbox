@@ -153,6 +153,7 @@ fn decode_config(bytes: &[u8]) -> Result<seedbox_engine_core::world_config::Worl
                 | "end_on_exit"
                 | "timer_jitter_ns"
                 | "stop_tolerance_ns"
+                | "cpu_speed_hz"
                 | "progress_ns"
                 | "progress_jitter_ns"
                 | "network"
@@ -329,6 +330,7 @@ pub fn run(options: &Options) -> Result<Value> {
                 jitter_ns: cfg.timer_jitter_ns,
             }),
             progress: Some(super::Progress {
+                speed_hz: cfg.cpu_speed_hz,
                 ns: cfg.progress_ns,
                 jitter_ns: cfg.progress_jitter_ns,
                 seed: crate::rng::Rng::new(options.seed, &format!("progress-jitter/{}", m.name))

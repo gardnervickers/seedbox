@@ -1762,11 +1762,27 @@ fn condition(focus: &Focus, m: &MachineState) -> (String, Color) {
             if m.exit_code == Some(0) { DIM } else { RED },
         ),
     };
-    if let Some(permille) = m.throttle_permille {
-        text.0
-            .push_str(&format!(" ×{:.1}", permille as f64 / 1000.0));
+    if let Some(hz) = m.throttle_speed_hz {
+        text.0.push_str(&format!(" {}", frequency(hz)));
     }
     text
+}
+
+/// A CPU speed in its largest unit, with up to two decimals: `2GHz`,
+/// `1.5GHz`, `333.33MHz`, `800kHz`.
+pub fn frequency(hz: u64) -> String {
+    for (unit, scale) in [
+        ("GHz", 1_000_000_000u64),
+        ("MHz", 1_000_000),
+        ("kHz", 1_000),
+    ] {
+        if hz >= scale {
+            let hundredths = (hz * 100).div_ceil(scale);
+            let text = format!("{}.{:02}", hundredths / 100, hundredths % 100);
+            return format!("{}{unit}", text.trim_end_matches('0').trim_end_matches('.'));
+        }
+    }
+    format!("{hz}Hz")
 }
 
 fn tabbed_title(active: Panel) -> Line<'static> {
@@ -3176,6 +3192,23 @@ mod tests {
         }));
         assert_eq!(app.screen, Screen::Timeline);
         assert_eq!(app.fault_menu, None);
+    }
+
+    #[test]
+    fn a_throttled_machine_shows_its_speed() {
+        assert_eq!(frequency(2_000_000_000), "2GHz");
+        assert_eq!(frequency(1_500_000_000), "1.5GHz");
+        assert_eq!(frequency(333_000_000), "333MHz");
+        assert_eq!(frequency(333_333_333), "333.34MHz");
+        assert_eq!(frequency(800_000), "800kHz");
+        assert_eq!(frequency(999), "999Hz");
+        let mut app = app(&["app", "oracle"]);
+        assert!(!render(&app).contains("500MHz"));
+        let mut w = world(&["app", "oracle"]);
+        w.machines[0].throttle_speed_hz = Some(500_000_000);
+        app.apply(Update::World(w));
+        let text = render(&app);
+        assert!(text.contains("● ready 500MHz"), "{text}");
     }
 
     #[test]
