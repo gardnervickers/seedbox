@@ -187,7 +187,7 @@ int main(void) {
     def test_poll_yield_preserves_caller_mask_and_retries_after_irq(self):
         source = (HERE / "seedbox.c").read_text()
         read = source[source.index("u64 notrace seedbox_read(void)"):
-                      source.index("/* Charge syscall work")]
+                      source.index("/* splitmix64")]
         fixture = r"""
 #include <assert.h>
 #include <stdint.h>
@@ -268,9 +268,13 @@ typedef uint64_t u64;
 #define notrace
 #define unlikely(x) (x)
 #define panic(...) abort()
+struct pt_regs { unsigned long regs[31]; };
 """ + page + r"""
 _Static_assert(offsetof(struct seedbox_page, syscall_ns) == 48, "PV syscall cost ABI");
+_Static_assert(offsetof(struct seedbox_page, progress_jitter_ns) == 56, "progress jitter ABI");
+_Static_assert(offsetof(struct seedbox_page, progress_jitter_seed) == 64, "progress jitter ABI");
 static struct seedbox_page storage, *page = &storage;
+static struct pt_regs regs;
 static u64 early_last, next_cost, window;
 static unsigned long irq_flags;
 static unsigned int writes;
@@ -282,7 +286,8 @@ static void *event = registers;
 #define local_irq_restore(saved) do { irq_flags = (saved); } while (0)
 #define irqs_disabled_flags(saved) ((saved) & 128)
 #define isb() ((void)0)
-#define READ_ONCE(x) (assert(&(x) == &page->syscall_ns || (irq_flags & 128)), (x))
+#define READ_ONCE(x) (assert(&(x) == &page->syscall_ns || &(x) == &page->progress_jitter_ns \
+                             || &(x) == &page->progress_jitter_seed || (irq_flags & 128)), (x))
 #define WRITE_ONCE(x, v) do { assert(irq_flags & 128); (x) = (v); } while (0)
 static void writeq(unsigned long value, void *address) {
     assert(value == 1 && address == registers + 24);
@@ -305,36 +310,62 @@ int main(void) {
     for (u64 cost = 1000; cost <= 4000; cost *= 4) {
         reset(cost, UINT64_MAX, 0, 0);
         assert(seedbox_read() == 1);
-        seedbox_syscall_progress();
+        seedbox_syscall_progress(&regs, 0);
         assert(page->last == cost + 1 && writes == 0);
         assert(irq_flags == 0);
     }
     reset(1000000, UINT64_MAX, 0, 0);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 1000000 && writes == 0);
 
     /* Throttling halfway through affects the next syscall, not owed work. */
     reset(1000, 500, 500, 4000);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 1000 && writes == 1 && page->syscall_ns == 4000);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 5000 && writes == 9);
 
     /* Healing halfway through likewise preserves the original charge. */
     reset(4000, 2000, 2000, 1000);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 4000 && writes == 1 && page->syscall_ns == 1000);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 5000 && writes == 2);
 
     /* Multiple bounded rendezvous neither lose nor duplicate work. */
     reset(1000, 250, 250, 0);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 1000 && writes == 3 && irq_flags == 0);
+
+    /* A marked progress call adds a seeded draw up to the bound. Other
+     * syscalls, a plain getpid and a zero bound add nothing, and a changed
+     * seed restarts the stream. */
+    reset(1000, UINT64_MAX, 0, 0);
+    page->progress_jitter_ns = 5000;
+    page->progress_jitter_seed = 7;
+    regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    u64 first = page->last - 1000;
+    assert(first <= 5000 && writes == 0);
+    seedbox_syscall_progress(&regs, 1);
+    regs.regs[0] = 0;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == 3000 + first);
+    regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+    page->progress_jitter_seed = 8;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    u64 other = page->last - 4000 - first;
+    assert(other <= 5000);
+    page->progress_jitter_seed = 7;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == 5000 + first + other + first);
+    page->progress_jitter_ns = 0;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == 6000 + first + other + first && irq_flags == 0);
 
     /* Preserve the pre-initialization syscall behavior. */
     page = NULL;
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
     assert(early_last == 1000 && irq_flags == 0);
 }
 """
