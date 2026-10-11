@@ -158,14 +158,7 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 &directory,
                 state,
                 "first",
-                &[
-                    "run",
-                    workload.to_str().unwrap(),
-                    "--seed",
-                    "7578384725853898576",
-                    "--wall-time",
-                    "30m",
-                ],
+                &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
             )?;
             let first = simulation_id(&first_output)?;
             let described = invoke(
