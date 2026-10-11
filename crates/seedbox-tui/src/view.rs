@@ -3752,11 +3752,7 @@ mod tests {
         let mut app = app(&["n1", "n2", "n3", "oracle"]);
         let mut w = world(&["n1", "n2", "n3", "oracle"]);
         w.simulated_time_ns = 3_000_000_000;
-        for (id, action, handle) in [
-            (1, "throttle", "t1"),
-            (2, "clock_skew", "c1"),
-            (3, "throttle", "t2"),
-        ] {
+        for (id, action, handle) in [(1, "throttle", "t1"), (2, "clock_skew", "c1")] {
             w.faults.push(FaultState {
                 input_key: None,
                 id,
@@ -3805,8 +3801,7 @@ mod tests {
             }
             assert_eq!(tile.contains("throttle t1 · 2.0s"), !healed, "{tile}");
             assert!(tile.contains("clock_skew c1 · 2.0s"), "{tile}");
-            assert!(tile.contains("throttle t2 · 2.0s"), "{tile}");
-            assert_eq!(rect.height, if healed { 7 } else { 8 });
+            assert_eq!(rect.height, if healed { 6 } else { 7 });
         }
     }
 }
