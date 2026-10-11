@@ -117,6 +117,16 @@ pub struct TimerPolicy {
     pub jitter_ns: u64,
 }
 
+/// The bound on the seeded extra charge the guest kernel adds to each PV
+/// progress call, and the seed of the stream it draws from. Both go to the
+/// time page at boot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgressJitter {
+    pub bound_ns: u64,
+    pub seed: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     Frame(Vec<u8>),

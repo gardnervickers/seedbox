@@ -10,6 +10,7 @@
 #include <linux/of_irq.h>
 #include <linux/sched_clock.h>
 #include <linux/sizes.h>
+#include <asm/ptrace.h>
 #include <asm/seedbox.h>
 #include <asm/sysreg.h>
 
@@ -18,7 +19,13 @@
 struct seedbox_page {
 	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
 	u64 syscall_ns;
+	/* Bound on the seeded extra charge per progress call (0 is off), and
+	 * the VMM-seeded stream it is drawn from. */
+	u64 progress_jitter_ns, progress_jitter_seed;
 };
+/* A progress call: getpid with this first argument (guest/progress/budget.h). */
+#define SEEDBOX_PROGRESS_NR 172
+#define SEEDBOX_PROGRESS_MARK 0x5eedb0c5UL
 static struct seedbox_page *page;
 static void __iomem *event;
 static u64 early_last;
@@ -69,15 +76,48 @@ out:
 	return value;
 }
 
+/* splitmix64 on the page-seeded state. */
+static u64 jitter_next(u64 *state)
+{
+	u64 z = (*state += 0x9e3779b97f4a7c15ULL);
+
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+	return z ^ (z >> 31);
+}
+
+/* Progress jitter: a progress call is charged a seeded extra time, uniform up
+ * to the bound, so equal work takes a little longer on some seeds than on
+ * others. The VMM seeds the stream per machine at boot; the state lives in
+ * guest RAM, so a snapshot continues its own stream. One guest CPU, syscall
+ * context only. */
+static u64 progress_jitter(void)
+{
+	static u64 state, seeded;
+	u64 bound = READ_ONCE(page->progress_jitter_ns), seed;
+
+	if (!bound)
+		return 0;
+	seed = READ_ONCE(page->progress_jitter_seed);
+	if (seed != seeded) {
+		state = seed;
+		seeded = seed;
+	}
+	return jitter_next(&state) % (bound + 1);
+}
+
 /* Charge syscall work through the existing bounded clock rendezvous. Keeping
  * each read bounded also preserves pending IRQ delivery at an exact deadline.
  * Load the charge once: throttle/heal changes at a rendezvous affect the next
  * syscall, while the remaining charge survives in guest registers or stack.
+ * A progress call adds its seeded jitter to the charge.
  */
-void seedbox_syscall_progress(void)
+void seedbox_syscall_progress(struct pt_regs *regs, int scno)
 {
 	u64 remaining = page ? READ_ONCE(page->syscall_ns) : 1000;
 
+	if (page && scno == SEEDBOX_PROGRESS_NR && regs->regs[0] == SEEDBOX_PROGRESS_MARK)
+		remaining += progress_jitter();
 	while (remaining) {
 		(void)seedbox_read();
 		--remaining;

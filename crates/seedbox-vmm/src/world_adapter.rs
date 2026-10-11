@@ -107,6 +107,19 @@ impl WorldMachine for Machine {
         self.syscall_ns = crate::machine::pv::syscall_ns(&mut Rng::new(seed, domain));
         Ok(())
     }
+    fn seed_progress_jitter(&mut self, seed: u64, domain: &str) -> Result<(), String> {
+        Machine::seed_progress_jitter(self, Rng::new(seed, domain).next());
+        Ok(())
+    }
+    fn seed_progress_jitter_branch(
+        &mut self,
+        seed: u64,
+        identity: Option<&str>,
+        domain: &str,
+    ) -> Result<(), String> {
+        Machine::seed_progress_jitter(self, Rng::branch(seed, identity, domain).next());
+        Ok(())
+    }
     fn supports_throttle(&self) -> bool {
         true
     }

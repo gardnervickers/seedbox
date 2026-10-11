@@ -11,9 +11,10 @@
 //! clock would pass the soft stop (the `bound` we publish) or at the syscall
 //! that reaches it (`syscall_target`). Every exit is a deterministic point.
 //! Application code makes progress through the guest's automatic
-//! instrumentation (guest/progress), which charges a syscall every 10,000
-//! translated blocks per thread, and the kernel's syscall and `cpu_relax`
-//! hooks.
+//! instrumentation (guest/progress), which charges a syscall per configured
+//! number of executed instructions per thread (plus seeded progress jitter
+//! the kernel draws from a stream this VMM seeds on the time page), and the
+//! kernel's syscall and `cpu_relax` hooks.
 //!
 //! A loop with no exit at all would never end and never let time move. A
 //! watchdog (host CPU time, a performance setting) interrupts a run with no

@@ -82,6 +82,7 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<WorldConfig> {
         end_on_exit: Some(workload_machine.clone()),
         timer_jitter_ns: request.schedule.timer_jitter_ns,
         stop_tolerance_ns: request.schedule.stop_tolerance_ns,
+        progress_jitter_ns: request.schedule.progress_jitter_ns,
         exact_timer_ppm: None,
         network: Some(network),
         machines,

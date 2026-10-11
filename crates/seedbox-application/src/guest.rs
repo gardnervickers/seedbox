@@ -127,16 +127,6 @@ pub fn launch_recipe_with_progress(
             "wall-clock epoch {wall_clock_epoch} is below {MIN_WALL_CLOCK_EPOCH}; the guest kernel cannot set a time earlier than its uptime"
         )));
     }
-    let jitter = u32::try_from(progress.progress_jitter_ns)
-        .ok()
-        .filter(|ns| u64::from(*ns) <= seedbox_spec::project::MAX_PROGRESS_JITTER_NS)
-        .ok_or_else(|| {
-            Error::Setup(format!(
-                "progress jitter {} ns exceeds {} ns",
-                progress.progress_jitter_ns,
-                seedbox_spec::project::MAX_PROGRESS_JITTER_NS
-            ))
-        })?;
     let mut bytes = LAUNCH_MAGIC.to_vec();
     for value in [ip, hosts, hostname, &launch.user, &launch.working_dir] {
         field(&mut bytes, value.as_bytes())?;
@@ -146,7 +136,6 @@ pub fn launch_recipe_with_progress(
     bytes.extend_from_slice(&wall_clock_epoch.to_le_bytes());
     bytes.extend_from_slice(&progress.instructions_per_progress_call.get().to_le_bytes());
     bytes.extend_from_slice(&progress.progress_points_per_block.get().to_le_bytes());
-    bytes.extend_from_slice(&jitter.to_le_bytes());
     list(&mut bytes, &launch.argv)?;
     list(
         &mut bytes,

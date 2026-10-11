@@ -16,6 +16,9 @@ use std::{collections::BTreeSet, rc::Rc, time::Instant};
 const EXCLUSIVE_EPOCH_OFFSET: usize = 40;
 const SYSCALL_NS_OFFSET: usize = 48;
 const SYSCALL_NS: u64 = 1_000;
+/// Progress jitter bound and stream seed (kernel-arm64/seedbox.c).
+const PROGRESS_JITTER_NS_OFFSET: usize = 56;
+const PROGRESS_JITTER_SEED_OFFSET: usize = 64;
 
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -322,6 +325,20 @@ impl<B: Backend> Machine<B> {
 
     pub fn console(&self) -> &[u8] {
         &self.uart.console
+    }
+
+    /// Publish the progress jitter bound and the seed of the stream the
+    /// guest kernel draws it from, before the first instruction. The page is
+    /// part of every snapshot, so a branch keeps its own stream.
+    pub fn with_progress_jitter(self, jitter: &application::ProgressJitter) -> Result<Self> {
+        if self.raw_exits != 0 {
+            return Err("progress jitter must be set before the machine runs".into());
+        }
+        unsafe {
+            self.page.set_word(PROGRESS_JITTER_NS_OFFSET, jitter.bound_ns)?;
+            self.page.set_word(PROGRESS_JITTER_SEED_OFFSET, jitter.seed)?;
+        }
+        Ok(self)
     }
 
     pub fn with_timer_policy(mut self, policy: application::TimerPolicy) -> Result<Self> {

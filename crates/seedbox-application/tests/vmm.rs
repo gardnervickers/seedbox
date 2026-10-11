@@ -70,6 +70,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
         schedule: &Schedule {
             timer_jitter_ns: 50_000,
             stop_tolerance_ns: 40_000,
+            progress_jitter_ns: 2_500,
         },
         control: None,
         check: &Check {
@@ -219,6 +220,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         assert_eq!(world["machines"][0]["initrd"], "/verified/retained-input");
         assert_eq!(world["timer_jitter_ns"], 50_000);
         assert_eq!(world["stop_tolerance_ns"], 40_000);
+        assert_eq!(world["progress_jitter_ns"], 2_500);
         assert_eq!(world["duration_ns"], 1_000_000_000);
         assert!(world["machines"]
             .as_array()

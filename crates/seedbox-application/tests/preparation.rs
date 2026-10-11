@@ -296,11 +296,6 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
                 u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()),
                 points
             );
-            cursor += 4;
-            assert_eq!(
-                u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()),
-                0
-            );
         }
     }
 }

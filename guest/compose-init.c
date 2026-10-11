@@ -39,7 +39,7 @@
 #include <unistd.h>
 
 static int recipe_fd, management = -1;
-static uint32_t instructions_per_progress_call = 50000, progress_points_per_block = 1, progress_jitter_ns;
+static uint32_t instructions_per_progress_call = 50000, progress_points_per_block = 1;
 #define RPC_FRAME_MAX 16384
 static int control_listener = -1, control_client = -1;
 static uint32_t relay_id, waiting_relay, session_id;
@@ -536,7 +536,7 @@ static pid_t start(void) {
         size_t count = 0;
         while (arguments[count]) ++count;
         /* Translator arguments, the application's own, and execv's NULL. */
-        enum { PREFIX_MAX = 14 };
+        enum { PREFIX_MAX = 12 };
         char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
         if (!instrumented) die("instrumentation arguments");
         size_t prefix = 0;
@@ -550,16 +550,13 @@ static pid_t start(void) {
 #endif
         instrumented[prefix++] = "-c";
         instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
-        char progress_budget[11], progress_points[11], progress_jitter[11];
+        char progress_budget[11], progress_points[11];
         snprintf(progress_budget, sizeof(progress_budget), "%u", instructions_per_progress_call);
         snprintf(progress_points, sizeof(progress_points), "%u", progress_points_per_block);
-        snprintf(progress_jitter, sizeof(progress_jitter), "%u", progress_jitter_ns);
         instrumented[prefix++] = "--instructions-per-progress-call";
         instrumented[prefix++] = progress_budget;
         instrumented[prefix++] = "--progress-points-per-block";
         instrumented[prefix++] = progress_points;
-        instrumented[prefix++] = "--progress-jitter-ns";
-        instrumented[prefix++] = progress_jitter;
         instrumented[prefix++] = "--";
         if (prefix > PREFIX_MAX) die("instrumentation prefix");
         for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
@@ -800,8 +797,6 @@ int main(void) {
     if (!instructions_per_progress_call) { errno = EINVAL; die("zero progress instruction budget"); }
     progress_points_per_block = count();
     if (!progress_points_per_block) { errno = EINVAL; die("zero progress points per block"); }
-    progress_jitter_ns = count();
-    if (progress_jitter_ns > 1000000) { errno = EINVAL; die("progress jitter"); }
     arguments = list(); environment = list(); char **volumes = list(); char **disk_volumes = list();
     if (!arguments[0] || !*arguments[0]) { errno = EINVAL; die("empty executable"); }
     configure_network(ip);

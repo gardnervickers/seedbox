@@ -98,8 +98,10 @@ pub fn resolve(
         simulator: Simulator {
             instructions_per_progress_call: configuration.simulator.instructions_per_progress_call,
             progress_points_per_block: configuration.simulator.progress_points_per_block,
-            progress_jitter_ns: configuration.simulator.progress_jitter_ns,
-            schedule: configuration.schedule.clone(),
+            schedule: seedbox_spec::Schedule {
+                progress_jitter_ns: configuration.simulator.progress_jitter_ns,
+                ..configuration.schedule.clone()
+            },
             disk: configuration.disk.clone(),
             oracle_control: configuration.control.is_some(),
         },
@@ -514,7 +516,7 @@ fn launch_configs(bytes: &[u8]) -> Result<&[u8]> {
             .ok_or_else(fail)?;
     }
     cursor = cursor
-        .checked_add(20)
+        .checked_add(16)
         .filter(|n| *n <= bytes.len())
         .ok_or_else(fail)?;
     for _ in 0..4 {
@@ -648,19 +650,14 @@ mod tests {
             .any(|v| v == b"preserve me"));
         assert!(bytes.windows(b"--changed".len()).any(|v| v == b"--changed"));
         store.verify(&original).unwrap();
-        // Jitter is a launch input too; turning it off restores the exact bytes.
-        definition.simulator.progress_jitter_ns = 5_000;
-        let jitter = prepared(&definition, &store).unwrap();
-        assert_ne!(jitter.guests, changed.guests);
-        let bytes = store.read(&jitter.guests["oracle"]).unwrap();
-        assert!(bytes
-            .windows(b"preserve me".len())
-            .any(|v| v == b"preserve me"));
-        definition.simulator.progress_jitter_ns = 0;
+        // Progress jitter is the VMM's input, not the guest's: the recipe
+        // and the prepared guests do not change with it.
+        definition.simulator.schedule.progress_jitter_ns = 5_000;
         assert_eq!(
             prepared(&definition, &store).unwrap().guests,
             changed.guests
         );
+        definition.simulator.schedule.progress_jitter_ns = 0;
     }
     #[test]
     fn checkpoint_binary_closure_survives_source_deletion_and_preserves_guest_paths() {

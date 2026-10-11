@@ -52,6 +52,11 @@ const PAGE_CAPABILITIES: usize = 15;
 const PAGE_SYSCALL_NS: usize = 16;
 const PAGE_SYSCALLS0: usize = 17;
 const PAGE_PLAN_TIME: usize = 18;
+/// Progress jitter: the bound and the seed of the stream the kernel draws
+/// from at each progress call. Written at boot, carried across a reboot and
+/// reseeded with the other streams at a fork.
+const PAGE_PROGRESS_JITTER_NS: usize = 19;
+const PAGE_PROGRESS_JITTER_SEED: usize = 20;
 pub const ABI_PAGE_TIMER: u64 = 4;
 const CAP_PAGE_TIMER: u64 = 1;
 const TIMER_DISARMED: u64 = u64::MAX;
@@ -122,6 +127,8 @@ const _: () = {
     assert!(PAGE_SYSCALL_NS == 16);
     assert!(PAGE_SYSCALLS0 == 17);
     assert!(PAGE_PLAN_TIME == 18);
+    assert!(PAGE_PROGRESS_JITTER_NS == 19);
+    assert!(PAGE_PROGRESS_JITTER_SEED == 20);
     assert!(ABI_PAGE_TIMER == 4);
     assert!(CAP_PAGE_TIMER == 1);
 };
@@ -709,6 +716,24 @@ impl Machine {
         Ok(())
     }
 
+    /// Publish the progress jitter bound and the first seed of the stream
+    /// the guest kernel draws it from. Both are page words outside the
+    /// checkpointed prefix, so a snapshot carries them like the plan.
+    pub fn set_progress_jitter(&mut self, bound_ns: u64, seed: u64) {
+        self.page_set(PAGE_PROGRESS_JITTER_NS, bound_ns);
+        self.page_set(PAGE_PROGRESS_JITTER_SEED, seed);
+    }
+
+    /// Give the progress jitter stream a new seed; the kernel restarts the
+    /// stream from it at its next progress call.
+    pub fn seed_progress_jitter(&mut self, seed: u64) {
+        self.page_set(PAGE_PROGRESS_JITTER_SEED, seed);
+    }
+
+    pub fn progress_jitter_ns(&self) -> u64 {
+        self.page_get(PAGE_PROGRESS_JITTER_NS)
+    }
+
     #[cfg(test)]
     pub fn published_entropy(&self) -> [u64; 5] {
         std::array::from_fn(|i| self.page_get(PAGE_ENTROPY_GEN + i))
@@ -771,6 +796,16 @@ impl Machine {
         // The same machine: under the PV clock it keeps its speed, or members
         // restarted together would run in lockstep again.
         self.syscall_ns = old.syscall_ns;
+        // And its progress jitter bound, drawn from the incarnation's own stream.
+        self.set_progress_jitter(
+            old.progress_jitter_ns(),
+            crate::rng::Rng::branch(
+                seed,
+                identity,
+                &format!("progress-jitter/{}/{}", old.world.name, self.world.incarnation()),
+            )
+            .next(),
+        );
         // Flushed data survives; the disk policy chooses unflushed survivors.
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
             let (disk, lost) =
@@ -2293,7 +2328,12 @@ mod fork_tests {
         assert_eq!(fields["syscall_ns"], (PAGE_SYSCALL_NS, 1));
         assert_eq!(fields["syscalls0"], (PAGE_SYSCALLS0, 1));
         assert_eq!(fields["plan_time"], (PAGE_PLAN_TIME, 1));
-        assert_eq!(index, 19);
+        assert_eq!(fields["progress_jitter_ns"], (PAGE_PROGRESS_JITTER_NS, 1));
+        assert_eq!(
+            fields["progress_jitter_seed"],
+            (PAGE_PROGRESS_JITTER_SEED, 1)
+        );
+        assert_eq!(index, 21);
         assert_eq!(PAGE_FIELDS, PAGE_PV_CLOCK);
         assert_eq!(PAGE_ENTROPY_FIELDS * 8, ENTROPY_WORDS * 4);
         let abi: u64 = header

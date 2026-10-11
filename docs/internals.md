@@ -46,10 +46,13 @@ A block is normally charged once, at its entry. The project can ask for several
 charge points per block, so a progress call can land inside a long block.
 
 Equal work interleaves the same way on every seed. Optional progress jitter
-adds a seeded amount of extra time after each progress call. Each thread seeds
-its own stream from the guest's deterministic `getrandom`, so a run still
-replays exactly. A time fork reseeds guest entropy but not streams that threads
-already hold.
+adds a seeded amount of extra time to each progress call. The client marks a
+progress call with a fixed first argument to `getpid`; the kernel's syscall
+charge recognizes it and draws the extra time from a stream the VMM seeds per
+machine on the time page, so a run replays exactly and a time fork reseeds the
+stream with the others. On x86 the extra time is charged as whole syscalls, so
+the count-based plan stays linear; on ARM it is charged through the bounded
+clock reads. The client itself draws nothing.
 
 Instrumentation must leave the application's registers and comparison flags
 intact. On ARM, the client uses arithmetic that leaves those flags alone and a
@@ -57,7 +60,7 @@ branch that tests the sign bit directly (`TBZ`). DynamoRIO's drreg extension
 manages the temporary registers.
 
 Code: [progress client](../guest/progress/progress.c),
-[options and jitter draw](../guest/progress/budget.h).
+[x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c).
 
 ## Progress inside kernel polling
 

@@ -15,12 +15,16 @@
 #define SEEDBOX_TSC_KHZ		1000000
 /* Virtual time one guest clock read costs (ns). */
 #define SEEDBOX_PV_READ_NS	100
+/* A progress call: getpid with this first argument (guest/progress/budget.h). */
+#define SEEDBOX_PROGRESS_NR	39
+#define SEEDBOX_PROGRESS_MARK	0x5eedb0c5UL
 
 #ifndef __ASSEMBLY__
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/jump_label.h>
 #include <asm/io.h>
+#include <asm/ptrace.h>
 
 /*
  * The VMM reads guest-written fields only while the guest is stopped at a
@@ -49,6 +53,8 @@ struct seedbox_time_page {
 	u64 syscall_ns;	/* VMM plan: per-syscall cost */
 	u64 syscalls0;	/* VMM plan: syscall count used for syscall_target */
 	u64 plan_time;	/* VMM plan: t0 at the last deterministic publication */
+	u64 progress_jitter_ns;	/* bound on the seeded extra charge per progress call; 0 is off */
+	u64 progress_jitter_seed;	/* VMM-seeded stream the kernel draws that charge from */
 };
 
 struct pt_regs;
@@ -63,18 +69,23 @@ bool seedbox_set_next_event(unsigned long ticks);
 void seedbox_timer_disarm(void);
 /* Mix in fork entropy and reseed if the VMM published new (drivers/char/random.c). */
 void seedbox_take_entropy(void);
+/* Extra syscalls a progress call is charged, drawn from the VMM-seeded stream. */
+u64 seedbox_progress_jitter(struct seedbox_time_page *p);
 
 /*
  * Offer the VMM a deterministic stopping point. The executed conditional
- * branches are the same whether or not the exit happens.
+ * branches are the same whether or not the exit happens. A progress call
+ * counts as one syscall plus its seeded jitter.
  */
-static __always_inline void seedbox_syscall_hook(void)
+static __always_inline void seedbox_syscall_hook(struct pt_regs *regs, int nr)
 {
 	struct seedbox_time_page *p = READ_ONCE(seedbox_page);
 
 	if (p) {
 		u64 n = p->syscalls + 1;
 
+		if (nr == SEEDBOX_PROGRESS_NR && regs->di == SEEDBOX_PROGRESS_MARK)
+			n += seedbox_progress_jitter(p);
 		WRITE_ONCE(p->syscalls, n);
 		if (READ_ONCE(p->exit_req))
 			outl(0, SEEDBOX_PORT_YIELD);

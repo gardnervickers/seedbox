@@ -32,6 +32,8 @@ pub struct Boot {
     pub disk_fault_model: DiskFaultModel,
     #[serde(default)]
     pub timer_policy: Option<super::TimerPolicy>,
+    #[serde(default)]
+    pub progress_jitter: Option<super::ProgressJitter>,
 }
 impl Boot {
     fn machine<B: Backend>(&self, disk: Option<Disk>) -> Result<Machine<B>> {
@@ -50,6 +52,10 @@ impl Boot {
             self.mac,
             disk,
         )?;
+        let machine = match &self.progress_jitter {
+            Some(jitter) => machine.with_progress_jitter(jitter)?,
+            None => machine,
+        };
         match &self.timer_policy {
             Some(policy) => machine.with_timer_policy(policy.clone()),
             None => Ok(machine),
@@ -1146,6 +1152,7 @@ mod tests {
                 disk_sectors: Some(2),
                 disk_fault_model: model,
                 timer_policy: None,
+                progress_jitter: None,
             };
             let boot: Boot = serde_json::from_slice(&serde_json::to_vec(&boot).unwrap()).unwrap();
             let mut disk = boot.disk().unwrap().unwrap();

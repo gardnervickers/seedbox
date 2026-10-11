@@ -37,8 +37,6 @@ static int application_execv(const char *path, char *const argv[]) {
     assert(!strcmp(argv[index++], "4294967295"));
     assert(!strcmp(argv[index++], "--progress-points-per-block"));
     assert(!strcmp(argv[index++], "4294967294"));
-    assert(!strcmp(argv[index++], "--progress-jitter-ns"));
-    assert(!strcmp(argv[index++], "1000000"));
     assert(!strcmp(argv[index++], "--"));
     assert(argv[index]);
     return execv(argv[index], argv + index);
@@ -93,7 +91,6 @@ static void test_cmdline(const char *path, const char *text) {
 int main(int argc, char **argv) {
     instructions_per_progress_call = UINT32_MAX;
     progress_points_per_block = UINT32_MAX - 1;
-    progress_jitter_ns = 1000000;
     struct in_addr network_ip, network_mask;
     assert(!network_address("10.0.0.3/24", &network_ip, &network_mask));
     assert(ntohl(network_ip.s_addr) == 0x0a000003 && ntohl(network_mask.s_addr) == 0xffffff00);

@@ -153,6 +153,7 @@ fn decode_config(bytes: &[u8]) -> Result<seedbox_engine_core::world_config::Worl
                 | "end_on_exit"
                 | "timer_jitter_ns"
                 | "stop_tolerance_ns"
+                | "progress_jitter_ns"
                 | "network"
                 | "machines"
                 | "control"
@@ -325,6 +326,11 @@ pub fn run(options: &Options) -> Result<Value> {
                 seed: options.seed,
                 domain: format!("timer-jitter/{}", m.name),
                 jitter_ns: cfg.timer_jitter_ns,
+            }),
+            progress_jitter: Some(super::ProgressJitter {
+                bound_ns: cfg.progress_jitter_ns,
+                seed: crate::rng::Rng::new(options.seed, &format!("progress-jitter/{}", m.name))
+                    .next(),
             }),
         };
         machines.push(ArmMachine::boot(

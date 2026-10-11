@@ -55,17 +55,16 @@ int main(int argc, char **argv) {
 
 
 class ProgressBudgetTests(unittest.TestCase):
-    def test_strict_option_parser_accepts_its_ranges_and_rejects_bad_options(self):
+    def test_strict_option_parser_accepts_u32_range_and_rejects_bad_options(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / 'budget.c'
             source.write_text(r"""#include "progress/budget.h"
 #include <stdio.h>
 int main(int argc, char **argv) {
-    uint32_t budget = 0, points = 0, jitter = 0;
-    if (!seedbox_progress_arguments(argc, (const char **)argv, &budget, &points, &jitter))
-        return 2;
-    printf("%u %u %u\n", budget, points, jitter);
+    uint32_t budget = 0, points = 0;
+    if (!seedbox_progress_arguments(argc, (const char **)argv, &budget, &points)) return 2;
+    printf("%u %u\n", budget, points);
     return 0;
 }
 """)
@@ -76,27 +75,17 @@ int main(int argc, char **argv) {
             def run(*args):
                 return subprocess.run([str(probe), *args], capture_output=True, text=True,
                                       timeout=10)
-            budget, points, jitter = ('--instructions-per-progress-call',
-                                      '--progress-points-per-block', '--progress-jitter-ns')
-            def options(b='1', p='1', j='0'):
-                return [budget, b, points, p, jitter, j]
+            budget, points = '--instructions-per-progress-call', '--progress-points-per-block'
             for value in ['1', '17', '50000', '4294967295']:
-                result = run(*options(value, value))
+                result = run(budget, value, points, value)
                 self.assertEqual(result.returncode, 0)
-                self.assertEqual(result.stdout, f'{value} {value} 0\n')
-            for value in ['0', '1', '2500', '1000000']:
-                result = run(*options(j=value))
-                self.assertEqual(result.returncode, 0, value)
-                self.assertEqual(result.stdout, f'1 1 {value}\n')
-            malformed = ['', '-1', '+1', ' 1', '1 ', '1x', '4294967296',
-                         '999999999999999999999999999999']
-            for value in malformed + ['0']:
-                self.assertEqual(run(*options(b=value)).returncode, 2, value)
-                self.assertEqual(run(*options(p=value)).returncode, 2, value)
-            for value in malformed + ['1000001', '1us']:
-                self.assertEqual(run(*options(j=value)).returncode, 2, value)
-            for args in [options()[:4], options()[2:4] + options()[:2] + options()[4:],
-                         options() + ['--other', '1'],
-                         ['--blocks-per-progress-call', '1'] + options()[2:],
-                         [budget + '-extra'] + options()[1:], [budget[:-1]] + options()[1:]]:
+                self.assertEqual(result.stdout, f'{value} {value}\n')
+            for value in ['', '0', '-1', '+1', ' 1', '1 ', '1x', '4294967296',
+                           '999999999999999999999999999999']:
+                self.assertEqual(run(budget, value, points, '1').returncode, 2, value)
+                self.assertEqual(run(budget, '1', points, value).returncode, 2, value)
+            for args in [[budget, '1'], [points, '1', budget, '1'],
+                         [budget, '1', points, '1', '--other', '1'],
+                         ['--blocks-per-progress-call', '1', points, '1'],
+                         [budget + '-extra', '1', points, '1'], [budget[:-1], '1', points, '1']]:
                 self.assertEqual(run(*args).returncode, 2, args)

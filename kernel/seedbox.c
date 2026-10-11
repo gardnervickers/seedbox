@@ -135,6 +135,8 @@ void __init seedbox_time_init(void)
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscall_ns) != 16 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscalls0) != 17 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, plan_time) != 18 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, progress_jitter_ns) != 19 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, progress_jitter_seed) != 20 * sizeof(u64));
 	BUILD_BUG_ON(SEEDBOX_ABI != 4);
 	BUILD_BUG_ON(SEEDBOX_CAP_PAGE_TIMER != 1);
 
@@ -153,6 +155,47 @@ void __init seedbox_time_init(void)
 	outl(SEEDBOX_ABI, SEEDBOX_PORT_TIME_READY);
 	WRITE_ONCE(seedbox_page, p);
 	pr_info("seedbox: deterministic time page active\n");
+}
+
+/* splitmix64 on the page-seeded state. */
+static u64 seedbox_jitter_next(u64 *state)
+{
+	u64 z = (*state += 0x9e3779b97f4a7c15ULL);
+
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+	return z ^ (z >> 31);
+}
+
+/*
+ * Progress jitter: a progress call costs its syscall plus a seeded number of
+ * extra syscalls, so equal work takes a little longer on some seeds than on
+ * others while the count-based plan stays linear. The draw is uniform up to
+ * the bound; the remainder below one syscall's cost rounds at random, so the
+ * expected extra time is exactly the draw. Always two draws, so the stream
+ * never depends on the value drawn. The VMM seeds the stream per machine at
+ * boot, at a reboot and at a time fork; the state lives here, in guest RAM,
+ * so a restored snapshot continues its own stream until it is reseeded.
+ * Called only from the syscall hook on the one guest CPU.
+ */
+u64 seedbox_progress_jitter(struct seedbox_time_page *p)
+{
+	static u64 state, seeded;
+	u64 bound = READ_ONCE(p->progress_jitter_ns);
+	u64 seed, cost, draw, round;
+
+	if (!bound)
+		return 0;
+	seed = READ_ONCE(p->progress_jitter_seed);
+	if (seed != seeded) {
+		state = seed;
+		seeded = seed;
+	}
+	/* The plan's per-syscall cost; nominal before the first plan. */
+	cost = READ_ONCE(p->syscall_ns) ?: 1000;
+	draw = seedbox_jitter_next(&state) % (bound + 1);
+	round = seedbox_jitter_next(&state) % cost;
+	return draw / cost + (round < draw % cost);
 }
 
 bool seedbox_set_next_event(unsigned long ticks)
