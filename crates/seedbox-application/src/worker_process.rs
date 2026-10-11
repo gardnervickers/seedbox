@@ -40,15 +40,29 @@ fn replacement_version_with_timeout(
             supplied_path.display()
         ))
     };
-    let child = Command::new(engine)
+    let start = Instant::now();
+    let mut command = Command::new(engine);
+    command
         .arg("--version")
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| failure(&e.to_string()))?;
+        .process_group(0);
+    let child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            // Another concurrent fork can temporarily retain a writable fd
+            // to the just-materialized executable until it calls exec.
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                if start.elapsed() >= timeout {
+                    return Err(failure("version probe timed out: executable is still busy"));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(failure(&error.to_string())),
+        }
+    };
     let mut process = OwnedProcess(Some(child));
     let mut stdout = process
         .0
@@ -60,7 +74,6 @@ fn replacement_version_with_timeout(
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(failure(&std::io::Error::last_os_error().to_string()));
     }
-    let start = Instant::now();
     let mut bytes = Vec::new();
     let mut finished: Option<bool> = None;
     loop {
@@ -511,9 +524,6 @@ mod tests {
 
     #[test]
     fn replacement_probe_bounds_output_and_cleans_up_timeout() {
-        let _lock = crate::preparation_command::PROCESS_TEST_LOCK
-            .lock()
-            .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let engine = directory.path().join("engine");
         let probe = |body: &str, timeout| {
@@ -558,6 +568,40 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replacement_probe_retries_busy_executables_within_its_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = directory.path().join("engine");
+        fs::write(&engine, b"#!/bin/sh\nprintf 'seedbox test-version\\n'\n").unwrap();
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
+        let writer = fs::OpenOptions::new().write(true).open(&engine).unwrap();
+        let error = replacement_version_with_timeout(&engine, &engine, Duration::from_millis(30))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("timed out: executable is still busy"),
+            "{error}"
+        );
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                drop(writer);
+            });
+            assert_eq!(
+                replacement_version_with_timeout(&engine, &engine, Duration::from_secs(2))
+                    .unwrap()
+                    .as_deref(),
+                Some("test-version")
+            );
+        });
+        let missing = directory.path().join("missing");
+        let error = replacement_version_with_timeout(&missing, &missing, Duration::from_secs(2))
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("timed out"), "{error}");
     }
 
     #[test]
