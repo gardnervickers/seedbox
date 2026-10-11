@@ -71,6 +71,47 @@ fn require_full_state_match(output: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Capture both sides while the session is still alive. The CI artifact collector
+// bounds these files; shutdown would otherwise remove the evidence we need.
+fn compare(
+    cli: &Path,
+    directory: &Path,
+    state: &Path,
+    name: &str,
+    baseline: &str,
+    repeated: &str,
+) -> Result<(), String> {
+    let result = invoke(
+        cli,
+        directory,
+        state,
+        name,
+        &["compare", baseline, repeated, "--json"],
+    )
+    .and_then(|output| require_full_state_match(&output));
+    if result.is_err() {
+        for (side, id) in [("baseline", baseline), ("repeated", repeated)] {
+            for (kind, args) in [
+                ("definition", vec!["describe", "simulation", id, "--json"]),
+                ("world", vec!["get", "world", id, "--json"]),
+                ("timeline", vec!["get", "timeline", id, "--json"]),
+                ("logs", vec!["logs", id, "--tail", "100"]),
+            ] {
+                if let Err(error) = invoke(
+                    cli,
+                    directory,
+                    state,
+                    &format!("{name}-{side}-{kind}"),
+                    &args,
+                ) {
+                    eprintln!("comparison diagnostic: {error}");
+                }
+            }
+        }
+    }
+    result
+}
+
 #[test]
 fn every_application_runs_twice_and_reruns_through_the_server() {
     let cli = std::env::var_os("SEEDBOX_TEST_CLI")
@@ -117,7 +158,14 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 &directory,
                 state,
                 "first",
-                &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
+                &[
+                    "run",
+                    workload.to_str().unwrap(),
+                    "--seed",
+                    "7578384725853898576",
+                    "--wall-time",
+                    "30m",
+                ],
             )?;
             let first = simulation_id(&first_output)?;
             let described = invoke(
@@ -149,14 +197,7 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 ],
             )?;
             let second = simulation_id(&second_output)?;
-            let comparison = invoke(
-                Path::new(&cli),
-                &directory,
-                state,
-                "compare",
-                &["compare", first, second, "--json"],
-            )?;
-            require_full_state_match(&comparison)?;
+            compare(Path::new(&cli), &directory, state, "compare", first, second)?;
             let repeated = invoke(
                 Path::new(&cli),
                 &directory,
@@ -164,14 +205,14 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 "rerun",
                 &["rerun", first, "--wall-time", "30m"],
             )?;
-            let comparison = invoke(
+            compare(
                 Path::new(&cli),
                 &directory,
                 state,
                 "compare-rerun",
-                &["compare", first, simulation_id(&repeated)?, "--json"],
+                first,
+                simulation_id(&repeated)?,
             )?;
-            require_full_state_match(&comparison)?;
             Ok(())
         };
         if let Err(error) = check() {
