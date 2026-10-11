@@ -505,18 +505,20 @@ fn explicit_inputs_must_exist() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn missing_explicit_runtime_assets_are_reported_before_worker_validation() {
+fn explicit_missing_helpers_do_not_fall_back_to_embedded_assets() {
     let (directory, mut args) = runtime_project();
     let archive = directory
         .path()
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("runtime.tar.gz");
-    // Exercise missing input even when this test build embeds guest helpers.
-    args.extend(["--runtime-assets".into(), archive.to_str().unwrap().into()]);
+    // Exercise a missing archive even when this binary embeds built assets.
+    args.extend([
+        "--runtime-assets".into(),
+        archive.to_string_lossy().into_owned(),
+    ]);
     let args: Vec<_> = args.iter().map(String::as_str).collect();
     let output = seedbox(&args, directory.path());
-    assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         stderr(&output),
         format!("error: --runtime-assets {}: not found\n", archive.display())

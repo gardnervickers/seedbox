@@ -137,6 +137,7 @@ mod tests {
                 avail_idx: 0,
                 next_buf: 0x10000,
             };
+            g.dev.transport.status = 15;
             for (off, v) in [
                 (0x030, 0),
                 (0x038, 16),

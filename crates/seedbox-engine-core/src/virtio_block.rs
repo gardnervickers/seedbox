@@ -15,7 +15,7 @@ const S_OK: u8 = 0;
 const S_IOERR: u8 = 1;
 const S_UNSUPP: u8 = 2;
 
-/// Existing descriptor and effect policies, preserved during extraction.
+/// Adapter accounting identity; request and completion rules are shared.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Policy {
@@ -70,102 +70,49 @@ struct Request {
 }
 
 impl Request {
-    fn decode(memory: &[u8], chain: &Chain, policy: Policy) -> Result<Self> {
+    fn decode(memory: &[u8], chain: &Chain) -> Result<Self> {
         let segments = &chain.segments;
-        let (kind, sector, input, output, room, status) = match policy {
-            Policy::Application => {
-                if segments.len() < 2 {
-                    return Err("short block descriptor chain".into());
-                }
-                let header = &segments[0];
-                let status = segments.last().expect("checked descriptor count");
-                if header.writable || header.len != 16 || !status.writable || status.len != 1 {
-                    return Err("invalid block header/status descriptors".into());
-                }
-                let kind = u32::from_le_bytes(
-                    memory[header.offset..header.offset + 4]
-                        .try_into()
-                        .expect("validated header"),
-                );
-                let sector = u64::from_le_bytes(
-                    memory[header.offset + 8..header.offset + 16]
-                        .try_into()
-                        .expect("validated header"),
-                );
-                let data = &segments[1..segments.len() - 1];
-                let len = data.iter().map(|s| s.len).sum::<usize>();
-                match kind {
-                    T_IN | T_OUT
-                        if !len.is_multiple_of(SECTOR)
-                            || data.iter().any(|s| s.writable != (kind == T_IN)) =>
-                    {
-                        return Err("invalid block data descriptors".into())
-                    }
-                    T_FLUSH if !data.is_empty() => {
-                        return Err("block flush includes data descriptors".into())
-                    }
-                    T_GET_ID if data.iter().any(|s| !s.writable) => {
-                        return Err("block ID buffer is not writable".into())
-                    }
-                    _ => (),
-                }
-                let mut input = Vec::new();
-                if kind == T_OUT {
-                    for span in data {
-                        input.extend_from_slice(&memory[span.offset..span.offset + span.len]);
-                    }
-                }
-                (
-                    kind,
-                    sector,
-                    input,
-                    data.iter().map(|s| (s.offset, s.len)).collect(),
-                    len,
-                    status.offset,
-                )
+        let (kind, sector, input, output, room, status) = {
+            let readable = segments
+                .iter()
+                .filter(|s| !s.writable)
+                .map(|s| s.len)
+                .sum::<usize>();
+            let writable = segments
+                .iter()
+                .filter(|s| s.writable)
+                .map(|s| s.len)
+                .sum::<usize>();
+            if readable < 16 || writable < 1 {
+                return Err("disk request without a header or status byte".into());
             }
-            Policy::Block => {
-                let readable = segments
-                    .iter()
-                    .filter(|s| !s.writable)
-                    .map(|s| s.len)
-                    .sum::<usize>();
-                let writable = segments
-                    .iter()
-                    .filter(|s| s.writable)
-                    .map(|s| s.len)
-                    .sum::<usize>();
-                if readable < 16 || writable < 1 {
-                    return Err("disk request without a header or status byte".into());
-                }
-                // Copy all readable bytes before any disk or RAM write, including aliases.
-                let mut bytes = Vec::with_capacity(readable);
-                for span in segments.iter().filter(|s| !s.writable) {
-                    bytes.extend_from_slice(&memory[span.offset..span.offset + span.len]);
-                }
-                let kind = u32::from_le_bytes(bytes[..4].try_into().expect("checked header"));
-                let sector = u64::from_le_bytes(bytes[8..16].try_into().expect("checked header"));
-                let room = writable - 1;
-                let mut left = room;
-                let mut output = Vec::new();
-                let mut status = None;
-                for span in segments.iter().filter(|s| s.writable) {
-                    let n = span.len.min(left);
-                    output.push((span.offset, n));
-                    left -= n;
-                    if left == 0 && n < span.len {
-                        status = Some(span.offset + n);
-                    }
-                }
-                (
-                    kind,
-                    sector,
-                    bytes[16..].to_vec(),
-                    output,
-                    room,
-                    status.expect("nonempty writable capacity"),
-                )
+            // Copy all readable bytes before any disk or RAM write, including aliases.
+            let mut bytes = Vec::with_capacity(readable);
+            for span in segments.iter().filter(|s| !s.writable) {
+                bytes.extend_from_slice(&memory[span.offset..span.offset + span.len]);
             }
+            let kind = u32::from_le_bytes(bytes[..4].try_into().expect("checked header"));
+            let sector = u64::from_le_bytes(bytes[8..16].try_into().expect("checked header"));
+            let room = writable - 1;
+            let mut left = room;
+            let mut output = Vec::new();
+            let mut status = None;
+            for span in segments.iter().filter(|s| s.writable) {
+                let n = span.len.min(left);
+                output.push((span.offset, n));
+                left -= n;
+                if left == 0 && n < span.len {
+                    status = Some(span.offset + n);
+                }
+            }
+            (
+                kind,
+                sector,
+                bytes[16..].to_vec(),
+                output,
+                room,
+                status.expect("nonempty writable capacity"),
+            )
         };
         Ok(Self {
             kind,
@@ -230,22 +177,14 @@ impl Block {
         mut dirty: impl FnMut(usize, usize),
     ) -> Result<Notified> {
         let mut out = Notified::default();
-        let policy = match self.policy {
-            Policy::Application => QueuePolicy {
-                limit: 4 << 20,
-                direction: Direction::Any,
-                reject_empty: true,
-                diagnostics: Diagnostics::Virtio,
-            },
-            Policy::Block => QueuePolicy {
-                limit: 4 << 20,
-                direction: Direction::ReadThenWrite,
-                reject_empty: false,
-                diagnostics: Diagnostics::Disk,
-            },
+        let policy = QueuePolicy {
+            limit: 4 << 20,
+            direction: Direction::ReadThenWrite,
+            reject_empty: false,
+            diagnostics: Diagnostics::Disk,
         };
         while let Some(chain) = transport.queues[0].validated_chain(memory, base, policy)? {
-            let request = Request::decode(memory, &chain, self.policy)?;
+            let request = Request::decode(memory, &chain)?;
             let mut data = Vec::new();
             let status = match request.kind {
                 T_IN => {
@@ -274,10 +213,10 @@ impl Block {
                 }
                 T_FLUSH => {
                     let n = self.disk.flush();
+                    out.flushed += n;
                     if self.policy == Policy::Block {
                         self.stats.flushes += 1;
                         self.stats.sectors_flushed += n;
-                        out.flushed += n;
                     }
                     S_OK
                 }
@@ -303,9 +242,8 @@ impl Block {
             dirty(request.status, 1);
             transport.queues[0].complete_chain(memory, &chain, done + 1, &mut dirty);
             out.irq = true;
-            if self.policy == Policy::Application {
-                transport.isr |= 1;
-            } else {
+            transport.isr |= 1;
+            if self.policy == Policy::Block {
                 out.completed += 1;
                 out.log.push((request.kind, request.sector, status));
             }

@@ -1,0 +1,26 @@
+--- a/core/arch/interp.c
++++ b/core/arch/interp.c
+@@ -3411,6 +3411,7 @@
+                         if (bb->vmlist != NULL) {
+                             vm_area_destroy_list(dcontext, bb->vmlist);
+                             bb->vmlist = NULL;
++                            bb->checked_start_vmarea = false;
+                         }
+                         bb->full_decode = true;
+                         build_bb_ilist(dcontext, bb);
+@@ -4076,6 +4077,7 @@
+         if (bb->vmlist != NULL) {
+             vm_area_destroy_list(dcontext, bb->vmlist);
+             bb->vmlist = NULL;
++            bb->checked_start_vmarea = false;
+         }
+         /* Remove FRAG_HAS_DIRECT_CTI, since we're turning off follow_direct.
+          * Try to keep the known flags.  We stopped the bb before merging in any
+@@ -4513,6 +4515,7 @@
+             if (bb->vmlist != NULL) {
+                 vm_area_destroy_list(dcontext, bb->vmlist);
+                 bb->vmlist = NULL;
++                bb->checked_start_vmarea = false;
+             }
+             bb->flags = FRAG_SELFMOD_SANDBOXED; /* lose all other flags */
+             bb->full_decode = true;             /* full decode this time! */

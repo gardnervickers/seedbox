@@ -184,9 +184,36 @@ int main(void) {
             ], check=True, capture_output=True)
             subprocess.run([str(exe)], check=True, capture_output=True)
 
+    def test_kernel_poll_hook_is_active_only_outside_vdso(self):
+        header = 'static inline void cpu_relax(void)\n{\n\tasm volatile("yield" ::: "memory");\n}\n'
+        patched = apply.polling(header)
+        # The host may be x86. Replace only the architecture hint; compile the
+        # actual patched call and guard, then check the positive/negative cases.
+        patched = patched.replace('asm volatile("yield" ::: "memory")', 'asm volatile("" ::: "memory")')
+        fixture = '#include <assert.h>\nstatic unsigned reads;\n' + patched + '\n' + r"""
+void seedbox_cpu_relax(void) { ++reads; }
+int main(void) {
+    for (unsigned i = 0; i < 123; ++i) cpu_relax();
+#ifdef BUILD_VDSO
+    assert(reads == 0);
+#else
+    assert(reads == 123);
+#endif
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            c = Path(directory) / "relax.c"
+            exe = Path(directory) / "relax"
+            c.write_text(fixture)
+            for flags in [[], ["-DBUILD_VDSO"]]:
+                subprocess.run(shlex.split(os.environ.get("CC", "cc")) + flags + [
+                    "-Wall", "-Wextra", "-Werror", str(c), "-o", str(exe)
+                ], check=True, capture_output=True)
+                subprocess.run([str(exe)], check=True, capture_output=True)
+
     def test_poll_yield_preserves_caller_mask_and_retries_after_irq(self):
         source = (HERE / "seedbox.c").read_text()
-        read = source[source.index("u64 notrace seedbox_read(void)"):
+        read = source[source.index("static u64 notrace seedbox_read_step(u64 step)"):
                       source.index("/* splitmix64")]
         fixture = r"""
 #include <assert.h>
@@ -228,18 +255,18 @@ int main(void) {
         storage.now = storage.last = storage.bound = 100;
         storage.deferred_irq_pending = 0;
         writes = synchronized = 0;
-        assert(seedbox_read() == (masked ? 101 : 106));
+        assert(seedbox_read() == (masked ? 200 : 205));
         assert(irq_flags == caller_flags && writes == 1);
-        assert(seedbox_read() == (masked ? 102 : 107));
+        assert(seedbox_read() == (masked ? 300 : 305));
         assert(irq_flags == caller_flags && writes == 1);
         assert(storage.deferred_irq_pending == (u64)masked);
         if (masked) {
             /* No idle or other MMIO: the next unmasked read delivers it. */
             caller_flags = irq_flags = 0x340;
-            assert(seedbox_read() == 106);
+            assert(seedbox_read() == 205);
             assert(irq_flags == caller_flags && writes == 2);
             assert(storage.deferred_irq_pending == 0);
-            assert(seedbox_read() == 107 && writes == 2);
+            assert(seedbox_read() == 305 && writes == 2);
         }
     }
 }
@@ -257,7 +284,7 @@ int main(void) {
         source = (HERE / "seedbox.c").read_text()
         page = source[source.index("struct seedbox_page {"):
                       source.index("static struct seedbox_page *page;")]
-        helpers = source[source.index("u64 notrace seedbox_read(void)"):
+        helpers = source[source.index("static u64 notrace seedbox_read_step(u64 step)"):
                          source.index("static u64 cs_read")]
         fixture = r"""
 #include <assert.h>
@@ -309,12 +336,12 @@ static void reset(u64 cost, u64 bound, u64 span, u64 replacement) {
     writes = 0;
 }
 int main(void) {
-    /* Ordinary clock reads still cost one, independently of CPU throttle. */
+    /* Ordinary clock reads cost 100 ns, independently of CPU throttle. */
     for (u64 cost = 1000; cost <= 4000; cost *= 4) {
         reset(cost, UINT64_MAX, 0, 0);
-        assert(seedbox_read() == 1);
+        assert(seedbox_read() == 100);
         seedbox_syscall_progress(&regs, 0);
-        assert(page->last == cost + 1 && writes == 0);
+        assert(page->last == cost + 100 && writes == 0);
         assert(irq_flags == 0);
     }
     reset(1000000, UINT64_MAX, 0, 0);

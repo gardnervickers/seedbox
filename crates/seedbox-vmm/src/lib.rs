@@ -679,8 +679,6 @@ pub fn run(
         boots.push(boot);
         open_outputs(&mut mach, &out, options.stream_console)?;
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
-        mach.syscall_ns =
-            machine::pv::syscall_ns(&mut Rng::new(boot_seed, &format!("pv-speed/{}", names[i])));
         mach.seed_progress_jitter(
             Rng::new(boot_seed, &format!("progress-jitter/{}", names[i])).next(),
         );

@@ -7,8 +7,8 @@ Each section links to the code that owns it.
 
 Reading the host counter would make a guest polling loop's iteration count
 depend on host scheduling. Kernel clock reads use a
-shared PV page. Repeated reads charge a fixed increment, and a read that would
-pass the published bound yields to the VMM before returning that time. This
+shared PV page. Repeated reads charge 100 ns on both architectures. A read that
+would pass the published bound yields to the VMM before returning that time. This
 bound is the latest time the guest may reach before the VMM must handle a
 pending event or scheduling boundary. The VMM processes that boundary and
 publishes a new bound.
@@ -69,7 +69,11 @@ On x86 the charge is counted in whole syscall costs, so the count-based plan
 stays linear. The remainder carries to the next call, and a count the hard
 stop cuts off stays owed to the next run. On ARM the charge advances the
 bounded clock in bulk, with the same rendezvous at every bound as single clock
-reads. A throttle fault scales the compute charge like every syscall's.
+reads. A throttle fault scales the compute charge like every syscall's. Both
+backends start with a fixed 1,000 ns syscall charge. There is no implicit per-machine
+speed draw at boot or a time fork; only authored progress jitter consumes its
+own RNG stream. Snapshots retain charges and jitter continuation, and reboot
+reapplies active throttle faults.
 
 Instrumentation must leave the application's registers and comparison flags
 intact. On ARM, the client uses arithmetic that leaves those flags alone and a
@@ -100,10 +104,14 @@ interrupts. Interrupt delivery stays deferred until the guest permits it.
 
 Each hook charges a 100 ns read and is inactive before PV activation.
 This covers the patched kernel `cpu_relax`/`rep_nop` paths. It does not cover
-arbitrary assembly `PAUSE`, early decompression, the vDSO, or every ARM kernel
-polling loop. Application polling is handled by binary instrumentation.
+arbitrary assembly `PAUSE`/`YIELD`, early decompression or the vDSO. ARM
+`cpu_relax()` uses the same bounded read. Its raw exclusive-store retry loops
+remain uncharged: host interruptions can cause those retries and must not
+advance guest time or the software reservation epoch. Application polling is
+handled by binary instrumentation.
 
-Code: [kernel clock](../kernel/seedbox.c), [patch sites](../kernel/apply.py).
+Code: [x86 clock](../kernel/seedbox.c), [x86 patch sites](../kernel/apply.py),
+[ARM clock](../kernel-arm64/seedbox.c), [ARM patch sites](../kernel-arm64/apply.py).
 
 ## Observation without guest progress
 
@@ -311,8 +319,26 @@ Virtio devices mutate guest RAM as well as host state. Payload, status, and
 used-ring writes must retain their order, and the x86 dirty journal must include
 every write. A malformed later request does not undo earlier completed requests.
 Interrupt and queue-cursor timing on error therefore affects observable state.
-The shared device models have backend-specific validation profiles; sharing
-code does not make those profiles identical.
+Both adapters use the same modern descriptor and register contracts. Block
+headers may span readable descriptors; the last writable byte is status. A
+flush ignores extra data, and transfers with invalid lengths return IOERR.
+Console data waits for the multiport open handshake, with a 64 KiB limit per
+chain rather than per notification. Network offloads that were not advertised
+are rejected, received frames are limited to 64 KiB, and an undersized receive
+chain retains the frame without writing a truncated payload.
+
+Each completed request publishes its interrupt state before the next request
+is validated. Earlier payload, status, used-ring writes and backlog removals
+survive a later failure; the failing request is not completed. MMIO rejects
+invalid selectors, sizes and ready values, protects ready queues from edits,
+and preserves cursors on repeated ready writes. Driver readiness requires
+VERSION_1 and a subset of advertised features; the control console also requires
+MULTIPORT because its protocol uses a named port and the open handshake.
+
+Adapter identities still select retained accounting and x86 network
+notification optimizations (EVENT_IDX, notification suppression and deferred
+TX). Those negotiated extensions can suppress an interrupt; they do not
+change request validation or completed-prefix mutation rules.
 
 The disk model separates stable and volatile writes. Flush and FUA affect what
 is stable; a crash applies the configured survival policy to volatile state.
