@@ -511,6 +511,11 @@ pub fn throttle_permille(speed_hz: u64, throttled_hz: u64) -> u64 {
         .clamp(*THROTTLE_PERMILLE.start(), *THROTTLE_PERMILLE.end())
 }
 
+/// Nominal CPU speed actually applied after factor rounding and saturation.
+pub fn effective_throttle_speed(speed_hz: u64, factor_permille: u64) -> u64 {
+    (u128::from(speed_hz) * 1000 / u128::from(factor_permille)) as u64
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub id: u32,
@@ -533,6 +538,15 @@ mod tests {
         assert_eq!(throttle_permille(2_000_000_000, 1_000), 1_000_000);
         assert_eq!(throttle_permille(2_000_000_000, 0), 1_000_000);
         assert_eq!(throttle_permille(0, 500_000_000), 1000);
+        for (requested, effective) in [
+            (500_000_000, 500_000_000),
+            (3_000_000_000, 2_000_000_000),
+            (1_000, 2_000_000),
+            (333_000_000, 332_944_897),
+        ] {
+            let factor = throttle_permille(2_000_000_000, requested);
+            assert_eq!(effective_throttle_speed(2_000_000_000, factor), effective);
+        }
     }
     #[test]
     fn strict_wire_rejects_unknown_fields_bad_targets_and_duplicate_identity() {

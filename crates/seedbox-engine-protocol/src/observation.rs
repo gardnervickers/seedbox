@@ -127,7 +127,7 @@ pub enum MachineTransition {
     Resumed,
     Crashed,
     Rebooted,
-    /// The CPU runs at this speed in Hz, or at the project's speed again.
+    /// Effective nominal speed after throttle rounding and clamping; None is healed.
     Throttled {
         speed_hz: Option<u64>,
     },

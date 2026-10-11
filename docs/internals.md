@@ -69,6 +69,15 @@ manages the temporary registers.
 Code: [progress client](../guest/progress/progress.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c).
 
+On x86 a charge can span several scheduling boundaries. Its unpaid time is
+retained with the machine and drained while the vCPU is stopped, before guest
+execution resumes. Timers can become pending during that interval; checkpoints
+preserve the remainder.
+
+Throttle observations report the effective nominal CPU speed after the backend
+rounds and clamps the requested speed. The fault's recorded input keeps the
+original request.
+
 ## Progress inside kernel polling
 
 An x86 kernel `cpu_relax()` loop may hold a lock with interrupts disabled. It

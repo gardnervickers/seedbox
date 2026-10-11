@@ -1072,103 +1072,109 @@ fn an_event_already_due_is_delivered_even_when_the_machine_stands_past_the_slice
 
 #[test]
 fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across_workers() {
-    let mut reference = None;
-    for workers in [0, 1, 2, 4] {
-        use seedbox_engine_protocol::observation::{
-            Kind, MachineTransition, Observation, MAX_DATAGRAM_BYTES,
-        };
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("observer");
-        let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
-        receiver.set_nonblocking(true).unwrap();
-        let mut w = world(&["a", "b"])
-            .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
-        for (at, action) in [
-            (
-                10,
-                json!({"action":"throttle","handle":"t","machine":"b","speed_hz":500_000_000}),
-            ),
-            (20, json!({"action":"crash","machine":"b"})),
-            (25, json!({"action":"reboot","machine":"b"})),
-            (30, json!({"action":"heal","handle":"t"})),
-        ] {
-            let mut action = action;
-            action["id"] = json!(0);
-            action["at_ns"] = json!(at);
-            action["deadline_ns"] = json!(at);
-            w.faults
-                .append(serde_json::from_value(action).unwrap())
-                .unwrap();
-        }
-        for at in [5, 15, 27, 35] {
-            w.machines[1].steps.push_back(Step::new(at, Stop::Sent));
-        }
-        run_with(&mut w, 60, None, workers, Duration::from_micros(3)).unwrap();
-        let mut delivered = Vec::new();
-        let mut bytes = [0; MAX_DATAGRAM_BYTES];
-        loop {
-            match receiver.recv(&mut bytes) {
-                Ok(count) => {
-                    let event: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
-                    if let Kind::MachineLifecycle { transition } = event.kind {
-                        delivered.push((
-                            event.simulated_time_ns,
-                            event.machine,
-                            event.incarnation,
-                            transition,
-                        ));
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => panic!("{error}"),
-            }
-        }
-        assert_eq!(
-            delivered,
-            vec![
+    for (requested, effective) in [
+        (500_000_000u64, 500_000_000u64),
+        (1000, 2_000_000),
+        (3_000_000_000, 2_000_000_000),
+    ] {
+        let mut reference = None;
+        for workers in [0, 1, 2, 4] {
+            use seedbox_engine_protocol::observation::{
+                Kind, MachineTransition, Observation, MAX_DATAGRAM_BYTES,
+            };
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("observer");
+            let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+            receiver.set_nonblocking(true).unwrap();
+            let mut w = world(&["a", "b"])
+                .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
+            for (at, action) in [
                 (
                     10,
-                    "b".into(),
-                    0,
-                    MachineTransition::Throttled {
-                        speed_hz: Some(500_000_000)
+                    json!({"action":"throttle","handle":"t","machine":"b","speed_hz":requested}),
+                ),
+                (20, json!({"action":"crash","machine":"b"})),
+                (25, json!({"action":"reboot","machine":"b"})),
+                (30, json!({"action":"heal","handle":"t"})),
+            ] {
+                let mut action = action;
+                action["id"] = json!(0);
+                action["at_ns"] = json!(at);
+                action["deadline_ns"] = json!(at);
+                w.faults
+                    .append(serde_json::from_value(action).unwrap())
+                    .unwrap();
+            }
+            for at in [5, 15, 27, 35] {
+                w.machines[1].steps.push_back(Step::new(at, Stop::Sent));
+            }
+            run_with(&mut w, 60, None, workers, Duration::from_micros(3)).unwrap();
+            let mut delivered = Vec::new();
+            let mut bytes = [0; MAX_DATAGRAM_BYTES];
+            loop {
+                match receiver.recv(&mut bytes) {
+                    Ok(count) => {
+                        let event: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+                        if let Kind::MachineLifecycle { transition } = event.kind {
+                            delivered.push((
+                                event.simulated_time_ns,
+                                event.machine,
+                                event.incarnation,
+                                transition,
+                            ));
+                        }
                     }
-                ),
-                (20, "b".into(), 0, MachineTransition::Crashed),
-                (25, "b".into(), 1, MachineTransition::Rebooted),
-                (
-                    30,
-                    "b".into(),
-                    1,
-                    MachineTransition::Throttled { speed_hz: None }
-                ),
-            ]
-        );
-        let throttles: Vec<String> = machine_trace(&w, "b")
-            .into_iter()
-            .filter(|line| line.contains(":throttle/"))
-            .collect();
-        // Each change lands with the machine at its exact boundary; the
-        // crash's fresh incarnation is throttled again.
-        assert_eq!(
-            throttles,
-            [
-                "b:throttle/500000000:10",
-                "b:throttle/500000000:20",
-                "b:throttle/full:30"
-            ]
-        );
-        assert!(w.faults.active_handles().is_empty());
-        assert!(w
-            .faults
-            .log
-            .iter()
-            .all(|row| row.status == RowStatus::Applied));
-        let observed = (throttles, w.faults.log.clone());
-        if let Some(want) = &reference {
-            assert_eq!(&observed, want);
-        } else {
-            reference = Some(observed);
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            assert_eq!(
+                delivered,
+                vec![
+                    (
+                        10,
+                        "b".into(),
+                        0,
+                        MachineTransition::Throttled {
+                            speed_hz: Some(effective)
+                        }
+                    ),
+                    (20, "b".into(), 0, MachineTransition::Crashed),
+                    (25, "b".into(), 1, MachineTransition::Rebooted),
+                    (
+                        30,
+                        "b".into(),
+                        1,
+                        MachineTransition::Throttled { speed_hz: None }
+                    ),
+                ]
+            );
+            let throttles: Vec<String> = machine_trace(&w, "b")
+                .into_iter()
+                .filter(|line| line.contains(":throttle/"))
+                .collect();
+            // Each change lands with the machine at its exact boundary; the
+            // crash's fresh incarnation is throttled again.
+            assert_eq!(
+                throttles,
+                [
+                    format!("b:throttle/{requested}:10"),
+                    format!("b:throttle/{requested}:20"),
+                    "b:throttle/full:30".to_owned()
+                ]
+            );
+            assert!(w.faults.active_handles().is_empty());
+            assert!(w
+                .faults
+                .log
+                .iter()
+                .all(|row| row.status == RowStatus::Applied));
+            let observed = (throttles, w.faults.log.clone());
+            if let Some(want) = &reference {
+                assert_eq!(&observed, want);
+            } else {
+                reference = Some(observed);
+            }
         }
     }
 }

@@ -287,10 +287,9 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     }
     /// Run the CPU at `speed_hz` instead of the project's speed, charging CPU
     /// work by the ratio; `None` restores it. Takes effect from the machine's
-    /// next slice.
-    fn throttle(&mut self, _speed_hz: Option<u64>) -> Result<(), String> {
-        Err("throttle is unsupported by this backend".into())
-    }
+    /// next slice. Returns the effective nominal speed after backend rounding
+    /// and clamping, or `None` when healed.
+    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<Option<u64>, String>;
     fn exits(&self) -> u64;
     fn exit_witness(&mut self) -> Result<String, String>;
     /// Idempotently poison, close and reap owned worker transport without another
@@ -853,7 +852,9 @@ impl<M: WorldMachine> World<M> {
             faults::Lifecycle::Resume => self.machines[m].resume(t),
             faults::Lifecycle::Crash => self.crash(m, t),
             faults::Lifecycle::Reboot => self.reboot(m, t),
-            faults::Lifecycle::Throttle(speed_hz) => self.machines[m].throttle(speed_hz),
+            faults::Lifecycle::Throttle(speed_hz) => {
+                self.machines[m].throttle(speed_hz).map(|_| ())
+            }
         }
     }
 

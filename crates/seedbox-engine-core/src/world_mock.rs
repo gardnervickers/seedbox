@@ -229,7 +229,7 @@ impl WorldMachine for Mock {
     fn supports_throttle(&self) -> bool {
         self.throttleable
     }
-    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<(), String> {
+    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<Option<u64>, String> {
         match speed_hz {
             Some(speed_hz) => self.record(&format!("throttle/{speed_hz}")),
             None => self.record("throttle/full"),
@@ -237,7 +237,12 @@ impl WorldMachine for Mock {
         if self.bad == Some("throttle") {
             return Err("throttle ACK lost".into());
         }
-        Ok(())
+        Ok(speed_hz.map(|hz| {
+            seedbox_control::effective_throttle_speed(
+                2_000_000_000,
+                seedbox_control::throttle_permille(2_000_000_000, hz),
+            )
+        }))
     }
     fn exits(&self) -> u64 {
         0

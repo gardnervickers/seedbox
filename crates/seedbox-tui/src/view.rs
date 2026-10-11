@@ -3250,11 +3250,15 @@ mod tests {
         assert_eq!(frequency(999), "999Hz");
         let mut app = app(&["app", "oracle"]);
         assert!(!render(&app).contains("500MHz"));
-        let mut w = world(&["app", "oracle"]);
-        w.machines[0].throttle_speed_hz = Some(500_000_000);
-        app.apply(Update::World(w));
-        let text = render(&app);
-        assert!(text.contains("● ready 500MHz"), "{text}");
+        // Observations carry the effective speed, including a saturated
+        // throttle: a 2 GHz CPU requested at 1 kHz actually runs at 2 MHz.
+        for (effective, label) in [(500_000_000, "500MHz"), (2_000_000, "2MHz")] {
+            let mut w = world(&["app", "oracle"]);
+            w.machines[0].throttle_speed_hz = Some(effective);
+            app.apply(Update::World(w));
+            let text = render(&app);
+            assert!(text.contains(&format!("● ready {label}")), "{text}");
+        }
     }
 
     #[test]

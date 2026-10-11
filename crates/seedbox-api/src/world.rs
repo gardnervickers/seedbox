@@ -63,7 +63,7 @@ pub struct MachineState {
     pub condition: MachineCondition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<u8>,
-    /// The CPU's speed in Hz while a throttle holds it below the project's.
+    /// Effective nominal CPU speed in Hz after throttle rounding and clamping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub throttle_speed_hz: Option<u64>,
     /// The workload oracle whose exit decides the verdict.

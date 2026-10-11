@@ -637,11 +637,13 @@ impl WorldMachine for ArmMachine {
     fn supports_throttle(&self) -> bool {
         true
     }
-    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<()> {
+    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<Option<u64>> {
         let factor_permille = speed_hz.map_or(1000, |speed_hz| {
             seedbox_control::throttle_permille(self.cpu_speed_hz, speed_hz)
         });
-        self.ready(Operation::Throttle { factor_permille })
+        self.ready(Operation::Throttle { factor_permille })?;
+        Ok(speed_hz
+            .map(|_| seedbox_control::effective_throttle_speed(self.cpu_speed_hz, factor_permille)))
     }
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<()> {
         Err("ARM machine speed reseeding is unsupported".into())

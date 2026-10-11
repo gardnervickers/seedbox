@@ -196,7 +196,7 @@ pub struct Faults {
     pub readiness: Vec<Value>,
     handles: BTreeMap<String, BTreeSet<(usize, usize)>>,
     clocks: BTreeMap<String, Clock>,
-    /// Active throttle handles: machine and factor in thousandths.
+    /// Active throttle handles: machine and requested CPU speed in Hz.
     throttles: BTreeMap<String, (usize, u64)>,
     #[serde(with = "crate::checkpoint::ordered_map")]
     cuts: BTreeMap<(usize, usize), usize>,

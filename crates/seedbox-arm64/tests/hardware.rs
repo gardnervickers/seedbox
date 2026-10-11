@@ -323,6 +323,12 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
             survival_probability: 1.0,
         },
         timer_policy: None,
+        progress: Some(seedbox_arm64::application::Progress {
+            speed_hz: 2_000_000_000,
+            ns: 25_000,
+            jitter_ns: 1_250,
+            seed: 7,
+        }),
     };
     let mut saved = None;
     let mut expected = None;
@@ -360,6 +366,7 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
         };
         call(Operation::Boot(boot.clone()));
         if generation == 1 {
+            call(Operation::SeedProgressJitter { seed: 123 });
             call(Operation::Advance {
                 hard_limit: 10,
                 early_slack: 0,

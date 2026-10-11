@@ -804,6 +804,7 @@ impl<M: WorldMachine> Coord<'_, M> {
             return Err("lifecycle boundary is in committed machine past".into());
         }
         let previous_incarnation = guests[m].m.incarnation();
+        let mut applied_speed_hz = None;
         match op {
             faults::Lifecycle::Pause => {
                 self.paused_ingress[m] = 0;
@@ -849,7 +850,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                     return Err(error);
                 }
             }
-            faults::Lifecycle::Throttle(speed_hz) => guests[m].m.throttle(speed_hz)?,
+            faults::Lifecycle::Throttle(speed_hz) => {
+                applied_speed_hz = guests[m].m.throttle(speed_hz)?;
+            }
             faults::Lifecycle::Reboot => {
                 // Frames that reached it before `t` belonged to the dead
                 // NIC and are dropped; later ones arrive normally.
@@ -878,7 +881,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                 faults::Lifecycle::Resume => MachineTransition::Resumed,
                 faults::Lifecycle::Crash => MachineTransition::Crashed,
                 faults::Lifecycle::Reboot => MachineTransition::Rebooted,
-                faults::Lifecycle::Throttle(speed_hz) => MachineTransition::Throttled { speed_hz },
+                faults::Lifecycle::Throttle(_) => MachineTransition::Throttled {
+                    speed_hz: applied_speed_hz,
+                },
             };
             let incarnation = if op == faults::Lifecycle::Crash {
                 previous_incarnation

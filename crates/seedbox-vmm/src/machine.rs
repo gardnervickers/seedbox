@@ -1275,6 +1275,20 @@ impl Machine {
         Ok(true)
     }
 
+    /// Pay counted CPU work before resuming the guest. As with owed I/O,
+    /// timer expiry may make an IRQ pending, but must not execute the vCPU.
+    fn drain_progress(&mut self, limit: u64) -> Result<(), String> {
+        while self.pv_debt_ns != 0 && self.world.time < limit {
+            self.expire_timers()?;
+            let end = limit.min(self.pit.deadline.unwrap_or(u64::MAX));
+            let (charged, owed) = pv_plan::charge(self.pv_debt_ns, 0, end - self.world.time);
+            self.pv_debt_ns = owed;
+            self.advance_to(self.world.time + charged, Cause::Progress);
+            self.expire_timers()?;
+        }
+        Ok(())
+    }
+
     fn checked_page_time(&self, limit: u64) -> Result<u64, String> {
         let last = unsafe { std::ptr::read_volatile(self.page.0.add(1)) };
         advance_time(self.world.time, last.saturating_sub(self.world.time), limit)
@@ -1385,6 +1399,7 @@ impl Machine {
                 ))?;
                 self.sync_page_timer()?;
                 self.expire_timers()?;
+                self.drain_progress(slice_end)?;
                 // Also runs on slice entry after world RX delivery. Never poll
                 // at watchdog landings.
                 if self.poll_net(frames, self.world.time >= slice_end)? {

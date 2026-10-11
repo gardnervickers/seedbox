@@ -129,8 +129,11 @@ impl PvClock {
         // transaction. Never rewrite any of its inputs at a watchdog landing:
         // even a mathematically equivalent replan can tear those loads, relax
         // a previous re-arm's bound, or move an overdue target.
-        // The owed time is as good as spent: the plan counts from there.
-        let t0 = m.time.saturating_add(m.pv_debt_ns);
+        // At a legal resume the run loop has paid all outstanding progress
+        // before allowing another guest instruction. Watchdog resumes retain
+        // the guest's existing plan until it reaches its semantic yield.
+        debug_assert!(!legal || m.pv_debt_ns == 0);
+        let t0 = m.time;
         if let Some((bound, target)) = clock_plan(
             t0,
             m.page_get(PAGE_SYSCALLS),
@@ -348,32 +351,74 @@ mod tests {
 
     #[test]
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
-    fn syscalls_counted_past_the_hard_stop_are_owed_to_the_next_run() {
+    fn progress_debt_stops_guest_execution_and_survives_restore() {
         let kvm = Kvm::new().unwrap();
-        let mut m = machine(&kvm, &[0xf4]);
-        m.page_timer_requested = true;
-        m.abi = super::super::ABI_PAGE_TIMER;
-        m.enable_page_timer();
-        let mut clock = PvClock::new(Duration::from_secs(10)).unwrap();
-        m.page_set(PAGE_SYSCALLS, 0);
-        // 25 syscalls (a progress call at 2 GHz) against a 10 us stop.
-        clock.prepare(&mut m, 10_000, 10_000, true).unwrap();
-        clock.start(0);
-        assert_eq!(clock.read(&mut m.pv_debt_ns, 25), 10_000);
-        assert_eq!(m.pv_debt_ns, 15_000);
-        m.time = 10_000;
-        m.page_set(PAGE_SYSCALLS, 25);
-        // The next plan counts from the owed time: 5 us of debt left after a
-        // 10 us soft stop would be reached by the first syscall.
-        clock.prepare(&mut m, 100_000, 20_000, true).unwrap();
-        assert_eq!(m.page_get(super::super::PAGE_PLAN_TIME), 25_000);
-        assert_eq!(m.page_get(PAGE_SYSCALL_TARGET), 26);
-        clock.start(25);
-        assert_eq!(clock.read(&mut m.pv_debt_ns, 25), 15_000);
-        assert_eq!(m.pv_debt_ns, 0);
-        clock.start(25);
-        assert_eq!(clock.read(&mut m.pv_debt_ns, 27), 2_000);
-        assert_eq!(m.pv_debt_ns, 0);
+        // Count 25 us, yield, then write a byte and exit. The write must not
+        // execute while any of that CPU charge is still owed.
+        let code = [
+            0xc7, 0x05, 0x18, 0x00, 0x00, 0xd0, 25, 0, 0, 0, // syscalls = 25
+            // Force watchdog interruptions between the count and its yield.
+            0xb9, 0, 0, 0, 1, 0x49, 0x75, 0xfd, 0xba, 0x2c, 0x05, 0, 0, 0x31, 0xc0,
+            0xee, // yield(0)
+            0xba, 0xe9, 0, 0, 0, 0xb0, b'X', 0xee, // debug console
+            0xba, 0xf4, 0, 0, 0, 0x31, 0xc0, 0xee, // exit(0)
+        ];
+        let mut reference = None;
+        for watchdog in [Duration::from_secs(10), Duration::from_micros(100)] {
+            let mut m = machine(&kvm, &code);
+            m.page_timer_requested = true;
+            m.abi = super::super::ABI_PAGE_TIMER;
+            m.enable_page_timer();
+            m.pic.set_masks(0xffff);
+            let mut clock = PvClock::new(watchdog).unwrap();
+            let mut frames = Vec::new();
+            assert_eq!(
+                m.run_until(&mut clock, 10_000, 0, &mut frames).unwrap(),
+                Stop::Reached
+            );
+            assert_eq!((m.time, m.pv_debt_ns), (10_000, 15_000));
+            assert!(m.com1.out.is_empty());
+            if watchdog == Duration::from_micros(100) {
+                assert!(m.stats.eintr > 0, "exercise watchdog landings with debt");
+            }
+            let saved = m.snapshot().unwrap();
+            let mut replay = None;
+            for restored in [false, true] {
+                if restored {
+                    m.restore(&saved).unwrap();
+                    clock.restore_boundary().unwrap();
+                }
+                // A timer can become due while the stopped CPU pays its debt.
+                m.pit.program_deadline(Some(15_000));
+                m.pit.fresh = false;
+                let exits = m.stats.exits;
+                assert_eq!(
+                    m.run_until(&mut clock, 20_000, 0, &mut frames).unwrap(),
+                    Stop::Reached
+                );
+                assert_eq!((m.time, m.pv_debt_ns), (20_000, 5_000));
+                assert_eq!(m.stats.exits, exits, "debt must drain without KVM_RUN");
+                assert!(m.com1.out.is_empty());
+                assert_eq!(m.pit.deadline, None);
+                assert_eq!(
+                    m.run_until(&mut clock, 30_000, 0, &mut frames).unwrap(),
+                    Stop::Exited
+                );
+                assert_eq!((m.time, m.pv_debt_ns), (25_000, 0));
+                assert_eq!(m.com1.out, b"X");
+                let result = (m.time, m.exit_witness(), m.com1.out.clone());
+                if let Some(want) = &replay {
+                    assert_eq!(&result, want);
+                } else {
+                    replay = Some(result.clone());
+                }
+                if let Some(want) = &reference {
+                    assert_eq!(&result, want);
+                } else {
+                    reference = Some(result);
+                }
+            }
+        }
     }
 
     #[test]

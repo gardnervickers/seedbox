@@ -1,4 +1,7 @@
 name: slow-machine
+cpu:
+  speed: 2GHz
+  jitter: 5%
 machines:
   worker:
     image: docker.io/library/python:3.13-alpine
