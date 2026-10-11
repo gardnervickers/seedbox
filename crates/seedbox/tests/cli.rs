@@ -2251,3 +2251,99 @@ fn capacity_help_explains_resident_slots_and_accepts_json() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("--unexpected"));
 }
+
+#[test]
+fn get_world_prints_machine_and_link_tables() {
+    use seedbox_api::{
+        LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, WorldState,
+    };
+    use std::io::{Read, Write};
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join(".local/state/seedbox");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&state)
+        .unwrap();
+    let machine = |name: &str, oracle| MachineState {
+        name: name.into(),
+        incarnation: 0,
+        condition: MachineCondition::Ready,
+        exit_code: None,
+        throttle_permille: None,
+        oracle,
+        last_transition: None,
+        last_transition_at_ns: None,
+        condition_since_ns: None,
+        application: Default::default(),
+    };
+    let link = |from: &str, to: &str, cut: Option<&str>| LinkState {
+        from: from.into(),
+        to: to.into(),
+        policy: LinkPolicy {
+            latency_ns: 2_500_000,
+            jitter_ns: 500_000,
+            loss_ppm: 100,
+            bandwidth_bps: None,
+        },
+        partitioned_by: cut.map(Into::into),
+        shaped_by: None,
+        counters: LinkCounters {
+            scheduled: 12,
+            partition_dropped: 3,
+            loss_dropped: 1,
+            bytes: 960,
+            ..Default::default()
+        },
+    };
+    let world = WorldState {
+        override_rejections: Default::default(),
+        simulation: "k7m2p9qx".parse().unwrap(),
+        revision: 3,
+        simulated_time_ns: 1_000_000_000,
+        machines: vec![machine("n1", false), machine("oracle", true)],
+        links: vec![link("n1", "oracle", None), link("oracle", "n1", Some("p1"))],
+        faults: Vec::new(),
+    };
+    let body = serde_json::to_string(&world).unwrap();
+    // A stand-in server answering the one world request on the default socket.
+    let listener = std::os::unix::net::UnixListener::bind(state.join("server.sock")).unwrap();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&buffer[..n]),
+                }
+            }
+            if !request.starts_with(b"GET /v1/simulations/k7m2p9qx/world ") {
+                continue;
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            return;
+        }
+    });
+    let output = seedbox(&["get", "world", "k7m2p9qx"], directory.path());
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+MACHINE  CONDITION  INCARNATION  EXIT  ORACLE
+n1       ready      0            -     -
+oracle   ready      0            -     yes
+
+FROM    TO      LATENCY  JITTER  LOSS    FRAMES  BYTES  DROPPED  FAULT
+n1      oracle  2.5ms    500µs   100ppm  12      960    4        -
+oracle  n1      2.5ms    500µs   100ppm  12      960    4        cut p1
+
+simulated time: 1s
+"
+    );
+}

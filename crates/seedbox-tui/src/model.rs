@@ -746,6 +746,7 @@ pub(super) enum HitTarget {
     Faults,
     Links,
     Logs,
+    Oracle,
 }
 
 /// The simulation panel that arrow keys move within.
@@ -756,6 +757,7 @@ pub(super) enum Panel {
     Faults,
     Links,
     Logs,
+    Oracle,
 }
 
 pub struct App {
@@ -772,6 +774,8 @@ pub struct App {
     pub(super) links_scroll: usize,
     /// Link rows the links pane showed when last drawn, to bound scrolling.
     pub(super) links_rows: std::cell::Cell<usize>,
+    /// Rows back from the oracle panel's newest output; 0 follows it.
+    pub(super) oracle_scroll: usize,
     /// Show raw server events in place of logs.
     pub(super) events_tab: bool,
     /// Keys typed while the inject palette is opening.
@@ -1109,6 +1113,7 @@ impl App {
             events_scroll: 0,
             links_scroll: 0,
             links_rows: Default::default(),
+            oracle_scroll: 0,
             events_tab: false,
             typeahead: Vec::new(),
             zoom: 0,
@@ -1299,6 +1304,7 @@ impl App {
         } else {
             0
         };
+        let oracle_before = self.oracle_row_count();
         let mut requests = self.apply_update(update);
         requests.extend(self.preview_requests());
         requests.extend(self.fault_preview_requests());
@@ -1311,7 +1317,32 @@ impl App {
                 .logs_scroll
                 .saturating_add(after.saturating_sub(before));
         }
+        if self.oracle_scroll > 0 {
+            let added = self.oracle_row_count().saturating_sub(oracle_before);
+            self.oracle_scroll = self.oracle_scroll.saturating_add(added);
+        }
         requests
+    }
+
+    /// Wrapped rows in the oracle panel as last laid out, or 0 when hidden.
+    fn oracle_row_count(&self) -> usize {
+        let shown = self.logs_exclude.borrow();
+        let (Some(name), Some(focus)) = (shown.as_deref(), self.focus.as_ref()) else {
+            return 0;
+        };
+        let width = self
+            .hitboxes
+            .borrow()
+            .iter()
+            .find(|(_, target)| *target == HitTarget::Oracle)
+            .map_or(40, |(rect, _)| rect.width.saturating_sub(2));
+        crate::view::log_rows(focus, width, crate::view::LogScope::Only(name)).len()
+    }
+
+    /// Move the oracle panel `step` rows back in its output, never past the first row.
+    fn scroll_oracle(&mut self, step: isize) {
+        let maximum = self.oracle_row_count();
+        self.oracle_scroll = self.oracle_scroll.saturating_add_signed(step).min(maximum);
     }
 
     /// Wrapped rows in the log pane as last laid out.
@@ -2066,7 +2097,9 @@ impl App {
                 KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
             )
         {
-            let offset = if self.events_tab {
+            let offset = if self.panel == Panel::Oracle {
+                &mut self.oracle_scroll
+            } else if self.events_tab {
                 &mut self.events_scroll
             } else {
                 &mut self.logs_scroll
@@ -2160,6 +2193,10 @@ impl App {
                     self.panel = Panel::Links;
                     self.scroll_links(if up { -3 } else { 3 });
                 }
+                HitTarget::Oracle => {
+                    self.panel = Panel::Oracle;
+                    self.scroll_oracle(if up { 3 } else { -3 });
+                }
                 HitTarget::Timeline(_) => {
                     return self.timeline_key(KeyEvent::new(
                         if up { KeyCode::Up } else { KeyCode::Down },
@@ -2185,6 +2222,7 @@ impl App {
                 HitTarget::Fault(_) | HitTarget::Faults => self.panel = Panel::Faults,
                 HitTarget::Links => self.panel = Panel::Links,
                 HitTarget::Logs => self.panel = Panel::Logs,
+                HitTarget::Oracle => self.panel = Panel::Oracle,
                 _ => {}
             }
             match target {
@@ -2231,7 +2269,6 @@ impl App {
         Vec::new()
     }
 
-    /// Move the faults panel selection through active, upcoming and history rows.
     /// Move the links pane by `step` rows, keeping its last page full.
     fn scroll_links(&mut self, step: isize) {
         let links = self
@@ -2243,6 +2280,7 @@ impl App {
         self.links_scroll = self.links_scroll.saturating_add_signed(step).min(last);
     }
 
+    /// Move the faults panel selection through active, upcoming and history rows.
     fn move_fault_selection(&mut self, step: isize) {
         let Some(focus) = self.focus.as_mut() else {
             return;
@@ -2395,7 +2433,10 @@ impl App {
             KeyCode::Esc => self.screen = Screen::Catalogue,
             KeyCode::Char('a') => focus.selected = None,
             KeyCode::Tab | KeyCode::BackTab => {
-                let order = [Panel::Machines, Panel::Faults, Panel::Links, Panel::Logs];
+                let mut order = vec![Panel::Machines, Panel::Faults, Panel::Links, Panel::Logs];
+                if self.logs_exclude.borrow().is_some() {
+                    order.push(Panel::Oracle);
+                }
                 let index = order.iter().position(|p| *p == self.panel).unwrap_or(0);
                 let step = if key.code == KeyCode::Tab {
                     1
@@ -2414,6 +2455,7 @@ impl App {
                     Panel::Machines => select(focus, step),
                     Panel::Faults => self.move_fault_selection(step),
                     Panel::Links => self.scroll_links(step),
+                    Panel::Oracle => self.scroll_oracle(-step),
                     Panel::Logs => {
                         let offset = if self.events_tab {
                             &mut self.events_scroll
