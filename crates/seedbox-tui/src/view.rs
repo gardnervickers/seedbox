@@ -3554,6 +3554,7 @@ mod tests {
             simulation: "k7m2p9qx".parse().unwrap(),
             faults: vec![seedbox_api::FaultDescriptor {
                 name: "spawn".into(),
+                category: seedbox_api::FaultCategory::Machine,
                 title: "Spawn machine".into(),
                 description: "Copy the source machine".into(),
                 schema: serde_json::json!({

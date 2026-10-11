@@ -361,6 +361,9 @@ mod tests {
             throttle_permille: None,
             oracle: false,
             last_transition: None,
+            last_transition_at_ns: None,
+            condition_since_ns: None,
+            application: Default::default(),
         });
         let catalogue = discover(&world, 1_000_000);
         let schema = &catalogue

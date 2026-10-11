@@ -38,6 +38,7 @@ struct Field {
 /// heal shortcuts and the map preview. The schema still decides validity.
 #[derive(Clone, Debug, Default)]
 pub(super) struct FormContext {
+    pub machines: Vec<String>,
     pub selected: Option<String>,
     /// Every handle the world has used, so new ones stay unique.
     pub handles: Vec<String>,
@@ -1652,6 +1653,7 @@ mod tests {
             schema: heal,
         });
         let context = FormContext {
+            machines: vec!["alpha".into(), "beta".into()],
             selected: Some("beta".into()),
             handles: vec!["p1".into()],
             active: vec![("p1".into(), "partition alpha┃beta".into())],
@@ -1755,6 +1757,7 @@ mod tests {
             simulation: "k7m2p9qx".parse().expect("id"),
             faults: vec![seedbox_api::FaultDescriptor {
                 name: "spawn".into(),
+                category: seedbox_api::FaultCategory::Machine,
                 title: "Spawn machine".into(),
                 description: String::new(),
                 schema: json!({"type":"object","additionalProperties":false,
