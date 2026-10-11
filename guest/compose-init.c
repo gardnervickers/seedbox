@@ -27,6 +27,7 @@
 #include "application-output.h"
 #include "barrier.h"
 #include "progress-launch.h"
+#include "world-clock.h"
 #include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -792,7 +793,7 @@ int main(void) {
     if (memcmp(magic, "SBXLAUNCH6", 10)) { errno = EINVAL; die("launch version"); }
     char *ip = text(), *hosts = text(), *hostname = text(); user = text(); working_dir = text();
     uint32_t max_map_count = count();
-    struct timespec wall_clock = {.tv_sec = count(), .tv_nsec = 0};
+    uint32_t wall_clock_epoch = count();
     instructions_per_progress_call = count();
     if (!instructions_per_progress_call) { errno = EINVAL; die("zero progress instruction budget"); }
     progress_points_per_block = count();
@@ -835,6 +836,7 @@ int main(void) {
     relay_socket("/proc/cmdline", "/run/seedbox/control.sock");
     /* Everything before this point is fixed by the boot seed; the application
      * starts after the world is released under the run seed. */
+    struct timespec wall_clock = seedbox_wall_clock_at(wall_clock_epoch, seedbox_world_time_ns());
     if (clock_settime(CLOCK_REALTIME, &wall_clock)) die("set recorded wall clock");
     if (seedbox_launch_barrier("/proc/cmdline", "/dev/urandom")) die("launch barrier");
     watch_children();

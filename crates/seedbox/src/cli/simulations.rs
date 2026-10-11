@@ -816,3 +816,46 @@ pub(super) fn runtime() -> Result<tokio::runtime::Runtime> {
 pub(super) fn client_error(error: seedbox_client::Error) -> Error {
     Error::Setup(error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_acceptance_projects_round_trip_through_submission_json() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../harness/acceptance/workloads");
+        let mut tested = 0;
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|v| v.to_str()) != Some("yaml") {
+                continue;
+            }
+            let (spec, _) = load_spec(
+                &ComposeArg {
+                    compose: path.clone(),
+                },
+                None,
+            )
+            .unwrap();
+            let bytes =
+                serde_json::to_vec(&spec).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let restored: SimulationSpec = serde_json::from_slice(&bytes).unwrap();
+            let project: seedbox_spec::project::Project =
+                serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                project.machines.len() + 1,
+                spec.configuration.services.len()
+            );
+            assert!(matches!(restored.inputs, InputSource::Project));
+            assert_eq!(
+                serde_json::to_value(&restored).unwrap(),
+                serde_json::to_value(&spec).unwrap(),
+                "{}",
+                path.display()
+            );
+            tested += 1;
+        }
+        assert!(tested >= 7);
+    }
+}

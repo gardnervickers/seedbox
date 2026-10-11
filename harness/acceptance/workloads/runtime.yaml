@@ -1,17 +1,13 @@
 name: guest-runtime
-services:
-  runtime:
-    build:
-      context: ../../../guest
-      dockerfile: acceptance-runtime.Dockerfile
-    user: "123:456"
-    volumes:
-      - {type: volume, source: data, target: /data}
-volumes:
-  data: {}
-x-seedbox:
-  version: 1
-  machine: {memory_mb: 2048}
-  seed: 172
-  limits: {simulated_time: 30s, wall_time: 15m}
-  check: {service: runtime}
+machines: {}
+oracle:
+  build:
+    context: "../../../guest"
+    dockerfile: acceptance-runtime.Dockerfile
+  user: 123:456
+  volumes:
+    data:
+      target: "/data"
+  entrypoint:
+  - "/runtime-probe"
+  - oracle

@@ -1,0 +1,17 @@
+name: clock-reboot
+machines:
+  a:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint: [python3, /scenario/clock_skew.py, clock]
+    files:
+      - {source: ../driver/clock_skew.py, target: /scenario/clock_skew.py}
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint: [python3, /scenario/clock_reboot.py]
+  files:
+    - {source: ../driver/clock_reboot.py, target: /scenario/clock_reboot.py}
+    - {source: ../driver/clock_skew.py, target: /scenario/clock_skew.py}
+    - {source: ../../../python/seedbox/__init__.py, target: /scenario/seedbox/__init__.py}
+    - {source: ../../../python/seedbox/control.py, target: /scenario/seedbox/control.py}
+network:
+  latency: 1ms

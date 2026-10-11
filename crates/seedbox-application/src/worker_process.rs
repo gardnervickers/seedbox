@@ -12,7 +12,7 @@ use seedbox_engine_core::launch::{Performance, WorkerRequest};
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     os::fd::AsRawFd,
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::PathBuf,
@@ -285,6 +285,25 @@ impl WorkerLaunch {
     }
 }
 
+/// Include a bounded diagnostic tail when a worker exits without a usable report.
+/// The original stderr file remains available for the complete diagnostic.
+fn worker_failure(report: &std::path::Path) -> String {
+    const LIMIT: u64 = 8192;
+    let failure = crate::engine_adapter::VMM_FAILURE_MESSAGE;
+    let tail = (|| -> std::io::Result<String> {
+        let mut file = fs::File::open(report.with_file_name("vmm.stderr"))?;
+        let len = file.metadata()?.len();
+        file.seek(SeekFrom::Start(len.saturating_sub(LIMIT)))?;
+        let mut bytes = Vec::new();
+        file.take(LIMIT).read_to_end(&mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes).trim().to_owned())
+    })();
+    match tail {
+        Ok(tail) if !tail.is_empty() => format!("{failure}; worker stderr: {tail}"),
+        _ => failure.into(),
+    }
+}
+
 pub(crate) struct RunningWorker {
     // Field drop order keeps process cleanup ahead of endpoint removal.
     process: OwnedProcess,
@@ -309,16 +328,16 @@ impl RunningWorker {
                     (true, report) => report,
                     (false, Ok(mut report)) => {
                         report.reason = StopReason::Error;
-                        let failure = crate::engine_adapter::VMM_FAILURE_MESSAGE;
+                        let failure = worker_failure(&self.report);
                         report.detail = Some(match report.detail {
                             Some(detail) => format!("{failure}; {detail}"),
-                            None => failure.into(),
+                            None => failure,
                         });
                         Ok(report)
                     }
                     (false, Err(error)) => Err(Error::Execution(format!(
                         "{}; {error}",
-                        crate::engine_adapter::VMM_FAILURE_MESSAGE
+                        worker_failure(&self.report)
                     ))),
                 };
             }
@@ -451,6 +470,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn worker_failure_includes_bounded_stderr_without_requiring_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let report = directory.path().join("vmm.json");
+        assert_eq!(
+            worker_failure(&report),
+            crate::engine_adapter::VMM_FAILURE_MESSAGE
+        );
+        let stderr = directory.path().join("vmm.stderr");
+        fs::write(
+            &stderr,
+            format!("{}\nerror: reboot transport closed\n", "x".repeat(20000)),
+        )
+        .unwrap();
+        let failure = worker_failure(&report);
+        assert!(failure.ends_with("error: reboot transport closed"));
+        assert!(failure.len() < 8400);
+        fs::write(&stderr, " \n").unwrap();
+        assert_eq!(
+            worker_failure(&report),
+            crate::engine_adapter::VMM_FAILURE_MESSAGE
+        );
+    }
+
+    #[test]
     fn cleanup_failure_preserves_the_observed_oracle_exit() {
         for code in [0, 7] {
             let mut report = incomplete(StopReason::Completed);
@@ -468,9 +511,12 @@ mod tests {
 
     #[test]
     fn replacement_probe_bounds_output_and_cleans_up_timeout() {
-        let _lock = crate::preparation_command::PROCESS_TEST_LOCK
-            .lock()
-            .unwrap();
+        if !crate::test_process::isolated(concat!(
+            module_path!(),
+            "::replacement_probe_bounds_output_and_cleans_up_timeout"
+        )) {
+            return;
+        }
         let directory = tempfile::tempdir().unwrap();
         let engine = directory.path().join("engine");
         let probe = |body: &str, timeout| {
@@ -727,7 +773,8 @@ mod tests {
             .env_clear()
             .env("PATH", std::env::var_os("PATH").expect("test tool PATH"))
             .process_group(0)
-            .stdout(fs::File::create(&report).unwrap());
+            .stdout(fs::File::create(&report).unwrap())
+            .stderr(fs::File::create(output.join("vmm.stderr")).unwrap());
         WorkerLaunch {
             command,
             engine: "/bin/sh".into(),
@@ -750,6 +797,30 @@ mod tests {
             Some(libc::ECHILD)
         );
         assert!(!output.join("host-control").exists());
+    }
+
+    #[test]
+    fn worker_failure_preserves_stderr_when_report_is_empty_or_invalid() {
+        for script in [
+            "echo 'error: reboot transport closed' >&2; exit 1",
+            "echo 'error: reboot transport closed' >&2; printf '{invalid'; exit 1",
+        ] {
+            let output = tempfile::tempdir().unwrap();
+            let child = worker(output.path(), script);
+            let pid = child.process.0.as_ref().unwrap().id();
+            let error = child
+                .wait(&CancellationToken::default(), 5_000_000_000, |bytes| {
+                    serde_json::from_slice::<serde_json::Value>(bytes)?;
+                    Ok(incomplete(StopReason::Completed))
+                })
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("worker stderr: error: reboot transport closed"),
+                "{error}"
+            );
+            assert_reaped(pid, output.path());
+        }
     }
 
     #[test]
