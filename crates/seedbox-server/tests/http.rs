@@ -81,6 +81,39 @@ async fn unix_client_submits_describes_and_retries_without_duplicate_work() {
         seedbox_control::MAX_PPM
     );
     assert_eq!(shape.schema["properties"]["loss_ppm"]["x-unit"], "ppm");
+    assert_eq!(stop.category, seedbox_api::FaultCategory::Application);
+    let preview = client
+        .preview_fault(
+            &simulation.metadata.id,
+            &serde_json::json!({"action":"stop","machine":"oracle"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.machines, ["oracle"]);
+    assert_eq!(preview.revision, world.revision);
+    assert_eq!(preview.category, seedbox_api::FaultCategory::Application);
+    assert!(preview
+        .limitations
+        .iter()
+        .any(|text| text.contains("not guaranteed")));
+    assert_eq!(client.world(&simulation.metadata.id).await.unwrap(), world);
+    assert_eq!(
+        client.describe(&simulation.metadata.id).await.unwrap(),
+        simulation
+    );
+    assert!(pending.try_recv().is_err());
+    assert!(matches!(
+        client
+            .preview_fault(
+                &simulation.metadata.id,
+                &serde_json::json!({"action":"stop","machine":"missing"})
+            )
+            .await,
+        Err(Error::Rejected {
+            code: ErrorCode::InvalidRequest,
+            ..
+        })
+    ));
     let unknown = "zzzzzzzz".parse().unwrap();
     assert!(matches!(
         client.fault_types(&unknown).await,
@@ -505,5 +538,65 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
         })
     ));
     let _ = shutdown.send(());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn native_acceptance_submissions_round_trip_over_unix_http() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = Arc::new(seedbox_server::manager::Manager::new(
+        Catalogue::open(&temp.path().join("catalogue")).unwrap(),
+    ));
+    let (work, mut pending) = mpsc::channel(4);
+    let socket = temp.path().join("api.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let (shutdown, done) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router(ApiState::new(manager, work)))
+            .with_graceful_shutdown(async {
+                let _ = done.await;
+            })
+            .await
+            .unwrap();
+    });
+    let client = Client::connect_to(&socket).unwrap();
+    for name in [
+        "connections",
+        "key-value",
+        "mac-capabilities",
+        "race",
+        "runtime",
+        "triggers",
+        "volume-crash",
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../harness/acceptance/workloads/{name}.yaml"))
+            .canonicalize()
+            .unwrap();
+        let mut request = support::request();
+        request.request_id = format!("native-{name}");
+        request.spec.inputs = seedbox_api::InputSource::Project;
+        request.spec.configuration = seedbox_application::config::load_for_architecture(
+            &path,
+            &Default::default(),
+            seedbox_application::guest::Architecture::Amd64,
+        )
+        .unwrap();
+        let simulation = client
+            .submit(&request)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(pending.recv().await.unwrap(), simulation.metadata.id);
+        assert_eq!(
+            serde_json::to_value(&simulation.spec).unwrap(),
+            serde_json::to_value(&request.spec).unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            client.describe(&simulation.metadata.id).await.unwrap(),
+            simulation
+        );
+    }
+    shutdown.send(()).unwrap();
     server.await.unwrap();
 }

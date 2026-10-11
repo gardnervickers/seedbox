@@ -1,30 +1,35 @@
 name: clock-skew
-services:
+machines:
   a:
     image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/clock_skew.py, clock]
-    configs:
-      - {source: driver, target: /scenario/clock_skew.py}
+    entrypoint:
+    - python3
+    - "/scenario/clock_skew.py"
+    - clock
+    files:
+    - source: "../driver/clock_skew.py"
+      target: "/scenario/clock_skew.py"
   b:
     image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/clock_skew.py, clock]
-    configs:
-      - {source: driver, target: /scenario/clock_skew.py}
-  scenario:
-    image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/clock_skew.py, scenario]
-    configs:
-      - {source: driver, target: /scenario/clock_skew.py}
-      - {source: api-package, target: /scenario/seedbox/__init__.py}
-      - {source: api-control, target: /scenario/seedbox/control.py}
-configs:
-  driver: {file: ../driver/clock_skew.py}
-  api-package: {file: ../../../python/seedbox/__init__.py}
-  api-control: {file: ../../../python/seedbox/control.py}
-x-seedbox:
-  version: 1
-  seed: 57
-  limits: {simulated_time: 30s, wall_time: 10m}
-  network: {latency: 1ms, jitter: 0ns}
-  control: {service: scenario}
-  check: {service: scenario}
+    entrypoint:
+    - python3
+    - "/scenario/clock_skew.py"
+    - clock
+    files:
+    - source: "../driver/clock_skew.py"
+      target: "/scenario/clock_skew.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/clock_skew.py"
+  - scenario
+  files:
+  - source: "../driver/clock_skew.py"
+    target: "/scenario/clock_skew.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

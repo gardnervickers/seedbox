@@ -1,43 +1,62 @@
 name: key-value-faults
-services:
+machines:
   server:
     image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/main.py]
-    configs:
-      - {source: workload, target: /scenario/main.py}
-      - {source: scenario, target: /scenario/scenario.py}
-      - {source: api-package, target: /scenario/seedbox/__init__.py}
-      - {source: api-control, target: /scenario/seedbox/control.py}
-    command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]
+    entrypoint:
+    - python3
+    - "/scenario/main.py"
+    command:
+    - server
+    - "--listen"
+    - 0.0.0.0:7000
+    - "--state"
+    - "/data/kv.log"
+    files:
+    - source: "../../../examples/faults/workload/main.py"
+      target: "/scenario/main.py"
+    - source: "../../../examples/faults/workload/scenario.py"
+      target: "/scenario/scenario.py"
+    - source: "../../../python/seedbox/__init__.py"
+      target: "/scenario/seedbox/__init__.py"
+    - source: "../../../python/seedbox/control.py"
+      target: "/scenario/seedbox/control.py"
   client:
     image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/main.py]
-    configs:
-      - {source: workload, target: /scenario/main.py}
-      - {source: scenario, target: /scenario/scenario.py}
-      - {source: api-package, target: /scenario/seedbox/__init__.py}
-      - {source: api-control, target: /scenario/seedbox/control.py}
-    command: [client, --listen, "0.0.0.0:7001", --address, "server:7000"]
-  scenario:
-    image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/main.py]
-    configs:
-      - {source: workload, target: /scenario/main.py}
-      - {source: scenario, target: /scenario/scenario.py}
-      - {source: api-package, target: /scenario/seedbox/__init__.py}
-      - {source: api-control, target: /scenario/seedbox/control.py}
-    command: [scenario, --control-address, "client:7001"]
-configs:
-  workload: {file: ../../../examples/faults/workload/main.py}
-  scenario: {file: ../../../examples/faults/workload/scenario.py}
-  api-package: {file: ../../../python/seedbox/__init__.py}
-  api-control: {file: ../../../python/seedbox/control.py}
-x-seedbox:
-  version: 1
-  machine: {memory_mb: 512}
-  seed: 1009
-  limits: {simulated_time: 30s, wall_time: 10m}
-  network: {latency: 1ms, jitter: 200us}
-  schedule: {timer_jitter: 1ms}
-  control: {service: scenario}
-  check: {service: scenario}
+    entrypoint:
+    - python3
+    - "/scenario/main.py"
+    command:
+    - client
+    - "--listen"
+    - 0.0.0.0:7001
+    - "--address"
+    - server:7000
+    files:
+    - source: "../../../examples/faults/workload/main.py"
+      target: "/scenario/main.py"
+    - source: "../../../examples/faults/workload/scenario.py"
+      target: "/scenario/scenario.py"
+    - source: "../../../python/seedbox/__init__.py"
+      target: "/scenario/seedbox/__init__.py"
+    - source: "../../../python/seedbox/control.py"
+      target: "/scenario/seedbox/control.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/main.py"
+  command:
+  - scenario
+  - "--control-address"
+  - client:7001
+  files:
+  - source: "../../../examples/faults/workload/main.py"
+    target: "/scenario/main.py"
+  - source: "../../../examples/faults/workload/scenario.py"
+    target: "/scenario/scenario.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

@@ -121,3 +121,33 @@ fn session_copy_cannot_hide_a_corrupt_persistent_binary() {
     assert!(store.put_file(&source).is_err());
     assert!(store.put(bytes).is_err());
 }
+
+#[test]
+fn cached_verification_rejects_same_length_edits_and_replaced_objects() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path());
+    let digest = store.put(b"original").unwrap();
+    let object = directory.path().join("sha256").join(digest.hex());
+    let original_modified = fs::metadata(&object).unwrap().modified().unwrap();
+    store.clone().verify(&digest).unwrap();
+
+    // Restoring mtime and keeping the length cannot conceal a write: ctime
+    // changes too. This exercises the shared cache populated by put().
+    fs::write(&object, b"modified").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&object)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(original_modified))
+        .unwrap();
+    assert!(store.verify(&digest).is_err());
+
+    fs::write(&object, b"original").unwrap();
+    store.verify(&digest).unwrap();
+    let replacement = directory.path().join("replacement");
+    fs::write(&replacement, b"replaced").unwrap();
+    fs::rename(replacement, &object).unwrap();
+    assert!(store.clone().verify(&digest).is_err());
+    fs::remove_file(object).unwrap();
+    assert!(store.verify(&digest).is_err());
+}

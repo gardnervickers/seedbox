@@ -800,6 +800,7 @@ fn run(cli: Cli) -> Result<u8> {
                 Some(id) => simulations::seed_range(&id, json),
                 None => simulations::list(json),
             },
+            CollectionArg::Capacity { json } => simulations::capacity(json),
             CollectionArg::Checkpoints { id, json } => simulations::checkpoints(&id, None, json),
             CollectionArg::World { id, json } => observe::world(&id, json),
             CollectionArg::Timeline { id, json } => observe::timeline(&id, json),
@@ -1213,6 +1214,12 @@ enum DeleteArg {
 
 #[derive(Subcommand)]
 enum CollectionArg {
+    /// Show resident execution slots, paused occupants and queue reasons.
+    Capacity {
+        /// Print JSON instead of tables.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one simulation and optionally watch its status.
     Simulation {
         /// Short simulation ID.

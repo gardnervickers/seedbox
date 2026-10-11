@@ -189,7 +189,35 @@ again.
 Code: [input program](../crates/seedbox-engine-core/src/input_program.rs),
 [coordinator](../crates/seedbox-engine-core/src/world.rs).
 
+## Fault discovery and previews
+
+The server owns categories, parameter schemas and effect explanations.
+`POST /v1/simulations/{id}/fault-preview` accepts an `action` and returns expected
+machines, directed links, effects, preconditions and observations at a world
+revision and simulated time. The shape compiler selects targets without preparing
+an admission, sampling random streams or assigning a fault ID. Heal resolves the
+original active handle, including policies hidden beneath later fault layers.
+
+Preview is observational: process effects still need guest acknowledgement,
+connection incarnations may disappear, and lifecycle state may change before
+submission. Unknown application state stays explicit. Clients must submit through
+the ordinary control path for admission. The TUI discards obsolete form previews,
+shows server targets on the map, and requires Enter after the current preview is
+available; opening and closing the menu retain the playback pause/restore flow.
+
+Code: [preview API](../crates/seedbox-api/src/fault_catalogue.rs),
+[server effects](../crates/seedbox-server/src/fault_preview.rs),
+[target compilation](../crates/seedbox-engine-core/src/faults.rs).
+
 ## Checkpoints and lifecycle
+
+World observations expose machine and application conditions separately.
+Confirmed process effects update the application condition at their effect time;
+whole-machine pause preserves it. Resume restores the machine's pre-pause
+condition, including startup. Crash makes the application unavailable, and reboot
+waits for a new readiness observation. Application exits retain their exit code.
+Persistent stop and pause effects remain active until reversed or ended by a
+lifecycle transition.
 
 A checkpoint captures the world and its input-program cursor together. Restoring
 it must neither repeat consumed overrides nor lose pending ones. Capture requires
@@ -249,6 +277,10 @@ Code: [classifier](../crates/seedbox-engine-core/src/connections.rs),
 A resolved definition retains the initial wall-clock epoch. The default derives
 from image creation times, with a minimum of 86400 seconds. Sampling the host
 clock for each run would make otherwise identical fresh runs differ.
+The guest supervisor initializes wall time to that epoch plus elapsed world time
+on every boot. It reads the kernel-emulated PV counter because a rebooted
+kernel's monotonic clock begins again at boot. An explicit clock fault may
+change wall time independently.
 
 Kernels, engines, prepared boot archives, and checkpoint binaries are identified
 by content digest in the persistent server cache. Metadata, logs, and execution

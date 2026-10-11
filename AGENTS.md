@@ -3,6 +3,16 @@
 Read [README.md](README.md) first. [Design](docs/design.md) describes the
 architecture; [internals](docs/internals.md) explains the tricky mechanisms.
 
+## Pull requests
+
+Changes that touch the user interface must include screenshots in the PR
+showing what changed. This includes TUI screens and user-facing CLI output.
+Capture and inspect the changed interface; include before/after views when they
+help explain the change. Label fixture or test-rendered screenshots clearly.
+Every PR must reference its originating issue. Use `Closes #N` only when the
+issue is fully resolved; otherwise use `Refs #N`. Keep PR descriptions short.
+Open review-ready PRs as non-drafts; reviews and merges go through the user.
+
 ## Workspace
 
 - `crates/seedbox` is the default executable package: `cargo run -- <command>` runs the CLI.

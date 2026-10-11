@@ -1,32 +1,35 @@
 name: volume-crash
-services:
+machines:
   server:
     image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/main.py]
-    command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]
-    volumes: [data:/data]
-    configs:
-      - {source: workload, target: /scenario/main.py}
-  client:
-    image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/volume.py]
-    configs:
-      - {source: driver, target: /scenario/volume.py}
-      - {source: workload, target: /scenario/main.py}
-      - {source: api-package, target: /scenario/seedbox/__init__.py}
-      - {source: api-control, target: /scenario/seedbox/control.py}
-volumes:
-  data: {}
-configs:
-  driver: {file: ../driver/volume.py}
-  workload: {file: ../../../examples/faults/workload/main.py}
-  api-package: {file: ../../../python/seedbox/__init__.py}
-  api-control: {file: ../../../python/seedbox/control.py}
-x-seedbox:
-  version: 1
-  seed: 4100
-  limits: {simulated_time: 60s, wall_time: 10m}
-  network: {latency: 1ms, jitter: 200us}
-  schedule: {timer_jitter: 1ms}
-  control: {service: client}
-  check: {service: client}
+    entrypoint:
+    - python3
+    - "/scenario/main.py"
+    command:
+    - server
+    - "--listen"
+    - 0.0.0.0:7000
+    - "--state"
+    - "/data/kv.log"
+    files:
+    - source: "../../../examples/faults/workload/main.py"
+      target: "/scenario/main.py"
+    volumes:
+      data:
+        target: "/data"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/volume.py"
+  files:
+  - source: "../driver/volume.py"
+    target: "/scenario/volume.py"
+  - source: "../../../examples/faults/workload/main.py"
+    target: "/scenario/main.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

@@ -149,6 +149,13 @@ pub enum Life {
     Paused,
     Down,
 }
+
+/// Names selected by shape compilation, with no admission or execution effects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionTargets {
+    pub machines: Vec<String>,
+    pub links: Vec<(String, String)>,
+}
 /// A lifecycle transition applied at a fault boundary, for the world to carry
 /// out on the machine before anything else happens at that time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -285,6 +292,38 @@ impl Faults {
             action: action.clone(),
         })
         .map(|_| ())
+    }
+
+    /// Compile only target selection. This never samples RNG, prepares an
+    /// admission, or assigns/reserves an ID. Heal targets need an observation
+    /// of the active handle and are deliberately not inferred here.
+    pub fn action_targets(&self, action: &Action) -> Result<ActionTargets, String> {
+        let entry = self.compile(Plan {
+            id: 0,
+            at_ns: 0,
+            deadline_ns: 0,
+            action: action.clone(),
+        })?;
+        let mut machines = BTreeSet::new();
+        if let Some(target) = entry.target {
+            machines.insert(self.names[target].clone());
+        }
+        let mut links: Vec<_> = entry
+            .pairs
+            .iter()
+            .map(|&(from, to)| (self.names[from].clone(), self.names[to].clone()))
+            .collect();
+        if let Action::DropConnection { connection, .. } = action {
+            links.push((connection.from.clone(), connection.to.clone()));
+        }
+        for (from, to) in &links {
+            machines.insert(from.clone());
+            machines.insert(to.clone());
+        }
+        Ok(ActionTargets {
+            machines: machines.into_iter().collect(),
+            links,
+        })
     }
     fn compile(&self, plan: Plan) -> Result<Entry, String> {
         if plan.deadline_ns < plan.at_ns {

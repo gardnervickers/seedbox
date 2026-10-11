@@ -33,6 +33,28 @@ pub enum MachineCondition {
     Exited,
 }
 
+/// Process state is independent of whole-machine pause/crash state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApplicationCondition {
+    #[default]
+    Unknown,
+    Starting,
+    Running,
+    Stopped,
+    Paused,
+    Exited,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationState {
+    pub condition: ApplicationCondition,
+    pub changed_at_ns: Option<u64>,
+    pub exit_code: Option<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MachineState {
@@ -47,6 +69,12 @@ pub struct MachineState {
     /// The workload oracle whose exit decides the verdict.
     pub oracle: bool,
     pub last_transition: Option<MachineTransition>,
+    #[serde(default)]
+    pub last_transition_at_ns: Option<u64>,
+    #[serde(default)]
+    pub condition_since_ns: Option<u64>,
+    #[serde(default)]
+    pub application: ApplicationState,
 }
 
 /// One direction of a machine pair.
@@ -106,7 +134,7 @@ pub struct FaultState {
     pub applied_time_ns: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<serde_json::Value>,
-    /// An applied network, clock or throttle fault whose handle has not been healed.
+    /// An applied effect that persists until healed, reversed, or ended by lifecycle.
     pub active: bool,
 }
 

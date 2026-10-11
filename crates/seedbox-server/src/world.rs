@@ -2,8 +2,9 @@
 //! The spec seeds the initial machines and link policies; everything after
 //! that, including machines the spec never named, comes from observations.
 use seedbox_api::{
-    EventKind, FaultAction, FaultState, FaultStatus, Frame, FrameFate, LinkCounters, LinkPolicy,
-    LinkState, MachineCondition, MachineState, MachineTransition, SimulationId, WorldState,
+    ApplicationCondition, ApplicationState, EventKind, FaultAction, FaultState, FaultStatus, Frame,
+    FrameFate, LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState,
+    MachineTransition, SimulationId, WorldState,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,6 +25,9 @@ pub(crate) struct Tracker {
     partitions: BTreeMap<String, (u32, BTreeSet<Pair>)>,
     shapes: BTreeMap<String, (u32, BTreeSet<Pair>, LinkPolicy)>,
     healable: BTreeMap<String, u32>,
+    process_effects: BTreeMap<String, u32>,
+    machine_pauses: BTreeMap<String, u32>,
+    before_pause: BTreeMap<String, MachineCondition>,
 }
 
 fn pairs(from: &[String], to: &[String]) -> BTreeSet<Pair> {
@@ -69,6 +73,9 @@ impl Tracker {
             partitions: BTreeMap::new(),
             shapes: BTreeMap::new(),
             healable: BTreeMap::new(),
+            process_effects: BTreeMap::new(),
+            machine_pauses: BTreeMap::new(),
+            before_pause: BTreeMap::new(),
         };
         for name in configuration.services.keys() {
             tracker.machine(name);
@@ -90,6 +97,9 @@ impl Tracker {
                     throttle_permille: None,
                     oracle: name == self.oracle,
                     last_transition: None,
+                    last_transition_at_ns: None,
+                    condition_since_ns: None,
+                    application: ApplicationState::default(),
                 },
             );
         }
@@ -113,6 +123,12 @@ impl Tracker {
                 let m = self.machine(machine);
                 m.incarnation = *incarnation;
                 m.condition = MachineCondition::Ready;
+                m.condition_since_ns = Some(time);
+                m.application = ApplicationState {
+                    condition: ApplicationCondition::Running,
+                    changed_at_ns: Some(time),
+                    exit_code: None,
+                };
             }
             EventKind::MachineExited {
                 machine,
@@ -123,27 +139,78 @@ impl Tracker {
                 m.incarnation = *incarnation;
                 m.condition = MachineCondition::Exited;
                 m.exit_code = Some(*code);
+                m.condition_since_ns = Some(time);
+                m.application = ApplicationState {
+                    condition: ApplicationCondition::Exited,
+                    changed_at_ns: Some(time),
+                    exit_code: Some(*code),
+                };
+                self.process_effects.remove(machine);
+                self.machine_pauses.remove(machine);
+                self.before_pause.remove(machine);
             }
             EventKind::MachineLifecycle {
                 machine,
                 incarnation,
                 transition,
             } => {
+                let resumed_condition = match transition {
+                    MachineTransition::Paused => {
+                        let condition = self.machine(machine).condition;
+                        self.before_pause
+                            .entry(machine.clone())
+                            .or_insert(condition);
+                        None
+                    }
+                    MachineTransition::Resumed => self.before_pause.remove(machine),
+                    MachineTransition::Crashed | MachineTransition::Rebooted => {
+                        self.before_pause.remove(machine);
+                        None
+                    }
+                    MachineTransition::Throttled { .. } => None,
+                };
                 let m = self.machine(machine);
                 m.incarnation = *incarnation;
                 m.last_transition = Some(*transition);
+                m.last_transition_at_ns = Some(time);
+                if !matches!(transition, MachineTransition::Throttled { .. }) {
+                    m.condition_since_ns = Some(time);
+                }
                 match transition {
                     MachineTransition::Paused => m.condition = MachineCondition::Paused,
-                    MachineTransition::Resumed => m.condition = MachineCondition::Ready,
-                    MachineTransition::Crashed => m.condition = MachineCondition::Crashed,
+                    MachineTransition::Resumed => {
+                        m.condition = resumed_condition.unwrap_or(MachineCondition::Starting);
+                    }
+                    MachineTransition::Crashed => {
+                        m.condition = MachineCondition::Crashed;
+                        m.application = ApplicationState {
+                            condition: ApplicationCondition::Unavailable,
+                            changed_at_ns: Some(time),
+                            exit_code: None,
+                        };
+                    }
                     MachineTransition::Rebooted => {
                         m.condition = MachineCondition::Starting;
                         m.exit_code = None;
+                        m.application = ApplicationState {
+                            condition: ApplicationCondition::Starting,
+                            changed_at_ns: Some(time),
+                            exit_code: None,
+                        };
                     }
                     MachineTransition::Throttled { factor_permille } => {
                         m.throttle_permille =
                             (*factor_permille != 1000).then_some(*factor_permille);
                     }
+                }
+                if matches!(
+                    transition,
+                    MachineTransition::Crashed | MachineTransition::Rebooted
+                ) {
+                    self.process_effects.remove(machine);
+                    self.machine_pauses.remove(machine);
+                } else if matches!(transition, MachineTransition::Resumed) {
+                    self.machine_pauses.remove(machine);
                 }
             }
             EventKind::FaultChanged {
@@ -182,7 +249,7 @@ impl Tracker {
                         .clone()
                         .and_then(|plan| serde_json::from_value::<FaultAction>(plan).ok())
                     {
-                        self.apply(*id, &plan);
+                        self.apply(*id, applied_time_ns.unwrap_or(time), &plan);
                     }
                 }
             }
@@ -191,8 +258,41 @@ impl Tracker {
         self.revision += 1;
     }
 
-    fn apply(&mut self, id: u32, plan: &FaultAction) {
+    fn apply(&mut self, id: u32, at: u64, plan: &FaultAction) {
         match plan {
+            FaultAction::Stop { machine }
+            | FaultAction::PauseProcess { machine }
+            | FaultAction::Restart { machine }
+            | FaultAction::ResumeProcess { machine } => {
+                let condition = match plan {
+                    FaultAction::Stop { .. } => ApplicationCondition::Stopped,
+                    FaultAction::PauseProcess { .. } => ApplicationCondition::Paused,
+                    _ => ApplicationCondition::Running,
+                };
+                self.machine(machine).application = ApplicationState {
+                    condition,
+                    changed_at_ns: Some(at),
+                    exit_code: None,
+                };
+                if matches!(
+                    condition,
+                    ApplicationCondition::Stopped | ApplicationCondition::Paused
+                ) {
+                    self.process_effects.insert(machine.clone(), id);
+                } else {
+                    self.process_effects.remove(machine);
+                }
+            }
+            FaultAction::Pause { machine } => {
+                self.machine_pauses.insert(machine.clone(), id);
+            }
+            FaultAction::Resume { machine } => {
+                self.machine_pauses.remove(machine);
+            }
+            FaultAction::Crash { machine } | FaultAction::Reboot { machine } => {
+                self.machine_pauses.remove(machine);
+                self.process_effects.remove(machine);
+            }
             FaultAction::Partition {
                 handle,
                 left,
@@ -229,7 +329,8 @@ impl Tracker {
             }
             FaultAction::ClockSkew { handle, .. }
             | FaultAction::ClockDrift { handle, .. }
-            | FaultAction::Throttle { handle, .. } => {
+            | FaultAction::Throttle { handle, .. }
+            | FaultAction::DropConnection { handle, .. } => {
                 self.healable.insert(handle.clone(), id);
             }
             FaultAction::Heal { handle } => {
@@ -237,7 +338,6 @@ impl Tracker {
                 self.partitions.remove(handle);
                 self.shapes.remove(handle);
             }
-            _ => {}
         }
     }
 
@@ -329,6 +429,8 @@ impl Tracker {
             .map(|(id, _)| *id)
             .chain(self.shapes.values().map(|(id, _, _)| *id))
             .chain(self.healable.values().copied())
+            .chain(self.process_effects.values().copied())
+            .chain(self.machine_pauses.values().copied())
             .collect();
         WorldState {
             override_rejections: self.override_rejections.clone(),
@@ -436,8 +538,210 @@ mod tests {
         }
     }
 
+    #[test]
+    fn selected_connection_loss_is_discoverable_and_healable() {
+        let mut t = tracker();
+        let action: FaultAction = serde_json::from_value(serde_json::json!({
+            "action":"drop_connection", "handle":"selected", "connection":{
+                "from":"a", "to":"b", "src_addr":"10.0.0.1", "dst_addr":"10.0.0.2",
+                "src_port":1234, "dst_port":80, "incarnation":1
+            }
+        }))
+        .unwrap();
+        t.event(10, &fault(1, FaultStatus::Applied, action));
+        assert!(t.snapshot().faults[0].active);
+        let forms = crate::fault_catalogue::discover(&t.snapshot(), 1_000_000);
+        let heal = forms.faults.iter().find(|f| f.name == "heal").unwrap();
+        assert_eq!(
+            heal.schema["properties"]["handle"]["enum"],
+            serde_json::json!(["selected"])
+        );
+        t.event(
+            20,
+            &fault(
+                2,
+                FaultStatus::Applied,
+                FaultAction::Heal {
+                    handle: "selected".into(),
+                },
+            ),
+        );
+        assert!(!t.snapshot().faults[0].active);
+    }
+
     fn plan_name(plan: &FaultAction) -> String {
         plan.name().into()
+    }
+
+    #[test]
+    fn process_state_uses_confirmed_effect_time_and_survives_machine_pause() {
+        let mut t = tracker();
+        t.event(
+            10,
+            &EventKind::MachineReady {
+                machine: "a".into(),
+                incarnation: 0,
+            },
+        );
+        let action = FaultAction::PauseProcess {
+            machine: "a".into(),
+        };
+        t.event(20, &fault(1, FaultStatus::Requested, action.clone()));
+        assert_eq!(
+            t.snapshot().machines[0].application.condition,
+            ApplicationCondition::Running
+        );
+        let mut applied = fault(1, FaultStatus::Applied, action);
+        if let EventKind::FaultChanged {
+            applied_time_ns, ..
+        } = &mut applied
+        {
+            *applied_time_ns = Some(25);
+        }
+        t.event(30, &applied);
+        let world = t.snapshot();
+        assert_eq!(world.machines[0].condition, MachineCondition::Ready);
+        assert_eq!(
+            world.machines[0].application.condition,
+            ApplicationCondition::Paused
+        );
+        assert_eq!(world.machines[0].application.changed_at_ns, Some(25));
+        assert!(world.faults[0].active);
+        t.event(
+            40,
+            &EventKind::MachineLifecycle {
+                machine: "a".into(),
+                incarnation: 0,
+                transition: MachineTransition::Paused,
+            },
+        );
+        let world = t.snapshot();
+        assert_eq!(world.machines[0].condition, MachineCondition::Paused);
+        assert_eq!(world.machines[0].condition_since_ns, Some(40));
+        assert_eq!(world.machines[0].last_transition_at_ns, Some(40));
+        assert_eq!(world.machines[0].application.changed_at_ns, Some(25));
+        t.event(
+            50,
+            &EventKind::MachineLifecycle {
+                machine: "a".into(),
+                incarnation: 0,
+                transition: MachineTransition::Resumed,
+            },
+        );
+        assert_eq!(
+            t.snapshot().machines[0].application.condition,
+            ApplicationCondition::Paused
+        );
+        t.event(
+            60,
+            &fault(
+                2,
+                FaultStatus::Applied,
+                FaultAction::ResumeProcess {
+                    machine: "a".into(),
+                },
+            ),
+        );
+        assert_eq!(
+            t.snapshot().machines[0].application.condition,
+            ApplicationCondition::Running
+        );
+        assert!(!t.snapshot().faults[0].active);
+    }
+
+    #[test]
+    fn resuming_during_boot_does_not_invent_readiness() {
+        let mut t = tracker();
+        for (time, transition) in [
+            (10, MachineTransition::Paused),
+            (20, MachineTransition::Resumed),
+            (30, MachineTransition::Paused),
+            (40, MachineTransition::Resumed),
+        ] {
+            t.event(
+                time,
+                &EventKind::MachineLifecycle {
+                    machine: "a".into(),
+                    incarnation: 0,
+                    transition,
+                },
+            );
+        }
+        let world = t.snapshot();
+        assert_eq!(world.machines[0].condition, MachineCondition::Starting);
+        assert_eq!(
+            world.machines[0].application.condition,
+            ApplicationCondition::Unknown
+        );
+        assert_eq!(world.machines[0].condition_since_ns, Some(40));
+    }
+
+    #[test]
+    fn crash_clears_process_effect_and_reboot_waits_for_readiness() {
+        let mut t = tracker();
+        t.event(
+            10,
+            &fault(
+                1,
+                FaultStatus::Applied,
+                FaultAction::Stop {
+                    machine: "a".into(),
+                },
+            ),
+        );
+        assert_eq!(
+            t.snapshot().machines[0].application.condition,
+            ApplicationCondition::Stopped
+        );
+        assert!(t.snapshot().faults[0].active);
+        t.event(
+            20,
+            &EventKind::MachineLifecycle {
+                machine: "a".into(),
+                incarnation: 0,
+                transition: MachineTransition::Crashed,
+            },
+        );
+        assert_eq!(
+            t.snapshot().machines[0].application.condition,
+            ApplicationCondition::Unavailable
+        );
+        assert!(!t.snapshot().faults[0].active);
+        t.event(
+            30,
+            &EventKind::MachineLifecycle {
+                machine: "a".into(),
+                incarnation: 1,
+                transition: MachineTransition::Rebooted,
+            },
+        );
+        let world = t.snapshot();
+        assert_eq!(world.machines[0].incarnation, 1);
+        assert_eq!(
+            world.machines[0].application.condition,
+            ApplicationCondition::Starting
+        );
+        t.event(
+            40,
+            &EventKind::MachineReady {
+                machine: "a".into(),
+                incarnation: 1,
+            },
+        );
+        assert_eq!(
+            t.snapshot().machines[0].application.condition,
+            ApplicationCondition::Running
+        );
+        t.event(
+            50,
+            &EventKind::MachineExited {
+                machine: "a".into(),
+                incarnation: 1,
+                code: 7,
+            },
+        );
+        assert_eq!(t.snapshot().machines[0].application.exit_code, Some(7));
+        assert_eq!(t.snapshot().machines[0].application.changed_at_ns, Some(50));
     }
 
     #[test]
@@ -492,7 +796,7 @@ mod tests {
                 },
             ),
         ] {
-            t.apply(id, &plan);
+            t.apply(id, 10, &plan);
             t.faults.insert(
                 id,
                 FaultState {
@@ -515,6 +819,7 @@ mod tests {
         );
         t.apply(
             4,
+            20,
             &FaultAction::Heal {
                 handle: "skew".into(),
             },
