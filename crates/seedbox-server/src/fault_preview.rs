@@ -8,15 +8,39 @@ pub(crate) fn preview(
     configuration: &seedbox_spec::Simulation,
     action: &Action,
 ) -> Result<FaultPreview, Error> {
-    let targets = seedbox_application::engine_adapter::fault_action_targets(configuration, action)
-        .map_err(|error| Error::Invalid(error.to_string()))?;
+    let (machines, links) = match action {
+        Action::Spawn {
+            machine,
+            from,
+            env,
+            argv,
+        } => {
+            seedbox_control::validate_spawn(machine, env, argv.as_deref())
+                .map_err(Error::Invalid)?;
+            if world
+                .machines
+                .iter()
+                .any(|observed| observed.name == *machine)
+                || !world.machines.iter().any(|observed| observed.name == *from)
+            {
+                return Err(Error::Invalid("invalid spawn machine".into()));
+            }
+            (vec![machine.clone()], Vec::new())
+        }
+        _ => {
+            let targets =
+                seedbox_application::engine_adapter::fault_action_targets(configuration, action)
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
+            (targets.machines, targets.links)
+        }
+    };
     let mut result = FaultPreview {
         simulation: world.simulation.clone(),
         revision: world.revision,
         simulated_time_ns: world.simulated_time_ns,
         category: crate::fault_catalogue::category(action.name()),
-        machines: targets.machines,
-        links: targets.links.into_iter().map(|(from, to)| FaultPreviewLink { from, to }).collect(),
+        machines,
+        links: links.into_iter().map(|(from, to)| FaultPreviewLink { from, to }).collect(),
         expected_effect: String::new(),
         observations: Vec::new(),
         preconditions: Vec::new(),
@@ -167,6 +191,13 @@ pub(crate) fn preview(
                 .push("The machine must be down.".into());
             "Boot a new machine incarnation from its prepared inputs and retained disk state; application readiness must be observed again.".into()
         }
+        Action::Spawn { machine, from, .. } => {
+            result
+                .observations
+                .push(format!("{from}: source machine observed."));
+            result.preconditions.push("The source machine must still exist and the new name must still be available at admission.".into());
+            format!("Add {machine} as a new machine running a copy of {from}'s prepared program with the requested launch overrides; readiness must be observed separately.")
+        }
         Action::ClockSkew {
             offset_ns,
             max_offset_ns,
@@ -272,6 +303,51 @@ mod tests {
         let world =
             crate::world::Tracker::new("abcdefgh".parse().unwrap(), &configuration).snapshot();
         (configuration, world)
+    }
+
+    #[test]
+    fn spawn_preview_uses_observed_source_and_new_target_without_mutation() {
+        let (configuration, mut world) = fixture();
+        world.machines.push(seedbox_api::MachineState {
+            name: "later".into(),
+            condition: MachineCondition::Ready,
+            application: Default::default(),
+            incarnation: 0,
+            exit_code: None,
+            cpu_speed_hz: None,
+            throttle_speed_hz: None,
+            oracle: false,
+            last_transition: None,
+            last_transition_at_ns: None,
+            condition_since_ns: None,
+        });
+        let before = world.clone();
+        let spawn = Action::Spawn {
+            machine: "new-node".into(),
+            from: "later".into(),
+            env: Default::default(),
+            argv: None,
+        };
+        let result = preview(&world, &configuration, &spawn).unwrap();
+        assert_eq!(result.category, FaultCategory::Machine);
+        assert_eq!(result.machines, ["new-node"]);
+        assert!(result.links.is_empty());
+        assert!(result.expected_effect.contains("copy of later"));
+        assert_eq!(world, before);
+        let duplicate = Action::Spawn {
+            machine: "later".into(),
+            from: "n1".into(),
+            env: Default::default(),
+            argv: None,
+        };
+        assert!(preview(&world, &configuration, &duplicate).is_err());
+        let unknown = Action::Spawn {
+            machine: "other-node".into(),
+            from: "missing".into(),
+            env: Default::default(),
+            argv: None,
+        };
+        assert!(preview(&world, &configuration, &unknown).is_err());
     }
 
     #[test]

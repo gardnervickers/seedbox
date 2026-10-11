@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import socket
+import sys
 import threading
 
 MARK = Path("/tmp/seedbox-lifecycle-mark")
@@ -15,6 +16,9 @@ def answer(command):
         os._exit(17)
     if command == b"PING":
         return "READY socket_absent"
+    if command == b"ROLE":
+        # A spawned copy may override its environment and command.
+        return f"ROLE {os.environ.get('ROLE', 'none')} {' '.join(sys.argv[1:2]) or '-'}"
     if command == b"MARK":
         MARK.write_text("marked\n")
         return "MARKED"

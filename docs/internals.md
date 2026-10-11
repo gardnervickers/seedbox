@@ -230,6 +230,13 @@ action is evaluated against the world when it becomes due. Recorded oracle event
 remain observations; replay executes the oracle rather than injecting its events
 again.
 
+A Python oracle may spawn a machine from an existing machine. The applied fault
+allocates its name and address; at the committed boundary the coordinator grows
+the world before admitting another same-time input or starting a new scheduling
+segment. The new boot recipe copies the source's launch settings, memory and CPU speed,
+with the supplied environment and command overrides. Reports bind spawned machines to applied fault
+evidence, not to replies, because a reply can be lost after the spawn takes effect.
+
 Code: [input program](../crates/seedbox-engine-core/src/input_program.rs),
 [coordinator](../crates/seedbox-engine-core/src/world.rs).
 
@@ -266,7 +273,11 @@ lifecycle transition.
 A checkpoint captures the world and its input-program cursor together. Restoring
 it must neither repeat consumed overrides nor lose pending ones. Capture requires
 a committed boundary with no outstanding I/O cost. A requested checkpoint may
-therefore need another step before it becomes available.
+therefore need another step before it becomes available. Snapshots retain the
+ancestry of spawned machines, so a fresh process can rebuild their boot inputs
+in order before restoring physical state. The process must supply the same
+initial machines and boot inputs. This changes the world snapshot format to
+version 2; version 1 snapshots are rejected by the new engine.
 
 Machine lifecycle updates must occur at their defined commit points around
 fallible backend operations. A failed crash transaction poisons the world and

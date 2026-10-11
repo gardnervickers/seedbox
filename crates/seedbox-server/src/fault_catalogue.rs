@@ -177,6 +177,18 @@ pub(crate) fn discover(world: &WorldState, minimum_latency_ns: u64) -> FaultCata
             &["machine"],
         ));
     }
+    faults.push(descriptor(
+        "spawn",
+        "Spawn machine",
+        "Add a machine running a copy of the source machine's prepared program. Supply a new machine name and optional launch overrides.",
+        json!({
+            "from":choice("Source machine to copy", &machines),
+            "machine":{"type":"string", "minLength":1, "maxLength":63, "pattern":"^[a-z0-9][a-z0-9-]{0,62}$", "description":"New lowercase DNS label (letters, digits and hyphens; cannot begin with a hyphen)"},
+            "env":{"type":"object", "description":"Environment overrides; keys must be nonempty without '=' or NUL, values cannot contain NUL", "propertyNames":{"pattern":r"^[^=\u0000]+$"}, "additionalProperties":{"type":"string", "pattern":r"^[^\u0000]*$"}},
+            "argv":{"type":"array", "minItems":1, "description":"Argument override; first argument must be nonempty, no argument may contain NUL", "prefixItems":[{"type":"string", "minLength":1, "pattern":r"^[^\u0000]*$"}], "items":{"type":"string", "pattern":r"^[^\u0000]*$"}}
+        }),
+        &["from", "machine"],
+    ));
     faults.push(descriptor("partition", "Partition network", "Cut traffic between two disjoint groups of machines. Every selected pair must have a configured link.",
         json!({"handle":handle, "left":group("First group of machines", &machines), "right":group("Second disjoint group of machines", &machines)}), &["handle","left","right"]));
     let mut network = json!({});
@@ -285,7 +297,8 @@ mod tests {
             | Action::Resume { .. }
             | Action::Crash { .. }
             | Action::Reboot { .. }
-            | Action::DropConnection { .. } => {}
+            | Action::DropConnection { .. }
+            | Action::Spawn { .. } => {}
         }
     }
     fn example(schema: &Value) -> Value {
@@ -330,6 +343,82 @@ mod tests {
         }
     }
     #[test]
+    fn spawn_form_exposes_source_and_launch_overrides() {
+        let mut world = WorldState {
+            override_rejections: Default::default(),
+            simulation: "abcdefgh".parse().unwrap(),
+            revision: 1,
+            simulated_time_ns: 0,
+            machines: vec![],
+            links: vec![],
+            faults: vec![],
+        };
+        world.machines.push(seedbox_api::MachineState {
+            name: "source".into(),
+            incarnation: 0,
+            condition: seedbox_api::MachineCondition::Ready,
+            exit_code: None,
+            cpu_speed_hz: None,
+            throttle_speed_hz: None,
+            oracle: false,
+            last_transition: None,
+            last_transition_at_ns: None,
+            condition_since_ns: None,
+            application: Default::default(),
+        });
+        let catalogue = discover(&world, 1_000_000);
+        let schema = &catalogue
+            .faults
+            .iter()
+            .find(|fault| fault.name == "spawn")
+            .unwrap()
+            .schema;
+        assert_eq!(schema["required"], json!(["action", "from", "machine"]));
+        assert_eq!(schema["properties"]["from"]["enum"], json!(["source"]));
+        assert_eq!(
+            schema["properties"]["env"]["additionalProperties"]["type"],
+            "string"
+        );
+        assert_eq!(schema["properties"]["argv"]["items"]["type"], "string");
+        assert_eq!(schema["properties"]["machine"]["maxLength"], 63);
+        assert_eq!(
+            schema["properties"]["machine"]["pattern"],
+            "^[a-z0-9][a-z0-9-]{0,62}$"
+        );
+        assert_eq!(
+            schema["properties"]["env"]["propertyNames"]["pattern"],
+            r"^[^=\u0000]+$"
+        );
+        assert_eq!(
+            schema["properties"]["env"]["additionalProperties"]["pattern"],
+            r"^[^\u0000]*$"
+        );
+        assert_eq!(schema["properties"]["argv"]["minItems"], 1);
+        assert_eq!(
+            schema["properties"]["argv"]["prefixItems"][0]["minLength"],
+            1
+        );
+        assert_eq!(
+            schema["properties"]["argv"]["prefixItems"][0]["pattern"],
+            r"^[^\u0000]*$"
+        );
+        assert_eq!(
+            schema["properties"]["argv"]["items"]["pattern"],
+            r"^[^\u0000]*$"
+        );
+        let action: Action = serde_json::from_value(json!({
+            "action":"spawn", "from":"source", "machine":"replica",
+            "env":{"ROLE":"follower"}, "argv":["/app", "--join"]
+        }))
+        .unwrap();
+        assert_eq!(action.name(), "spawn");
+        assert_eq!(
+            serde_json::to_value(action).unwrap()["env"]["ROLE"],
+            "follower"
+        );
+    }
+
+    #[test]
     fn every_form_generates_a_real_action_with_serializable_defaults() {
         let world = WorldState {
             override_rejections: Default::default(),
@@ -341,7 +430,7 @@ mod tests {
             faults: vec![],
         };
         let catalogue = discover(&world, 1_000_000);
-        assert_eq!(catalogue.faults.len(), 15);
+        assert_eq!(catalogue.faults.len(), 16);
         let mut names = BTreeSet::new();
         for descriptor in &catalogue.faults {
             assert!(names.insert(&descriptor.name));

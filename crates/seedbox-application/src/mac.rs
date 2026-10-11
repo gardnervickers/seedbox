@@ -8,7 +8,13 @@ use seedbox_arm64::{
     backend::{hvf::Hvf, Backend, SysReg},
     boot::BootSpec,
 };
-use std::{collections::BTreeMap, fs, path::Path};
+use seedbox_control::Action;
+use seedbox_engine_protocol::report::{FaultRecord, RowStatus};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 const BOOT_POLICY: &str = "image-reservation/archive-aligned/final-dtb-v1";
 const ENTROPY_POLICY: &str = "sha256-domain-u64-seed-v1";
@@ -267,8 +273,44 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
         .get(&request.prepared.kernel)
         .ok_or_else(|| Error::Integrity("missing retained kernel".into()))?;
     let kernel = fs::read(kernel_path)?;
-    let mut remaining: std::collections::BTreeSet<_> =
-        request.prepared.guests.keys().map(String::as_str).collect();
+    if ContentDigest::of(&kernel) != request.prepared.kernel {
+        return Err(Error::Integrity("retained ARM kernel hash mismatch".into()));
+    }
+    let initial: BTreeSet<_> = request.prepared.guests.keys().map(String::as_str).collect();
+    let controller = request.control.and_then(|control| {
+        request
+            .prepared
+            .placement
+            .get(&control.service)
+            .map(String::as_str)
+    });
+    let mut boots = BTreeMap::new();
+    for (name, digest) in &request.prepared.guests {
+        let initrd = fs::read(
+            request
+                .artifacts
+                .get(digest)
+                .ok_or_else(|| Error::Integrity("missing retained ARM guest".into()))?,
+        )?;
+        if ContentDigest::of(&initrd) != *digest {
+            return Err(Error::Integrity("retained ARM guest hash mismatch".into()));
+        }
+        let mut command_line = seedbox_arm64::boot::DEFAULT_COMMAND_LINE.to_owned();
+        if controller == Some(name.as_str()) {
+            command_line.push_str(" seedbox.control=1");
+        }
+        boots.insert(
+            name.clone(),
+            ApplicationBoot {
+                initrd,
+                command_line,
+                memory_mb: request.prepared.memory_mb(name),
+                booted_at_ns: None,
+            },
+        );
+    }
+    let faults: Vec<FaultRecord> = serde_json::from_value(report["faults"].clone())?;
+    let mut remaining = spawned_boots(boots, &faults)?;
     for row in report["machines"]
         .as_array()
         .ok_or_else(|| Error::Integrity("missing application machine reports".into()))?
@@ -276,49 +318,29 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
         let name = row["name"]
             .as_str()
             .ok_or_else(|| Error::Integrity("invalid application machine name".into()))?;
-        if !remaining.remove(name) {
-            return Err(Error::Integrity(
-                "duplicate or unknown application machine".into(),
-            ));
-        }
-        let memory = u64::from(request.prepared.memory_mb(name)) * 1024 * 1024;
-        let initrd_digest = request
-            .prepared
-            .guests
-            .get(name)
-            .ok_or_else(|| Error::Integrity("unknown application machine".into()))?;
-        let initrd = fs::read(
-            request
-                .artifacts
-                .get(initrd_digest)
-                .ok_or_else(|| Error::Integrity("missing retained ARM guest".into()))?,
-        )?;
+        let boot = remaining
+            .remove(name)
+            .ok_or_else(|| Error::Integrity("duplicate or unknown application machine".into()))?;
+        let memory = u64::from(boot.memory_mb) * 1024 * 1024;
+        let initrd_digest = ContentDigest::of(&boot.initrd);
         let evidence: seedbox_arm64::application::Evidence =
             serde_json::from_value(row["application_evidence"].clone())?;
         let incarnation = row["incarnation"]
             .as_u64()
             .ok_or_else(|| Error::Integrity("missing application incarnation".into()))?;
-        let domain = if incarnation == 0 {
+        let domain = if incarnation > 0 {
+            format!("reboot-entropy/{name}/{incarnation}")
+        } else if initial.contains(name) {
             format!("boot-entropy/{name}")
         } else {
-            format!("reboot-entropy/{name}/{incarnation}")
+            format!("spawn-entropy/{name}")
         };
         let seed = seedbox_arm64::application::world::entropy_seed(request.seed, &domain);
-        let mut cmdline = seedbox_arm64::boot::DEFAULT_COMMAND_LINE.to_owned();
-        if request.control.is_some_and(|control| {
-            request
-                .prepared
-                .placement
-                .get(&control.service)
-                .map(String::as_str)
-                == Some(name)
-        }) {
-            cmdline.push_str(" seedbox.control=1");
-        }
-        if launch_skew.is_some() && incarnation == 0 {
+        let mut cmdline = boot.command_line;
+        if launch_skew.is_some() && incarnation == 0 && initial.contains(name) {
             cmdline.push_str(" seedbox.barrier=1");
         }
-        let spec = BootSpec::for_application(&kernel, &initrd, seed, memory, &cmdline)
+        let spec = BootSpec::for_application(&kernel, &boot.initrd, seed, memory, &cmdline)
             .map_err(Error::Integrity)?;
         let timer_domain = if incarnation == 0 {
             format!("timer-jitter/{name}")
@@ -377,6 +399,10 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
                 != seedbox_arm64::application::BootIdentity::from_spec(spec)
                     .map_err(Error::Integrity)?
             || evidence.timer_policy != Some(timer_policy)
+            || (incarnation == 0
+                && boot
+                    .booted_at_ns
+                    .is_some_and(|at| row["booted_at_ns"].as_u64() != Some(at)))
             || row["time_ns"].as_u64() != Some(evidence.time_ns)
             || row["witness"].as_str() != Some(&evidence.witness)
             || row["state_digest"] != serde_json::to_value(&evidence.state_digest)?
@@ -391,10 +417,97 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
     }
     if !remaining.is_empty() {
         return Err(Error::Integrity(
-            "application report is missing a prepared machine".into(),
+            "application report is missing a prepared or spawned machine".into(),
         ));
     }
     Ok(())
+}
+
+struct ApplicationBoot {
+    initrd: Vec<u8>,
+    command_line: String,
+    /// A spawned machine has its source's memory.
+    memory_mb: u32,
+    booted_at_ns: Option<u64>,
+}
+
+/// Spawn faults are the only authority for new machines. Construct their boot
+/// inputs in applied fault order: a child may inherit an earlier child's recipe.
+fn spawned_boots(
+    mut boots: BTreeMap<String, ApplicationBoot>,
+    faults: &[FaultRecord],
+) -> Result<BTreeMap<String, ApplicationBoot>> {
+    let bad = || Error::Integrity("invalid application spawn evidence".into());
+    let mut names: Vec<String> = boots.keys().cloned().collect();
+    // Fault IDs are allocated in admission order; applied times can be equal,
+    // but a source must already exist when its spawn applies.
+    let mut applied: Vec<_> = faults
+        .iter()
+        .filter(|fault| {
+            matches!(&fault.request.action, Action::Spawn { .. })
+                && fault.status == RowStatus::Applied
+        })
+        .collect();
+    applied.sort_by_key(|fault| (fault.applied_at_ns, fault.id));
+    for fault in applied {
+        let Action::Spawn {
+            machine,
+            from,
+            env,
+            argv,
+        } = &fault.request.action
+        else {
+            return Err(bad());
+        };
+        let at = fault.applied_at_ns.ok_or_else(bad)?;
+        let index = names.len();
+        if fault.action != "spawn"
+            || fault.machine.as_deref() != Some(machine)
+            || at < fault.request.at_ns
+            || index >= seedbox_engine_core::faults::MAX_MACHINES
+            || boots.contains_key(machine)
+        {
+            return Err(bad());
+        }
+        let source = boots.get(from).ok_or_else(bad)?;
+        let memory_mb = source.memory_mb;
+        names.push(machine.clone());
+        let mut mac = [2, 0, 0, 0, 0, 0];
+        mac[5] = (index + 1) as u8;
+        let address = seedbox_engine_core::world::machine_address(index);
+        let spec = seedbox_engine_core::world::SpawnSpec {
+            name: machine,
+            index,
+            mac,
+            address,
+            names: &names,
+            env,
+            argv: argv.as_deref(),
+        };
+        let initrd = seedbox_engine_core::spawn_recipe::spawned_initrd(&source.initrd, &spec)
+            .map_err(Error::Integrity)?;
+        let mut command_line = source
+            .command_line
+            .split_whitespace()
+            .filter(|part| {
+                *part != "seedbox.control=1"
+                    && !part.starts_with("seedbox.index=")
+                    && !part.starts_with("seedbox.name=")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        command_line.push_str(&format!(" seedbox.index={index} seedbox.name={machine}"));
+        boots.insert(
+            machine.clone(),
+            ApplicationBoot {
+                initrd,
+                command_line,
+                memory_mb,
+                booted_at_ns: Some(at),
+            },
+        );
+    }
+    Ok(boots)
 }
 
 fn validate_initial_launch<'a>(
@@ -481,6 +594,272 @@ mod process_tests {
             },
         }
     }
+    fn initrd() -> Vec<u8> {
+        use seedbox_engine_core::spawn_recipe::{entry, Recipe};
+        let recipe = Recipe {
+            ip: b"10.0.0.1/24".to_vec(),
+            hosts: b"10.0.0.1 source\n".to_vec(),
+            hostname: b"source".to_vec(),
+            user: b"0:0".to_vec(),
+            working_dir: b"/".to_vec(),
+            max_map_count: 262_144,
+            wall_clock_epoch: 1_700_000_000,
+            instructions_per_progress_call: 50000,
+            progress_points_per_block: 1,
+            argv: vec![b"/bin/source".to_vec()],
+            environment: vec![b"ROLE=source".to_vec()],
+            volumes: vec![],
+            disk_volumes: vec![],
+            configs: vec![],
+        };
+        let mut archive = Vec::new();
+        entry(
+            &mut archive,
+            "seedbox/launch.bin",
+            1,
+            0o100400,
+            &recipe.encode(),
+        );
+        entry(&mut archive, "TRAILER!!!", 2, 0, &[]);
+        archive
+    }
+
+    fn spawn(id: u32, at: u64, machine: &str, from: &str, env: &[(&str, &str)]) -> FaultRecord {
+        let env: BTreeMap<String, String> = env
+            .iter()
+            .map(|(key, value)| ((*key).into(), (*value).into()))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "action": "spawn", "applied_at_ns": at,
+            "detail": format!("machine {machine} spawned"), "id": id,
+            "machine": machine,
+            "request": {"id":id,"at_ns":at,"deadline_ns":at + 1,
+                        "action":"spawn","machine":machine,"from":from,"env":env},
+            "requested_at_ns":at,"status":"applied"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn spawned_boots_inherit_recursive_recipe_and_reject_unapplied_or_unknown_sources() {
+        use seedbox_engine_core::spawn_recipe::{find, Recipe};
+        let base = initrd();
+        let boots = || {
+            BTreeMap::from([(
+                "source".into(),
+                ApplicationBoot {
+                    initrd: base.clone(),
+                    command_line: "console=ttyAMA0 seedbox.control=1".into(),
+                    memory_mb: 128,
+                    booted_at_ns: None,
+                },
+            )])
+        };
+        let child = spawn(1, 100, "child", "source", &[("ROLE", "child")]);
+        let grandchild = spawn(2, 100, "grandchild", "child", &[("EXTRA", "yes")]);
+        let inherited = spawned_boots(boots(), &[grandchild.clone(), child.clone()]).unwrap();
+        assert_eq!(inherited["child"].booted_at_ns, Some(100));
+        assert_eq!(inherited["grandchild"].booted_at_ns, Some(100));
+        assert_eq!(
+            inherited["grandchild"].command_line,
+            "console=ttyAMA0 seedbox.index=2 seedbox.name=grandchild"
+        );
+        let recipe =
+            Recipe::parse(find(&inherited["grandchild"].initrd, "seedbox/launch.bin").unwrap())
+                .unwrap();
+        assert_eq!(recipe.ip, b"10.0.0.3/24");
+        assert_eq!(recipe.hostname, b"grandchild");
+        assert_eq!(
+            recipe.environment,
+            [b"ROLE=child".to_vec(), b"EXTRA=yes".to_vec()]
+        );
+        assert_eq!(
+            recipe.hosts,
+            b"10.0.0.1 source\n10.0.0.2 child\n10.0.0.3 grandchild\n"
+        );
+        let mut unapplied = child.clone();
+        unapplied.status = RowStatus::Unrequested;
+        unapplied.applied_at_ns = None;
+        assert_eq!(spawned_boots(boots(), &[unapplied]).unwrap().len(), 1);
+        assert!(spawned_boots(boots(), &[grandchild]).is_err());
+        assert!(spawned_boots(boots(), &[child.clone(), child]).is_err());
+        assert!(spawned_boots(boots(), &[spawn(1, 100, "source", "source", &[])]).is_err());
+    }
+
+    #[test]
+    fn application_report_validates_spawned_boot_identity_and_seed_domains() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut kernel = vec![0; 4096];
+        kernel[8..16].copy_from_slice(&0x80000u64.to_le_bytes());
+        kernel[16..24].copy_from_slice(&8192u64.to_le_bytes());
+        kernel[56..60].copy_from_slice(b"ARM\x64");
+        let source_initrd = initrd();
+        let kernel_hash = ContentDigest::of(&kernel);
+        let source_hash = ContentDigest::of(&source_initrd);
+        let kernel_path = temp.path().join("kernel");
+        let source_path = temp.path().join("source");
+        fs::write(&kernel_path, &kernel).unwrap();
+        fs::write(&source_path, &source_initrd).unwrap();
+        let artifacts = BTreeMap::from([
+            (kernel_hash.clone(), kernel_path),
+            (source_hash.clone(), source_path),
+        ]);
+        let mut profile = profile();
+        profile.witness_mode = WitnessMode::Exits;
+        let prepared = PreparedInputs {
+            wall_clock_epoch: None,
+            kernel: kernel_hash.clone(),
+            images: BTreeMap::new(),
+            placement: BTreeMap::from([("oracle".into(), "source".into())]),
+            guests: BTreeMap::from([("source".into(), source_hash)]),
+            machine_memory_mb: BTreeMap::new(),
+            profile,
+            auxiliary: BTreeMap::new(),
+            provenance: BTreeMap::new(),
+        };
+        let limits = crate::config::Limits {
+            simulated_time_ns: 10_000_000,
+            wall_time_ns: 20_000_000,
+        };
+        let network = crate::config::Network {
+            links: vec![],
+            name: "private".into(),
+            latency_ns: 100_000,
+            jitter_ns: 20_000,
+            bandwidth_bps: None,
+            queue_bound_ns: None,
+        };
+        let schedule = crate::config::Schedule::default();
+        let check = crate::config::Check {
+            service: "oracle".into(),
+            exit_code: 0,
+        };
+        let request = ExecutionRequest {
+            start_paused: false,
+            resume_checkpoint: None,
+            intervention_history: None,
+            replay_interventions: None,
+            observations: None,
+            seed: 1009,
+            program: &[],
+            limits: &limits,
+            network: &network,
+            cpus: &BTreeMap::new(),
+            schedule: &schedule,
+            control: None,
+            check: &check,
+            prepared: &prepared,
+            artifacts: &artifacts,
+            output: temp.path(),
+            cancellation: &CancellationToken::default(),
+            performance_parameters: &BTreeMap::new(),
+        };
+        let fault = spawn(1, 100, "child", "source", &[("ROLE", "child")]);
+        let boots = spawned_boots(
+            BTreeMap::from([(
+                "source".into(),
+                ApplicationBoot {
+                    initrd: source_initrd,
+                    command_line: seedbox_arm64::boot::DEFAULT_COMMAND_LINE.into(),
+                    memory_mb: prepared.memory_mb("source"),
+                    booted_at_ns: None,
+                },
+            )]),
+            std::slice::from_ref(&fault),
+        )
+        .unwrap();
+        let row = |name: &str, incarnation: u64| {
+            let boot = &boots[name];
+            let domain = if incarnation > 0 {
+                format!("reboot-entropy/{name}/{incarnation}")
+            } else if name == "source" {
+                format!("boot-entropy/{name}")
+            } else {
+                format!("spawn-entropy/{name}")
+            };
+            let seed = seedbox_arm64::application::world::entropy_seed(request.seed, &domain);
+            let mut command_line = boot.command_line.clone();
+            if name == "source" && incarnation == 0 {
+                command_line.push_str(" seedbox.barrier=1");
+            }
+            let spec =
+                BootSpec::for_application(&kernel, &boot.initrd, seed, 512 << 20, &command_line)
+                    .unwrap();
+            let digest = ContentDigest::of(b"test-evidence").hex().to_owned();
+            let evidence = seedbox_arm64::application::Evidence {
+                format: 1,
+                boot: seedbox_arm64::application::BootIdentity::from_spec(spec).unwrap(),
+                kernel_sha256: kernel_hash.hex().to_owned(),
+                initrd_sha256: ContentDigest::of(&boot.initrd).hex().to_owned(),
+                timer_policy: Some(seedbox_arm64::application::TimerPolicy {
+                    seed: request.seed,
+                    domain: if incarnation == 0 {
+                        format!("timer-jitter/{name}")
+                    } else {
+                        format!("timer-jitter/{name}/{incarnation}")
+                    },
+                    jitter_ns: 0,
+                }),
+                disk_digest: None,
+                control_channel: None,
+                time_ns: 1000,
+                exits: 10,
+                trace_hash: digest.clone(),
+                console_hash: digest.clone(),
+                witness: digest,
+                state_digest: None,
+                state_digest_parts: None,
+            };
+            serde_json::json!({
+                "name":name,"incarnation":incarnation,
+                "booted_at_ns":boot.booted_at_ns.unwrap_or(0),
+                "application_evidence":evidence,
+                "time_ns":1000,"witness":evidence.witness,
+                "state_digest":null,"state_digest_parts":null,
+                "control_channel":null,
+            })
+        };
+        let skew = crate::engine::arm_launch_skew(&request.prepared.profile, 80_000).unwrap();
+        let mut rng = seedbox_engine_core::rng::Rng::new(request.seed, "release/source");
+        let mut report = serde_json::json!({
+            "timebase":crate::engine::ARM_REPORT_TIMEBASE,
+            "faults":[fault],
+            "machines":[row("source", 0), row("child", 0)],
+            "initial_launch": {
+                "max_skew_ns":skew, "released":true,
+                "barrier_ns":100, "release_ns":100 + skew,
+                "release_times":{"source":100 + rng.below(skew + 1)}
+            },
+        });
+        let valid = |report: &serde_json::Value| {
+            validate_report(&serde_json::to_vec(report).unwrap(), &request)
+        };
+        valid(&report).unwrap();
+        report["machines"][1] = row("child", 1);
+        report["machines"][1]["booted_at_ns"] = 101.into();
+        valid(&report).unwrap();
+        report["machines"][1]["application_evidence"]["initrd_sha256"] =
+            ContentDigest::of(b"unrelated archive").hex().into();
+        assert!(valid(&report).is_err());
+        report["machines"][1] = row("child", 0);
+        report["machines"][1]["application_evidence"]["boot"]["seed"] = 0.into();
+        assert!(valid(&report).is_err());
+        report["machines"][1] = row("child", 0);
+        report["machines"][1]["booted_at_ns"] = 101.into();
+        assert!(valid(&report).is_err());
+        report["machines"][1] = row("source", 0);
+        assert!(valid(&report).is_err());
+        report["machines"].as_array_mut().unwrap().pop();
+        assert!(valid(&report).is_err());
+        report["machines"]
+            .as_array_mut()
+            .unwrap()
+            .push(row("child", 0));
+        report["faults"][0]["status"] = "unrequested".into();
+        report["faults"][0]["applied_at_ns"] = serde_json::Value::Null;
+        assert!(valid(&report).is_err());
+    }
+
     #[test]
     fn preflight_workers_admits_the_linux_range_without_core_reservation() {
         let executor = MacExecutor {

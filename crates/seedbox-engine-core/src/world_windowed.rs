@@ -1060,6 +1060,10 @@ impl<M: WorldMachine> Coord<'_, M> {
                     self.stopped = Some(RunOutcome::FaultFailed);
                     return Ok(sw::Flow::Stop);
                 }
+                if self.faults.has_spawns() {
+                    self.stopped = Some(RunOutcome::Spawn);
+                    return Ok(sw::Flow::Stop);
+                }
                 continue;
             }
             if fault_boundary <= start
@@ -1069,6 +1073,11 @@ impl<M: WorldMachine> Coord<'_, M> {
                 self.apply_faults(plan, guests, fault_boundary)?;
                 if self.faults.error.is_some() && self.control.pending.is_none() {
                     self.stopped = Some(RunOutcome::FaultFailed);
+                    return Ok(sw::Flow::Stop);
+                }
+                // The world grows between segments; the next one starts here.
+                if self.faults.has_spawns() {
+                    self.stopped = Some(RunOutcome::Spawn);
                     return Ok(sw::Flow::Stop);
                 }
                 continue;
@@ -1329,10 +1338,10 @@ fn hook<M: WorldMachine>(
     coord.between_rounds(plan, guests)
 }
 
-/// Run one segment with every machine on the calling thread, using the
-/// world's clock. Returns the outcome word and the scheduler's report
-/// section; queued events are left in `world.events` and
-/// `world.strict_events`.
+/// Run the world with every machine on the calling thread, using the
+/// world's clock, until it ends or stops at a checkpoint or fork point.
+/// Returns the outcome word and the scheduler's report section; queued events
+/// are left in `world.events` and `world.strict_events`.
 pub fn simulate<M: WorldMachine>(
     world: &mut World<M>,
     run: &Run,
@@ -1349,14 +1358,16 @@ pub fn simulate_with_callbacks<M: WorldMachine>(
     skew: Duration,
     boundary: &mut CallbackHandler<'_>,
 ) -> Result<(RunOutcome, Value), String> {
-    windowed(
-        world,
-        run,
-        skew,
-        1,
-        boundary,
-        |plan, guests, clock, coord| sw::run_serial(plan, guests, clock, coord, hook::<M>),
-    )
+    segments(world, |world| {
+        windowed(
+            world,
+            run,
+            skew,
+            1,
+            &mut *boundary,
+            |plan, guests, clock, coord| sw::run_serial(plan, guests, clock, coord, hook::<M>),
+        )
+    })
 }
 
 /// As [`simulate`], with machines on a work-stealing pool of `workers`
@@ -1394,16 +1405,50 @@ where
     F: Fn(usize) -> Result<M::Clock, String> + Sync,
 {
     let count = workers.count;
-    windowed(
-        world,
-        run,
-        workers.skew,
-        count,
-        boundary,
-        |plan, guests, _, coord| {
-            sw::run_parallel(plan, guests, count, make_clock, coord, hook::<M>)
-        },
-    )
+    segments(world, |world| {
+        windowed(
+            world,
+            run,
+            workers.skew,
+            count,
+            &mut *boundary,
+            |plan, guests, _, coord| {
+                sw::run_parallel(plan, guests, count, &make_clock, coord, hook::<M>)
+            },
+        )
+    })
+}
+
+/// Run segments until one stops for anything but a spawn, growing the world
+/// between them. A run without spawns is exactly one segment and reports it
+/// unchanged; otherwise the counters cover every segment and each segment's
+/// effects digest is listed in order.
+fn segments<M: WorldMachine>(
+    world: &mut World<M>,
+    mut segment: impl FnMut(&mut World<M>) -> Result<(RunOutcome, Value), String>,
+) -> Result<(RunOutcome, Value), String> {
+    let mut earlier: Vec<Value> = Vec::new();
+    loop {
+        let (word, mut evidence) = segment(world)?;
+        if word == RunOutcome::Spawn {
+            world.grow_spawns()?;
+            earlier.push(evidence);
+            continue;
+        }
+        if earlier.is_empty() {
+            return Ok((word, evidence));
+        }
+        earlier.push(evidence.clone());
+        for key in ["rounds", "exact_rounds", "machine_runs", "migrations"] {
+            let total: u64 = earlier.iter().filter_map(|e| e[key].as_u64()).sum();
+            evidence[key] = json!(total);
+        }
+        evidence["segment_effects_digests"] = earlier
+            .iter()
+            .map(|e| e["effects_digest"].clone())
+            .collect();
+        return Ok((word, evidence));
+    }
 }
 
 /// Outputs one machine may buffer in one round.

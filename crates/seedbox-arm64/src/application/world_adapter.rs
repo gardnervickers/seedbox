@@ -173,9 +173,10 @@ pub struct Factory {
     observations: Option<Arc<seedbox_engine_core::observation::Publisher>>,
     executable: PathBuf,
     output: PathBuf,
-    names: BTreeMap<String, usize>,
+    names: std::cell::RefCell<BTreeMap<String, usize>>,
     /// Shared by a machine and its crash successor; only the live one writes.
-    captures: Vec<Option<Arc<Mutex<Captures>>>>,
+    captures: std::cell::RefCell<Vec<Option<Arc<Mutex<Captures>>>>>,
+    console_limit: usize,
     generation: Cell<u64>,
     full_state: bool,
 }
@@ -230,40 +231,81 @@ impl Factory {
             std::fs::canonicalize(&output).map_err(|e| format!("world output path: {e}"))?;
         let mut captures = Vec::new();
         for name in names {
-            if !retain {
-                captures.push(None);
-                continue;
-            }
-            let console = File::create(output.join(format!("{name}.console")))
-                .map_err(|e| format!("console output: {e}"))?;
-            let management = File::create(output.join(format!("{name}.mgmt")))
-                .map_err(|e| format!("management output: {e}"))?;
-            captures.push(Some(Arc::new(Mutex::new(Captures {
-                console: Capture::new(
-                    console,
-                    IndexFile::open(output.join(format!("{name}.console.chunks"))),
+            captures.push(if retain {
+                Some(machine_captures(
+                    &output,
+                    name,
                     console_limit,
                     log_capture::stream_limit(names.len()),
-                ),
-                management: Capture::new(
-                    management,
-                    IndexFile::open(output.join(format!("{name}.mgmt.chunks"))),
-                    console_limit,
-                    log_capture::stream_limit(names.len()),
-                ),
-                order: 0,
-            }))));
+                )?)
+            } else {
+                None
+            });
         }
         Ok(Self {
             executable,
             observations: None,
             output,
-            names: indexes,
-            captures,
+            names: std::cell::RefCell::new(indexes),
+            captures: std::cell::RefCell::new(captures),
+            console_limit,
             generation: Cell::new(0),
             full_state,
         })
     }
+
+    fn add_spawn(&self, name: &str, index: usize) -> Result<()> {
+        let capture = if self.observations.is_some() {
+            None
+        } else {
+            Some(machine_captures(
+                &self.output,
+                name,
+                self.console_limit,
+                log_capture::stream_limit(index + 1),
+            )?)
+        };
+        let mut captures = self.captures.borrow_mut();
+        if index > captures.len() {
+            return Err("spawned ARM machine index differs from factory".into());
+        }
+        if index == captures.len() {
+            captures.push(capture);
+        } else {
+            captures[index] = capture;
+        }
+        let mut names = self.names.borrow_mut();
+        names.retain(|_, slot| *slot != index);
+        names.insert(name.into(), index);
+        Ok(())
+    }
+}
+
+fn machine_captures(
+    output: &std::path::Path,
+    name: &str,
+    console_limit: usize,
+    record_limit: usize,
+) -> Result<Arc<Mutex<Captures>>> {
+    let console = File::create(output.join(format!("{name}.console")))
+        .map_err(|e| format!("console output: {e}"))?;
+    let management = File::create(output.join(format!("{name}.mgmt")))
+        .map_err(|e| format!("management output: {e}"))?;
+    Ok(Arc::new(Mutex::new(Captures {
+        console: Capture::new(
+            console,
+            IndexFile::open(output.join(format!("{name}.console.chunks"))),
+            console_limit,
+            record_limit,
+        ),
+        management: Capture::new(
+            management,
+            IndexFile::open(output.join(format!("{name}.mgmt.chunks"))),
+            console_limit,
+            record_limit,
+        ),
+        order: 0,
+    })))
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -400,7 +442,12 @@ impl WorldMachine for ArmMachine {
         barrier: bool,
         entropy: [u8; 32],
     ) -> Result<Self> {
-        let index = *factory.names.get(name).ok_or("unknown ARM machine name")?;
+        let index = *factory
+            .names
+            .borrow()
+            .get(name)
+            .ok_or("unknown ARM machine name")?;
+        let captures = factory.captures.borrow()[index].clone();
         let generation = factory
             .generation
             .get()
@@ -439,7 +486,7 @@ impl WorldMachine for ArmMachine {
             world: MachineState::new(name.into()),
             worker,
             physical,
-            captures: factory.captures[index].clone(),
+            captures,
             transcript: Transcript::new(),
             index,
             output: factory.output.clone(),
@@ -453,6 +500,41 @@ impl WorldMachine for ArmMachine {
             ram_pages,
             cpu_speed_hz,
         })
+    }
+    fn spawn_boot(
+        factory: &Factory,
+        base: &Boot,
+        spec: &seedbox_engine_core::world::SpawnSpec<'_>,
+    ) -> Result<Boot> {
+        let bytes = std::fs::read(&base.initrd)
+            .map_err(|e| format!("spawn {} initrd {}: {e}", spec.name, base.initrd.display()))?;
+        let initrd = seedbox_engine_core::spawn_recipe::spawned_initrd(&bytes, spec)
+            .map_err(|e| format!("spawn {}: {e}", spec.name))?;
+        let path = factory.output.join(format!(".spawn-{}.initrd", spec.name));
+        std::fs::write(&path, initrd)
+            .map_err(|e| format!("spawn {} initrd {}: {e}", spec.name, path.display()))?;
+        factory.add_spawn(spec.name, spec.index)?;
+        let mut boot = base.clone();
+        boot.initrd = path;
+        boot.mac = spec.mac;
+        boot.command_line = base
+            .command_line
+            .split_whitespace()
+            .filter(|part| {
+                *part != "seedbox.control=1"
+                    && !part.starts_with("seedbox.index=")
+                    && !part.starts_with("seedbox.name=")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        boot.command_line.push_str(&format!(
+            " seedbox.index={} seedbox.name={}",
+            spec.index, spec.name
+        ));
+        if let Some(policy) = &mut boot.timer_policy {
+            policy.domain = format!("timer-jitter/{}", spec.name);
+        }
+        Ok(boot)
     }
     fn has_pending_irq(&self) -> bool {
         self.physical.pending_irq
@@ -892,7 +974,103 @@ impl WorldMachine for ArmMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbox_engine_core::{
+        spawn_recipe::{entry, find, Recipe},
+        world::SpawnSpec,
+    };
     use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn spawned_arm_boot_has_own_recipe_mac_index_and_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let names = ["controller".into(), "db".into()];
+        let factory =
+            Factory::new("worker".into(), directory.path().into(), &names, 32, false).unwrap();
+        let recipe = Recipe {
+            ip: b"10.0.0.2/24".to_vec(),
+            hosts: b"10.0.0.1 controller\n10.0.0.2 db\n".to_vec(),
+            hostname: b"db".to_vec(),
+            user: b"0:0".to_vec(),
+            working_dir: b"/".to_vec(),
+            max_map_count: 262144,
+            wall_clock_epoch: 1_700_000_000,
+            instructions_per_progress_call: 50000,
+            progress_points_per_block: 1,
+            argv: vec![b"/bin/db".to_vec()],
+            environment: vec![b"ROLE=old".to_vec()],
+            volumes: vec![],
+            disk_volumes: vec![],
+            configs: 0u32.to_le_bytes().to_vec(),
+        };
+        let mut archive = Vec::new();
+        entry(
+            &mut archive,
+            "seedbox/launch.bin",
+            1,
+            0o100400,
+            &recipe.encode(),
+        );
+        entry(&mut archive, "TRAILER!!!", 2, 0, &[]);
+        let base_initrd = directory.path().join("base.initrd");
+        std::fs::write(&base_initrd, archive).unwrap();
+        let base = Boot {
+            kernel: "kernel".into(),
+            initrd: base_initrd,
+            seed: 7,
+            memory_bytes: 128 << 20,
+            command_line: format!("{} seedbox.control=1", crate::boot::DEFAULT_COMMAND_LINE),
+            mac: [2, 0, 0, 0, 0, 2],
+            disk_image: None,
+            disk_sectors: Some(4),
+            disk_fault_model: crate::disk::parse_disk_fault_model(&Value::Null).unwrap(),
+            timer_policy: Some(super::super::TimerPolicy {
+                seed: 11,
+                domain: "timer-jitter/db".into(),
+                jitter_ns: 3,
+            }),
+            progress: Some(super::super::Progress {
+                speed_hz: 800_000_000,
+                ns: 0,
+                jitter_ns: 0,
+                seed: 5,
+            }),
+        };
+        let env = BTreeMap::from([("ROLE".into(), "new".into())]);
+        let argv = ["/bin/joiner".into()];
+        let next = ["controller".into(), "db".into(), "db-2".into()];
+        let spec = SpawnSpec {
+            name: "db-2",
+            index: 2,
+            mac: [2, 0, 0, 0, 0, 3],
+            address: "10.0.0.3".into(),
+            names: &next,
+            env: &env,
+            argv: Some(&argv),
+        };
+        let boot = ArmMachine::spawn_boot(&factory, &base, &spec).unwrap();
+        assert_eq!(boot.mac, spec.mac);
+        assert_eq!(boot.memory_bytes, base.memory_bytes);
+        assert_eq!(boot.progress, base.progress);
+        assert!(boot
+            .command_line
+            .ends_with("seedbox.index=2 seedbox.name=db-2"));
+        assert!(!boot.command_line.contains("seedbox.control=1"));
+        assert_eq!(
+            boot.timer_policy.as_ref().unwrap().domain,
+            "timer-jitter/db-2"
+        );
+        let bytes = std::fs::read(&boot.initrd).unwrap();
+        let got = Recipe::parse(find(&bytes, "seedbox/launch.bin").unwrap()).unwrap();
+        assert_eq!(got.ip, b"10.0.0.3/24");
+        assert_eq!(got.hostname, b"db-2");
+        assert_eq!(got.environment, [b"ROLE=new".to_vec()]);
+        assert_eq!(got.argv, [b"/bin/joiner".to_vec()]);
+        assert_eq!(factory.names.borrow().get("db-2"), Some(&2));
+        assert!(factory.captures.borrow()[2].is_some());
+        assert!(directory.path().join("db-2.console").exists());
+        assert!(directory.path().join("db-2.mgmt").exists());
+    }
+
     fn records(bytes: &[u8]) -> Vec<[u64; 5]> {
         assert_eq!(&bytes[..8], log_capture::MAGIC);
         assert_eq!((bytes.len() - 8) % 40, 0);

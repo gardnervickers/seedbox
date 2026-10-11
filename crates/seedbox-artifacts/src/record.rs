@@ -145,9 +145,11 @@ pub fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
         record.report.as_ref().is_some_and(|r| {
             r.witness.is_some()
                 && (record.identity.inputs.profile.witness_mode != WitnessMode::FullState
-                    || r.full_state
-                        .as_ref()
-                        .is_some_and(|s| s.keys().eq(record.identity.inputs.guests.keys())))
+                    || r.full_state.as_ref().is_some_and(|s| {
+                        s.keys()
+                            .map(String::as_str)
+                            .eq(r.machines(record.identity.inputs.guests.keys()))
+                    }))
         })
     };
     let comparable = matches!(

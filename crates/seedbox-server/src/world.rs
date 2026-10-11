@@ -293,6 +293,18 @@ impl Tracker {
                 self.machine_pauses.remove(machine);
                 self.process_effects.remove(machine);
             }
+            FaultAction::Spawn { machine, from, .. } => {
+                let cpu_speed_hz = self.machines.get(from).and_then(|m| m.cpu_speed_hz);
+                let spawned = self.machine(machine);
+                spawned.cpu_speed_hz = cpu_speed_hz;
+                spawned.condition = MachineCondition::Starting;
+                spawned.condition_since_ns = Some(at);
+                spawned.application = ApplicationState {
+                    condition: ApplicationCondition::Starting,
+                    changed_at_ns: Some(at),
+                    exit_code: None,
+                };
+            }
             FaultAction::Partition {
                 handle,
                 left,
@@ -544,6 +556,52 @@ mod tests {
             plan: Some(Box::new(serde_json::to_value(plan).unwrap())),
             input_key: None,
         }
+    }
+
+    #[test]
+    fn applied_spawn_adds_starting_machine_before_readiness() {
+        let mut tracker = tracker();
+        let plan = FaultAction::Spawn {
+            machine: "new-node".into(),
+            from: "a".into(),
+            env: Default::default(),
+            argv: None,
+        };
+        tracker.event(10, &fault(1, FaultStatus::Applied, plan));
+        let snapshot = tracker.snapshot();
+        let spawned = snapshot
+            .machines
+            .iter()
+            .find(|m| m.name == "new-node")
+            .unwrap();
+        assert_eq!(spawned.condition, MachineCondition::Starting);
+        assert_eq!(spawned.condition_since_ns, Some(10));
+        assert_eq!(spawned.cpu_speed_hz, Some(800_000_000));
+        assert_eq!(
+            spawned.application.condition,
+            ApplicationCondition::Starting
+        );
+        assert_eq!(spawned.application.changed_at_ns, Some(10));
+        assert!(snapshot
+            .links
+            .iter()
+            .any(|link| link.from == "a" && link.to == "new-node"));
+        assert!(!snapshot.faults[0].active);
+        tracker.event(
+            20,
+            &EventKind::MachineReady {
+                machine: "new-node".into(),
+                incarnation: 0,
+            },
+        );
+        let ready = tracker.snapshot();
+        let spawned = ready
+            .machines
+            .iter()
+            .find(|m| m.name == "new-node")
+            .unwrap();
+        assert_eq!(spawned.condition, MachineCondition::Ready);
+        assert_eq!(spawned.application.condition, ApplicationCondition::Running);
     }
 
     #[test]

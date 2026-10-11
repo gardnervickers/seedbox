@@ -10,7 +10,7 @@ use seedbox_api::{
     FrameFate, LogDelivery, LogEntry, LogStream, PlaybackObservation, PlaybackRate, Simulation,
     SimulationComparison, SimulationEvent, SimulationId, SimulationSummary, WorldState,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
@@ -513,6 +513,7 @@ impl Focus {
             })
             .unwrap_or_default();
         crate::fault_form::FormContext {
+            machines: self.machines(),
             selected: self.selected.clone(),
             handles,
             active: activity
@@ -780,6 +781,12 @@ pub struct App {
     pub(super) events_tab: bool,
     /// Keys typed while the inject palette is opening.
     typeahead: Vec<KeyEvent>,
+    /// Submit the selected machine's default spawn once playback is held.
+    spawn_pending: bool,
+    /// Names admitted by quick spawn but not yet visible in the observed world.
+    reserved_spawns: BTreeSet<String>,
+    /// The quick spawn awaiting its fault acknowledgement.
+    spawn_in_flight: Option<String>,
     /// Time bar zoom: each step halves the visible window.
     pub(super) zoom: u32,
     /// Whether the newest catalogue poll reached the server.
@@ -1116,6 +1123,9 @@ impl App {
             oracle_scroll: 0,
             events_tab: false,
             typeahead: Vec::new(),
+            spawn_pending: false,
+            reserved_spawns: BTreeSet::new(),
+            spawn_in_flight: None,
             zoom: 0,
             connected: true,
             previews: BTreeMap::new(),
@@ -1279,8 +1289,23 @@ impl App {
             .map(|(_, s)| s.metadata.id.clone())
     }
 
+    fn spawn_form_context(&self) -> crate::fault_form::FormContext {
+        let mut context = self
+            .focus
+            .as_ref()
+            .map(Focus::form_context)
+            .unwrap_or_default();
+        context
+            .machines
+            .extend(self.reserved_spawns.iter().cloned());
+        context
+    }
+
     fn close_terminal_menu(&mut self) {
         if self.focus.as_ref().is_some_and(Focus::terminal) {
+            self.spawn_pending = false;
+            self.spawn_in_flight = None;
+            self.reserved_spawns.clear();
             self.fault_form = None;
             self.fault_menu = None;
             self.control_pending = false;
@@ -1377,6 +1402,9 @@ impl App {
                     self.focus = None;
                     self.fault_form = None;
                     self.fault_menu = None;
+                    self.spawn_pending = false;
+                    self.spawn_in_flight = None;
+                    self.reserved_spawns.clear();
                     if self.quit_pending {
                         self.quit = true;
                     }
@@ -1421,8 +1449,9 @@ impl App {
                     }) {
                         return requests;
                     }
-                    let names: Vec<&String> = world.machines.iter().map(|m| &m.name).collect();
-                    if focus.selected.as_ref().is_some_and(|s| !names.contains(&s)) {
+                    let names: BTreeSet<String> =
+                        world.machines.iter().map(|m| m.name.clone()).collect();
+                    if focus.selected.as_ref().is_some_and(|s| !names.contains(s)) {
                         focus.selected = None;
                     }
                     for machine in &world.machines {
@@ -1433,6 +1462,7 @@ impl App {
                     focus.traffic.observe(&world);
                     focus.world = Some(world);
                     focus.reconcile_heals();
+                    self.reserved_spawns.retain(|name| !names.contains(name));
                 }
             }
             Update::FaultMenuReady(result) => match result {
@@ -1441,25 +1471,51 @@ impl App {
                     if self.quit_pending {
                         return self.cancel_fault_menu();
                     }
+                    if self.spawn_pending
+                        && self.typeahead.iter().any(|key| key.code == KeyCode::Esc)
+                    {
+                        self.typeahead.clear();
+                        return self.cancel_fault_menu();
+                    }
                     if let Some(catalogue) = self.focus.as_ref().and_then(|f| f.fault_types.clone())
                     {
-                        let context = self
-                            .focus
-                            .as_ref()
-                            .map(Focus::form_context)
-                            .unwrap_or_default();
+                        let context = self.spawn_form_context();
                         self.fault_form = Some(FaultForm::new(catalogue).with_context(context));
-                        for key in std::mem::take(&mut self.typeahead) {
-                            requests.extend(self.input_raw(Event::Key(key)));
-                        }
-                        if requests.iter().any(|r| matches!(r, Request::Fault(..))) {
-                            self.fault_menu = Some(FaultMenu::Finishing);
+                        if self.spawn_pending {
+                            self.spawn_pending = false;
+                            self.typeahead.clear();
+                            if let Some(action) = self
+                                .fault_form
+                                .as_ref()
+                                .and_then(FaultForm::quick_spawn_action)
+                            {
+                                if let Some(focus) = &self.focus {
+                                    self.spawn_in_flight =
+                                        action["machine"].as_str().map(str::to_owned);
+                                    requests.push(Request::Fault(focus.id.clone(), action, rate));
+                                    self.fault_menu = Some(FaultMenu::Finishing);
+                                }
+                            } else {
+                                self.notify(
+                                    "selected machine can no longer be spawned",
+                                    Tone::Info,
+                                );
+                                return self.cancel_fault_menu();
+                            }
+                        } else {
+                            for key in std::mem::take(&mut self.typeahead) {
+                                requests.extend(self.input_raw(Event::Key(key)));
+                            }
+                            if requests.iter().any(|r| matches!(r, Request::Fault(..))) {
+                                self.fault_menu = Some(FaultMenu::Finishing);
+                            }
                         }
                     } else {
                         return self.cancel_fault_menu();
                     }
                 }
                 Err(error) => {
+                    self.spawn_pending = false;
                     self.typeahead.clear();
                     self.fault_menu = Some(FaultMenu::Failed);
                     self.notify(error, Tone::Bad);
@@ -1469,6 +1525,7 @@ impl App {
                 }
             },
             Update::FaultRejected(rate, error) => {
+                self.spawn_in_flight = None;
                 self.fault_menu = Some(FaultMenu::Editing(rate));
                 if let Some(form) = self.fault_form.as_mut() {
                     form.set_error(error);
@@ -1478,6 +1535,12 @@ impl App {
                 }
             }
             Update::FaultMenuDone(ok) => {
+                self.spawn_pending = false;
+                if let Some(name) = self.spawn_in_flight.take() {
+                    if ok {
+                        self.reserved_spawns.insert(name);
+                    }
+                }
                 if ok {
                     self.fault_form = None;
                 }
@@ -1854,6 +1917,7 @@ impl App {
     }
 
     fn cancel_fault_menu(&mut self) -> Vec<Request> {
+        self.spawn_pending = false;
         self.fault_form = None;
         if let Some(FaultMenu::Editing(rate)) = self.fault_menu {
             self.fault_menu = Some(FaultMenu::Finishing);
@@ -2382,6 +2446,9 @@ impl App {
             return Vec::new();
         }
         self.fault_form = None;
+        self.spawn_pending = false;
+        self.spawn_in_flight = None;
+        self.reserved_spawns.clear();
         self.focus = Some(Focus::new(id.clone()));
         self.inspector = None;
         self.logs_scroll = 0;
@@ -2396,7 +2463,7 @@ impl App {
         };
         let live = matches!(
             key.code,
-            KeyCode::Char(' ' | '.' | '+' | '=' | '-' | 'c' | 'f' | ':' | 'h' | 'n')
+            KeyCode::Char(' ' | '.' | '+' | '=' | '-' | 'c' | 'f' | ':' | 'h' | 'n' | 's')
         );
         if focus.terminal() && live {
             self.notify(
@@ -2565,8 +2632,31 @@ impl App {
                 return vec![Request::Branch(id.clone())];
             }
             KeyCode::Char('r') => return self.rerun(id),
+            KeyCode::Char('s') => {
+                let mut context = focus.form_context();
+                context
+                    .machines
+                    .extend(self.reserved_spawns.iter().cloned());
+                let available = focus.fault_types.as_ref().is_some_and(|catalogue| {
+                    FaultForm::new(catalogue.clone())
+                        .with_context(context)
+                        .quick_spawn_action()
+                        .is_some()
+                });
+                if available {
+                    self.spawn_pending = true;
+                    self.typeahead.clear();
+                    self.fault_menu = Some(FaultMenu::Opening);
+                    return vec![Request::BeginFaultMenu(id)];
+                }
+                self.notify(
+                    "select a machine to spawn a copy, or use f to customize",
+                    Tone::Info,
+                );
+            }
             KeyCode::Char('f') | KeyCode::Char(':') => {
                 if focus.fault_types.is_some() {
+                    self.spawn_pending = false;
                     self.typeahead.clear();
                     self.fault_menu = Some(FaultMenu::Opening);
                     return vec![Request::BeginFaultMenu(id)];
@@ -3238,6 +3328,26 @@ pub(crate) mod tests {
         }
     }
 
+    fn spawn_catalogue() -> FaultCatalogue {
+        FaultCatalogue {
+            simulation: "k7m2p9qx".parse().unwrap(),
+            faults: vec![seedbox_api::FaultDescriptor {
+                name: "spawn".into(),
+                category: seedbox_api::FaultCategory::Machine,
+                title: "Spawn machine".into(),
+                description: "Copy a machine".into(),
+                schema: serde_json::json!({
+                    "type":"object", "required":["action","from","machine"],
+                    "properties":{
+                        "action":{"const":"spawn"},
+                        "from":{"type":"string","enum":["server"]},
+                        "machine":{"type":"string","minLength":1}
+                    }
+                }),
+            }],
+        }
+    }
+
     fn submit_fault(app: &mut App) -> Vec<Request> {
         app.input(key('f'));
         if app.fault_menu == Some(FaultMenu::Opening) {
@@ -3380,6 +3490,114 @@ pub(crate) mod tests {
         app.apply(Update::FaultMenuDone(false));
         app.input(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert_eq!(submit_fault(&mut app).len(), 1);
+    }
+
+    #[test]
+    fn selected_machine_spawns_after_pause_and_restores_on_rejection() {
+        let mut app = app(&["server"]);
+        app.apply(Update::FaultTypes(spawn_catalogue()));
+        let id: SimulationId = "k7m2p9qx".parse().unwrap();
+        assert_eq!(app.input(key('s')), [Request::BeginFaultMenu(id.clone())]);
+        assert_eq!(app.fault_menu, Some(FaultMenu::Opening));
+        let prior = limited(3, 7);
+        let requests = app.apply(Update::FaultMenuReady(Ok(prior)));
+        assert_eq!(
+            requests,
+            [Request::Fault(
+                id,
+                serde_json::json!({"action":"spawn","from":"server","machine":"server-2"}),
+                prior
+            )]
+        );
+        assert_eq!(app.fault_menu, Some(FaultMenu::Finishing));
+        app.apply(Update::FaultRejected(prior, "spawn rejected".into()));
+        assert_eq!(app.fault_menu, Some(FaultMenu::Editing(prior)));
+        assert_eq!(
+            app.input(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+            [Request::EndFaultMenu("k7m2p9qx".parse().unwrap(), prior)]
+        );
+    }
+
+    #[test]
+    fn escape_during_pending_quick_spawn_restores_rate_without_spawning() {
+        let mut app = app(&["server"]);
+        app.apply(Update::FaultTypes(spawn_catalogue()));
+        let id: SimulationId = "k7m2p9qx".parse().unwrap();
+        assert_eq!(app.input(key('s')), [Request::BeginFaultMenu(id.clone())]);
+        assert!(app
+            .input(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
+            .is_empty());
+        let prior = limited(3, 7);
+        assert_eq!(
+            app.apply(Update::FaultMenuReady(Ok(prior))),
+            [Request::EndFaultMenu(id, prior)]
+        );
+        assert_eq!(app.fault_menu, Some(FaultMenu::Finishing));
+        assert!(app.spawn_in_flight.is_none());
+        assert!(app.reserved_spawns.is_empty());
+        app.apply(Update::FaultMenuDone(true));
+        assert_eq!(app.fault_menu, None);
+    }
+
+    #[test]
+    fn consecutive_quick_spawns_reserve_names_until_world_observation() {
+        let mut app = app(&["server"]);
+        app.apply(Update::FaultTypes(spawn_catalogue()));
+        let id: SimulationId = "k7m2p9qx".parse().unwrap();
+        let prior = limited(3, 7);
+        for expected in ["server-2", "server-3"] {
+            assert_eq!(app.input(key('s')), [Request::BeginFaultMenu(id.clone())]);
+            assert_eq!(
+                app.apply(Update::FaultMenuReady(Ok(prior))),
+                [Request::Fault(
+                    id.clone(),
+                    serde_json::json!({"action":"spawn","from":"server","machine":expected}),
+                    prior
+                )]
+            );
+            app.apply(Update::FaultMenuDone(true));
+            assert!(app.reserved_spawns.contains(expected));
+        }
+        assert_eq!(app.reserved_spawns.len(), 2);
+        assert_eq!(app.input(key('s')), [Request::BeginFaultMenu(id.clone())]);
+        assert_eq!(
+            app.apply(Update::FaultMenuReady(Ok(prior))),
+            [Request::Fault(
+                id.clone(),
+                serde_json::json!({"action":"spawn","from":"server","machine":"server-4"}),
+                prior
+            )]
+        );
+        app.apply(Update::FaultRejected(prior, "rejected".into()));
+        assert!(app.spawn_in_flight.is_none());
+        assert!(!app.reserved_spawns.contains("server-4"));
+        assert_eq!(
+            app.input(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+            [Request::EndFaultMenu(id, prior)]
+        );
+    }
+
+    #[test]
+    fn spawn_shortcut_requires_selected_source_and_survives_catalogue_change() {
+        let mut app = app(&["server"]);
+        app.apply(Update::FaultTypes(spawn_catalogue()));
+        app.input(key('a'));
+        assert!(app.input(key('s')).is_empty());
+        assert_eq!(app.fault_menu, None);
+        app.focus.as_mut().unwrap().selected = Some("server".into());
+        assert_eq!(
+            app.input(key('s')),
+            [Request::BeginFaultMenu("k7m2p9qx".parse().unwrap())]
+        );
+        app.apply(Update::FaultTypes(fault_catalogue("heal")));
+        assert_eq!(
+            app.apply(Update::FaultMenuReady(Ok(PlaybackRate::Unlimited))),
+            [Request::EndFaultMenu(
+                "k7m2p9qx".parse().unwrap(),
+                PlaybackRate::Unlimited
+            )]
+        );
+        assert_eq!(app.fault_menu, Some(FaultMenu::Finishing));
     }
 
     #[test]

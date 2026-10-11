@@ -591,7 +591,14 @@ fn footer(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
                 if let Some(handle) = focus.healable(&activity) {
                     push("h", format!("heal {handle}"));
                 }
-                push(":", "inject".into());
+                if focus.selected.is_some()
+                    && focus.fault_types.as_ref().is_some_and(|catalogue| {
+                        catalogue.faults.iter().any(|fault| fault.name == "spawn")
+                    })
+                {
+                    push("s", "spawn copy".into());
+                }
+                push(":", "inject / customize".into());
                 push("+-", "rate".into());
                 push("c", "checkpoint".into());
                 push("b", "branch".into());
@@ -673,7 +680,8 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
             (".", "step one scheduler round"),
             ("+ / -", "change the playback rate"),
             ("n", "run until just before the next fault"),
-            (": or f", "inject a fault; heals are listed first"),
+            ("s", "spawn a copy of the selected machine"),
+            (": or f", "inject or customize a spawn; Esc cancels"),
             ("h", "heal the selected (or oldest) active fault"),
             ("c / b", "checkpoint · branch from the newest checkpoint"),
             ("r", "rerun with the same retained inputs"),
@@ -3538,6 +3546,44 @@ mod tests {
         EventDelivery, FaultState, Frame as WireFrame, FrameDelivery, LogDelivery, LogEntry,
         SimulationEvent,
     };
+
+    #[test]
+    fn selected_machine_spawn_palette_shows_quick_action_and_customization() {
+        let mut app = app(&["server", "oracle"]);
+        let catalogue = seedbox_api::FaultCatalogue {
+            simulation: "k7m2p9qx".parse().unwrap(),
+            faults: vec![seedbox_api::FaultDescriptor {
+                name: "spawn".into(),
+                category: seedbox_api::FaultCategory::Machine,
+                title: "Spawn machine".into(),
+                description: "Copy the source machine".into(),
+                schema: serde_json::json!({
+                    "type":"object", "required":["action", "from", "machine"],
+                    "properties": {
+                        "action":{"type":"string","const":"spawn"},
+                        "from":{"type":"string","enum":["server","oracle"]},
+                        "machine":{"type":"string","minLength":1},
+                        "env":{"type":"object","additionalProperties":{"type":"string"}},
+                        "argv":{"type":"array","items":{"type":"string"}}
+                    }
+                }),
+            }],
+        };
+        app.apply(Update::FaultTypes(catalogue));
+        render(&app);
+        app.input(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('f'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        app.apply(Update::FaultMenuReady(Ok(PlaybackRate::Unlimited)));
+        let screen = render(&app);
+        assert!(screen.contains("Spawn a copy of server"));
+        assert!(screen.contains("Spawn machine"));
+        assert!(screen.contains("server-2"));
+        assert!(screen.contains("customize"));
+    }
 
     fn render(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();

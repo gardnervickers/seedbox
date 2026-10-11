@@ -317,6 +317,20 @@ pub struct ExecutionReport {
     pub full_state: Option<BTreeMap<String, ContentDigest>>,
     pub faults: Vec<FaultEvent>,
     pub detail: Option<String>,
+    /// Machines the scenario spawned at runtime, in spawn order. They run
+    /// beside the prepared machines and have their own logs and state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawned: Vec<String>,
+}
+
+impl ExecutionReport {
+    /// Every machine of the run: prepared, then spawned.
+    pub fn machines<'a>(
+        &'a self,
+        prepared: impl Iterator<Item = &'a String>,
+    ) -> std::collections::BTreeSet<&'a str> {
+        prepared.chain(&self.spawned).map(String::as_str).collect()
+    }
 }
 
 #[cfg(test)]

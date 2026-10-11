@@ -329,6 +329,7 @@ impl Orchestrator {
                     full_state: None,
                     faults: vec![],
                     detail: Some("cancelled before execution".into()),
+                    spawned: Vec::new(),
                 });
             }
             let start = seedbox_engine_protocol::host_clock::Instant::now()?;
@@ -518,6 +519,7 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
     for fault in &report.faults {
         if fault.applied_at_ns < fault.requested_at_ns
             || !(simulation.services.contains_key(&fault.service)
+                || report.spawned.contains(&fault.service)
                 || (fault.service.is_empty()
                     && matches!(
                         fault.action.as_str(),
@@ -549,7 +551,11 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
         ));
     }
     if let Some(state) = &report.full_state {
-        if state.keys().ne(identity.inputs.guests.keys()) {
+        if state
+            .keys()
+            .map(String::as_str)
+            .ne(report.machines(identity.inputs.guests.keys()))
+        {
             return Err(Error::Execution(
                 "full-state digests must cover exactly the configured machines".into(),
             ));

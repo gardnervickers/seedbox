@@ -77,6 +77,33 @@ fn malformed_world_faults_return_errors_instead_of_panicking() {
 }
 
 #[test]
+fn invalid_interactive_spawn_is_rejected_before_fault_admission() {
+    let faults = engine::Faults::new(vec![], vec!["source".into()]).unwrap();
+    let invalid = [
+        json!({"action":"spawn", "machine":"Bad.Name", "from":"source"}),
+        json!({"action":"spawn", "machine":"-node", "from":"source"}),
+        json!({"action":"spawn", "machine":"node", "from":"source", "argv":[]}),
+        json!({"action":"spawn", "machine":"node", "from":"source", "argv":[""]}),
+        json!({"action":"spawn", "machine":"node", "from":"source", "argv":["/app", "\u{0}"]}),
+        json!({"action":"spawn", "machine":"node", "from":"source", "env":{"A=B":"value"}}),
+        json!({"action":"spawn", "machine":"node", "from":"source", "env":{"OK":"bad\u{0}value"}}),
+    ];
+    for action in invalid {
+        let action: seedbox_control::Action = serde_json::from_value(action.clone()).unwrap();
+        assert!(
+            faults.validate_action_shape(&action).is_err(),
+            "admitted {action:?}"
+        );
+    }
+    let valid: seedbox_control::Action = serde_json::from_value(json!({
+        "action":"spawn", "machine":"node-2", "from":"source",
+        "env":{"ROLE":"follower"}, "argv":["/app", "--join"]
+    }))
+    .unwrap();
+    assert!(faults.validate_action_shape(&valid).is_ok());
+}
+
+#[test]
 fn same_time_partition_then_heal_completes_in_author_order_before_new_sends() {
     let mut f = engine::Faults::new(vec![
         json!({"id":1,"at_ns":10,"deadline_ns":20,"action":"partition","handle":"cut","left":["n1"],"right":["n2"]}),

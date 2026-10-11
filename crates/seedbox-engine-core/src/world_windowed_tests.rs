@@ -2547,3 +2547,263 @@ fn checkpoint_continuation_schedules_edited_inputs_before_the_first_resumed_roun
         assert_eq!(w.faults.log[2].applied_at_ns, Some(at + 1));
     }
 }
+
+fn spawn(machine: &str, from: &str) -> Action {
+    Action::Spawn {
+        machine: machine.into(),
+        from: from.into(),
+        env: [("ROLE".to_string(), "joiner".to_string())].into(),
+        argv: None,
+    }
+}
+
+/// `a` sends one frame to the machine spawned third, every tick from `from`.
+fn frames_to_spawned(w: &mut World<Mock>, from: u64) {
+    let mut frame = vec![0; 60];
+    frame[..6].copy_from_slice(&[0, 0, 0, 0, 0, 3]);
+    frame[11] = 0;
+    for at in from..40 {
+        let mut step = Step::new(at, Stop::Sent);
+        step.frames = vec![frame.clone()];
+        w.machines[0].steps.push_back(step);
+    }
+}
+
+#[test]
+fn timed_spawn_grows_before_the_next_same_time_input() {
+    use crate::input_program::TimedInput;
+    for workers in [0, 2, 4] {
+        let mut w = world(&["a", "b"]);
+        w.early = 0;
+        w.arm_input_program(
+            vec![
+                TimedInput {
+                    timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                    key: "spawn".into(),
+                    at_ns: 6,
+                    action: spawn("c", "a"),
+                },
+                TimedInput {
+                    timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                    key: "partition".into(),
+                    at_ns: 6,
+                    action: Action::Partition {
+                        handle: "cut".into(),
+                        left: vec!["a".into()],
+                        right: vec!["c".into()],
+                    },
+                },
+            ],
+            60,
+            0,
+        )
+        .unwrap();
+        let (word, evidence) = run_with(&mut w, 60, None, workers, Duration::ZERO).unwrap();
+        assert_eq!(word, "duration");
+        assert_eq!(w.machines.len(), 3);
+        assert_eq!(w.machines[2].booted_at, 6);
+        assert_eq!(w.input_admissions().len(), 2);
+        assert_eq!(w.faults.log[0].applied_at_ns, Some(6));
+        assert_eq!(w.faults.log[1].applied_at_ns, Some(6));
+        assert!(evidence["segment_effects_digests"].is_array());
+    }
+}
+
+#[test]
+fn a_spawn_grows_the_world_at_its_fault_boundary() {
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    plan(&mut w, 6, spawn("c", "a"));
+    frames_to_spawned(&mut w, 8);
+    let (word, evidence) = run_with(&mut w, 60, None, 0, Duration::ZERO).unwrap();
+    assert_eq!(word, "duration");
+    assert_eq!(
+        evidence["segment_effects_digests"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(w.machines.len(), 3);
+    let c = &w.machines[2];
+    assert_eq!(
+        (c.name.as_str(), c.booted_at, c.incarnation, c.down),
+        ("c", 6, 0, false)
+    );
+    assert_eq!(c.time, 60);
+    assert_eq!(w.macs[2], [0, 0, 0, 0, 0, 3]);
+    assert_eq!(w.faults.names(), ["a", "b", "c"]);
+    assert_eq!(w.control.names, ["a", "b", "c"]);
+    assert_eq!(w.faults.log[0].status, RowStatus::Applied);
+    let c_trace = machine_trace(&w, "c");
+    assert_eq!(c_trace[0], "c:spawned:6");
+    assert!(
+        c_trace.iter().any(|l| l.starts_with("c:frame:")),
+        "{c_trace:?}"
+    );
+    assert!(w.delivered > 0);
+    // The spawned machine takes part in the usual lifecycle.
+    plan(
+        &mut w,
+        70,
+        Action::Crash {
+            machine: "c".into(),
+        },
+    );
+    plan(
+        &mut w,
+        75,
+        Action::Reboot {
+            machine: "c".into(),
+        },
+    );
+    assert_eq!(run(&mut w, 90, None).unwrap(), "duration");
+    assert_eq!(w.machines[2].incarnation, 1);
+    assert_eq!(w.machines[2].booted_at, 75);
+}
+
+#[test]
+fn a_spawn_is_identical_across_worker_counts_and_snapshot_restores_drop_it() {
+    let mut reference = None;
+    for workers in [0, 1, 2, 4] {
+        let mut w = world(&["a", "b"]);
+        w.early = 0;
+        plan(&mut w, 6, spawn("c", "a"));
+        frames_to_spawned(&mut w, 8);
+        let snapshot = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+        w.factory.lock().unwrap().clear();
+        let execute = |w: &mut World<Mock>| {
+            let (_, evidence) = run_with(w, 60, None, workers, Duration::from_micros(3)).unwrap();
+            (
+                evidence["segment_effects_digests"].clone(),
+                ["a", "b", "c"].map(|m| machine_trace(w, m)),
+                w.faults.log.clone(),
+                w.network_snapshot(),
+            )
+        };
+        let observed = execute(&mut w);
+        match &reference {
+            Some(want) => assert_eq!(&observed, want),
+            None => reference = Some(observed.clone()),
+        }
+        snapshot.restore(&mut w).unwrap();
+        assert_eq!(w.machines.len(), 2);
+        assert_eq!(w.control.names.len(), 2);
+        assert!(trace(&w).contains(&"c:terminate:60".to_string()));
+        w.factory.lock().unwrap().clear();
+        assert_eq!(execute(&mut w), observed);
+    }
+}
+
+#[test]
+fn a_spawned_checkpoint_restores_in_a_fresh_world_and_after_divergent_growth() {
+    let mut original = world(&["a", "b"]);
+    original.early = 0;
+    plan(&mut original, 6, spawn("c", "a"));
+    assert_eq!(
+        segment(&mut original, 60, None, None, Some(10), true).unwrap(),
+        "checkpoint"
+    );
+    plan(&mut original, 12, spawn("d", "c"));
+    assert_eq!(
+        segment(&mut original, 60, None, None, Some(20), true).unwrap(),
+        "checkpoint"
+    );
+    assert_eq!(original.machines.len(), 4);
+    let saved = WorldSnapshot::take_checkpoint(&mut original).unwrap();
+    let serialized = serde_json::to_vec(&saved).unwrap();
+    let saved: WorldSnapshot<Mock> = serde_json::from_slice(&serialized).unwrap();
+    let expected = {
+        saved.restore_checkpoint(&mut original).unwrap();
+        let (outcome, _) = run_with(&mut original, 45, None, 0, Duration::ZERO).unwrap();
+        (
+            outcome,
+            original.faults.log.clone(),
+            original.network_snapshot(),
+        )
+    };
+
+    // A newly started process boots only the original machines; the persisted
+    // recipe must recreate a spawn from a spawn before restoring RAM/state.
+    let mut fresh = world(&["a", "b"]);
+    fresh.early = 0;
+    saved.restore_checkpoint(&mut fresh).unwrap();
+    assert_eq!(
+        fresh
+            .machines
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c", "d"]
+    );
+    assert_eq!(fresh.machines[2].booted_at, 6);
+    assert_eq!(fresh.machines[3].booted_at, 12);
+    assert_eq!(fresh.macs[2], [0, 0, 0, 0, 0, 3]);
+    assert_eq!(fresh.macs[3], [0, 0, 0, 0, 0, 4]);
+    assert_eq!(fresh.control.names, original.control.names);
+    assert_eq!(fresh.faults.names(), original.faults.names());
+    let (outcome, _) = run_with(&mut fresh, 45, None, 2, Duration::ZERO).unwrap();
+    assert_eq!(
+        (outcome, fresh.faults.log.clone(), fresh.network_snapshot()),
+        expected
+    );
+
+    // A later branch may grow again; restoring the earlier checkpoint drops
+    // that new machine and restores exactly the saved membership.
+    plan(&mut fresh, 47, spawn("e", "d"));
+    assert_eq!(run(&mut fresh, 55, None).unwrap(), "duration");
+    assert_eq!(fresh.machines.len(), 5);
+    saved.restore_checkpoint(&mut fresh).unwrap();
+    assert_eq!(fresh.machines.len(), 4);
+    assert_eq!(fresh.faults.names(), ["a", "b", "c", "d"]);
+    assert_eq!(fresh.control.names, ["a", "b", "c", "d"]);
+}
+
+#[test]
+fn a_spawn_rejects_a_name_in_use_and_an_unknown_source() {
+    let mut w = world(&["a", "b"]);
+    for action in [spawn("b", "a"), spawn("c", "z")] {
+        assert!(w
+            .faults
+            .append(Plan {
+                id: 0,
+                at_ns: 5,
+                deadline_ns: 10,
+                action,
+            })
+            .is_err());
+    }
+}
+
+#[test]
+fn a_spawn_request_replies_with_the_new_machine_and_its_address() {
+    let mut w = world(&["a", "b"]);
+    configure_control(&mut w);
+    let request =
+        json!({"version":1,"id":1,"op":"spawn","from":{"machine":"b"},"env":{"ROLE":"joiner"}});
+    w.control
+        .request(0, 0, format!("SBX_RPC1 1 1 {request}").as_bytes(), 0)
+        .unwrap();
+    assert_eq!(run(&mut w, 200, None).unwrap(), "duration");
+    let response = &w.control.log[0]["response"];
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(
+        response["result"],
+        json!({"machine":"b-2","address":"10.0.0.3"})
+    );
+    assert_eq!(w.machines.len(), 3);
+    assert_eq!(w.machines[2].name, "b-2");
+    assert!(trace(&w)
+        .iter()
+        .any(|l| l.starts_with("a:control/SBX_REPLY1 1 1 ")));
+    // The spawned machine is an ordinary target from then on.
+    let request = json!({"version":1,"id":2,"op":"spawn","from":{"machine":"b-2"},"name":"b-2"});
+    w.control
+        .request(0, 200, format!("SBX_RPC1 2 1 {request}").as_bytes(), 0)
+        .unwrap();
+    assert_eq!(run(&mut w, 400, None).unwrap(), "duration");
+    assert_eq!(
+        w.control.log[1]["response"]["error"]["message"],
+        "spawn name is already in use"
+    );
+}

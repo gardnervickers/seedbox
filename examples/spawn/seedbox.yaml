@@ -1,0 +1,14 @@
+name: spawn-demo
+machines:
+  server:
+    build:
+      context: ./workload
+oracle:
+  build:
+    context: ./workload
+  entrypoint: [python3, /workload/oracle.py]
+  files:
+    - source: ../../python/seedbox/__init__.py
+      target: /workload/seedbox/__init__.py
+    - source: ../../python/seedbox/control.py
+      target: /workload/seedbox/control.py

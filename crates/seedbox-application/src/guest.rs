@@ -571,3 +571,46 @@ impl<W: Write> Newc<W> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod spawn_tests {
+    use super::*;
+
+    /// A spawned machine's recipe is rewritten by the engine; it must read
+    /// every recipe this build writes.
+    #[test]
+    fn the_engine_reads_the_written_launch_recipe() {
+        let launch = Launch {
+            argv: vec!["/bin/app".into(), "--flag".into()],
+            environment: BTreeMap::from([("A".into(), "1".into())]),
+            working_dir: "/srv".into(),
+            user: "0:0".into(),
+            volumes: vec!["/cache".into()],
+            disk_volumes: vec![],
+        };
+        let configs = BTreeMap::from([("/etc/app.conf".to_string(), b"x".to_vec())]);
+        let bytes = launch_recipe(
+            &launch,
+            "10.0.0.1/24",
+            "10.0.0.1 app\n",
+            "app",
+            &configs,
+            MIN_WALL_CLOCK_EPOCH,
+        )
+        .unwrap();
+        let recipe = seedbox_engine_core::spawn_recipe::Recipe::parse(&bytes).unwrap();
+        assert_eq!(recipe.hostname, b"app");
+        assert_eq!(recipe.wall_clock_epoch, MIN_WALL_CLOCK_EPOCH);
+        assert_eq!(
+            recipe.instructions_per_progress_call,
+            seedbox_spec::project::PROGRESS_INSTRUCTIONS
+        );
+        assert_eq!(
+            recipe.progress_points_per_block,
+            seedbox_spec::project::PROGRESS_POINTS
+        );
+        assert_eq!(recipe.argv, [b"/bin/app".to_vec(), b"--flag".to_vec()]);
+        assert_eq!(recipe.environment, [b"A=1".to_vec()]);
+        assert_eq!(recipe.encode(), bytes);
+    }
+}

@@ -230,7 +230,64 @@ pub struct BootInputs {
     console_limit: Option<usize>,
     features: MachineFeatures,
     log_chunk_limit: Option<usize>,
+    /// Where a machine's console, management log and trace go.
+    outputs: Rc<Outputs>,
     observations: Option<std::sync::Arc<seedbox_engine_core::observation::Publisher>>,
+}
+
+/// The run directory's per-machine output files.
+#[derive(Default)]
+struct Outputs {
+    /// The current run or branch directory; a forked seed or checkpoint
+    /// branch writes under its own.
+    dir: std::cell::RefCell<String>,
+    stream_console: bool,
+    trace: bool,
+}
+
+impl BootInputs {
+    /// A spawned machine's inputs: the source's kernel, memory, devices and
+    /// configured disk, with its own name, index and MAC, and its launch
+    /// recipe rewritten into an appended initramfs archive.
+    fn spawned(&self, spec: &world_core::SpawnSpec<'_>) -> Result<Self, String> {
+        let mut boot = self.clone();
+        // Only the controller gets the control flag.
+        let identity = |cmdline: &str| {
+            cmdline
+                .split(' ')
+                .filter(|w| *w != "seedbox.control=1")
+                .map(|w| {
+                    if w.starts_with("seedbox.name=") {
+                        format!("seedbox.name={}", spec.name)
+                    } else if w.starts_with("seedbox.index=") {
+                        format!("seedbox.index={}", spec.index)
+                    } else {
+                        w.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        boot.cmdline = (identity(&self.cmdline.0), identity(&self.cmdline.1));
+        boot.mac = self.mac.map(|_| spec.mac);
+        let initrd = seedbox_engine_core::spawn_recipe::spawned_initrd(&self.initrd, spec)
+            .map_err(|e| format!("spawn {}: {e}", spec.name))?;
+        boot.initrd = Rc::new(initrd.into());
+        Ok(boot)
+    }
+}
+
+/// Open `mach`'s console and management logs and its trace under the
+/// current output directory, as every machine has them.
+fn attach_outputs(mach: &mut Machine, outputs: &Outputs) -> Result<(), String> {
+    let out = outputs.dir.borrow();
+    open_outputs(mach, &out, outputs.stream_console)?;
+    if outputs.trace {
+        let f = std::fs::File::create(format!("{out}/{}.trace", mach.world.name))
+            .map_err(|e| e.to_string())?;
+        mach.trace = Some(std::io::BufWriter::new(f));
+    }
+    Ok(())
 }
 
 /// A machine's disk: zeroed, or a raw image relative to `base` (with
@@ -634,6 +691,11 @@ pub fn run(
     let mut macs = Vec::new();
     let mut boots = Vec::new();
     let mut initrds: BTreeMap<String, Rc<GuestImage>> = BTreeMap::new();
+    let outputs = Rc::new(Outputs {
+        dir: out.clone().into(),
+        stream_console: options.stream_console,
+        trace: options.trace,
+    });
     for (i, mc) in cfg.machines.iter().enumerate() {
         let ipath = base.join(&mc.initrd).to_string_lossy().to_string();
         if !initrds.contains_key(&ipath) {
@@ -672,23 +734,19 @@ pub fn run(
             console_limit,
             features,
             log_chunk_limit: options.log_chunk_limit,
+            outputs: outputs.clone(),
             observations: observations.clone(),
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
         let mut mach = boot_machine(&kvm, &names[i], &boot, barrier, seed)?;
+        attach_outputs(&mut mach, &boot.outputs)?;
         boots.push(boot);
-        open_outputs(&mut mach, &out, options.stream_console)?;
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
         mach.syscall_ns =
             machine::pv::syscall_ns(&mut Rng::new(boot_seed, &format!("pv-speed/{}", names[i])));
         mach.seed_progress_jitter(
             Rng::new(boot_seed, &format!("progress-jitter/{}", names[i])).next(),
         );
-        if options.trace {
-            let f = std::fs::File::create(format!("{out}/{}.trace", names[i]))
-                .map_err(|e| e.to_string())?;
-            mach.trace = Some(std::io::BufWriter::new(f));
-        }
         machines.push(mach);
     }
     let net = cfg.network.clone().unwrap_or_default();
@@ -818,8 +876,14 @@ pub fn run(
                     snapshot.restore_checkpoint(&mut world)?;
                     replay = saved_replay.clone();
                     let identity = checkpoint::branch_identity(&parent, *at, branch_seed);
+                    // Machines spawned before the checkpoint are part of it.
+                    let present: Vec<String> = world
+                        .machines()
+                        .iter()
+                        .map(|m| m.world.name.clone())
+                        .collect();
                     let reseed =
-                        reseed_checkpoint(&mut world, &names, seed, branch_seed, &identity)?;
+                        reseed_checkpoint(&mut world, &present, seed, branch_seed, &identity)?;
                     let dir = output_layout::checkpoint_directory(
                         &out,
                         held.len(),
@@ -1014,6 +1078,10 @@ fn open_outputs(mach: &mut Machine, out: &str, stream: bool) -> Result<(), Strin
 /// Move every machine's logs to a new output directory `out`, for a branch.
 fn reopen_outputs(world: &mut World, out: &str, stream: bool) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    // Machines spawned from now on write there too.
+    if let Some(boot) = world.boot_inputs().first() {
+        *boot.outputs.dir.borrow_mut() = out.to_owned();
+    }
     for mach in world.machines_mut() {
         open_outputs(mach, out, stream)?;
     }
@@ -1372,6 +1440,81 @@ fn report(
 #[cfg(test)]
 mod progress_tests {
     use super::*;
+
+    #[test]
+    fn a_spawned_machine_boots_its_source_inputs_under_its_own_identity() {
+        use seedbox_engine_core::spawn_recipe::{entry, find, Recipe};
+        let recipe = Recipe {
+            ip: b"10.0.0.2/24".to_vec(),
+            hosts: b"10.0.0.1 ctl\n10.0.0.2 db\n".to_vec(),
+            hostname: b"db".to_vec(),
+            user: b"0:0".to_vec(),
+            working_dir: b"/".to_vec(),
+            max_map_count: 1,
+            wall_clock_epoch: 86400,
+            instructions_per_progress_call: 50000,
+            progress_points_per_block: 1,
+            argv: vec![b"/db".to_vec()],
+            environment: vec![],
+            volumes: vec![],
+            disk_volumes: vec![],
+            configs: 0u32.to_le_bytes().to_vec(),
+        };
+        let mut initrd = Vec::new();
+        entry(
+            &mut initrd,
+            "seedbox/launch.bin",
+            1,
+            0o100400,
+            &recipe.encode(),
+        );
+        entry(&mut initrd, "TRAILER!!!", 2, 0, &[]);
+        let base = BootInputs {
+            kernel: Rc::from([]),
+            initrd: Rc::new(initrd.clone().into()),
+            cmdline: (
+                "console=ttyS0 seedbox.name=db seedbox.index=1 virtio_mmio.device=x".into(),
+                " seedbox.control=1 extra=1".into(),
+            ),
+            mem: 1 << 20,
+            mac: Some([0x52, 0x54, 0, 0, 0, 2]),
+            control_channel: true,
+            disk: Some(disk::Disk::new(None, Some(8)).unwrap()),
+            tolerance: 0,
+            timer_jitter: 0,
+            exact_timer_ppm: 0,
+            console_limit: None,
+            features: MachineFeatures::default(),
+            log_chunk_limit: None,
+            outputs: Default::default(),
+            observations: None,
+        };
+        let names = ["ctl", "db", "db-2"].map(String::from);
+        let env = BTreeMap::new();
+        let spec = world_core::SpawnSpec {
+            name: "db-2",
+            index: 2,
+            mac: [0x52, 0x54, 0, 0, 0, 3],
+            address: world_core::machine_address(2),
+            names: &names,
+            env: &env,
+            argv: None,
+        };
+        let spawned = base.spawned(&spec).unwrap();
+        assert_eq!(
+            spawned.cmdline,
+            (
+                "console=ttyS0 seedbox.name=db-2 seedbox.index=2 virtio_mmio.device=x".into(),
+                " extra=1".into()
+            )
+        );
+        assert_eq!(spawned.mac, Some([0x52, 0x54, 0, 0, 0, 3]));
+        assert!(spawned.disk.is_some());
+        let tail = &spawned.initrd[initrd.len()..];
+        let got = Recipe::parse(find(tail, "seedbox/launch.bin").unwrap()).unwrap();
+        assert_eq!(got.ip, b"10.0.0.3/24");
+        assert_eq!(got.hostname, b"db-2");
+    }
 
     /// Guests see the command line: these are the exact bytes `run` gave
     /// them before it had a builder.
