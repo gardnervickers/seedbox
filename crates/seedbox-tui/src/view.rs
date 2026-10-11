@@ -597,6 +597,7 @@ fn footer(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
                 let panel = match app.panel {
                     Panel::Machines => "machines",
                     Panel::Faults => "faults",
+                    Panel::Links => "links",
                     Panel::Logs => "logs",
                 };
                 push("tab", format!("focus: {panel}"));
@@ -762,7 +763,10 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
             app.map_bottom.set(Some(map_area.y + map_area.height));
         }
     }
-    if wide {
+    if wide && app.panel == Panel::Links {
+        // Focusing links expands them over the side panels.
+        links(frame, app, focus, side, None);
+    } else if wide {
         let machine_rows = (present.len() as u16 + 3).clamp(4, side.height / 2);
         // Faults take what their rows need; links fill the rest of the side.
         let fault_rows = (fault_entries(&activity) as u16 + 2).clamp(5, side.height / 3);
@@ -773,10 +777,12 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
         ])
         .areas(side);
         faults(frame, app, focus, &activity, faults_area, sim_now, None);
-        links(frame, app, focus, links_area);
+        links(frame, app, focus, links_area, None);
         machines(frame, app, focus, machines_area, None);
     } else if app.panel == Panel::Machines {
         machines(frame, app, focus, side, Some(Panel::Machines));
+    } else if app.panel == Panel::Links {
+        links(frame, app, focus, side, Some(Panel::Links));
     } else {
         faults(
             frame,
@@ -1884,6 +1890,8 @@ fn tabbed_title(active: Panel) -> Line<'static> {
         tab("faults", active == Panel::Faults),
         Span::styled("│", Style::new().fg(BORDER)),
         tab("machines", active == Panel::Machines),
+        Span::styled("│", Style::new().fg(BORDER)),
+        tab("links", active == Panel::Links),
     ])
 }
 
@@ -2033,10 +2041,20 @@ fn bytes_rate(per_second: f64) -> String {
 }
 
 /// Every directed link with its policy, traffic, drops and any fault on it.
-/// Links of the selected machine come first, then altered and busy links.
-fn links(frame: &mut Frame, app: &App, focus: &Focus, area: Rect) {
-    let mut b = block("links", false).title_bottom(source("GET world", app.details));
+/// Links of the selected machine come first, then cut or shaped links, each
+/// group by name so rows hold still while scrolling.
+fn links(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Option<Panel>) {
+    let focused = app.panel == Panel::Links;
+    let mut b = match tabbed {
+        Some(panel) => Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(if focused { BORDER_HI } else { BORDER }))
+            .title(tabbed_title(panel)),
+        None => block("links", focused),
+    }
+    .title_bottom(source("GET world", app.details));
     let inner = b.inner(area);
+    app.hitboxes.borrow_mut().push((area, HitTarget::Links));
     let Some(world) = &focus.world else {
         frame.render_widget(b, area);
         return;
@@ -2052,22 +2070,25 @@ fn links(frame: &mut Frame, app: &App, focus: &Focus, area: Rect) {
         };
         rank(a)
             .cmp(&rank(b))
-            .then(
-                focus
-                    .traffic
-                    .link_rate(&b.from, &b.to)
-                    .total_cmp(&focus.traffic.link_rate(&a.from, &a.to)),
-            )
             .then((&a.from, &a.to).cmp(&(&b.from, &b.to)))
     });
     let rows = inner.height.saturating_sub(1) as usize;
-    let hidden = links.len().saturating_sub(rows);
-    let summary = if hidden > 0 {
-        format!(" {} links · +{hidden} below ", links.len())
+    app.links_rows.set(rows);
+    let start = app.links_scroll.min(links.len().saturating_sub(rows));
+    let end = (start + rows).min(links.len());
+    let summary = if end - start < links.len() {
+        let hint = if focused { "↑↓" } else { "tab ↑↓" };
+        format!(" {}–{} of {} links · {hint} ", start + 1, end, links.len())
     } else {
         format!(" {} links ", links.len())
     };
-    b = b.title(Line::styled(summary, Style::new().fg(DIM)).right_aligned());
+    let title_width = if tabbed.is_some() { 30 } else { 9 };
+    let summary = Line::styled(summary, Style::new().fg(DIM)).right_aligned();
+    b = if title_width + summary.width() + 2 <= area.width as usize {
+        b.title(summary)
+    } else {
+        b.title_bottom(summary)
+    };
     frame.render_widget(b, area);
     let width = inner.width as usize;
     let name_width = links
@@ -2092,7 +2113,7 @@ fn links(frame: &mut Frame, app: &App, focus: &Focus, area: Rect) {
     header.push_str(&pad_left("LAT", 7));
     header.push_str(&format!(" {}", pad("FAULT", fault_width.saturating_sub(1))));
     let mut lines = vec![Line::styled(header, Style::new().fg(FAINT_TEXT))];
-    for link in links.into_iter().take(rows) {
+    for link in links.into_iter().skip(start).take(rows) {
         let rates = focus.traffic.link(&link.from, &link.to);
         let involved = selected.is_some_and(|s| link.from == s || link.to == s);
         let counters = &link.counters;
@@ -3615,6 +3636,47 @@ mod tests {
         assert!(std::ptr::eq(events[2], &fault));
         // Only an admission at the same simulated time moves.
         assert!(std::ptr::eq(events[3], &unrelated));
+    }
+
+    #[test]
+    fn every_link_is_reachable_by_scrolling_at_compact_heights() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let names = ["n1", "n2", "n3", "n4", "oracle"];
+        let all: Vec<String> = names
+            .iter()
+            .flat_map(|a| {
+                names
+                    .iter()
+                    .filter(move |b| *b != a)
+                    .map(move |b| format!("{a}→{b}"))
+            })
+            .collect();
+        let press = |app: &mut App, code| {
+            app.input(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        // The smallest wide layout and a narrow one, where links are a tab.
+        for (width, height) in [(130, 36), (100, 30)] {
+            let mut app = app(&names);
+            app.focus.as_mut().unwrap().selected = None;
+            press(&mut app, KeyCode::Tab);
+            press(&mut app, KeyCode::Tab);
+            assert_eq!(app.panel, Panel::Links);
+            let mut seen = std::collections::BTreeSet::new();
+            for _ in 0..all.len() {
+                let text = render_at(&app, width, height);
+                for link in &all {
+                    if text.contains(link.as_str()) {
+                        seen.insert(link.clone());
+                    }
+                }
+                press(&mut app, KeyCode::Down);
+            }
+            assert_eq!(seen.len(), all.len(), "{width}x{height} missed links");
+            // Scrolling stops with the last page full.
+            assert_eq!(app.links_scroll, all.len() - app.links_rows.get());
+            let text = render_at(&app, width, height);
+            assert!(text.contains(&format!(" of {} links", all.len())));
+        }
     }
 
     #[test]

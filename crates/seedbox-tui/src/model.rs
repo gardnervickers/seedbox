@@ -744,6 +744,7 @@ pub(super) enum HitTarget {
     /// A row of the faults panel or a span on the time bar, by activity row.
     Fault(usize),
     Faults,
+    Links,
     Logs,
 }
 
@@ -753,6 +754,7 @@ pub(super) enum Panel {
     #[default]
     Machines,
     Faults,
+    Links,
     Logs,
 }
 
@@ -766,6 +768,10 @@ pub struct App {
     pub(super) panel: Panel,
     pub(super) logs_scroll: usize,
     pub(super) events_scroll: usize,
+    /// First link row shown in the links pane.
+    pub(super) links_scroll: usize,
+    /// Link rows the links pane showed when last drawn, to bound scrolling.
+    pub(super) links_rows: std::cell::Cell<usize>,
     /// Show raw server events in place of logs.
     pub(super) events_tab: bool,
     /// Keys typed while the inject palette is opening.
@@ -1101,6 +1107,8 @@ impl App {
             panel: Panel::Machines,
             logs_scroll: 0,
             events_scroll: 0,
+            links_scroll: 0,
+            links_rows: Default::default(),
             events_tab: false,
             typeahead: Vec::new(),
             zoom: 0,
@@ -2148,6 +2156,10 @@ impl App {
                     self.panel = Panel::Faults;
                     self.move_fault_selection(if up { -1 } else { 1 });
                 }
+                HitTarget::Links => {
+                    self.panel = Panel::Links;
+                    self.scroll_links(if up { -3 } else { 3 });
+                }
                 HitTarget::Timeline(_) => {
                     return self.timeline_key(KeyEvent::new(
                         if up { KeyCode::Up } else { KeyCode::Down },
@@ -2171,6 +2183,7 @@ impl App {
             match target {
                 HitTarget::Machine(_) => self.panel = Panel::Machines,
                 HitTarget::Fault(_) | HitTarget::Faults => self.panel = Panel::Faults,
+                HitTarget::Links => self.panel = Panel::Links,
                 HitTarget::Logs => self.panel = Panel::Logs,
                 _ => {}
             }
@@ -2219,6 +2232,17 @@ impl App {
     }
 
     /// Move the faults panel selection through active, upcoming and history rows.
+    /// Move the links pane by `step` rows, keeping its last page full.
+    fn scroll_links(&mut self, step: isize) {
+        let links = self
+            .focus
+            .as_ref()
+            .and_then(|focus| focus.world.as_ref())
+            .map_or(0, |world| world.links.len());
+        let last = links.saturating_sub(self.links_rows.get().max(1));
+        self.links_scroll = self.links_scroll.saturating_add_signed(step).min(last);
+    }
+
     fn move_fault_selection(&mut self, step: isize) {
         let Some(focus) = self.focus.as_mut() else {
             return;
@@ -2371,9 +2395,13 @@ impl App {
             KeyCode::Esc => self.screen = Screen::Catalogue,
             KeyCode::Char('a') => focus.selected = None,
             KeyCode::Tab | KeyCode::BackTab => {
-                let order = [Panel::Machines, Panel::Faults, Panel::Logs];
+                let order = [Panel::Machines, Panel::Faults, Panel::Links, Panel::Logs];
                 let index = order.iter().position(|p| *p == self.panel).unwrap_or(0);
-                let step = if key.code == KeyCode::Tab { 1 } else { 2 };
+                let step = if key.code == KeyCode::Tab {
+                    1
+                } else {
+                    order.len() - 1
+                };
                 self.panel = order[(index + step) % order.len()];
             }
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
@@ -2385,6 +2413,7 @@ impl App {
                 match self.panel {
                     Panel::Machines => select(focus, step),
                     Panel::Faults => self.move_fault_selection(step),
+                    Panel::Links => self.scroll_links(step),
                     Panel::Logs => {
                         let offset = if self.events_tab {
                             &mut self.events_scroll
@@ -3677,6 +3706,8 @@ pub(crate) mod tests {
         );
         // Machine selection is untouched while faults have focus.
         assert_eq!(app.focus.as_ref().unwrap().selected.as_deref(), Some("b"));
+        app.input(tab());
+        assert_eq!(app.panel, Panel::Links);
         app.input(tab());
         assert_eq!(app.panel, Panel::Logs);
         app.input(key('k'));
