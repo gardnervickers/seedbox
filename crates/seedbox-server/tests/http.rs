@@ -507,3 +507,62 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
     let _ = shutdown.send(());
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn legacy_acceptance_submissions_preserve_configuration_over_unix_http() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = Arc::new(seedbox_server::manager::Manager::new(
+        Catalogue::open(&temp.path().join("catalogue")).unwrap(),
+    ));
+    let (work, mut pending) = mpsc::channel(4);
+    let socket = temp.path().join("api.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let (shutdown, done) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router(ApiState::new(manager, work)))
+            .with_graceful_shutdown(async {
+                let _ = done.await;
+            })
+            .await
+            .unwrap();
+    });
+    let client = Client::connect_to(&socket).unwrap();
+    for name in [
+        "connections",
+        "key-value",
+        "mac-capabilities",
+        "race",
+        "runtime",
+        "triggers",
+        "volume-crash",
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../harness/acceptance/workloads/{name}.yaml"))
+            .canonicalize()
+            .unwrap();
+        let mut request = support::request();
+        request.request_id = format!("legacy-{name}");
+        request.spec.inputs = seedbox_api::InputSource::LegacyProject;
+        request.spec.configuration = seedbox_application::config::load_for_architecture(
+            &path,
+            &Default::default(),
+            seedbox_application::guest::Architecture::Amd64,
+        )
+        .unwrap();
+        let simulation = client
+            .submit(&request)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(pending.recv().await.unwrap(), simulation.metadata.id);
+        assert_eq!(
+            simulation.spec.configuration, request.spec.configuration,
+            "{name}"
+        );
+        assert_eq!(
+            client.describe(&simulation.metadata.id).await.unwrap(),
+            simulation
+        );
+    }
+    shutdown.send(()).unwrap();
+    server.await.unwrap();
+}

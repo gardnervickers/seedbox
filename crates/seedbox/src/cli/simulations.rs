@@ -57,7 +57,11 @@ fn load_spec(
             program: Vec::new(),
             start_paused: false,
             seed: None,
-            inputs: InputSource::Project,
+            inputs: if document.get("machines").is_some() || document.get("oracle").is_some() {
+                InputSource::Project
+            } else {
+                InputSource::LegacyProject
+            },
             configuration: seedbox_application::config::parse_for_architecture(
                 &source,
                 &path,
@@ -815,4 +819,45 @@ pub(super) fn runtime() -> Result<tokio::runtime::Runtime> {
 
 pub(super) fn client_error(error: seedbox_client::Error) -> Error {
     Error::Setup(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acceptance_projects_round_trip_through_submission_json_without_losing_settings() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../harness/acceptance/workloads");
+        let mut tested = 0;
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|v| v.to_str()) != Some("yaml") {
+                continue;
+            }
+            let (spec, _) = load_spec(
+                &ComposeArg {
+                    compose: path.clone(),
+                },
+                None,
+            )
+            .unwrap();
+            let bytes =
+                serde_json::to_vec(&spec).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let restored: SimulationSpec = serde_json::from_slice(&bytes).unwrap();
+            if matches!(spec.inputs, InputSource::LegacyProject) {
+                assert_eq!(restored, spec, "{}", path.display());
+                // Saved pre-native documents used `project` inside the same
+                // full configuration wrapper. They must retain these settings too.
+                let mut old = serde_json::to_value(&spec).unwrap();
+                old["inputs"]["kind"] = "project".into();
+                let old: SimulationSpec = serde_json::from_value(old).unwrap();
+                assert_eq!(old, spec, "{}", path.display());
+            } else {
+                assert!(matches!(restored.inputs, InputSource::Project));
+            }
+            tested += 1;
+        }
+        assert!(tested >= 7);
+    }
 }
