@@ -424,6 +424,14 @@ fn read_config(path: &Path) -> Result<WorldConfig, String> {
 /// machine boots.
 fn validate_config(cfg: &WorldConfig) -> Result<(), String> {
     seedbox_engine_core::input_program::validate_program(&cfg.input_program, cfg.duration_ns)?;
+    for machine in &cfg.machines {
+        if !(64..=65536).contains(&machine.memory_mb(cfg)) {
+            return Err(format!(
+                "machine {} memory must be 64..65536 MiB",
+                machine.name
+            ));
+        }
+    }
     if cfg.control.is_some() && cfg.control_channel.is_none() {
         return Err("runtime control requires virtio-console-v1 channel".into());
     }
@@ -572,7 +580,6 @@ pub fn run(
     let disk_fault_model = disk::fault_model(cfg.disk_loss)?;
     let base = config_path.parent().unwrap_or(Path::new(""));
     let kernel = std::fs::read(base.join(&cfg.kernel)).map_err(|e| format!("kernel: {e}"))?;
-    let mem = cfg.mem_mb as usize * 1024 * 1024;
     let duration = cfg.duration_ns;
     let checkpoint_times = checkpoint_plan(&cfg, options, &mut seeds)?;
     let end_on = cfg.end_on_exit.as_deref();
@@ -645,7 +652,7 @@ pub fn run(
             kernel: kernel.clone(),
             initrd: initrds[&ipath].clone(),
             cmdline: cmdline.build(),
-            mem,
+            mem: mc.memory_mb(&cfg) as usize * 1024 * 1024,
             mac: networked.then_some(mac),
             control_channel,
             disk,

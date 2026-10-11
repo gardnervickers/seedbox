@@ -295,6 +295,7 @@ pub fn parse_for_architecture(
         services.insert(
             key,
             Service {
+                memory_mb: None,
                 source: image_source,
                 platform,
                 entrypoint: command(svc.get("entrypoint"), &format!("{p}.entrypoint"))?,

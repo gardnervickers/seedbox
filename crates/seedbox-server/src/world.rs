@@ -461,6 +461,7 @@ mod tests {
 
     fn tracker_with_bandwidth(bandwidth_bps: Option<u64>) -> Tracker {
         let service = |_| seedbox_spec::Service {
+            memory_mb: None,
             source: seedbox_spec::ImageSource::Registry {
                 reference: "example".into(),
             },

@@ -589,6 +589,7 @@ mod tests {
                 ExecutableKind::ArmWorld => Some(crate::engine::arm_descriptor()),
             };
             let prepared = PreparedInputs {
+                machine_memory_mb: Default::default(),
                 wall_clock_epoch: None,
                 kernel: hash.clone(),
                 images: BTreeMap::new(),

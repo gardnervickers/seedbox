@@ -212,6 +212,9 @@ pub struct PreparedInputs {
     pub placement: BTreeMap<String, String>,
     /// Machine name to prepared boot filesystem/archive and launch helpers.
     pub guests: BTreeMap<String, ContentDigest>,
+    /// Per-machine RAM overrides in MiB; older inputs use the profile default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub machine_memory_mb: BTreeMap<String, u32>,
     pub profile: ExecutionProfile,
     /// Config files, source/build snapshots, and other replay dependencies.
     pub auxiliary: BTreeMap<String, ContentDigest>,
@@ -220,6 +223,13 @@ pub struct PreparedInputs {
 }
 
 impl PreparedInputs {
+    pub fn memory_mb(&self, machine: &str) -> u32 {
+        self.machine_memory_mb
+            .get(machine)
+            .copied()
+            .unwrap_or(self.profile.semantic_parameters.memory_mb)
+    }
+
     pub fn digests(&self) -> impl Iterator<Item = &ContentDigest> {
         [&self.kernel, &self.profile.engine]
             .into_iter()

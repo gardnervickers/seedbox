@@ -36,6 +36,20 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<WorldConfig> {
         return Err(Error::Integrity("expected 1..254 prepared machines".into()));
     }
     let memory = request.prepared.profile.semantic_parameters.memory_mb;
+    for name in request.prepared.machine_memory_mb.keys() {
+        if !request.prepared.guests.contains_key(name) {
+            return Err(Error::Integrity(format!(
+                "RAM override names unknown machine {name}"
+            )));
+        }
+    }
+    for name in request.prepared.guests.keys() {
+        crate::preparation::validate_machine_memory(
+            &request.prepared.profile,
+            name,
+            request.prepared.memory_mb(name),
+        )?;
+    }
     let workload_machine = request
         .prepared
         .placement
@@ -137,6 +151,12 @@ fn machine(
     });
     Ok(MachineConfig {
         name: name.clone(),
+        mem_mb: request
+            .prepared
+            .machine_memory_mb
+            .get(name)
+            .copied()
+            .map(u64::from),
         initrd: artifact(request, digest)?,
         disk: volumes.then_some(DiskConfig {
             size_mib: Some(VOLUME_DISK_MIB),

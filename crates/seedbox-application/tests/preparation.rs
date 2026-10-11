@@ -279,3 +279,83 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
         }
     }
 }
+
+#[test]
+fn machine_memory_overrides_survive_preparation_and_set_each_archive_boot_floor() {
+    struct Transport;
+    impl ImageTransport for Transport {
+        fn import(
+            &self,
+            _: &config::Service,
+            directory: &Path,
+            store: &ContentStore,
+            _: Option<(&PreparationContext, &str)>,
+            _: seedbox_application::guest::Architecture,
+        ) -> seedbox_application::Result<ImportedImage> {
+            fs::create_dir_all(directory)?;
+            let digest =
+                store.put(br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/app"]}}"#)?;
+            Ok(ImportedImage {
+                image: seedbox_application::execution::PreparedImage {
+                    manifest: digest.clone(),
+                    config: digest,
+                    layers: vec![],
+                    launch: seedbox_application::image::Launch {
+                        argv: vec!["/app".into()],
+                        environment: BTreeMap::new(),
+                        working_dir: "/".into(),
+                        user: "".into(),
+                        volumes: vec![],
+                        disk_volumes: vec![],
+                    },
+                },
+                rootfs: RootFilesystem::Directory(directory.into()),
+                auxiliary: BTreeMap::new(),
+                provenance: BTreeMap::new(),
+            })
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (preparer, mut simulation, store) = fixture(root.path());
+    simulation.wall_clock_epoch = Some(86400);
+    let other = simulation.services["app"].clone();
+    simulation.services.insert("other".into(), other);
+    simulation.services.get_mut("app").unwrap().memory_mb = Some(256);
+    let context = PreparationContext::new(root.path().join("memory"), Default::default()).unwrap();
+    let inputs = preparer
+        .prepare_with_transport(&simulation, &store, &context, &Transport)
+        .unwrap();
+    assert_eq!(
+        inputs.machine_memory_mb,
+        BTreeMap::from([("app".into(), 256)])
+    );
+    assert_eq!(inputs.memory_mb("app"), 256);
+    assert_eq!(inputs.memory_mb("other"), 1024);
+    let retained: seedbox_application::execution::PreparedInputs =
+        serde_json::from_slice(&serde_json::to_vec(&inputs).unwrap()).unwrap();
+    assert_eq!(retained, inputs);
+    let mut legacy = serde_json::to_value(&inputs).unwrap();
+    legacy.as_object_mut().unwrap().remove("machine_memory_mb");
+    let legacy: seedbox_application::execution::PreparedInputs =
+        serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.memory_mb("app"), 1024);
+    assert!(serde_json::to_value(legacy)
+        .unwrap()
+        .get("machine_memory_mb")
+        .is_none());
+    simulation.services.get_mut("app").unwrap().memory_mb = Some(64);
+    let context = PreparationContext::new(root.path().join("small"), Default::default()).unwrap();
+    let error = preparer
+        .prepare_with_transport(&simulation, &store, &context, &Transport)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("service app: 64 MiB"), "{error}");
+    assert!(error.contains("archive boot floor"), "{error}");
+    simulation.services.get_mut("app").unwrap().memory_mb = Some(65537);
+    let context = PreparationContext::new(root.path().join("large"), Default::default()).unwrap();
+    assert!(preparer
+        .prepare_with_transport(&simulation, &store, &context, &Transport)
+        .unwrap_err()
+        .to_string()
+        .contains("memoryMiB must be 64..65536"));
+}

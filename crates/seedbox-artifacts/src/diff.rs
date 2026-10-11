@@ -632,17 +632,16 @@ fn ram_only(a: &Machine, b: &Machine) -> bool {
             .is_some_and(|(a, b)| a.ram_only_difference(b))
 }
 
-fn page_file(directory: &Path, evidence: &Evidence, name: &str) -> Result<Option<File>> {
+fn page_file(
+    directory: &Path,
+    evidence: &Evidence,
+    machine: &str,
+    name: &str,
+) -> Result<Option<File>> {
     let Some(file) = log(directory, &evidence.record, name)? else {
         return Ok(None);
     };
-    let memory_mb = evidence
-        .record
-        .identity
-        .inputs
-        .profile
-        .semantic_parameters
-        .memory_mb;
+    let memory_mb = evidence.record.identity.inputs.memory_mb(machine);
     if memory_mb == 0 {
         return Err(bad(directory, "page hashes require recorded memory_mb"));
     }
@@ -667,8 +666,8 @@ fn ram_pages(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<Ra
             continue;
         }
         let name = page_hash_log(machine);
-        let x = page_file(a, left, &name)?;
-        let y = page_file(b, right, &name)?;
+        let x = page_file(a, left, machine, &name)?;
+        let y = page_file(b, right, machine, &name)?;
         if let (Some(x), Some(y)) = (x, y) {
             let pages = compare_pages(x, y)
                 .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?;
