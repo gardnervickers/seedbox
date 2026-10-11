@@ -49,7 +49,7 @@ int main(void)
     const char *fixtures[] = {
         "/exclusive-epoch", "/exclusive-overlap", "/exclusive-consume",
         "/exclusive-discard", "/exclusive-fault", "/exclusive-fault-pair",
-        "/exclusive-fault-stolen", "/wait",
+        "/exclusive-fault-stolen", "/wait", "/jit-pages",
     };
     for (unsigned i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); ++i) {
         if (check_fixture(fixtures[i]) != 0)
