@@ -29,47 +29,32 @@ Code: [x86 clock](../kernel/seedbox.c), [ARM clock](../kernel-arm64/seedbox.c).
 ## Progress from translated blocks
 
 A computation or spin loop that never reads the clock still needs to let other
-guest threads and machines make progress. The DynamoRIO client charges each
-translated basic block its application instruction count against a per-thread
-budget and issues a raw `getpid` syscall each time the budget is used up
-(`simulator.instructionsPerProgressCall`, 50,000 by default). The kernel
-charges that syscall as PV progress, so a machine's virtual time grows with the
-instructions it executes, whether they run in a tight loop of short blocks or in
-long straight-line code. Existing executable code, shared libraries and JIT code
-go through the translator without application-specific flags or recompilation.
+guest threads and machines make progress. The DynamoRIO client counts the
+instructions each thread executes and issues a raw `getpid` syscall every time
+that count reaches a configured budget. The kernel charges that syscall as PV
+progress. Existing executable code, shared libraries and JIT code go through the
+translator without application-specific flags or recompilation.
 
-A charge that crosses the budget leaves it negative. The checkpoint then adds
-the budget back once per progress call until it is positive again, so the
-overshoot carries into the next window and a block longer than the budget makes
-as many calls as its instructions are worth.
+The count is taken per basic block: a sequence of instructions with one entry
+and no internal control-flow branch. Each block is charged its length, so a
+tight loop and straight-line code advance time at the same rate per
+instruction. A charge can cross the budget; the remainder carries into the
+next window. Translator-internal work and kernel execution are outside the
+count.
 
-`simulator.progressPointsPerBlock` (default 1) sets how many charge points each
-block gets. One point charges the whole block at its entry, which is fastest.
-With more, a block is split into that many nearly equal runs (never more than
-its instruction count), each charged where it starts, so progress calls can
-land inside long blocks rather than only at their entries.
+A block is normally charged once, at its entry. The project can ask for several
+charge points per block, so a progress call can land inside a long block.
 
-Without jitter every progress call costs the same, so equal work interleaves the
-same way on every seed. `simulator.progressJitter` (a duration, default 0, at
-most 1ms) follows each progress call with a seeded number of extra `getpid`
-calls: the client draws a time uniformly up to the bound and charges it in
-nominal 1 µs calls, rounding the remainder up or down at random so the average
-is exact. Each machine's seeded speed scales the extra calls like any other
-syscall. Each thread seeds its own stream once, from the guest's deterministic
-`getrandom`, so a run replays exactly. A time fork reseeds guest entropy but not
-streams that threads already hold. With jitter off the client draws and charges
-nothing extra. All three settings change results and are part of the simulation
-definition.
+Equal work interleaves the same way on every seed. Optional progress jitter
+adds a seeded amount of extra time after each progress call. Each thread seeds
+its own stream from the guest's deterministic `getrandom`, so a run still
+replays exactly. A time fork reseeds guest entropy but not streams that threads
+already hold.
 
-A basic block is a sequence of instructions with one entry and no internal
-control-flow branch. Instructions count equally; translator-internal work and
-kernel execution are outside that counter.
 Instrumentation must leave the application's registers and comparison flags
-intact. On x86 the charge is a `sub` on the thread's budget word followed by a
-sign test, with drreg preserving live flags. On ARM, the client uses arithmetic
-that leaves the flags alone and a branch that tests the sign bit directly
-(`TBZ`, test bit and branch if zero). DynamoRIO's drreg extension manages the
-temporary registers.
+intact. On ARM, the client uses arithmetic that leaves those flags alone and a
+branch that tests the sign bit directly (`TBZ`). DynamoRIO's drreg extension
+manages the temporary registers.
 
 Code: [progress client](../guest/progress/progress.c),
 [options and jitter draw](../guest/progress/budget.h).
