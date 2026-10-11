@@ -321,18 +321,18 @@
       * or to &uninit_tls (i#2089), both of which will be is_dynamo_address().
 --- a/core/translate.c
 +++ b/core/translate.c
-@@ -427,7 +427,10 @@
+@@ -429,7 +429,10 @@
                  instr_get_opcode(instr_get_prev(inst)) == OP_subs)) ||
                (instr_get_opcode(inst) == OP_b &&
                 (instr_get_prev(inst) != NULL &&
--                instr_is_exclusive_store(instr_get_prev(inst)))))
+-                instr_is_exclusive_store(instr_get_prev(inst))))
 +                (instr_is_exclusive_store(instr_get_prev(inst)) ||
 +                 (instr_get_opcode(instr_get_prev(inst)) == OP_cbnz &&
 +                  instr_get_prev(instr_get_prev(inst)) != NULL &&
-+                  instr_is_exclusive_store(instr_get_prev(instr_get_prev(inst))))))))
++                  instr_is_exclusive_store(instr_get_prev(instr_get_prev(inst)))))))
+                   IF_AARCH64(|| instr_get_opcode(inst) == OP_tbz ||
+                              instr_get_opcode(inst) == OP_tbnz))
  #elif defined(RISCV64)
-             /* Do not reset for bne in LR/SC mangling, nor for the jal after SC.
-              * This should be kept in sync with mangle_exclusive_monitor_op().
 --- a/core/ir/instr_shared.c
 +++ b/core/ir/instr_shared.c
 @@ -4253,7 +4253,11 @@
