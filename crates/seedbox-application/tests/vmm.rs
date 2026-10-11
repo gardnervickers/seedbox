@@ -185,11 +185,22 @@ fn start_stagger_parks_at_the_launch_barrier_under_the_run_seed() {
             ..*base
         };
         let world = world_json(&request).unwrap();
+        // Clipped to latency 100 µs less jitter 20 µs and early delivery 40 µs.
         assert_eq!(
             world["boot"],
-            json!({"seed": 1009, "release_skew_ns": 20_000_000})
+            json!({"seed": 1009, "release_skew_ns": 40_000})
         );
         typed(&world);
+        let short = Schedule {
+            start_stagger_ns: 30_000,
+            ..base.schedule.clone()
+        };
+        let world = world_json(&ExecutionRequest {
+            schedule: &short,
+            ..request
+        })
+        .unwrap();
+        assert_eq!(world["boot"]["release_skew_ns"], 30_000);
         // The ARM worker keeps its own launch skew instead.
         let mut prepared = base.prepared.clone();
         prepared.profile.backend = Backend::Hvf;

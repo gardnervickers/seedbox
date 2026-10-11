@@ -103,12 +103,19 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<WorldConfig> {
     world.launch_skew_ns = crate::engine::arm_launch_skew(&request.prepared.profile, lookahead);
     // A start stagger boots every machine under the run seed, parks it at its
     // launch barrier and releases each one up to the stagger later, drawn
-    // from its release/<machine> stream. Zero keeps the unparked cold run.
-    // The ARM worker keeps its own bounded launch skew.
-    if request.schedule.start_stagger_ns > 0 && world.launch_skew_ns.is_none() {
+    // from its release/<machine> stream. Like the ARM launch skew, it is
+    // clipped to the lookahead less early delivery, so no frame or control
+    // effect sent after the first release is due before the last one. Zero
+    // keeps the unparked cold run. The ARM worker keeps its own launch skew.
+    let early = (request.network.latency_ns / 2).min(request.schedule.stop_tolerance_ns);
+    let stagger = request
+        .schedule
+        .start_stagger_ns
+        .min(lookahead.saturating_sub(early));
+    if stagger > 0 && world.launch_skew_ns.is_none() {
         world.boot = Some(BootConfig {
             seed: request.seed,
-            release_skew_ns: request.schedule.start_stagger_ns,
+            release_skew_ns: stagger,
             fork_at_ns: None,
         });
     }

@@ -168,8 +168,9 @@ pub struct Limits {
 pub struct Schedule {
     pub timer_jitter_ns: u64,
     pub stop_tolerance_ns: u64,
-    /// Seeded application start stagger (Linux KVM). A retained record
-    /// without it means 0, and 0 is omitted so such records keep their bytes.
+    /// Seeded application start stagger (Linux KVM), at most the network
+    /// lookahead. A retained record without it means 0, and 0 is omitted so
+    /// such records keep their bytes.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub start_stagger_ns: u64,
 }
@@ -180,8 +181,9 @@ fn is_zero(value: &u64) -> bool {
 
 /// Default timer jitter of a new simulation.
 pub const DEFAULT_TIMER_JITTER_NS: u64 = 20_000;
-/// Default start stagger of a new simulation.
-pub const DEFAULT_START_STAGGER_NS: u64 = 20_000_000;
+/// Default start stagger of a new simulation, before it is clipped to the
+/// network lookahead.
+pub const DEFAULT_START_STAGGER_NS: u64 = 1_000_000;
 
 impl Schedule {
     /// The defaults of a new simulation: seeds differ in timer and start timing.
