@@ -30,34 +30,36 @@ Code: [x86 clock](../kernel/seedbox.c), [ARM clock](../kernel-arm64/seedbox.c).
 
 A computation or spin loop that never reads the clock still needs to let other
 guest threads and machines make progress. The DynamoRIO client counts the
-instructions each thread executes and issues a raw `getpid` syscall every
-50,000 of them, marked with a fixed first argument. The kernel recognizes the
-mark and charges the call the time those instructions take on the project's
-virtual CPU: `cpu.speed` in `seedbox.yaml` (2 GHz unless set) makes a call
-cost 25 µs. Existing executable code, shared libraries and JIT code go through
-the translator without application-specific flags or recompilation.
+instructions each thread executes. Every 50,000 instructions it issues a raw
+`getpid` syscall with a fixed first argument, which marks it as a progress
+call. Existing executable code, shared libraries and JIT code go through the
+translator without application-specific flags or recompilation.
 
 The count is taken per basic block: a sequence of instructions with one entry
 and no internal control-flow branch. Each block is charged its length at its
 entry, so a tight loop and straight-line code advance time at the same rate
 per instruction. A charge can cross the budget; the remainder carries into the
 next window. Translator-internal work and kernel execution are outside the
-count. The instructions per call and the charge point per block are constants
-of the instrumentation, carried in the launch recipe so the guest and the
-simulator agree on what a call stands for; a project chooses a speed, not a
-mechanism.
+count.
 
-Equal work interleaves the same way on every seed. Optional `cpu.jitter`, a
-percentage of the per-call charge, makes each call cost a seeded amount more
-or less than nominal, within that percentage. The kernel draws it from a
-stream the VMM seeds per machine on the time page, so a run replays exactly, a
-reboot and a time fork reseed the stream with the others, and the client
-itself draws nothing. On x86 the charge is counted in whole syscall costs with
-the remainder carried to the next call, so the count-based plan stays linear;
-a count the hard stop cuts off stays owed and is charged first by the next
-run. On ARM the charge advances the bounded clock in bulk, with the same
-rendezvous at every bound as single clock reads. A throttle fault scales the
-compute charge like every syscall's.
+The kernel recognizes the mark and charges the call the time those
+instructions take on the project's virtual CPU. The speed is `cpu.speed` in
+`seedbox.yaml`, 2 GHz unless set, so a call costs 25 µs by default. The
+instructions per call is a constant of the instrumentation, carried in the
+launch recipe so the guest and the simulator agree on what a call stands for.
+A project chooses a speed, not a mechanism.
+
+Equal work interleaves the same way on every seed. `cpu.jitter`, a percentage,
+makes each call cost a seeded amount more or less than nominal, within that
+percentage. The kernel draws it from a stream the VMM seeds per machine on the
+time page. A run replays exactly, and a reboot or a time fork reseeds the
+stream with the others. The client itself draws nothing.
+
+On x86 the charge is counted in whole syscall costs, so the count-based plan
+stays linear. The remainder carries to the next call, and a count the hard
+stop cuts off stays owed to the next run. On ARM the charge advances the
+bounded clock in bulk, with the same rendezvous at every bound as single clock
+reads. A throttle fault scales the compute charge like every syscall's.
 
 Instrumentation must leave the application's registers and comparison flags
 intact. On ARM, the client uses arithmetic that leaves those flags alone and a
