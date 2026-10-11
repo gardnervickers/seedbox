@@ -3,8 +3,12 @@
  * application instructions. Every translated block is charged its own
  * instruction count at one or more charge points; a charge that crosses the
  * budget makes a progress call, and the overshoot carries into the next
- * window. The budget and the charge points are part of execution semantics,
- * not performance settings.
+ * window. With progress jitter on, each progress call is followed by a seeded
+ * number of extra calls (budget.h), so equal work takes a little longer on
+ * some seeds than others. Each thread draws from its own stream, seeded from
+ * the guest's deterministic getrandom when the thread starts; with jitter off
+ * nothing extra is drawn or charged. The budget, charge points and jitter are
+ * part of execution semantics, not performance settings.
  *
  * On AArch64 the patched translator implements software exclusive reservations.
  * Host-only retries stay inside one mangled store instruction, below this
@@ -26,14 +30,22 @@
 
 static ptr_int_t instruction_budget;
 static uint points_per_block;
+static uint32_t jitter_ns;
 static reg_id_t budget_segment;
 static uint budget_offset;
+/* Raw TLS slots: the budget word, then the jitter stream. */
+#define TLS_SLOTS 2
 
 /* Instructions left in this thread's window. It goes negative when a charge
  * crosses the budget, and the checkpoint carries that overshoot. */
 static ptr_int_t *budget(void)
 {
     return (ptr_int_t *)((byte *)dr_get_dr_segment_base(budget_segment) + budget_offset);
+}
+
+static uint64_t *jitter_stream(void)
+{
+    return (uint64_t *)(budget() + 1);
 }
 
 static void progress_call(void)
@@ -53,20 +65,48 @@ static void progress_call(void)
 }
 
 /* One progress call per budget the charges have used, so a charge larger than
- * the budget still advances virtual time in proportion to its instructions. */
+ * the budget still advances virtual time in proportion to its instructions.
+ * Jitter adds its seeded extra calls after each one. */
 static void checkpoint(void)
 {
     ptr_int_t *left = budget();
     do {
         *left += instruction_budget;
         progress_call();
+        if (jitter_ns) {
+            for (uint32_t extra = seedbox_progress_extra_calls(jitter_stream(), jitter_ns);
+                 extra > 0; --extra)
+                progress_call();
+        }
     } while (*left < 0);
+}
+
+static uint64_t jitter_seed(void)
+{
+    uint64_t seed;
+#ifdef X86_64
+    long result;
+    __asm__ volatile("syscall" : "=a"(result)
+                     : "a"(318L), "D"(&seed), "S"(sizeof(seed)), "d"(0L)
+                     : "rcx", "r11", "memory", "cc");
+#elif defined(AARCH64)
+    register long number __asm__("x8") = 278;
+    register long result __asm__("x0") = (long)&seed;
+    register long size __asm__("x1") = sizeof(seed);
+    register long flags __asm__("x2") = 0;
+    __asm__ volatile("svc #0" : "+r"(result) : "r"(number), "r"(size), "r"(flags)
+                     : "memory", "cc");
+#endif
+    DR_ASSERT(result == sizeof(seed));
+    return seed;
 }
 
 static void thread_init(void *context)
 {
     (void)context;
     *budget() = instruction_budget;
+    if (jitter_ns)
+        *jitter_stream() = jitter_seed();
 }
 
 /* Charge `instructions` before `where` and call the checkpoint when the charge
@@ -183,7 +223,7 @@ static dr_emit_flags_t instrument(void *context, void *tag, instrlist_t *block,
 
 static void finished(void)
 {
-    DR_ASSERT(dr_raw_tls_cfree(budget_offset, 1));
+    DR_ASSERT(dr_raw_tls_cfree(budget_offset, TLS_SLOTS));
     drreg_exit();
     drmgr_exit();
 }
@@ -191,9 +231,10 @@ static void finished(void)
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
 {
     uint32_t parsed_budget, parsed_points;
-    if (!seedbox_progress_arguments(argc, argv, &parsed_budget, &parsed_points)) {
+    if (!seedbox_progress_arguments(argc, argv, &parsed_budget, &parsed_points, &jitter_ns)) {
         dr_fprintf(STDERR, "seedbox progress: expected " SEEDBOX_PROGRESS_INSTRUCTIONS
-                   " and " SEEDBOX_PROGRESS_POINTS ", each with a positive u32\n");
+                   " and " SEEDBOX_PROGRESS_POINTS ", each with a positive u32, then "
+                   SEEDBOX_PROGRESS_JITTER " from 0 to %u\n", SEEDBOX_PROGRESS_JITTER_MAX_NS);
         dr_abort();
         return;
     }
@@ -204,7 +245,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
     drreg_options_t options = {sizeof(options), 3, false};
     DR_ASSERT(drmgr_init());
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);
-    DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 1, 0));
+    DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, TLS_SLOTS, 0));
     drmgr_register_thread_init_event(thread_init);
     drmgr_register_bb_app2app_event(neutralize_waits, NULL);
     drmgr_register_bb_instrumentation_event(analyze, instrument, NULL);

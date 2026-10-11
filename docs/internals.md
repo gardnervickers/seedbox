@@ -47,8 +47,19 @@ as many calls as its instructions are worth.
 block gets. One point charges the whole block at its entry, which is fastest.
 With more, a block is split into that many nearly equal runs (never more than
 its instruction count), each charged where it starts, so progress calls can
-land inside long blocks rather than only at their entries. Both settings change
-results and are part of the simulation definition.
+land inside long blocks rather than only at their entries.
+
+Without jitter every progress call costs the same, so equal work interleaves the
+same way on every seed. `simulator.progressJitter` (a duration, default 0, at
+most 1ms) follows each progress call with a seeded number of extra `getpid`
+calls: the client draws a time uniformly up to the bound and charges it in
+nominal 1 µs calls, rounding the remainder up or down at random so the average
+is exact. Each machine's seeded speed scales the extra calls like any other
+syscall. Each thread seeds its own stream once, from the guest's deterministic
+`getrandom`, so a run replays exactly. A time fork reseeds guest entropy but not
+streams that threads already hold. With jitter off the client draws and charges
+nothing extra. All three settings change results and are part of the simulation
+definition.
 
 A basic block is a sequence of instructions with one entry and no internal
 control-flow branch. Instructions count equally; translator-internal work and
@@ -60,7 +71,8 @@ that leaves the flags alone and a branch that tests the sign bit directly
 (`TBZ`, test bit and branch if zero). DynamoRIO's drreg extension manages the
 temporary registers.
 
-Code: [progress client](../guest/progress/progress.c).
+Code: [progress client](../guest/progress/progress.c),
+[options and jitter draw](../guest/progress/budget.h).
 
 ## Progress inside kernel polling
 
