@@ -55,6 +55,14 @@ Omission uses 1024 MiB; supported sizes are 64–3072 MiB on Apple Silicon and
 64–65536 MiB on Linux x86-64. Preparation checks the image archive’s boot memory
 requirement; applications may need more.
 
+The [Kafka example](examples/kafka/seedbox.yaml) runs three KRaft brokers with
+2 GiB each and an oracle that writes ten records to a replicated topic, then
+reads them back. The broker image uses a glibc JVM and a 512 MiB heap, leaving
+RAM for Kafka’s native allocations and the guest’s image archive. Serial GC
+and one reported CPU keep JVM worker counts appropriate for a one-vCPU guest.
+The example uses C1 compilation to avoid an ARM translator crash seen with
+higher JVM compiler tiers.
+
 Images must match the guest architecture: `linux/arm64` on Apple Silicon,
 `linux/amd64` on Linux x86-64. Pull private images with Docker or Podman first;
 Seedbox does not integrate registry credential helpers.
