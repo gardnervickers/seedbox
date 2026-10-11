@@ -40,9 +40,3 @@ cc = "1"
 
 [dev-dependencies]
 fdt = "0.1"
-
-[features]
-kvm-tests = []
-hvf-tests = []
-# Real guest inputs are additional to the native hypervisor primitives.
-guest-tests = []

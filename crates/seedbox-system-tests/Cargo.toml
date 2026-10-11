@@ -1,0 +1,28 @@
+[package]
+name = "seedbox-system-tests"
+description = "Indispensable native hypervisor and application system tests"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+seedbox-api.workspace = true
+seedbox-client.workspace = true
+seedbox-application.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+bollard.workspace = true
+tar.workspace = true
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies]
+seedbox-vmm = { path = "../seedbox-vmm" }
+kvm-bindings = { version = "=0.14.1", features = ["fam-wrappers", "serde"] }
+kvm-ioctls = "=0.25.0"
+vmm-core = { package = "seedbox-vmm-engine-core", path = "../seedbox-vmm/engine-core" }
+
+[target.'cfg(target_arch = "aarch64")'.dev-dependencies]
+seedbox-arm64 = { path = "../seedbox-arm64" }

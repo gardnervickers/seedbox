@@ -7,3 +7,11 @@ publish.workspace = true
 [dependencies]
 tempfile.workspace = true
 libc.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+seedbox-system-tests = { path = "../seedbox-system-tests" }
+
+[dev-dependencies]
+tar.workspace = true
+flate2.workspace = true
+hex.workspace = true

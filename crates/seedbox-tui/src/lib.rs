@@ -16,6 +16,35 @@ pub use view::latency;
 use seedbox_api::SimulationId;
 use seedbox_client::Client;
 
+pub use model::{Request, Update};
+pub use timeline::{TimelineDraft, TimelineMetadata};
+
+/// Console state without a terminal. Observations and input use the same model
+/// as the interactive driver; persistence remains owned by this console.
+pub struct Console(model::App);
+impl Console {
+    pub fn new(
+        focus: Option<SimulationId>,
+        timeline_directory: std::path::PathBuf,
+    ) -> std::io::Result<Self> {
+        Ok(Self(
+            model::App::new(focus).with_timelines(timeline_directory)?,
+        ))
+    }
+    pub fn apply(&mut self, update: Update) -> Vec<Request> {
+        self.0.apply(update)
+    }
+    pub fn input(&mut self, event: crossterm::event::Event) -> Vec<Request> {
+        self.0.input(event)
+    }
+    pub fn timelines(&self) -> &[TimelineDraft] {
+        &self.0.timelines
+    }
+    pub fn quit_requested(&self) -> bool {
+        self.0.quit
+    }
+}
+
 /// Run the console on the current terminal until the user quits. With `focus`,
 /// open that simulation first; otherwise start in the catalogue.
 pub async fn run(
@@ -23,7 +52,7 @@ pub async fn run(
     focus: Option<SimulationId>,
     timeline_directory: std::path::PathBuf,
 ) -> std::io::Result<()> {
-    let app = model::App::new(focus).with_timelines(timeline_directory)?;
+    let app = Console::new(focus, timeline_directory)?.0;
     let mut terminal = ratatui::try_init()?;
     if let Err(error) = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
     {

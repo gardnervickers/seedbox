@@ -36,8 +36,8 @@ pub fn init(destination: &Path, template: Template) -> Result<()> {
                 include_str!("../../../examples/etcd/workload/go.sum"),
             ),
             (
-                "workload/main_test.go",
-                include_str!("../../../examples/etcd/workload/main_test.go"),
+                "workload/writes.go",
+                include_str!("../../../examples/etcd/workload/writes.go"),
             ),
         ],
         Template::Redis => vec![

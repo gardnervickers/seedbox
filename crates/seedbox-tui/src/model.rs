@@ -3591,69 +3591,6 @@ pub(crate) mod tests {
             .contains("open this timeline's source"));
     }
 
-    #[test]
-    fn editing_save_failure_survives_refresh_and_retry_persists_edits() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-model-timeline-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::write(&directory, b"block directory creation").unwrap();
-        let mut app = edited_timeline_app();
-        app.timeline_directory = Some(directory.clone());
-        app.input(key('d'));
-        assert!(app.timelines[0].is_unsaved());
-        assert!(app.timelines[0].save_error().is_some());
-        let entries = app.timelines[0].entries().to_vec();
-        app.timeline_update(seedbox_api::FaultTimeline {
-            simulation: "k7m2p9qx".parse().unwrap(),
-            entries,
-        });
-        assert!(app.timelines[0].is_unsaved());
-        assert_eq!(app.timelines[0].modified_count(), 1);
-        std::fs::remove_file(&directory).unwrap();
-        app.timelines[0].retry_save(&directory).unwrap();
-        assert!(!app.timelines[0].is_unsaved());
-        assert!(app.timelines[0].save_error().is_none());
-        let (saved, _) = crate::timeline::TimelineDraft::load_all(&directory).unwrap();
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].modified_count(), 1);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn unknown_admitted_fault_is_persisted_before_immediate_quit() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-immediate-timeline-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut app = app(&["a"]);
-        app.focus.as_mut().unwrap().resource = Some(timeline_resource(10));
-        app.timeline_directory = Some(directory.clone());
-        app.apply(Update::FaultReceipt {
-            title:"future_action".into(), request:serde_json::json!({"command":{"type":"injectFault","action":{"action":"future_action","newField":{"value":7}}}}).to_string(),
-            result:Ok(serde_json::json!({"state":{"type":"acknowledged","error":null,
-                "intervention":{"requestId":"new-request","position":{"boundaryIndex":4,"completedRounds":3,"simulatedTimeNs":100},
-                "plan":{"id":1,"at_ns":100,"deadline_ns":200,"action":"future_action","newField":{"value":7}}}}})),
-        });
-        app.input(key('q'));
-        assert!(app.quit);
-        let (saved, _) = crate::timeline::TimelineDraft::load_all(&directory).unwrap();
-        assert_eq!(saved[0].entries()[0].id, "program:new-request");
-        assert_eq!(
-            saved[0].entries()[0].action,
-            serde_json::json!({"action":"future_action","newField":{"value":7}})
-        );
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
     fn heal_catalogue() -> FaultCatalogue {
         FaultCatalogue {
             simulation: "k7m2p9qx".parse().unwrap(),

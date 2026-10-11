@@ -19,6 +19,7 @@ use std::time::Instant;
 mod checkpoint;
 pub mod pv;
 mod pv_plan;
+mod time_page;
 pub use checkpoint::MachineSnapshot;
 use pv::PvClock;
 
@@ -701,14 +702,11 @@ impl Machine {
         self.entropy = entropy;
         self.entropy_read = 0;
         self.record(b'R', self.world.time);
-        if self.barrier {
-            return Ok(Reseed::Barrier);
+        let mode = time_page::release_mode(self.abi, self.barrier);
+        if mode == Reseed::Page {
+            self.reseed_time_page(entropy)?;
         }
-        if self.abi < ABI_PAGE_RESEED {
-            return Ok(Reseed::Unsupported);
-        }
-        self.reseed_time_page(entropy)?;
-        Ok(Reseed::Page)
+        Ok(mode)
     }
 
     /// Publish fork entropy without parking, advancing clocks or touching I/O.
@@ -719,14 +717,22 @@ impl Machine {
         }
         self.entropy = entropy;
         self.entropy_read = 0;
-        let gen = self.page_get(PAGE_ENTROPY_GEN) + 1;
-        for (i, v) in page_entropy(&entropy).into_iter().enumerate() {
-            self.page_set(PAGE_ENTROPY + i, v);
-        }
-        // Publish the generation last: the guest reads it first.
-        self.page_set(PAGE_ENTROPY_GEN, gen);
+        let gen = time_page::publish_entropy(self, &entropy);
         self.record(b'S', gen);
         Ok(())
+    }
+
+    /// Shared ABI fields observed while the vCPU is stopped. Guest writes remain
+    /// visible only at the backend's committed execution boundaries.
+    pub fn time_page(&self) -> [u64; 22] {
+        std::array::from_fn(|index| self.page_get(index))
+    }
+
+    /// Architectural registers observed without another guest entry.
+    pub fn registers(&self) -> Result<kvm_regs, String> {
+        self.vcpu
+            .get_regs()
+            .map_err(|error| format!("{}: read registers: {error}", self.world.name))
     }
 
     /// Publish what a progress call costs: its nominal charge, the bound on
@@ -1214,9 +1220,8 @@ impl Machine {
     }
 
     fn enable_page_timer(&mut self) {
-        if self.page_timer_requested && self.abi >= ABI_PAGE_TIMER {
-            self.page_set(PAGE_TIMER_DEADLINE, TIMER_DISARMED);
-            self.page_set(PAGE_CAPABILITIES, CAP_PAGE_TIMER);
+        let (requested, abi) = (self.page_timer_requested, self.abi);
+        if time_page::enable_timer(self, requested, abi) {
             self.page_timer.enabled = true;
         }
     }
@@ -2038,265 +2043,6 @@ fn ram_page_hashes_match_full_hashes_for_zero_changed_and_short_pages() {
 }
 
 #[cfg(test)]
-mod net_poll_tests {
-    use super::*;
-
-    #[test]
-    #[cfg_attr(
-        not(feature = "kvm-tests"),
-        ignore = "requires KVM on a Linux x86-64 host"
-    )]
-    fn event_idx_polls_on_entry_slice_boundary_and_halt_without_kicks() {
-        let kvm = Kvm::new().unwrap();
-        for site in ["entry", "slice", "bounded_slice", "halt", "charged_io"] {
-            for (event_idx, deferred) in
-                [(false, false), (true, false), (false, true), (true, true)]
-            {
-                let case = format!("site={site} event_idx={event_idx} deferred={deferred}");
-                // Publish a head, then yield to the slice end, halt, or start
-                // charged port I/O. Entry starts with an already posted head.
-                let mut code = vec![0xc7, 0x05, 0x02, 0x20, 0x08, 0x00, 1, 0, 0, 0];
-                if site == "slice" || site == "bounded_slice" {
-                    code.extend_from_slice(&[0xb0, 1, 0xba, 0x2c, 0x05, 0, 0, 0xee]);
-                }
-                if site == "charged_io" {
-                    code.extend_from_slice(&[0xba, 0x30, 0x05, 0, 0, 0xee]);
-                }
-                code.push(0xf4);
-                let mut kernel = vec![0; 1024];
-                kernel[0x1f1] = 1;
-                kernel.extend(code);
-                let spec = BootSpec {
-                    kernel: &kernel,
-                    initrd: &[],
-                    cmdline: String::new(),
-                    mem: INITRD_ADDR + 0x100000,
-                    rng_seed: [0; 32],
-                    mac: Some([2, 0, 0, 0, 0, 1]),
-                    control_channel: false,
-                    disk: None,
-                    barrier: false,
-                    page_timer: false,
-                };
-                let mut m = Machine::new(&kvm, "net-poll", &spec).unwrap();
-                let mut r = m.vcpu.get_regs().unwrap();
-                r.rflags = 0x202;
-                m.vcpu.set_regs(&r).unwrap();
-                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem.0, m.mem_size) };
-                let net = m.net.as_mut().unwrap();
-                net.set_deferred_tx(deferred);
-                for (off, v) in [
-                    (0x020, (1 << 5) | if event_idx { 1 << 29 } else { 0 }),
-                    (0x024, 1),
-                    (0x020, 1),
-                    (0x070, 15),
-                    (0x030, 1),
-                    (0x038, 1),
-                    (0x080, 0x81000),
-                    (0x090, 0x82000),
-                    (0x0a0, 0x83000),
-                    (0x044, 1),
-                ] {
-                    net.write(memory, off, v).unwrap();
-                }
-                memory[0x81000..0x81008].copy_from_slice(&0x84000u64.to_le_bytes());
-                memory[0x81008..0x8100c].copy_from_slice(&17u32.to_le_bytes());
-                memory[0x8400c..0x84011].copy_from_slice(b"frame");
-                if site == "entry" {
-                    memory[0x82002..0x82004].copy_from_slice(&1u16.to_le_bytes());
-                }
-                let mut frames = Vec::new();
-                let (limit, early) = if site == "bounded_slice" {
-                    (1_000_000, 100_000)
-                } else {
-                    (500, 0)
-                };
-                let stop = m
-                    .run_until(
-                        &mut PvClock::new(std::time::Duration::from_millis(20)).unwrap(),
-                        limit,
-                        early,
-                        &mut frames,
-                    )
-                    .unwrap();
-                if site == "bounded_slice" {
-                    assert_eq!(
-                        m.time,
-                        if deferred {
-                            seedbox_engine_core::virtio_network::TX_POLL_NS
-                        } else {
-                            limit - early
-                        },
-                        "{case}"
-                    );
-                }
-                if event_idx || deferred {
-                    assert_eq!(stop, Stop::Sent, "{case}");
-                    assert_eq!(frames, [b"frame".to_vec()], "{case}");
-                    // used->idx is at used + 2; used + 12 is avail_event
-                    // for this one-entry queue. Only one head was posted.
-                    assert_eq!(
-                        u16::from_le_bytes(m.memory()[0x83002..0x83004].try_into().unwrap()),
-                        1,
-                        "{case}"
-                    );
-                } else {
-                    assert_eq!(
-                        stop,
-                        if site == "slice" || site == "bounded_slice" || site == "charged_io" {
-                            Stop::Reached
-                        } else {
-                            Stop::Halted
-                        },
-                        "{case}"
-                    );
-                    assert!(frames.is_empty(), "{case}");
-                }
-                let net = m.net.as_ref().unwrap();
-                assert_eq!(net.stats().doorbell_exits, 0, "{case}");
-                assert_eq!(
-                    net.stats().tx_frames,
-                    u64::from(event_idx || deferred),
-                    "{case}"
-                );
-                assert_eq!(
-                    net.stats().tx_polled_at_boundary,
-                    u64::from((event_idx || deferred) && site != "entry"),
-                    "{case}"
-                );
-                assert!(net.dirty.is_empty(), "{case}"); // Machine adopted all DMA writes.
-            }
-        }
-    }
-    #[test]
-    #[cfg_attr(
-        not(feature = "kvm-tests"),
-        ignore = "requires KVM on a Linux x86-64 host"
-    )]
-    fn pv_stop_adopts_the_guest_clock() {
-        let kvm = Kvm::new().unwrap();
-        for arm in [false, true] {
-            // Read the clock 5 ms ahead of the VMM, optionally arm one PIT
-            // tick through port 0x530, halt. The stop's time, which the world
-            // plans the next limit from, and any deadline follow that clock.
-            let mut code = vec![0xc7, 0x05, 0x08, 0x00, 0x00, 0xd0];
-            code.extend_from_slice(&5_000_000u32.to_le_bytes());
-            if arm {
-                code.extend_from_slice(&[0xb8, 1, 0, 0, 0, 0xba, 0x30, 0x05, 0, 0, 0x66, 0xef]);
-            }
-            code.push(0xf4);
-            let mut kernel = vec![0; 1024];
-            kernel[0x1f1] = 1;
-            kernel.extend(code);
-            let spec = BootSpec {
-                kernel: &kernel,
-                initrd: &[],
-                cmdline: String::new(),
-                mem: INITRD_ADDR + 0x100000,
-                rng_seed: [0; 32],
-                mac: None,
-                control_channel: false,
-                disk: None,
-                barrier: false,
-                page_timer: false,
-            };
-            let mut m = Machine::new(&kvm, "pv-stop", &spec).unwrap();
-            let mut frames = Vec::new();
-            let mut stop = m
-                .run_until(
-                    &mut PvClock::new(std::time::Duration::from_millis(20)).unwrap(),
-                    10_000_000,
-                    0,
-                    &mut frames,
-                )
-                .unwrap();
-            while stop == Stop::Reached {
-                stop = m
-                    .run_until(
-                        &mut PvClock::new(std::time::Duration::from_millis(20)).unwrap(),
-                        10_000_000,
-                        0,
-                        &mut frames,
-                    )
-                    .unwrap();
-            }
-            assert!(m.time >= 5_000_000, "arm={arm} time {}", m.time);
-            assert!(
-                m.pit.deadline.is_none_or(|d| d > 5_000_000),
-                "arm={arm} {:?}",
-                m.pit.deadline
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod io_boundary_tests {
-    use super::*;
-
-    fn probe(kvm: &Kvm, port: u16, write: bool) -> Machine {
-        // A minimal 32-bit payload using the real Linux boot handoff path.
-        // After one charged I/O: conditional branch, marker store, HLT.
-        let value = if port == 0x530 { 1u32 } else { 0x1234u32 };
-        let mut code = vec![0xb8];
-        code.extend_from_slice(&value.to_le_bytes());
-        code.push(0xba);
-        code.extend_from_slice(&(port as u32).to_le_bytes());
-        if port == 0x530 {
-            code.extend_from_slice(&[0x66, 0xef]);
-        } else {
-            code.push(if write { 0xee } else { 0xec });
-        }
-        code.extend_from_slice(&[
-            0x85, 0xc0, 0x74, 0x00, 0xc7, 0x05, 0x00, 0x00, 0x08, 0x00, 0x78, 0x56, 0x34, 0x12,
-            0xf4,
-        ]);
-        let mut kernel = vec![0u8; 1024];
-        kernel[0x1f1] = 1;
-        kernel.extend(code);
-        let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
-            barrier: false,
-            page_timer: false,
-        };
-        let mut machine = Machine::new(kvm, "io-probe", &spec).unwrap();
-        let mut r = machine.vcpu.get_regs().unwrap();
-        r.rflags = 0x202;
-        machine.vcpu.set_regs(&r).unwrap();
-        machine.pit.write(0x43, 0x34, 0);
-        machine.pit.program(0x1234, 0);
-        machine.pit.write(0x43, 0, 0);
-        machine.pic.set_masks(0);
-        machine
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux host")]
-    fn page_capture_has_documented_format_and_preserves_ram_witness_state() {
-        let kvm = Kvm::new().unwrap();
-        let mut m = probe(&kvm, 0x530, true);
-        let before = (m.exit_witness(), m.state_digest(), m.memory().to_vec());
-        let pages = m.page_hashes();
-        assert_eq!(pages.len(), m.mem_size / 4096 * 8);
-        for (pfn, page) in before.2.chunks(4096).enumerate() {
-            let hash = u64::from_le_bytes(Sha256::digest(page)[..8].try_into().unwrap());
-            assert_eq!(&pages[pfn * 8..pfn * 8 + 8], &hash.to_le_bytes());
-        }
-        assert_eq!(
-            (m.exit_witness(), m.state_digest(), m.memory().to_vec()),
-            before
-        );
-    }
-}
-
-#[cfg(test)]
 mod fork_tests {
     use super::*;
 
@@ -2368,226 +2114,6 @@ mod fork_tests {
             .parse()
             .unwrap();
         assert_eq!(abi, ABI_PAGE_TIMER);
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
-    fn page_timer_negotiation_and_sync_use_the_separate_page_word() {
-        let kvm = Kvm::new().unwrap();
-        let mut m = probe_machine(&kvm, false);
-        for requested in [false, true] {
-            for abi in 0..=ABI_PAGE_TIMER {
-                m.page_timer_requested = requested;
-                m.abi = abi;
-                m.page_timer = PageTimer::new();
-                m.page_set(PAGE_TIMER_DEADLINE, 0);
-                m.page_set(PAGE_CAPABILITIES, 0);
-                m.enable_page_timer();
-                let active = requested && abi >= ABI_PAGE_TIMER;
-                assert_eq!(m.page_timer.enabled, active);
-                assert_eq!(
-                    m.page_get(PAGE_CAPABILITIES),
-                    if active { CAP_PAGE_TIMER } else { 0 }
-                );
-                assert_eq!(
-                    m.page_get(PAGE_TIMER_DEADLINE),
-                    if active { TIMER_DISARMED } else { 0 }
-                );
-            }
-        }
-        m.page_set(PAGE_TIMER_DEADLINE, 10000);
-        m.sync_page_timer().unwrap();
-        assert_eq!(m.next_deadline(), 10000);
-        m.page_set(PAGE_TIMER_DEADLINE, TIMER_DISARMED);
-        m.sync_page_timer().unwrap();
-        assert_eq!(m.next_deadline(), TIMER_DISARMED);
-        assert_eq!(m.pit.deadline, None);
-    }
-
-    // These tests create a vCPU but never enter the guest or open a perf event.
-    #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
-    fn abi_below_3_time_forks_do_not_write_extensions_or_add_reseed_witnesses() {
-        let kvm = Kvm::new().unwrap();
-        for abi in 0..ABI_PAGE_RESEED {
-            let mut m = probe_machine(&kvm, false);
-            assert_eq!(m.page_get(PAGE_PV_CLOCK), 1, "fresh boot, ABI {abi}");
-            assert!((7..14).all(|i| m.page_get(i) == 0), "fresh boot, ABI {abi}");
-            for i in 6..14 {
-                m.page_set(i, 100 + i as u64);
-            }
-            m.abi = abi;
-            m.park().unwrap();
-            let mut witness = m.witness.clone();
-            witness.update([b'R']);
-            witness.update(m.time.to_le_bytes());
-            witness.update(m.time.to_le_bytes());
-            // Pre-K2 exit_witness also covers pending I/O: none after park().
-            witness.update(b"pending_io");
-            witness.update([0]);
-            assert_eq!(
-                m.release(m.time, [7; ENTROPY_WORDS]).unwrap(),
-                Reseed::Unsupported
-            );
-            assert!(
-                (6..14).all(|i| m.page_get(i) == 100 + i as u64),
-                "ABI {abi}"
-            );
-            assert_eq!(
-                m.exit_witness(),
-                hex::encode(witness.finalize()),
-                "ABI {abi}"
-            );
-        }
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
-    fn a_time_fork_writes_only_entropy_and_a_barrier_writes_none() {
-        let kvm = Kvm::new().unwrap();
-        for barrier in [false, true] {
-            let mut m = probe_machine(&kvm, barrier);
-            assert_eq!(m.page_get(PAGE_PV_CLOCK), 1, "fresh boot");
-            assert!((7..14).all(|i| m.page_get(i) == 0), "fresh boot");
-            m.abi = ABI_PAGE_RESEED;
-            for i in 0..14 {
-                m.page_set(i, 100 + i as u64);
-            }
-            let before: Vec<_> = (0..14).map(|i| m.page_get(i)).collect();
-            // Both release paths require a parked world, before any page write.
-            assert!(m.release(m.time, [7; ENTROPY_WORDS]).is_err());
-            assert_eq!((0..14).map(|i| m.page_get(i)).collect::<Vec<_>>(), before);
-            m.park().unwrap();
-            let how = m.release(m.time, [7; ENTROPY_WORDS]).unwrap();
-            assert_eq!(
-                how,
-                if barrier {
-                    Reseed::Barrier
-                } else {
-                    Reseed::Page
-                }
-            );
-            assert_eq!(
-                (0..9).map(|i| m.page_get(i)).collect::<Vec<_>>(),
-                before[..9]
-            );
-            if barrier {
-                assert_eq!(
-                    (9..14).map(|i| m.page_get(i)).collect::<Vec<_>>(),
-                    before[9..14]
-                );
-            } else {
-                assert_eq!(m.page_get(PAGE_ENTROPY_GEN), before[9] + 1);
-                assert_eq!(
-                    (10..14).map(|i| m.page_get(i)).collect::<Vec<_>>(),
-                    page_entropy(&[7; ENTROPY_WORDS])
-                );
-            }
-        }
-    }
-
-    fn probe_machine(kvm: &Kvm, barrier: bool) -> Machine {
-        let mut code = vec![
-            0xb8, 1, 0, 0, 0, 0xba, 0xf8, 0, 0, 0, 0xef, 0xed, 0xa3, 0x00, 0x00, 0x08, 0x00,
-        ];
-        code.extend_from_slice(&[0xb9, 0xe8, 0x03, 0, 0, 0x49, 0x75, 0xfd]);
-        code.extend_from_slice(&[0xc7, 0x05, 0x00, 0x10, 0x08, 0x00, 0xad, 0xde, 0, 0, 0xf4]);
-        let mut kernel = vec![0u8; 1024];
-        kernel[0x1f1] = 1;
-        kernel.extend(code);
-        let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
-            barrier,
-            page_timer: false,
-        };
-        Machine::new(kvm, "fork-probe", &spec).unwrap()
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
-    fn runtime_checkpoint_restores_pv_fields_and_seeded_syscall_cost() {
-        let kvm = Kvm::new().unwrap();
-        let mut m = probe_machine(&kvm, false);
-        m.syscall_ns = 937;
-        m.abi = ABI_PAGE_RESEED;
-        for i in 6..14 {
-            m.page_set(i, 100 + i as u64);
-        }
-        let saved = m.snapshot().unwrap();
-        m.syscall_ns = 1000;
-        for i in 6..14 {
-            m.page_set(i, 0);
-        }
-        let directory = tempfile::tempdir().unwrap();
-        saved
-            .persist(&directory.path().join("machine.snapshot"))
-            .unwrap();
-        let reference = serde_json::to_vec(&saved).unwrap();
-        drop(saved);
-        drop(m);
-        let saved: MachineSnapshot = serde_json::from_slice(&reference).unwrap();
-        let mut m = probe_machine(&kvm, false);
-        m.restore(&saved).unwrap();
-        assert_eq!(m.syscall_ns, 937);
-        assert_eq!(
-            (6..14).map(|i| m.page_get(i)).collect::<Vec<_>>(),
-            (6..14).map(|i| 100 + i as u64).collect::<Vec<_>>()
-        );
-        let pv_fields = (6..9).map(|i| m.page_get(i)).collect::<Vec<_>>();
-        m.reseed_time_page([42; ENTROPY_WORDS]).unwrap();
-        assert_eq!((6..9).map(|i| m.page_get(i)).collect::<Vec<_>>(), pv_fields);
-        assert_eq!(m.page_get(9), 110);
-        assert_eq!(
-            (10..14).map(|i| m.page_get(i)).collect::<Vec<_>>(),
-            page_entropy(&[42; ENTROPY_WORDS])
-        );
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
-    fn runtime_reseed_publishes_page_without_advancing_or_unpausing() {
-        let kvm = Kvm::new().unwrap();
-        let mut m = probe_machine(&kvm, false);
-        m.abi = ABI_PAGE_RESEED;
-        m.pause().unwrap();
-        let saved = m.snapshot().unwrap();
-        let before = m.published_entropy();
-        m.reseed_time_page([42; ENTROPY_WORDS]).unwrap();
-        assert!(m.is_paused());
-        assert_eq!(m.time, 0);
-        assert!(!m.is_parked());
-        assert_eq!(m.page_get(PAGE_ENTROPY_GEN), 1);
-        let page = page_entropy(&[42; ENTROPY_WORDS]);
-        for (i, word) in page.into_iter().enumerate() {
-            assert_eq!(m.page_get(PAGE_ENTROPY + i), word);
-        }
-        let branch = m.published_entropy();
-        assert_ne!(branch, before);
-        m.restore(&saved).unwrap();
-        m.reseed_time_page([43; ENTROPY_WORDS]).unwrap();
-        assert_ne!(m.published_entropy(), branch);
-        m.restore(&saved).unwrap();
-        m.reseed_time_page([42; ENTROPY_WORDS]).unwrap();
-        assert_eq!(m.published_entropy(), branch);
-        m.abi = 2;
-        assert!(m
-            .reseed_time_page([44; ENTROPY_WORDS])
-            .unwrap_err()
-            .contains("requires guest ABI 3"));
-        m.abi = 0;
-        m.reseed_time_page([45; ENTROPY_WORDS]).unwrap();
-        assert_eq!(
-            m.page_get(PAGE_ENTROPY_GEN),
-            2,
-            "pre-boot entropy is published too"
-        );
     }
 }
 

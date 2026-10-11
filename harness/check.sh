@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the named platform suites (default portable); see --help for the list.
+# Named portable and system suites, implemented and tested in Rust.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec python3 harness/check.py "$@"
+exec cargo xtask check "$@"

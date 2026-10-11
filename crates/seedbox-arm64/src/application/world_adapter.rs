@@ -956,9 +956,8 @@ mod tests {
     }
     #[test]
     fn machine_order_and_retained_offsets_continue_across_incarnations() {
-        let root =
-            std::env::temp_dir().join(format!("seedbox-arm-log-sink-{}", std::process::id()));
-        std::fs::create_dir(&root).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
         let stream = |name: &str| {
             Capture::new(
                 File::create(root.join(name)).unwrap(),

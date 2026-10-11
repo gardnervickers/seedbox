@@ -21,7 +21,7 @@ shell-words = "1"
 tempfile.workspace = true
 tar.workspace = true
 walkdir = "2"
-flate2 = "1"
+flate2.workspace = true
 xattr = "1"
 bollard.workspace = true
 futures-util.workspace = true
@@ -36,11 +36,3 @@ seedbox-vmm = { path = "../seedbox-vmm" }
 
 [target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))'.dependencies]
 seedbox-arm64 = { path = "../seedbox-arm64" }
-
-
-[features]
-oci-tests = []
-
-[[test]]
-name = "oci_engine"
-required-features = ["oci-tests"]

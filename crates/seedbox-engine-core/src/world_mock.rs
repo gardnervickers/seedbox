@@ -1,9 +1,9 @@
 //! A scripted `WorldMachine` for coordinator tests: the legacy loop's and the
 //! windowed scheduler's. Shared, so both run the same scripts.
 use super::world::*;
-use crate::{control, links, network_counters, world::boot_faults};
+use crate::{control, links, world::boot_faults};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 
@@ -359,33 +359,26 @@ impl WorldMachine for Mock {
     }
 }
 pub(crate) fn world(names: &[&str]) -> World<Mock> {
-    let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    World::new(world_inputs(names)).unwrap()
+}
+pub(crate) fn world_inputs(names: &[&str]) -> WorldInputs<Mock> {
+    let names: Vec<String> = names.iter().map(|name| (*name).into()).collect();
     let trace = Trace::default();
     let n = names.len();
-    World {
-        scheduler_continuation: None,
-        input_program: Default::default(),
-        observations: None,
-        failure: None,
+    WorldInputs {
         machines: names
             .iter()
             .map(|name| Mock::new(name, trace.clone()))
             .collect(),
         factory: trace,
         boot: vec![(); n],
+        clock: MockClock::default(),
         barrier: false,
         boot_seed: 1,
         run_seed: 2,
-        branch_identity: None,
-        incarnations: vec![vec![]; n],
-        paused_ingress: vec![0; n],
-        clock: MockClock::default(),
-        events: vec![BTreeMap::new(); n],
-        seq: 0,
         lookahead: 10,
         early: 3,
         latency: 10,
-        partitioned: BTreeMap::new(),
         faults: boot_faults(
             &names,
             &[],
@@ -394,13 +387,6 @@ pub(crate) fn world(names: &[&str]) -> World<Mock> {
         )
         .unwrap(),
         control: control::Control::new(&Value::Null, names, 10, 3).unwrap(),
-        strict_events: vec![BTreeMap::new(); n],
         macs: (0..n).map(|i| [0, 0, 0, 0, 0, i as u8]).collect(),
-        dropped: 0,
-        delivered: 0,
-        link_counts: BTreeMap::new(),
-        semantic_counts: network_counters::NetworkCounters::default(),
-        slices: 0,
-        boundaries: 0,
     }
 }

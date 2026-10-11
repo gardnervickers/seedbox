@@ -470,15 +470,11 @@ impl ExecutionService {
                 self.manager.update(&id, |s| {
                     s.status.phase = Phase::Completed;
                     s.status.stage = None;
-                    s.status.termination = Some(if cancellation.is_cancelled() {
-                        ExecutionTermination::Stopped
-                    } else if preparation_expired.load(Ordering::Acquire) {
-                        ExecutionTermination::PreparationTimeLimit
-                    } else {
-                        ExecutionTermination::Error {
-                            message: error.to_string(),
-                        }
-                    });
+                    s.status.termination = Some(failed_termination(
+                        &error,
+                        cancellation.is_cancelled(),
+                        preparation_expired.load(Ordering::Acquire),
+                    ));
                 })?;
             }
         }
@@ -778,6 +774,22 @@ fn save_inputs(
     Ok(())
 }
 
+fn failed_termination(
+    error: &seedbox_application::Error,
+    cancelled: bool,
+    preparation_expired: bool,
+) -> ExecutionTermination {
+    if cancelled {
+        ExecutionTermination::Stopped
+    } else if preparation_expired {
+        ExecutionTermination::PreparationTimeLimit
+    } else {
+        ExecutionTermination::Error {
+            message: error.to_string(),
+        }
+    }
+}
+
 // Committed observations may be ahead of a late final report. Neither the
 // oracle's first exit nor the public timeline may move backwards during cleanup.
 fn merge_report_observation(
@@ -794,577 +806,43 @@ fn merge_report_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seedbox_api::{SimulationSpec, SubmitRequest, TestVerdict};
-
-    struct WaitingProvider(AtomicBool);
-    impl BackendProvider for WaitingProvider {
-        fn project(
-            &self,
-            _: &Simulation,
-            _: &ContentStore,
-            cancellation: &CancellationToken,
-        ) -> seedbox_application::Result<Backends> {
-            let limit = std::time::Instant::now() + Duration::from_secs(2);
-            while !cancellation.is_cancelled() && std::time::Instant::now() < limit {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            self.0.store(cancellation.is_cancelled(), Ordering::Release);
-            Err(seedbox_application::Error::PreparationCancelled)
-        }
-        fn retained(
-            &self,
-            _: &PreparedInputs,
-            _: &ContentStore,
-        ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
-            panic!("the preparation timeout must not launch retained execution")
-        }
-    }
-
-    #[tokio::test]
-    async fn capacity_api_tracks_real_admission_and_releases_joined_tasks() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
-        let execution = Arc::new(
-            ExecutionService::new(
-                manager,
-                root.into(),
-                ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
-            )
-            .unwrap(),
-        );
-        let socket = root.join("api.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let shutdown = CancellationToken::default();
-        let owner = tokio::spawn(crate::serve(
-            listener,
-            execution.manager.clone(),
-            execution.clone(),
-            NonZeroUsize::MIN,
-            shutdown.clone(),
-        ));
-        let client = seedbox_client::Client::connect_to(&socket).unwrap();
-        let mut configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
-            &Default::default(),
-        )
-        .unwrap();
-        for service in configuration.services.values_mut() {
-            service.platform.clear();
-        }
-        let request = |name: &str| SubmitRequest {
-            metadata: Default::default(),
-            options: Default::default(),
-            request_id: name.into(),
-            spec: SimulationSpec {
-                program: Vec::new(),
-                start_paused: false,
-                seed: Some(1),
-                inputs: InputSource::Project,
-                configuration: configuration.clone(),
-            },
-        };
-        let first = client.submit(&request("first")).await.unwrap().metadata.id;
-        let second = client.submit(&request("second")).await.unwrap().metadata.id;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let capacity = client.capacity().await.unwrap();
-                if capacity.occupying.iter().any(|o| o.simulation == first) {
-                    assert_eq!(capacity.slots, 1);
-                    assert_eq!(capacity.occupying.len(), 1);
-                    assert_eq!(capacity.queued.len(), 1);
-                    assert_eq!(capacity.queued[0].simulation, second);
-                    assert_eq!(
-                        capacity.queued[0].reason,
-                        seedbox_api::QueueReason::ResidentCapacity
-                    );
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        client.stop(&first).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let capacity = client.capacity().await.unwrap();
-                if capacity.occupying.iter().any(|o| o.simulation == second) {
-                    assert_eq!(capacity.occupying.len(), 1);
-                    assert!(capacity.queued.is_empty());
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
-        shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(5), owner)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(execution.capacity().unwrap().occupying.is_empty());
-    }
-
     #[test]
-    fn project_execution_uses_the_canonical_mixed_memory_profile() {
-        use seedbox_application::{execution::*, image::Launch};
-        #[derive(Clone)]
-        struct FixtureBackend(PreparedInputs);
-        impl PreparationBackend for FixtureBackend {
-            fn prepare(
-                &self,
-                _: &Simulation,
-                _: &ContentStore,
-            ) -> seedbox_application::Result<PreparedInputs> {
-                Ok(self.0.clone())
-            }
-            fn prepare_cancellable(
-                &self,
-                simulation: &Simulation,
-                store: &ContentStore,
-                _: &PreparationContext,
-            ) -> seedbox_application::Result<PreparedInputs> {
-                self.prepare(simulation, store)
-            }
+    fn preparation_deadline_is_distinct_from_stop_and_execution_error() {
+        let error = seedbox_application::Error::PreparationCancelled;
+        for expired in [false, true] {
+            assert_eq!(
+                failed_termination(&error, true, expired),
+                ExecutionTermination::Stopped
+            );
         }
-        impl ExecutionBackend for FixtureBackend {
-            fn profile(&self) -> ExecutionProfile {
-                self.0.profile.clone()
-            }
-            fn execute(
-                &self,
-                request: ExecutionRequest<'_>,
-            ) -> seedbox_application::Result<ExecutionReport> {
-                assert_eq!(request.prepared.profile, self.profile());
-                assert_eq!(request.prepared.memory_mb("app"), 2048);
-                assert_eq!(request.prepared.memory_mb("oracle"), 256);
-                assert_eq!(request.prepared.memory_mb("helper"), 1024);
-                Ok(ExecutionReport {
-                    simulated_time_ns: Some(1),
-                    host_wait_ns: 0,
-                    reason: StopReason::Completed,
-                    workload_exit: Some(WorkloadExit {
-                        service: "oracle".into(),
-                        code: 0,
-                    }),
-                    witness: Some(self.0.kernel.clone()),
-                    full_state: None,
-                    faults: vec![],
-                    detail: None,
-                })
-            }
-        }
-        struct Provider(FixtureBackend);
-        impl BackendProvider for Provider {
-            fn project(
-                &self,
-                _: &Simulation,
-                _: &ContentStore,
-                _: &CancellationToken,
-            ) -> seedbox_application::Result<Backends> {
-                Ok(Backends {
-                    preparation: Box::new(self.0.clone()),
-                    execution: Box::new(self.0.clone()),
-                })
-            }
-            fn retained(
-                &self,
-                inputs: &PreparedInputs,
-                _: &ContentStore,
-            ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
-                Ok(Box::new(FixtureBackend(inputs.clone())))
-            }
-        }
-        let temporary = tempfile::tempdir().unwrap();
-        let store = ContentStore::new(temporary.path().join("store"));
-        let digest = store.put(b"test-only-binary").unwrap();
-        let configuration = seedbox_application::config::parse_for_architecture(
-            "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\n",
-            Path::new("/project/seedbox.yaml"), &Default::default(),
-            if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 },
-        ).unwrap();
-        let image = PreparedImage {
-            manifest: digest.clone(),
-            config: digest.clone(),
-            layers: vec![],
-            launch: Launch {
-                argv: vec!["/app".into()],
-                environment: BTreeMap::new(),
-                working_dir: "/".into(),
-                user: "".into(),
-                volumes: vec![],
-                disk_volumes: vec![],
-            },
-        };
-        let inputs = PreparedInputs {
-            wall_clock_epoch: Some(86400),
-            kernel: digest.clone(),
-            images: BTreeMap::from([
-                ("app".into(), image.clone()),
-                ("helper".into(), image.clone()),
-                ("oracle".into(), image),
-            ]),
-            placement: BTreeMap::from([
-                ("app".into(), "app".into()),
-                ("helper".into(), "helper".into()),
-                ("oracle".into(), "oracle".into()),
-            ]),
-            guests: BTreeMap::from([
-                ("app".into(), digest.clone()),
-                ("helper".into(), digest.clone()),
-                ("oracle".into(), digest.clone()),
-            ]),
-            machine_memory_mb: BTreeMap::from([("app".into(), 2048), ("oracle".into(), 256)]),
-            profile: ExecutionProfile {
-                backend: Backend::Other("test".into()),
-                engine: digest,
-                witness_mode: WitnessMode::Exits,
-                semantic_parameters: SemanticParameters::new(1024),
-            },
-            auxiliary: BTreeMap::new(),
-            provenance: BTreeMap::new(),
-        };
-        let manager = Arc::new(Manager::new(catalogue::Catalogue::in_memory()));
-        let service = ExecutionService::new(
-            manager.clone(),
-            temporary.path().join("execution"),
-            store,
-            Arc::new(Provider(FixtureBackend(inputs))),
-        )
-        .unwrap();
-        let spec = SimulationSpec {
-            configuration,
-            inputs: InputSource::Project,
-            seed: Some(1),
-            program: vec![],
-            start_paused: false,
-        };
-        let resource = manager
-            .submit(SubmitRequest {
-                metadata: Default::default(),
-                options: Default::default(),
-                request_id: "mixed-memory".into(),
-                spec,
-            })
-            .unwrap()
-            .0;
-        service.execute(resource.metadata.id.clone()).unwrap();
-        let finished = manager.describe(&resource.metadata.id).unwrap();
-        assert_eq!(finished.status.oracle_exit_code, Some(0));
         assert_eq!(
-            finished.status.termination,
-            Some(seedbox_api::ExecutionTermination::OracleExited)
+            failed_termination(&error, false, true),
+            ExecutionTermination::PreparationTimeLimit
+        );
+        assert_eq!(
+            failed_termination(&error, false, false),
+            ExecutionTermination::Error {
+                message: error.to_string()
+            }
         );
     }
-
     #[test]
     fn final_report_cannot_regress_a_committed_oracle_observation() {
-        let directory = tempfile::tempdir().unwrap();
-        let manager =
-            Manager::new(catalogue::Catalogue::open(&directory.path().join("catalogue")).unwrap());
-        let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
-            &Default::default(),
-        )
-        .unwrap();
-        let id = manager
-            .submit(SubmitRequest {
-                metadata: Default::default(),
-                options: Default::default(),
-                request_id: "late-report".into(),
-                spec: SimulationSpec {
-                    program: Vec::new(),
-                    start_paused: false,
-                    seed: Some(1),
-                    inputs: InputSource::Project,
-                    configuration,
-                },
-            })
-            .unwrap()
-            .0
-            .metadata
-            .id;
-        manager.begin(&id).unwrap().unwrap();
-        manager
-            .update(&id, |s| {
-                s.status.phase = Phase::Running;
-            })
-            .unwrap();
-        manager.publish_engine_event(
-            &id,
-            100,
-            seedbox_api::EventKind::MachineExited {
-                machine: "oracle".into(),
-                incarnation: 0,
-                code: 0,
-            },
-        );
+        let mut status = seedbox_api::SimulationStatus {
+            simulated_time_ns: 100,
+            oracle_exit_code: Some(0),
+            ..Default::default()
+        };
         for phase in [Phase::Finalizing, Phase::Completed] {
-            manager
-                .update(&id, |s| {
-                    merge_report_observation(&mut s.status, Some(7), Some(50));
-                    s.status.phase = phase;
-                })
-                .unwrap();
-            let status = manager.describe(&id).unwrap().status;
+            merge_report_observation(&mut status, Some(7), Some(50));
+            status.phase = phase;
             assert_eq!(status.simulated_time_ns, 100);
             assert_eq!(status.oracle_exit_code, Some(0));
         }
-    }
-
-    #[test]
-    fn deletion_drains_control_io_and_retires_stale_handles_before_removing_files() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
-        let service = Arc::new(
-            ExecutionService::new(
-                manager.clone(),
-                root.into(),
-                ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
-            )
-            .unwrap(),
-        );
-        let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
-            &Default::default(),
-        )
-        .unwrap();
-        let resource = manager
-            .submit(SubmitRequest {
-                metadata: Default::default(),
-                options: Default::default(),
-                request_id: "delete-control-io".into(),
-                spec: SimulationSpec {
-                    program: Vec::new(),
-                    start_paused: false,
-                    seed: Some(1),
-                    inputs: InputSource::Project,
-                    configuration,
-                },
-            })
-            .unwrap()
-            .0;
-        let id = resource.metadata.id;
-        manager.begin(&id).unwrap().unwrap();
-        manager
-            .update(&id, |resource| {
-                resource.status.phase = Phase::Running;
-            })
-            .unwrap();
-        let attempt = root.join("runs").join(id.as_str()).join("attempt");
-        fs::create_dir_all(&attempt).unwrap();
-        manager.attach_worker(&id, &attempt).unwrap();
-        let stale = manager.worker(&id).unwrap().unwrap();
-        // Hold the same mutex that drive owns throughout RPC and checkpoint I/O.
-        let active_operation = stale.lock().unwrap();
-        let (finished, completion) = std::sync::mpsc::channel();
-        let owner = service.clone();
-        let deleting_id = id.clone();
-        let deletion = std::thread::spawn(move || {
-            finished.send(owner.delete(&deleting_id)).unwrap();
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !manager.describe(&id).unwrap().status.stop_requested {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "deletion never requested stop"
-            );
-            std::thread::yield_now();
-        }
-        // Execution can complete before the held control operation finishes.
-        manager
-            .update(&id, |resource| {
-                resource.status.phase = Phase::Completed;
-            })
-            .unwrap();
-        assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
-        assert!(attempt.is_dir());
-        fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
-        drop(active_operation);
-        completion
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap()
-            .unwrap();
-        deletion.join().unwrap();
-        assert!(!attempt.exists());
-        assert!(matches!(
-            manager.describe(&id),
-            Err(catalogue::Error::NotFound(_))
-        ));
-        let mut worker = stale.lock().unwrap();
-        assert!(worker.is_retired());
-        assert!(matches!(
-            worker.apply(&seedbox_api::ControlRequest {
-                request_id: "stale".into(),
-                command: seedbox_api::ControlCommand::Checkpoint,
-            }),
-            Err(crate::worker::Error::Retired)
-        ));
-        assert!(worker.inspect().is_err());
-        assert!(!attempt.exists());
-    }
-
-    #[test]
-    fn completion_retires_control_handles_before_later_deletion() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
-        let service = Arc::new(
-            ExecutionService::new(
-                manager.clone(),
-                root.into(),
-                ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
-            )
-            .unwrap(),
-        );
-        let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
-            &Default::default(),
-        )
-        .unwrap();
-        let resource = manager
-            .submit(SubmitRequest {
-                metadata: Default::default(),
-                options: Default::default(),
-                request_id: "delete-control-io".into(),
-                spec: SimulationSpec {
-                    program: Vec::new(),
-                    start_paused: false,
-                    seed: Some(1),
-                    inputs: InputSource::Project,
-                    configuration,
-                },
-            })
-            .unwrap()
-            .0;
-        let id = resource.metadata.id;
-        manager.begin(&id).unwrap().unwrap();
-        manager
-            .update(&id, |resource| {
-                resource.status.phase = Phase::Running;
-            })
-            .unwrap();
-        let attempt = root.join("runs").join(id.as_str()).join("attempt");
-        fs::create_dir_all(&attempt).unwrap();
-        manager.attach_worker(&id, &attempt).unwrap();
-        let stale = manager.worker(&id).unwrap().unwrap();
-        // Hold the same mutex that drive owns throughout RPC and checkpoint I/O.
-        let active_operation = stale.lock().unwrap();
-        let (finished, completion) = std::sync::mpsc::channel();
-        let owner = manager.clone();
-        let completing_id = id.clone();
-        let finalization = std::thread::spawn(move || {
-            // ExecutionService::execute uses this order after its receiver drains.
-            owner.retire_worker(&completing_id).unwrap();
-            owner
-                .update(&completing_id, |resource| {
-                    resource.status.phase = Phase::Completed;
-                })
-                .unwrap();
-            finished.send(()).unwrap();
-        });
-        assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
-        assert_eq!(manager.describe(&id).unwrap().status.phase, Phase::Running);
-        fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
-        drop(active_operation);
-        completion.recv_timeout(Duration::from_secs(2)).unwrap();
-        finalization.join().unwrap();
-        assert_eq!(
-            manager.describe(&id).unwrap().status.phase,
-            Phase::Completed
-        );
-        assert!(manager.worker(&id).unwrap().is_none());
-        // Deletion begins after completion has dropped Live and its worker handle.
-        service.delete(&id).unwrap();
-        assert!(!attempt.exists());
-        assert!(matches!(
-            manager.describe(&id),
-            Err(catalogue::Error::NotFound(_))
-        ));
-        let mut worker = stale.lock().unwrap();
-        assert!(worker.is_retired());
-        assert!(matches!(
-            worker.apply(&seedbox_api::ControlRequest {
-                request_id: "stale".into(),
-                command: seedbox_api::ControlCommand::Checkpoint,
-            }),
-            Err(crate::worker::Error::Retired)
-        ));
-        assert!(worker.inspect().is_err());
-        assert!(!attempt.exists());
-    }
-
-    #[test]
-    fn preparation_timeout_waits_for_cleanup_and_finishes_without_an_oracle_exit() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
-        let provider = Arc::new(WaitingProvider(AtomicBool::new(false)));
-        let mut service = ExecutionService::new(
-            manager.clone(),
-            root.into(),
-            ContentStore::new(root.join("store")),
-            provider.clone(),
-        )
-        .unwrap();
-        service.preparation_limit = Duration::from_millis(10);
-        let mut configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
-            &Default::default(),
-        )
-        .unwrap();
-        for service in configuration.services.values_mut() {
-            service.platform.clear();
-        }
-        let resource = manager
-            .submit(SubmitRequest {
-                metadata: Default::default(),
-                options: Default::default(),
-                request_id: "timeout".into(),
-                spec: SimulationSpec {
-                    program: Vec::new(),
-                    start_paused: false,
-                    seed: Some(1),
-                    inputs: InputSource::Project,
-                    configuration,
-                },
-            })
-            .unwrap()
-            .0;
-        service.execute(resource.metadata.id.clone()).unwrap();
-        assert!(provider.0.load(Ordering::Acquire));
-        let completed = manager.describe(&resource.metadata.id).unwrap();
-        assert_eq!(completed.status.phase, Phase::Completed);
-        assert_eq!(
-            completed.status.termination,
-            Some(ExecutionTermination::PreparationTimeLimit)
-        );
-        assert_eq!(completed.status.verdict(), TestVerdict::Incomplete);
-        assert!(!completed.status.stop_requested);
-        assert!(completed.status.stage_timings[&Stage::Preparing].complete);
-        assert!(!root
-            .join("inputs")
-            .join(format!("{}.json", resource.metadata.id))
-            .exists());
+        merge_report_observation(&mut status, None, Some(101));
+        assert_eq!(status.simulated_time_ns, 101);
+        let mut empty = seedbox_api::SimulationStatus::default();
+        merge_report_observation(&mut empty, Some(7), None);
+        assert_eq!(empty.oracle_exit_code, Some(7));
     }
 }

@@ -1686,7 +1686,3 @@ where
     }
     Ok((word, evidence))
 }
-
-#[cfg(test)]
-#[path = "world_windowed_tests.rs"]
-mod tests;

@@ -42,6 +42,10 @@ fn generated_templates_are_self_contained_and_preserve_the_existing_etcd_checker
         include_bytes!("../../../examples/etcd/workload/main.go")
     );
     assert_eq!(
+        fs::read(directory.path().join("etcd/workload/writes.go")).unwrap(),
+        include_bytes!("../../../examples/etcd/workload/writes.go")
+    );
+    assert_eq!(
         fs::read(directory.path().join("etcd/workload/go.sum")).unwrap(),
         include_bytes!("../../../examples/etcd/workload/go.sum")
     );

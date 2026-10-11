@@ -76,18 +76,3 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
         assert!(!destination.join(variant).join("workload/main.rs").exists());
     }
 }
-
-#[test]
-fn actual_python_services_and_independent_client_verify_two_restarts() {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/faults/portable.py");
-    let result = Command::new("python3").arg(script).output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&result.stdout).contains("portable Python workload checks passed")
-    );
-}

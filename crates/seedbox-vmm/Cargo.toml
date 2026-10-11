@@ -41,10 +41,5 @@ tempfile.workspace = true
 sha2.workspace = true
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info"] }
 
-[features]
-# Hardware tests compile by default; features enable their execution.
-kvm-tests = []
-guest-tests = ["kvm-tests"]
-
 [profile.release]
 debug = 1
