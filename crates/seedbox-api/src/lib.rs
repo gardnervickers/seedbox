@@ -44,8 +44,8 @@ pub use seeds::{SeedRangeRequest, SeedRangeStatus};
 
 mod world;
 pub use world::{
-    FaultState, Frame, FrameDelivery, FrameFate, LinkCounters, LinkPolicy, LinkState,
-    MachineCondition, MachineState, WorldState,
+    ApplicationCondition, ApplicationState, FaultState, Frame, FrameDelivery, FrameFate,
+    LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, WorldState,
 };
 
 mod timeline;
