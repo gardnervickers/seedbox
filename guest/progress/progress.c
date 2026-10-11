@@ -214,5 +214,10 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
     drmgr_register_thread_init_event(thread_init);
     drmgr_register_bb_app2app_event(neutralize_waits, NULL);
     drmgr_register_bb_instrumentation_event(analyze, instrument, NULL);
+    /* The newer ARM SDK routes exit callbacks through drmgr. */
+#ifdef AARCH64
+    drmgr_register_exit_event(finished);
+#else
     dr_register_exit_event(finished);
+#endif
 }

@@ -1,11 +1,14 @@
 { pkgs }:
 let
   arm = pkgs.stdenv.hostPlatform.isAarch64;
-  # Keep this SDK release and its hashes aligned with nix/dynamorio.nix.
-  # ARM uses its launcher/preload libraries with that patched core and extensions.
+  # ARM uses the matching SDK launcher/preload libraries with the patched core
+  # from nix/dynamorio.nix. Keep its version and hash aligned with that source.
+  # The x86 runtime remains on its existing release; this upgrade fixes ARM JITs.
+  sdkTag = if arm then "cronbuild-11.91.20735" else "release_11.3.0-1";
+  sdkVersion = if arm then "11.91.20735" else "11.3.0";
   sdk = pkgs.fetchurl {
-    url = "https://github.com/DynamoRIO/dynamorio/releases/download/release_11.3.0-1/DynamoRIO-${if arm then "AArch64-Linux" else "Linux"}-11.3.0.tar.gz";
-    hash = if arm then "sha256-n/e3uHdovA0O2hjyJH5VS6sbPoxXbvxXmS87dcEoqGM=" else "sha256-rgIEnfXE2uuC1Ah6qg04v1jN0ms4+2BC3M8ny8Ms7tk=";
+    url = "https://github.com/DynamoRIO/dynamorio/releases/download/${sdkTag}/DynamoRIO-${if arm then "AArch64-Linux" else "Linux"}-${sdkVersion}.tar.gz";
+    hash = if arm then "sha256-cMcDq/M5+XjvOcbPkMNtdRCiiYG7gGpGuj7AvqrXmto=" else "sha256-rgIEnfXE2uuC1Ah6qg04v1jN0ms4+2BC3M8ny8Ms7tk=";
   };
   loader = if arm then "ld-linux-aarch64.so.1" else "ld-linux-x86-64.so.2";
   armRuntime = import ./dynamorio.nix { inherit pkgs; };
