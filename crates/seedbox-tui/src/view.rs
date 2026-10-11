@@ -2438,12 +2438,6 @@ fn oracle_logs(frame: &mut Frame, app: &App, focus: &Focus, name: &str, area: Re
     let rows = log_rows(focus, area.width.saturating_sub(2), LogScope::Only(name));
     let scroll = app.oracle_scroll.min(rows.len().saturating_sub(height));
     let mut right = Vec::new();
-    if scroll > 0 {
-        right.push(Span::styled(
-            format!(" ↑ {scroll} rows back · End follows "),
-            Style::new().fg(AMBER),
-        ));
-    }
     if let Some(m) = focus
         .world
         .as_ref()
@@ -2475,6 +2469,18 @@ fn oracle_logs(frame: &mut Frame, app: &App, focus: &Focus, name: &str, area: Re
             Span::styled("◆ ", Style::new().fg(MAGENTA)),
         ]))
         .title(Line::from(right).right_aligned());
+    // The top border is full with the name, state and verdict.
+    let b = if scroll > 0 {
+        b.title_bottom(
+            Line::styled(
+                format!(" ↑ {scroll} rows back · End follows "),
+                Style::new().fg(AMBER),
+            )
+            .right_aligned(),
+        )
+    } else {
+        b
+    };
     let lines = if rows.is_empty() {
         vec![Line::styled("no oracle output yet", Style::new().fg(DIM))]
     } else {
