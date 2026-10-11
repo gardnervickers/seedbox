@@ -193,6 +193,7 @@ mod tests {
                 m: vec![0; 4096],
                 queue,
             };
+            g.net.transport.status = 15;
             for (off, value) in [
                 (0x030, queue as u32),
                 (0x038, 2),
@@ -373,43 +374,47 @@ mod tests {
     }
 
     #[test]
-    fn kvm_rx_truncates_to_posted_buffer_and_completes_the_prefix() {
-        for (capacity, expected_len) in [(0, 0), (11, 11), (12, 12), (1530, 1530), (1630, 1612)] {
+    fn kvm_rx_rejects_short_buffers_without_truncation() {
+        for capacity in [0, 11, 12, 1530, 1630] {
             for (flags, expected_irq) in [(0, true), (VRING_AVAIL_F_NO_INTERRUPT, false)] {
                 let mut g = Guest::new(0);
                 g.post(&[]);
-                wr32(&mut g.m, DESC + 8, capacity as u32);
+                wr32(&mut g.m, DESC + 8, capacity);
                 wr16(&mut g.m, AVAIL, flags);
                 let frame = vec![0x5a; 1600];
-                let received = g.net.receive(&mut g.m, &frame).unwrap();
-
-                assert_eq!(
-                    received,
-                    ReceiveOutcome {
-                        accepted: true,
-                        irq: expected_irq
-                    }
-                );
-                assert_eq!(rd32(&g.m, USED + 8), expected_len as u32);
-                assert_eq!(rd16(&g.m, USED + 2), 1);
-                let mut packet = vec![0; HDR];
-                packet[10] = 1;
-                packet.extend_from_slice(&frame);
-                assert_eq!(&g.m[0x400..0x400 + expected_len], &packet[..expected_len]);
-                assert_eq!(
-                    g.net.dirty,
-                    [
-                        (0x400, expected_len),
-                        (USED as usize + 4, 8),
-                        (USED as usize + 2, 2)
-                    ]
-                );
-                assert_eq!(g.net.stats().rx_frames, 1);
-                assert!(g.net.model.projection()["backlog"]
-                    .as_array()
-                    .unwrap()
-                    .is_empty());
-                assert_eq!(g.net.read(0x060), u32::from(expected_irq));
+                let before = g.m.clone();
+                let received = g.net.receive(&mut g.m, &frame);
+                if capacity < 1612 {
+                    assert!(received.is_err());
+                    assert_eq!(g.m, before);
+                    assert!(g.net.dirty.is_empty());
+                    assert_eq!(rd16(&g.m, USED + 2), 0);
+                    assert_eq!(
+                        g.net.model.projection()["backlog"]
+                            .as_array()
+                            .unwrap()
+                            .len(),
+                        1
+                    );
+                } else {
+                    assert_eq!(
+                        received.unwrap(),
+                        ReceiveOutcome {
+                            accepted: true,
+                            irq: expected_irq
+                        }
+                    );
+                    assert_eq!(rd32(&g.m, USED + 8), 1612);
+                    assert_eq!(&g.m[0x40c..0x400 + 1612], frame);
+                    assert_eq!(
+                        g.net.dirty,
+                        [
+                            (0x400, 1612),
+                            (USED as usize + 4, 8),
+                            (USED as usize + 2, 2)
+                        ]
+                    );
+                }
             }
         }
     }
@@ -466,9 +471,10 @@ mod tests {
     fn unready_notifications_do_not_access_guest_rings() {
         let mut net = VirtioNet::new([2, 0, 0, 0, 0, 1]);
         for queue in [0, 1] {
-            let out = net.write(&mut [], 0x050, queue).unwrap();
-            assert!(!out.irq);
-            assert!(out.frames.is_empty());
+            assert_eq!(
+                net.write(&mut [], 0x050, queue).err().unwrap(),
+                "virtio notify before DRIVER_OK"
+            );
         }
         assert!(net.dirty.is_empty());
     }
@@ -485,6 +491,7 @@ mod tests {
     #[test]
     fn event_idx_is_offered_negotiated_and_reset() {
         let mut g = Guest::new(1);
+        g.net.transport.status = 0;
         assert_eq!(g.net.read(0x010), (1 << 5) | VIRTIO_RING_F_EVENT_IDX);
         g.net.write(&mut g.m, 0x014, 1).unwrap();
         assert_eq!(g.net.read(0x010), 1);

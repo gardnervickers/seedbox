@@ -92,55 +92,36 @@ impl Guest {
 }
 
 #[test]
-fn closed_port_policies_and_per_chain_vs_batch_transmit_boundaries() {
+fn closed_ports_and_per_chain_transmit_limits_match() {
     for policy in [Policy::Application, Policy::Console] {
         let mut g = Guest::new(policy);
         let at = g.post(0, &[0; 3], true);
-        assert_eq!(g.receive(b"abc").unwrap(), policy == Policy::Application);
-        assert_eq!(
-            &g.m[at..at + 3],
-            if policy == Policy::Application {
-                b"abc"
-            } else {
-                b"\0\0\0"
-            }
-        );
+        assert!(!g.receive(b"abc").unwrap());
+        assert_eq!(&g.m[at..at + 3], b"\0\0\0");
         g.post(1, b"hi", false);
-        if policy == Policy::Application {
-            assert_eq!(g.notify(1).unwrap().payloads, vec![b"hi".to_vec()]);
-        } else {
-            assert_eq!(
-                g.notify(1).err().unwrap(),
-                "console transmit before port open"
-            );
-            assert_eq!(g.t.queues[1].used_idx, 0);
-        }
+        assert_eq!(
+            g.notify(1).err().unwrap(),
+            "console transmit before port open"
+        );
+        assert_eq!(g.t.queues[1].used_idx, 0);
+        g.open();
+        assert_eq!(&g.m[at..at + 3], b"abc");
+        assert_eq!(g.notify(1).unwrap().payloads, vec![b"hi".to_vec()]);
         let mut g = Guest::new(policy);
         g.open();
         g.post(1, &vec![1; 40000], false);
         g.post(1, &vec![2; 30000], false);
-        if policy == Policy::Application {
-            assert_eq!(
-                g.notify(1)
-                    .unwrap()
-                    .payloads
-                    .iter()
-                    .map(Vec::len)
-                    .collect::<Vec<_>>(),
-                vec![40000, 30000]
-            );
-            assert_eq!(g.c.counters(), (70000, 0));
-            assert_eq!(g.t.isr, 1);
-        } else {
-            assert_eq!(
-                g.notify(1).err().unwrap(),
-                "console transmit batch too large"
-            );
-            assert_eq!(g.t.queues[1].used_idx, 1);
-            assert_eq!(g.t.isr, 0);
-            assert_eq!(g.c.counters(), (0, 0));
-            assert_eq!(g.dirty, vec![(4096 + 516, 8), (4096 + 514, 2)]);
-        }
+        assert_eq!(
+            g.notify(1)
+                .unwrap()
+                .payloads
+                .iter()
+                .map(Vec::len)
+                .collect::<Vec<_>>(),
+            vec![40000, 30000]
+        );
+        assert_eq!(g.c.counters(), (70000, 0));
+        assert_eq!(g.t.isr, 1);
     }
 }
 
@@ -153,41 +134,39 @@ fn late_direction_error_preserves_completed_prefix_and_irq_policy() {
         g.post(1, b"bad", true);
         assert_eq!(
             g.notify(1).err().unwrap(),
-            if policy == Policy::Application {
-                "virtio transmit chain is writable"
-            } else {
-                "unsupported console descriptor flags/direction"
-            }
+            "unsupported console descriptor flags/direction"
         );
         assert_eq!((g.t.queues[1].last_avail, g.t.queues[1].used_idx), (1, 1));
-        assert_eq!(g.t.isr, if policy == Policy::Application { 1 } else { 0 });
+        assert_eq!(g.t.isr, 1);
         assert_eq!(g.dirty, vec![(4096 + 516, 8), (4096 + 514, 2)]);
     }
 }
 
 #[test]
-fn counter_overflow_retains_exact_partial_dma_state() {
-    let mut g = Guest::new(Policy::Application);
-    g.c.rx_dma_bytes = u64::MAX;
-    let addr = g.post(0, &[0; 2], true);
-    assert_eq!(
-        g.receive(b"xy").err().unwrap(),
-        "control DMA byte counter overflow"
-    );
-    assert_eq!(&g.m[addr..addr + 2], b"xy");
-    assert_eq!((g.t.queues[0].last_avail, g.t.queues[0].used_idx), (1, 1));
-    assert_eq!(g.c.rx.iter().copied().collect::<Vec<_>>(), b"xy");
-    assert_eq!(g.c.rx_dma_bytes, u64::MAX);
-    assert_eq!(g.t.isr, 0);
-    assert_eq!(g.dirty, vec![(addr, 2), (516, 8), (514, 2)]);
-    g.c.tx_bytes = u64::MAX;
-    g.post(1, b"z", false);
-    assert_eq!(
-        g.notify(1).err().unwrap(),
-        "control transmit byte counter overflow"
-    );
-    assert_eq!(g.t.queues[1].used_idx, 0);
-    assert_eq!(g.t.isr, 0);
+fn counter_overflow_rejects_before_dma() {
+    for policy in [Policy::Application, Policy::Console] {
+        let mut g = Guest::new(policy);
+        g.open();
+        g.c.rx_dma_bytes = u64::MAX;
+        let addr = g.post(0, &[0; 2], true);
+        assert_eq!(
+            g.receive(b"xy").err().unwrap(),
+            "control DMA byte counter overflow"
+        );
+        assert_eq!(&g.m[addr..addr + 2], &[0; 2]);
+        assert_eq!((g.t.queues[0].last_avail, g.t.queues[0].used_idx), (0, 0));
+        assert_eq!(g.c.rx.iter().copied().collect::<Vec<_>>(), b"xy");
+        assert_eq!(g.c.rx_dma_bytes, u64::MAX);
+        assert_eq!(g.t.isr, 0);
+        assert!(g.dirty.is_empty());
+        g.c.tx_bytes = u64::MAX;
+        g.post(1, b"z", false);
+        assert_eq!(
+            g.notify(1).err().unwrap(),
+            "control transmit byte counter overflow"
+        );
+        assert_eq!(g.t.queues[1].used_idx, 0);
+    }
 }
 
 #[test]
@@ -249,11 +228,7 @@ fn repeated_handshake_and_receive_size_boundaries_are_transactional() {
         tx.post(1, &vec![0; LIMIT + 1], false);
         assert_eq!(
             tx.notify(1).err().unwrap(),
-            if policy == Policy::Application {
-                "console transmit chain too large"
-            } else {
-                "console descriptor chain too large"
-            }
+            "console descriptor chain too large"
         );
         assert_eq!(tx.t.queues[1].used_idx, 0);
     }
@@ -270,7 +245,7 @@ fn late_receive_and_control_errors_preserve_the_completed_prefix() {
         assert_eq!(&g.m[at..at + 2], b"ab");
         assert_eq!(g.c.rx.iter().copied().collect::<Vec<_>>(), b"cd");
         assert_eq!((g.t.queues[0].last_avail, g.t.queues[0].used_idx), (1, 1));
-        assert_eq!(g.t.isr, if policy == Policy::Application { 1 } else { 0 });
+        assert_eq!(g.t.isr, 1);
         assert_eq!(g.dirty, vec![(at, 2), (516, 8), (514, 2)]);
 
         let mut g = Guest::new(policy);
@@ -283,7 +258,7 @@ fn late_receive_and_control_errors_preserve_the_completed_prefix() {
         assert_eq!(&g.m[at..at + 8], &[0, 0, 0, 0, 1, 0, 1, 0]);
         assert_eq!(g.c.control_rx.len(), 2);
         assert_eq!((g.t.queues[2].last_avail, g.t.queues[2].used_idx), (1, 1));
-        assert_eq!(g.t.isr, if policy == Policy::Application { 1 } else { 0 });
+        assert_eq!(g.t.isr, 1);
         assert_eq!(
             g.dirty,
             vec![

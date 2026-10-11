@@ -1,5 +1,5 @@
 //! Modern virtio MMIO registers, independent of RAM, device effects and IRQ wiring.
-//! Compatibility profiles retain the policies of the migrated device adapters.
+//! Adapter identities are retained in checkpoints; register rules are common.
 use crate::virtqueue::Queue;
 use serde::Serialize;
 
@@ -14,7 +14,7 @@ pub struct Spec {
     pub features: [u32; 2],
 }
 
-/// Existing register behavior.
+/// Adapter checkpoint identity.
 /// See docs/internals.md#device-completion-and-disk-state before converging profiles.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -192,49 +192,25 @@ impl Transport {
             0x24 => self.drv_sel = value,
             0x30 => self.queue_sel = value,
             0x38 | 0x44 | 0x80 | 0x84 | 0x90 | 0x94 | 0xa0 | 0xa4 => {
-                let selected = if self.policy == Policy::Network {
-                    (self.queue_sel as usize).min(1)
-                } else {
-                    self.queue_sel as usize
+                let Some(queue) = self.queues.get_mut(self.queue_sel as usize) else {
+                    return Err("virtio queue selection out of range".into());
                 };
-                let Some(queue) = self.queues.get_mut(selected) else {
-                    return match self.policy {
-                        Policy::Application => Err("virtio queue selection out of range".into()),
-                        Policy::Console => Err("invalid console queue selector".into()),
-                        Policy::Block | Policy::Network => Ok(Effect::None),
-                    };
-                };
-                if self.policy == Policy::Console && queue.ready && offset != 0x44 {
-                    return Err("console queue changed while ready".into());
+                if queue.ready && offset != 0x44 {
+                    return Err("virtio queue changed while ready".into());
                 }
                 match offset {
                     0x38 => {
-                        if matches!(self.policy, Policy::Application | Policy::Console)
-                            && (value == 0 || value > QUEUE_SIZE as u32 || !value.is_power_of_two())
-                        {
-                            return Err(match self.policy {
-                                Policy::Console => "invalid console queue size",
-                                _ => "invalid virtio queue size",
-                            }
-                            .into());
+                        if value == 0 || value > QUEUE_SIZE as u32 || !value.is_power_of_two() {
+                            return Err("invalid virtio queue size".into());
                         }
-                        queue.num = if self.policy == Policy::Network {
-                            (value as u16).clamp(1, QUEUE_SIZE)
-                        } else {
-                            value as u16
-                        };
+                        queue.num = value as u16;
                     }
                     0x44 => {
-                        if matches!(self.policy, Policy::Application | Policy::Console) && value > 1
-                        {
-                            return Err(match self.policy {
-                                Policy::Console => "invalid console queue ready value",
-                                _ => "invalid virtio queue ready flag",
-                            }
-                            .into());
+                        if value > 1 {
+                            return Err("invalid virtio queue ready flag".into());
                         }
                         queue.ready = value == 1;
-                        if self.policy != Policy::Console || value == 0 {
+                        if value == 0 {
                             queue.last_avail = 0;
                             queue.used_idx = 0;
                         }
@@ -249,21 +225,11 @@ impl Transport {
                 }
             }
             0x50 => {
-                match self.policy {
-                    Policy::Application if value as usize >= self.queues.len() => {
-                        return Err("virtio notification queue out of range".into());
-                    }
-                    Policy::Console => {
-                        if value as usize >= self.queues.len() {
-                            return Err("invalid console notify queue".into());
-                        }
-                        if self.status & DRIVER_OK == 0 {
-                            return Err("console notify before DRIVER_OK".into());
-                        }
-                    }
-                    Policy::Block if value != 0 => return Ok(Effect::None),
-                    Policy::Network if value > 1 => return Ok(Effect::None),
-                    _ => (),
+                if value as usize >= self.queues.len() {
+                    return Err("virtio notification queue out of range".into());
+                }
+                if self.status & DRIVER_OK == 0 {
+                    return Err("virtio notify before DRIVER_OK".into());
                 }
                 return Ok(Effect::Notify(value as usize));
             }
@@ -274,13 +240,21 @@ impl Transport {
                     *self = Self::new(self.spec, self.queues.len(), self.policy);
                     return Ok(Effect::Reset);
                 }
-                if self.policy == Policy::Console {
-                    if value & FEATURES_OK != 0 && self.features != self.spec.features {
-                        self.status &= !FEATURES_OK;
-                    }
-                    if value & DRIVER_OK != 0 && self.status & FEATURES_OK == 0 {
-                        return Err("console DRIVER_OK without negotiated features".into());
-                    }
+                // VERSION_1 is mandatory. Our control console requires MULTIPORT;
+                // other advertised device features are optional.
+                if value & FEATURES_OK != 0
+                    && (self.features[1] & 1 == 0
+                        || (self.spec.device_id == 3 && self.features[0] & 2 == 0)
+                        || self
+                            .features
+                            .iter()
+                            .zip(self.spec.features)
+                            .any(|(selected, offered)| selected & !offered != 0))
+                {
+                    self.status &= !FEATURES_OK;
+                }
+                if value & DRIVER_OK != 0 && self.status & FEATURES_OK == 0 {
+                    return Err("virtio DRIVER_OK without negotiated features".into());
                 }
             }
             _ => (),

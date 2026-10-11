@@ -101,11 +101,10 @@ impl WorldMachine for Machine {
         Ok(())
     }
     fn supports_speed_reseed(&self) -> bool {
-        true
+        false
     }
-    fn seed_speed(&mut self, seed: u64, domain: &str) -> Result<(), String> {
-        self.syscall_ns = crate::machine::pv::syscall_ns(&mut Rng::new(seed, domain));
-        Ok(())
+    fn seed_speed(&mut self, _: u64, _: &str) -> Result<(), String> {
+        Err("machine speed reseeding is unsupported".into())
     }
     fn seed_progress_jitter(&mut self, seed: u64, domain: &str) -> Result<(), String> {
         Machine::seed_progress_jitter(self, Rng::new(seed, domain).next());

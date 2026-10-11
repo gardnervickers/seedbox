@@ -154,7 +154,7 @@ fn successful_disk_operations_and_snapshot_restore_keep_layers_and_stats() {
     }
 }
 #[test]
-fn descriptor_profiles_keep_split_header_zero_length_and_partial_io_distinct() {
+fn descriptor_profiles_accept_modern_framing_and_report_io_errors() {
     for policy in [Policy::Application, Policy::Block] {
         let mut g = Guest::new(policy);
         let h = g.header(1, 1);
@@ -166,16 +166,8 @@ fn descriptor_profiles_keep_split_header_zero_length_and_partial_io_distinct() {
             (d, 512, false),
             (s, 1, true),
         ]);
-        if policy == Policy::Application {
-            assert_eq!(
-                g.notify().unwrap_err(),
-                "invalid block header/status descriptors"
-            );
-            assert_eq!(g.m[s], 0xff);
-        } else {
-            g.notify().unwrap();
-            assert_eq!(g.m[s], 0);
-        }
+        g.notify().unwrap();
+        assert_eq!(g.m[s], 0);
         let mut g = Guest::new(policy);
         let h = g.header(8, 0);
         let s = g.buf(&[0xff]);
@@ -187,22 +179,13 @@ fn descriptor_profiles_keep_split_header_zero_length_and_partial_io_distinct() {
         empty.post(&[(at, 0, false)]);
         assert_eq!(
             empty.notify().unwrap_err(),
-            if policy == Policy::Application {
-                "empty virtio descriptor chain"
-            } else {
-                "disk request without a header or status byte"
-            }
+            "disk request without a header or status byte"
         );
         let mut g = Guest::new(policy);
         let before = g.b.disk().digest();
         let (_, s) = g.request(1, 1, &[7; 513], false);
-        if policy == Policy::Application {
-            assert_eq!(g.notify().unwrap_err(), "invalid block data descriptors");
-            assert_eq!(g.m[s], 0xff);
-        } else {
-            assert_eq!(g.notify().unwrap().log, vec![(1, 1, 1)]);
-            assert_eq!(g.m[s], 1);
-        }
+        g.notify().unwrap();
+        assert_eq!(g.m[s], 1);
         assert_eq!(g.b.disk().digest(), before);
     }
 }
@@ -217,23 +200,14 @@ fn flush_data_and_late_malformed_request_preserve_disk_prefix_and_irq_boundary()
         assert_eq!(g.m[s], 0);
         assert_eq!(g.b.disk().volatile_sectors(), 1);
         assert_eq!((g.t.queues[0].last_avail, g.t.queues[0].used_idx), (1, 1));
-        assert_eq!(g.t.isr, if policy == Policy::Application { 1 } else { 0 });
+        assert_eq!(g.t.isr, 1);
         assert_eq!(g.dirty, vec![(s, 1), (8196, 8), (8194, 2)]);
         let mut g = Guest::new(policy);
         g.b.disk_mut().write(1, &[5; 512]).unwrap();
         let (_, s) = g.request(4, 0, &[1; 16], false);
-        if policy == Policy::Application {
-            assert_eq!(
-                g.notify().unwrap_err(),
-                "block flush includes data descriptors"
-            );
-            assert_eq!(g.b.disk().volatile_sectors(), 1);
-            assert_eq!(g.m[s], 0xff);
-        } else {
-            assert_eq!(g.notify().unwrap().flushed, 1);
-            assert_eq!(g.b.disk().stable_sectors(), 1);
-            assert_eq!(g.m[s], 0);
-        }
+        assert_eq!(g.notify().unwrap().flushed, 1);
+        assert_eq!(g.b.disk().stable_sectors(), 1);
+        assert_eq!(g.m[s], 0);
     }
 }
 #[test]

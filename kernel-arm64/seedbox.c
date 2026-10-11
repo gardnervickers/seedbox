@@ -37,23 +37,23 @@ static u64 early_last;
 u64 *seedbox_exclusive_epoch;
 static struct clock_event_device ce;
 
-u64 notrace seedbox_read(void)
+static u64 notrace seedbox_read_step(u64 step)
 {
 	unsigned long flags;
 	u64 value, last;
 	/* Serialize reads against IRQ clock reads on the one guest CPU. */
 	local_irq_save(flags);
 	if (unlikely(!page)) {
-		value = ++early_last;
+		value = early_last += step;
 		goto out;
 	}
 again:
 	value = READ_ONCE(page->now);
 	last = READ_ONCE(page->last);
-	if (value <= last)
-		value = last + 1;
-	if (unlikely(!value))
+	if (unlikely(last > ~0ULL - step))
 		panic("seedbox: clock overflow");
+	if (value < last + step)
+		value = last + step;
 	if (value > READ_ONCE(page->bound) ||
 	    (!irqs_disabled_flags(flags) && READ_ONCE(page->deferred_irq_pending))) {
 		/* Deliver at the yield when the caller permits IRQs. Restore the
@@ -77,6 +77,19 @@ again:
 out:
 	local_irq_restore(flags);
 	return value;
+}
+
+/* Public clock reads and kernel polling use the same 100 ns policy as x86. */
+u64 notrace seedbox_read(void)
+{
+	return seedbox_read_step(100);
+}
+
+/* Safe with locks held and IRQs masked. Early boot has no PV page yet. */
+void notrace seedbox_cpu_relax(void)
+{
+	if (page)
+		(void)seedbox_read();
 }
 
 /* splitmix64 on the page-seeded state. */
@@ -148,7 +161,7 @@ static void seedbox_charge(u64 ns)
 			}
 		}
 		local_irq_restore(flags);
-		(void)seedbox_read();
+		(void)seedbox_read_step(1);
 		--ns;
 	}
 }

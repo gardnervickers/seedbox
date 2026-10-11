@@ -167,7 +167,9 @@ fn receive_backpressure_is_bounded_and_reset_preserves_uncollected_dirty_ranges(
     assert_eq!(g.device.read(0x070), 0);
     assert_eq!(g.device.read(0x060), 0);
     assert_eq!(g.device.dirty, dirty);
-    assert!(g.device.receive(&mut g.ram, b"offline").is_err());
+    assert!(!g.device.receive(&mut g.ram, b"offline").unwrap().irq);
+    assert_eq!(g.device.pending_rx_bytes(), 7);
+    assert_eq!(g.device.dirty, dirty);
 }
 #[test]
 fn descriptor_validation_rejects_bounds_cycles_direction_and_ring_overrun_before_dma() {
