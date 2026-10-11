@@ -58,6 +58,7 @@ Using `target/release/seedbox` as `seedbox`:
 
 ```sh
 seedbox get simulations
+seedbox get capacity                    # Occupied slots and queue reasons.
 seedbox describe simulation <sim-id>
 seedbox logs <sim-id>                    # Recent application output, all machines.
 seedbox logs <sim-id> n1 --follow         # Stream one machine's output.

@@ -13,13 +13,14 @@ use seedbox_application::{
     store::{ContentDigest, ContentStore},
 };
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -75,6 +76,7 @@ pub struct ExecutionService {
     store: ContentStore,
     backends: Arc<dyn BackendProvider>,
     preparation_limit: Duration,
+    admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
 }
 
 impl ExecutionService {
@@ -92,7 +94,18 @@ impl ExecutionService {
             store,
             backends,
             preparation_limit: crate::preparation_budget::DEFAULT_LIMIT,
+            admission: Mutex::new((0, BTreeMap::new())),
         })
+    }
+
+    /// Reservations cover preparation, paused RAM and final worker cleanup.
+    pub fn capacity(&self) -> Result<seedbox_api::ExecutionCapacity, Error> {
+        let admission = self
+            .admission
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        let occupying: BTreeSet<_> = admission.1.values().cloned().collect();
+        Ok(self.manager.capacity(admission.0, &occupying)?)
     }
 
     /// Foreground cascading deletion: stop the frozen ownership tree, wait for
@@ -317,6 +330,10 @@ impl ExecutionService {
         capacity: NonZeroUsize,
         shutdown: CancellationToken,
     ) -> Result<(), Error> {
+        self.admission
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?
+            .0 = capacity.get();
         let recovery = self.clone();
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
             for id in recovery
@@ -346,9 +363,17 @@ impl ExecutionService {
                 return failure.map_or(Ok(()), Err);
             }
             tokio::select! {
-                result = tasks.join_next(), if !tasks.is_empty() => {
+                result = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                    let task_id = match &result {
+                        Some(Ok((id, _))) => Some(*id),
+                        Some(Err(error)) => Some(error.id()),
+                        None => None,
+                    };
+                    if let Some(id) = task_id {
+                        self.admission.lock().map_err(|_| catalogue::Error::StorageFailed)?.1.remove(&id);
+                    }
                     let error = match result {
-                        Some(Ok(Err(error))) => Some(error),
+                        Some(Ok((_, Err(error)))) => Some(error),
                         Some(Err(error)) => Some(Error::Task(error)),
                         _ => None,
                     };
@@ -361,7 +386,10 @@ impl ExecutionService {
                     match id {
                         Some(id) => {
                             let service = self.clone();
-                            tasks.spawn_blocking(move || service.execute(id));
+                            let mut admission = self.admission.lock().map_err(|_| catalogue::Error::StorageFailed)?;
+                            let admitted = id.clone();
+                            let task = tasks.spawn_blocking(move || service.execute(id));
+                            admission.1.insert(task.id(), admitted);
                         }
                         None => stopping = true,
                     }
@@ -783,6 +811,98 @@ mod tests {
         ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
             panic!("the preparation timeout must not launch retained execution")
         }
+    }
+
+    #[tokio::test]
+    async fn capacity_api_tracks_real_admission_and_releases_joined_tasks() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let manager = Arc::new(Manager::new(
+            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
+        ));
+        let execution = Arc::new(
+            ExecutionService::new(
+                manager,
+                root.into(),
+                ContentStore::new(root.join("store")),
+                Arc::new(WaitingProvider(AtomicBool::new(false))),
+            )
+            .unwrap(),
+        );
+        let socket = root.join("api.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let shutdown = CancellationToken::default();
+        let owner = tokio::spawn(crate::serve(
+            listener,
+            execution.manager.clone(),
+            execution.clone(),
+            NonZeroUsize::MIN,
+            shutdown.clone(),
+        ));
+        let client = seedbox_client::Client::connect_to(&socket).unwrap();
+        let mut configuration = seedbox_application::config::parse(
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        for service in configuration.services.values_mut() {
+            service.platform.clear();
+        }
+        let request = |name: &str| SubmitRequest {
+            metadata: Default::default(),
+            options: Default::default(),
+            request_id: name.into(),
+            spec: SimulationSpec {
+                program: Vec::new(),
+                start_paused: false,
+                seed: Some(1),
+                inputs: InputSource::Project,
+                configuration: configuration.clone(),
+            },
+        };
+        let first = client.submit(&request("first")).await.unwrap().metadata.id;
+        let second = client.submit(&request("second")).await.unwrap().metadata.id;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let capacity = client.capacity().await.unwrap();
+                if capacity.occupying.iter().any(|o| o.simulation == first) {
+                    assert_eq!(capacity.slots, 1);
+                    assert_eq!(capacity.occupying.len(), 1);
+                    assert_eq!(capacity.queued.len(), 1);
+                    assert_eq!(capacity.queued[0].simulation, second);
+                    assert_eq!(
+                        capacity.queued[0].reason,
+                        seedbox_api::QueueReason::ResidentCapacity
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        client.stop(&first).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let capacity = client.capacity().await.unwrap();
+                if capacity.occupying.iter().any(|o| o.simulation == second) {
+                    assert_eq!(capacity.occupying.len(), 1);
+                    assert!(capacity.queued.is_empty());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(execution.capacity().unwrap().occupying.is_empty());
     }
 
     #[test]

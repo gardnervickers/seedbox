@@ -4,6 +4,8 @@
 //! process startup belong to the executable, not this crate.
 
 #[cfg(unix)]
+mod capacity;
+#[cfg(unix)]
 pub mod catalogue;
 #[cfg(unix)]
 mod checkpoint_cleanup;

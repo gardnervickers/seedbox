@@ -53,6 +53,12 @@ impl Client {
         })
     }
 
+    /// Explain resident execution reservations and queued work.
+    pub async fn capacity(&self) -> Result<seedbox_api::ExecutionCapacity, Error> {
+        self.document(self.request(Method::GET, "/v1/capacity"))
+            .await
+    }
+
     pub async fn info(&self) -> Result<ServerInfo, Error> {
         self.document(self.request(Method::GET, "/v1")).await
     }

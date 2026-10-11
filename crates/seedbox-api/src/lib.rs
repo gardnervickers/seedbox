@@ -53,3 +53,6 @@ pub use timeline::{DeriveRequest, FaultTimeline, TimelineEntry, TimelineOrigin};
 
 mod comparison;
 pub use comparison::{ComparisonStatus, SimulationComparison};
+
+mod capacity;
+pub use capacity::{ExecutionCapacity, ExecutionOccupant, QueueReason, QueuedSimulation};

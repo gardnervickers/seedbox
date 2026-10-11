@@ -244,6 +244,24 @@ remove overlapping faults owned by other handles.
 Code: [classifier](../crates/seedbox-engine-core/src/connections.rs),
 [guest API](../python/seedbox/).
 
+## Execution admission
+
+The server bounds outstanding execution tasks with resident slots. Each task
+reserves one slot from preparation through worker cleanup. A paused simulation
+keeps its slot because its guests still hold RAM. Stop or delete an occupant to
+free capacity; resuming a paused occupant continues to use its existing slot.
+The limit counts simulations, not vCPUs or bytes, and does not guarantee that
+arbitrarily large worlds fit the host's memory.
+
+`seedbox get capacity` reports the configured limit, occupying simulation IDs,
+paused occupants, configured guest RAM and queued IDs. Configured RAM includes
+the oracle and is not a measurement of host residency. A queued simulation waits
+for resident capacity when all slots are reserved, or awaits dispatch when a
+slot is available. Queue order and host scheduling never enter simulation inputs.
+
+Code: [admission owner](../crates/seedbox-server/src/execution.rs),
+[capacity projection](../crates/seedbox-server/src/capacity.rs).
+
 ## Retained inputs
 
 A resolved definition retains the initial wall-clock epoch. The default derives

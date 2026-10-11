@@ -10,6 +10,65 @@ use seedbox_application::{execution::CancellationToken, Error, Result};
 use seedbox_client::Client;
 use std::{io::Read, time::Duration};
 
+pub(super) fn capacity(json: bool) -> Result<u8> {
+    let client = daemon::connect(None)?;
+    runtime()?.block_on(async {
+        let capacity = client.capacity().await.map_err(client_error)?;
+        if json {
+            output::json(&capacity)?;
+        } else {
+            output::field("slots", capacity.slots);
+            output::field("occupied", capacity.occupying.len());
+            output::field("paused", capacity.paused);
+            let occupants = capacity
+                .occupying
+                .iter()
+                .map(|o| {
+                    [
+                        o.simulation.to_string(),
+                        o.phase
+                            .as_ref()
+                            .map(output::word)
+                            .unwrap_or_else(|| "cleanup".into()),
+                        o.stage
+                            .as_ref()
+                            .map(output::word)
+                            .unwrap_or_else(|| "-".into()),
+                        o.paused.to_string(),
+                        o.guest_memory_bytes
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                    ]
+                })
+                .collect();
+            output::table(
+                [
+                    "SIMULATION",
+                    "PHASE",
+                    "STAGE",
+                    "PAUSED",
+                    "GUEST RAM (BYTES)",
+                ],
+                occupants,
+            )?;
+            let queued = capacity
+                .queued
+                .iter()
+                .map(|q| [q.simulation.to_string(), queue_reason(q.reason).into()])
+                .collect();
+            output::table(["QUEUED", "REASON"], queued)?;
+        }
+        Ok(0)
+    })
+}
+
+fn queue_reason(reason: seedbox_api::QueueReason) -> &'static str {
+    match reason {
+        seedbox_api::QueueReason::ResidentCapacity => "resident slots occupied; stop or delete an occupant to free capacity (pause retains RAM)",
+        seedbox_api::QueueReason::AwaitingDispatch => "awaiting dispatch to an available slot",
+    }
+}
+
 pub(super) fn tui(id: Option<SimulationId>) -> Result<u8> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -565,6 +624,23 @@ pub(super) fn get(id: &SimulationId, json: bool) -> Result<u8> {
         output::json(&resource)?;
     } else {
         simulation_table(vec![simulation_row(&resource)])?;
+        if resource.status.phase == Phase::Queued {
+            let capacity = runtime()?
+                .block_on(client.capacity())
+                .map_err(client_error)?;
+            if let Some(queued) = capacity.queued.iter().find(|q| q.simulation == *id) {
+                output::field("queue", queue_reason(queued.reason));
+                output::field(
+                    "capacity",
+                    format!(
+                        "{}/{} occupied, {} paused; seedbox get capacity lists occupants",
+                        capacity.occupying.len(),
+                        capacity.slots,
+                        capacity.paused
+                    ),
+                );
+            }
+        }
     }
     Ok(0)
 }

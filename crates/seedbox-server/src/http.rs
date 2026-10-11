@@ -45,6 +45,7 @@ impl ApiState {
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/v1", get(info))
+        .route("/v1/capacity", get(capacity))
         .route("/v1/simulations", get(list).post(submit))
         .route("/v1/seed-ranges", post(submit_seeds))
         .route("/v1/simulations/{id}/seeds", get(seed_range))
@@ -95,6 +96,22 @@ async fn info() -> Json<ServerInfo> {
         api_version: ApiVersion::V1,
         process_id: std::process::id(),
     })
+}
+
+async fn capacity(
+    State(state): State<ApiState>,
+) -> Result<Json<seedbox_api::ExecutionCapacity>, HttpError> {
+    let execution = state.execution.ok_or_else(|| {
+        HttpError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Unavailable,
+            "execution service unavailable",
+        )
+    })?;
+    let capacity = tokio::task::spawn_blocking(move || execution.capacity())
+        .await
+        .map_err(|e| HttpError::internal(e.to_string()))??;
+    Ok(Json(capacity))
 }
 
 async fn submit(
