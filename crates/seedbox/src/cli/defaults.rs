@@ -41,19 +41,6 @@ pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
     })
 }
 
-/// A recorded run: a directory holding `manifest.json`.
-pub fn run_directory(path: PathBuf) -> Result<PathBuf> {
-    let path = existing("run directory", path)?;
-    if path.join("manifest.json").is_file() {
-        Ok(path)
-    } else {
-        Err(Error::Setup(format!(
-            "{}: not a run directory (no manifest.json)",
-            path.display()
-        )))
-    }
-}
-
 /// An explicitly named input, checked before any slow preparation starts.
 pub fn existing(what: &str, path: PathBuf) -> Result<PathBuf> {
     if path.exists() {

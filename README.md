@@ -66,6 +66,9 @@ seedbox logs <sim-id>                    # Recent application output, all machin
 seedbox logs <sim-id> n1 --follow         # Stream one machine's output.
 seedbox events <sim-id> --follow          # Structured simulator events.
 seedbox replay <sim-id>                  # Rerun and compare results.
+seedbox diagnostics <sim-id>             # List completed raw worker/console evidence.
+seedbox export <sim-id> -o saved.seedbox.tar
+seedbox import saved.seedbox.tar          # Fresh completed resource; no execution.
 seedbox describe simulation <sim-id> > simulation.yaml
 seedbox run simulation.yaml              # Submit the saved definition.
 ```
@@ -76,8 +79,14 @@ also compares retained results and reports `MATCH`, `MISMATCH`, or
 
 Simulation IDs, observations, and bounded log buffers last for one server
 session. Binary assets survive restarts in the server's cache. Saved YAML needs
-those assets; it is not a portable bundle. `SEEDBOX_STATE` selects the server
-storage directory. The cache is not automatically pruned.
+those assets; it is not a portable bundle. Export a completed, resolved simulation
+to save its inputs, checkpoints, results, available raw diagnostics and bounded
+log/event history independently of the session. Import registers a fresh independent
+completed resource; use its ID to describe, compare, rerun, replay or branch from a
+retained checkpoint. Export rejects active simulations. Imports are non-idempotent:
+a cancelled or disconnected upload may still complete, so do not retry blindly.
+Frames and missing/evicted observations are not recovered; omissions remain explicit.
+`SEEDBOX_STATE` selects the server storage directory. The cache is not automatically pruned.
 
 [Design](docs/design.md) explains the architecture and principles.
 [Technical details](docs/internals.md) covers determinism, fault ordering,

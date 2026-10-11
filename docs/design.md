@@ -31,7 +31,10 @@ The TUI gets machine state, fault descriptions, parameter schemas, logs, and
 events from the API. Execution policy belongs in the server and engine so
 another client can control the same simulation without implementing that policy.
 Application logs contain application output. Events describe simulator activity.
-Both use bounded in-memory buffers.
+Both use bounded in-memory buffers: 64 MiB shared for application logs and 16 MiB
+for events, including completed and imported simulations. Eviction is visible as
+delivery gaps. `diagnostics ID` exposes completed raw console/management streams,
+chunk indexes and worker output separately, by exact retained name and digest.
 
 ## Definitions and execution state
 
@@ -51,6 +54,15 @@ The server catalogue is in memory. Execution uses session scratch directories,
 which are removed on graceful shutdown; startup cleans abandoned sessions.
 The binary cache survives restarts. Saved definitions can reuse it, but copying
 YAML to another server does not transfer the referenced bytes.
+
+A portable bundle transfers a completed resolved simulation, its binary closure,
+independent checkpoint definitions, retained result evidence and available bounded
+observations. Import creates a fresh completed resource without executing anything.
+Source IDs and host paths are provenance, never dependencies or restored ownership.
+A checkpoint branch resolves its inputs independently of the imported source.
+Import is not idempotent or resumable; a full upload may be accepted after the client
+disconnects. Export is completed-only, and files are published without overwriting
+an existing destination. Catalogue persistence and cache pruning are separate concerns.
 
 ## Deterministic execution
 
@@ -78,7 +90,7 @@ may differ. Logs and events are observations, not instructions to inject again.
 | `seedbox-api`, `seedbox-spec` | Resource types and simulation definitions |
 | `seedbox-server` | Catalogue, API, execution ownership |
 | `seedbox-application` | Configuration, image preparation, orchestration |
-| `seedbox-artifacts` | Offline records, content storage, comparison |
+| `seedbox-artifacts` | Retained records, content storage, comparison, portable archives |
 | `seedbox-engine-protocol` | Private worker transport and evidence formats |
 | `seedbox-engine-core` | Shared scheduling, faults, devices, deterministic policies |
 | `seedbox-vmm`, `seedbox-arm64` | Native machine execution |
@@ -93,3 +105,8 @@ A passing oracle and a matching replay answer different questions. The oracle
 checks application behavior. Replay checks whether retained inputs reproduce
 recorded results. An engine change also needs independent fresh runs: replay
 uses a retained engine and therefore cannot by itself validate a new engine.
+
+Server comparison checks resolved execution semantics and retained result evidence,
+not private run IDs. Image names and descriptive engine/host metadata do not replace
+actual binary assets and policies. Missing evidence remains `NOT_COMPARABLE`; changed
+results remain `MISMATCH`.

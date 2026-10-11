@@ -133,7 +133,8 @@ fn resource<'a>(path: &[&str], positionals: &[&'a str]) -> Option<Resource<'a>> 
         (["compare"], [] | [_]) => Some(Resource::Simulations),
         (
             ["rerun" | "replay" | "branch" | "stop" | "logs" | "events" | "playback" | "inject"
-            | "heal" | "pause" | "resume" | "step" | "checkpoint" | "rate" | "tui"],
+            | "heal" | "pause" | "resume" | "step" | "checkpoint" | "rate" | "tui" | "export"
+            | "diagnostics"],
             [],
         )
         | (["get", "simulation" | "simulations" | "checkpoints"], [])

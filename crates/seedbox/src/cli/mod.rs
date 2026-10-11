@@ -1,6 +1,7 @@
 //! The `seedbox` command line. Style rules for changes: `AGENTS.md`, "CLI".
 
 mod backends;
+mod bundles;
 mod completions;
 mod daemon;
 mod defaults;
@@ -17,10 +18,9 @@ use seedbox_application::vmm::VmmExecutor;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox_application::{
-    bundle, config, diff,
+    config,
     execution::{CancellationToken, ExecutionBackend, PreparationBackend, WitnessMode},
-    logs,
-    orchestration::{self, Orchestrator},
+    orchestration::Orchestrator,
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
@@ -34,20 +34,12 @@ use std::{
 
 const EXIT_CODES: &str = "\
 Exit status:
-  0    PASS, or a replay/diff MATCH
-  1    FAIL, replay MISMATCH, or diff DIFFERENT
+  0    PASS, or a replay/compare MATCH
+  1    FAIL, replay MISMATCH, or compare MISMATCH
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (cancelled or otherwise incomplete)
        A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
   124  TIMEOUT";
-
-const HOST_CONTROL_HELP: &str = "\
-Host execution control:
-  seedbox retained-pause RUN     Wait for a host slice-boundary pause
-  seedbox retained-resume RUN    Resume the same live world
-Pause preserves guest time and witnesses. Cancellation remains active; current workers exclude intentional waits from the execution budget.
-The executing attempt has an output/host-control locator; replay uses its new attempt.";
-const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty lines from the final 8 KiB of output/vmm.stderr on stderr; JSON output is unchanged.";
 
 #[derive(Parser)]
 #[command(
@@ -135,7 +127,7 @@ enum Command {
         inputs: RuntimeInputs,
     },
     /// Prepare images and run a simulation (Linux KVM host; or Apple Silicon Mac).
-    #[command(after_help = format!("{EXIT_CODES}\n\nPreparation has a 15-minute deadline, separate from the simulation execution budget.\n\n{VMM_FAILURE_HELP}"))]
+    #[command(after_help = format!("{EXIT_CODES}\n\nPreparation has a 15-minute deadline, separate from the simulation execution budget.\n\nUse diagnostics ID for retained worker errors after completion."))]
     Run {
         #[command(flatten)]
         compose: ComposeArg,
@@ -155,6 +147,7 @@ enum Command {
         execution: ExecutionArgs,
     },
     /// Compare deterministic results of two completed simulations.
+    #[command(after_help = EXIT_CODES)]
     Compare {
         /// Baseline simulation ID.
         baseline: seedbox_api::SimulationId,
@@ -317,47 +310,38 @@ enum Command {
         /// Playback rate: 0, a positive integer or fraction, or unlimited.
         rate: playback_args::Rate,
     },
-    /// Pause a legacy retained run or replay attempt.
-    #[command(after_help = HOST_CONTROL_HELP)]
-    RetainedPause {
-        /// Directory of the executing run or replay attempt.
-        run: PathBuf,
-    },
-    /// Resume a legacy retained run or replay attempt.
-    #[command(after_help = HOST_CONTROL_HELP)]
-    RetainedResume {
-        /// Directory of the executing run or replay attempt.
-        run: PathBuf,
-    },
-    /// Export a recorded run and its retained inputs and logs.
+    /// Export a completed resolved simulation and its inputs, checkpoints and evidence.
     Export {
-        /// Offline run directory, as printed by import.
-        run: PathBuf,
-        /// Bundle file to create [default: RUN-directory-name.seedbox.tar].
-        #[arg(long, short)]
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Bundle file to create without overwriting [default: SIMULATION-ID.seedbox.tar].
+        #[arg(long, short = 'o')]
         output: Option<PathBuf>,
         #[command(flatten)]
-        state: StateArg,
-        #[command(flatten)]
         transfer: Transfer,
+        /// Print exactly one export receipt as JSON.
+        #[arg(long)]
+        json: bool,
     },
-    /// Import a bundle into fresh run storage, without executing it.
+    /// Import a bundle as a fresh completed simulation, without executing it.
     Import {
         /// Bundle file to import.
         bundle: PathBuf,
         #[command(flatten)]
-        state: StateArg,
+        transfer: Transfer,
+        /// Print exactly one simulation document as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show completed simulation raw diagnostics, distinct from timed application logs.
+    Diagnostics {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Exact retained file name [default: list files and omissions].
+        name: Option<String>,
         #[command(flatten)]
         transfer: Transfer,
-    },
-    /// Compare retained run evidence, including terminal state parts, without executing guests.
-    #[command(after_help = EXIT_CODES)]
-    Diff {
-        /// First retained run directory.
-        run_a: PathBuf,
-        /// Second retained run directory.
-        run_b: PathBuf,
-        /// Print exactly one comparison report as JSON.
+        /// Print one metadata document, or one lossless hexadecimal file document.
         #[arg(long)]
         json: bool,
     },
@@ -389,35 +373,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read legacy retained console output without executing guests.
-    RetainedLogs {
-        /// Retained run directory.
-        run: PathBuf,
-        /// Select one machine from the retained run.
-        #[arg(long)]
-        machine: Option<String>,
-        /// Select the console or management stream [default: both].
-        #[arg(long, value_enum)]
-        stream: Option<LogStream>,
-        /// Include chunks whose first byte commits at or after this simulated nanosecond.
-        #[arg(long)]
-        since_ns: Option<u64>,
-        /// Include chunks whose first byte commits before this simulated nanosecond.
-        #[arg(long)]
-        until_ns: Option<u64>,
-        /// Print one JSON document with lossless hexadecimal payloads.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show a recorded run, including its error on stdout, after verifying its manifest.
-    #[command(after_help = VMM_FAILURE_HELP)]
-    Inspect {
-        /// Offline run directory, as printed by import.
-        run: PathBuf,
-        /// Print the full record as JSON.
-        #[arg(long)]
-        json: bool,
-    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -432,22 +387,6 @@ impl From<ApplicationLogStream> for seedbox_api::LogStream {
         match value {
             ApplicationLogStream::Stdout => Self::Stdout,
             ApplicationLogStream::Stderr => Self::Stderr,
-        }
-    }
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum LogStream {
-    /// Raw COM1 console bytes.
-    Console,
-    /// Raw management transport bytes.
-    Mgmt,
-}
-impl From<LogStream> for logs::Stream {
-    fn from(value: LogStream) -> Self {
-        match value {
-            LogStream::Console => Self::Console,
-            LogStream::Mgmt => Self::Mgmt,
         }
     }
 }
@@ -530,18 +469,9 @@ struct StateArg {
 
 #[derive(Args)]
 struct Transfer {
-    /// Maximum unique object payload and materialized log bytes.
-    #[arg(long, default_value_t = bundle::DEFAULT_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..))]
+    /// Maximum complete transfer bytes, including archive headers and padding.
+    #[arg(long, default_value_t = seedbox_api::BUNDLE_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=seedbox_api::BUNDLE_MAX_BYTES))]
     max_bytes: u64,
-}
-
-impl Transfer {
-    fn options(&self, cancellation: CancellationToken) -> bundle::Options {
-        bundle::Options {
-            max_bytes: self.max_bytes,
-            cancellation,
-        }
-    }
 }
 
 impl StateArg {
@@ -724,7 +654,6 @@ fn run(cli: Cli) -> Result<u8> {
             inputs,
             startup_handshake,
         } => daemon::serve(state, inputs, startup_handshake),
-        Command::RetainedPause { run } => host_control(&run, true),
         Command::Inject { mutation, action } => faults::inject(mutation, &action),
         Command::Heal { mutation, handle } => simulations::mutate_control(
             mutation,
@@ -754,7 +683,6 @@ fn run(cli: Cli) -> Result<u8> {
             mutation,
             seedbox_api::ControlCommand::SetRate { rate: rate.0 },
         ),
-        Command::RetainedResume { run } => host_control(&run, false),
         Command::Init {
             directory,
             template,
@@ -865,17 +793,22 @@ fn run(cli: Cli) -> Result<u8> {
             execution,
         } => simulations::replay(&id, json, execution.wall_time),
         Command::Export {
-            run,
+            id,
             output,
-            state,
             transfer,
-        } => export(run, output, &state, &transfer),
+            json,
+        } => bundles::export(&id, output, transfer.max_bytes, json),
         Command::Import {
             bundle,
-            state,
             transfer,
-        } => import(bundle, &state, &transfer),
-        Command::Diff { run_a, run_b, json } => compare(&run_a, &run_b, json),
+            json,
+        } => bundles::import(&bundle, transfer.max_bytes, json),
+        Command::Diagnostics {
+            id,
+            name,
+            transfer,
+            json,
+        } => diagnostics::diagnostics(&id, name.as_deref(), transfer.max_bytes, json),
         Command::Logs {
             id,
             machine,
@@ -901,31 +834,7 @@ fn run(cli: Cli) -> Result<u8> {
                 json,
             },
         ),
-        Command::RetainedLogs {
-            run,
-            machine,
-            stream,
-            since_ns,
-            until_ns,
-            json,
-        } => show_logs(
-            run,
-            logs::Filter {
-                machine,
-                stream: stream.map(Into::into),
-                since_ns,
-                until_ns,
-            },
-            json,
-        ),
-        Command::Inspect { run, json } => inspect(run, json),
     }
-}
-
-fn host_control(run: &Path, paused: bool) -> Result<u8> {
-    let status = seedbox_application::host_control::set_paused(run, paused)?;
-    output::status(&output::word(&status), run.display());
-    Ok(0)
 }
 
 fn init(directory: &Path, template: TemplateArg) -> Result<u8> {
@@ -1043,161 +952,6 @@ fn prepare(
     serde_json::to_writer_pretty(file, &prepared)?;
     output::status("PREPARED", output.display());
     Ok(0)
-}
-
-fn export(
-    run: PathBuf,
-    output: Option<PathBuf>,
-    state: &StateArg,
-    transfer: &Transfer,
-) -> Result<u8> {
-    let run = defaults::run_directory(run)?;
-    let output = match output {
-        Some(path) => path,
-        None => {
-            let name = run
-                .file_name()
-                .ok_or_else(|| Error::Setup(format!("{}: no run directory name", run.display())))?;
-            let mut name = name.to_os_string();
-            name.push(".seedbox.tar");
-            PathBuf::from(name)
-        }
-    };
-    if output.symlink_metadata().is_ok() {
-        return Err(Error::Setup(format!(
-            "--output {}: already exists; choose a new file",
-            output.display()
-        )));
-    }
-    let cancellation = CancellationToken::default();
-    let _signals = Signals::register(&cancellation)?;
-    let options = transfer.options(cancellation);
-    let store = ContentStore::new(state.state.join("objects"));
-    let record = bundle::export(&run, &store, &output, &options).map_err(|e| {
-        Error::Setup(format!(
-            "export {} to {}: {e}",
-            run.display(),
-            output.display()
-        ))
-    })?;
-    output::status("EXPORTED", output.display());
-    print_omissions(&record);
-    Ok(0)
-}
-
-fn import(path: PathBuf, state: &StateArg, transfer: &Transfer) -> Result<u8> {
-    let path = defaults::existing("bundle", path)?;
-    let cancellation = CancellationToken::default();
-    let _signals = Signals::register(&cancellation)?;
-    let options = transfer.options(cancellation);
-    // Import performs its own no-follow opening; StateArg::open would
-    // canonicalize away root symlink evidence.
-    let run = bundle::import(&path, &state.state, &options).map_err(|e| {
-        Error::Setup(format!(
-            "import {} into {}: {e}",
-            path.display(),
-            state.state.display()
-        ))
-    })?;
-    output::status("IMPORTED", run.directory.display());
-    print_omissions(&run.record);
-    Ok(0)
-}
-
-fn compare(run_a: &Path, run_b: &Path, json: bool) -> Result<u8> {
-    let comparison = diff::diff(run_a, run_b)?;
-    if json {
-        output::json(&comparison)?;
-    } else {
-        output::status(
-            &output::word(&comparison.status),
-            format_args!("{} <> {}", run_a.display(), run_b.display()),
-        );
-        output::field(
-            "world witness",
-            serde_json::to_string(&comparison.world_witness)?,
-        );
-        for machine in &comparison.machines {
-            output::field("machine", serde_json::to_string(machine)?);
-            if let Some(pages) = &machine.ram_pages {
-                diagnostics::ram_pages(&machine.machine, pages);
-            }
-        }
-        output::field("divergence", serde_json::to_string(&comparison.divergence)?);
-        if let Some(divergence) = &comparison.divergence {
-            diagnostics::divergence(divergence);
-        }
-        output::field(
-            "first record",
-            serde_json::to_string(&comparison.first_record)?,
-        );
-        for (label, differences) in [
-            ("identity", &comparison.identity_differences),
-            ("result", &comparison.result_differences),
-            ("evidence", &comparison.evidence_differences),
-        ] {
-            for difference in differences {
-                output::field(label, serde_json::to_string(difference)?);
-            }
-        }
-        for limitation in &comparison.limitations {
-            output::field("limitation", limitation);
-        }
-    }
-    Ok(match comparison.status {
-        diff::Status::Match => 0,
-        diff::Status::Different => 1,
-    })
-}
-
-fn show_logs(run: PathBuf, filter: logs::Filter, json: bool) -> Result<u8> {
-    use std::io::Write;
-    let run = defaults::run_directory(run)?;
-    let mut reader = logs::Reader::open(&run, &filter)?;
-    let mut output = std::io::BufWriter::new(std::io::stdout().lock());
-    if json {
-        reader.write_json(&mut output)?;
-    } else {
-        let mut diagnostics = std::io::stderr().lock();
-        writeln!(diagnostics, "logs: {}", run.display())?;
-        for (name, reason) in &reader.report.omissions {
-            writeln!(
-                diagnostics,
-                "omission: {}",
-                serde_json::to_string(&(name, reason))?
-            )?;
-        }
-        reader.write_raw(&mut output)?;
-    }
-    output.flush()?;
-    Ok(0)
-}
-
-fn inspect(run: PathBuf, json: bool) -> Result<u8> {
-    let run = defaults::run_directory(run)?;
-    let record = orchestration::inspect(&run)?;
-    if json {
-        output::json(&record)?;
-        return Ok(0);
-    }
-    output::status(
-        &output::word(&record.outcome),
-        format_args!("{} (seed {})", record.attempt, record.identity.seed),
-    );
-    if let Some(replay) = record.replay {
-        output::field("replay", output::word(&replay.status));
-    }
-    if let Some(error) = record.error {
-        output::field("error", &error);
-        diagnostics::vmm_failure(&run, &error);
-    }
-    Ok(0)
-}
-
-fn print_omissions(record: &orchestration::RunRecord) {
-    if !record.omitted_logs.is_empty() {
-        output::field("omitted files", record.omitted_logs.len());
-    }
 }
 
 #[derive(Subcommand)]

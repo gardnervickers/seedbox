@@ -59,3 +59,8 @@ pub use comparison::{ComparisonStatus, SimulationComparison};
 
 mod capacity;
 pub use capacity::{ExecutionCapacity, ExecutionOccupant, QueueReason, QueuedSimulation};
+
+mod bundles;
+mod diagnostics;
+pub use bundles::*;
+pub use diagnostics::{DiagnosticDocument, DiagnosticFile, DiagnosticFileQuery, DiagnosticFiles};
