@@ -69,6 +69,26 @@ static void checkpoint(void)
     } while (*left < 0);
 }
 
+#ifdef AARCH64
+/* Guest signals arrive only at progress calls, so the translator's request to
+ * synchronize all threads always finds a busy thread inside this clean call,
+ * where it cannot translate the thread's state. Returning into the code cache
+ * would let that request retry forever while every other thread stays
+ * suspended. Leave through the dispatcher instead, which waits for a pending
+ * request at a safe spot. `resume` is the application address of the charged
+ * instruction; the charge there runs again, so give its `charged` back. */
+static void checkpoint_and_dispatch(app_pc resume, ptr_int_t charged)
+{
+    checkpoint();
+    *budget() += charged;
+    dr_mcontext_t context = {sizeof(context), DR_MC_ALL};
+    DR_ASSERT(dr_get_mcontext(dr_get_current_drcontext(), &context));
+    context.pc = resume;
+    dr_redirect_execution(&context);
+    DR_ASSERT(false);
+}
+#endif
+
 static void thread_init(void *context)
 {
     (void)context;
@@ -106,7 +126,15 @@ static void charge_before(void *context, instrlist_t *block, instr_t *where,
     instrlist_meta_preinsert(block, where, INSTR_CREATE_tbz(context,
         opnd_create_instr(skip), opnd_create_reg(scratch), OPND_CREATE_INT(63)));
 #endif
+#ifdef X86_64
     dr_insert_clean_call(context, block, where, (void *)checkpoint, false, 0);
+#else
+    /* The redirect reads the application context, and TBZ skips the call. */
+    dr_insert_clean_call_ex(context, block, where, (void *)checkpoint_and_dispatch,
+                            DR_CLEANCALL_READS_APP_CONTEXT | DR_CLEANCALL_MULTIPATH, 2,
+                            OPND_CREATE_INTPTR((ptr_int_t)instr_get_app_pc(where)),
+                            OPND_CREATE_INTPTR((ptr_int_t)instructions));
+#endif
     instrlist_meta_preinsert(block, where, skip);
 #ifdef X86_64
     DR_ASSERT(drreg_unreserve_aflags(context, block, where) == DRREG_SUCCESS);
