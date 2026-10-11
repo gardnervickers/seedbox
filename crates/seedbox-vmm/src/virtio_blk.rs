@@ -11,7 +11,31 @@ pub struct VirtioBlk {
     transport: Transport,
     pub dirty: Vec<(usize, usize)>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Snapshot {
+    model: seedbox_engine_core::virtio_block::Snapshot,
+    transport: seedbox_engine_core::virtio_mmio::Snapshot,
+    dirty: Vec<(usize, usize)>,
+}
+
 impl VirtioBlk {
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            model: self.model.snapshot(),
+            transport: self.transport.snapshot(),
+            dirty: self.dirty.clone(),
+        }
+    }
+    pub(crate) fn from_snapshot(snapshot: Snapshot, disk: Disk) -> Result<Self, String> {
+        let device = Self::new(disk);
+        Ok(Self {
+            model: device.model.restore_snapshot(snapshot.model)?,
+            transport: device.transport.restore_snapshot(snapshot.transport)?,
+            dirty: snapshot.dirty,
+        })
+    }
+
     pub fn new(disk: Disk) -> Self {
         Self {
             model: Block::new(disk, BlockPolicy::Block),

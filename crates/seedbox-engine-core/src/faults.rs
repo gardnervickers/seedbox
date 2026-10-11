@@ -9,7 +9,29 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Shared runtime state rejection. Guest replies preserve the distinction
+/// between lifecycle errors and an inactive heal handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionError {
+    InvalidState(&'static str),
+    InactiveHandle,
+}
+impl AdmissionError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::InvalidState(message) => message,
+            Self::InactiveHandle => "heal of inactive handle",
+        }
+    }
+    pub fn code(self) -> Option<&'static str> {
+        match self {
+            Self::InvalidState(_) => Some("invalid_state"),
+            Self::InactiveHandle => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     Scheduled,
     Waiting,
@@ -19,7 +41,7 @@ pub enum Status {
 }
 pub use seedbox_engine_protocol::report::RowStatus;
 /// Selected-connection evidence, fields in sorted key order.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct SelectionCounts {
     pub dropped: u64,
     pub matched: u64,
@@ -27,9 +49,9 @@ pub struct SelectionCounts {
 /// One fault's evidence row, as reports and witnesses carry it. Fields are in
 /// sorted key order and nested counts serialize with sorted keys, so a row
 /// serializes byte for byte as the sorted-key JSON object it replaced.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct FaultRow {
-    pub action: &'static str,
+    pub action: std::borrow::Cow<'static, str>,
     pub applied_at_ns: Option<u64>,
     pub detail: String,
     pub id: u32,
@@ -68,17 +90,17 @@ fn sorted<T: Serialize, S: Serializer>(value: &Option<T>, s: S) -> Result<S::Ok,
 }
 /// A guest effect that matched no waiting fault, kept as evidence. Fields are
 /// in sorted key order.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct RejectedEffect {
     pub at_ns: u64,
-    pub detail: &'static str,
+    pub detail: std::borrow::Cow<'static, str>,
     pub id: u32,
     pub machine: Option<String>,
     /// Always `"rejected"`.
-    pub status: &'static str,
+    pub status: std::borrow::Cow<'static, str>,
     pub success: bool,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Entry {
     plan: Plan,
     target: Option<usize>,
@@ -91,21 +113,21 @@ struct Entry {
 }
 /// A guest clock change: a wall-clock step in nanoseconds, or the absolute
 /// rate error of the system clock in parts per billion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum ClockChange {
     Step(i64),
     Rate(i64),
 }
 /// A clock skew or drift handle: the guest has been asked to make its change,
 /// has done so, is undoing it, or lost it in a crash.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum ClockState {
     Pending,
     Active,
     Healing,
     Lost,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct Clock {
     machine: usize,
     change: ClockChange,
@@ -121,7 +143,7 @@ impl Clock {
 }
 /// Whole-machine lifecycle. A paused machine keeps its VM and executes
 /// nothing; a down machine has no VM until it reboots.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Life {
     Up,
     Paused,
@@ -129,7 +151,7 @@ pub enum Life {
 }
 /// A lifecycle transition applied at a fault boundary, for the world to carry
 /// out on the machine before anything else happens at that time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Lifecycle {
     Pause,
     Resume,
@@ -138,7 +160,7 @@ pub enum Lifecycle {
     /// Charge CPU work at this many thousandths of the seeded speed.
     Throttle(u64),
 }
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 enum Event {
     Apply,
     Dispatch,
@@ -146,7 +168,7 @@ enum Event {
 }
 /// Commands for target guests: (machine, management line).
 type Commands = Vec<(usize, Vec<u8>)>;
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Faults {
     /// One evidence row per fault, by ID.
     pub log: Vec<FaultRow>,
@@ -169,6 +191,7 @@ pub struct Faults {
     clocks: BTreeMap<String, Clock>,
     /// Active throttle handles: machine and factor in thousandths.
     throttles: BTreeMap<String, (usize, u64)>,
+    #[serde(with = "crate::checkpoint::ordered_map")]
     cuts: BTreeMap<(usize, usize), usize>,
     names: Vec<String>,
     changed_network: Vec<usize>,
@@ -241,6 +264,16 @@ impl Faults {
             .iter()
             .position(|n| n == name)
             .ok_or_else(|| unknown.to_owned())
+    }
+    /// Validate shape and target names without assigning or reserving an ID.
+    pub fn validate_action_shape(&self, action: &Action) -> Result<(), String> {
+        self.compile(Plan {
+            id: 0,
+            at_ns: 0,
+            deadline_ns: 0,
+            action: action.clone(),
+        })
+        .map(|_| ())
     }
     fn compile(&self, plan: Plan) -> Result<Entry, String> {
         if plan.deadline_ns < plan.at_ns {
@@ -368,19 +401,53 @@ impl Faults {
             clock: None,
         })
     }
-    pub fn append(&mut self, mut plan: Plan) -> Result<u32, String> {
-        let id = u32::try_from(self.entries.len() + 1).map_err(|_| "fault ID exhausted")?;
-        if self
-            .entries
-            .last()
-            .is_some_and(|e| e.plan.at_ns > plan.at_ns)
-        {
-            return Err("fault time moved backwards".into());
+    /// Load a plan before execution. IDs follow admission order; scheduled
+    /// times may differ, and the boundary queue defines execution order.
+    pub fn append(&mut self, plan: Plan) -> Result<u32, String> {
+        self.admit(plan, 0)
+    }
+
+    /// Admit a runtime plan without allowing an effect in the committed past.
+    /// Equal-time plans execute in their stable admission-ID order.
+    pub fn admit(&mut self, plan: Plan, boundary: u64) -> Result<u32, String> {
+        let entry = self.prepare(plan, boundary)?;
+        Ok(self.commit(entry))
+    }
+
+    /// Validate without changing fault state, assigning the next admission ID.
+    /// The caller can retain this exact plan before committing it.
+    pub fn propose(&self, plan: Plan, boundary: u64) -> Result<Plan, String> {
+        Ok(self.prepare(plan, boundary)?.plan)
+    }
+
+    /// Admit a retained plan without silently replacing its identity. A changed
+    /// scenario/guest admission sequence is a replay divergence, not a new ID.
+    pub fn admit_exact(&mut self, plan: Plan, boundary: u64) -> Result<u32, String> {
+        if plan.id != self.next_id()? {
+            return Err("retained fault ID differs from the next admission ID".into());
         }
-        plan.id = id;
-        let entry = self.compile(plan)?;
+        self.admit(plan, boundary)
+    }
+
+    fn next_id(&self) -> Result<u32, String> {
+        u32::try_from(self.entries.len())
+            .ok()
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| "fault ID exhausted".into())
+    }
+
+    fn prepare(&self, mut plan: Plan, boundary: u64) -> Result<Entry, String> {
+        if plan.at_ns < boundary {
+            return Err("fault time precedes admission boundary".into());
+        }
+        plan.id = self.next_id()?;
+        self.compile(plan)
+    }
+
+    fn commit(&mut self, entry: Entry) -> u32 {
+        let id = entry.plan.id;
         self.log.push(FaultRow {
-            action: entry.plan.action.name(),
+            action: entry.plan.action.name().into(),
             applied_at_ns: None,
             detail: "scheduled".into(),
             id,
@@ -400,8 +467,15 @@ impl Faults {
             self.lifecycle_at[m].insert((entry.plan.at_ns, id));
         }
         self.entries.push(entry);
-        Ok(id)
+        id
     }
+    /// True only for a newly due action, not an acknowledgement deadline.
+    pub fn has_effect_at(&self, at: u64) -> bool {
+        self.boundaries
+            .iter()
+            .any(|(time, _, event)| *time == at && *event == Event::Apply)
+    }
+
     pub fn next_boundary(&self) -> u64 {
         self.boundaries.first().map(|e| e.0).unwrap_or(u64::MAX)
     }
@@ -473,6 +547,18 @@ impl Faults {
             Life::Up => "Running",
         }
     }
+    /// Check the same live fault state for guest, interactive and program inputs.
+    /// Shape compilation and ID allocation remain in the ordinary admit path.
+    pub fn validate_admission_state(&self, action: &Action) -> Result<(), AdmissionError> {
+        if let Some(error) = self.admission_error(action) {
+            return Err(AdmissionError::InvalidState(error));
+        }
+        if matches!(action, Action::Heal { handle } if !self.active_handles().contains(handle)) {
+            return Err(AdmissionError::InactiveHandle);
+        }
+        Ok(())
+    }
+
     pub fn admission_error(&self, action: &Action) -> Option<&'static str> {
         if let Action::Heal { handle } = action {
             let clock = self.clocks.get(handle)?;
@@ -663,6 +749,15 @@ impl Faults {
     fn unavailable(&mut self, i: usize, time: u64, detail: &str) {
         self.settle(i, Status::Unavailable(time), detail.into());
     }
+    /// Resolve every outstanding effect for an exited VM, independently of
+    /// whether the fault came from a static plan, trigger, or runtime request.
+    pub fn machine_exited(&mut self, machine: usize, time: u64) {
+        for index in 0..self.entries.len() {
+            let id = self.entries[index].plan.id;
+            self.target_exited(id, machine, time);
+        }
+    }
+
     /// A target VM that exits before acknowledging leaves its process fault unavailable, not failed.
     pub fn target_exited(&mut self, id: u32, machine: usize, time: u64) {
         let Some(i) = self.index(id) else {
@@ -743,6 +838,16 @@ impl Faults {
         }
     }
     /// Readiness is the reserved success id0; process commands wait for it.
+    /// Historical readiness survives crashes and prevents a reboot from
+    /// changing the initial boot/execution stage back to booting.
+    pub(crate) fn initial_applications_ready(&self) -> bool {
+        self.names.iter().all(|name| {
+            self.readiness
+                .iter()
+                .any(|row| row.get("machine").and_then(Value::as_str) == Some(name.as_str()))
+        })
+    }
+
     pub fn management_ready(&mut self, m: usize, time: u64, latency: u64) -> Result<(), String> {
         if m >= self.names.len() || self.ready[m] {
             return Err("duplicate/unknown management readiness".into());
@@ -1121,12 +1226,12 @@ impl Faults {
         self.lifecycle.push((m, op));
     }
     pub fn effect(&mut self, machine: usize, id: u32, time: u64, success: bool) {
-        let rejected = |detail| RejectedEffect {
+        let rejected = |detail: &'static str| RejectedEffect {
             at_ns: time,
-            detail,
+            detail: detail.into(),
             id,
             machine: self.names.get(machine).cloned(),
-            status: "rejected",
+            status: "rejected".into(),
             success,
         };
         let Some(i) = self.index(id) else {
@@ -1372,7 +1477,7 @@ mod link_tests {
     #[test]
     fn fault_row_bytes_are_pinned() {
         let mut row = FaultRow {
-            action: "shape",
+            action: "shape".into(),
             applied_at_ns: Some(10),
             detail: "applied".into(),
             id: 2,

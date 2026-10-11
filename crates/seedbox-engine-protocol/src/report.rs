@@ -105,6 +105,10 @@ pub struct WorldEvidence {
     pub outcome: RunOutcome,
     pub world_witness: String,
     pub faults: Vec<FaultRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_admissions: Vec<crate::input_program::InputAdmission>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_rejections: Vec<crate::input_program::InputRejection>,
     pub fault_error: Option<String>,
     pub control_history: Vec<ControlRecord>,
     pub control_latency_ns: u64,

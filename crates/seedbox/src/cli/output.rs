@@ -1,7 +1,7 @@
-//! Text results on stdout: one `WORD: detail` status line, then lowercase
-//! `key: value` fields. Diagnostics go to stderr elsewhere.
-use seedbox::Result;
-use std::fmt::{self, Display};
+//! Text results on stdout: tables, documents, or status lines and result fields.
+//! Diagnostics go to stderr elsewhere.
+use seedbox_application::Result;
+use std::fmt::Display;
 
 /// Print the command's one `WORD: detail` status line.
 pub fn status(word: &str, detail: impl Display) {
@@ -19,6 +19,33 @@ pub fn json(value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
+pub fn yaml(value: &impl serde::Serialize) -> Result<()> {
+    use std::io::Write;
+    std::io::stdout()
+        .lock()
+        .write_all(serde_yaml_ng::to_string(value)?.as_bytes())?;
+    Ok(())
+}
+
+/// Flush each observation so downstream consumers can process live events.
+pub fn json_line(value: &impl serde::Serialize) -> Result<()> {
+    use std::io::Write;
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&line)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+pub fn bytes(bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(bytes)?;
+    stdout.flush()?;
+    Ok(())
+}
+
 /// The serialized (SCREAMING_SNAKE_CASE) name of a status enum, as in `--json`.
 pub fn word(value: &impl serde::Serialize) -> String {
     match serde_json::to_value(value) {
@@ -27,39 +54,56 @@ pub fn word(value: &impl serde::Serialize) -> String {
     }
 }
 
-/// Seconds with millisecond precision.
-pub struct Seconds(pub f64);
-impl Display for Seconds {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:.3}", self.0)
-    }
+/// An aligned text table. Cells stay on one line, including untrusted names.
+pub struct Table<const N: usize> {
+    widths: [usize; N],
 }
 
-/// Values separated by commas, without spaces.
-#[cfg(any(target_os = "linux", test))]
-pub struct Csv<'a, T>(pub &'a [T]);
-#[cfg(any(target_os = "linux", test))]
-impl<T: Display> Display for Csv<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, value) in self.0.iter().enumerate() {
-            if index > 0 {
-                f.write_str(",")?;
+impl<const N: usize> Table<N> {
+    pub fn new(headers: [&str; N], minimum_widths: [usize; N]) -> Result<Self> {
+        let table = Self {
+            widths: std::array::from_fn(|i| minimum_widths[i].max(headers[i].len())),
+        };
+        table.row(headers.map(str::to_owned))?;
+        Ok(table)
+    }
+
+    pub fn row(&self, cells: [String; N]) -> Result<()> {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        for (i, cell) in cells.iter().enumerate() {
+            let cell: String = cell
+                .chars()
+                .map(|c| {
+                    if c.is_control() || c.is_whitespace() {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            if i + 1 == N {
+                writeln!(stdout, "{cell}")?;
+            } else {
+                write!(stdout, "{cell:width$}  ", width = self.widths[i])?;
             }
-            value.fmt(f)?;
         }
+        stdout.flush()?;
         Ok(())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wrappers_match_the_documented_text() {
-        assert_eq!(Seconds(1.0).to_string(), "1.000");
-        assert_eq!(Seconds(0.0004).to_string(), "0.000");
-        assert_eq!(Csv::<u32>(&[]).to_string(), "");
-        assert_eq!(Csv(&[3, 4, 10]).to_string(), "3,4,10");
+/// Print a finite table, sizing columns from all of its rows.
+pub fn table<const N: usize>(headers: [&str; N], rows: Vec<[String; N]>) -> Result<()> {
+    let widths = std::array::from_fn(|i| {
+        rows.iter()
+            .map(|row| row[i].chars().count())
+            .max()
+            .unwrap_or(0)
+    });
+    let table = Table::new(headers, widths)?;
+    for row in rows {
+        table.row(row)?;
     }
+    Ok(())
 }

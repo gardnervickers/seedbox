@@ -32,6 +32,9 @@ struct Args {
     /// Host control socket path.
     #[arg(long)]
     host_control: Option<PathBuf>,
+    /// Private live observation datagram socket.
+    #[arg(long)]
+    observations: Option<PathBuf>,
     /// Bytes retained per console stream.
     #[arg(long)]
     console_limit: Option<usize>,
@@ -57,9 +60,6 @@ struct Args {
     #[arg(long, default_value_t = 1,
           value_parser = clap::value_parser!(u64).range(1..=MAX_MACHINE_WORKERS as u64))]
     machine_workers: u64,
-    /// Comma-separated CPUs, one per machine thread (performance only).
-    #[arg(long, value_delimiter = ',')]
-    machine_cpus: Vec<usize>,
 }
 
 impl Args {
@@ -78,6 +78,10 @@ impl Args {
             out: self.out.unwrap_or_default(),
             digest: self.digest,
             host_control: self.host_control,
+            start_paused: false,
+            interventions: None,
+            resume_checkpoint: None,
+            observations: self.observations,
             console_limit: self.console_limit,
             log_chunk_limit: self.log_chunk_limit,
             features: MachineFeatures {
@@ -86,7 +90,6 @@ impl Args {
             },
             checkpoint_at_ns: self.checkpoint_at_ns,
             machine_workers: self.machine_workers as usize,
-            machine_cpus: self.machine_cpus,
             stream_console: self.stream_console,
             trace: self.trace,
             performance: Performance::default(),
@@ -200,12 +203,11 @@ mod tests {
         assert!(with(&["--machine-workers", "0"])
             .unwrap_err()
             .contains("--machine-workers"));
-        assert_eq!(
-            with(&["--machine-workers", "2", "--machine-cpus", "4,5,6"]).unwrap_err(),
-            "--machine-cpus: give one CPU per machine worker"
-        );
-        let o = with(&["--machine-workers", "4", "--machine-cpus", "4,5,6,7"]).unwrap();
-        assert_eq!((o.machine_workers, o.machine_cpus), (4, vec![4, 5, 6, 7]));
+        let o = with(&["--machine-workers", "4"]).unwrap();
+        assert_eq!(o.machine_workers, 4);
+        assert!(with(&["--machine-cpus", "4,5"])
+            .unwrap_err()
+            .contains("--machine-cpus"));
     }
 
     #[test]

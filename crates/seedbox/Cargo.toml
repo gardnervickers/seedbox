@@ -1,35 +1,29 @@
 [package]
 name = "seedbox"
 build = "build-runtime.rs"
-description = "Seedbox simulation configuration and orchestration"
+description = "Seedbox CLI and retained engine worker executable"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-seedbox-artifacts = { path = "../seedbox-artifacts" }
+seedbox-spec.workspace = true
+seedbox-application.workspace = true
+seedbox-api.workspace = true
+seedbox-client.workspace = true
+seedbox-tui.workspace = true
+seedbox-server.workspace = true
 seedbox-engine-protocol.workspace = true
 clap.workspace = true
 serde.workspace = true
-seedbox-control.workspace = true
-seedbox-engine-core.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
-sha2.workspace = true
-shell-words = "1"
 tempfile.workspace = true
-tar.workspace = true
-walkdir = "2"
-flate2 = "1"
-xattr = "1"
-bollard = { version = "0.21", features = ["buildkit", "chrono"] }
-futures-util = "0.3"
-tokio-util = { version = "0.7", features = ["io"] }
-globset = "0.4"
-tokio = { version = "1", features = ["rt", "time", "fs", "macros"] }
+bollard.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
 libc.workspace = true
 signal-hook = "0.3"
-ocirender = "0.2.2"
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 seedbox-vmm = { path = "../seedbox-vmm" }
@@ -37,8 +31,11 @@ seedbox-vmm = { path = "../seedbox-vmm" }
 [target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))'.dependencies]
 seedbox-arm64 = { path = "../seedbox-arm64" }
 
+[dev-dependencies]
+seedbox-engine-core.workspace = true
+tar.workspace = true
+
 [features]
-oci-tests = []
 application-tests = []
 retained-run-tests = []
 
@@ -49,7 +46,3 @@ required-features = ["application-tests"]
 [[test]]
 name = "host_pause"
 required-features = ["retained-run-tests"]
-
-[[test]]
-name = "oci_engine"
-required-features = ["oci-tests"]

@@ -38,6 +38,7 @@ unsafe extern "C" {
     fn hv_vcpu_set_vtimer_mask(cpu: u64, masked: bool) -> i32;
     fn hv_vcpu_get_simd_fp_reg(cpu: u64, reg: u32, value: *mut SimdValue) -> i32;
     fn os_release(object: *mut c_void);
+    fn seedbox_hvf_set_simd(cpu: u64, reg: u32, bytes: *const u8) -> i32;
 }
 #[repr(C, align(16))]
 struct SimdValue([u8; 16]);
@@ -139,6 +140,8 @@ pub struct Hvf {
     gic: Gic,
     mappings: BTreeMap<u32, (u64, Rc<Memory>)>,
     pending: Option<Pending>,
+    entered: bool,
+    restore_failed: bool,
     _thread: PhantomData<Rc<()>>,
 }
 impl Hvf {
@@ -164,6 +167,8 @@ impl Backend for Hvf {
                 gic,
                 mappings: BTreeMap::new(),
                 pending: None,
+                entered: false,
+                restore_failed: false,
                 _thread: PhantomData,
             })
         }
@@ -276,9 +281,13 @@ impl Backend for Hvf {
         gic_dist(offset)
     }
     fn run(&mut self) -> Result<RunStop> {
+        if self.restore_failed {
+            return Err("HVF restore failed; discard this VM".into());
+        }
         if self.pending.is_some() {
             return Err("run before completing held HVF exit".into());
         }
+        self.entered = true;
         unsafe {
             check("hv_vcpu_run", hv_vcpu_run(self.cpu()?))?;
         }
@@ -394,6 +403,80 @@ impl Backend for Hvf {
     }
     fn dirty_pages(&self, _: u32) -> Result<DirtyPages> {
         Ok(DirtyPages::Unsupported)
+    }
+    fn snapshot_state(&self) -> Result<BackendState> {
+        if self.pending.is_some() || self.restore_failed {
+            return Err("HVF snapshot requires a completed, healthy stop".into());
+        }
+        self.state()
+    }
+    fn restore_state(&mut self, state: &BackendState) -> Result<()> {
+        if self.entered || self.pending.is_some() || self.restore_failed {
+            return Err("HVF restore requires a fresh, never-entered VM".into());
+        }
+        let initial = self.state()?;
+        if state.core.len() != initial.core.len()
+            || state.simd.len() != initial.simd.len()
+            || state.system.keys().ne(initial.system.keys())
+            || state.gic_cpu.keys().ne(initial.gic_cpu.keys())
+            || state.gic.is_empty()
+            || state.gic.len() > 4 << 20
+        {
+            return Err("invalid HVF architectural state inventory".into());
+        }
+        // Feature/identity registers describe the architecture rather than
+        // mutable execution state. Validate them without attempting writes.
+        let immutable = |reg: u16| reg == 0xc000 || (0xc020..=0xc03a).contains(&reg);
+        for (&reg, &value) in &state.system {
+            if immutable(reg) && initial.system[&reg] != value {
+                return Err(format!(
+                    "HVF snapshot architectural register {reg:#x} differs"
+                ));
+            }
+        }
+        self.restore_failed = true;
+        let cpu = self.cpu()?;
+        unsafe {
+            let set_gic: unsafe extern "C" fn(*const c_void, usize) -> i32 =
+                std::mem::transmute(symbol(c"hv_gic_set_state")?);
+            let set_icc: unsafe extern "C" fn(u64, u16, u64) -> i32 =
+                std::mem::transmute(symbol(c"hv_gic_set_icc_reg")?);
+            check(
+                "restore hv_gic_set_state",
+                set_gic(state.gic.as_ptr().cast(), state.gic.len()),
+            )?;
+            for (&reg, &value) in &state.system {
+                // Keep an already-correct reset value untouched. In particular,
+                // writing a disabled DBGBCR's zero reset value makes HVF lazily
+                // normalize BAS on the next entry, unlike an untouched register.
+                if !immutable(reg) && initial.system[&reg] != value {
+                    self.set_sys_reg(SysReg(reg), value)?;
+                }
+            }
+            for (reg, value) in state.simd.iter().enumerate() {
+                check(
+                    "restore hv_vcpu_set_simd_fp_reg",
+                    seedbox_hvf_set_simd(cpu, reg as u32, value.as_ptr()),
+                )?;
+            }
+            for (reg, &value) in state.core.iter().enumerate() {
+                check(
+                    "restore hv_vcpu_set_reg",
+                    hv_vcpu_set_reg(cpu, reg as u32, value),
+                )?;
+            }
+            for (&reg, &value) in &state.gic_cpu {
+                // Running priority is derived from active priority registers.
+                if reg != 0xc65b {
+                    check("restore hv_gic_set_icc_reg", set_icc(cpu, reg, value))?;
+                }
+            }
+        }
+        if self.state()? != *state {
+            return Err("HVF architectural state differs after restore".into());
+        }
+        self.restore_failed = false;
+        Ok(())
     }
     fn state(&self) -> Result<BackendState> {
         let cpu = self.cpu()?;

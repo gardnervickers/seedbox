@@ -16,8 +16,10 @@ use sha2::{Digest, Sha256};
 use std::os::fd::AsRawFd;
 use std::time::Instant;
 
+mod checkpoint;
 pub mod pv;
 mod pv_plan;
+pub use checkpoint::MachineSnapshot;
 use pv::PvClock;
 
 pub const TIME_PAGE: u64 = 0xd000_0000;
@@ -56,7 +58,7 @@ const TIMER_DISARMED: u64 = u64::MAX;
 
 /// The last adopted page store. Kept separately so expiration cannot rearm
 /// an unchanged word, and legacy PIT writes can still replace a page arm.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct PageTimer {
     enabled: bool,
     seen: u64,
@@ -145,14 +147,29 @@ pub const ENTROPY_WORDS: usize = 8;
 
 /// Everything about one machine that a world fork puts back: vCPU, RAM, the
 /// shared page, device models and the VMM's per-machine scalars.
-pub struct MachineSnapshot {
-    world: MachineState,
+pub struct MemorySnapshot {
     ram: Mapping,
+    page: Box<[u8; 4096]>,
+    blk: Option<VirtioBlk>,
+    state: SnapshotState,
+    artifact: std::sync::OnceLock<checkpoint::Artifact>,
+}
+
+impl std::ops::Deref for MemorySnapshot {
+    type Target = SnapshotState;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotState {
+    world: MachineState,
     pending_io: Option<PendingIo>,
     timer_rng: Option<crate::rng::Rng>,
     entropy: [u32; ENTROPY_WORDS],
     entropy_read: usize,
-    page: Box<[u8; 4096]>,
     cpu: VcpuState,
     tsc_latch: u64,
     guest_exit_code: Option<u8>,
@@ -164,9 +181,9 @@ pub struct MachineSnapshot {
     com2: Uart,
     log_order: u64,
     management_framer: crate::control::ManagementFramer,
+    log_decoder: seedbox_engine_core::observation::Decoder,
     net: Option<VirtioNet>,
     channel: Option<VirtioConsole>,
-    blk: Option<VirtioBlk>,
     control_dma_bytes: u64,
     control_tx_bytes: u64,
     pv: bool,
@@ -177,6 +194,7 @@ pub struct MachineSnapshot {
     pit_exact: bool,
     exit_req: bool,
     stats: Stats,
+    #[serde(with = "seedbox_engine_core::checkpoint::sha256")]
     witness: Sha256,
     witness_log: WitnessLog,
     shadow_stats: ShadowStats,
@@ -210,7 +228,7 @@ impl Drop for Mapping {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     pub exits: u64,
     pub pio: u64,
@@ -253,7 +271,7 @@ impl Site {
 }
 
 /// Guest clock minus VMM time: how often and how far ahead or behind.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Skew {
     pub n: u64,
     pub ahead: u64,
@@ -299,6 +317,8 @@ pub struct Machine {
     rtc_index: u8,
     pub com1: Uart,
     pub com2: Uart,
+    pub observations: Option<std::sync::Arc<seedbox_engine_core::observation::Publisher>>,
+    log_decoder: seedbox_engine_core::observation::Decoder,
     log_order: u64,
     management_framer: crate::control::ManagementFramer,
     pub net: Option<VirtioNet>,
@@ -579,6 +599,8 @@ impl Machine {
             com2: Uart::default(),
             log_order: 0,
             management_framer: crate::control::ManagementFramer::default(),
+            log_decoder: seedbox_engine_core::observation::Decoder::default(),
+            observations: None,
             net,
             channel: spec.control_channel.then(VirtioConsole::new),
             blk: spec.disk.clone().map(VirtioBlk::new),
@@ -739,6 +761,8 @@ impl Machine {
             new.out = std::mem::take(&mut old.out);
             new.output_file = old.output_file.take();
             new.output_limit = old.output_limit;
+            new.discard_output = old.discard_output;
+            new.transmitted = old.transmitted;
             new.chunks = std::mem::take(&mut old.chunks);
         }
         self.log_order = old.log_order;
@@ -779,6 +803,7 @@ impl Machine {
         if !self.world.fault_effects.is_empty()
             || !self.world.control_requests.is_empty()
             || self.world.committed_console.is_some()
+            || !self.world.committed_output.is_empty()
         {
             return Err(format!("{}: not at a fork point", self.world.name));
         }
@@ -793,42 +818,46 @@ impl Machine {
         self.hold_fork_point()?;
         let mut page = Box::new([0u8; 4096]);
         unsafe { std::ptr::copy_nonoverlapping(self.page.0 as *const u8, page.as_mut_ptr(), 4096) };
-        Ok(MachineSnapshot {
+        Ok(MachineSnapshot::Memory(Box::new(MemorySnapshot {
             ram,
             page,
-            cpu,
-            world: self.world.clone(),
-            tsc_latch: self.tsc_latch,
-            pending_io: self.pending_io.clone(),
-            timer_rng: self.timer_rng.clone(),
-            entropy: self.entropy,
-            entropy_read: self.entropy_read,
-            guest_exit_code: self.guest_exit_code,
-            guest_init_error: self.guest_init_error,
-            pic: self.pic.clone(),
-            pit: self.pit.clone(),
-            rtc_index: self.rtc_index,
-            com1: self.com1.snapshot(),
-            com2: self.com2.snapshot(),
-            log_order: self.log_order,
-            management_framer: self.management_framer.clone(),
-            net: self.net.clone(),
-            channel: self.channel.clone(),
             blk: self.blk.clone(),
-            control_dma_bytes: self.control_dma_bytes,
-            control_tx_bytes: self.control_tx_bytes,
-            pv: self.pv,
-            syscall_ns: self.syscall_ns,
-            throttle_permille: self.throttle_permille,
-            abi: self.abi,
-            page_timer: self.page_timer,
-            pit_exact: self.pit_exact,
-            exit_req: self.exit_req,
-            stats: self.stats.clone(),
-            witness: self.witness.clone(),
-            witness_log: self.witness_log.clone(),
-            shadow_stats: self.shadow.stats.clone(),
-        })
+            artifact: Default::default(),
+            state: SnapshotState {
+                cpu,
+                world: self.world.clone(),
+                tsc_latch: self.tsc_latch,
+                pending_io: self.pending_io.clone(),
+                timer_rng: self.timer_rng.clone(),
+                entropy: self.entropy,
+                entropy_read: self.entropy_read,
+                guest_exit_code: self.guest_exit_code,
+                guest_init_error: self.guest_init_error,
+                pic: self.pic.clone(),
+                pit: self.pit.clone(),
+                rtc_index: self.rtc_index,
+                com1: self.com1.snapshot(),
+                com2: self.com2.snapshot(),
+                log_order: self.log_order,
+                management_framer: self.management_framer.clone(),
+                log_decoder: self.log_decoder.clone(),
+                net: self.net.clone(),
+                channel: self.channel.clone(),
+                control_dma_bytes: self.control_dma_bytes,
+                control_tx_bytes: self.control_tx_bytes,
+                pv: self.pv,
+                syscall_ns: self.syscall_ns,
+                throttle_permille: self.throttle_permille,
+                abi: self.abi,
+                page_timer: self.page_timer,
+                pit_exact: self.pit_exact,
+                exit_req: self.exit_req,
+                stats: self.stats.clone(),
+                witness: self.witness.clone(),
+                witness_log: self.witness_log.clone(),
+                shadow_stats: self.shadow.stats.clone(),
+            },
+        })))
     }
 
     /// Hold a fork point in the shadow, starting KVM's dirty log first if
@@ -855,7 +884,17 @@ impl Machine {
 
     /// Put the machine back to a snapshot taken by `snapshot`, from wherever
     /// the last run left it. Returns the number of RAM pages copied back.
-    pub fn restore(&mut self, s: &MachineSnapshot) -> Result<u64, String> {
+    pub fn restore(&mut self, snapshot: &MachineSnapshot) -> Result<u64, String> {
+        match snapshot {
+            MachineSnapshot::Memory(saved) => self.restore_memory(saved),
+            MachineSnapshot::File(path) => {
+                let saved = checkpoint::read(self, path)?;
+                self.restore_memory(&saved)
+            }
+        }
+    }
+
+    fn restore_memory(&mut self, s: &MemorySnapshot) -> Result<u64, String> {
         // The last exit may still owe KVM its completion (an exit port write,
         // say); complete it so the vCPU accepts new state. Its effect is
         // overwritten below, and a vCPU that cannot run any more (shutdown)
@@ -899,6 +938,7 @@ impl Machine {
         self.log_order = s.log_order;
         self.world.clear_effects();
         self.management_framer = s.management_framer.clone();
+        self.log_decoder = s.log_decoder.clone();
         self.net = s.net.clone();
         self.channel = s.channel.clone();
         self.blk = s.blk.clone();
@@ -955,6 +995,9 @@ impl Machine {
     }
     fn capture_output(&mut self) {
         for uart in [&mut self.com1, &mut self.com2] {
+            if uart.discard_output {
+                continue;
+            }
             uart.chunks.capture(
                 uart.out.len() as u64,
                 self.world.time,
@@ -964,13 +1007,22 @@ impl Machine {
         }
     }
     fn channel_output(&mut self, bytes: &[u8]) -> Result<bool, String> {
-        if self.com2.output_limit.is_some_and(|limit| {
-            self.com2
-                .out
-                .len()
-                .checked_add(bytes.len())
-                .is_none_or(|n| n > limit)
-        }) {
+        let output_time = self.world.time;
+        self.log_decoder.commit(
+            &mut self.world,
+            self.observations.as_deref(),
+            output_time,
+            bytes,
+        );
+        if !self.com2.discard_output
+            && self.com2.output_limit.is_some_and(|limit| {
+                self.com2
+                    .out
+                    .len()
+                    .checked_add(bytes.len())
+                    .is_none_or(|n| n > limit)
+            })
+        {
             return Err("guest control output limit exceeded".into());
         }
         if let Some(file) = self.com2.output_file.as_mut() {
@@ -978,11 +1030,14 @@ impl Machine {
             file.write_all(bytes)
                 .map_err(|e| format!("control log: {e}"))?;
         }
-        self.com2.out.extend_from_slice(bytes);
+        self.com2.transmitted = self.com2.transmitted.saturating_add(bytes.len() as u64);
+        if !self.com2.discard_output {
+            self.com2.out.extend_from_slice(bytes);
+        }
         self.control_tx_bytes += bytes.len() as u64;
         self.capture_output();
         let frames = self.management_framer.receive(bytes)?;
-        let stop = !frames.is_empty();
+        let stop = !frames.is_empty() || !self.world.committed_output.is_empty();
         self.world
             .control_requests
             .extend(frames.into_iter().map(|f| (self.world.time, f)));
@@ -1099,7 +1154,7 @@ impl Machine {
         let mut h = self.witness.clone();
         h.update(b"pending_io");
         h.update(self.pending_io_bytes());
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 
     fn note_skew(&mut self, site: Site) {
@@ -1447,7 +1502,7 @@ impl Machine {
                     };
                     let after_io = self.world.time;
                     let mut control_stop = false;
-                    let console_before = self.com1.out.len();
+                    let console_before = self.com1.transmitted;
                     match port {
                         0x3f8..=0x3ff => {
                             if port == 0x3f8 && v == b'\n' && crate::console_trace_enabled() {
@@ -1581,7 +1636,7 @@ impl Machine {
                         _ => {}
                     }
                     self.capture_output();
-                    if self.world.observe_console && self.com1.out.len() > console_before {
+                    if self.world.observe_console && self.com1.transmitted > console_before {
                         // Console ports have zero charge; the sink and pending KVM
                         // response are committed once at this deterministic exit.
                         self.world.committed_console = Some((after_io, v));
@@ -1776,7 +1831,7 @@ impl Machine {
     /// page, RAM and any retained disk. The digest is the hash of the parts.
     /// Not covered: other MSRs, debug registers and other VMM device models.
     pub fn state_digest(&mut self) -> (String, Vec<(&'static str, String)>) {
-        let hex = |h: Sha256| format!("{:x}", h.finalize());
+        let hex = |h: Sha256| hex::encode(h.finalize());
         let mut parts = Vec::new();
         let r = self.vcpu.get_regs().unwrap();
         let s = self.vcpu.get_sregs().unwrap();
@@ -1790,7 +1845,9 @@ impl Machine {
         }
         parts.push(("regs", hex(h)));
         let mut h = Sha256::new();
-        for w in self.vcpu.get_xsave().unwrap().region {
+        let mut xsave = self.vcpu.get_xsave().unwrap();
+        crate::xsave::canonicalize_ymm(&mut xsave.region);
+        for w in xsave.region {
             h.update(w.to_le_bytes());
         }
         parts.push(("xsave", hex(h)));
@@ -2314,7 +2371,7 @@ mod fork_tests {
             );
             assert_eq!(
                 m.exit_witness(),
-                format!("{:x}", witness.finalize()),
+                hex::encode(witness.finalize()),
                 "ABI {abi}"
             );
         }
@@ -2404,6 +2461,15 @@ mod fork_tests {
         for i in 6..14 {
             m.page_set(i, 0);
         }
+        let directory = tempfile::tempdir().unwrap();
+        saved
+            .persist(&directory.path().join("machine.snapshot"))
+            .unwrap();
+        let reference = serde_json::to_vec(&saved).unwrap();
+        drop(saved);
+        drop(m);
+        let saved: MachineSnapshot = serde_json::from_slice(&reference).unwrap();
+        let mut m = probe_machine(&kvm, false);
         m.restore(&saved).unwrap();
         assert_eq!(m.syscall_ns, 937);
         assert_eq!(

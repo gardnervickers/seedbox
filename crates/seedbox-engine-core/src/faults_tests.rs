@@ -86,7 +86,7 @@ fn same_time_partition_then_heal_completes_in_author_order_before_new_sends() {
     assert!((f.error.is_none() && f.pending_boundaries() == 0));
     assert!(!f.blocked(0, 1));
     assert_eq!(
-        f.log.iter().map(|r| r.action).collect::<Vec<_>>(),
+        f.log.iter().map(|r| r.action.as_ref()).collect::<Vec<_>>(),
         vec!["partition", "heal"]
     );
 }

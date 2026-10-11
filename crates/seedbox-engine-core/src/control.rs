@@ -6,12 +6,95 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    #[test]
+    fn partial_transport_and_pending_call_continue_after_serialization() {
+        let mut framer = ManagementFramer::default();
+        assert!(framer
+            .receive(b"SBX_RPC1 1 1 {\"version\":1,")
+            .unwrap()
+            .is_empty());
+        let mut framer: ManagementFramer =
+            serde_json::from_slice(&serde_json::to_vec(&framer).unwrap()).unwrap();
+        let frames = framer.receive(b"\"id\":1,\"op\":\"now\"}\n").unwrap();
+        assert_eq!(frames.len(), 1);
+        let names = vec!["scenario".into()];
+        let mut original = Control::new(
+            &json!({"machine":"scenario","latency_ns":20,"placement":{"scenario":"scenario"}}),
+            names.clone(),
+            10,
+            5,
+        )
+        .unwrap();
+        original.request(0, 100, &frames[0], 115).unwrap();
+        let mut restored: Control =
+            serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+        let mut replies = Vec::new();
+        for control in [&mut original, &mut restored] {
+            let mut faults = crate::faults::Faults::new(vec![], names.clone()).unwrap();
+            control.apply_boundary(&mut faults, 120).unwrap();
+            replies.push(control.response(140).unwrap());
+            control.mark_delivered(140).unwrap();
+        }
+        assert_eq!(replies[0], replies[1]);
+        assert_eq!(
+            serde_json::to_value(original).unwrap(),
+            serde_json::to_value(restored).unwrap()
+        );
+        for invalid in [
+            vec![b'x'; MAX_TRANSPORT_FRAME + 1],
+            b"already complete\n".to_vec(),
+        ] {
+            assert!(serde_json::from_value::<ManagementFramer>(
+                serde_json::to_value(invalid).unwrap()
+            )
+            .is_err());
+        }
+    }
+}
+
+/// Admission policy shared by guest controls and host interventions. A dead VM
+/// can still be crashed and rebooted; process and clock controls need a live VM.
+pub(crate) fn exited_target_error(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Pause { .. } | Action::Resume { .. } => {
+            Some("target VM has exited; crash and reboot it instead")
+        }
+        Action::ClockSkew { .. } | Action::ClockDrift { .. } => Some("target VM has exited"),
+        Action::PauseProcess { .. } | Action::ResumeProcess { .. } => {
+            Some("target VM has exited; there is no process to pause or resume")
+        }
+        Action::Stop { .. } | Action::Restart { .. } => {
+            Some("target VM has exited; restart only starts a stopped process")
+        }
+        _ => None,
+    }
+}
+
 pub const MAX_FRAME: usize = 16384;
 pub const MAX_TRANSPORT_FRAME: usize = MAX_FRAME + 64;
 /// Frame actual transport bytes; adapters exclude register-only writes.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
 pub struct ManagementFramer {
     line: Vec<u8>,
+}
+impl From<ManagementFramer> for Vec<u8> {
+    fn from(framer: ManagementFramer) -> Self {
+        framer.line
+    }
+}
+impl TryFrom<Vec<u8>> for ManagementFramer {
+    type Error = String;
+    fn try_from(line: Vec<u8>) -> Result<Self, Self::Error> {
+        if line.len() > MAX_TRANSPORT_FRAME || line.contains(&b'\n') {
+            return Err("invalid checkpoint management frame".into());
+        }
+        Ok(Self { line })
+    }
 }
 impl ManagementFramer {
     /// Accept a byte only after its transport actually transmits it.
@@ -36,7 +119,8 @@ impl ManagementFramer {
         Ok(frames)
     }
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Call {
     pub relay: u32,
     pub session: u32,
@@ -51,13 +135,14 @@ pub struct Call {
     pub operation: Option<Operation>,
     pub result: Value,
     pub error: Option<String>,
-    pub error_code: Option<&'static str>,
+    pub error_code: Option<std::borrow::Cow<'static, str>>,
     pub fatal: bool,
     /// A planned `arm_trigger`, armed at admission.
     pub trigger: Option<TriggerArm>,
 }
 /// An `arm_trigger` request resolved to its source machine and fault action.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TriggerArm {
     pub source: String,
     pub marker: Vec<u8>,
@@ -102,7 +187,8 @@ pub(crate) fn disjoint_sides<T, N: Ord + Clone>(
     }
     Ok(resolved)
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Control {
     pub controller: Option<usize>,
     pub latency: u64,
@@ -563,7 +649,7 @@ impl Control {
             operation,
             result,
             error,
-            error_code: unsupported.then_some("unsupported"),
+            error_code: unsupported.then_some("unsupported".into()),
             fatal: false,
             trigger,
         });
@@ -572,35 +658,17 @@ impl Control {
     /// Validate target VM existence at the admission barrier, never at request observation.
     pub fn reject_unavailable(&mut self, exited: &[String]) {
         if let Some(p) = self.pending.as_mut() {
-            if !p.admitted_done
-                && p.plan.as_ref().is_some_and(|plan| {
-                    (plan.action.is_process()
-                        || matches!(
-                            plan.action,
-                            Action::Pause { .. } | Action::Resume { .. } | Action::ClockSkew { .. }
-                        ))
-                        && plan
-                            .action
-                            .machine()
-                            .is_some_and(|name| exited.iter().any(|n| n == name))
-                })
-            {
-                let message = match p.plan.as_ref().map(|plan| &plan.action) {
-                    Some(Action::Pause { .. } | Action::Resume { .. }) => {
-                        "target VM has exited; crash and reboot it instead"
-                    }
-                    Some(Action::ClockSkew { .. } | Action::ClockDrift { .. }) => {
-                        "target VM has exited"
-                    }
-                    Some(Action::PauseProcess { .. } | Action::ResumeProcess { .. }) => {
-                        "target VM has exited; there is no process to pause or resume"
-                    }
-                    _ => "target VM has exited; restart only starts a stopped process",
-                };
+            let rejection = p.plan.as_ref().and_then(|plan| {
+                plan.action
+                    .machine()
+                    .filter(|name| exited.iter().any(|n| n == name))
+                    .and_then(|_| exited_target_error(&plan.action))
+            });
+            if let Some(message) = rejection.filter(|_| !p.admitted_done) {
                 p.plan = None;
                 p.effect = Some(p.admitted);
                 p.error = Some(message.into());
-                p.error_code = Some("target_unavailable");
+                p.error_code = Some("target_unavailable".into());
             }
         }
     }
@@ -615,8 +683,8 @@ impl Control {
                 p.plan = None;
                 p.effect = Some(p.admitted);
                 p.result = json!({});
-                p.error = Some("throttle needs the x86 pv timebase".into());
-                p.error_code = Some("unsupported");
+                p.error = Some("throttle needs a backend with configurable CPU cost".into());
+                p.error_code = Some("unsupported".into());
             }
         }
     }
@@ -698,20 +766,16 @@ impl Control {
                     Err(error) => {
                         p.result = json!({});
                         p.error = Some(error);
-                        p.error_code = Some("invalid_state");
+                        p.error_code = Some("invalid_state".into());
                     }
                 }
             }
             if let Some(plan) = p.plan.take() {
-                if let Some(error) = faults.admission_error(&plan.action) {
-                    p.error = Some(error.into());
-                    p.error_code = Some("invalid_state");
-                    p.effect = Some(now);
-                } else if matches!(
-                    &plan.action,
-                    Action::Heal { handle } if !faults.active_handles().contains(handle)
-                ) {
-                    p.error = Some("heal of inactive handle".into());
+                if let Err(error) = faults.validate_admission_state(&plan.action) {
+                    p.error = Some(error.message().into());
+                    if let Some(code) = error.code() {
+                        p.error_code = Some(code.into());
+                    }
                     p.effect = Some(now);
                 } else {
                     if let Action::Heal { handle } = &plan.action {
@@ -719,7 +783,7 @@ impl Control {
                             p.result = json!({ "matched": s.matched, "dropped": s.dropped });
                         }
                     }
-                    p.fault = Some(faults.append(plan)?);
+                    p.fault = Some(faults.admit(plan, now)?);
                 }
             }
         }
@@ -749,7 +813,7 @@ impl Control {
                         }
                         Some((crate::faults::Status::Unavailable(at), detail)) => {
                             p.error = Some(detail.to_owned());
-                            p.error_code = Some("target_unavailable");
+                            p.error_code = Some("target_unavailable".into());
                             Some(at)
                         }
                         _ => None,
@@ -892,7 +956,7 @@ impl Control {
             && serde_json::to_vec(&reply).map_err(|e| e.to_string())?.len() + 1 > MAX_FRAME
         {
             p.error = Some("operation result exceeds response frame bound".into());
-            p.error_code = Some("result_too_large");
+            p.error_code = Some("result_too_large".into());
         }
         if let Some(error) = p.error {
             let handle = reply["result"].get("handle").cloned();
@@ -902,13 +966,13 @@ impl Control {
             let code = if p.fatal {
                 "effect_failed"
             } else {
-                p.error_code.unwrap_or("invalid_request")
+                p.error_code.as_deref().unwrap_or("invalid_request")
             };
             reply["ok"] = json!(false);
             reply["error"] = json!({ "code": code, "message": error });
             // An unavailable effect still allocated its handle; keep it so the
             // planned action can be reconstructed from the reply.
-            if let (Some(handle), Some("target_unavailable")) = (handle, p.error_code) {
+            if let (Some(handle), Some("target_unavailable")) = (handle, p.error_code.as_deref()) {
                 reply["error"]["handle"] = handle;
             }
             if p.fatal {

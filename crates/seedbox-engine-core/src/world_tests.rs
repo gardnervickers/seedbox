@@ -679,6 +679,95 @@ fn boot_snapshot_resets_plan_but_keeps_readiness_and_rebuilds_crashed_machine() 
 }
 
 #[test]
+fn invalid_scheduler_checkpoint_is_rejected_before_physical_restore() {
+    for fresh in [false, true] {
+        let mut w = world(&["a", "b"]);
+        let scheduler = crate::window::World::<crate::world_windowed::Msg>::new(
+            2,
+            crate::window::Params {
+                latency: 10,
+                early: 0,
+                duration: 100,
+                end_on: None,
+                max_outputs: 64,
+            },
+        )
+        .unwrap();
+        w.scheduler_continuation = Some(scheduler);
+        let mut saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+        let encoded = serde_json::to_vec(&saved.scheduler_continuation).unwrap();
+        saved.scheduler_continuation = serde_json::from_slice(&encoded).unwrap();
+        let mut corrupt = serde_json::to_value(&saved.scheduler_continuation).unwrap();
+        corrupt["version"] = json!(999);
+        saved.scheduler_continuation = Some(serde_json::from_value(corrupt).unwrap());
+        w.machines[0].time = 10;
+        let before = w.factory.lock().unwrap().clone();
+        let error = if fresh {
+            saved.restore_checkpoint(&mut w)
+        } else {
+            saved.restore(&mut w)
+        }
+        .unwrap_err();
+        assert!(error.contains("unsupported version"));
+        assert_eq!(w.machines[0].time, 10);
+        assert_eq!(*w.factory.lock().unwrap(), before);
+        assert!(w.failure.is_none());
+        // Replacing the invalid metadata permits a later valid restore.
+        saved.scheduler_continuation = serde_json::from_slice(&encoded).unwrap();
+        saved.restore_checkpoint(&mut w).unwrap();
+        assert_eq!(w.machines[0].time, 0);
+        assert!(w.scheduler_continuation.is_some());
+    }
+}
+
+#[test]
+fn failed_restore_terminates_every_worker_and_refuses_retry_before_activity() {
+    for fresh in [false, true] {
+        let mut w = world(&["a", "b"]);
+        let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+        w.machines[0].time = 10;
+        w.machines[1].time = 10;
+        if fresh {
+            w.factory.lock().unwrap().push("fail/boot".into());
+        } else {
+            w.machines[1].bad = Some("restore");
+        }
+        let error = if fresh {
+            saved.restore_checkpoint(&mut w)
+        } else {
+            saved.restore(&mut w)
+        }
+        .unwrap_err();
+        assert!(error.contains(if fresh {
+            "boot failed"
+        } else {
+            "partial restore failed"
+        }));
+        if !fresh {
+            // A restored first machine and a partially mutated second machine
+            // must never be admitted as one runnable world.
+            assert_eq!(w.machines[0].time, 0);
+            assert_eq!(w.machines[1].time, 999);
+        }
+        let trace = w.factory.lock().unwrap().clone();
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|event| event.contains(":terminate:"))
+                .count(),
+            2
+        );
+        assert!(w.validate().unwrap_err().contains("terminal"));
+        assert!(saved.restore(&mut w).unwrap_err().contains("terminal"));
+        assert!(saved
+            .restore_checkpoint(&mut w)
+            .unwrap_err()
+            .contains("terminal"));
+        assert_eq!(*w.factory.lock().unwrap(), trace);
+    }
+}
+
+#[test]
 fn snapshot_restore_resets_clock_boundary_once_for_boot_and_runtime_forks() {
     let mut w = world(&["a"]);
     w.machines[0].park().unwrap();

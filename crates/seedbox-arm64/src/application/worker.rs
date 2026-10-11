@@ -119,6 +119,22 @@ pub struct StoppedObservation {
     pub barrier: bool,
     pub has_control: bool,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Checkpoint {
+    pub artifact: PathBuf,
+    pub identity: Identity,
+    pub observation: StoppedObservation,
+    pub console_offset: usize,
+    pub sha256: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointHeader {
+    identity: Identity,
+    observation: StoppedObservation,
+    console_offset: usize,
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Operation {
     Boot(Boot),
@@ -139,6 +155,9 @@ pub enum Operation {
         seed: u64,
         domain: String,
     },
+    Throttle {
+        factor_permille: u64,
+    },
     Evidence {
         full_state: bool,
         #[serde(default)]
@@ -150,8 +169,10 @@ pub enum Operation {
         transfer: TransferDescriptor,
     },
     InstallSuccession(ExportedTransfer),
-    Snapshot,
-    Restore,
+    Snapshot {
+        artifact: PathBuf,
+    },
+    Restore(Checkpoint),
     Quit,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -165,6 +186,8 @@ pub struct Request {
 #[serde(deny_unknown_fields)]
 pub enum Answer {
     Ready,
+    Snapshot(Checkpoint),
+    Restored(Checkpoint),
     Advanced {
         stop: MachineStop,
         time_ns: u64,
@@ -256,7 +279,7 @@ fn artifact_hash(file: &mut std::fs::File) -> Result<String> {
     }
     file.seek(SeekFrom::Start(0))
         .map_err(|e| format!("transfer seek: {e}"))?;
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex::encode(hash.finalize()))
 }
 
 /// All requests complete stopped. Identity and sequence are checked before any
@@ -267,6 +290,7 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
     let mut machine: Option<Machine<B>> = None;
     let mut console_offset = 0usize;
     let mut install_available = false;
+    let mut boot_inputs: Option<Boot> = None;
     while let Some(request) = read_message::<Request>(input)? {
         if request.sequence != sequence {
             return Err("worker request sequence mismatch".into());
@@ -294,6 +318,7 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                     return Err("worker already bound or invalid initial incarnation".into());
                 }
                 machine = Some(boot.machine(boot.disk()?)?);
+                boot_inputs = Some(boot.clone());
                 identity = Some(request.expected.clone());
                 install_available = true;
                 return Ok(Answer::Ready);
@@ -301,6 +326,46 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
             if matches!(request.operation, Operation::Quit) {
                 machine = None;
                 return Ok(Answer::Bye);
+            }
+            if let Operation::Restore(saved) = &request.operation {
+                if saved.identity.name != request.expected.name || !saved.artifact.is_absolute() {
+                    return Err("checkpoint identity/path mismatch".into());
+                }
+                let mut file = std::fs::File::open(&saved.artifact)
+                    .map_err(|e| format!("open checkpoint: {e}"))?;
+                if artifact_hash(&mut file)? != saved.sha256 {
+                    return Err("checkpoint artifact hash mismatch".into());
+                }
+                let header = read_message::<CheckpointHeader>(&mut file)?
+                    .ok_or("missing checkpoint header")?;
+                if header.identity != saved.identity
+                    || header.observation != saved.observation
+                    || header.console_offset != saved.console_offset
+                {
+                    return Err("checkpoint header binding mismatch".into());
+                }
+                let boot = boot_inputs
+                    .as_ref()
+                    .ok_or("missing checkpoint boot inputs")?;
+                // HVF allows one VM per process and requires architectural restore
+                // into a never-entered replacement. Failure terminates this worker.
+                drop(machine.take());
+                let restored = boot
+                    .machine::<B>(boot.disk()?)?
+                    .restore_checkpoint(&mut file)?;
+                if restored.stopped_observation() != saved.observation
+                    || saved.console_offset > restored.console().len()
+                {
+                    return Err("checkpoint restored observation mismatch".into());
+                }
+                machine = Some(restored);
+                identity = Some(Identity {
+                    incarnation: saved.identity.incarnation,
+                    ..request.expected.clone()
+                });
+                console_offset = saved.console_offset;
+                install_available = false;
+                return Ok(Answer::Restored(saved.clone()));
             }
             let vm = machine.as_mut().ok_or("worker has no live machine")?;
             match request.operation {
@@ -351,6 +416,10 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 }
                 Operation::SeedTimer { seed, domain } => {
                     vm.seed_timer(seed, &domain)?;
+                    Ok(Answer::Ready)
+                }
+                Operation::Throttle { factor_permille } => {
+                    vm.throttle(factor_permille)?;
                     Ok(Answer::Ready)
                 }
                 Operation::Evidence {
@@ -443,9 +512,38 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                     identity = Some(next.clone());
                     Ok(Answer::Installed { transfer })
                 }
-                Operation::Snapshot | Operation::Restore => Err(
-                    "ARM arbitrary CPU/device snapshot capture and restore are unsupported".into(),
-                ),
+                Operation::Snapshot { artifact } => {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    if !artifact.is_absolute() {
+                        return Err("checkpoint path must be absolute".into());
+                    }
+                    let snapshot = vm.snapshot()?;
+                    let observation = vm.stopped_observation();
+                    let mut file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&artifact)
+                        .map_err(|e| format!("create checkpoint {}: {e}", artifact.display()))?;
+                    write_message(
+                        &mut file,
+                        &CheckpointHeader {
+                            identity: request.expected.clone(),
+                            observation: observation.clone(),
+                            console_offset,
+                        },
+                    )?;
+                    snapshot.write_checkpoint(&mut file)?;
+                    let sha256 = artifact_hash(&mut file)?;
+                    Ok(Answer::Snapshot(Checkpoint {
+                        artifact,
+                        identity: request.expected.clone(),
+                        observation,
+                        console_offset,
+                        sha256,
+                    }))
+                }
                 _ => Err("invalid worker operation".into()),
             }
         })();
@@ -629,8 +727,16 @@ impl OwnedWorker {
     }
     fn validate_response(&self, request: &Request, response: &Response) -> Result<()> {
         let expected_before = self.bound.then_some(&self.identity);
+        let restored_identity = match &request.operation {
+            Operation::Restore(saved) => Some(Identity {
+                incarnation: saved.identity.incarnation,
+                ..self.identity.clone()
+            }),
+            _ => None,
+        };
         let expected_after = match &request.operation {
             Operation::InstallSuccession(t) => &t.descriptor.successor,
+            Operation::Restore(_) => restored_identity.as_ref().expect("restore identity"),
             _ => &self.identity,
         };
         if response.sequence != request.sequence
@@ -650,13 +756,16 @@ impl OwnedWorker {
                     | Operation::Release { .. }
                     | Operation::ResumeAt(_)
                     | Operation::Park
-                    | Operation::SeedTimer { .. },
+                    | Operation::SeedTimer { .. }
+                    | Operation::Throttle { .. },
                 Answer::Ready
             ) | (Operation::Advance { .. }, Answer::Advanced { .. })
                 | (Operation::Frame(_), Answer::Accepted(_))
                 | (Operation::Evidence { .. }, Answer::Evidence(_))
                 | (Operation::CrashExport { .. }, Answer::Crashed { .. })
                 | (Operation::InstallSuccession(_), Answer::Installed { .. })
+                | (Operation::Snapshot { .. }, Answer::Snapshot(_))
+                | (Operation::Restore(_), Answer::Restored(_))
                 | (Operation::Quit, Answer::Bye)
         );
         if !kind_matches {
@@ -671,9 +780,10 @@ impl OwnedWorker {
         }
         if let Some(observation) = &response.observation {
             if observation.time_ns == u64::MAX
-                || self.observation.as_ref().is_some_and(|old| {
-                    observation.time_ns < old.time_ns || observation.exits < old.exits
-                })
+                || (!matches!(request.operation, Operation::Restore(_))
+                    && self.observation.as_ref().is_some_and(|old| {
+                        observation.time_ns < old.time_ns || observation.exits < old.exits
+                    }))
             {
                 return Err("worker stopped observation moved backwards".into());
             }
@@ -688,6 +798,28 @@ impl OwnedWorker {
                 return Err("worker reported conflicting physical stop states".into());
             }
             match &request.operation {
+                Operation::Snapshot { artifact } => {
+                    let Answer::Snapshot(saved) = &response.answer else {
+                        unreachable!()
+                    };
+                    if saved.artifact != *artifact
+                        || saved.identity != request.expected
+                        || &saved.observation != observation
+                        || self.observation.as_ref() != Some(observation)
+                        || saved.sha256.len() != 64
+                        || !saved.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                    {
+                        return Err("checkpoint acknowledgement mismatch".into());
+                    }
+                }
+                Operation::Restore(saved) => {
+                    if saved.identity.name != request.expected.name
+                        || &saved.observation != observation
+                        || !matches!(&response.answer, Answer::Restored(ack) if ack == saved)
+                    {
+                        return Err("checkpoint restore acknowledgement mismatch".into());
+                    }
+                }
                 Operation::Boot(_) => {
                     if observation.time_ns != 0
                         || observation.exits != 0
@@ -746,11 +878,15 @@ impl OwnedWorker {
                             | Operation::Control(_)
                             | Operation::Park
                             | Operation::SeedTimer { .. }
+                            | Operation::Throttle { .. }
                             | Operation::Evidence { .. }
                     );
                     let preserves_irq = matches!(
                         operation,
-                        Operation::Park | Operation::SeedTimer { .. } | Operation::Evidence { .. }
+                        Operation::Park
+                            | Operation::SeedTimer { .. }
+                            | Operation::Throttle { .. }
+                            | Operation::Evidence { .. }
                     );
                     if (preserves_deadline && observation.next_deadline != old.next_deadline)
                         || (preserves_irq && observation.pending_irq != old.pending_irq)

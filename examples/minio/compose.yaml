@@ -49,12 +49,10 @@
       "jitter": "200us"
     },
     "schedule": {
-      "timer_jitter": "1ms",
-      "stop_tolerance": "2ms"
+      "timer_jitter": "1ms"
     },
     "check": {
-      "service": "client",
-      "exit_code": 0
+      "service": "client"
     }
   }
 }

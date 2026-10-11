@@ -4,6 +4,7 @@
 #![recursion_limit = "256"]
 
 mod boundary;
+mod live_checkpoint;
 mod management_uart;
 use seedbox_engine_core::{checkpoint, control, disk, links, output_layout, rng};
 #[cfg(test)]
@@ -19,6 +20,7 @@ mod virtio_console_tests;
 mod virtio_net;
 mod witness_log;
 mod world_adapter;
+mod xsave;
 
 use machine::pv::PvClock;
 use machine::{
@@ -225,6 +227,7 @@ pub struct BootInputs {
     console_limit: Option<usize>,
     features: MachineFeatures,
     log_chunk_limit: Option<usize>,
+    observations: Option<std::sync::Arc<seedbox_engine_core::observation::Publisher>>,
 }
 
 /// A machine's disk: zeroed, or a raw image relative to `base` (with
@@ -284,6 +287,9 @@ fn boot_machine(
     mach.com2.output_limit = b.console_limit;
     mach.com1.chunks.limit = b.log_chunk_limit;
     mach.com2.chunks.limit = b.log_chunk_limit;
+    mach.observations = b.observations.clone();
+    mach.com1.discard_output = b.observations.is_some();
+    mach.com2.discard_output = b.observations.is_some();
     mach.tolerance = b.tolerance;
     mach.timer_jitter = b.timer_jitter;
     mach.exact_timer_ppm = b.exact_timer_ppm;
@@ -305,62 +311,99 @@ use seedbox_engine_core::world_windowed::RunOutcome;
 type World = world_core::World<Machine>;
 type WorldSnapshot = world_core::WorldSnapshot<Machine>;
 
+/// Host playback is inspected before effects without creating a new retained
+/// boundary; ordinary replay/admission remains at its original hook.
+struct NativeBoundary<'a> {
+    host: &'a mut Option<host_control::HostControl>,
+}
+impl world_windowed::BoundaryCallbacks for NativeBoundary<'_> {
+    fn before_fault(&mut self, position: world_windowed::Boundary) -> Result<(), String> {
+        if let Some(host) = self.host.as_mut() {
+            host.before_fault(position)
+                .map_err(|e| format!("host control: {e}"))?;
+        }
+        Ok(())
+    }
+    fn boundary(
+        &mut self,
+        position: world_windowed::Boundary,
+        admission: &mut seedbox_engine_core::intervention::Admission<'_>,
+    ) -> Result<(), String> {
+        // All external actions are armed in the shared timed program.
+        if let Some(host) = self.host.as_mut() {
+            host.boundary_with_admission(position, admission)
+                .map_err(|e| format!("host control: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
 /// One segment of the run under the windowed scheduler, on one thread or
 /// the machine worker pool. Returns the outcome word and the scheduler's
 /// report section.
-fn simulate_windowed(
+fn simulate_segment(
     world: &mut World,
     run: &world_windowed::Run,
     request: &WorkerRequest,
     host_control: &mut Option<host_control::HostControl>,
+    _replay: &mut seedbox_engine_core::intervention::Replay,
 ) -> Result<(RunOutcome, Value), String> {
-    let mut boundary = || {
-        if let Some(control) = host_control.as_mut() {
-            control
-                .boundary()
-                .map_err(|e| format!("host control: {e}"))?;
-        }
-        Ok(())
-    };
+    let mut boundary = NativeBoundary { host: host_control };
     let skew = std::time::Duration::from_micros(request.windowed_skew_us);
     if request.machine_workers <= 1 {
-        return world_windowed::simulate(world, run, skew, &mut boundary);
+        return world_windowed::simulate_with_callbacks(world, run, skew, &mut boundary);
     }
     // Each pool thread opens its own clock: the watchdog measures that
     // thread's CPU time.
     let watchdog_ms = request.performance.watchdog_ms;
-    let cpus = &request.machine_cpus;
     let workers = world_windowed::Workers {
         count: request.machine_workers,
         skew,
     };
-    world_windowed::simulate_parallel(
+    world_windowed::simulate_parallel_with_callbacks(
         world,
         run,
         workers,
-        |w| {
-            if let Some(&cpu) = cpus.get(w) {
-                pin(cpu)?;
-            }
-            open_clock(watchdog_ms)
-        },
+        |_| open_clock(watchdog_ms),
         &mut boundary,
     )
 }
-/// Pin the calling thread to one CPU.
-fn pin(cpu: usize) -> Result<(), String> {
-    unsafe {
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_SET(cpu, &mut set);
-        if libc::sched_setaffinity(0, std::mem::size_of_val(&set), &set) != 0 {
-            return Err(format!(
-                "pin machine worker to CPU {cpu}: {}",
-                std::io::Error::last_os_error()
-            ));
+/// Hold interactive snapshots across segments; a successful capture is an
+/// observation of the current timeline, not the simulation's final outcome.
+fn simulate_windowed(
+    world: &mut World,
+    run: &world_windowed::Run,
+    request: &WorkerRequest,
+    host: &mut Option<host_control::HostControl>,
+    replay: &mut seedbox_engine_core::intervention::Replay,
+    checkpoints: &mut live_checkpoint::Checkpoints,
+) -> Result<(RunOutcome, Value), String> {
+    let mut segments = Vec::new();
+    loop {
+        if let Some(host) = host.as_mut() {
+            checkpoints.held.configure(host);
+            // Before the launch release nothing is armed for the run seed.
+            if run.fork.is_some() {
+                host.disable_checkpoints();
+            }
         }
+        let (outcome, mut scheduler) = simulate_segment(world, run, request, host, replay)?;
+        if outcome == RunOutcome::Checkpoint {
+            if let Some(host) = host.as_mut() {
+                if checkpoints.capture(world, replay, host, &request.out)? {
+                    segments.push(scheduler);
+                    continue;
+                }
+            }
+        }
+        if !segments.is_empty() {
+            segments.push(scheduler.clone());
+            scheduler["segments"] = serde_json::json!(segments);
+        }
+        return Ok((outcome, scheduler));
     }
-    Ok(())
 }
+
 use world_core::reseed_checkpoint;
 
 fn release(
@@ -384,12 +427,13 @@ fn read_config(path: &Path) -> Result<WorldConfig, String> {
 /// Check the parts of a world document that no type expresses, before any
 /// machine boots.
 fn validate_config(cfg: &WorldConfig) -> Result<(), String> {
+    seedbox_engine_core::input_program::validate_program(&cfg.input_program, cfg.duration_ns)?;
     if cfg.control.is_some() && cfg.control_channel.is_none() {
         return Err("runtime control requires virtio-console-v1 channel".into());
     }
     if let Some(control) = &cfg.control {
-        if cfg.seed_plan().has_static_events() {
-            return Err("runtime control cannot mix with static/legacy scenarios".into());
+        if !cfg.scenario.is_empty() || cfg.kill_restart.is_some() {
+            return Err("runtime control cannot mix with legacy scenarios".into());
         }
         if cfg.end_on_exit.as_ref() != Some(&control.machine) {
             return Err("controller must also be the end_on_exit machine".into());
@@ -446,16 +490,6 @@ impl Cmdline<'_> {
 
 /// The checkpoint times of this run, from `--checkpoint-at-ns` or the
 /// document's `checkpoint`; the latter also selects the branch seed.
-/// The latest machine clock in the world.
-fn world_time(world: &World) -> u64 {
-    world
-        .machines()
-        .iter()
-        .map(|m| m.world.time)
-        .max()
-        .unwrap_or(0)
-}
-
 fn checkpoint_plan(
     cfg: &WorldConfig,
     options: &WorkerRequest,
@@ -481,13 +515,7 @@ fn checkpoint_plan(
         (true, None) => Vec::new(),
     };
     if !times.is_empty() {
-        // A barrier boot under one seed is a staggered cold run, so it can
-        // take checkpoints after its release. Time forks and boot seeds other
-        // than the run seed fork the world and cannot.
-        if cfg
-            .boot
-            .is_some_and(|b| b.fork_at_ns.is_some() || b.seed != options.seed)
-        {
+        if cfg.boot.is_some() {
             return Err("runtime checkpoints cannot mix with boot forks".into());
         }
         if options.trace {
@@ -508,6 +536,13 @@ pub fn run(
     console_trace: Option<ConsoleTraceCallback>,
 ) -> Result<RunReport, String> {
     options.validate()?;
+    let mut replay = seedbox_engine_core::intervention::Replay::new(Default::default())?;
+    let observations = options
+        .observations
+        .as_deref()
+        .map(seedbox_engine_core::observation::Publisher::connect)
+        .transpose()
+        .map_err(|e| format!("observation socket: {e}"))?;
     START.with(|_| ());
     let _console_trace =
         ConsoleTraceGuard(CONSOLE_TRACE.with(|trace| trace.replace(console_trace)));
@@ -519,13 +554,24 @@ pub fn run(
     let digest = options.digest;
     let features = options.features;
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let mut live_checkpoints = live_checkpoint::Checkpoints::default();
     let mut host_control = options
         .host_control
         .as_deref()
-        .map(host_control::HostControl::bind)
+        .map(|path| {
+            if options.start_paused {
+                host_control::HostControl::bind_paused(path)
+            } else {
+                host_control::HostControl::bind(path)
+            }
+        })
         .transpose()
         .map_err(|e| format!("host control: {e}"))?;
-    let cfg = read_config(config_path)?;
+    let mut cfg = read_config(config_path)?;
+    seedbox_engine_core::input_program::merge_interventions(
+        &mut cfg.input_program,
+        &options.interventions.clone().unwrap_or_default(),
+    )?;
     validate_config(&cfg)?;
     let disk_fault_model = disk::fault_model(cfg.disk_loss)?;
     let base = config_path.parent().unwrap_or(Path::new(""));
@@ -613,6 +659,7 @@ pub fn run(
             console_limit,
             features,
             log_chunk_limit: options.log_chunk_limit,
+            observations: observations.clone(),
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
         let mut mach = boot_machine(&kvm, &names[i], &boot, barrier, seed)?;
@@ -655,43 +702,42 @@ pub fn run(
         control: control::Control::from_config(None, names.clone(), latency, early)?,
         macs,
         machines,
-    })?;
-    if !forked || !checkpoint_times.is_empty() {
-        let mut launch = None;
-        let kills = if forked {
-            // Staggered cold run: boot, park every machine at its barrier and
-            // release under the run seed; checkpoints come after the release.
-            let started = Instant::now();
-            simulate_windowed(
-                &mut world,
-                &segment(Some(world_windowed::Fork::Barrier), None),
-                options,
-                &mut host_control,
-            )?;
-            let barrier_ns = world_time(&world);
-            let boot_host_seconds = started.elapsed().as_secs_f64();
-            let (kills, reseed) = release(&mut world, cfg.seed_plan(), &names, seed, release_skew)?;
-            let released_ns = world_time(&world);
-            if let Some(&at) = checkpoint_times.iter().find(|&&at| at < released_ns) {
-                return Err(format!(
-                    "checkpoint at {at} ns is before the launch release at {released_ns} ns; choose a later checkpoint"
-                ));
-            }
-            launch = Some(BootReport {
-                seed: boot_seed,
-                barrier_ns,
-                fork_at_ns: None,
-                release_skew_ns: release_skew,
-                boot_host_seconds,
-                forked: false,
-                restored_pages: 0,
-                restore_host_seconds: 0.0,
-                reseed,
-            });
-            kills
-        } else {
-            arm_seed(&mut world, cfg.seed_plan(), &names, seed, 0)?
+    })?
+    .with_observations(observations);
+    if let Some(path) = &options.resume_checkpoint {
+        let saved = live_checkpoint::load(path)?;
+        let state = saved.state;
+        replay = seedbox_engine_core::intervention::Replay::new(Default::default())?;
+        state.world.restore_checkpoint(&mut world)?;
+        world.merge_input_program(cfg.input_program.clone())?;
+        live_checkpoints.boot = saved.boot;
+        live_checkpoints.kills = saved.kills;
+        let started = Instant::now();
+        let run = segment(None, None);
+        let (outcome, scheduler) = simulate_windowed(
+            &mut world,
+            &run,
+            options,
+            &mut host_control,
+            &mut replay,
+            &mut live_checkpoints,
+        )?;
+        replay.finish()?;
+        let finished = Finished {
+            outcome,
+            scheduler,
+            seed,
+            kills: &live_checkpoints.kills,
+            host_seconds: started.elapsed().as_secs_f64(),
+            out: &out,
         };
+        let mut result = report(&mut world, &run, digest, finished)?;
+        result.boot = live_checkpoints.boot;
+        return Ok(RunReport::Single(Box::new(result)));
+    }
+    if !forked {
+        let kills = arm_seed(&mut world, cfg.seed_plan(), &names, seed, 0)?;
+        live_checkpoints.kills = kills.clone();
         if !checkpoint_times.is_empty() {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let engine =
@@ -725,25 +771,36 @@ pub fn run(
             } else {
                 None
             };
+            let origin_replay = replay.clone();
             let mut held = Vec::new();
             for &at in &checkpoint_times {
                 if let Some(origin) = origin.as_ref().filter(|_| !held.is_empty()) {
                     origin.restore_checkpoint(&mut world)?;
+                    replay = origin_replay.clone();
                 }
                 let run = segment(None, Some(at));
-                let (outcome, _) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
+                let (outcome, _) = simulate_windowed(
+                    &mut world,
+                    &run,
+                    options,
+                    &mut host_control,
+                    &mut replay,
+                    &mut live_checkpoints,
+                )?;
                 if outcome != RunOutcome::Checkpoint {
-                    let ended = world_time(&world);
-                    return Err(format!(
-                        "checkpoint at {at} ns not reached: the world ended ({outcome}) at {ended} ns; choose an earlier checkpoint"
-                    ));
+                    return Err(format!("checkpoint at {at} ns not reached: {outcome}"));
                 }
-                held.push((at, WorldSnapshot::take_checkpoint(&mut world)?));
+                held.push((
+                    at,
+                    WorldSnapshot::take_checkpoint(&mut world)?,
+                    replay.clone(),
+                ));
             }
             let mut reports = Vec::new();
-            for (at, snapshot) in &held {
+            for (at, snapshot, saved_replay) in &held {
                 for &branch_seed in &seeds {
                     snapshot.restore_checkpoint(&mut world)?;
+                    replay = saved_replay.clone();
                     let identity = checkpoint::branch_identity(&parent, *at, branch_seed);
                     let reseed =
                         reseed_checkpoint(&mut world, &names, seed, branch_seed, &identity)?;
@@ -757,8 +814,15 @@ pub fn run(
                     reopen_outputs(&mut world, &dir, options.stream_console)?;
                     let started = Instant::now();
                     let run = segment(None, None);
-                    let (outcome, scheduler) =
-                        simulate_windowed(&mut world, &run, options, &mut host_control)?;
+                    let (outcome, scheduler) = simulate_windowed(
+                        &mut world,
+                        &run,
+                        options,
+                        &mut host_control,
+                        &mut replay,
+                        &mut live_checkpoints,
+                    )?;
+                    replay.finish()?;
                     // The public report's seed remains the parent seed; the
                     // semantic branch seed and identity have explicit fields.
                     let finished = Finished {
@@ -777,7 +841,6 @@ pub fn run(
                         branch_identity: Some(identity),
                     });
                     r.checkpoint_reseed = Some(reseed);
-                    r.boot = launch.clone();
                     reports.push(r);
                 }
             }
@@ -792,7 +855,14 @@ pub fn run(
         }
         let started = Instant::now();
         let run = segment(None, None);
-        let (outcome, scheduler) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
+        let (outcome, scheduler) = simulate_windowed(
+            &mut world,
+            &run,
+            options,
+            &mut host_control,
+            &mut replay,
+            &mut live_checkpoints,
+        )?;
         let finished = Finished {
             outcome,
             scheduler,
@@ -801,6 +871,7 @@ pub fn run(
             host_seconds: started.elapsed().as_secs_f64(),
             out: &out,
         };
+        replay.finish()?;
         return report(&mut world, &run, digest, finished).map(|r| RunReport::Single(Box::new(r)));
     }
 
@@ -810,8 +881,15 @@ pub fn run(
         &segment(Some(fork_at.into()), None),
         options,
         &mut host_control,
+        &mut replay,
+        &mut live_checkpoints,
     )?;
-    let barrier_ns = world_time(&world);
+    let barrier_ns = world
+        .machines()
+        .iter()
+        .map(|m| m.world.time)
+        .max()
+        .unwrap_or(0);
     let boot_host_seconds = started.elapsed().as_secs_f64();
     let started = Instant::now();
     let snapshot = if seeds.len() > 1 {
@@ -820,9 +898,11 @@ pub fn run(
         None
     };
     let snapshot_host_seconds = started.elapsed().as_secs_f64();
+    let snapshot_replay = replay.clone();
     let stream = options.stream_console;
     let mut reports = Vec::new();
     for (i, &seed) in seeds.iter().enumerate() {
+        replay = snapshot_replay.clone();
         let started = Instant::now();
         let restored_pages = match (i, snapshot.as_ref()) {
             (0, _) | (_, None) => 0,
@@ -839,8 +919,27 @@ pub fn run(
         }
         let started = Instant::now();
         let (kills, reseed) = release(&mut world, cfg.seed_plan(), &names, seed, release_skew)?;
+        live_checkpoints.kills = kills.clone();
+        live_checkpoints.boot = Some(BootReport {
+            seed: boot_seed,
+            barrier_ns,
+            fork_at_ns: fork_at,
+            release_skew_ns: release_skew,
+            boot_host_seconds,
+            forked: i > 0,
+            restored_pages,
+            restore_host_seconds,
+            reseed: reseed.clone(),
+        });
         let run = segment(None, None);
-        let (outcome, scheduler) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
+        let (outcome, scheduler) = simulate_windowed(
+            &mut world,
+            &run,
+            options,
+            &mut host_control,
+            &mut replay,
+            &mut live_checkpoints,
+        )?;
         let finished = Finished {
             outcome,
             scheduler,
@@ -849,6 +948,7 @@ pub fn run(
             host_seconds: started.elapsed().as_secs_f64(),
             out: &dir,
         };
+        replay.finish()?;
         let mut r = report(&mut world, &run, digest, finished)?;
         r.boot = Some(BootReport {
             seed: boot_seed,
@@ -882,6 +982,9 @@ pub fn run(
 /// indexes and, when streaming, the raw logs, which start with the bytes the
 /// machine has already written.
 fn open_outputs(mach: &mut Machine, out: &str, stream: bool) -> Result<(), String> {
+    if mach.observations.is_some() {
+        return Ok(());
+    }
     for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
         uart.output_file = uart.chunks.reopen_stream(
             &format!("{out}/{}.{ext}", mach.world.name),
@@ -1179,10 +1282,12 @@ fn report(
             mach.witness_log.encode(mach.world.time, &mach.witness),
         )
         .map_err(|e| e.to_string())?;
-        std::fs::write(format!("{out}/{}.console", mach.world.name), &mach.com1.out)
-            .map_err(|e| e.to_string())?;
-        std::fs::write(format!("{out}/{}.mgmt", mach.world.name), &mach.com2.out)
-            .map_err(|e| e.to_string())?;
+        if mach.observations.is_none() {
+            std::fs::write(format!("{out}/{}.console", mach.world.name), &mach.com1.out)
+                .map_err(|e| e.to_string())?;
+            std::fs::write(format!("{out}/{}.mgmt", mach.world.name), &mach.com2.out)
+                .map_err(|e| e.to_string())?;
+        }
         machines.push(row);
     }
     let sim_ns = world
@@ -1209,15 +1314,21 @@ fn report(
             .map(|r| serde_json::to_value(r).map_err(|e| e.to_string()))
             .collect()
     };
+    if !world.input_rejections().is_empty() {
+        world_witness
+            .update(serde_json::to_vec(world.input_rejections()).map_err(|e| e.to_string())?);
+    }
     Ok(EngineReport {
         report_version: REPORT_VERSION,
         seed,
         deferred_tx: world.boot_inputs().iter().any(|b| b.features.deferred_tx),
         evidence: WorldEvidence {
             outcome,
-            world_witness: format!("{:x}", world_witness.finalize()),
+            world_witness: hex::encode(world_witness.finalize()),
             faults,
             fault_error,
+            input_admissions: world.input_admissions().to_vec(),
+            input_rejections: world.input_rejections().to_vec(),
             control_history,
             control_latency_ns: world.control().latency,
             triggers,
@@ -1229,7 +1340,7 @@ fn report(
         frames_delivered: world.delivered(),
         frames_dropped: world.dropped(),
         network_counters: world.network_snapshot(),
-        network_witness: format!("{network_witness:x}"),
+        network_witness: hex::encode(network_witness),
         kills: kills.to_vec(),
         rejected_fault_effects: to_values(&world.faults().rejected_effects)?,
         management_readiness: world.faults().readiness.clone(),

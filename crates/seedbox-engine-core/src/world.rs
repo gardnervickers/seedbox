@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     Running,
     Halted,
@@ -29,7 +29,7 @@ impl std::fmt::Display for State {
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Stop {
     Reached,
     Halted,
@@ -61,7 +61,7 @@ impl Reseed {
 /// observation stops on the first committed byte when requested by a trigger.
 /// IPC adapters validate incarnation/generation and monotonic observations before
 /// updating this record. Neither side runs an independent world scheduler.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MachineState {
     pub name: String,
     pub time: u64,
@@ -75,6 +75,10 @@ pub struct MachineState {
     pub control_requests: Vec<(u64, Vec<u8>)>,
     pub observe_console: bool,
     pub committed_console: Option<(u64, u8)>,
+    /// Complete application frames, committed at their terminating transport byte.
+    pub committed_output: Vec<(u64, Vec<u8>)>,
+    #[serde(with = "crate::observation::empty_checkpoint")]
+    pub(crate) observations: crate::observation::Buffer,
 }
 impl MachineState {
     pub fn is_parked(&self) -> bool {
@@ -106,6 +110,8 @@ impl MachineState {
             control_requests: vec![],
             observe_console: false,
             committed_console: None,
+            committed_output: Vec::new(),
+            observations: crate::observation::Buffer::default(),
         }
     }
 }
@@ -171,6 +177,8 @@ impl MachineState {
         self.fault_effects.clear();
         self.control_requests.clear();
         self.committed_console = None;
+        self.committed_output.clear();
+        self.observations.clear();
     }
     pub fn restore_lifecycle(&mut self) {
         self.paused = false;
@@ -309,6 +317,8 @@ impl SliceObservation {
         if !m.fault_effects.is_empty()
             || !m.control_requests.is_empty()
             || m.committed_console.is_some()
+            || !m.committed_output.is_empty()
+            || !m.observations.is_empty()
         {
             return Err(format!("{}: undrained effects before slice", m.name));
         }
@@ -356,6 +366,9 @@ impl SliceObservation {
         {
             return Err(error("console effect outside observed slice"));
         }
+        if !m.committed_output.is_empty() && !request.observe_console {
+            return Err(error("application output outside observed slice"));
+        }
         fn ordered(times: impl Iterator<Item = u64>, start: u64, end: u64) -> bool {
             let mut previous = start;
             for at in times {
@@ -367,6 +380,10 @@ impl SliceObservation {
             true
         }
         if !ordered(
+            m.committed_output.iter().map(|(at, _)| *at),
+            self.time,
+            m.time,
+        ) || !ordered(
             m.fault_effects.iter().map(|(_, at, _)| *at),
             self.time,
             m.time,
@@ -381,7 +398,7 @@ impl SliceObservation {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Payload {
     Frame { from: usize, bytes: Vec<u8> },
     Serial(Vec<u8>),
@@ -419,6 +436,10 @@ pub struct WorldInputs<M: WorldMachine> {
 }
 
 pub struct World<M: WorldMachine> {
+    /// An interactive capture suspends this exact plan, including queue keys
+    /// and source counters. Rebuilding it would renumber in-flight effects.
+    pub(crate) scheduler_continuation: Option<crate::window::World<crate::world_windowed::Msg>>,
+    pub(crate) observations: Option<std::sync::Arc<crate::observation::Publisher>>,
     /// A failed crash transaction is terminal even if a direct caller retains World.
     pub(crate) failure: Option<String>,
     pub(crate) machines: Vec<M>,
@@ -445,6 +466,7 @@ pub struct World<M: WorldMachine> {
     pub(crate) latency: u64,
     pub(crate) partitioned: BTreeMap<(usize, usize), bool>,
     pub(crate) faults: faults::Faults,
+    pub(crate) input_program: crate::input_program::Program,
     pub(crate) control: control::Control,
     pub(crate) strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
     pub(crate) macs: Vec<[u8; 6]>,
@@ -453,6 +475,7 @@ pub struct World<M: WorldMachine> {
     pub(crate) link_counts: network_counters::LinkCounts,
     pub(crate) semantic_counts: network_counters::NetworkCounters,
     pub(crate) slices: u64,
+    pub(crate) boundaries: u64,
 }
 
 impl<M: WorldMachine> World<M> {
@@ -476,6 +499,7 @@ impl<M: WorldMachine> World<M> {
         } = inputs;
         let n = machines.len();
         let world = Self {
+            observations: None,
             machines,
             factory,
             boot,
@@ -490,6 +514,8 @@ impl<M: WorldMachine> World<M> {
             control,
             macs,
             failure: None,
+            input_program: Default::default(),
+            scheduler_continuation: None,
             branch_identity: None,
             incarnations: vec![Vec::new(); n],
             paused_ingress: vec![0; n],
@@ -502,9 +528,44 @@ impl<M: WorldMachine> World<M> {
             link_counts: BTreeMap::new(),
             semantic_counts: network_counters::NetworkCounters::default(),
             slices: 0,
+            boundaries: 0,
         };
         world.validate()?;
         Ok(world)
+    }
+
+    /// Arm external inputs before execution or at a seed release.
+    pub fn arm_input_program(
+        &mut self,
+        inputs: Vec<crate::input_program::TimedInput>,
+        duration_ns: u64,
+        from: u64,
+    ) -> Result<(), String> {
+        self.check_active()?;
+        self.input_program = crate::input_program::Program::new(inputs, duration_ns, from)?;
+        Ok(())
+    }
+    pub fn merge_input_program(
+        &mut self,
+        inputs: Vec<crate::input_program::TimedInput>,
+    ) -> Result<(), String> {
+        self.check_active()?;
+        self.input_program.replace_pending(inputs)
+    }
+    pub fn input_rejections(&self) -> &[crate::input_program::InputRejection] {
+        self.input_program.rejections()
+    }
+    pub fn input_admissions(&self) -> &[crate::input_program::InputAdmission] {
+        self.input_program.admissions()
+    }
+
+    /// Attach a runtime-only sink; observations publish after a round commits.
+    pub fn with_observations(
+        mut self,
+        observations: Option<std::sync::Arc<crate::observation::Publisher>>,
+    ) -> Self {
+        self.observations = observations;
+        self
     }
 
     /// Fixed machine membership; adapters may inspect or update physical state.
@@ -553,12 +614,13 @@ impl<M: WorldMachine> World<M> {
 
     pub fn check_active(&self) -> Result<(), String> {
         match &self.failure {
-            Some(reason) => Err(format!("world is terminal after failed crash: {reason}")),
+            Some(reason) => Err(format!("world is terminal after failed mutation: {reason}")),
             None => Ok(()),
         }
     }
     /// Common admission for direct and IPC adapters, before any execution.
     pub fn validate(&self) -> Result<(), String> {
+        self.input_program.validate()?;
         self.check_active()?;
         let n = self.machines.len();
         if n == 0 {
@@ -1057,6 +1119,7 @@ pub fn arm_seed<M: WorldMachine>(
 ) -> Result<Vec<Kill>, String> {
     world.check_active()?;
     plan.check_after(from)?;
+    world.arm_input_program(plan.input_program.to_vec(), u64::MAX, from)?;
     let booted = std::mem::take(&mut world.faults.readiness);
     let connections = world.faults.connections.clone();
     world.faults = faults::Faults::with_plans(
@@ -1241,19 +1304,36 @@ pub fn reseed_checkpoint<M: WorldMachine>(
 
 /// A committed world boundary. Runtime forks retain the active plan and RNG
 /// positions; boot forks still replace the plan and streams at release.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    bound(
+        serialize = "M::Snapshot: serde::Serialize",
+        deserialize = "M::Snapshot: serde::Deserialize<'de>"
+    )
+)]
 pub struct WorldSnapshot<M: WorldMachine> {
+    version: u32,
+    scheduler_continuation: Option<crate::window::Checkpoint<crate::world_windowed::Msg>>,
     boot_snapshot: bool,
     machines: Vec<M::Snapshot>,
+    #[serde(with = "crate::checkpoint::ordered_maps")]
     events: Vec<BTreeMap<(u64, u64), Payload>>,
+    #[serde(with = "crate::checkpoint::ordered_maps")]
     strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
     seq: u64,
+    #[serde(with = "crate::checkpoint::ordered_map")]
     partitioned: BTreeMap<(usize, usize), bool>,
     dropped: u64,
     delivered: u64,
+    #[serde(with = "crate::checkpoint::ordered_map")]
     link_counts: network_counters::LinkCounts,
     semantic_counts: network_counters::NetworkCounters,
     slices: u64,
+    boundaries: u64,
     faults: faults::Faults,
+    #[serde(default)]
+    input_program: crate::input_program::Program,
     control: control::Control,
     run_seed: u64,
     branch_identity: Option<String>,
@@ -1283,11 +1363,18 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             !m.fault_effects.is_empty()
                 || !m.control_requests.is_empty()
                 || m.committed_console.is_some()
+                || !m.committed_output.is_empty()
+                || !m.observations.is_empty()
         }) {
             return Err("checkpoint requires drained machine messages".into());
         }
         Ok(Self {
             boot_snapshot,
+            version: 1,
+            scheduler_continuation: world
+                .scheduler_continuation
+                .as_ref()
+                .map(crate::window::World::checkpoint),
             machines: world
                 .machines
                 .iter_mut()
@@ -1302,7 +1389,9 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             link_counts: world.link_counts.clone(),
             semantic_counts: world.semantic_counts.clone(),
             slices: world.slices,
+            boundaries: world.boundaries,
             faults: world.faults.clone(),
+            input_program: world.input_program.clone(),
             control: world.control.clone(),
             run_seed: world.run_seed,
             branch_identity: world.branch_identity.clone(),
@@ -1311,9 +1400,72 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         })
     }
 
+    /// Backend owners persist machine artifacts before publishing coordinator metadata.
+    pub fn machine_snapshots(&self) -> &[M::Snapshot] {
+        &self.machines
+    }
+
     /// Multiple held snapshots cannot share Undo's single dirty-page baseline.
     /// Fresh VMs force full RAM copies and discard stale incarnation/KVM state.
     pub fn restore_checkpoint(&self, world: &mut World<M>) -> Result<u64, String> {
+        self.restore_transaction(world, true)
+    }
+
+    /// Put the world back to the fork point. Returns RAM pages copied back.
+    pub fn restore(&self, world: &mut World<M>) -> Result<u64, String> {
+        self.restore_transaction(world, false)
+    }
+
+    fn restore_transaction(&self, world: &mut World<M>, fresh: bool) -> Result<u64, String> {
+        world.validate()?;
+        if self.version != 1 {
+            return Err("unsupported world checkpoint version".into());
+        }
+        if self.machines.len() != world.machines.len() {
+            return Err("snapshot machine count differs from world".into());
+        }
+        let count = self.machines.len();
+        if [
+            self.events.len(),
+            self.strict_events.len(),
+            self.incarnations.len(),
+            self.paused_ingress.len(),
+        ]
+        .into_iter()
+        .any(|len| len != count)
+        {
+            return Err("snapshot per-machine state has inconsistent lengths".into());
+        }
+        // Reject malformed scheduler metadata before touching any machine.
+        let continuation = self
+            .scheduler_continuation
+            .clone()
+            .map(crate::window::World::from_checkpoint)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        if continuation
+            .as_ref()
+            .is_some_and(|scheduler| scheduler.machines() != self.machines.len())
+        {
+            return Err("snapshot scheduler machine count differs from world".into());
+        }
+        // Once physical restoration starts, failure may leave a mixture of
+        // timelines. Never allow a retry or guest entry against that world.
+        let result = if fresh {
+            self.restore_checkpoint_inner(world)
+        } else {
+            self.restore_inner(world)
+        };
+        let pages = result.map_err(|mut error| {
+            terminate_workers(&mut world.machines, &mut error);
+            world.failure = Some(error.clone());
+            error
+        })?;
+        world.scheduler_continuation = continuation;
+        Ok(pages)
+    }
+
+    fn restore_checkpoint_inner(&self, world: &mut World<M>) -> Result<u64, String> {
         world.check_active()?;
         world.validate()?;
         if self.machines.len() != world.machines.len() {
@@ -1326,11 +1478,10 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             world.machines[i] =
                 M::boot(&world.factory, &name, &world.boot[i], world.barrier, seed)?;
         }
-        self.restore(world)
+        self.restore_inner(world)
     }
 
-    /// Put the world back to the fork point. Returns RAM pages copied back.
-    pub fn restore(&self, world: &mut World<M>) -> Result<u64, String> {
+    fn restore_inner(&self, world: &mut World<M>) -> Result<u64, String> {
         world.check_active()?;
         world.validate()?;
         if self.machines.len() != world.machines.len() {
@@ -1367,8 +1518,10 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         world.link_counts = self.link_counts.clone();
         world.semantic_counts = self.semantic_counts.clone();
         world.slices = self.slices;
+        world.boundaries = self.boundaries;
         if self.boot_snapshot && self.control.triggers.records.is_empty() {
             let names: Vec<_> = world.machines.iter().map(|m| m.name.clone()).collect();
+            world.input_program = Default::default();
             world.faults = boot_faults(
                 &names,
                 &self.faults.readiness,
@@ -1379,6 +1532,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             world.control = control::Control::new(&Value::Null, names, world.latency, world.early)?;
         } else {
             world.faults = self.faults.clone();
+            world.input_program = self.input_program.clone();
             world.control = self.control.clone();
         }
         world.run_seed = self.run_seed;
@@ -1397,6 +1551,8 @@ pub fn drain_machine_messages<M: WorldMachine>(
     until_barrier: bool,
     exited: bool,
 ) -> Result<(), String> {
+    // The legacy test-only scheduler has no live observation contract.
+    world.machines[m].observations.clear();
     if let Some((at, byte)) = world.machines[m].committed_console.take() {
         let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
         world.control.triggers.committed(
@@ -1406,6 +1562,18 @@ pub fn drain_machine_messages<M: WorldMachine>(
             world.control.latency,
             max_time,
         )?;
+    }
+    for (at, bytes) in std::mem::take(&mut world.machines[m].committed_output) {
+        let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+        for byte in bytes {
+            world.control.triggers.committed(
+                &world.machines[m].name,
+                at,
+                byte,
+                world.control.latency,
+                max_time,
+            )?;
+        }
     }
     for (id, at, success) in world.machines[m].fault_effects.drain(..) {
         if id == 0 && success {
@@ -1417,20 +1585,7 @@ pub fn drain_machine_messages<M: WorldMachine>(
         }
     }
     if exited {
-        for id in world
-            .control
-            .triggers
-            .records
-            .iter()
-            .filter_map(|r| r.fault_id)
-        {
-            world.faults.target_exited(id, m, world.machines[m].time);
-        }
-    }
-    if exited {
-        if let Some(id) = world.control.pending.as_ref().and_then(|p| p.fault) {
-            world.faults.target_exited(id, m, world.machines[m].time);
-        }
+        world.faults.machine_exited(m, world.machines[m].time);
     }
     for (at, line) in std::mem::take(&mut world.machines[m].control_requests) {
         if until_barrier {

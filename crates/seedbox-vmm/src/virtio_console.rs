@@ -12,7 +12,8 @@ pub struct ReceiveOutcome {
     pub accepted: bool,
     pub irq: bool,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(into = "Snapshot", try_from = "Snapshot")]
 pub struct VirtioConsole {
     transport: Transport,
     model: Console,
@@ -22,6 +23,33 @@ pub struct VirtioConsole {
 impl Default for VirtioConsole {
     fn default() -> Self {
         Self::new()
+    }
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Snapshot {
+    transport: seedbox_engine_core::virtio_mmio::Snapshot,
+    model: seedbox_engine_core::virtio_console::Snapshot,
+    dirty: Vec<(usize, usize)>,
+}
+impl From<VirtioConsole> for Snapshot {
+    fn from(device: VirtioConsole) -> Self {
+        Self {
+            transport: device.transport.snapshot(),
+            model: device.model.snapshot(),
+            dirty: device.dirty,
+        }
+    }
+}
+impl TryFrom<Snapshot> for VirtioConsole {
+    type Error = String;
+    fn try_from(snapshot: Snapshot) -> Result<Self, Self::Error> {
+        let device = Self::new();
+        Ok(Self {
+            transport: device.transport.restore_snapshot(snapshot.transport)?,
+            model: device.model.restore_snapshot(snapshot.model)?,
+            dirty: snapshot.dirty,
+        })
     }
 }
 impl VirtioConsole {

@@ -11,22 +11,40 @@ use std::os::fd::AsRawFd;
 const KVM_GET_DIRTY_LOG: libc::c_ulong = 0x4010_ae42;
 const PAGE: usize = 4096;
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ShadowStats {
     pub synced_pages: u64,
     pub restored_pages: u64,
 }
 
 /// Architectural vCPU state that a world fork puts back.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VcpuState {
     regs: kvm_regs,
     sregs: kvm_sregs,
     xsave: Box<kvm_xsave>,
     xcrs: kvm_xcrs,
+    #[serde(with = "saved_msrs")]
     msrs: Msrs,
     debugregs: kvm_debugregs,
     events: kvm_vcpu_events,
     mp: kvm_mp_state,
+}
+
+// Serialize the actual entries, not the flexible-array wrapper allocation.
+mod saved_msrs {
+    use super::*;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(msrs: &Msrs, serializer: S) -> Result<S::Ok, S::Error> {
+        msrs.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Msrs, D::Error> {
+        let entries = Vec::<kvm_msr_entry>::deserialize(deserializer)?;
+        Msrs::from_entries(&entries).map_err(serde::de::Error::custom)
+    }
 }
 
 /// MSRs the guest may change, minus the TSC and paravirt ones; keep those KVM
@@ -247,5 +265,40 @@ impl Shadow {
         self.log.fill(0);
         self.since_fork.as_mut().unwrap().fill(0);
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    #[test]
+    fn architectural_checkpoint_round_trips_registers_xsave_and_msrs() {
+        let mut saved = VcpuState::new(
+            Msrs::from_entries(&[
+                kvm_msr_entry {
+                    index: 0x174,
+                    data: 0x1234,
+                    ..Default::default()
+                },
+                kvm_msr_entry {
+                    index: 0x175,
+                    data: 0x5678,
+                    ..Default::default()
+                },
+            ])
+            .unwrap(),
+        );
+        saved.regs.rip = 0xffff_ffff_8100_0042;
+        saved.regs.rax = 0x1234_5678_90ab_cdef;
+        saved.sregs.cr3 = 0x234000;
+        saved.xsave.region[140] = 0xfeed_beef;
+        let encoded = serde_json::to_vec(&saved).unwrap();
+        let restored: VcpuState = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.regs, saved.regs);
+        assert_eq!(restored.sregs, saved.sregs);
+        assert_eq!(restored.xsave.region, saved.xsave.region);
+        assert_eq!(restored.msrs.as_slice(), saved.msrs.as_slice());
+        assert_eq!(serde_json::to_vec(&restored).unwrap(), encoded);
     }
 }

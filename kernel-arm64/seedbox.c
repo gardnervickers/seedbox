@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Single-CPU PV ABI 2. Matches crates/seedbox-arm64; no architectural timer. */
+/* Single-CPU PV ABI 3. Matches crates/seedbox-arm64; no architectural timer. */
 #include <linux/clockchips.h>
 #include <linux/clocksource.h>
 #include <linux/init.h>
@@ -17,6 +17,7 @@
 #define EVENT_IPA 0x0a010000UL
 struct seedbox_page {
 	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
+	u64 syscall_ns;
 };
 static struct seedbox_page *page;
 static void __iomem *event;
@@ -70,12 +71,17 @@ out:
 
 /* Charge syscall work through the existing bounded clock rendezvous. Keeping
  * each read bounded also preserves pending IRQ delivery at an exact deadline.
+ * Load the charge once: throttle/heal changes at a rendezvous affect the next
+ * syscall, while the remaining charge survives in guest registers or stack.
  */
 void seedbox_syscall_progress(void)
 {
-	unsigned int i;
-	for (i = 0; i < 1000; ++i)
+	u64 remaining = page ? READ_ONCE(page->syscall_ns) : 1000;
+
+	while (remaining) {
 		(void)seedbox_read();
+		--remaining;
+	}
 }
 
 static u64 cs_read(struct clocksource *cs) { return seedbox_read(); }
@@ -140,12 +146,12 @@ void __init seedbox_time_init(void)
 	isb();
 	event = ioremap(EVENT_IPA, SZ_16K);
 	page = memremap(TIME_IPA, SZ_16K, MEMREMAP_WB);
-	if (!event || !page || READ_ONCE(page->abi) != 2)
-		panic("seedbox: PV ABI 2 page unavailable");
+	if (!event || !page || READ_ONCE(page->abi) != 3)
+		panic("seedbox: PV ABI 3 page unavailable");
 	seedbox_exclusive_epoch = &page->exclusive_epoch;
 	WRITE_ONCE(page->last, early_last);
-	writeq(2, event + 32);
-	node = of_find_compatible_node(NULL, NULL, "seedbox,pv-time-v2");
+	writeq(3, event + 32);
+	node = of_find_compatible_node(NULL, NULL, "seedbox,pv-time-v3");
 	if (!node)
 		panic("seedbox: missing PV FDT node");
 	irq = irq_of_parse_and_map(node, 0);

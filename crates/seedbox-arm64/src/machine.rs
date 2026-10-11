@@ -1,3 +1,6 @@
+mod snapshot;
+pub use snapshot::Snapshot;
+
 use crate::{
     backend::{Backend, CoreReg, Exit, SysReg},
     devices::{pl011::Pl011, ClockEvent, Effect, MmioDevice, TimePage},
@@ -11,6 +14,8 @@ use crate::{
 use std::{collections::BTreeSet, rc::Rc, time::Instant};
 
 const EXCLUSIVE_EPOCH_OFFSET: usize = 40;
+const SYSCALL_NS_OFFSET: usize = 48;
+const SYSCALL_NS: u64 = 1_000;
 
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -104,6 +109,7 @@ impl<B: Backend> Machine<B> {
             )?;
             page.set_word(16, u64::MAX)?;
             page.set_word(24, ABI)?;
+            page.set_word(SYSCALL_NS_OFFSET, SYSCALL_NS)?;
         }
         let mut backend = B::create()?;
         backend.map_memory(0, RAM_BASE, Rc::clone(&ram))?;
@@ -231,6 +237,18 @@ impl<B: Backend> Machine<B> {
         // Every nonterminal return has completed its held backend operation.
         Ok(())
     }
+    /// Publish the next syscall's CPU charge while the vCPU is stopped. An
+    /// in-flight charge lives in guest registers/stack and keeps its old cost.
+    /// The page is included in snapshots; crash succession reapplies active
+    /// faults through the shared world coordinator.
+    pub fn throttle(&mut self, factor_permille: u64) -> Result<()> {
+        if !seedbox_control::THROTTLE_PERMILLE.contains(&factor_permille) {
+            return Err("invalid ARM throttle factor".into());
+        }
+        // The default charge is 1000 ns, so permille maps exactly to ns.
+        unsafe { self.page.set_word(SYSCALL_NS_OFFSET, factor_permille) }
+    }
+
     pub fn seed_timer(&mut self, seed: u64, domain: &str) -> Result<()> {
         if domain.is_empty() {
             return Err("empty application timer domain".into());
@@ -351,7 +369,7 @@ impl<B: Backend> Machine<B> {
         for record in &self.trace {
             trace.update(record.encode());
         }
-        let trace_hash = format!("{:x}", trace.finalize());
+        let trace_hash = hex::encode(trace.finalize());
         let console_hash = witness::hash(&self.uart.console);
         let timer_policy = self.timer_policy.as_ref().map(|(policy, _)| policy.clone());
         let disk_digest = devices
@@ -389,7 +407,7 @@ impl<B: Backend> Machine<B> {
                 serde_json::to_vec(&self.backend.state()?).map_err(|error| error.to_string())?;
             Some(BTreeMap::from([
                 ("boot".into(), witness::hash(&identity)),
-                ("ram".into(), format!("{:x}", ram.finalize())),
+                ("ram".into(), hex::encode(ram.finalize())),
                 ("cpu".into(), witness::hash(&cpu)),
                 ("devices".into(), devices.state_digest()?),
                 ("uart".into(), self.uart.state_digest()),
@@ -430,7 +448,7 @@ impl<B: Backend> Machine<B> {
             exits: self.trace.len() as u64,
             trace_hash,
             console_hash,
-            witness: format!("{:x}", hash.finalize()),
+            witness: hex::encode(hash.finalize()),
             state_digest,
             state_digest_parts: parts,
         })
@@ -1076,6 +1094,19 @@ mod spi_regression {
         fn dirty_pages(&self, _: u32) -> Result<DirtyPages> {
             Ok(DirtyPages::Unsupported)
         }
+        fn snapshot_state(&self) -> Result<backend::BackendState> {
+            self.state()
+        }
+        fn restore_state(&mut self, state: &backend::BackendState) -> Result<()> {
+            self.regs = state
+                .core
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i as u32, v))
+                .collect();
+            self.sys = state.system.clone();
+            Ok(())
+        }
         fn state(&self) -> Result<backend::BackendState> {
             Ok(backend::BackendState {
                 core: (0..34).map(|i| *self.regs.get(&i).unwrap_or(&0)).collect(),
@@ -1086,6 +1117,108 @@ mod spi_regression {
             })
         }
     }
+    #[test]
+    fn machine_snapshot_preserves_stopped_state_and_isolates_later_mutations() {
+        let fresh = || {
+            let mut machine = machine();
+            machine.application.as_mut().unwrap().block = Some(application::virtio::Virtio::block(
+                crate::disk::Disk::new(None, Some(8)).unwrap(),
+            ));
+            machine
+        };
+        let mut original = fresh();
+        original.backend.set_reg(CoreReg::X(7), 123).unwrap();
+        original.clock.arm(500).unwrap();
+        original.ready = true;
+        original.throttle(4_000).unwrap();
+        original.uart.console.extend_from_slice(b"abc");
+        original.uart_irq = true;
+        original.deferred_spis.insert(application::NET_SPI);
+        original.asserted_spis.insert(application::CONSOLE_SPI);
+        original.timer_policy = Some((
+            application::TimerPolicy {
+                seed: 9,
+                domain: "timer/test".into(),
+                jitter_ns: 10,
+            },
+            crate::rng::Rng::new(9, "timer/test"),
+        ));
+        let next_random = original.timer_policy.as_ref().unwrap().1.clone().next();
+        original
+            .log_capture
+            .append(application::log_capture::Stream::Console, 0, 3);
+        unsafe {
+            original.ram.write(0x1000, b"before checkpoint").unwrap();
+        }
+        let devices = original.application.as_mut().unwrap();
+        let mut disk = crate::disk::Disk::new(None, Some(8)).unwrap();
+        disk.write(1, &[3; 512]).unwrap();
+        disk.flush();
+        disk.write(1, &[4; 512]).unwrap();
+        devices.block = Some(application::virtio::Virtio::block(disk));
+        devices.entropy.extend([1, 2, 3]);
+        devices
+            .console
+            .receive(&mut [], b"pending control")
+            .unwrap();
+        let expected = original.application_evidence(true).unwrap();
+        let snapshot = original.snapshot().unwrap();
+        original.throttle(1_000).unwrap();
+        unsafe {
+            original.ram.write(0x1000, b"after checkpoint!").unwrap();
+        }
+        original.application.as_mut().unwrap().entropy.clear();
+        original.uart.console.clear();
+        drop(original);
+        let mut restored = fresh().restore_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            unsafe { restored.page.word(SYSCALL_NS_OFFSET).unwrap() },
+            4_000
+        );
+        assert_eq!(restored.application_evidence(true).unwrap(), expected);
+        assert_eq!(
+            restored.timer_policy.as_mut().unwrap().1.next(),
+            next_random
+        );
+        assert_eq!(restored.log_capture.take()[0].length, 3);
+        assert_eq!(
+            restored.deferred_spis,
+            BTreeSet::from([application::NET_SPI])
+        );
+        assert_eq!(
+            restored.asserted_spis,
+            BTreeSet::from([application::CONSOLE_SPI])
+        );
+        // A second branch receives the unchanged snapshot, not the first branch's RNG.
+        let mut checkpoint = Vec::new();
+        snapshot.write_checkpoint(&mut checkpoint).unwrap();
+        let mut branch = fresh().restore_checkpoint(checkpoint.as_slice()).unwrap();
+        assert_eq!(branch.application_evidence(true).unwrap(), expected);
+        assert_eq!(branch.timer_policy.as_mut().unwrap().1.next(), next_random);
+        // RAM corruption must fail before a restored machine can escape.
+        let metadata_len = u64::from_le_bytes(checkpoint[8..16].try_into().unwrap()) as usize;
+        let last_ram_byte = 16 + metadata_len + 32 + 8 + branch.ram.len() - 1;
+        checkpoint[last_ram_byte] ^= 1;
+        assert!(fresh().restore_checkpoint(checkpoint.as_slice()).is_err());
+    }
+
+    #[test]
+    fn throttle_changes_only_future_syscall_cost_and_survives_publication() {
+        let mut m = machine();
+        assert_eq!(unsafe { m.page.word(SYSCALL_NS_OFFSET).unwrap() }, 1_000);
+        m.clock.arm(500).unwrap();
+        let before = m.stopped_observation();
+        m.throttle(4_000).unwrap();
+        m.publish().unwrap();
+        assert_eq!(unsafe { m.page.word(SYSCALL_NS_OFFSET).unwrap() }, 4_000);
+        assert_eq!(m.stopped_observation(), before);
+        assert!(m.throttle(999).is_err());
+        assert!(m.throttle(1_000_001).is_err());
+        assert_eq!(unsafe { m.page.word(SYSCALL_NS_OFFSET).unwrap() }, 4_000);
+        m.throttle(1_000).unwrap();
+        assert_eq!(unsafe { m.page.word(SYSCALL_NS_OFFSET).unwrap() }, 1_000);
+    }
+
     fn machine() -> Machine<Fake> {
         let mut kernel = [0; 64];
         kernel[56..60].copy_from_slice(b"ARM\x64");

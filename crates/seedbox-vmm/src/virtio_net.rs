@@ -4,11 +4,41 @@ pub use seedbox_engine_core::virtio_network::{
     poll_limit, Notified as WriteOutcome, Received as ReceiveOutcome,
 };
 use seedbox_engine_core::virtio_network::{Network, Policy, Stats, EVENT_IDX};
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(into = "Snapshot", try_from = "Snapshot")]
 pub struct VirtioNet {
     transport: Transport,
     model: Network,
     pub dirty: Vec<(usize, usize)>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Snapshot {
+    mac: [u8; 6],
+    transport: seedbox_engine_core::virtio_mmio::Snapshot,
+    model: seedbox_engine_core::virtio_network::Snapshot,
+    dirty: Vec<(usize, usize)>,
+}
+impl From<VirtioNet> for Snapshot {
+    fn from(device: VirtioNet) -> Self {
+        Self {
+            mac: device.model.mac(),
+            transport: device.transport.snapshot(),
+            model: device.model.snapshot(),
+            dirty: device.dirty,
+        }
+    }
+}
+impl TryFrom<Snapshot> for VirtioNet {
+    type Error = String;
+    fn try_from(snapshot: Snapshot) -> Result<Self, Self::Error> {
+        let device = Self::new(snapshot.mac);
+        Ok(Self {
+            transport: device.transport.restore_snapshot(snapshot.transport)?,
+            model: device.model.restore_snapshot(snapshot.model)?,
+            dirty: snapshot.dirty,
+        })
+    }
 }
 impl VirtioNet {
     pub fn new(mac: [u8; 6]) -> Self {

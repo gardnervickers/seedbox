@@ -89,6 +89,7 @@ fn bad(message: impl Into<String>) -> Error {
 fn closure(record: &RunRecord) -> BTreeSet<ContentDigest> {
     std::iter::once(&record.run_id)
         .chain(record.identity.inputs.digests())
+        .chain(record.identity.interventions.iter())
         .chain(record.logs.values())
         .cloned()
         .collect()

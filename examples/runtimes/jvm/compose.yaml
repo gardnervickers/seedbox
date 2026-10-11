@@ -12,4 +12,4 @@ x-seedbox:
   machine: {memory_mb: 2048}
   seed: 172
   limits: {simulated_time: 60s, wall_time: 15m}
-  check: {service: jvm, exit_code: 0}
+  check: {service: jvm}

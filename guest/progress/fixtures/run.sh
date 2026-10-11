@@ -21,7 +21,7 @@ for shape in packed unpacked; do
         for options in "-no_ldstex2cas -unsafe_build_ldstex" "-no_ldstex2cas"; do
             log=$work/$fixture-$shape.log
             if strace -f -c -e trace=getpid -o "$work/strace" \
-                "$dr/bin64/drrun" -opt_speed -disable_traces $options -c "$client" -- \
+                "$dr/bin64/drrun" -opt_speed -disable_traces $options -c "$client" --blocks-per-progress-call 10000 -- \
                 "$work/$fixture-$shape" >"$log" 2>"$log.err"; then rc=0; else rc=$?; fi
             getpids=$(awk '/getpid/ {print $4}' "$work/strace" | head -1)
             printf '%-7s %-8s %-32s rc=%s getpid=%-8s %s %s\n' "$fixture" "$shape" \

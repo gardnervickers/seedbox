@@ -52,3 +52,35 @@ int main(int argc, char **argv) {
             script.write_text('#!' + 'x' * 300)
             self.assertEqual(run(str(script)).returncode, 2)
             self.assertEqual(run('missing').returncode, 2)
+
+
+class ProgressBudgetTests(unittest.TestCase):
+    def test_strict_budget_parser_accepts_u32_range_and_rejects_bad_options(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'budget.c'
+            source.write_text(r'''#include "progress/budget.h"
+#include <stdio.h>
+int main(int argc, char **argv) {
+    uint32_t budget = 0;
+    if (argc != 3 || !seedbox_progress_budget(argv[1], argv[2], &budget)) return 2;
+    printf("%u\n", budget);
+    return 0;
+}
+''')
+            probe = root / 'budget'
+            subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
+                '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'guest'),
+                str(source), '-o', str(probe)], check=True, capture_output=True)
+            for budget in ['1', '17', '10000', '4294967295']:
+                result = subprocess.run([str(probe), '--blocks-per-progress-call', budget],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, budget + '\n')
+            for budget in ['', '0', '-1', '+1', ' 1', '1 ', '1x', '4294967296',
+                           '999999999999999999999999999999']:
+                result = subprocess.run([str(probe), '--blocks-per-progress-call', budget],
+                                        capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 2, budget)
+            for option in ['--other', '--blocks-per-progress-call-extra', '--blocks-per-progress-cal']:
+                self.assertEqual(subprocess.run([str(probe), option, '1'], timeout=10).returncode, 2)

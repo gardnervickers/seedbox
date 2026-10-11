@@ -1,6 +1,6 @@
 //! Best-effort excerpts of local execution diagnostics, for text output only.
 
-use seedbox::{engine_adapter::VMM_FAILURE_MESSAGE, Error};
+use seedbox_application::{engine_adapter::VMM_FAILURE_MESSAGE, Error};
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
@@ -10,11 +10,11 @@ use std::{
 const TAIL_BYTES: u64 = 8 * 1024;
 const TAIL_LINES: usize = 5;
 
-pub(super) fn ram_pages(machine: &str, pages: &seedbox::diff::PageHashDiff) {
+pub(super) fn ram_pages(machine: &str, pages: &seedbox_application::diff::PageHashDiff) {
     eprintln!("{}", ram_page_line(machine, pages));
 }
 
-fn ram_page_line(machine: &str, pages: &seedbox::diff::PageHashDiff) -> String {
+fn ram_page_line(machine: &str, pages: &seedbox_application::diff::PageHashDiff) -> String {
     // Escape arbitrary retained names so evidence cannot introduce status lines.
     let machine: String = machine.chars().flat_map(char::escape_default).collect();
     format!(
@@ -23,30 +23,18 @@ fn ram_page_line(machine: &str, pages: &seedbox::diff::PageHashDiff) -> String {
     )
 }
 
-pub(super) fn replay_pages(comparison: &seedbox::orchestration::ReplayComparison) {
-    if let Some(report) = &comparison.ram_pages {
-        for (machine, pages) in &report.machines {
-            ram_pages(machine, pages);
-        }
-        for limitation in &report.limitations {
-            let safe: String = limitation.chars().flat_map(char::escape_default).collect();
-            eprintln!("ram pages: {safe}");
-        }
-    }
-}
-
-pub(super) fn divergence(divergence: &seedbox::diff::Divergence) {
+pub(super) fn divergence(divergence: &seedbox_application::diff::Divergence) {
     eprintln!("{}", divergence_line(divergence));
 }
 
-fn divergence_line(d: &seedbox::diff::Divergence) -> String {
+fn divergence_line(d: &seedbox_application::diff::Divergence) -> String {
     // Escape arbitrary retained names so evidence cannot introduce status lines.
     let machine: String = d.machine.chars().flat_map(char::escape_default).collect();
     let from = d.last_match.as_ref().map_or_else(
         || "start".to_owned(),
         |s| format!("{} ns (record {})", s.time_ns, s.records),
     );
-    let side = |s: &Option<seedbox::diff::WitnessSample>| {
+    let side = |s: &Option<seedbox_application::diff::WitnessSample>| {
         s.as_ref().map_or_else(
             || "ended".to_owned(),
             |s| format!("{} ns (record {})", s.time_ns, s.records),
@@ -57,18 +45,6 @@ fn divergence_line(d: &seedbox::diff::Divergence) -> String {
         side(&d.a),
         side(&d.b)
     )
-}
-
-pub(super) fn replay_divergence(comparison: &seedbox::orchestration::ReplayComparison) {
-    if let Some(report) = &comparison.divergence {
-        if let Some(d) = &report.divergence {
-            divergence(d);
-        }
-        for limitation in &report.limitations {
-            let safe: String = limitation.chars().flat_map(char::escape_default).collect();
-            eprintln!("divergence: {safe}");
-        }
-    }
 }
 
 pub(super) fn vmm_failure(directory: &Path, error: &str) {
@@ -124,7 +100,7 @@ mod tests {
 
     #[test]
     fn page_diagnostics_cannot_inject_status_lines() {
-        let pages = seedbox::diff::PageHashDiff {
+        let pages = seedbox_application::diff::PageHashDiff {
             differing_pfns: 2,
             first_pfns: vec![3, 9],
         };
@@ -136,12 +112,12 @@ mod tests {
 
     #[test]
     fn divergence_diagnostics_name_the_interval_and_cannot_inject_status_lines() {
-        let sample = |time_ns, records| seedbox::diff::WitnessSample {
+        let sample = |time_ns, records| seedbox_application::diff::WitnessSample {
             time_ns,
             records,
             witness: "00".repeat(8),
         };
-        let mut d = seedbox::diff::Divergence {
+        let mut d = seedbox_application::diff::Divergence {
             machine: "server\nPASS: fake".into(),
             sample: 3,
             last_match: Some(sample(2_000_100, 40)),

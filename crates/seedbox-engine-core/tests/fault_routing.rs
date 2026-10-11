@@ -107,3 +107,52 @@ fn a_reboot_takes_only_what_arrived_before_it() {
         vec!["in transit at the reboot", "later"]
     );
 }
+
+#[test]
+fn runtime_admission_can_precede_future_plans_but_never_its_boundary() {
+    use seedbox_control::{Action, Plan};
+    let mut faults = engine::Faults::new(vec![], vec!["a".into(), "b".into()]).unwrap();
+    let cut = |at| Plan {
+        id: 0,
+        at_ns: at,
+        deadline_ns: at,
+        action: Action::Partition {
+            handle: "cut".into(),
+            left: vec!["a".into()],
+            right: vec!["b".into()],
+        },
+    };
+    let heal = Plan {
+        id: 0,
+        at_ns: 100,
+        deadline_ns: 100,
+        action: Action::Heal {
+            handle: "cut".into(),
+        },
+    };
+    assert_eq!(faults.append(heal).unwrap(), 1);
+    assert_eq!(faults.admit(cut(20), 20).unwrap(), 2);
+    let before = faults.log.clone();
+    assert!(faults
+        .admit(cut(19), 20)
+        .unwrap_err()
+        .contains("admission boundary"));
+    assert_eq!(faults.log, before);
+    assert_eq!(faults.next_boundary(), 20);
+    faults.apply_due(20);
+    assert!(faults.blocked(0, 1));
+    assert_eq!(faults.next_boundary(), 100);
+    // Equal-time actions retain admission-ID order: heal 1, then partition 3.
+    assert_eq!(faults.admit(cut(100), 20).unwrap(), 3);
+    faults.apply_due(100);
+    assert!(faults.blocked(0, 1));
+    assert!(faults.error.is_none());
+    assert_eq!(
+        faults
+            .log
+            .iter()
+            .map(|row| (row.id, row.applied_at_ns))
+            .collect::<Vec<_>>(),
+        vec![(1, Some(100)), (2, Some(20)), (3, Some(100))]
+    );
+}

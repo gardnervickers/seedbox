@@ -17,8 +17,24 @@ const DOMAINS: [&str; 5] = [
     "link-tcp-reset",
 ];
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "[Vec<(Pair, Rng)>; 5]", into = "[Vec<(Pair, Rng)>; 5]")]
 pub struct Streams([BTreeMap<Pair, Rng>; 5]);
+impl From<Streams> for [Vec<(Pair, Rng)>; 5] {
+    fn from(streams: Streams) -> Self {
+        streams.0.map(|map| map.into_iter().collect())
+    }
+}
+impl TryFrom<[Vec<(Pair, Rng)>; 5]> for Streams {
+    type Error = String;
+    fn try_from(entries: [Vec<(Pair, Rng)>; 5]) -> Result<Self, Self::Error> {
+        let mut maps = std::array::from_fn(|_| BTreeMap::new());
+        for (map, entries) in maps.iter_mut().zip(entries) {
+            *map = crate::checkpoint::ordered_map::collect(entries)?;
+        }
+        Ok(Self(maps))
+    }
+}
 impl Streams {
     pub fn reseed(&mut self, seed: u64, identity: Option<&str>, names: &[String]) {
         for (streams, domain) in self.0.iter_mut().zip(DOMAINS) {
@@ -68,7 +84,7 @@ impl Streams {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Counts {
     pub matched: u64,
     /// Candidates given an extra reorder delay; receipt order is workload evidence.

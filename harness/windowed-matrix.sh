@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
-# Windowed-scheduler evidence (docs/windowed-scheduler.md). Run as root in the
+# Windowed-scheduler evidence (docs/internals.md#parallel-scheduling). Run as root in the
 # dev shell on a KVM host:
 #
-#   sudo -E env PATH="$PATH" bash harness/windowed-matrix.sh KERNEL VMM CPUS
+#   sudo -E env PATH="$PATH" bash harness/windowed-matrix.sh KERNEL VMM WORKERS
 #
 # KERNEL is a guest kernel (kernel/build.sh). VMM is this revision's
-# `cargo build-vmm` output. CPUS lists one CPU per machine thread, e.g. 4,5,6,7.
+# `cargo build-vmm` output. WORKERS is the maximum machine-thread count.
 #
 # For each world (harness/worlds/window2.json, window4.json),
-# runs with 1..len(CPUS) threads, and with reversed completion order, must
+# runs with 1..WORKERS threads, and with reversed completion order, must
 # agree with each other on world, network and full-state witnesses, machine
 # times and the committed end.
 # Prints one timing row per run; exits nonzero on any disagreement.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-kernel=$(realpath "$1"); vmm=$(realpath "$2"); cpus=$3
+kernel=$(realpath "$1"); vmm=$(realpath "$2"); workers=$3
+[[ "$workers" =~ ^[1-9][0-9]*$ ]] || { echo "WORKERS must be a positive integer" >&2; exit 2; }
 seed=${SEED:-7}
 out=$(mktemp -d "${TMPDIR:-/tmp}/windowed-matrix.XXXXXX")
 trap 'rm -rf "$out"' EXIT
 bash "$here/../guest/build-initramfs.sh" "$out/window.cpio" "$here/../guest/window.init" >/dev/null
-IFS=, read -ra cpu_list <<< "$cpus"
 
-run() { # NAME ENGINE TASKSET-CPUS [VMM ARGS...]
-    local name=$1 engine=$2 set=$3; shift 3
+run() { # NAME ENGINE [VMM ARGS...]
+    local name=$1 engine=$2; shift 2
     mkdir -p "$out/$name"
-    taskset -c "$set" "$engine" --config "$out/world.json" --seed "$seed" --out "$out/$name" --digest "$@" \
+    "$engine" --config "$out/world.json" --seed "$seed" --out "$out/$name" --digest "$@" \
         > "$out/$name/vmm.json" 2> "$out/$name/stderr" || { echo "$name failed:" >&2; tail -n 5 "$out/$name/stderr" >&2; exit 1; }
 }
 
@@ -39,16 +39,15 @@ json.dump(w, open(sys.argv[2], "w"))
 PY
     machines=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["machines"]))' "$out/world.json")
     names=()
-    for ((t = 1; t <= ${#cpu_list[@]} && t <= machines; t++)); do
-        set=$(IFS=,; echo "${cpu_list[*]:0:t}")
+    for ((t = 1; t <= workers && t <= machines; t++)); do
         args=()
-        if ((t > 1)); then args+=(--machine-workers "$t" --machine-cpus "$set"); fi
-        run "$world-w$t" "$vmm" "$set" "${args[@]}"
+        if ((t > 1)); then args+=(--machine-workers "$t"); fi
+        run "$world-w$t" "$vmm" "${args[@]}"
         names+=("$world-w$t")
         last=$t
     done
     # Reversed completion order: machine i waits (n - i) x 300 us per run.
-    SEEDBOX_WINDOWED_SKEW_US=300 run "$world-w${last}r" "$vmm" "$set" "${args[@]}"
+    SEEDBOX_WINDOWED_SKEW_US=300 run "$world-w${last}r" "$vmm" "${args[@]}"
     names+=("$world-w${last}r")
     python3 - "$out" "${names[@]}" <<'PY'
 import json, sys

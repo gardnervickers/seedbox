@@ -23,4 +23,4 @@ x-seedbox:
   limits: {simulated_time: 60s, wall_time: 10m}
   network: {latency: 1ms, jitter: 0ns}
   control: {service: scenario}
-  check: {service: scenario, exit_code: 0}
+  check: {service: scenario}

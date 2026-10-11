@@ -2,10 +2,8 @@ name: PV tests
 
 on:
   pull_request:
-    paths-ignore: ['**/*.md']
   push:
     branches: [main]
-    paths-ignore: ['**/*.md']
   workflow_dispatch:
 
 permissions:
@@ -16,7 +14,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run_tests: ${{ steps.changes.outputs.run_tests }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Detect changes that need PV tests
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, subprocess
+
+          base, head = os.environ['BASE_SHA'], os.environ['HEAD_SHA']
+          run_tests = True
+          if os.environ['GITHUB_EVENT_NAME'] != 'workflow_dispatch' and base and set(base) != {'0'}:
+              revisions = [f'{base}...{head}'] if os.environ['GITHUB_EVENT_NAME'] == 'pull_request' else [base, head]
+              changed = subprocess.check_output(['git', 'diff', '--no-renames', '--name-only', '-z', *revisions, '--'])
+              paths = [path for path in changed.split(b'\0') if path]
+              run_tests = any(not path.endswith(b'.md') for path in paths)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'run_tests={str(run_tests).lower()}\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('PV tests required.\n' if run_tests else 'Markdown-only changes; PV tests skipped.\n')
+          PYTHON
+
   test:
+    needs: changes
+    # A skipped job satisfies the required check; a skipped workflow never does.
+    # Run conservatively if change detection fails rather than skipping tests.
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.run_tests == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     env:
@@ -50,7 +84,7 @@ jobs:
       - uses: nix-community/cache-nix-action/restore@v7
         id: nix-cache
         with:
-          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**', 'kernel/**', 'kernel-arm64/**', 'guest/**', 'tools/runtime/**', 'tools/build-assets.sh') }}
+          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**', 'kernel/**', 'kernel-arm64/**', 'guest/**', 'tools/runtime/**', 'crates/xtask/**') }}
           restore-prefixes-first-match: |
             pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-${{ runner.os }}-${{ runner.arch }}-
@@ -63,13 +97,13 @@ jobs:
           cmd-format: nix develop --command {0}
           workspaces: |
             . -> target
+            . -> build/cargo
             crates/seedbox-vmm -> target
             crates/seedbox-arm64 -> target
           cache-bin: false
       - name: Build and root guest assets from the checkout
         run: |
           nix build .#guestKernel .#runtimeArchive --out-link "$RUNNER_TEMP/pv-assets"
-          bash tools/build-assets.sh
       # Save expensive dependencies before tests, so a test failure does not
       # force the next run to rebuild the kernel or download the toolchain.
       - uses: nix-community/cache-nix-action/save@v7
@@ -87,7 +121,7 @@ jobs:
             du -sh /nix/store
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Portable prerequisites and PV application acceptance
-        run: nix develop --command bash harness/check.sh linux-apps --cpu 1
+        run: nix develop --command bash harness/check.sh linux-apps
       - name: Bound diagnostic artifact storage
         if: always()
         # Privileged KVM tests leave root-owned manifests and logs.

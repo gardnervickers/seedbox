@@ -18,11 +18,11 @@ pub struct ContentDigest(String);
 
 impl ContentDigest {
     pub fn of(bytes: &[u8]) -> Self {
-        Self(format!("{:x}", Sha256::digest(bytes)))
+        Self(hex::encode(Sha256::digest(bytes)))
     }
     /// The digest of everything fed to a streaming hasher.
     pub fn finish(hash: Sha256) -> Self {
-        Self(format!("{:x}", hash.finalize()))
+        Self(hex::encode(hash.finalize()))
     }
     pub fn hex(&self) -> &str {
         &self.0
@@ -53,6 +53,7 @@ impl From<ContentDigest> for String {
 #[derive(Clone, Debug)]
 pub struct ContentStore {
     root: PathBuf,
+    evidence_root: Option<PathBuf>,
     /// Objects this process hashed, with the file identity they had then.
     /// Clones share it, so exploration workers verify each object once.
     verified: Arc<Mutex<HashMap<ContentDigest, Stamp>>>,
@@ -116,13 +117,40 @@ impl ContentStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            evidence_root: None,
             verified: Arc::default(),
             shared: Arc::default(),
         }
     }
 
+    /// Keep immutable inputs in a reusable cache while run identities and logs
+    /// written through `put_unsynced` belong to one disposable server session.
+    pub fn with_ephemeral_evidence(
+        cache: impl Into<PathBuf>,
+        evidence: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            evidence_root: Some(evidence.into()),
+            ..Self::new(cache)
+        }
+    }
+
     fn path(&self, digest: &ContentDigest) -> PathBuf {
         self.root.join("sha256").join(digest.hex())
+    }
+
+    fn object_path(&self, digest: &ContentDigest) -> PathBuf {
+        let cached = self.path(digest);
+        if cached.exists() {
+            return cached;
+        }
+        if let Some(root) = &self.evidence_root {
+            let path = root.join("sha256").join(digest.hex());
+            if path.exists() {
+                return path;
+            }
+        }
+        cached
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<ContentDigest> {
@@ -138,7 +166,8 @@ impl ContentStore {
     /// crash can lose such an object, and a record that names it then fails
     /// verification as an integrity error; it is never silently wrong. Putting
     /// the same bytes unsynced again replaces such an object. Inputs
-    /// that later runs replay from keep using the synced `put*` calls.
+    /// that later runs replay from keep using the synced `put*` calls. With
+    /// `with_ephemeral_evidence`, these objects live only in the session store.
     pub fn put_unsynced(&self, bytes: &[u8]) -> Result<ContentDigest> {
         self.put_reader_with(bytes, false)
     }
@@ -149,11 +178,16 @@ impl ContentStore {
     }
 
     fn put_reader_with(&self, mut reader: impl Read, durable: bool) -> Result<ContentDigest> {
-        let directory = self.root.join("sha256");
+        let root = if durable {
+            &self.root
+        } else {
+            self.evidence_root.as_ref().unwrap_or(&self.root)
+        };
+        let directory = root.join("sha256");
         fs::create_dir_all(&directory)?;
         let mut temp = tempfile::NamedTempFile::new_in(&directory)?;
         let digest = transfer(&mut reader, &mut temp)?;
-        let path = self.path(&digest);
+        let path = directory.join(digest.hex());
         if durable {
             temp.as_file().sync_all()?;
         }
@@ -179,7 +213,7 @@ impl ContentStore {
     pub fn put_file(&self, path: &Path) -> Result<ContentDigest> {
         let mut file = fs::File::open(path)?;
         let digest = file_digest_with(&mut file, |file| transfer(file, &mut io::sink()))?;
-        if let Ok(existing) = self.open(&digest) {
+        if let Ok(existing) = fs::File::open(self.path(&digest)) {
             // Verify the existing entry; never repair corruption implicitly.
             if self.trusted(&digest, &existing)?.is_none() {
                 self.verify(&digest)?;
@@ -229,8 +263,8 @@ impl ContentStore {
 
     /// Size of a regular retained object, for bounded streaming containers.
     pub fn size(&self, digest: &ContentDigest) -> Result<u64> {
-        let metadata =
-            fs::symlink_metadata(self.path(digest)).context(Error::Integrity, digest.hex())?;
+        let metadata = fs::symlink_metadata(self.object_path(digest))
+            .context(Error::Integrity, digest.hex())?;
         if !metadata.is_file() {
             return Err(Error::Integrity(format!(
                 "{}: object is not a regular file",
@@ -241,7 +275,7 @@ impl ContentStore {
     }
 
     fn open(&self, digest: &ContentDigest) -> Result<fs::File> {
-        fs::File::open(self.path(digest)).context(Error::Integrity, digest.hex())
+        fs::File::open(self.object_path(digest)).context(Error::Integrity, digest.hex())
     }
 
     pub fn verify(&self, digest: &ContentDigest) -> Result<()> {

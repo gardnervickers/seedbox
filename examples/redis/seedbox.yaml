@@ -1,0 +1,15 @@
+name: redis-demo
+machines:
+  redis:
+    image: docker.io/library/redis:7.2
+    command: [redis-server, --appendonly, "yes", --save, ""]
+oracle:
+  build:
+    context: ./workload
+  environment:
+    REDIS_ADDRESS: redis:6379
+    SEEDBOX_PLANT_FAILURE: "0"
+network:
+  latency: 1ms
+simulator:
+  blocksPerProgressCall: 10000

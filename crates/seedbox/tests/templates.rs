@@ -1,4 +1,4 @@
-use seedbox::{
+use seedbox_application::{
     config,
     templates::{self, Template},
 };
@@ -15,15 +15,15 @@ fn generated_templates_are_self_contained_and_preserve_the_existing_etcd_checker
         let checked_in = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples")
             .join(name)
-            .join("compose.yaml");
+            .join("seedbox.yaml");
         config::load(&checked_in, &BTreeMap::new()).unwrap();
         let destination = directory.path().join(name);
         templates::init(&destination, template).unwrap();
-        let config = config::load(&destination.join("compose.yaml"), &BTreeMap::new()).unwrap();
+        let config = config::load(&destination.join("seedbox.yaml"), &BTreeMap::new()).unwrap();
         assert_eq!(config.services.len(), services);
-        assert_eq!(config.check.service, "client");
-        assert_eq!(config.seed, Some(1009));
-        match &config.services["client"].source {
+        assert_eq!(config.check.service, "oracle");
+        assert_eq!(config.seed, None);
+        match &config.services["oracle"].source {
             config::ImageSource::Build {
                 context,
                 dockerfile,
@@ -60,10 +60,10 @@ fn init_cli_refuses_to_overwrite_an_existing_project() {
             .unwrap()
     };
     assert!(command().status.success());
-    fs::write(destination.join("compose.yaml"), "user edits").unwrap();
+    fs::write(destination.join("seedbox.yaml"), "user edits").unwrap();
     assert!(!command().status.success());
     assert_eq!(
-        fs::read_to_string(destination.join("compose.yaml")).unwrap(),
+        fs::read_to_string(destination.join("seedbox.yaml")).unwrap(),
         "user edits"
     );
 }

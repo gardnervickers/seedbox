@@ -51,6 +51,18 @@ pub struct WorkerRequest {
     /// Write full-state page digests.
     pub digest: bool,
     pub host_control: Option<PathBuf>,
+    /// Initial host playback state, outside guest experiment identity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_paused: bool,
+    /// Resume an explicitly captured simulation timeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_checkpoint: Option<PathBuf>,
+    /// Exact retained interactive inputs for this timeline, consumed across segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interventions: Option<crate::intervention::History>,
+    /// Private live observation datagram socket; no observations are retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observations: Option<PathBuf>,
     /// Bytes retained per console stream.
     pub console_limit: Option<usize>,
     /// Chunk index entries retained per console stream.
@@ -59,10 +71,8 @@ pub struct WorkerRequest {
     /// Runtime checkpoints, strictly increasing; empty for none.
     pub checkpoint_at_ns: Vec<u64>,
     /// Machine threads for the windowed scheduler (performance only;
-    /// docs/windowed-scheduler.md).
+    /// docs/internals.md#parallel-scheduling).
     pub machine_workers: usize,
-    /// One CPU per machine thread, in thread order (performance only).
-    pub machine_cpus: Vec<usize>,
     /// Write raw console logs while the world runs.
     pub stream_console: bool,
     /// Write per-machine execution traces.
@@ -84,12 +94,15 @@ impl WorkerRequest {
             out,
             digest: false,
             host_control: None,
+            start_paused: false,
+            resume_checkpoint: None,
+            interventions: None,
+            observations: None,
             console_limit: None,
             log_chunk_limit: None,
             features: MachineFeatures::default(),
             checkpoint_at_ns: Vec::new(),
             machine_workers: 1,
-            machine_cpus: Vec::new(),
             stream_console: false,
             trace: false,
             performance: Performance::default(),
@@ -99,11 +112,14 @@ impl WorkerRequest {
 
     /// Check settings that depend on each other or have bounded ranges.
     pub fn validate(&self) -> Result<(), String> {
+        if self.start_paused && self.host_control.is_none() {
+            return Err("start-paused requires a host control endpoint".into());
+        }
+        if let Some(history) = &self.interventions {
+            history.validate()?;
+        }
         if !(1..=MAX_MACHINE_WORKERS).contains(&self.machine_workers) {
             return Err(format!("--machine-workers: use 1..{MAX_MACHINE_WORKERS}"));
-        }
-        if !self.machine_cpus.is_empty() && self.machine_cpus.len() != self.machine_workers {
-            return Err("--machine-cpus: give one CPU per machine worker".into());
         }
         Ok(())
     }
@@ -132,15 +148,35 @@ mod tests {
     }
 
     #[test]
+    fn paused_start_is_optional_and_requires_controls() {
+        let mut request = WorkerRequest::new("w".into(), 0, "o".into());
+        let mut legacy = serde_json::to_value(&request).unwrap();
+        legacy.as_object_mut().unwrap().remove("start_paused");
+        assert!(
+            !serde_json::from_value::<WorkerRequest>(legacy)
+                .unwrap()
+                .start_paused
+        );
+        request.start_paused = true;
+        assert!(request.validate().is_err());
+        request.host_control = Some("control".into());
+        request.validate().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<WorkerRequest>(&serde_json::to_vec(&request).unwrap())
+                .unwrap(),
+            request
+        );
+    }
+
+    #[test]
     fn worker_bounds() {
         let mut request = WorkerRequest::new("w".into(), 0, "o".into());
         request.validate().unwrap();
         request.machine_workers = 0;
         assert!(request.validate().is_err());
-        request.machine_workers = 2;
-        request.machine_cpus = vec![1];
-        assert!(request.validate().is_err());
-        request.machine_cpus = vec![1, 2];
+        request.machine_workers = MAX_MACHINE_WORKERS;
         request.validate().unwrap();
+        request.machine_workers += 1;
+        assert!(request.validate().is_err());
     }
 }

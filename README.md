@@ -1,145 +1,85 @@
 # Seedbox
 
-**Run real Linux applications. Reproduce the same execution.**
+> **⚠️ Early, buggy software.** 
+> I vibe-coded the vast majority of this so temper your expectations. Expect slop, bugs, and dead code. Nothing api-wise is stable yet. 
 
-Seedbox runs each service in its own Linux virtual machine and controls time,
-networking and disk faults. Describe your application with Compose, choose a
-seed, and replay a failure using the exact inputs retained by the run.
+Seedbox runs Linux applications in virtual machines with controlled time,
+networking, and disk faults. A seed and recorded inputs let you repeat a
+simulation and compare its results.
 
-[Quick start](#quick-start) · [Your application](#your-application) · [Runtime guide](docs/runtime.md) · [Contributing](docs/contributing.md)
+![Inject and heal an etcd network partition in the Seedbox TUI](docs/assets/seedbox-tui.gif)
 
-## Quick start
+## Try it
 
-You need **Nix** for the build tools and a running **Docker-compatible engine**
-(such as Docker or Podman) for application images. Apple Silicon Macs also need
-Apple's Command Line Tools. Linux x86-64 needs read/write access to `/dev/kvm`.
-
-Build the guest assets and Seedbox once:
+Use an Apple Silicon Mac or Linux x86-64 host with access to `/dev/kvm`.
+Install Nix and start Docker or Podman. Macs also need Apple's Command Line Tools.
 
 ```sh
 nix develop
-bash tools/build-assets.sh
+cargo xtask build-assets
 cargo build --release
+./target/release/seedbox run examples/etcd --paused --detach
+./target/release/seedbox tui <sim-id>
 ```
 
-Then run the etcd example:
+The build embeds the guest kernel and helpers. Running Seedbox does not invoke
+Nix or a compiler. Docker or Podman prepares application images.
+
+If no server is running, the CLI asks before starting a persistent local one.
+For scripts, start `seedbox serve` explicitly. `seedbox shutdown` stops the server
+and its simulations.
+
+In the TUI, press **Space** to resume. Press **f**, choose **Partition network**,
+put `n1` on one side and `n2` / `n3` on the other, and submit with **Enter**.
+Choose **Heal fault** to restore communication. Fault menus pause the simulation
+and restore its previous playback state when closed. Click a pane to focus it;
+use the mouse wheel to scroll logs. The **3 timeline** tab lets you edit recorded
+faults and submit a new simulation.
+
+## Run your application
+
+Start with [the etcd example](examples/etcd/seedbox.yaml), or generate a project:
 
 ```sh
-./target/release/seedbox --kernel /path/to/kernel examples/etcd/compose.yaml
+./target/release/seedbox init my-test --template etcd
+./target/release/seedbox run my-test
 ```
 
-The asset command prints the directory containing `kernel`. You can also omit
-`--kernel` to use that locally built kernel automatically:
+`seedbox.yaml` defines machines and a separate **oracle**: the program that drives
+the test and checks its results. Oracle exit code zero means pass; nonzero means
+fail. An execution that ends without an oracle exit has no completed test verdict.
+Images must match the guest architecture: `linux/arm64` on Apple Silicon,
+`linux/amd64` on Linux x86-64. Pull private images with Docker or Podman first;
+Seedbox does not integrate registry credential helpers.
+
+Seeds differ in timing by default: timer jitter, network jitter and a seeded
+start stagger. Set `network.jitter`, `schedule.timerJitter` or
+`schedule.startStagger` to `0ns` in `seedbox.yaml` to turn one off.
+
+## Inspect and repeat
+
+Using `target/release/seedbox` as `seedbox`:
 
 ```sh
-./target/release/seedbox examples/etcd
+seedbox get simulations
+seedbox describe simulation <sim-id>
+seedbox logs <sim-id>                    # Recent application output, all machines.
+seedbox logs <sim-id> n1 --follow         # Stream one machine's output.
+seedbox events <sim-id> --follow          # Structured simulator events.
+seedbox replay <sim-id>                  # Rerun and compare results.
+seedbox describe simulation <sim-id> > simulation.yaml
+seedbox run simulation.yaml              # Submit the saved definition.
 ```
 
-Seedbox finds your Docker or Podman socket, builds the example's workload oracle
-with the engine's normal cache, prepares the images, and runs the Linux guests.
-Progress appears on stderr. Set `DOCKER_HOST` if your engine uses a custom socket.
-Application progress comes from automatic binary instrumentation on both
-platforms; see the [determinism catalogue](docs/determinism-catalogue.md).
+An omitted seed is chosen randomly. `rerun` repeats the oracle test; `replay`
+also compares retained results and reports `MATCH`, `MISMATCH`, or
+`NOT_COMPARABLE`. Use `seedbox help` or `seedbox help COMMAND` for options.
 
-On Linux, `--watchdog-ms 200` raises the host CPU interval (default 20 ms)
-after which a guest that makes no exits is interrupted so the engine can
-report where it is stuck. It changes performance only and can also be set on
-`replay` or `explore`.
+Simulation IDs, observations, and bounded log buffers last for one server
+session. Binary assets survive restarts in the server's cache. Saved YAML needs
+those assets; it is not a portable bundle. `SEEDBOX_STATE` selects the server
+storage directory. The cache is not automatically pruned.
 
-**The kernel is the only separate guest asset.** The release executable embeds
-its supervisor and filesystem tool. No private GitHub access or runtime guest
-build is needed. Locally built kernels live under `/tmp/seedbox-UID/ARCH` (the invoking user's UID, even under `sudo`); rebuild
-if the OS removes them. Seedbox never downloads kernels automatically.
-
-
-Guest time starts at the latest build time recorded in the prepared images, so
-independent fresh runs of the same images start at the same time and can be
-compared directly. Set `x-seedbox.wall_clock_epoch` (Unix seconds, at least
-86400) in the Compose file to choose the start time. Replay always retains the
-original guest clock.
-
-### Your application
-
-Compose can reference an existing image or a Dockerfile build context:
-
-```yaml
-services:
-  database:
-    image: quay.io/coreos/etcd:v3.5.2
-  oracle:
-    build: ./workload
-```
-
-The full [etcd example](examples/etcd/compose.yaml) adds commands, the seed, limits,
-and the workload check. Edit the oracle and run the same command again: the
-engine reuses unchanged build layers. Seedbox has no separate source-hash cache.
-Images must match the guest platform: `linux/arm64` on Apple Silicon or
-`linux/amd64` on Linux x86-64. Existing local images are used before registry pulls.
-Build contexts honor `.dockerignore`; `build: {context: ..., dockerfile: ...}`
-selects a different Dockerfile inside the context. Docker uses BuildKit; Podman uses its native builder. Dockerfile feature support
-follows the selected engine. Pull private images with your engine first; registry
-credential helpers are not yet integrated into Seedbox.
-
-### Replay and inspect
-
-A run prints its result and directory. Replay needs neither the container engine
-nor the original kernel, source files or image registry:
-
-```sh
-./target/release/seedbox replay .seedbox/runs/ATTEMPT
-./target/release/seedbox logs .seedbox/runs/ATTEMPT
-./target/release/seedbox inspect .seedbox/runs/ATTEMPT
-```
-
-Retained runs keep their own inputs. Delete run directories when you no longer
-need them; clearing temporary build assets does not remove run data.
-
-## Learn more
-
-| Topic | Guide |
-| --- | --- |
-| Configuration, faults and replay | [Runtime guide](docs/runtime.md) |
-| Flags, defaults and advanced usage | [CLI reference](docs/cli-reference.md) |
-| Build or replace guest assets | [Asset builds](tools/runtime/README.md) |
-| Platform requirements | [Mac](tools/mac-runtime/README.md) · [Linux](tools/linux-runtime/README.md) |
-| Design and direction | [Vision](docs/vision.md) |
-| Determinism mechanisms and their invariants | [Technique catalogue](docs/determinism-catalogue.md) |
-
-Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
-prepared inputs and each `SBXLAUNCH4` boot recipe. `x-seedbox.wall_clock_epoch`
-sets it explicitly (at least 86400, because Linux cannot set a wall clock earlier
-than the guest's uptime). Otherwise it is the latest `created` time in any
-prepared image's config or history, and at least 86400. Builders stamp those
-times after each step, so a certificate minted during a build is already valid,
-and the same images always start at the same time on every host; preparation
-never samples the host clock. The shared supervisor sets `CLOCK_REALTIME` before
-the launch barrier on x86 and arm64. Replay uses retained bytes. Rebuilt images
-can change the epoch and witnesses; replay of recorded inputs is unchanged. Both application kernels support unprivileged user namespaces,
-including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.
-The supervisor recursively mounts the image at the namespace root before
-entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
-
-## Layout
-
-| Path | Contents |
-| --- | --- |
-| [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
-| `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
-| `crates/seedbox-engine-protocol/` | Worker requests, world configuration and retained evidence formats; no execution policy |
-| `crates/seedbox-artifacts/` | Offline records, content storage, logs, comparison and bundles; no container engine or hypervisor dependency |
-| `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, the shared world coordinator and the [windowed scheduler](docs/windowed-scheduler.md) |
-| `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
-| `tools/mac-runtime/` | Mac signing and platform notes |
-| `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |
-| `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
-| `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
-| `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
-| `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)) |
-| [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
-
-## Contributor checks
-
-Run `nix develop --command bash harness/check.sh` for portable checks, or name
-the platform suites to run: `bash harness/check.sh linux` on a Linux KVM host,
-`bash harness/check.sh mac` on Apple Silicon (`--help` lists every suite).
-See [Contributing](docs/contributing.md) for Linux host validation and fixtures.
+[Design](docs/design.md) explains the architecture and principles.
+[Technical details](docs/internals.md) covers determinism, fault ordering,
+checkpoints, and development checks.

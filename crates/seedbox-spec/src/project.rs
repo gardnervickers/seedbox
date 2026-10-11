@@ -1,0 +1,235 @@
+//! Human-authored `seedbox.yaml`, before local paths and image defaults resolve.
+//!
+//! This format deliberately excludes execution options and retained recordings.
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, num::NonZeroU32, path::PathBuf};
+
+/// Application machines and the independently declared oracle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Project {
+    pub name: String,
+    #[serde(default)]
+    pub machines: BTreeMap<String, Machine>,
+    pub oracle: Machine,
+    #[serde(default)]
+    pub network: NetworkDefaults,
+    #[serde(default)]
+    pub simulator: SimulatorDefaults,
+    #[serde(default)]
+    pub schedule: ScheduleDefaults,
+}
+
+/// Launch inputs shared by application machines and the oracle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "MachineFields"
+)]
+pub struct Machine {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<Build>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    pub environment: BTreeMap<String, Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    pub files: Vec<InitialFile>,
+    pub volumes: BTreeMap<String, Volume>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MachineFields {
+    image: Option<String>,
+    build: Option<Build>,
+    entrypoint: Option<Vec<String>>,
+    command: Option<Vec<String>>,
+    #[serde(default)]
+    environment: BTreeMap<String, Option<String>>,
+    working_directory: Option<String>,
+    user: Option<String>,
+    #[serde(default)]
+    files: Vec<InitialFile>,
+    #[serde(default)]
+    volumes: BTreeMap<String, Volume>,
+}
+
+impl TryFrom<MachineFields> for Machine {
+    type Error = String;
+
+    fn try_from(fields: MachineFields) -> Result<Self, Self::Error> {
+        if fields.image.is_some() == fields.build.is_some() {
+            return Err("a machine requires exactly one of image or build".into());
+        }
+        if fields.image.as_ref().is_some_and(|image| {
+            image.is_empty() || image.chars().any(char::is_whitespace) || image.contains("://")
+        }) {
+            return Err(
+                "image must be a nonempty registry reference without a transport prefix".into(),
+            );
+        }
+        Ok(Self {
+            image: fields.image,
+            build: fields.build,
+            entrypoint: fields.entrypoint,
+            command: fields.command,
+            environment: fields.environment,
+            working_directory: fields.working_directory,
+            user: fields.user,
+            files: fields.files,
+            volumes: fields.volumes,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Build {
+    pub context: PathBuf,
+    #[serde(default = "dockerfile")]
+    pub dockerfile: PathBuf,
+}
+
+fn dockerfile() -> PathBuf {
+    "Dockerfile".into()
+}
+
+/// A file or directory captured at submission, never a live host mount.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InitialFile {
+    pub source: PathBuf,
+    pub target: String,
+}
+
+/// A fresh writable disk scoped to one machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Volume {
+    pub target: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkDefaults {
+    #[serde(default = "latency")]
+    pub latency: String,
+    /// Omitted means a tenth of the latency; `0ns` turns it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<String>,
+}
+
+fn latency() -> String {
+    "1ms".into()
+}
+
+impl Default for NetworkDefaults {
+    fn default() -> Self {
+        Self {
+            latency: latency(),
+            jitter: None,
+        }
+    }
+}
+
+/// Seed diversity in timing; omitted values use the new-simulation defaults
+/// and `0ns` turns one off.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScheduleDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timer_jitter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_stagger: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SimulatorDefaults {
+    #[serde(default = "progress_budget")]
+    pub blocks_per_progress_call: NonZeroU32,
+}
+
+fn progress_budget() -> NonZeroU32 {
+    NonZeroU32::new(10_000).expect("the default progress budget is nonzero")
+}
+
+impl Default for SimulatorDefaults {
+    fn default() -> Self {
+        Self {
+            blocks_per_progress_call: progress_budget(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oracle_has_the_same_launch_options_without_a_machine_reference() {
+        let project: Project = serde_yaml_ng::from_str(
+            "name: test\noracle:\n  build:\n    context: ./oracle\n  entrypoint: []\n  environment:\n    REMOVE: null\n    KEEP: 'yes'\n",
+        ).unwrap();
+        assert!(project.machines.is_empty());
+        assert_eq!(project.oracle.entrypoint, Some(vec![]));
+        assert_eq!(project.oracle.command, None);
+        assert_eq!(project.oracle.environment["REMOVE"], None);
+        assert_eq!(project.oracle.environment["KEEP"].as_deref(), Some("yes"));
+        assert_eq!(
+            project.oracle.build.unwrap().dockerfile,
+            PathBuf::from("Dockerfile")
+        );
+        assert_eq!(project.simulator.blocks_per_progress_call.get(), 10_000);
+        assert_eq!(project.network.latency, "1ms");
+        assert_eq!(project.network.jitter, None);
+        assert_eq!(project.schedule, ScheduleDefaults::default());
+    }
+
+    #[test]
+    fn timing_diversity_is_authored_as_durations() {
+        let project: Project = serde_yaml_ng::from_str(
+            "name: test\noracle: {image: oracle}\nnetwork: {jitter: 0ns}\nschedule: {timerJitter: 5us, startStagger: 0ns}\n",
+        )
+        .unwrap();
+        assert_eq!(project.network.jitter.as_deref(), Some("0ns"));
+        assert_eq!(project.schedule.timer_jitter.as_deref(), Some("5us"));
+        assert_eq!(project.schedule.start_stagger.as_deref(), Some("0ns"));
+        assert!(serde_yaml_ng::from_str::<Project>(
+            "name: test\noracle: {image: oracle}\nschedule: {stopTolerance: 1us}\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn machine_source_is_exclusive_and_required() {
+        for machine in ["{}", "{image: app, build: {context: .}}", "{image: ''}"] {
+            assert!(serde_yaml_ng::from_str::<Machine>(machine).is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_options_and_advanced_knobs_are_not_authoring_inputs() {
+        for extra in [
+            "limits: {wallTime: 5m}",
+            "seed: 1",
+            "startPaused: true",
+            "network: {bandwidthBps: 1000}",
+        ] {
+            let yaml = format!("name: test\noracle: {{image: oracle}}\n{extra}\n");
+            assert!(
+                serde_yaml_ng::from_str::<Project>(&yaml).is_err(),
+                "{extra}"
+            );
+        }
+        assert!(serde_yaml_ng::from_str::<SimulatorDefaults>("blocksPerProgressCall: 0").is_err());
+    }
+}

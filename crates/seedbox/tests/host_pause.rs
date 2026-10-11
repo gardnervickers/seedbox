@@ -1,170 +1,190 @@
-//! Hardware acceptance using exact retained inputs, with the ordinary CLI owning
-//! admission, CPU/SMT leases, wall limits and cancellation.
+//! Hardware acceptance of server-owned pause/resume using exact retained inputs.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use seedbox_api::{
+    ComparisonStatus, ControlCommand, ControlRequest, ControlState, Phase, PlaybackRate,
+    PlaybackStatus, Simulation, SimulationId, TestVerdict,
+};
+use seedbox_client::Client;
 use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::{Child, Command, Output},
+    io::{BufRead, BufReader},
+    path::Path,
+    process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
 };
 
-fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_seedbox"))
+fn cli(binary: &Path, state: &Path) -> Command {
+    let mut command = Command::new(binary);
+    command
+        .env_remove("SEEDBOX_VMM")
+        .env("SEEDBOX_STATE", state);
+    command
 }
 
-fn attempt(output: &Output) -> PathBuf {
+fn simulation(output: Output) -> Simulation {
     assert!(
         output.status.success(),
-        "{}",
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    PathBuf::from(
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .find_map(|line| line.split_once(": ").map(|(_, path)| path))
-            .expect("CLI outcome line"),
-    )
-}
-
-fn record(run: &Path) -> serde_json::Value {
-    let output = cli().args(["inspect", "--json"]).arg(run).output().unwrap();
-    assert!(output.status.success());
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-struct Running(Child);
-impl Drop for Running {
-    fn drop(&mut self) {
-        if self.0.try_wait().unwrap().is_none() {
-            // Let the executor reap its engine and restore the owned host state.
-            unsafe { libc::kill(self.0.id() as i32, libc::SIGTERM) };
-            self.0.wait().unwrap();
+async fn set_rate(client: &Client, id: &SimulationId, rate: PlaybackRate) -> PlaybackStatus {
+    let request = ControlRequest {
+        request_id: Client::request_id().unwrap(),
+        command: ControlCommand::SetRate { rate },
+    };
+    let mut receipt = client.request_control(id, &request).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match receipt.state {
+            ControlState::Acknowledged {
+                status,
+                error: None,
+                ..
+            } => {
+                assert_eq!(status.rate, rate);
+                return status;
+            }
+            ControlState::Accepted => {}
+            state => panic!("playback command failed: {state:?}"),
         }
+        assert!(
+            Instant::now() < deadline,
+            "playback command not acknowledged"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        receipt = client
+            .control_receipt(id, &request.request_id)
+            .await
+            .unwrap();
     }
 }
 
 #[test]
-fn paused_and_resumed_replay_has_identical_witness_and_full_state() {
-    assert_eq!(std::env::consts::OS, "linux");
-    let source = PathBuf::from(
-        std::env::var_os("SEEDBOX_HOST_PAUSE_RUN")
-            .expect("retained full-state run made with the new host-control engine"),
-    );
-    let source_state = PathBuf::from(
-        std::env::var_os("SEEDBOX_HOST_PAUSE_STATE").expect("source content store state directory"),
-    );
-    assert!(record(&source)["report"]["full_state"].is_object());
-    let scratch = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
-    let bundle = scratch.path().join("input.tar");
-    let state = scratch.path().join("state");
-    let exported = cli()
-        .arg("export")
-        .arg(&source)
-        .arg("--state")
-        .arg(source_state)
-        .arg("-o")
-        .arg(&bundle)
-        .output()
-        .unwrap();
-    assert!(
-        exported.status.success(),
-        "{}",
-        String::from_utf8_lossy(&exported.stderr)
-    );
-    let imported = attempt(
-        &cli()
-            .arg("import")
-            .arg(&bundle)
-            .arg("--state")
-            .arg(&state)
+fn paused_start_and_resume_has_identical_witness_and_full_state() {
+    let binary = std::env::var_os("SEEDBOX_TEST_CLI")
+        .expect("harness/check.sh supplies the current release CLI");
+    let reports =
+        std::env::var_os("SEEDBOX_TEST_REPORT_DIR").expect("set a fresh SEEDBOX_TEST_REPORT_DIR");
+    let state = Path::new(&reports).join("pause-server");
+    let binary = Path::new(&binary);
+    let _server = Server::start(binary, &state);
+    let workload = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../harness/acceptance/workloads/key-value.yaml");
+    let source = simulation(
+        cli(binary, &state)
+            .arg("run")
+            .arg(&workload)
+            .args(["--seed", "1009", "--json"])
             .output()
             .unwrap(),
     );
-    let replay = || {
-        let mut command = cli();
-        command
-            .arg("replay")
-            .arg(&imported)
-            .arg("--state")
-            .arg(&state);
-        command
-    };
-    let baseline = record(&attempt(&replay().output().unwrap()));
-    assert_eq!(baseline["replay"]["status"], "MATCH");
-    let stdout = scratch.path().join("paused.stdout");
-    let stderr = scratch.path().join("paused.stderr");
-    let mut running = Running(
-        replay()
-            .stdout(fs::File::create(&stdout).unwrap())
-            .stderr(fs::File::create(&stderr).unwrap())
-            .spawn()
+    assert_eq!(source.status.verdict(), TestVerdict::Passed);
+    let rerun = simulation(
+        cli(binary, &state)
+            .arg("run")
+            .arg(&workload)
+            .args(["--seed", "1009", "--paused", "--detach", "--json"])
+            .output()
             .unwrap(),
     );
-    let started = Instant::now();
-    let paused = loop {
-        assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "no live boundary endpoint"
-        );
-        assert!(
-            running.0.try_wait().unwrap().is_none(),
-            "{}",
-            fs::read_to_string(&stderr).unwrap()
-        );
-        let candidate = fs::read_dir(state.join("runs"))
-            .unwrap()
-            .filter_map(|entry| {
-                let path = entry.unwrap().path();
-                path.join("output/host-control").is_file().then_some(path)
-            })
-            .next();
-        if let Some(run) = candidate {
-            let response = cli().arg("pause").arg(&run).output().unwrap();
-            if response.status.success() {
-                assert_eq!(
-                    String::from_utf8_lossy(&response.stdout),
-                    format!("PAUSED: {}\n", run.display())
-                );
-                break run;
+    let client = Client::connect_to(&state.join("server.sock")).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let id = &rerun.metadata.id;
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            match client.playback(id).await {
+                Ok(observation) => {
+                    assert!(!observation.state.terminal, "run ended before resume");
+                    assert_eq!(observation.state.rate, PlaybackRate::Paused);
+                    assert_eq!(observation.state.position.completed_rounds, 0);
+                    assert_eq!(observation.state.position.simulated_time_ns, 0);
+                    break;
+                }
+                Err(seedbox_client::Error::Rejected {
+                    code: seedbox_api::ErrorCode::Unavailable,
+                    ..
+                }) => {}
+                Err(error) => panic!("playback unavailable: {error}"),
             }
+            let current = client.describe(id).await.unwrap();
+            assert_ne!(current.status.phase, Phase::Completed, "{current:?}");
+            assert!(Instant::now() < deadline, "no live playback endpoint");
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    // Two cycles ensure a resumed world can reach another acknowledged boundary.
-    for cycle in 0..2 {
-        if cycle != 0 {
-            assert!(cli().arg("pause").arg(&paused).status().unwrap().success());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(
-            running.0.try_wait().unwrap().is_none(),
-            "world ended while paused"
+        let paused = set_rate(&client, id, PlaybackRate::Paused).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let observation = client.playback(id).await.unwrap();
+        assert_eq!(observation.state.rate, PlaybackRate::Paused);
+        assert_eq!(observation.state.position, paused.position);
+        assert_ne!(
+            client.describe(id).await.unwrap().status.phase,
+            Phase::Completed
         );
-        assert!(cli().arg("resume").arg(&paused).status().unwrap().success());
-        if cycle == 0 {
-            std::thread::sleep(Duration::from_millis(10));
+        set_rate(&client, id, PlaybackRate::Unlimited).await;
+
+        let deadline = Instant::now() + Duration::from_secs(600);
+        loop {
+            let current = client.describe(id).await.unwrap();
+            if current.status.phase == Phase::Completed {
+                assert_eq!(current.status.verdict(), TestVerdict::Passed, "{current:?}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "rerun exceeded test bound");
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }
-    loop {
-        if let Some(status) = running.0.try_wait().unwrap() {
-            assert!(status.success(), "{}", fs::read_to_string(&stderr).unwrap());
-            break;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(120),
-            "replay exceeded test bound"
+        let comparison = client.compare(&source.metadata.id, id).await.unwrap();
+        assert_eq!(comparison.status, ComparisonStatus::Match);
+        assert!(comparison.outcome_matches);
+        assert_eq!(comparison.witness_matches, Some(true));
+        assert_eq!(comparison.full_state_matches, Some(true));
+    });
+}
+
+/// The fixture owns its server; retained reports outlive the process.
+struct Server(Child);
+impl Server {
+    fn start(binary: &Path, state: &Path) -> Self {
+        let mut server = Self(
+            cli(binary, state)
+                .args(["serve", "--startup-handshake", "--full-state"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
         );
-        std::thread::sleep(Duration::from_millis(10));
+        let mut ready = String::new();
+        BufReader::new(server.0.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        let ready: serde_json::Value = serde_json::from_str(&ready).unwrap();
+        assert_eq!(ready["status"], "ready");
+        server
     }
-    let result = record(&paused);
-    assert_eq!(result["replay"]["status"], "MATCH");
-    assert_eq!(result["outcome"], baseline["outcome"]);
-    assert_eq!(result["identity"], baseline["identity"]);
-    assert_eq!(result["report"]["witness"], baseline["report"]["witness"]);
-    assert_eq!(
-        result["report"]["full_state"],
-        baseline["report"]["full_state"]
-    );
-    assert!(!paused.join("output/host-control").exists());
+}
+impl Drop for Server {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        // SAFETY: this is the unreaped child owned by this fixture.
+        unsafe {
+            libc::kill(self.0.id() as i32, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if self.0.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }

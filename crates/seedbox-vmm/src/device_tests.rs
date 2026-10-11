@@ -29,6 +29,31 @@ fn uart_baud_register_writes_do_not_enter_console_output() {
     assert_eq!(uart.out, b"A");
 }
 
+#[test]
+fn live_uart_discards_bytes_without_changing_registers_or_transmission_observation() {
+    let mut retained = devices::Uart::default();
+    let mut live = devices::Uart::default();
+    live.discard_output = true;
+    live.output_limit = Some(0);
+    for (register, value) in [(3, 0x80), (0, 12), (3, 0), (1, 2), (0, 0), (0, 255)] {
+        retained.write(register, value).unwrap();
+        live.write(register, value).unwrap();
+        assert_eq!(retained.transmitted, live.transmitted);
+        assert_eq!(retained.edge(), live.edge());
+        for register in 0..8 {
+            assert_eq!(retained.read(register), live.read(register));
+        }
+    }
+    assert_eq!(live.transmitted, 2);
+    assert!(live.out.is_empty());
+    assert_eq!(retained.out, [0, 255]);
+    let snapshot = live.snapshot();
+    live.transmit(b'x').unwrap();
+    live.restore(&snapshot);
+    assert_eq!(live.transmitted, 2);
+    assert!(live.discard_output && live.out.is_empty());
+}
+
 fn rx_device(available: bool) -> (virtio_net::VirtioNet, Vec<u8>) {
     let mut net = virtio_net::VirtioNet::new([2, 0, 0, 0, 0, 1]);
     let mut memory = vec![0; 4096];

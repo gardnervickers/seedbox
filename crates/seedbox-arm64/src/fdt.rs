@@ -148,7 +148,7 @@ fn build_tree(
     };
     t.node("");
     t.string("compatible", "seedbox,arm64-pv");
-    t.string("model", "Seedbox arm64 PV ABI 2");
+    t.string("model", "Seedbox arm64 PV ABI 3");
     t.cells("#address-cells", &[2]);
     t.cells("#size-cells", &[2]);
     t.cells("interrupt-parent", &[1]);
@@ -215,7 +215,7 @@ fn build_tree(
     t.string("method", "hvc");
     t.end();
     t.node("seedbox-time@a000000");
-    t.string("compatible", "seedbox,pv-time-v2");
+    t.string("compatible", "seedbox,pv-time-v3");
     t.cells(
         "reg",
         &[

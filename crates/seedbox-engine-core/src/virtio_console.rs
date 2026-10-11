@@ -7,7 +7,8 @@ const LIMIT: usize = 65536;
 type Result<T> = std::result::Result<T, String>;
 
 /// Preserve the two existing console contracts during extraction.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Policy {
     Application,
     Console,
@@ -15,6 +16,19 @@ pub enum Policy {
 
 #[derive(Clone)]
 pub struct Console {
+    policy: Policy,
+    device_ready: bool,
+    port_ready: bool,
+    guest_open: bool,
+    rx: VecDeque<u8>,
+    control_rx: VecDeque<Vec<u8>>,
+    tx_bytes: u64,
+    rx_dma_bytes: u64,
+}
+/// Owned checkpoint metadata; constructor-owned policy is verified on restore.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
     policy: Policy,
     device_ready: bool,
     port_ready: bool,
@@ -33,6 +47,36 @@ pub struct Output {
 }
 
 impl Console {
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            policy: self.policy,
+            device_ready: self.device_ready,
+            port_ready: self.port_ready,
+            guest_open: self.guest_open,
+            rx: self.rx.clone(),
+            control_rx: self.control_rx.clone(),
+            tx_bytes: self.tx_bytes,
+            rx_dma_bytes: self.rx_dma_bytes,
+        }
+    }
+
+    /// Consume a configured model; failure never publishes partially restored state.
+    pub fn restore_snapshot(self, snapshot: Snapshot) -> std::result::Result<Self, String> {
+        if snapshot.policy != self.policy || snapshot.rx.len() > LIMIT {
+            return Err("console snapshot policy or backlog mismatch".into());
+        }
+        Ok(Self {
+            policy: snapshot.policy,
+            device_ready: snapshot.device_ready,
+            port_ready: snapshot.port_ready,
+            guest_open: snapshot.guest_open,
+            rx: snapshot.rx,
+            control_rx: snapshot.control_rx,
+            tx_bytes: snapshot.tx_bytes,
+            rx_dma_bytes: snapshot.rx_dma_bytes,
+        })
+    }
+
     pub fn new(policy: Policy) -> Self {
         Self {
             policy,

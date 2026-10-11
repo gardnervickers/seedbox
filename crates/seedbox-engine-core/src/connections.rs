@@ -14,14 +14,14 @@ const MINIMAL_TCP_FLAGS: usize = 14 + 20 + 13;
 type Endpoint = (usize, [u8; 4], u16);
 type Tuple = (Endpoint, Endpoint);
 pub type Identity = (Tuple, u64);
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Session {
     id: u64,
     syn: [Option<u32>; 2],
     fin: [bool; 2],
     closed: bool,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Selection {
     pub fault_id: u32,
     pub connection: Connection,
@@ -29,8 +29,9 @@ pub struct Selection {
     pub matched: u64,
     pub dropped: u64,
 }
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Connections {
+    #[serde(with = "crate::checkpoint::ordered_map")]
     sessions: BTreeMap<Tuple, Session>,
     next: u64,
     evicted: u64,

@@ -8,13 +8,63 @@ pub fn dispatch(args: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
     if args.next().as_deref() != Some(std::ffi::OsStr::new("__engine")) {
         return None;
     }
-    Some(match args.next().as_deref().and_then(|arg| arg.to_str()) {
-        Some(seedbox::engine::INTERNAL_WORKER_V1) => world_worker(executable, args.collect()),
+    let contract = args.next();
+    let mut args = args.peekable();
+    if args.peek().is_some_and(|arg| arg == "--owner-pipe") {
+        args.next();
+        if let Err(message) = watch_owner() {
+            return Some(error(&message));
+        }
+    }
+    Some(match contract.as_deref().and_then(|arg| arg.to_str()) {
+        Some(seedbox_application::engine::INTERNAL_WORKER_V1) => {
+            world_worker(executable, args.collect())
+        }
         Some("arm64-fixture-v1") => arm_fixture(executable, args.collect()),
         Some("arm64-machine-v2") => arm_machine(args.collect()),
-        Some(seedbox::engine::ARM_WORLD_V1) => arm_world(executable, args.collect()),
+        Some(seedbox_application::engine::ARM_WORLD_V1) => arm_world(executable, args.collect()),
         _ => error("unsupported internal engine contract; use the CLI retained with this run"),
     })
+}
+
+/// The parent owns the only write end. Reading happens independently of guest
+/// execution, so even a guest with no exits cannot outlive its server. Nested
+/// ARM workers inherit the world's process group and are stopped with it.
+#[cfg(unix)]
+fn watch_owner() -> Result<(), String> {
+    use std::io::Read;
+    // SAFETY: these process identity queries have no pointer arguments.
+    let pid = unsafe { libc::getpid() };
+    if unsafe { libc::getpgrp() } != pid {
+        return Err("owned worker must lead its process group".into());
+    }
+    std::thread::Builder::new()
+        .name("owner-lifetime".into())
+        .spawn(move || {
+            let mut input = std::io::stdin().lock();
+            let mut byte = [0];
+            loop {
+                match input.read(&mut byte) {
+                    Ok(0) => break,
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            // SAFETY: this is our still-live process group, not a persisted PID that
+            // might have been recycled. SIGKILL releases hypervisor ownership even
+            // when other worker threads are blocked.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        })
+        .map_err(|e| format!("watch execution owner: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn watch_owner() -> Result<(), String> {
+    Err("owned execution requires Unix".into())
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -24,6 +74,10 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
         let mut output = None;
         let mut seed = None;
         let mut host_control = None;
+        let mut start_paused = false;
+        let mut observations = None;
+        let mut interventions = None;
+        let mut resume_checkpoint = None;
         let mut full_state = false;
         let mut console_limit = 1024 * 1024 * 1024;
         let mut machine_workers = 1;
@@ -55,6 +109,34 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
                         args.next().ok_or("--host-control needs a path")?,
                     ))
                 }
+                "--resume-checkpoint" => {
+                    resume_checkpoint = Some(std::path::PathBuf::from(
+                        args.next().ok_or("--resume-checkpoint needs a path")?,
+                    ));
+                }
+                "--interventions" => {
+                    use std::io::Read;
+                    let path =
+                        std::path::Path::new(args.next().ok_or("--interventions needs a path")?);
+                    let limit = seedbox_engine_protocol::intervention::MAX_BYTES;
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(path)
+                        .and_then(|file| file.take(limit as u64 + 1).read_to_end(&mut bytes))
+                        .map_err(|e| format!("interventions {}: {e}", path.display()))?;
+                    if bytes.len() > limit {
+                        return Err(format!("interventions exceed {limit} bytes"));
+                    }
+                    interventions = Some(
+                        serde_json::from_slice(&bytes)
+                            .map_err(|e| format!("interventions {}: {e}", path.display()))?,
+                    );
+                }
+                "--observations" => {
+                    observations = Some(std::path::PathBuf::from(
+                        args.next().ok_or("--observations needs a path")?,
+                    ));
+                }
+                "--start-paused" => start_paused = true,
                 "--digest" => full_state = true,
                 "--stream-console" => {}
                 "--console-limit" => {
@@ -83,6 +165,10 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
             seed: seed.ok_or("worker requires --seed")?,
             full_state,
             host_control,
+            start_paused,
+            interventions,
+            resume_checkpoint,
+            observations,
             console_limit,
             machine_workers,
         };

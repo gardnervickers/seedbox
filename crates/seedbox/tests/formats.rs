@@ -1,6 +1,6 @@
 //! Run manifests are strict: unsupported versions and unknown fixed fields are
 //! rejected even when their checksums are recomputed. No guest execution.
-use seedbox::{
+use seedbox_application::{
     orchestration::{inspect, RunRecord},
     store::ContentDigest,
 };
@@ -8,7 +8,7 @@ use std::{fs, path::Path, process::Command};
 
 #[allow(dead_code)]
 mod record_fixture {
-    use seedbox as sb;
+    use seedbox_application as sb;
     include!("../../seedbox-artifacts/tests/support/diff_fixture.rs");
 
     pub(super) fn record() -> sb::orchestration::RunRecord {
