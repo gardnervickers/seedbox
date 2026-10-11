@@ -2349,3 +2349,22 @@ simulated time: 1s
 "
     );
 }
+
+#[test]
+fn server_machine_workers_are_bounded_and_documented() {
+    let directory = tempfile::tempdir().unwrap();
+    for count in ["0", "33", "four"] {
+        let output = seedbox(&["serve", "--machine-workers", count], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--machine-workers"));
+    }
+    let output = seedbox(
+        &["serve", "--machine-workers", "4", "--help"],
+        directory.path(),
+    );
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("Performance (never changes results)"));
+    assert!(help.contains("--machine-workers"));
+    assert!(help.contains("[default: 1]"));
+}

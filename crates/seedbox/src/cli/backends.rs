@@ -22,6 +22,14 @@ pub enum Executor {
     Mac(seedbox_application::mac::MacExecutor),
 }
 impl Executor {
+    pub(super) fn with_machine_workers(self, workers: u32) -> Result<Self> {
+        Ok(match self {
+            Self::Linux(executor) => Self::Linux(executor.with_machine_workers(workers)?),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            Self::Mac(executor) => Self::Mac(executor.with_machine_workers(workers)?),
+        })
+    }
+
     fn backend(&self) -> &dyn ExecutionBackend {
         match self {
             Self::Linux(e) => e,

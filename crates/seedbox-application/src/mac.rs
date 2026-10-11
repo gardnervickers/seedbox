@@ -130,6 +130,16 @@ impl MacExecutor {
             performance: BTreeMap::new(),
         })
     }
+    /// Set host machine threads without changing the execution profile.
+    pub fn with_machine_workers(mut self, workers: u32) -> Result<Self> {
+        if !(1..=32).contains(&workers) {
+            return Err(Error::Setup("--machine-workers: use 1..32".into()));
+        }
+        self.performance
+            .insert("machine_workers".into(), workers.to_string());
+        Ok(self)
+    }
+
     pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
         validate_kernel(kernel, 3072)?;
         Ok(DoctorReport {

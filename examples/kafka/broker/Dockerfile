@@ -6,7 +6,6 @@ COPY --from=kafka /etc/kafka/docker /etc/kafka/docker
 # These class-data archives belong to the original image's JVM.
 RUN rm -f /opt/kafka/*.jsa
 # One guest CPU: bound heap size and avoid parallel GC worker overhead.
-# C1 avoids an ARM translator crash observed with the higher compiler tiers.
 ENV CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk \
     KAFKA_PROCESS_ROLES=broker,controller \
     KAFKA_CONTROLLER_QUORUM_VOTERS=1@k1:9093,2@k2:9093,3@k3:9093 \
@@ -16,5 +15,5 @@ ENV CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk \
     KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
     KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
     KAFKA_HEAP_OPTS="-Xms512m -Xmx512m" \
-    KAFKA_JVM_PERFORMANCE_OPTS="-XX:+UseSerialGC -XX:ActiveProcessorCount=1 -XX:TieredStopAtLevel=1"
+    KAFKA_JVM_PERFORMANCE_OPTS="-XX:+UseSerialGC -XX:ActiveProcessorCount=1"
 ENTRYPOINT ["/etc/kafka/docker/run"]

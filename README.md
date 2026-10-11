@@ -60,8 +60,8 @@ The [Kafka example](examples/kafka/seedbox.yaml) runs three KRaft brokers with
 reads them back. The broker image uses a glibc JVM and a 512 MiB heap, leaving
 RAM for Kafka’s native allocations and the guest’s image archive. Serial GC
 and one reported CPU keep JVM worker counts appropriate for a one-vCPU guest.
-The example uses C1 compilation to avoid an ARM translator crash seen with
-higher JVM compiler tiers.
+Start the server with `seedbox serve --machine-workers 4` to run the three
+brokers and oracle concurrently on host threads.
 
 Images must match the guest architecture: `linux/arm64` on Apple Silicon,
 `linux/amd64` on Linux x86-64. Pull private images with Docker or Podman first;
