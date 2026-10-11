@@ -603,6 +603,9 @@ mod tests {
             throttle_permille: None,
             oracle: false,
             last_transition: None,
+            last_transition_at_ns: None,
+            condition_since_ns: None,
+            application: Default::default(),
         });
         let activity = derive(Some(&w), &[], &[], 5);
         assert_eq!(

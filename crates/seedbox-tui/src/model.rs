@@ -2404,6 +2404,9 @@ pub(crate) mod tests {
                 throttle_permille: None,
                 oracle: *n == "oracle",
                 last_transition: None,
+                last_transition_at_ns: None,
+                condition_since_ns: None,
+                application: Default::default(),
             })
             .collect();
         let mut links = Vec::new();

@@ -1,33 +1,40 @@
 name: committed-console-triggers
-services:
+machines:
   source:
     image: docker.io/library/python:3.13-alpine
-    command: [python3, -u, /triggers.py, source]
-    configs:
-      - {source: trigger-driver, target: /triggers.py}
-      - {source: trigger-sdk, target: /control.py}
+    command:
+    - python3
+    - "-u"
+    - "/triggers.py"
+    - source
+    files:
+    - source: "../driver/triggers.py"
+      target: "/triggers.py"
+    - source: "../../../python/seedbox/control.py"
+      target: "/control.py"
   peer:
     image: docker.io/library/python:3.13-alpine
-    command: [python3, -u, /triggers.py, peer]
-    configs:
-      - {source: trigger-driver, target: /triggers.py}
-      - {source: trigger-sdk, target: /control.py}
-  scenario:
-    image: docker.io/library/python:3.13-alpine
-    command: [python3, -u, /triggers.py, scenario]
-    configs:
-      - {source: trigger-driver, target: /triggers.py}
-      - {source: trigger-sdk, target: /control.py}
-configs:
-  trigger-driver:
-    file: ../driver/triggers.py
-  trigger-sdk:
-    file: ../../../python/seedbox/control.py
-x-seedbox:
-  version: 1
-  seed: 1009
-  limits: {simulated_time: 30s, wall_time: 10m}
-  network: {latency: 1ms, jitter: 200us}
-  schedule: {timer_jitter: 1ms}
-  control: {service: scenario}
-  check: {service: scenario}
+    command:
+    - python3
+    - "-u"
+    - "/triggers.py"
+    - peer
+    files:
+    - source: "../driver/triggers.py"
+      target: "/triggers.py"
+    - source: "../../../python/seedbox/control.py"
+      target: "/control.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  command:
+  - python3
+  - "-u"
+  - "/triggers.py"
+  - scenario
+  files:
+  - source: "../driver/triggers.py"
+    target: "/triggers.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/control.py"
+network:
+  latency: 1ms

@@ -1,16 +1,9 @@
 name: race
-services:
-  n1:
-    build:
-      context: ../../../guest
-      dockerfile: acceptance-race.Dockerfile
-    configs:
-      - {source: driver, target: /race.py}
-configs:
-  driver: {file: ../driver/race.py}
-x-seedbox:
-  version: 1
-  seed: 1
-  limits: {simulated_time: 60s, wall_time: 30m}
-  schedule: {timer_jitter: 1ms}
-  check: {service: n1}
+machines: {}
+oracle:
+  build:
+    context: "../../../guest"
+    dockerfile: acceptance-race.Dockerfile
+  files:
+  - source: "../driver/race.py"
+    target: "/race.py"

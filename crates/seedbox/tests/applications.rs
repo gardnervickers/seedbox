@@ -1,4 +1,4 @@
-//! Discover Compose workloads; the public CLI and guest checks own each verdict.
+//! Discover native workloads; the public CLI and guest checks own each verdict.
 #![cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
@@ -117,7 +117,7 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 &directory,
                 state,
                 "first",
-                &["run", workload.to_str().unwrap()],
+                &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
             )?;
             let first = simulation_id(&first_output)?;
             let described = invoke(
@@ -139,7 +139,14 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 &directory,
                 state,
                 "second",
-                &["run", workload.to_str().unwrap(), "--seed", &seed],
+                &[
+                    "run",
+                    workload.to_str().unwrap(),
+                    "--seed",
+                    &seed,
+                    "--wall-time",
+                    "30m",
+                ],
             )?;
             let second = simulation_id(&second_output)?;
             let comparison = invoke(
@@ -155,7 +162,7 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 &directory,
                 state,
                 "rerun",
-                &["rerun", first],
+                &["rerun", first, "--wall-time", "30m"],
             )?;
             let comparison = invoke(
                 Path::new(&cli),
