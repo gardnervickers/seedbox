@@ -161,6 +161,18 @@ struct HistoryCheck<'a> {
     down: BTreeSet<String>,
     /// Clock skew handles, whose heals wait for their guest effect.
     clocks: BTreeSet<String>,
+    /// Machines the scenario spawned; fault targets beside the prepared ones.
+    spawned: Vec<String>,
+}
+
+/// Machines the scenario spawned: every accepted spawn's machine.
+pub(super) fn spawned_machines(history: &[ControlRecord]) -> Vec<String> {
+    history
+        .iter()
+        .filter(|row| row.request["op"] == "spawn" && row.response.as_ref().is_some_and(|r| r.ok))
+        .filter_map(|row| row.result()?.get("machine")?.as_str())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Correlate guest-originated requests to responses and applied engine actions.
@@ -190,6 +202,7 @@ pub(super) fn validate_control_history(
         next_fault_id: 1,
         down: BTreeSet::new(),
         clocks: BTreeSet::new(),
+        spawned: spawned_machines(history),
     };
     for (i, row) in history.iter().enumerate() {
         if row.status == Some(ControlStatus::Rejected) && failed {
@@ -390,7 +403,8 @@ impl HistoryCheck<'_> {
             Target::Machine(machine) => Some(machine.as_str()),
         }
         .ok_or_else(|| Error::Integrity("invalid control target".into()))?;
-        if !self.request.prepared.guests.contains_key(machine)
+        if !(self.request.prepared.guests.contains_key(machine)
+            || self.spawned.iter().any(|s| s == machine))
             || self.controller.is_some_and(|name| name == machine)
         {
             return Err(Error::Integrity(
@@ -585,6 +599,31 @@ impl HistoryCheck<'_> {
                 }
                 Action::Heal { handle }
             }
+            Operation::Spawn {
+                from,
+                name,
+                env,
+                argv,
+            } => {
+                let machine = if response {
+                    row.result().and_then(|r| r.get("machine"))
+                } else {
+                    row.plan.as_ref().and_then(|p| p.get("machine"))
+                };
+                let machine = machine.and_then(Value::as_str).ok_or_else(bad)?.to_owned();
+                if self.request.prepared.guests.contains_key(&machine)
+                    || name.is_some_and(|name| name != machine)
+                    || (response && e != Some(a))
+                {
+                    return Err(bad());
+                }
+                Action::Spawn {
+                    machine,
+                    from: self.resolve(&from)?,
+                    env,
+                    argv,
+                }
+            }
             Operation::Now {} => {
                 let now = row
                     .result()
@@ -724,12 +763,15 @@ fn correlate_trigger_requests(
     let controller = request
         .control
         .and_then(|c| request.prepared.placement.get(&c.service));
+    let spawned = spawned_machines(history);
     let resolve = |target: &Target, fault: bool| -> Result<String> {
         let name = match target {
             Target::Service(s) => request.prepared.placement.get(s).ok_or_else(bad)?,
             Target::Machine(m) => m,
         };
-        if !request.prepared.guests.contains_key(name) || (fault && Some(name) == controller) {
+        if !(request.prepared.guests.contains_key(name) || spawned.contains(name))
+            || (fault && Some(name) == controller)
+        {
             return Err(bad());
         }
         Ok(name.clone())
@@ -1010,7 +1052,9 @@ pub(super) fn checked_report(
             .transpose()?;
     }
     let names: BTreeSet<_> = machines.iter().map(|machine| &machine.name).collect();
-    if names.len() != machines.len() || names != request.prepared.guests.keys().collect() {
+    let spawned = spawned_machines(&raw.control_history);
+    let expected: BTreeSet<_> = request.prepared.guests.keys().chain(&spawned).collect();
+    if names.len() != machines.len() || names != expected {
         return Err(Error::Integrity("VMM report machine set mismatch".into()));
     }
     let workload = request
@@ -1037,7 +1081,7 @@ pub(super) fn checked_report(
             RunOutcome::Duration => StopReason::SimulatedTimeLimit,
             RunOutcome::Quiescent => StopReason::Quiescent,
             RunOutcome::FaultFailed => StopReason::Error,
-            other @ (RunOutcome::Checkpoint | RunOutcome::Barrier) => {
+            other @ (RunOutcome::Checkpoint | RunOutcome::Barrier | RunOutcome::Spawn) => {
                 return Err(Error::Integrity(format!("unknown VMM outcome {other}")))
             }
         }
@@ -1150,6 +1194,7 @@ pub(super) fn checked_report(
         witness: Some(world_witness),
         full_state,
         faults,
+        spawned,
         detail: fault_failure.or_else(|| {
             infrastructure_error
                 .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name))
@@ -1295,6 +1340,12 @@ impl FaultCheck<'_> {
                             .iter()
                             .find(|(_, m)| *m == machine)
                             .map(|(s, _)| s.clone())
+                            // A spawned machine runs under its own name.
+                            .or_else(|| {
+                                spawned_machines(&self.raw.control_history)
+                                    .contains(machine)
+                                    .then(|| machine.clone())
+                            })
                     })
                     .unwrap_or_default();
                 Ok(FaultEffect::Applied(crate::execution::FaultEvent {

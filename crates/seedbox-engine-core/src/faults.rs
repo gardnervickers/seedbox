@@ -160,6 +160,15 @@ pub enum Lifecycle {
     /// Charge CPU work at this many thousandths of the seeded speed.
     Throttle(u64),
 }
+/// A machine a spawn added to these faults, for the world to build at `at`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Spawn {
+    pub machine: usize,
+    pub from: usize,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub argv: Option<Vec<String>>,
+    pub at: u64,
+}
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 enum Event {
     Apply,
@@ -197,6 +206,7 @@ pub struct Faults {
     changed_network: Vec<usize>,
     pub error: Option<String>,
     pub rejected_effects: Vec<RejectedEffect>,
+    spawns: Vec<Spawn>,
 }
 impl Faults {
     pub fn new(plans: Vec<Value>, names: Vec<String>) -> Result<Self, String> {
@@ -247,6 +257,7 @@ impl Faults {
             changed_network: vec![],
             error: None,
             rejected_effects: vec![],
+            spawns: vec![],
         };
         for (i, plan) in plans.into_iter().enumerate() {
             if plan.id as usize != i + 1 {
@@ -359,6 +370,12 @@ impl Faults {
             Action::Heal { handle } => {
                 if handle.is_empty() {
                     return Err("empty fault handle".into());
+                }
+            }
+            // The new machine has no index until the spawn applies.
+            Action::Spawn { machine, from, .. } => {
+                if self.names.contains(machine) || !self.names.contains(from) {
+                    return Err("invalid spawn machine".into());
                 }
             }
             Action::ClockSkew {
@@ -489,6 +506,29 @@ impl Faults {
     /// Machine `m`'s lifecycle as the fault model sees it.
     pub fn life(&self, m: usize) -> Life {
         self.life[m]
+    }
+    /// Machines spawned since the last call, in order. Their names and
+    /// per-machine fault state already exist; the world builds the machines.
+    pub fn take_spawns(&mut self) -> Vec<Spawn> {
+        std::mem::take(&mut self.spawns)
+    }
+    pub fn has_spawns(&self) -> bool {
+        !self.spawns.is_empty()
+    }
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+    /// Per-machine state for a machine added at runtime. It reports readiness
+    /// when it boots, like any incarnation.
+    fn add_machine(&mut self, name: String) {
+        self.names.push(name);
+        self.waiting_ready.push(BTreeSet::new());
+        self.ready.push(false);
+        self.stopped.push(false);
+        self.frozen.push(false);
+        self.life.push(Life::Up);
+        self.lifecycle_at.push(BTreeSet::new());
+        self.links.add_machine(&self.names);
     }
     /// Lifecycle transitions applied since the last call, in order.
     pub fn take_lifecycle(&mut self) -> Vec<(usize, Lifecycle)> {
@@ -944,7 +984,40 @@ impl Faults {
             | Action::Resume { .. }
             | Action::Crash { .. }
             | Action::Reboot { .. }) => self.apply_lifecycle(i, now, &action),
+            Action::Spawn {
+                machine,
+                from,
+                env,
+                argv,
+            } => self.apply_spawn(i, now, machine, from, env, argv),
         }
+    }
+    fn apply_spawn(
+        &mut self,
+        i: usize,
+        now: u64,
+        machine: String,
+        from: String,
+        env: BTreeMap<String, String>,
+        argv: Option<Vec<String>>,
+    ) {
+        if self.names.contains(&machine) || self.names.len() >= MAX_MACHINES {
+            self.fail(i, format!("cannot spawn {machine}"));
+            return;
+        }
+        let Some(from) = self.names.iter().position(|n| *n == from) else {
+            self.fail(i, "unknown spawn source".into());
+            return;
+        };
+        self.add_machine(machine.clone());
+        self.applied(i, now, format!("machine {machine} spawned"));
+        self.spawns.push(Spawn {
+            machine: self.names.len() - 1,
+            from,
+            env,
+            argv,
+            at: now,
+        });
     }
     fn apply_clock_skew(
         &mut self,
@@ -1309,6 +1382,8 @@ impl Faults {
     }
 }
 
+/// Machine addresses and MACs number machines from 1 within one /24.
+pub const MAX_MACHINES: usize = 254;
 /// A shape action's link policy and impairments.
 fn shape(action: &Action) -> Option<(Policy, NetworkFaults)> {
     match action {

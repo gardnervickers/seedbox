@@ -69,6 +69,14 @@ class ConnectionDrop:
 
 
 @dataclass(frozen=True)
+class Spawned:
+    """A machine the scenario added; target it with Machine(machine)."""
+    machine: str
+    address: str
+    effect: Effect
+
+
+@dataclass(frozen=True)
 class ClockSkew:
     handle: str
     offset_ns: int
@@ -229,6 +237,33 @@ class World:
     def reboot(self, target):
         """Boot a crashed machine again from its image; readiness is the application's own check."""
         return self._call("reboot", target=_target(target))[1]
+
+    def spawn(self, from_, *, name=None, env=None, args=None):
+        """Boot a new machine from a copy of another's prepared image.
+
+        It gets the next address and its own hostname; env overrides or adds
+        environment variables and args replaces the command. Other machines
+        don't learn its name, so reach it by the returned address.
+        """
+        arguments = {"from": _target(from_)}
+        if name is not None:
+            if not isinstance(name, str) or not name:
+                raise ValueError("spawn name must be a nonempty string")
+            arguments["name"] = name
+        if env:
+            if not isinstance(env, dict) or not all(
+                    isinstance(k, str) and k and "=" not in k and isinstance(v, str) for k, v in env.items()):
+                raise ValueError("spawn env must map names without '=' to strings")
+            arguments["env"] = dict(env)
+        if args is not None:
+            if isinstance(args, str) or not args or not all(isinstance(a, str) for a in args):
+                raise ValueError("spawn args must be a nonempty sequence of strings")
+            arguments["argv"] = list(args)
+        result, effect = self._call("spawn", **arguments)
+        if not isinstance(result.get("machine"), str) or not isinstance(result.get("address"), str):
+            self.close()
+            raise ProtocolError("spawn response lacks the new machine and its address")
+        return Spawned(result["machine"], result["address"], effect)
 
     def partition(self, left, right):
         """Cut traffic in both directions and return an independent handle."""

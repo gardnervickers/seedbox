@@ -176,6 +176,7 @@ impl Fixture {
                 full_state: None,
                 faults: vec![],
                 detail: None,
+                spawned: Vec::new(),
             },
             calls: AtomicUsize::new(0),
             fail: false,
@@ -364,6 +365,42 @@ mod page_evidence_tests {
         assert_eq!(comparison.full_state_matches, Some(false));
         assert!(comparison.ram_pages.unwrap().limitations[0].contains("page hash length"));
     }
+}
+
+#[test]
+fn spawned_machines_have_fault_events_and_full_state_under_their_names() {
+    let mut fixture = Fixture::new();
+    fixture.backend.profile.witness_mode = WitnessMode::FullState;
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    for action in ["spawn", "crash", "reboot"] {
+        fixture.backend.report.faults.push(FaultEvent {
+            requested_at_ns: 10,
+            applied_at_ns: 20,
+            service: "joiner".into(),
+            action: action.into(),
+            detail: String::new(),
+        });
+    }
+    let state = |names: &[&str]| {
+        Some(
+            names
+                .iter()
+                .map(|n| (n.to_string(), ContentDigest::of(n.as_bytes())))
+                .collect(),
+        )
+    };
+    fixture.backend.report.full_state = state(&["joiner", "workload"]);
+    // Without the report's spawned list, the name is unknown.
+    assert_eq!(fixture.run().record.outcome, Outcome::Error);
+    fixture.backend.report.spawned = vec!["joiner".into()];
+    let run = fixture.run();
+    assert_eq!(run.record.outcome, Outcome::Pass);
+    assert_eq!(
+        fixture.replay(&run).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+    fixture.backend.report.full_state = state(&["workload"]);
+    assert_eq!(fixture.run().record.outcome, Outcome::Error);
 }
 
 #[test]

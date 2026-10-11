@@ -270,6 +270,8 @@ mod tests {
             | Action::Crash { .. }
             | Action::Reboot { .. }
             | Action::DropConnection { .. } => {}
+            // A scenario's controller spawns machines; it is not an operator fault.
+            Action::Spawn { .. } => {}
         }
     }
     fn example(schema: &Value) -> Value {

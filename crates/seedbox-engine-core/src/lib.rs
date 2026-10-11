@@ -13,6 +13,7 @@ pub mod network_counters;
 pub mod playback;
 pub use seedbox_engine_protocol::output_layout;
 pub mod rng;
+pub mod spawn_recipe;
 pub use seedbox_engine_protocol::trace;
 pub mod triggers;
 

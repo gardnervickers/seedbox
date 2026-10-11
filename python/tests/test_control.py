@@ -9,7 +9,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from seedbox import ClockDrift, ClockSkew, Controller, FaultError, Machine, Partition, ProtocolError, Shape, Throttle, World
+from seedbox import ClockDrift, ClockSkew, Controller, FaultError, Machine, Partition, ProtocolError, Shape, Spawned, Throttle, World
 
 
 def reply(request_id=1, result=None, **changes):
@@ -365,6 +365,41 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(world.inspect()["services"], {"server": "vm-1"})
         self.assertEqual(peer.requests[0]["op"], "inspect")
 
+
+
+class SpawnTests(unittest.TestCase):
+    def test_spawn_sends_options_and_returns_the_new_machine(self):
+        peer = Peer(reply(result={"machine": "etcd-4", "address": "10.0.0.5"},
+                          effect_at_ns=20, replied_at_ns=30))
+        with World(peer) as world:
+            spawned = world.spawn("etcd-1", name="etcd-4", env={"ETCD_NAME": "etcd-4"},
+                                  args=["etcd", "--initial-cluster-state=existing"])
+        self.assertEqual(spawned, Spawned("etcd-4", "10.0.0.5", spawned.effect))
+        self.assertEqual(spawned.effect.effect_at_ns, 20)
+        self.assertEqual(peer.requests, [{
+            "version": 1, "id": 1, "op": "spawn", "from": {"service": "etcd-1"}, "name": "etcd-4",
+            "env": {"ETCD_NAME": "etcd-4"}, "argv": ["etcd", "--initial-cluster-state=existing"]}])
+
+    def test_spawn_defaults_send_only_the_source(self):
+        peer = Peer(reply(result={"machine": "db-2", "address": "10.0.0.3"}))
+        with World(peer) as world:
+            self.assertEqual(world.spawn(Machine("db")).machine, "db-2")
+        self.assertEqual(peer.requests, [{"version": 1, "id": 1, "op": "spawn", "from": {"machine": "db"}}])
+
+    def test_invalid_spawn_options_do_not_send(self):
+        for options in ({"name": ""}, {"env": {"A=B": "x"}}, {"env": {"A": 1}}, {"args": "sh"}, {"args": []}):
+            with self.subTest(options=options):
+                peer = Peer(b"")
+                with World(peer) as world, self.assertRaises(ValueError):
+                    world.spawn("db", **options)
+                self.assertEqual(peer.requests, [])
+
+    def test_spawn_response_without_machine_closes(self):
+        peer = Peer(reply(result={"machine": "db-2"}))
+        world = World(peer)
+        with self.assertRaises(ProtocolError):
+            world.spawn("db")
+        self.assertTrue(peer.closed)
 
 
 class TriggerTests(unittest.TestCase):

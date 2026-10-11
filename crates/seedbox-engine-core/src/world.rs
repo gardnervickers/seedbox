@@ -153,6 +153,12 @@ impl MachineState {
         self.booted_at = at;
         Ok(())
     }
+    /// A spawned machine's first incarnation exists from `at`, down until
+    /// `boot_at` brings it up there.
+    pub fn spawn_at(&mut self, at: u64) {
+        self.down = true;
+        self.time = at;
+    }
     pub fn succeed(&mut self, old: &Self, at: u64) -> Result<(), String> {
         self.incarnation = old
             .incarnation
@@ -269,6 +275,14 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
         Err("runtime checkpoints are unsupported by this backend".into())
     }
 
+    /// Boot inputs for a machine spawned from `base`, its source's inputs.
+    fn spawn_boot(_base: &Self::Boot, _spec: &SpawnSpec<'_>) -> Result<Self::Boot, String> {
+        Err("spawning machines is unsupported by this backend".into())
+    }
+    /// Open a spawned machine's outputs, as world setup does for the others.
+    fn attach_spawned(&mut self, _boot: &Self::Boot) -> Result<(), String> {
+        Ok(())
+    }
     fn supports_speed_reseed(&self) -> bool;
     fn seed_speed(&mut self, seed: u64, domain: &str) -> Result<(), String>;
     /// Whether `throttle` can scale this machine's CPU cost.
@@ -298,6 +312,25 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String>;
 }
+/// What a backend needs to derive a spawned machine's boot inputs from its
+/// source's: the identity preparation would have given it at `index`.
+pub struct SpawnSpec<'a> {
+    pub name: &'a str,
+    pub index: usize,
+    pub mac: [u8; 6],
+    /// Its IPv4 address, `10.0.0.{index + 1}`.
+    pub address: String,
+    /// Every machine by index, the new one last.
+    pub names: &'a [String],
+    pub env: &'a BTreeMap<String, String>,
+    pub argv: Option<&'a [String]>,
+}
+
+/// The address preparation and spawns give machine `index`.
+pub fn machine_address(index: usize) -> String {
+    format!("10.0.0.{}", index + 1)
+}
+
 /// Immutable slice preconditions, checked before any returned effects enter the
 /// world. Channel order remains the reference KVM order, not a merged batch.
 pub(crate) struct SliceObservation {
@@ -643,6 +676,88 @@ impl<M: WorldMachine> World<M> {
             return Err("world early slack must be below lookahead".into());
         }
         Ok(())
+    }
+
+    /// Build the machines the fault plan spawned since the last call, each
+    /// booting at its spawn time from a copy of its source's inputs. Returns
+    /// how many were added.
+    pub fn grow_spawns(&mut self) -> Result<usize, String> {
+        self.validate()?;
+        let spawns = self.faults.take_spawns();
+        for s in &spawns {
+            let index = self.machines.len();
+            if s.machine != index || s.from >= index {
+                return Err("spawned machine index differs from world".into());
+            }
+            let names = self.faults.names().to_vec();
+            let name = names
+                .get(index)
+                .ok_or("spawned machine has no name")?
+                .clone();
+            let mac = [0x52, 0x54, 0x00, 0x00, 0x00, index as u8 + 1];
+            let spec = SpawnSpec {
+                name: &name,
+                index,
+                mac,
+                address: machine_address(index),
+                names: &names[..=index],
+                env: &s.env,
+                argv: s.argv.as_deref(),
+            };
+            let boot = M::spawn_boot(&self.boot[s.from], &spec)?;
+            let identity = self.branch_identity.as_deref();
+            let mut rng = Rng::branch(self.run_seed, identity, &format!("spawn-entropy/{name}"));
+            let mut seed = [0u8; 32];
+            for chunk in seed.chunks_mut(8) {
+                chunk.copy_from_slice(&rng.next().to_le_bytes());
+            }
+            // A failed constructor owns cleanup of any partially booted worker.
+            let mut mach = M::boot(&self.factory, &name, &boot, false, seed)?;
+            let started = (|| {
+                mach.seed_timer_branch(self.run_seed, identity, &format!("timer-jitter/{name}"))?;
+                if mach.supports_speed_reseed() {
+                    mach.seed_speed(self.run_seed, &format!("pv-speed/{name}"))?;
+                }
+                mach.spawn_at(s.at);
+                mach.boot_at(s.at)?;
+                mach.attach_spawned(&boot)
+            })();
+            if let Err(mut error) = started {
+                if let Err(cleanup) = mach.terminate_worker() {
+                    error.push_str(&format!("; spawned worker cleanup: {cleanup}"));
+                }
+                return Err(error);
+            }
+            self.machines.push(mach);
+            self.boot.push(boot);
+            self.incarnations.push(Vec::new());
+            self.paused_ingress.push(0);
+            self.events.push(BTreeMap::new());
+            self.strict_events.push(BTreeMap::new());
+            self.macs.push(mac);
+            self.control.add_machine(&name);
+        }
+        Ok(spawns.len())
+    }
+
+    /// Drop machines spawned after a snapshot of `n` machines.
+    fn truncate_machines(&mut self, n: usize) -> Result<(), String> {
+        if n > self.machines.len() {
+            return Err("snapshot machine count differs from world".into());
+        }
+        let mut error = None;
+        for mut m in self.machines.drain(n..) {
+            if let Err(e) = m.terminate_worker() {
+                error.get_or_insert(format!("{} worker cleanup: {e}", m.name));
+            }
+        }
+        self.boot.truncate(n);
+        self.incarnations.truncate(n);
+        self.paused_ingress.truncate(n);
+        self.events.truncate(n);
+        self.strict_events.truncate(n);
+        self.macs.truncate(n);
+        error.map_or(Ok(()), Err)
     }
 
     /// Finalize retained control and trigger evidence at the run's semantic end.
@@ -1421,7 +1536,8 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         if self.version != 1 {
             return Err("unsupported world checkpoint version".into());
         }
-        if self.machines.len() != world.machines.len() {
+        // Machines spawned after the snapshot are dropped when it is restored.
+        if self.machines.len() > world.machines.len() {
             return Err("snapshot machine count differs from world".into());
         }
         let count = self.machines.len();
@@ -1468,9 +1584,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
     fn restore_checkpoint_inner(&self, world: &mut World<M>) -> Result<u64, String> {
         world.check_active()?;
         world.validate()?;
-        if self.machines.len() != world.machines.len() {
-            return Err("snapshot machine count differs from world".into());
-        }
+        world.truncate_machines(self.machines.len())?;
         M::restore_boundary(&mut world.clock)?;
         for i in 0..world.machines.len() {
             let name = world.machines[i].name.clone();
@@ -1484,9 +1598,8 @@ impl<M: WorldMachine> WorldSnapshot<M> {
     fn restore_inner(&self, world: &mut World<M>) -> Result<u64, String> {
         world.check_active()?;
         world.validate()?;
-        if self.machines.len() != world.machines.len() {
-            return Err("snapshot machine count differs from world".into());
-        }
+        // Machines spawned after the snapshot did not exist at it.
+        world.truncate_machines(self.machines.len())?;
         if self.boot_snapshot {
             M::restore_boundary(&mut world.clock)?;
         }
@@ -1801,6 +1914,9 @@ fn simulate_stopped<M: WorldMachine>(
             // its machine was just sent.
             for (target, op) in world.faults.take_lifecycle() {
                 world.lifecycle(target, op, fault_boundary)?;
+            }
+            if world.faults.has_spawns() {
+                return Err("spawning machines is unsupported by this backend".into());
             }
             world
                 .control

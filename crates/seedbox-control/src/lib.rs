@@ -142,6 +142,16 @@ pub enum Operation {
     Reboot {
         target: Target,
     },
+    /// Add a machine running a copy of `from`'s prepared program.
+    Spawn {
+        from: Target,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        argv: Option<Vec<String>>,
+    },
     Partition {
         left: Vec<Target>,
         right: Vec<Target>,
@@ -404,6 +414,15 @@ pub enum Action {
     Reboot {
         machine: String,
     },
+    /// Add `machine` as a copy of `from` with launch overrides.
+    Spawn {
+        machine: String,
+        from: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        argv: Option<Vec<String>>,
+    },
 }
 impl Action {
     pub fn name(&self) -> &'static str {
@@ -423,6 +442,7 @@ impl Action {
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
             Self::Reboot { .. } => "reboot",
+            Self::Spawn { .. } => "spawn",
         }
     }
     pub fn machine(&self) -> Option<&str> {
@@ -437,7 +457,8 @@ impl Action {
             | Self::Reboot { machine }
             | Self::ClockSkew { machine, .. }
             | Self::ClockDrift { machine, .. }
-            | Self::Throttle { machine, .. } => Some(machine),
+            | Self::Throttle { machine, .. }
+            | Self::Spawn { machine, .. } => Some(machine),
             _ => None,
         }
     }

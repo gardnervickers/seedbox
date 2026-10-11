@@ -209,6 +209,16 @@ impl WorldMachine for Mock {
         self.record("reseed-guest");
         Ok(())
     }
+    fn spawn_boot(_: &(), spec: &SpawnSpec<'_>) -> Result<(), String> {
+        if spec.names.last().map(String::as_str) != Some(spec.name) {
+            return Err("spawn spec names end with another machine".into());
+        }
+        Ok(())
+    }
+    fn attach_spawned(&mut self, _: &()) -> Result<(), String> {
+        self.record("spawned");
+        Ok(())
+    }
     fn supports_speed_reseed(&self) -> bool {
         true
     }

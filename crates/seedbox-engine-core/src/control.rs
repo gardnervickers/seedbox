@@ -196,7 +196,7 @@ pub struct Control {
     pub log: Vec<Value>,
     pub error: Option<String>,
     pub triggers: crate::triggers::Triggers,
-    names: Vec<String>,
+    pub(crate) names: Vec<String>,
     placement: BTreeMap<String, String>,
     last_relay: u32,
     last_session: u32,
@@ -258,6 +258,13 @@ impl Control {
             lookahead,
             undelivered_reply: false,
         })
+    }
+    /// A machine spawned at runtime: a target by machine or service name.
+    pub fn add_machine(&mut self, name: &str) {
+        self.names.push(name.to_owned());
+        if self.controller.is_some() {
+            self.placement.insert(name.to_owned(), name.to_owned());
+        }
     }
     fn target(&self, target: &Target) -> Result<String, String> {
         let name = match target {
@@ -474,6 +481,55 @@ impl Control {
                 None
             }
             Operation::CancelTrigger { .. } => None,
+            Operation::Spawn {
+                from,
+                name,
+                env,
+                argv,
+            } => {
+                let from = self.target(from)?;
+                let index = self.names.len();
+                if index >= crate::faults::MAX_MACHINES {
+                    return Err("spawn would exceed 254 machines".into());
+                }
+                let machine = match name {
+                    Some(name) => name.clone(),
+                    None => (2..)
+                        .map(|k| format!("{from}-{k}"))
+                        .find(|n| !self.names.contains(n) && !self.placement.contains_key(n))
+                        .unwrap(),
+                };
+                if machine.is_empty()
+                    || machine.len() > 63
+                    || machine.starts_with('-')
+                    || !machine
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                {
+                    return Err("spawn name must be a lowercase DNS label".into());
+                }
+                if self.names.contains(&machine) || self.placement.contains_key(&machine) {
+                    return Err("spawn name is already in use".into());
+                }
+                if env
+                    .keys()
+                    .any(|k| k.is_empty() || k.contains('=') || k.contains('\0'))
+                    || env.values().any(|v| v.contains('\0'))
+                    || argv.as_ref().is_some_and(|a| {
+                        a.is_empty() || a[0].is_empty() || a.iter().any(|x| x.contains('\0'))
+                    })
+                {
+                    return Err("invalid spawn environment or argv".into());
+                }
+                // Preparation numbers services' addresses the same way.
+                result = json!({"machine":machine,"address":crate::world::machine_address(index)});
+                Some(Action::Spawn {
+                    machine,
+                    from,
+                    env: env.clone(),
+                    argv: argv.clone(),
+                })
+            }
         };
         let plan = action
             .map(|action| {

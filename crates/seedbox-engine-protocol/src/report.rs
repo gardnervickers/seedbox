@@ -43,6 +43,9 @@ pub enum RunOutcome {
     Barrier,
     /// A fault or control request failed the run.
     FaultFailed,
+    /// A spawn applied; the world grows and the run continues in a new
+    /// segment, so a finished run never reports it.
+    Spawn,
 }
 impl RunOutcome {
     pub fn as_str(self) -> &'static str {
@@ -53,6 +56,7 @@ impl RunOutcome {
             Self::Checkpoint => "checkpoint",
             Self::Barrier => "barrier",
             Self::FaultFailed => "fault_failed",
+            Self::Spawn => "spawn",
         }
     }
 }

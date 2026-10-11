@@ -107,6 +107,10 @@ pub struct Links {
     jitter: BTreeMap<Pair, Rng>,
     network_streams: Streams,
     network_used: bool,
+    /// The seed and branch identity of the current streams, for machines
+    /// added later.
+    seed: u64,
+    identity: Option<String>,
     /// Per-machine `clock/<machine>` streams for seeded clock skew and drift;
     /// drawn only when a seeded skew or drift is applied.
     clock: BTreeMap<usize, Rng>,
@@ -152,6 +156,8 @@ impl Links {
             jitter: BTreeMap::new(),
             network_streams: Streams::default(),
             network_used: false,
+            seed,
+            identity: None,
             clock: BTreeMap::new(),
         };
         links.reseed(seed, names);
@@ -207,6 +213,8 @@ impl Links {
     }
     /// Preserve sampled arrivals, baselines and layers; only future draws change.
     pub fn reseed_branch(&mut self, seed: u64, identity: Option<&str>, names: &[String]) {
+        self.seed = seed;
+        self.identity = identity.map(str::to_owned);
         self.network_streams.reseed(seed, identity, names);
         self.loss.clear();
         self.jitter.clear();
@@ -221,21 +229,48 @@ impl Links {
         for a in 0..names.len() {
             for b in 0..names.len() {
                 if a != b {
-                    self.loss.insert(
-                        (a, b),
-                        Rng::branch(
-                            seed,
-                            identity,
-                            &format!("link-loss/{}/{}", names[a], names[b]),
-                        ),
-                    );
-                    self.jitter.insert(
-                        (a, b),
-                        Rng::branch(seed, identity, &format!("link/{}/{}", names[a], names[b])),
-                    );
+                    self.insert_streams(names, a, b);
                 }
             }
         }
+    }
+    fn insert_streams(&mut self, names: &[String], a: usize, b: usize) {
+        let identity = self.identity.as_deref();
+        self.loss.insert(
+            (a, b),
+            Rng::branch(
+                self.seed,
+                identity,
+                &format!("link-loss/{}/{}", names[a], names[b]),
+            ),
+        );
+        self.jitter.insert(
+            (a, b),
+            Rng::branch(
+                self.seed,
+                identity,
+                &format!("link/{}/{}", names[a], names[b]),
+            ),
+        );
+    }
+    /// Streams for the last of `names`, added at runtime. Every stream is
+    /// keyed by its pair's names, so existing streams don't move.
+    pub fn add_machine(&mut self, names: &[String]) {
+        let new = names.len() - 1;
+        for other in 0..new {
+            self.insert_streams(names, new, other);
+            self.insert_streams(names, other, new);
+        }
+        self.network_streams
+            .add_machine(self.seed, self.identity.as_deref(), names);
+        self.clock.insert(
+            new,
+            Rng::branch(
+                self.seed,
+                self.identity.as_deref(),
+                &format!("clock/{}", names[new]),
+            ),
+        );
     }
     /// A signed clock offset (ns) or rate (ppb) drawn uniformly from
     /// [-max, max] on machine `m`'s stream.
