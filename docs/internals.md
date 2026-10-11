@@ -91,6 +91,12 @@ there runs again, so the call gives it back first. The translator patch saves
 each vector register of the call in its own context slot, so that exit
 restores them exactly.
 
+The ARM translator finds rewritten code by write-protecting the pages it has
+translated (`-no_hw_cache_consistency`), as DynamoRIO 11.3 did by default.
+With the newer default, which acts on the application's cache-maintenance
+instructions instead, a Kafka broker's memory grew to 2 GB while it started its
+controller, about eight times as much, and the guest killed it.
+
 Code: [progress client](../guest/progress/progress.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
 [vector context patch](../guest/progress/dynamorio-cleancall-simd.patch).

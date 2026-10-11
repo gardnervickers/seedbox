@@ -548,6 +548,10 @@ static pid_t start(void) {
         /* The patched ARM translator implements guest-epoch reservations and
          * hides host-only exclusive-store retries from application execution. */
         instrumented[prefix++] = "-ldstex2cas";
+        /* Detect code writes by page protection, as DynamoRIO 11.3 did. With
+         * hardware cache consistency, a JVM broker's translator memory grows
+         * past 2 GiB while it starts its controller. */
+        instrumented[prefix++] = "-no_hw_cache_consistency";
 #endif
         instrumented[prefix++] = "-c";
         instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
