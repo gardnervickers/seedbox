@@ -1499,10 +1499,8 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
         };
         let last = activity
             .rows()
-            .filter(|item| {
-                item.lane == Lane::Machine(m.name.clone()) && item.state != State::Upcoming
-            })
-            .max_by_key(|item| (item.open(), item.end_ns.unwrap_or(item.start_ns)));
+            .filter(|item| item.lane == Lane::Machine(m.name.clone()) && item.open())
+            .max_by_key(|item| item.start_ns);
         let target = targets.contains(&m.name);
         let rect = node_rect(c, field, box_width, box_height);
         app.hitboxes
@@ -3646,6 +3644,76 @@ mod tests {
                 .collect();
             assert!(text.contains(action), "{text}");
             assert!(!text.contains("ago"), "{text}");
+        }
+    }
+    #[test]
+    fn every_fault_card_hides_history_and_shows_only_active_effects() {
+        let app = app(&["n1"]);
+        let focus = app.focus.as_ref().unwrap();
+        let machine = &focus.world.as_ref().unwrap().machines[0];
+        for action in [
+            "drop_connection",
+            "stop",
+            "restart",
+            "pause_process",
+            "resume_process",
+            "partition",
+            "shape",
+            "heal",
+            "clock_skew",
+            "clock_drift",
+            "throttle",
+            "pause",
+            "resume",
+            "crash",
+            "reboot",
+            "future_fault",
+        ] {
+            for state in [
+                State::Active,
+                State::Closed,
+                State::Instant,
+                State::Failed,
+                State::Upcoming,
+            ] {
+                let item = Item {
+                    key: crate::activity::Key::Fault(1),
+                    lane: Lane::Machine("n1".into()),
+                    action: action.into(),
+                    target: "n1".into(),
+                    handle: Some("f1".into()),
+                    start_ns: 1_000_000_000,
+                    end_ns: (state == State::Closed).then_some(2_000_000_000),
+                    closed_by: (state == State::Closed).then(|| "heal".into()),
+                    state,
+                };
+                let mut terminal = Terminal::new(TestBackend::new(40, 7)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        node(
+                            frame,
+                            focus,
+                            machine,
+                            frame.area(),
+                            Some(&item),
+                            false,
+                            3_000_000_000,
+                        )
+                    })
+                    .unwrap();
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                assert_eq!(
+                    text.contains(action),
+                    state == State::Active,
+                    "{action} {state:?}: {text}"
+                );
+            }
         }
     }
 }
