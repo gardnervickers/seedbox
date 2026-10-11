@@ -382,6 +382,10 @@ fn simulate_windowed(
     loop {
         if let Some(host) = host.as_mut() {
             checkpoints.held.configure(host);
+            // Before the launch release nothing is armed for the run seed.
+            if run.fork.is_some() {
+                host.disable_checkpoints();
+            }
         }
         let (outcome, mut scheduler) = simulate_segment(world, run, request, host, replay)?;
         if outcome == RunOutcome::Checkpoint {

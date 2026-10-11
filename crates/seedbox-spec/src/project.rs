@@ -16,6 +16,8 @@ pub struct Project {
     pub network: NetworkDefaults,
     #[serde(default)]
     pub simulator: SimulatorDefaults,
+    #[serde(default)]
+    pub schedule: ScheduleDefaults,
 }
 
 /// Launch inputs shared by application machines and the oracle.
@@ -120,6 +122,9 @@ pub struct Volume {
 pub struct NetworkDefaults {
     #[serde(default = "latency")]
     pub latency: String,
+    /// Omitted means a tenth of the latency; `0ns` turns it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<String>,
 }
 
 fn latency() -> String {
@@ -128,8 +133,22 @@ fn latency() -> String {
 
 impl Default for NetworkDefaults {
     fn default() -> Self {
-        Self { latency: latency() }
+        Self {
+            latency: latency(),
+            jitter: None,
+        }
     }
+}
+
+/// Seed diversity in timing; omitted values use the new-simulation defaults
+/// and `0ns` turns one off.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScheduleDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timer_jitter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_stagger: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +190,23 @@ mod tests {
         );
         assert_eq!(project.simulator.blocks_per_progress_call.get(), 10_000);
         assert_eq!(project.network.latency, "1ms");
+        assert_eq!(project.network.jitter, None);
+        assert_eq!(project.schedule, ScheduleDefaults::default());
+    }
+
+    #[test]
+    fn timing_diversity_is_authored_as_durations() {
+        let project: Project = serde_yaml_ng::from_str(
+            "name: test\noracle: {image: oracle}\nnetwork: {jitter: 0ns}\nschedule: {timerJitter: 5us, startStagger: 0ns}\n",
+        )
+        .unwrap();
+        assert_eq!(project.network.jitter.as_deref(), Some("0ns"));
+        assert_eq!(project.schedule.timer_jitter.as_deref(), Some("5us"));
+        assert_eq!(project.schedule.start_stagger.as_deref(), Some("0ns"));
+        assert!(serde_yaml_ng::from_str::<Project>(
+            "name: test\noracle: {image: oracle}\nschedule: {stopTolerance: 1us}\n"
+        )
+        .is_err());
     }
 
     #[test]
@@ -186,7 +222,7 @@ mod tests {
             "limits: {wallTime: 5m}",
             "seed: 1",
             "startPaused: true",
-            "network: {jitter: 1ms}",
+            "network: {bandwidthBps: 1000}",
         ] {
             let yaml = format!("name: test\noracle: {{image: oracle}}\n{extra}\n");
             assert!(

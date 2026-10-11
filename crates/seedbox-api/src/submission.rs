@@ -37,13 +37,19 @@ pub struct Simulator {
     pub blocks_per_progress_call: std::num::NonZeroU32,
     /// Expose world controls to the oracle process.
     pub oracle_control: bool,
+    pub timer_jitter_ns: u64,
+    /// Seeded application start stagger (Linux KVM).
+    pub start_stagger_ns: u64,
 }
 impl Default for Simulator {
     fn default() -> Self {
+        let schedule = seedbox_spec::Schedule::new_simulation();
         Self {
             blocks_per_progress_call: project::SimulatorDefaults::default()
                 .blocks_per_progress_call,
             oracle_control: true,
+            timer_jitter_ns: schedule.timer_jitter_ns,
+            start_stagger_ns: schedule.start_stagger_ns,
         }
     }
 }
@@ -52,7 +58,9 @@ impl Default for Simulator {
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Network {
     pub latency_ns: u64,
-    pub jitter_ns: u64,
+    /// Omitted means a tenth of the latency.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter_ns: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bandwidth_bps: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,7 +72,7 @@ impl Default for Network {
     fn default() -> Self {
         Self {
             latency_ns: 1_000_000,
-            jitter_ns: 0,
+            jitter_ns: None,
             bandwidth_bps: None,
             queue_bound_ns: None,
             links: Vec::new(),
@@ -225,7 +233,9 @@ impl Submission {
         let network = seedbox_spec::Network {
             name: "default".into(),
             latency_ns: self.network.latency_ns,
-            jitter_ns: self.network.jitter_ns,
+            jitter_ns: self.network.jitter_ns.unwrap_or_else(|| {
+                seedbox_spec::default_network_jitter_ns(self.network.latency_ns)
+            }),
             bandwidth_bps: self.network.bandwidth_bps,
             queue_bound_ns: self.network.queue_bound_ns,
             links: self
@@ -260,7 +270,11 @@ impl Submission {
             simulator: project::SimulatorDefaults {
                 blocks_per_progress_call: self.simulator.blocks_per_progress_call,
             },
-            schedule: Default::default(),
+            schedule: seedbox_spec::Schedule {
+                timer_jitter_ns: self.simulator.timer_jitter_ns,
+                stop_tolerance_ns: 0,
+                start_stagger_ns: self.simulator.start_stagger_ns,
+            },
             control: self
                 .simulator
                 .oracle_control
@@ -308,8 +322,8 @@ impl Submission {
                 "machine (memory_mb, page_timer or deferred_tx)",
             ),
             (
-                config.schedule != seedbox_spec::Schedule::default(),
-                "schedule",
+                config.schedule.stop_tolerance_ns != 0,
+                "schedule (stop_tolerance)",
             ),
             (config.disk != seedbox_spec::DiskOptions::default(), "disk"),
             (config.wall_clock_epoch.is_some(), "wall_clock_epoch"),
@@ -410,7 +424,7 @@ impl Submission {
                 .collect::<Result<_, String>>()?,
             network: Network {
                 latency_ns: config.network.latency_ns,
-                jitter_ns: config.network.jitter_ns,
+                jitter_ns: Some(config.network.jitter_ns),
                 bandwidth_bps: config.network.bandwidth_bps,
                 queue_bound_ns: config.network.queue_bound_ns,
                 links: config
@@ -431,6 +445,8 @@ impl Submission {
             simulator: Simulator {
                 blocks_per_progress_call: config.simulator.blocks_per_progress_call,
                 oracle_control: config.control.is_some(),
+                timer_jitter_ns: config.schedule.timer_jitter_ns,
+                start_stagger_ns: config.schedule.start_stagger_ns,
             },
             overrides: spec
                 .program
@@ -531,7 +547,7 @@ mod tests {
             let mut spec = baseline.clone();
             match field {
                 "machine" => spec.configuration.machine.memory_mb = 512,
-                "schedule" => spec.configuration.schedule.timer_jitter_ns = 10,
+                "schedule" => spec.configuration.schedule.stop_tolerance_ns = 10,
                 "disk" => spec.configuration.disk.torn_writes = true,
                 "wall_clock_epoch" => spec.configuration.wall_clock_epoch = Some(86400),
                 _ => unreachable!(),
@@ -541,6 +557,33 @@ mod tests {
             assert!(error.contains("complete resolved Simulation"), "{error}");
         }
     }
+    #[test]
+    fn omitted_timing_uses_seed_diversity_defaults_and_explicit_zeros_roundtrip() {
+        let spec: SimulationSpec = serde_json::from_value(partial()).unwrap();
+        let config = &spec.configuration;
+        assert_eq!(config.schedule, seedbox_spec::Schedule::new_simulation());
+        assert_eq!(config.network.jitter_ns, 100_000);
+        let mut value = partial();
+        value["network"] = serde_json::json!({"latencyNs": 5_000_000});
+        let spec: SimulationSpec = serde_json::from_value(value).unwrap();
+        assert_eq!(spec.configuration.network.jitter_ns, 500_000);
+        let mut value = partial();
+        value["network"] = serde_json::json!({"jitterNs": 0});
+        value["simulator"] = serde_json::json!({"timerJitterNs": 0, "startStaggerNs": 0});
+        let zeros: SimulationSpec = serde_json::from_value(value).unwrap();
+        assert_eq!(zeros.configuration.network.jitter_ns, 0);
+        assert_eq!(
+            zeros.configuration.schedule,
+            seedbox_spec::Schedule::default()
+        );
+        let wire = serde_json::to_value(&zeros).unwrap();
+        assert_eq!(wire["network"]["jitterNs"], 0);
+        assert_eq!(wire["simulator"]["timerJitterNs"], 0);
+        assert_eq!(wire["simulator"]["startStaggerNs"], 0);
+        let restored: SimulationSpec = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored.configuration, zeros.configuration);
+    }
+
     #[test]
     fn nonzero_oracle_success_code_is_rejected_instead_of_normalized() {
         let mut spec: SimulationSpec = serde_json::from_value(partial()).unwrap();

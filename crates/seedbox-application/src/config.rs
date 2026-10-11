@@ -367,11 +367,13 @@ pub fn parse_for_architecture(
         if let Some(v) = net.get("latency") {
             network.latency_ns = duration(v, "$.x-seedbox.network.latency", false)?;
         }
-        if let Some(v) = net.get("jitter") {
-            network.jitter_ns = duration(v, "$.x-seedbox.network.jitter", true)?;
-        }
         (network.bandwidth_bps, network.queue_bound_ns) = bandwidth(net, "$.x-seedbox.network")?;
     }
+    // Seeds diverge in frame timing by default; an explicit 0 turns it off.
+    network.jitter_ns = match ext.get("network").and_then(|v| v.get("jitter")) {
+        Some(v) => duration(v, "$.x-seedbox.network.jitter", true)?,
+        None => default_network_jitter_ns(network.latency_ns),
+    };
     if network.jitter_ns >= network.latency_ns {
         return invalid("$.x-seedbox.network.jitter", "must be less than latency");
     }
@@ -447,11 +449,18 @@ pub fn parse_for_architecture(
             });
         }
     }
-    let mut schedule = Schedule::default();
+    let mut schedule = Schedule::new_simulation();
     if let Some(raw) = ext.get("schedule") {
-        let options = fields(raw, "$.x-seedbox.schedule", &["timer_jitter"])?;
+        let options = fields(
+            raw,
+            "$.x-seedbox.schedule",
+            &["timer_jitter", "start_stagger"],
+        )?;
         if let Some(v) = options.get("timer_jitter") {
             schedule.timer_jitter_ns = duration(v, "$.x-seedbox.schedule.timer_jitter", true)?;
+        }
+        if let Some(v) = options.get("start_stagger") {
+            schedule.start_stagger_ns = duration(v, "$.x-seedbox.schedule.start_stagger", true)?;
         }
     }
     let mut machine = MachineOptions::default();

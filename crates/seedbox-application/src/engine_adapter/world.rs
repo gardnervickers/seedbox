@@ -3,8 +3,8 @@
 use super::*;
 use seedbox_engine_protocol::disk::DiskFaultModel;
 use seedbox_engine_protocol::world_config::{
-    CheckpointConfig, ControlChannel, ControlConfig, DiskConfig, LinkConfig, MachineConfig,
-    NetworkConfig, WorldConfig,
+    BootConfig, CheckpointConfig, ControlChannel, ControlConfig, DiskConfig, LinkConfig,
+    MachineConfig, NetworkConfig, WorldConfig,
 };
 
 pub(super) fn control_latency(request: &ExecutionRequest<'_>) -> Result<u64> {
@@ -101,6 +101,17 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<WorldConfig> {
         .latency_ns
         .saturating_sub(request.network.jitter_ns);
     world.launch_skew_ns = crate::engine::arm_launch_skew(&request.prepared.profile, lookahead);
+    // A start stagger boots every machine under the run seed, parks it at its
+    // launch barrier and releases each one up to the stagger later, drawn
+    // from its release/<machine> stream. Zero keeps the unparked cold run.
+    // The ARM worker keeps its own bounded launch skew.
+    if request.schedule.start_stagger_ns > 0 && world.launch_skew_ns.is_none() {
+        world.boot = Some(BootConfig {
+            seed: request.seed,
+            release_skew_ns: request.schedule.start_stagger_ns,
+            fork_at_ns: None,
+        });
+    }
     if request.prepared.profile.semantic_parameters.torn_writes {
         world.disk_loss = Some(DiskFaultModel {
             sector_bytes: 512,

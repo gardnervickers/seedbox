@@ -52,6 +52,10 @@ Images must match the guest architecture: `linux/arm64` on Apple Silicon,
 `linux/amd64` on Linux x86-64. Pull private images with Docker or Podman first;
 Seedbox does not integrate registry credential helpers.
 
+Seeds differ in timing by default: timer jitter, network jitter and a seeded
+start stagger. Set `network.jitter`, `schedule.timerJitter` or
+`schedule.startStagger` to `0ns` in `seedbox.yaml` to turn one off.
+
 ## Inspect and repeat
 
 Using `target/release/seedbox` as `seedbox`:
