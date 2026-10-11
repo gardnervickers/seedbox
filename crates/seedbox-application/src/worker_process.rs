@@ -603,6 +603,7 @@ mod tests {
                 schedule: &Schedule {
                     timer_jitter_ns: 50_000,
                     stop_tolerance_ns: 40_000,
+                    start_stagger_ns: 0,
                 },
                 control: None,
                 check: &Check {

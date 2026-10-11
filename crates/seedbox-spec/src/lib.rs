@@ -161,11 +161,44 @@ pub struct Limits {
     pub wall_time_ns: u64,
 }
 
+/// All zero is the schedule without seed diversity; new simulations start
+/// from [`Schedule::new_simulation`].
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
     pub timer_jitter_ns: u64,
     pub stop_tolerance_ns: u64,
+    /// Seeded application start stagger (Linux KVM), at most the network
+    /// lookahead. A retained record without it means 0, and 0 is omitted so
+    /// such records keep their bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub start_stagger_ns: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// Default timer jitter of a new simulation.
+pub const DEFAULT_TIMER_JITTER_NS: u64 = 20_000;
+/// Default start stagger of a new simulation, before it is clipped to the
+/// network lookahead.
+pub const DEFAULT_START_STAGGER_NS: u64 = 1_000_000;
+
+impl Schedule {
+    /// The defaults of a new simulation: seeds differ in timer and start timing.
+    pub fn new_simulation() -> Self {
+        Self {
+            timer_jitter_ns: DEFAULT_TIMER_JITTER_NS,
+            stop_tolerance_ns: 0,
+            start_stagger_ns: DEFAULT_START_STAGGER_NS,
+        }
+    }
+}
+
+/// Default network jitter of a new simulation: a tenth of its latency.
+pub fn default_network_jitter_ns(latency_ns: u64) -> u64 {
+    latency_ns / 10
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,5 +220,18 @@ mod tests {
             ..Default::default()
         }
         .is_default());
+    }
+
+    #[test]
+    fn a_zero_start_stagger_keeps_older_schedule_bytes() {
+        let older = serde_json::json!({"timer_jitter_ns": 5, "stop_tolerance_ns": 0});
+        let schedule: Schedule = serde_json::from_value(older.clone()).unwrap();
+        assert_eq!(schedule.start_stagger_ns, 0);
+        assert_eq!(serde_json::to_value(&schedule).unwrap(), older);
+        let staggered = Schedule::new_simulation();
+        assert_eq!(
+            serde_json::to_value(&staggered).unwrap()["start_stagger_ns"],
+            DEFAULT_START_STAGGER_NS
+        );
     }
 }

@@ -70,6 +70,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
         schedule: &Schedule {
             timer_jitter_ns: 50_000,
             stop_tolerance_ns: 40_000,
+            start_stagger_ns: 0,
         },
         control: None,
         check: &Check {
@@ -162,6 +163,61 @@ fn initial_arm_launch_uses_numeric_cap_and_network_bound() {
             };
             assert_eq!(world_json(&request).unwrap()["launch_skew_ns"], expected);
         }
+    });
+}
+
+#[test]
+fn start_stagger_parks_at_the_launch_barrier_under_the_run_seed() {
+    fixture(|base| {
+        assert!(world_json(base).unwrap()["boot"].is_null());
+        let schedule = Schedule {
+            start_stagger_ns: 20_000_000,
+            ..base.schedule.clone()
+        };
+        let request = ExecutionRequest {
+            program: &[],
+            intervention_history: None,
+            start_paused: false,
+            resume_checkpoint: None,
+            replay_interventions: None,
+            observations: None,
+            schedule: &schedule,
+            ..*base
+        };
+        let world = world_json(&request).unwrap();
+        // Clipped to latency 100 µs less jitter 20 µs and early delivery 40 µs.
+        assert_eq!(
+            world["boot"],
+            json!({"seed": 1009, "release_skew_ns": 40_000})
+        );
+        typed(&world);
+        let short = Schedule {
+            start_stagger_ns: 30_000,
+            ..base.schedule.clone()
+        };
+        let world = world_json(&ExecutionRequest {
+            schedule: &short,
+            ..request
+        })
+        .unwrap();
+        assert_eq!(world["boot"]["release_skew_ns"], 30_000);
+        // The ARM worker keeps its own launch skew instead.
+        let mut prepared = base.prepared.clone();
+        prepared.profile.backend = Backend::Hvf;
+        prepared.profile.semantic_parameters.hvf = Some(HvfParameters {
+            boot_policy: String::new(),
+            entropy_policy: String::new(),
+            device_policy: String::new(),
+            host_release: String::new(),
+            cpu_features: String::new(),
+            guest_kernel: ContentDigest::of(b"kernel"),
+            launch_max_skew_ns: 800,
+        });
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            ..request
+        };
+        assert!(world_json(&request).unwrap()["boot"].is_null());
     });
 }
 

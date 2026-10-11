@@ -55,6 +55,23 @@ pub(super) fn parse(
         "$.network.latency",
         false,
     )?;
+    let optional = |value: Option<String>, path: &str| {
+        value
+            .map(|v| duration(&Value::String(v), path, true))
+            .transpose()
+    };
+    let jitter_ns = optional(project.network.jitter, "$.network.jitter")?
+        .unwrap_or_else(|| default_network_jitter_ns(latency_ns));
+    if jitter_ns >= latency_ns {
+        return invalid("$.network.jitter", "must be less than latency");
+    }
+    let mut schedule = Schedule::new_simulation();
+    if let Some(v) = optional(project.schedule.timer_jitter, "$.schedule.timerJitter")? {
+        schedule.timer_jitter_ns = v;
+    }
+    if let Some(v) = optional(project.schedule.start_stagger, "$.schedule.startStagger")? {
+        schedule.start_stagger_ns = v;
+    }
     Ok(Simulation {
         name: project.name,
         source: source.to_owned(),
@@ -63,12 +80,12 @@ pub(super) fn parse(
         network: Network {
             name: "default".into(),
             latency_ns,
-            jitter_ns: 0,
+            jitter_ns,
             bandwidth_bps: None,
             queue_bound_ns: None,
             links: vec![],
         },
-        schedule: Schedule::default(),
+        schedule,
         control: Some(Control {
             service: "oracle".into(),
         }),
@@ -272,6 +289,26 @@ mod tests {
         assert_eq!(sim.services["app"].platform, "linux/arm64");
         assert_eq!(sim.network.latency_ns, 2_500_000);
         assert_eq!(sim.limits.simulated_time_ns, u64::MAX);
+        assert_eq!(sim.network.jitter_ns, 250_000);
+        assert_eq!(sim.schedule, Schedule::new_simulation());
+    }
+
+    #[test]
+    fn explicit_zeros_turn_seed_diversity_off() {
+        let sim = parse_native("name: demo\noracle: {image: test}\nnetwork: {jitter: 0ns}\nschedule: {timerJitter: 0ns, startStagger: 0ns}\n").unwrap();
+        assert_eq!(sim.network.jitter_ns, 0);
+        assert_eq!(sim.schedule, Schedule::default());
+        let sim =
+            parse_native("name: demo\noracle: {image: test}\nschedule: {startStagger: 5ms}\n")
+                .unwrap();
+        assert_eq!(sim.schedule.start_stagger_ns, 5_000_000);
+        assert_eq!(sim.schedule.timer_jitter_ns, DEFAULT_TIMER_JITTER_NS);
+        for yaml in [
+            "name: demo\noracle: {image: test}\nnetwork: {latency: 1ms, jitter: 1ms}",
+            "name: demo\noracle: {image: test}\nschedule: {timerJitter: -1us}",
+        ] {
+            assert!(parse_native(yaml).is_err(), "{yaml}");
+        }
     }
 
     #[test]

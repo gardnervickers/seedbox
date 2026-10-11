@@ -153,6 +153,30 @@ happens to finish first.
 
 Code: [RNG](../crates/seedbox-engine-core/src/rng.rs), [link policy](../crates/seedbox-engine-core/src/links.rs).
 
+## Seed diversity and the launch release
+
+By default two seeds differ in more than guest CRNG bytes. Timer jitter (20 µs)
+draws from `timer-jitter/<machine>`, network jitter (a tenth of latency) from
+`link/<a>/<b>`, and on Linux KVM a start stagger (1 ms) parks every machine at
+its launch barrier, just before its application starts. When the last machine
+arrives, each one is released at that time plus an offset in `[0, stagger]`
+from `release/<machine>`, reseeds its kernel CRNG from `fork-entropy/<machine>`,
+and restarts its timer stream. The stagger is clipped to the network lookahead
+(latency less jitter and early delivery), as the ARM launch skew is: a frame or
+control request sent after the first release is then never due before the last
+one, so no machine receives anything in its past. Faults, overrides and control are armed for the
+run seed at the release, so every timed override must be at or after the latest
+possible release. Interactive faults wait for application readiness, and live
+checkpoints are unavailable before the release. The ARM backend keeps its own
+bounded launch skew and ignores the stagger.
+
+The resolved values are part of the simulation definition, so replay restores
+them. Setting all three to zero gives the unparked cold run and its previous
+witness; a zero stagger is omitted from the definition.
+
+Code: [release](../crates/seedbox-engine-core/src/world.rs),
+[world adapter](../crates/seedbox-application/src/engine_adapter/world.rs).
+
 ## Parallel scheduling
 
 The scheduler executes machines in rounds. The network's minimum delivery delay
