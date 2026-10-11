@@ -122,8 +122,12 @@ pub struct TimerPolicy {
 /// time page at boot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProgressJitter {
-    pub bound_ns: u64,
+pub struct Progress {
+    /// Nominal charge per progress call; zero charges a call like a syscall.
+    pub ns: u64,
+    /// Bound on the seeded variation of that charge, each way; zero is off.
+    pub jitter_ns: u64,
+    /// First seed of the stream the guest kernel draws the variation from.
     pub seed: u64,
 }
 

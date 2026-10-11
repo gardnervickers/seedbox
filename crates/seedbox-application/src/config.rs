@@ -554,7 +554,7 @@ pub fn parse_for_architecture(
         services,
         configs,
         network,
-        simulator: Default::default(),
+        cpu: Default::default(),
         schedule,
         control,
         limits,

@@ -13,6 +13,8 @@
 #define SEEDBOX_CAP_PAGE_TIMER	1ULL
 #define SEEDBOX_TIMER_DISARMED	(~0ULL)
 #define SEEDBOX_TSC_KHZ		1000000
+/* Nominal virtual time one syscall costs (ns); the unit a progress charge is counted in. */
+#define SEEDBOX_SYSCALL_NS	1000ULL
 /* Virtual time one guest clock read costs (ns). */
 #define SEEDBOX_PV_READ_NS	100
 /* A progress call: getpid with this first argument (guest/progress/budget.h). */
@@ -53,8 +55,9 @@ struct seedbox_time_page {
 	u64 syscall_ns;	/* VMM plan: per-syscall cost */
 	u64 syscalls0;	/* VMM plan: syscall count used for syscall_target */
 	u64 plan_time;	/* VMM plan: t0 at the last deterministic publication */
-	u64 progress_jitter_ns;	/* bound on the seeded extra charge per progress call; 0 is off */
-	u64 progress_jitter_seed;	/* VMM-seeded stream the kernel draws that charge from */
+	u64 progress_ns;	/* nominal charge per progress call; 0 charges one syscall */
+	u64 progress_jitter_ns;	/* bound on the seeded variation of that charge, each way; 0 is off */
+	u64 progress_jitter_seed;	/* VMM-seeded stream the kernel draws that variation from */
 };
 
 struct pt_regs;
@@ -69,23 +72,25 @@ bool seedbox_set_next_event(unsigned long ticks);
 void seedbox_timer_disarm(void);
 /* Mix in fork entropy and reseed if the VMM published new (drivers/char/random.c). */
 void seedbox_take_entropy(void);
-/* Extra syscalls a progress call is charged, drawn from the VMM-seeded stream. */
-u64 seedbox_progress_jitter(struct seedbox_time_page *p);
+/* The syscalls a progress call counts as: its charge in whole syscall costs. */
+u64 seedbox_progress_syscalls(struct seedbox_time_page *p);
 
 /*
  * Offer the VMM a deterministic stopping point. The executed conditional
  * branches are the same whether or not the exit happens. A progress call
- * counts as one syscall plus its seeded jitter.
+ * counts as the syscalls its compute charge comes to, not one.
  */
 static __always_inline void seedbox_syscall_hook(struct pt_regs *regs, int nr)
 {
 	struct seedbox_time_page *p = READ_ONCE(seedbox_page);
 
 	if (p) {
-		u64 n = p->syscalls + 1;
+		u64 n = p->syscalls;
 
 		if (nr == SEEDBOX_PROGRESS_NR && regs->di == SEEDBOX_PROGRESS_MARK)
-			n += seedbox_progress_jitter(p);
+			n += seedbox_progress_syscalls(p);
+		else
+			n += 1;
 		WRITE_ONCE(p->syscalls, n);
 		if (READ_ONCE(p->exit_req))
 			outl(0, SEEDBOX_PORT_YIELD);

@@ -93,6 +93,8 @@ pub const MIN_WALL_CLOCK_EPOCH: u32 = 86400;
 
 /// This binary recipe is consumed by the small static Linux guest init. Length
 /// prefixes avoid shell evaluation of command, environment or config contents.
+/// The progress instrumentation's constants ride along, so the guest and the
+/// simulator agree on what one progress call stands for.
 pub fn launch_recipe(
     launch: &Launch,
     ip: &str,
@@ -100,27 +102,6 @@ pub fn launch_recipe(
     hostname: &str,
     configs: &BTreeMap<String, Vec<u8>>,
     wall_clock_epoch: u32,
-) -> Result<Vec<u8>> {
-    launch_recipe_with_progress(
-        launch,
-        ip,
-        hosts,
-        hostname,
-        configs,
-        wall_clock_epoch,
-        &seedbox_spec::project::SimulatorDefaults::default(),
-    )
-}
-
-/// Encode the explicit PV progress settings with the prepared guest inputs.
-pub fn launch_recipe_with_progress(
-    launch: &Launch,
-    ip: &str,
-    hosts: &str,
-    hostname: &str,
-    configs: &BTreeMap<String, Vec<u8>>,
-    wall_clock_epoch: u32,
-    progress: &seedbox_spec::project::SimulatorDefaults,
 ) -> Result<Vec<u8>> {
     if wall_clock_epoch < MIN_WALL_CLOCK_EPOCH {
         return Err(Error::Setup(format!(
@@ -134,8 +115,8 @@ pub fn launch_recipe_with_progress(
     // A guest-wide default per service VM, retained with the launch inputs.
     bytes.extend_from_slice(&262144_u32.to_le_bytes()); // vm.max_map_count
     bytes.extend_from_slice(&wall_clock_epoch.to_le_bytes());
-    bytes.extend_from_slice(&progress.instructions_per_progress_call.get().to_le_bytes());
-    bytes.extend_from_slice(&progress.progress_points_per_block.get().to_le_bytes());
+    bytes.extend_from_slice(&seedbox_spec::project::PROGRESS_INSTRUCTIONS.to_le_bytes());
+    bytes.extend_from_slice(&seedbox_spec::project::PROGRESS_POINTS.to_le_bytes());
     list(&mut bytes, &launch.argv)?;
     list(
         &mut bytes,

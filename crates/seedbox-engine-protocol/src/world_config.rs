@@ -32,8 +32,13 @@ pub struct WorldConfig {
     pub timer_jitter_ns: u64,
     #[serde(default)]
     pub stop_tolerance_ns: u64,
-    /// Bound on the seeded extra charge the guest kernel adds to each PV
-    /// progress call, drawn from a per-machine stream; zero is off.
+    /// Nominal virtual time the guest kernel charges each PV progress call:
+    /// the instructions between calls at the configured CPU speed. Zero
+    /// charges a call like one syscall.
+    #[serde(default)]
+    pub progress_ns: u64,
+    /// Bound on the seeded variation of that charge, each way, drawn from a
+    /// per-machine stream; zero charges every call the same.
     #[serde(default)]
     pub progress_jitter_ns: u64,
     /// Exact timer frequency error in parts per million; absent is zero.
@@ -376,6 +381,7 @@ mod tests {
             end_on_exit: None,
             timer_jitter_ns: 0,
             stop_tolerance_ns: 0,
+            progress_ns: 0,
             progress_jitter_ns: 0,
             exact_timer_ppm: None,
             network: None,
@@ -394,7 +400,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&cfg).unwrap(),
             serde_json::json!({"kernel":"k","mem_mb":512,"duration_ns":1,"timer_jitter_ns":0,
-                "stop_tolerance_ns":0,"progress_jitter_ns":0,"machines":[],"control":null})
+                "stop_tolerance_ns":0,"progress_ns":0,"progress_jitter_ns":0,"machines":[],"control":null})
         );
     }
 

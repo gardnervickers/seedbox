@@ -349,6 +349,7 @@ impl Orchestrator {
                 program: &record.identity.program,
                 limits: &limits,
                 network: &record.identity.configuration.network,
+                cpu: &record.identity.configuration.cpu,
                 schedule: &record.identity.configuration.schedule,
                 control: record.identity.configuration.control.as_ref(),
                 check: &record.identity.configuration.check,

@@ -57,6 +57,7 @@ pub struct ExecutionRequest<'a> {
     pub program: &'a [seedbox_engine_protocol::input_program::TimedInput],
     pub limits: &'a Limits,
     pub network: &'a Network,
+    pub cpu: &'a seedbox_spec::project::CpuDefaults,
     pub schedule: &'a Schedule,
     pub control: Option<&'a crate::config::Control>,
     pub check: &'a Check,

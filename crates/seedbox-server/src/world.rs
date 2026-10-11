@@ -490,7 +490,7 @@ mod tests {
                 queue_bound_ns: None,
                 links: Vec::new(),
             },
-            simulator: Default::default(),
+            cpu: Default::default(),
             schedule: Default::default(),
             control: None,
             limits: seedbox_spec::Limits {

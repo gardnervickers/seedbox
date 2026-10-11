@@ -86,7 +86,7 @@ pub(super) fn parse(
         wall_clock_epoch: None,
         machine: MachineOptions::default(),
         disk: DiskOptions::default(),
-        simulator: project.simulator,
+        cpu: project.cpu,
     })
 }
 
@@ -272,15 +272,21 @@ mod tests {
         assert_eq!(sim.services["app"].platform, "linux/arm64");
         assert_eq!(sim.network.latency_ns, 2_500_000);
         assert_eq!(sim.limits.simulated_time_ns, u64::MAX);
-        assert_eq!(sim.simulator.progress_jitter_ns, 0);
+        assert_eq!(sim.cpu, seedbox_spec::project::CpuDefaults::default());
         let sim =
-            parse_native("name: demo\noracle: {image: test}\nsimulator: {progressJitter: 5us}\n")
+            parse_native("name: demo\noracle: {image: test}\ncpu: {speed: 800MHz, jitter: 5%}\n")
                 .unwrap();
-        assert_eq!(sim.simulator.progress_jitter_ns, 5_000);
-        assert!(parse_native(
-            "name: demo\noracle: {image: test}\nsimulator: {progressJitter: 2ms}\n"
-        )
-        .is_err());
+        assert_eq!(sim.cpu.speed_hz, 800_000_000);
+        assert_eq!(sim.cpu.jitter_percent, 5);
+        for cpu in ["{speed: 2}", "{jitter: 101%}", "{progressJitter: 5us}"] {
+            assert!(
+                parse_native(&format!(
+                    "name: demo\noracle: {{image: test}}\ncpu: {cpu}\n"
+                ))
+                .is_err(),
+                "{cpu}"
+            );
+        }
     }
 
     #[test]

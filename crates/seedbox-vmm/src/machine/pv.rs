@@ -11,10 +11,16 @@
 //! clock would pass the soft stop (the `bound` we publish) or at the syscall
 //! that reaches it (`syscall_target`). Every exit is a deterministic point.
 //! Application code makes progress through the guest's automatic
-//! instrumentation (guest/progress), which charges a syscall per configured
-//! number of executed instructions per thread (plus seeded progress jitter
-//! the kernel draws from a stream this VMM seeds on the time page), and the
-//! kernel's syscall and `cpu_relax` hooks.
+//! instrumentation (guest/progress): every so many executed instructions a
+//! thread makes a progress call, which the kernel counts as the syscalls
+//! that compute costs at the configured CPU speed (plus seeded jitter it
+//! draws from a stream this VMM seeds on the time page), and the kernel's
+//! syscall and `cpu_relax` hooks.
+//!
+//! The count is the guest's; the hard stop is ours. Syscalls counted past
+//! the stop are not lost: the time they owe is a debt the machine carries
+//! (`Machine::pv_debt_ns`) and the next run charges first, so a progress
+//! call that straddles a stop costs what it should.
 //!
 //! A loop with no exit at all would never end and never let time move. A
 //! watchdog (host CPU time, a performance setting) interrupts a run with no
@@ -26,7 +32,7 @@
 //! limit, which follows from the model: such a loop waits on something only
 //! virtual time could bring.
 
-use super::pv_plan::clock_plan;
+use super::pv_plan::{charge, clock_plan};
 #[cfg(test)]
 use super::PAGE_TIMER_DEADLINE;
 use super::{Machine, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
@@ -123,8 +129,10 @@ impl PvClock {
         // transaction. Never rewrite any of its inputs at a watchdog landing:
         // even a mathematically equivalent replan can tear those loads, relax
         // a previous re-arm's bound, or move an overdue target.
+        // The owed time is as good as spent: the plan counts from there.
+        let t0 = m.time.saturating_add(m.pv_debt_ns);
         if let Some((bound, target)) = clock_plan(
-            m.time,
+            t0,
             m.page_get(PAGE_SYSCALLS),
             self.syscall_ns,
             soft,
@@ -136,7 +144,7 @@ impl PvClock {
             if m.page_timer.enabled {
                 m.page_set(super::PAGE_SYSCALL_NS, self.syscall_ns);
                 m.page_set(super::PAGE_SYSCALLS0, m.page_get(PAGE_SYSCALLS));
-                m.page_set(super::PAGE_PLAN_TIME, m.time);
+                m.page_set(super::PAGE_PLAN_TIME, t0);
             }
         }
         Ok(())
@@ -147,11 +155,14 @@ impl PvClock {
         self.syscalls0 = syscalls;
     }
 
-    /// Progress made by the run, from the syscall count after KVM_RUN.
-    pub(crate) fn read(&mut self, syscalls: u64) -> u64 {
-        (syscalls - self.syscalls0)
-            .saturating_mul(self.syscall_ns)
-            .min(self.remaining)
+    /// Progress made by the run, from the syscall count after KVM_RUN: the
+    /// owed time first, then the counted syscalls, up to the hard stop. What
+    /// the stop cuts off stays owed.
+    pub(crate) fn read(&mut self, debt: &mut u64, syscalls: u64) -> u64 {
+        let elapsed = (syscalls - self.syscalls0).saturating_mul(self.syscall_ns);
+        let (charged, owed) = charge(*debt, elapsed, self.remaining);
+        *debt = owed;
+        charged
     }
 }
 
@@ -320,7 +331,10 @@ mod tests {
         let mut charge = |m: &mut Machine, legal: bool| {
             clock.prepare(m, 1_000_000, 1_000_000, legal).unwrap();
             clock.start(17);
-            (clock.read(27), m.page_get(super::super::PAGE_SYSCALL_NS))
+            (
+                clock.read(&mut m.pv_debt_ns, 27),
+                m.page_get(super::super::PAGE_SYSCALL_NS),
+            )
         };
         assert_eq!(charge(&mut m, true), (9370, 937));
         m.throttle_permille = Some(4000);
@@ -330,6 +344,36 @@ mod tests {
         m.throttle_permille = Some(1000);
         assert_eq!(charge(&mut m, false), (37480, 3748));
         assert_eq!(charge(&mut m, true), (9370, 937));
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    fn syscalls_counted_past_the_hard_stop_are_owed_to_the_next_run() {
+        let kvm = Kvm::new().unwrap();
+        let mut m = machine(&kvm, &[0xf4]);
+        m.page_timer_requested = true;
+        m.abi = super::super::ABI_PAGE_TIMER;
+        m.enable_page_timer();
+        let mut clock = PvClock::new(Duration::from_secs(10)).unwrap();
+        m.page_set(PAGE_SYSCALLS, 0);
+        // 25 syscalls (a progress call at 2 GHz) against a 10 us stop.
+        clock.prepare(&mut m, 10_000, 10_000, true).unwrap();
+        clock.start(0);
+        assert_eq!(clock.read(&mut m.pv_debt_ns, 25), 10_000);
+        assert_eq!(m.pv_debt_ns, 15_000);
+        m.time = 10_000;
+        m.page_set(PAGE_SYSCALLS, 25);
+        // The next plan counts from the owed time: 5 us of debt left after a
+        // 10 us soft stop would be reached by the first syscall.
+        clock.prepare(&mut m, 100_000, 20_000, true).unwrap();
+        assert_eq!(m.page_get(super::super::PAGE_PLAN_TIME), 25_000);
+        assert_eq!(m.page_get(PAGE_SYSCALL_TARGET), 26);
+        clock.start(25);
+        assert_eq!(clock.read(&mut m.pv_debt_ns, 25), 15_000);
+        assert_eq!(m.pv_debt_ns, 0);
+        clock.start(25);
+        assert_eq!(clock.read(&mut m.pv_debt_ns, 27), 2_000);
+        assert_eq!(m.pv_debt_ns, 0);
     }
 
     #[test]

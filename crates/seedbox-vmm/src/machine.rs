@@ -55,8 +55,9 @@ const PAGE_PLAN_TIME: usize = 18;
 /// Progress jitter: the bound and the seed of the stream the kernel draws
 /// from at each progress call. Written at boot, carried across a reboot and
 /// reseeded with the other streams at a fork.
-const PAGE_PROGRESS_JITTER_NS: usize = 19;
-const PAGE_PROGRESS_JITTER_SEED: usize = 20;
+const PAGE_PROGRESS_NS: usize = 19;
+const PAGE_PROGRESS_JITTER_NS: usize = 20;
+const PAGE_PROGRESS_JITTER_SEED: usize = 21;
 pub const ABI_PAGE_TIMER: u64 = 4;
 const CAP_PAGE_TIMER: u64 = 1;
 const TIMER_DISARMED: u64 = u64::MAX;
@@ -127,8 +128,9 @@ const _: () = {
     assert!(PAGE_SYSCALL_NS == 16);
     assert!(PAGE_SYSCALLS0 == 17);
     assert!(PAGE_PLAN_TIME == 18);
-    assert!(PAGE_PROGRESS_JITTER_NS == 19);
-    assert!(PAGE_PROGRESS_JITTER_SEED == 20);
+    assert!(PAGE_PROGRESS_NS == 19);
+    assert!(PAGE_PROGRESS_JITTER_NS == 20);
+    assert!(PAGE_PROGRESS_JITTER_SEED == 21);
     assert!(ABI_PAGE_TIMER == 4);
     assert!(CAP_PAGE_TIMER == 1);
 };
@@ -196,6 +198,8 @@ pub struct SnapshotState {
     pv: bool,
     syscall_ns: u64,
     throttle_permille: Option<u64>,
+    #[serde(default)]
+    pv_debt_ns: u64,
     abi: u64,
     page_timer: PageTimer,
     pit_exact: bool,
@@ -349,6 +353,9 @@ pub struct Machine {
     /// A throttle fault's factor on `syscall_ns`, in thousandths. `None`
     /// until the first throttle, so unthrottled runs charge exactly as before.
     pub throttle_permille: Option<u64>,
+    /// PV clock: virtual time the guest's counted syscalls already owe past
+    /// the last hard stop, charged at the start of the next run.
+    pub pv_debt_ns: u64,
     /// Consecutive watchdog interruptions since the last natural exit.
     stall_ticks: u64,
     pub timer_rng: Option<crate::rng::Rng>,
@@ -623,6 +630,7 @@ impl Machine {
             timer_jitter: 0,
             syscall_ns: pv::SYSCALL_NS,
             throttle_permille: None,
+            pv_debt_ns: 0,
             stall_ticks: 0,
             timer_rng: None,
             shadow: Box::new(shadow),
@@ -716,11 +724,13 @@ impl Machine {
         Ok(())
     }
 
-    /// Publish the progress jitter bound and the first seed of the stream
-    /// the guest kernel draws it from. Both are page words outside the
-    /// checkpointed prefix, so a snapshot carries them like the plan.
-    pub fn set_progress_jitter(&mut self, bound_ns: u64, seed: u64) {
-        self.page_set(PAGE_PROGRESS_JITTER_NS, bound_ns);
+    /// Publish what a progress call costs: its nominal charge, the bound on
+    /// its seeded variation and the first seed of the stream the guest kernel
+    /// draws that variation from. All are page words outside the checkpointed
+    /// prefix, so a snapshot carries them like the plan.
+    pub fn set_progress(&mut self, progress_ns: u64, jitter_ns: u64, seed: u64) {
+        self.page_set(PAGE_PROGRESS_NS, progress_ns);
+        self.page_set(PAGE_PROGRESS_JITTER_NS, jitter_ns);
         self.page_set(PAGE_PROGRESS_JITTER_SEED, seed);
     }
 
@@ -869,6 +879,7 @@ impl Machine {
                 pv: self.pv,
                 syscall_ns: self.syscall_ns,
                 throttle_permille: self.throttle_permille,
+                pv_debt_ns: self.pv_debt_ns,
                 abi: self.abi,
                 page_timer: self.page_timer,
                 pit_exact: self.pit_exact,
@@ -968,6 +979,7 @@ impl Machine {
         self.pv = s.pv;
         self.syscall_ns = s.syscall_ns;
         self.throttle_permille = s.throttle_permille;
+        self.pv_debt_ns = s.pv_debt_ns;
         self.abi = s.abi;
         self.page_timer = s.page_timer;
         self.pit_exact = s.pit_exact;
@@ -1418,7 +1430,7 @@ impl Machine {
             self.stats.kvm_ns[kind] += run_ns;
             self.stats.kvm_n[kind] += 1;
             let syscalls1 = unsafe { std::ptr::read_volatile(self.page.0.add(PAGE_SYSCALLS)) };
-            let delta = clock.read(syscalls1);
+            let delta = clock.read(&mut self.pv_debt_ns, syscalls1);
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
             let run_syscalls = syscalls1.wrapping_sub(syscalls0);
             // A watchdog interruption is not a deterministic point: the run
@@ -2314,12 +2326,13 @@ mod fork_tests {
         assert_eq!(fields["syscall_ns"], (PAGE_SYSCALL_NS, 1));
         assert_eq!(fields["syscalls0"], (PAGE_SYSCALLS0, 1));
         assert_eq!(fields["plan_time"], (PAGE_PLAN_TIME, 1));
+        assert_eq!(fields["progress_ns"], (PAGE_PROGRESS_NS, 1));
         assert_eq!(fields["progress_jitter_ns"], (PAGE_PROGRESS_JITTER_NS, 1));
         assert_eq!(
             fields["progress_jitter_seed"],
             (PAGE_PROGRESS_JITTER_SEED, 1)
         );
-        assert_eq!(index, 21);
+        assert_eq!(index, 22);
         assert_eq!(PAGE_FIELDS, PAGE_PV_CLOCK);
         assert_eq!(PAGE_ENTROPY_FIELDS * 8, ENTROPY_WORDS * 4);
         let abi: u64 = header

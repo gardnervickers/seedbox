@@ -16,9 +16,11 @@ use std::{collections::BTreeSet, rc::Rc, time::Instant};
 const EXCLUSIVE_EPOCH_OFFSET: usize = 40;
 const SYSCALL_NS_OFFSET: usize = 48;
 const SYSCALL_NS: u64 = 1_000;
-/// Progress jitter bound and stream seed (kernel-arm64/seedbox.c).
-const PROGRESS_JITTER_NS_OFFSET: usize = 56;
-const PROGRESS_JITTER_SEED_OFFSET: usize = 64;
+/// A progress call's nominal charge, jitter bound and stream seed
+/// (kernel-arm64/seedbox.c).
+const PROGRESS_NS_OFFSET: usize = 56;
+const PROGRESS_JITTER_NS_OFFSET: usize = 64;
+const PROGRESS_JITTER_SEED_OFFSET: usize = 72;
 
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -333,18 +335,20 @@ impl<B: Backend> Machine<B> {
         &self.uart.console
     }
 
-    /// Publish the progress jitter bound and the seed of the stream the
-    /// guest kernel draws it from, before the first instruction. The page is
-    /// part of every snapshot, so a branch keeps its own stream.
-    pub fn with_progress_jitter(self, jitter: &application::ProgressJitter) -> Result<Self> {
+    /// Publish what a progress call costs, its jitter bound and the seed of
+    /// the stream the guest kernel draws the jitter from, before the first
+    /// instruction. The page is part of every snapshot, so a branch keeps its
+    /// own stream.
+    pub fn with_progress(self, progress: &application::Progress) -> Result<Self> {
         if self.raw_exits != 0 {
-            return Err("progress jitter must be set before the machine runs".into());
+            return Err("the progress charge must be set before the machine runs".into());
         }
         unsafe {
+            self.page.set_word(PROGRESS_NS_OFFSET, progress.ns)?;
             self.page
-                .set_word(PROGRESS_JITTER_NS_OFFSET, jitter.bound_ns)?;
+                .set_word(PROGRESS_JITTER_NS_OFFSET, progress.jitter_ns)?;
             self.page
-                .set_word(PROGRESS_JITTER_SEED_OFFSET, jitter.seed)?;
+                .set_word(PROGRESS_JITTER_SEED_OFFSET, progress.seed)?;
         }
         Ok(self)
     }

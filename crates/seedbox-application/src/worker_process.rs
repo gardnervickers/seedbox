@@ -646,10 +646,10 @@ mod tests {
                     bandwidth_bps: None,
                     queue_bound_ns: None,
                 },
+                cpu: &Default::default(),
                 schedule: &Schedule {
                     timer_jitter_ns: 50_000,
                     stop_tolerance_ns: 40_000,
-                    progress_jitter_ns: 0,
                 },
                 control: None,
                 check: &Check {

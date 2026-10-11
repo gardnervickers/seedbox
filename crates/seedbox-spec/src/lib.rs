@@ -18,9 +18,9 @@ pub struct Simulation {
     pub services: BTreeMap<String, Service>,
     pub configs: BTreeMap<String, PathBuf>,
     pub network: Network,
-    /// PV instrumentation semantics retained with the simulation.
+    /// The virtual CPU, retained with the simulation.
     #[serde(default)]
-    pub simulator: project::SimulatorDefaults,
+    pub cpu: project::CpuDefaults,
     pub schedule: Schedule,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<Control>,
@@ -166,10 +166,6 @@ pub struct Limits {
 pub struct Schedule {
     pub timer_jitter_ns: u64,
     pub stop_tolerance_ns: u64,
-    /// Bound on the seeded extra charge per PV progress call; zero is off.
-    /// Authored as `simulator.progressJitter` in seedbox.yaml.
-    #[serde(default, skip_serializing_if = "crate::project::is_zero")]
-    pub progress_jitter_ns: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -96,12 +96,8 @@ pub fn resolve(
         oracle,
         network: configuration.network.clone(),
         simulator: Simulator {
-            instructions_per_progress_call: configuration.simulator.instructions_per_progress_call,
-            progress_points_per_block: configuration.simulator.progress_points_per_block,
-            schedule: seedbox_spec::Schedule {
-                progress_jitter_ns: configuration.simulator.progress_jitter_ns,
-                ..configuration.schedule.clone()
-            },
+            cpu: configuration.cpu.clone(),
+            schedule: configuration.schedule.clone(),
             disk: configuration.disk.clone(),
             oracle_control: configuration.control.is_some(),
         },
@@ -416,14 +412,13 @@ fn resolved_boot(
             })
             .collect(),
     };
-    let mut recipe = crate::guest::launch_recipe_with_progress(
+    let mut recipe = crate::guest::launch_recipe(
         &launch,
         &format!("10.0.0.{}/24", index + 1),
         &hosts,
         name,
         &BTreeMap::new(),
         definition.clock.epoch_seconds,
-        &definition.simulator.progress(),
     )?;
     let mut input = tempfile::tempfile()?;
     store.copy_to(&digest(&machine.boot_archive)?, &mut input)?;
@@ -636,8 +631,6 @@ mod tests {
         );
         definition.oracle.process.argv.push("--changed".into());
         definition.clock.epoch_seconds += 1;
-        definition.simulator.instructions_per_progress_call =
-            std::num::NonZeroU32::new(5000).unwrap();
         let changed = prepared(&definition, &store).unwrap();
         assert_ne!(changed.guests["oracle"], original);
         assert_eq!(
@@ -650,14 +643,15 @@ mod tests {
             .any(|v| v == b"preserve me"));
         assert!(bytes.windows(b"--changed".len()).any(|v| v == b"--changed"));
         store.verify(&original).unwrap();
-        // Progress jitter is the VMM's input, not the guest's: the recipe
-        // and the prepared guests do not change with it.
-        definition.simulator.schedule.progress_jitter_ns = 5_000;
+        // The CPU is the VMM's input, not the guest's: the recipe and the
+        // prepared guests do not change with it.
+        definition.simulator.cpu.speed_hz = 800_000_000;
+        definition.simulator.cpu.jitter_percent = 5;
         assert_eq!(
             prepared(&definition, &store).unwrap().guests,
             changed.guests
         );
-        definition.simulator.schedule.progress_jitter_ns = 0;
+        definition.simulator.cpu = Default::default();
     }
     #[test]
     fn checkpoint_binary_closure_survives_source_deletion_and_preserves_guest_paths() {

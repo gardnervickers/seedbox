@@ -164,24 +164,13 @@ impl Start {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Simulator {
-    pub instructions_per_progress_call: std::num::NonZeroU32,
-    pub progress_points_per_block: std::num::NonZeroU32,
+    /// The virtual CPU every machine runs on.
+    #[serde(default)]
+    pub cpu: crate::project::CpuDefaults,
     pub schedule: crate::Schedule,
     pub disk: crate::DiskOptions,
     /// The oracle exposes the world control API.
     pub oracle_control: bool,
-}
-impl Simulator {
-    /// The PV progress settings as seedbox.yaml authors them. The budget and
-    /// charge points go to the guest launch recipe; the jitter goes to the
-    /// VMM with the schedule.
-    pub fn progress(&self) -> crate::project::SimulatorDefaults {
-        crate::project::SimulatorDefaults {
-            instructions_per_progress_call: self.instructions_per_progress_call,
-            progress_points_per_block: self.progress_points_per_block,
-            progress_jitter_ns: self.schedule.progress_jitter_ns,
-        }
-    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -272,7 +261,7 @@ impl Definition {
                 ..Default::default()
             },
             disk: self.simulator.disk.clone(),
-            simulator: self.simulator.progress(),
+            cpu: self.simulator.cpu.clone(),
         }
     }
 }
