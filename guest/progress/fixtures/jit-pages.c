@@ -1,7 +1,8 @@
 /* AArch64 instruction-cache regression. Three reader threads repeatedly execute
  * a patched function, a block crossing a page boundary patched only on its second
  * page, and an untouched neighboring function. All writes happen between barriers.
- * Pass --skip-flush as a native-translator negative control: stale code must fail.
+ * Use --skip-flush with -no_hw_cache_consistency as a cache-maintenance negative
+ * control; hardware cache consistency can detect writes without explicit flushes.
  */
 #define _GNU_SOURCE
 #include <pthread.h>
