@@ -478,14 +478,16 @@ impl FaultForm {
         }
     }
 
-    pub(super) fn draw(&self, frame: &mut Frame, area: Rect) {
+    pub(super) fn draw(&self, frame: &mut Frame, area: Rect, map_bottom: Option<u16>) {
         let width = area.width.saturating_sub(4).min(92);
-        // Sit in the lower part of tall terminals so the map stays visible for
-        // the target preview; size to content.
-        let top = if area.height >= 34 {
-            area.y + area.height * 2 / 5
-        } else {
-            area.y + 1
+        // Sit below the network map when there is room for the form, so every
+        // previewed machine and link stays visible; otherwise in the lower
+        // part of tall terminals; size to content.
+        const ROOM: u16 = 18;
+        let top = match map_bottom {
+            Some(bottom) if area.y + area.height > bottom + ROOM => bottom,
+            _ if area.height >= 34 => area.y + area.height * 2 / 5,
+            _ => area.y + 1,
         };
         let height = (area.y + area.height).saturating_sub(top + 1).min(28);
         let mut modal = Rect::new(area.x + (area.width - width) / 2, top, width, height);
@@ -1384,7 +1386,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 35)).unwrap();
         terminal
-            .draw(|frame| form.draw(frame, frame.area()))
+            .draw(|frame| form.draw(frame, frame.area(), None))
             .unwrap();
         let text = terminal
             .backend()
@@ -1443,7 +1445,7 @@ mod tests {
         let render = |form: &FaultForm, width, height| {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|frame| form.draw(frame, frame.area()))
+                .draw(|frame| form.draw(frame, frame.area(), None))
                 .unwrap();
             terminal
                 .backend()

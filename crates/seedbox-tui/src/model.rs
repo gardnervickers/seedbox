@@ -211,6 +211,10 @@ pub struct Focus {
     pub fault_selected: Option<Key>,
     /// Per-machine preparation progress reported before execution.
     pub preparation: BTreeMap<String, seedbox_api::PreparationStage>,
+    /// Recent achieved rates between successive playback observations,
+    /// oldest first, in simulated seconds per wall-clock second.
+    pub achieved: VecDeque<f64>,
+    achieved_from: Option<seedbox_api::RateMeasurement>,
 }
 
 /// What the catalogue knows about a simulation beyond its summary.
@@ -232,26 +236,88 @@ pub struct Checkpoint {
 #[derive(Default)]
 pub struct Traffic {
     baseline: Option<(u64, LinkCounts)>,
-    /// Frames per simulated second on each directed link.
-    pub links: BTreeMap<(String, String), f64>,
+    /// Rates on each directed link over the newest window.
+    pub links: BTreeMap<(String, String), LinkRates>,
     /// Recent transmit rates per machine, oldest first.
     pub sent: BTreeMap<String, VecDeque<f64>>,
     pub received: BTreeMap<String, f64>,
+    /// Frames dropped per simulated second, charged as the counters are: the
+    /// sender for partition, loss and queue drops, the receiver for its own.
+    pub dropped: BTreeMap<String, Drops>,
+    /// Every window seen while watching, per machine, on simulated time.
+    pub history: BTreeMap<String, Vec<Sample>>,
 }
 
-/// Scheduled-frame counters per directed link.
-type LinkCounts = BTreeMap<(String, String), u64>;
+/// Counters per directed link, as last observed.
+type LinkCounts = BTreeMap<(String, String), seedbox_api::LinkCounters>;
+
+/// Frames per simulated second, by why they were dropped.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Drops {
+    pub partition: f64,
+    pub loss: f64,
+    pub queue: f64,
+    pub receiver: f64,
+}
+
+impl Drops {
+    pub fn total(&self) -> f64 {
+        self.partition + self.loss + self.queue + self.receiver
+    }
+
+    fn add(&mut self, other: &Drops) {
+        self.partition += other.partition;
+        self.loss += other.loss;
+        self.queue += other.queue;
+        self.receiver += other.receiver;
+    }
+
+    /// The largest cause, for a one-glyph summary.
+    pub fn dominant(&self) -> Option<&'static str> {
+        [
+            (self.partition, "partition"),
+            (self.loss, "loss"),
+            (self.queue, "queue"),
+            (self.receiver, "receiver"),
+        ]
+        .into_iter()
+        .filter(|(rate, _)| *rate >= 0.5)
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, cause)| cause)
+    }
+}
+
+/// Rates on one directed link over the newest window.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LinkRates {
+    pub frames: f64,
+    pub bytes: f64,
+    pub dropped: Drops,
+}
+
+/// One machine's traffic over the window `[from_ns, at_ns]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sample {
+    pub from_ns: u64,
+    pub at_ns: u64,
+    pub sent: f64,
+    pub dropped: f64,
+}
 
 const TRAFFIC_WINDOW_NS: u64 = 100_000_000;
 const TRAFFIC_SAMPLES: usize = 24;
+/// Retained samples per machine; older halves are merged pairwise so a long
+/// run keeps its whole shape at a coarser resolution.
+const HISTORY_SAMPLES: usize = 4096;
 const MAX_TRANSITIONS: usize = 2000;
+const ACHIEVED_SAMPLES: usize = 40;
 
 impl Traffic {
     fn observe(&mut self, world: &WorldState) {
-        let counts: BTreeMap<(String, String), u64> = world
+        let counts: LinkCounts = world
             .links
             .iter()
-            .map(|l| ((l.from.clone(), l.to.clone()), l.counters.scheduled))
+            .map(|l| ((l.from.clone(), l.to.clone()), l.counters.clone()))
             .collect();
         let Some((at, previous)) = &self.baseline else {
             self.baseline = Some((world.simulated_time_ns, counts));
@@ -266,24 +332,62 @@ impl Traffic {
             return;
         }
         let seconds = elapsed as f64 / 1e9;
+        let per_second = |now: u64, before: u64| now.saturating_sub(before) as f64 / seconds;
         let mut sent: BTreeMap<String, f64> = BTreeMap::new();
         let mut received: BTreeMap<String, f64> = BTreeMap::new();
+        let mut dropped: BTreeMap<String, Drops> = BTreeMap::new();
         self.links.clear();
-        for (key, count) in &counts {
-            let before = previous.get(key).copied().unwrap_or(0);
-            let rate = count.saturating_sub(before) as f64 / seconds;
-            self.links.insert(key.clone(), rate);
-            *sent.entry(key.0.clone()).or_default() += rate;
-            *received.entry(key.1.clone()).or_default() += rate;
+        for (key, now) in &counts {
+            let before = previous.get(key).cloned().unwrap_or_default();
+            let rates = LinkRates {
+                frames: per_second(now.scheduled, before.scheduled),
+                bytes: per_second(now.bytes, before.bytes),
+                dropped: Drops {
+                    partition: per_second(now.partition_dropped, before.partition_dropped),
+                    loss: per_second(now.loss_dropped, before.loss_dropped),
+                    queue: per_second(now.queue_dropped, before.queue_dropped),
+                    receiver: per_second(now.receiver_dropped, before.receiver_dropped),
+                },
+            };
+            *sent.entry(key.0.clone()).or_default() += rates.frames;
+            *received.entry(key.1.clone()).or_default() += rates.frames;
+            dropped.entry(key.0.clone()).or_default().add(&Drops {
+                receiver: 0.0,
+                ..rates.dropped
+            });
+            dropped.entry(key.1.clone()).or_default().receiver += rates.dropped.receiver;
+            self.links.insert(key.clone(), rates);
         }
         for machine in &world.machines {
+            let rate = sent.get(&machine.name).copied().unwrap_or(0.0);
             let history = self.sent.entry(machine.name.clone()).or_default();
-            history.push_back(sent.get(&machine.name).copied().unwrap_or(0.0));
+            history.push_back(rate);
             while history.len() > TRAFFIC_SAMPLES {
                 history.pop_front();
             }
+            let samples = self.history.entry(machine.name.clone()).or_default();
+            samples.push(Sample {
+                from_ns: *at,
+                at_ns: world.simulated_time_ns,
+                sent: rate,
+                dropped: dropped.get(&machine.name).map_or(0.0, Drops::total),
+            });
+            if samples.len() > HISTORY_SAMPLES {
+                let keep = samples.len() / 2;
+                let merged: Vec<Sample> = samples[..keep]
+                    .chunks(2)
+                    .map(|pair| Sample {
+                        from_ns: pair[0].from_ns,
+                        at_ns: pair[pair.len() - 1].at_ns,
+                        sent: pair.iter().map(|s| s.sent).sum::<f64>() / pair.len() as f64,
+                        dropped: pair.iter().map(|s| s.dropped).sum::<f64>() / pair.len() as f64,
+                    })
+                    .collect();
+                samples.splice(..keep, merged);
+            }
         }
         self.received = received;
+        self.dropped = dropped;
         self.baseline = Some((world.simulated_time_ns, counts));
     }
 
@@ -298,11 +402,19 @@ impl Traffic {
         self.received.get(machine).copied().unwrap_or(0.0)
     }
 
-    pub fn link_rate(&self, from: &str, to: &str) -> f64 {
+    pub fn dropped_rate(&self, machine: &str) -> Drops {
+        self.dropped.get(machine).copied().unwrap_or_default()
+    }
+
+    pub fn link(&self, from: &str, to: &str) -> LinkRates {
         self.links
             .get(&(from.to_owned(), to.to_owned()))
             .copied()
-            .unwrap_or(0.0)
+            .unwrap_or_default()
+    }
+
+    pub fn link_rate(&self, from: &str, to: &str) -> f64 {
+        self.link(from, to).frames
     }
 }
 
@@ -331,7 +443,39 @@ impl Focus {
             seen: Vec::new(),
             fault_selected: None,
             preparation: BTreeMap::new(),
+            achieved: VecDeque::new(),
+            achieved_from: None,
         }
+    }
+
+    /// Record the rate achieved since the previous observation. The server
+    /// measures from its last rate change, so a smaller wall time starts over.
+    fn observe_achieved(&mut self, sample: &PlaybackObservation) {
+        if matches!(sample.state.rate, PlaybackRate::Paused) {
+            self.achieved_from = None;
+            return;
+        }
+        let Some(now) = sample.state.achieved_rate else {
+            return;
+        };
+        if let Some(before) = self.achieved_from {
+            let wall = now
+                .wall_time_ns
+                .get()
+                .checked_sub(before.wall_time_ns.get());
+            let simulated = now.simulated_time_ns.checked_sub(before.simulated_time_ns);
+            match (wall, simulated) {
+                (Some(wall), Some(simulated)) if wall >= 50_000_000 => {
+                    self.achieved.push_back(simulated as f64 / wall as f64);
+                    while self.achieved.len() > ACHIEVED_SAMPLES {
+                        self.achieved.pop_front();
+                    }
+                }
+                (Some(_), Some(_)) => return,
+                _ => {}
+            }
+        }
+        self.achieved_from = Some(now);
     }
 
     /// Fault spans, upcoming inputs and machine downtime as of now.
@@ -614,6 +758,11 @@ pub(super) enum Panel {
 
 pub struct App {
     pub(super) hitboxes: std::cell::RefCell<Vec<(ratatui::layout::Rect, HitTarget)>>,
+    /// The bottom row of the network map as last drawn, so the inject form
+    /// can sit below it and leave previewed targets visible.
+    pub(super) map_bottom: std::cell::Cell<Option<u16>>,
+    /// A machine whose output has its own panel, left out of the log pane.
+    pub(super) logs_exclude: std::cell::RefCell<Option<String>>,
     pub(super) panel: Panel,
     pub(super) logs_scroll: usize,
     pub(super) events_scroll: usize,
@@ -947,6 +1096,8 @@ impl App {
     pub fn new(focus: Option<SimulationId>) -> Self {
         Self {
             hitboxes: Default::default(),
+            map_bottom: Default::default(),
+            logs_exclude: Default::default(),
             panel: Panel::Machines,
             logs_scroll: 0,
             events_scroll: 0,
@@ -1136,7 +1287,7 @@ impl App {
         let before = if self.logs_scroll > 0 {
             self.focus
                 .as_ref()
-                .map_or(0, |focus| crate::view::log_rows(focus, width).len())
+                .map_or(0, |focus| self.log_row_count(focus, width))
         } else {
             0
         };
@@ -1147,12 +1298,22 @@ impl App {
             let after = self
                 .focus
                 .as_ref()
-                .map_or(0, |focus| crate::view::log_rows(focus, width).len());
+                .map_or(0, |focus| self.log_row_count(focus, width));
             self.logs_scroll = self
                 .logs_scroll
                 .saturating_add(after.saturating_sub(before));
         }
         requests
+    }
+
+    /// Wrapped rows in the log pane as last laid out.
+    fn log_row_count(&self, focus: &Focus, width: u16) -> usize {
+        let excluded = self.logs_exclude.borrow();
+        let scope = excluded.as_deref().map_or(
+            crate::view::LogScope::Default,
+            crate::view::LogScope::Except,
+        );
+        crate::view::log_rows(focus, width, scope).len()
     }
 
     fn apply_update(&mut self, update: Update) -> Vec<Request> {
@@ -1297,6 +1458,7 @@ impl App {
                     if !matches!(sample.state.rate, PlaybackRate::Paused) {
                         focus.resume_rate = sample.state.rate;
                     }
+                    focus.observe_achieved(&sample);
                     focus.playback = Some((sample, Instant::now()));
                 }
                 self.close_terminal_menu();
@@ -1975,7 +2137,7 @@ impl App {
                     let maximum = self
                         .focus
                         .as_ref()
-                        .map_or(0, |focus| crate::view::log_rows(focus, width).len());
+                        .map_or(0, |focus| self.log_row_count(focus, width));
                     self.logs_scroll = if up {
                         self.logs_scroll.saturating_add(3).min(maximum)
                     } else {
@@ -2775,12 +2937,23 @@ pub(crate) mod tests {
         )));
         assert!(app.logs_scroll > 0);
         let before = app.logs_scroll;
-        let rows_before = crate::view::log_rows(app.focus.as_ref().unwrap(), 40).len();
+        let rows_before = crate::view::log_rows(
+            app.focus.as_ref().unwrap(),
+            40,
+            crate::view::LogScope::Default,
+        )
+        .len();
         app.apply(output(
             2,
             b"a long message that wraps beyond the available width into multiple terminal rows\n",
         ));
-        let added = crate::view::log_rows(app.focus.as_ref().unwrap(), 40).len() - rows_before;
+        let added = crate::view::log_rows(
+            app.focus.as_ref().unwrap(),
+            40,
+            crate::view::LogScope::Default,
+        )
+        .len()
+            - rows_before;
         assert!(added > 1);
         assert_eq!(app.logs_scroll, before + added);
         app.input(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
@@ -3547,6 +3720,76 @@ pub(crate) mod tests {
         assert!(tree.contains(&(2, "cccccccc".into())));
         // A cycle is listed once per member rather than looping.
         assert_eq!(tree.len(), 5);
+    }
+
+    #[test]
+    fn drops_are_charged_by_cause_and_history_keeps_the_whole_run() {
+        let mut traffic = Traffic::default();
+        let mut w = world(&["a", "b"]);
+        traffic.observe(&w);
+        w.simulated_time_ns = 1_000_000_000;
+        for link in &mut w.links {
+            if link.from == "a" {
+                link.counters.scheduled = 100;
+                link.counters.partition_dropped = 40;
+                link.counters.receiver_dropped = 10;
+                link.counters.bytes = 2048;
+            }
+        }
+        traffic.observe(&w);
+        let a = traffic.dropped_rate("a");
+        assert_eq!((a.partition, a.receiver), (40.0, 0.0));
+        assert_eq!(a.dominant(), Some("partition"));
+        // The receiver is charged for frames it refused.
+        assert_eq!(traffic.dropped_rate("b").receiver, 10.0);
+        assert_eq!(traffic.link("a", "b").bytes, 2048.0);
+        assert_eq!(traffic.history["a"].len(), 1);
+        assert_eq!(traffic.history["a"][0].dropped, 40.0);
+        // A long watch merges its oldest samples instead of forgetting them.
+        for step in 2..=(HISTORY_SAMPLES as u64 + 2) {
+            w.simulated_time_ns = step * 1_000_000_000;
+            traffic.observe(&w);
+        }
+        let history = &traffic.history["a"];
+        assert!(history.len() <= HISTORY_SAMPLES);
+        assert_eq!(history[0].at_ns, 2_000_000_000);
+        assert!(history.windows(2).all(|pair| pair[0].at_ns < pair[1].at_ns));
+    }
+
+    #[test]
+    fn achieved_rate_history_measures_between_observations() {
+        let mut app = app(&["a"]);
+        let sample = |simulated: u64, wall: u64, rate| {
+            Update::Playback(PlaybackObservation {
+                state: seedbox_api::PlaybackStatus {
+                    position: Default::default(),
+                    rate,
+                    achieved_rate: Some(seedbox_api::RateMeasurement {
+                        simulated_time_ns: simulated,
+                        wall_time_ns: wall.try_into().unwrap(),
+                    }),
+                    stepping: false,
+                    terminal: false,
+                    application_ready: true,
+                },
+                age_ns: 0,
+            })
+        };
+        app.apply(sample(
+            1_000_000_000,
+            1_000_000_000,
+            PlaybackRate::Unlimited,
+        ));
+        app.apply(sample(
+            5_000_000_000,
+            2_000_000_000,
+            PlaybackRate::Unlimited,
+        ));
+        assert_eq!(app.focus.as_ref().unwrap().achieved, [4.0]);
+        // A new rate restarts the server's measurement; that is not a sample.
+        app.apply(sample(100_000_000, 500_000_000, PlaybackRate::Unlimited));
+        app.apply(sample(400_000_000, 1_500_000_000, PlaybackRate::Unlimited));
+        assert_eq!(app.focus.as_ref().unwrap().achieved, [4.0, 0.3]);
     }
 
     #[test]

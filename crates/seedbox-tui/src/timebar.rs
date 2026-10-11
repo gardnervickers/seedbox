@@ -1,7 +1,7 @@
 //! The time bar: one lane per machine or handle, fault spans and instants on
 //! simulated time, upcoming inputs ahead of the playhead and checkpoints below.
 use crate::activity::{Activity, Item, Key, Lane, State};
-use crate::model::{Checkpoint, HitTarget};
+use crate::model::{Checkpoint, HitTarget, Sample};
 use crate::view::{glyph, palette as p, short_time};
 use ratatui::{
     layout::Rect,
@@ -17,6 +17,8 @@ pub struct TimeBar<'a> {
     pub lanes: &'a [Lane],
     pub present: &'a [String],
     pub checkpoints: &'a [Checkpoint],
+    /// Traffic seen while watching, drawn beneath each machine's lane.
+    pub traffic: &'a std::collections::BTreeMap<String, Vec<Sample>>,
     pub selected: Option<&'a Key>,
     pub now: u64,
     pub zoom: u32,
@@ -157,6 +159,19 @@ impl TimeBar<'_> {
                 .filter(|(_, item)| &item.lane == lane)
                 .collect()
         };
+        // Traffic per machine, one column at a time: the busiest window in
+        // each column, scaled to the busiest machine anywhere in view.
+        let traffic: std::collections::BTreeMap<&str, Vec<Option<(f64, f64)>>> = self
+            .traffic
+            .iter()
+            .map(|(name, samples)| (name.as_str(), columns(samples, window, track)))
+            .collect();
+        let peak = traffic
+            .values()
+            .flatten()
+            .flatten()
+            .map(|(sent, _)| *sent)
+            .fold(1.0f64, f64::max);
         // Short of rows, lanes with something still open come first.
         let mut lanes: Vec<&Lane> = self.lanes.iter().collect();
         if hidden > 0 {
@@ -172,6 +187,24 @@ impl TimeBar<'_> {
             let mut cells: Vec<(char, Style)> = vec![(' ', Style::new()); track];
             if let Some(x) = playhead {
                 cells[x] = ('│', Style::new().fg(p::ICE_DIM));
+            }
+            if let Lane::Machine(name) = lane {
+                let shade = crate::view::dim(p::machine_color(name));
+                for (cell, value) in cells
+                    .iter_mut()
+                    .zip(traffic.get(name.as_str()).into_iter().flatten())
+                {
+                    if let Some(glyph) =
+                        value.and_then(|(sent, dropped)| level(sent, dropped, peak))
+                    {
+                        let color = if value.is_some_and(|(_, dropped)| dropped >= 0.5) {
+                            p::RED_SOFT
+                        } else {
+                            shade
+                        };
+                        *cell = (glyph, Style::new().fg(color));
+                    }
+                }
             }
             let items = rows_of(lane);
             // Spans first, instants and upcoming markers on top.
@@ -291,6 +324,35 @@ impl TimeBar<'_> {
     }
 }
 
+/// The busiest sample over each column, as (sent, dropped) frames per
+/// second. A sample covers every column its window spans.
+fn columns(samples: &[Sample], window: (u64, u64), width: usize) -> Vec<Option<(f64, f64)>> {
+    let mut out: Vec<Option<(f64, f64)>> = vec![None; width];
+    for sample in samples {
+        if sample.at_ns < window.0 || sample.from_ns > window.1 {
+            continue;
+        }
+        let from = clamp_column(sample.from_ns, window, width);
+        let to = clamp_column(sample.at_ns, window, width);
+        for cell in out.iter_mut().take(to + 1).skip(from) {
+            let cell = cell.get_or_insert((0.0, 0.0));
+            cell.0 = cell.0.max(sample.sent);
+            cell.1 = cell.1.max(sample.dropped);
+        }
+    }
+    out
+}
+
+/// A bar for a column's traffic relative to the busiest machine in view.
+/// Quiet columns stay empty; any traffic or drops show at least a low mark.
+fn level(sent: f64, dropped: f64, peak: f64) -> Option<char> {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if sent < 0.5 && dropped < 0.5 {
+        return None;
+    }
+    Some(BARS[((sent / peak) * 7.0).round().clamp(0.0, 7.0) as usize])
+}
+
 fn row(label: String, label_style: Style, cells: Vec<(char, Style)>) -> Line<'static> {
     let mut spans = vec![Span::styled(label, label_style)];
     let mut run = String::new();
@@ -311,6 +373,30 @@ fn row(label: String, label_style: Style, cells: Vec<(char, Style)>) -> Line<'st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traffic_columns_keep_the_busiest_window_and_mark_drops() {
+        let sample = |from_ns, at_ns, sent, dropped| Sample {
+            from_ns,
+            at_ns,
+            sent,
+            dropped,
+        };
+        let samples = [
+            sample(0, 0, 10.0, 0.0),
+            sample(0, 4, 30.0, 0.0),
+            sample(60, 100, 0.0, 5.0),
+        ];
+        let columns = columns(&samples, (0, 100), 11);
+        assert_eq!(columns[0], Some((30.0, 0.0)));
+        assert_eq!(columns[1], None);
+        // A window fills every column it spans.
+        assert!(columns[6..].iter().all(|c| *c == Some((0.0, 5.0))));
+        assert_eq!(level(0.0, 0.0, 100.0), None);
+        assert_eq!(level(0.0, 5.0, 100.0), Some('▁'));
+        assert_eq!(level(50.0, 0.0, 100.0), Some('▅'));
+        assert_eq!(level(100.0, 0.0, 100.0), Some('█'));
+    }
 
     #[test]
     fn ticks_are_round_and_windows_follow_the_playhead() {
