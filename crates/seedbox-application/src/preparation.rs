@@ -113,10 +113,19 @@ impl OciPreparer {
         if let Some(context) = context {
             context.check()?;
         }
-        let kernel = store.put_file(&self.kernel)?;
         if self.profile.backend == Backend::Kvm {
             crate::admission::validate_profile(&self.profile)?;
         }
+        for (name, service) in &simulation.services {
+            validate_machine_memory(
+                &self.profile,
+                name,
+                service
+                    .memory_mb
+                    .unwrap_or(self.profile.semantic_parameters.memory_mb),
+            )?;
+        }
+        let kernel = store.put_file(&self.kernel)?;
         let engine = store.put_file(&self.engine)?;
         if engine != self.profile.engine {
             return Err(Error::Integrity(
@@ -277,10 +286,12 @@ impl OciPreparer {
                     )?
                 }
             }
-            let memory_mb = self.profile.semantic_parameters.memory_mb;
+            let memory_mb = service
+                .memory_mb
+                .unwrap_or(self.profile.semantic_parameters.memory_mb);
             let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
             if memory_mb < minimum {
-                return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase x-seedbox.machine.memory_mb (application memory may require more)")));
+                return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase memoryMiB for this machine (legacy Compose: x-seedbox.machine.memory_mb; application memory may require more)")));
             }
             if let Some(context) = context {
                 context.check()?;
@@ -304,6 +315,16 @@ impl OciPreparer {
             }
         }
         Ok(PreparedInputs {
+            machine_memory_mb: simulation
+                .services
+                .iter()
+                .filter_map(|(name, service)| {
+                    service
+                        .memory_mb
+                        .filter(|memory| *memory != self.profile.semantic_parameters.memory_mb)
+                        .map(|memory| (name.clone(), memory))
+                })
+                .collect(),
             wall_clock_epoch: Some(wall_clock_epoch),
             kernel,
             images,
@@ -318,6 +339,24 @@ impl OciPreparer {
             provenance,
         })
     }
+}
+
+pub(crate) fn validate_machine_memory(
+    profile: &ExecutionProfile,
+    name: &str,
+    memory_mb: u32,
+) -> Result<()> {
+    let maximum = if profile.backend == Backend::Hvf {
+        3072
+    } else {
+        65536
+    };
+    if !(64..=maximum).contains(&memory_mb) {
+        return Err(Error::Setup(format!(
+            "machine {name}: memoryMiB must be 64..{maximum}"
+        )));
+    }
+    Ok(())
 }
 
 fn successful_source<K: Ord + Clone, V: Clone>(

@@ -461,6 +461,7 @@ mod tests {
 
     fn tracker_with_bandwidth(bandwidth_bps: Option<u64>) -> Tracker {
         let service = |name| seedbox_spec::Service {
+            memory_mb: None,
             cpu: seedbox_spec::project::Cpu {
                 speed_hz: match name {
                     "a" => 800_000_000,

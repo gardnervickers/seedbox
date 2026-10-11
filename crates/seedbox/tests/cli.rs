@@ -697,6 +697,7 @@ fn old_records_stay_inspectable_and_transferable() {
     let store = ContentStore::new(root.join("state/objects"));
     let object = store.put(b"opaque retained fixture").unwrap();
     let inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: None,
         kernel: object.clone(),
         profile: ExecutionProfile {
@@ -2271,7 +2272,8 @@ fn get_world_prints_machine_and_link_tables() {
         incarnation: 0,
         condition: MachineCondition::Ready,
         exit_code: None,
-        throttle_permille: None,
+        cpu_speed_hz: None,
+        throttle_speed_hz: None,
         oracle,
         last_transition: None,
         last_transition_at_ns: None,

@@ -98,6 +98,7 @@ impl Fixture {
             semantic_parameters: SemanticParameters::new(512),
         };
         let inputs = PreparedInputs {
+            machine_memory_mb: Default::default(),
             wall_clock_epoch: None,
             kernel,
             profile: profile.clone(),

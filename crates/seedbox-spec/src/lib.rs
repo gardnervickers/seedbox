@@ -34,7 +34,7 @@ pub struct Simulation {
     pub disk: DiskOptions,
 }
 
-/// Guest machine settings shared by every service; they change run identity and results.
+/// Default guest machine settings; per-service RAM may override memory_mb.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineOptions {
@@ -79,6 +79,9 @@ impl DiskOptions {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Service {
+    /// Guest RAM override in MiB; omission inherits MachineOptions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u32>,
     #[serde(default)]
     pub cpu: project::Cpu,
     pub source: ImageSource,
