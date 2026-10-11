@@ -14,10 +14,11 @@ def collect(root):
         if source.is_symlink() or not source.is_dir():
             continue
         for path in sorted(source.rglob("*")):
-            if count >= 128 or remaining <= 0:
+            if count >= 256 or remaining <= 0:
                 break
             if path.is_symlink() or not path.is_file() or path.suffix not in (
-                    ".json", ".txt", ".log", ".out", ".stderr", ".stdout"):
+                    ".json", ".txt", ".log", ".out", ".stderr", ".stdout",
+                    ".pages", ".current", ".baseline"):
                 continue
             relative = path.relative_to(source)
             if any(parent.is_symlink() for parent in path.parents if parent != source):
@@ -34,7 +35,7 @@ def collect(root):
             remaining -= len(data)
             count += 1
     (output / "LIMITS.txt").write_text(
-        "Diagnostics limited to 64 MiB total, 8 MiB/file, 128 files; VM disks are omitted.\n")
+        "Diagnostics limited to 64 MiB total, 8 MiB/file, 256 files; VM disks are omitted.\n")
 
 
 if __name__ == "__main__":

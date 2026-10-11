@@ -4,6 +4,7 @@
 #![recursion_limit = "256"]
 
 mod boundary;
+mod diagnostic_ram;
 mod live_checkpoint;
 mod management_uart;
 use seedbox_engine_core::{checkpoint, control, disk, links, output_layout, rng};
@@ -1125,6 +1126,7 @@ fn machine_report(
             mach.page_hashes(),
         )
         .map_err(|e| e.to_string())?;
+        diagnostic_ram::capture(mach, out)?;
         let parts = parts.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
         (Some(d), Some(parts))
     } else {

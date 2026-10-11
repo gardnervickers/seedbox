@@ -46,6 +46,38 @@ fn invoke(
                 eprintln!("{line}");
             }
             eprintln!("--- end of {name}");
+            if let Some(id) = text
+                .lines()
+                .find_map(|line| line.strip_prefix("FAIL: "))
+                .filter(|_| {
+                    args.first()
+                        .is_some_and(|argument| matches!(*argument, "run" | "rerun"))
+                })
+            {
+                if let Err(error) = capture_engine_evidence(
+                    state,
+                    id,
+                    &directory.join(format!("{name}-failed-engine")),
+                ) {
+                    eprintln!("engine diagnostic: {error}");
+                }
+                for (kind, arguments) in [
+                    ("definition", vec!["describe", "simulation", id, "--json"]),
+                    ("logs", vec!["logs", id, "--tail", "100"]),
+                ] {
+                    let result = invoke(
+                        cli,
+                        directory,
+                        state,
+                        &format!("{name}-failed-{kind}"),
+                        &arguments,
+                    );
+                    match result {
+                        Ok(output) => eprintln!("{kind}: {output}"),
+                        Err(error) => eprintln!("failure diagnostic: {error}"),
+                    }
+                }
+            }
         }
         return Err(format!("{name}: {status}; see {}", logfile.display()));
     }
@@ -91,6 +123,11 @@ fn compare(
     .and_then(|output| require_full_state_match(&output));
     if result.is_err() {
         for (side, id) in [("baseline", baseline), ("repeated", repeated)] {
+            if let Err(error) =
+                capture_engine_evidence(state, id, &directory.join(format!("{name}-{side}-engine")))
+            {
+                eprintln!("engine diagnostic: {error}");
+            }
             for (kind, args) in [
                 ("definition", vec!["describe", "simulation", id, "--json"]),
                 ("world", vec!["get", "world", id, "--json"]),
@@ -110,6 +147,44 @@ fn compare(
         }
     }
     result
+}
+
+// Temporary #304 capture, while the server still owns both attempts.
+fn capture_engine_evidence(state: &Path, id: &str, destination: &Path) -> Result<(), String> {
+    fn copy(directory: &Path, destination: &Path) -> std::io::Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let source = entry.path();
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                continue;
+            }
+            let target = destination.join(entry.file_name());
+            if kind.is_dir() {
+                copy(&source, &target)?;
+            } else if source.extension().is_some_and(|extension| {
+                ["json", "pages", "current", "baseline", "stderr"]
+                    .iter()
+                    .any(|s| extension == *s)
+            }) {
+                fs::create_dir_all(destination)?;
+                fs::copy(source, target)?;
+            }
+        }
+        Ok(())
+    }
+    for session in fs::read_dir(state.join("sessions")).map_err(|e| e.to_string())? {
+        let attempts = session
+            .map_err(|e| e.to_string())?
+            .path()
+            .join("runs")
+            .join(id)
+            .join("attempts");
+        if attempts.is_dir() {
+            return copy(&attempts, destination).map_err(|e| e.to_string());
+        }
+    }
+    Err(format!("no retained attempt for {id}"))
 }
 
 #[test]
@@ -147,19 +222,41 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
         }
     };
     let mut failures = Vec::new();
-    for workload in workloads {
-        let directory = Path::new(&reports)
+    let workloads = workloads.into_iter().flat_map(|workload| {
+        // Repeat the earlier hosted failure's seed on clean Linux hardware.
+        let repeats = if cfg!(target_os = "linux")
+            && workload
+                .file_stem()
+                .is_some_and(|name| name == "clock-drift")
+        {
+            6
+        } else {
+            1
+        };
+        (0..repeats).map(move |repeat| (workload.clone(), repeat))
+    });
+    for (workload, repeat) in workloads {
+        let mut directory = Path::new(&reports)
             .join("applications")
             .join(workload.file_stem().unwrap());
+        if repeat != 0 {
+            directory = directory.join(format!("historical-seed-{repeat}"));
+        }
         fs::create_dir_all(&directory).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let probe = Path::new("target/fullstate-probe");
+            if probe.exists() {
+                fs::remove_dir_all(probe).unwrap();
+            }
+            fs::create_dir_all(probe).unwrap();
+        }
         let check = || -> Result<(), String> {
-            let first_output = invoke(
-                Path::new(&cli),
-                &directory,
-                state,
-                "first",
-                &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
-            )?;
+            let mut first_args = vec!["run", workload.to_str().unwrap(), "--wall-time", "30m"];
+            if repeat != 0 {
+                first_args.extend(["--seed", "1839683002956703861"]);
+            }
+            let first_output = invoke(Path::new(&cli), &directory, state, "first", &first_args)?;
             let first = simulation_id(&first_output)?;
             let described = invoke(
                 Path::new(&cli),
@@ -211,6 +308,8 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
         if let Err(error) = check() {
             failures.push(format!("{}: {error}", workload.display()));
         }
+        #[cfg(target_os = "linux")]
+        fs::remove_dir_all("target/fullstate-probe").unwrap();
     }
     drop(server);
     if !failures.is_empty() {

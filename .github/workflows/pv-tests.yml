@@ -120,8 +120,10 @@ jobs:
             echo "Cargo exact cache hit: $CARGO_HIT"
             du -sh /nix/store
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Portable prerequisites and PV application acceptance
-        run: nix develop --command bash harness/check.sh linux-apps
+      - name: Standalone Linux engine build
+        run: nix develop --command cargo build-vmm
+      - name: Portable prerequisites and full Linux native acceptance
+        run: nix develop --command bash harness/check.sh linux
       - name: Bound diagnostic artifact storage
         if: always()
         # Privileged KVM tests leave root-owned manifests and logs.
@@ -136,4 +138,4 @@ jobs:
         if: always()
         # Diagnostics have been uploaded. Rust-cache archives the target tree,
         # so remove root-owned VM state and per-run reports before its post step.
-        run: sudo rm -rf -- target/check-reports target/pv-artifacts
+        run: sudo rm -rf -- target/check-reports target/pv-artifacts target/fullstate-probe crates/seedbox/target/fullstate-probe
