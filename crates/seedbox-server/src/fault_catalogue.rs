@@ -1,10 +1,20 @@
 //! Fault metadata belongs to the server, alongside control admission.
-use seedbox_api::{FaultCatalogue, FaultDescriptor, WorldState};
+use seedbox_api::{FaultCatalogue, FaultCategory, FaultDescriptor, WorldState};
 use seedbox_control::{
     MAX_CLOCK_OFFSET_NS, MAX_CLOCK_RATE_PPB, MAX_LINK_DELAY_NS, MAX_PPM, THROTTLE_SPEED_HZ,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+
+pub(crate) fn category(name: &str) -> FaultCategory {
+    match name {
+        "partition" | "shape" | "drop_connection" => FaultCategory::Network,
+        "stop" | "restart" | "pause_process" | "resume_process" => FaultCategory::Application,
+        "clock_skew" | "clock_drift" => FaultCategory::Clock,
+        "heal" => FaultCategory::Recovery,
+        _ => FaultCategory::Machine,
+    }
+}
 
 fn integer(
     description: &str,
@@ -65,6 +75,7 @@ fn descriptor(
     required.insert(0, json!("action"));
     FaultDescriptor {
         name: name.into(),
+        category: category(name),
         title: title.into(),
         description: description.into(),
         schema: json!({
@@ -105,7 +116,8 @@ pub(crate) fn discover(world: &WorldState, minimum_latency_ns: u64) -> FaultCata
                 | seedbox_control::Action::Shape { handle, .. }
                 | seedbox_control::Action::ClockSkew { handle, .. }
                 | seedbox_control::Action::ClockDrift { handle, .. }
-                | seedbox_control::Action::Throttle { handle, .. } => Some(handle.clone()),
+                | seedbox_control::Action::Throttle { handle, .. }
+                | seedbox_control::Action::DropConnection { handle, .. } => Some(handle.clone()),
                 _ => None,
             }
         })
@@ -233,7 +245,7 @@ pub(crate) fn discover(world: &WorldState, minimum_latency_ns: u64) -> FaultCata
         faults.push(fault);
     }
     faults.push(descriptor("throttle","Throttle CPU","Run the machine's CPU at a lower speed than the project's until healed. A speed at or above the project's leaves it at full speed; one below a thousandth of it runs at a thousandth.",json!({"handle":handle,"machine":machine,"speed_hz":integer("CPU speed in Hz",*THROTTLE_SPEED_HZ.start() as i128,*THROTTLE_SPEED_HZ.end(),Some(500_000_000),"Hz")}),&["handle","machine","speed_hz"]));
-    faults.push(descriptor("drop_connection", "Drop TCP connection", "Reset one observed IPv4 TCP incarnation. Supply the exact addresses, ports and incarnation from connection observations; this world view does not enumerate live connections.", json!({"handle":handle, "connection":{
+    faults.push(descriptor("drop_connection", "Drop TCP connection", "Drop future packets in one direction of an observed IPv4 TCP incarnation until healed. Supply the exact addresses, ports and incarnation from connection observations; this world view does not enumerate live connections.", json!({"handle":handle, "connection":{
         "type":"object", "description":"Exact directed TCP connection identity", "additionalProperties":false,
         "properties":{
             "from":choice("Source machine", &sources), "to":choice("Destination machine", &destinations),

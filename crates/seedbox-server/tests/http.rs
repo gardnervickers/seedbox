@@ -81,6 +81,39 @@ async fn unix_client_submits_describes_and_retries_without_duplicate_work() {
         seedbox_control::MAX_PPM
     );
     assert_eq!(shape.schema["properties"]["loss_ppm"]["x-unit"], "ppm");
+    assert_eq!(stop.category, seedbox_api::FaultCategory::Application);
+    let preview = client
+        .preview_fault(
+            &simulation.metadata.id,
+            &serde_json::json!({"action":"stop","machine":"oracle"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.machines, ["oracle"]);
+    assert_eq!(preview.revision, world.revision);
+    assert_eq!(preview.category, seedbox_api::FaultCategory::Application);
+    assert!(preview
+        .limitations
+        .iter()
+        .any(|text| text.contains("not guaranteed")));
+    assert_eq!(client.world(&simulation.metadata.id).await.unwrap(), world);
+    assert_eq!(
+        client.describe(&simulation.metadata.id).await.unwrap(),
+        simulation
+    );
+    assert!(pending.try_recv().is_err());
+    assert!(matches!(
+        client
+            .preview_fault(
+                &simulation.metadata.id,
+                &serde_json::json!({"action":"stop","machine":"missing"})
+            )
+            .await,
+        Err(Error::Rejected {
+            code: ErrorCode::InvalidRequest,
+            ..
+        })
+    ));
     let unknown = "zzzzzzzz".parse().unwrap();
     assert!(matches!(
         client.fault_types(&unknown).await,

@@ -2238,3 +2238,16 @@ fn native_project_discovery_prefers_seedbox_yaml_and_validates_oracle() {
     assert!(stderr(&output).contains("--wall-time"));
     assert!(stderr(&output).contains("duration must be positive"));
 }
+
+#[test]
+fn capacity_help_explains_resident_slots_and_accepts_json() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = seedbox(&["get", "capacity", "--help"], directory.path());
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("resident execution slots"));
+    assert!(stdout.contains("--json"));
+    let output = seedbox(&["get", "capacity", "--unexpected"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("--unexpected"));
+}

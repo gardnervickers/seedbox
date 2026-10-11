@@ -55,6 +55,12 @@ impl Client {
         })
     }
 
+    /// Explain resident execution reservations and queued work.
+    pub async fn capacity(&self) -> Result<seedbox_api::ExecutionCapacity, Error> {
+        self.document(self.request(Method::GET, "/v1/capacity"))
+            .await
+    }
+
     pub async fn info(&self) -> Result<ServerInfo, Error> {
         self.document(self.request(Method::GET, "/v1")).await
     }
@@ -227,6 +233,19 @@ impl Client {
     ) -> Result<seedbox_api::FaultCatalogue, Error> {
         self.document(self.request(Method::GET, &format!("/v1/simulations/{id}/fault-types")))
             .await
+    }
+
+    /// Explain an action without preparing it or allocating a fault ID.
+    pub async fn preview_fault(
+        &self,
+        id: &SimulationId,
+        action: &serde_json::Value,
+    ) -> Result<seedbox_api::FaultPreview, Error> {
+        self.document(
+            self.request(Method::POST, &format!("/v1/simulations/{id}/fault-preview"))
+                .json(&serde_json::json!({"action": action})),
+        )
+        .await
     }
 
     /// Submit a schema-generated control without decoding its action locally.

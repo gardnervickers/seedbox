@@ -211,6 +211,26 @@ again.
 Code: [input program](../crates/seedbox-engine-core/src/input_program.rs),
 [coordinator](../crates/seedbox-engine-core/src/world.rs).
 
+## Fault discovery and previews
+
+The server owns categories, parameter schemas and effect explanations.
+`POST /v1/simulations/{id}/fault-preview` accepts an `action` and returns expected
+machines, directed links, effects, preconditions and observations at a world
+revision and simulated time. The shape compiler selects targets without preparing
+an admission, sampling random streams or assigning a fault ID. Heal resolves the
+original active handle, including policies hidden beneath later fault layers.
+
+Preview is observational: process effects still need guest acknowledgement,
+connection incarnations may disappear, and lifecycle state may change before
+submission. Unknown application state stays explicit. Clients must submit through
+the ordinary control path for admission. The TUI discards obsolete form previews,
+shows server targets on the map, and requires Enter after the current preview is
+available; opening and closing the menu retain the playback pause/restore flow.
+
+Code: [preview API](../crates/seedbox-api/src/fault_catalogue.rs),
+[server effects](../crates/seedbox-server/src/fault_preview.rs),
+[target compilation](../crates/seedbox-engine-core/src/faults.rs).
+
 ## Checkpoints and lifecycle
 
 World observations expose machine and application conditions separately.

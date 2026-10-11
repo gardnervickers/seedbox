@@ -131,15 +131,6 @@ pub fn duration(ns: u64) -> String {
 }
 
 /// A short elapsed time for tight spaces: seconds, then whole minutes or hours.
-fn coarse(ns: u64) -> String {
-    let seconds = ns / 1_000_000_000;
-    match seconds {
-        0..=59 => duration(ns),
-        60..=3599 => format!("{}m", seconds / 60),
-        _ => format!("{}h", seconds / 3600),
-    }
-}
-
 fn count(n: u64) -> String {
     match n {
         0..=9_999 => n.to_string(),
@@ -873,6 +864,14 @@ fn spinner() -> char {
     SPINNER[(ms / 90) as usize % SPINNER.len()]
 }
 
+fn startup_paused(focus: &Focus) -> bool {
+    focus.paused()
+        && focus
+            .playback
+            .as_ref()
+            .is_some_and(|(p, _)| !p.state.stepping)
+}
+
 /// In place of the map while a simulation is queued, preparing or booting:
 /// what it is waiting for, progress so far and how long it has taken.
 fn startup(frame: &mut Frame, app: &App, focus: &Focus, phase: Phase, area: Rect) {
@@ -1004,7 +1003,14 @@ fn startup(frame: &mut Frame, app: &App, focus: &Focus, phase: Phase, area: Rect
             ));
         }
         _ => {
-            lines.push(heading("booting machines".into()));
+            if startup_paused(focus) {
+                lines.push(Line::styled(
+                    "❚❚  startup paused",
+                    Style::new().fg(AMBER).bold(),
+                ));
+            } else {
+                lines.push(heading("booting machines".into()));
+            }
             lines.push(Line::raw(""));
             if let Some(world) = &focus.world {
                 let width = world
@@ -1022,7 +1028,13 @@ fn startup(frame: &mut Frame, app: &App, focus: &Focus, phase: Phase, area: Rect
                     ]));
                 }
             }
-            if let Some(elapsed) = stage_elapsed(Stage::Booting) {
+            if startup_paused(focus) {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    "Press Space to resume startup",
+                    Style::new().fg(TEXT),
+                ));
+            } else if let Some(elapsed) = stage_elapsed(Stage::Booting) {
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
                     format!("booting for {elapsed}"),
@@ -1282,6 +1294,23 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
     if inner.width < 8 || inner.height < 3 {
         return;
     }
+    let effects: Vec<Vec<&Item>> = world
+        .machines
+        .iter()
+        .map(|machine| {
+            activity
+                .rows()
+                .filter(|item| item.open() && item.lane == Lane::Machine(machine.name.clone()))
+                .collect()
+        })
+        .collect();
+    let effect_rows = effects.iter().map(Vec::len).max().unwrap_or(0);
+    let effect_width = effects
+        .iter()
+        .flatten()
+        .map(|item| effect_label(item, now).chars().count() as u16 + 2)
+        .max()
+        .unwrap_or(0);
     let compact = inner.width < 64 || inner.height < 16;
     let (box_width, box_height) = if compact {
         (
@@ -1301,8 +1330,9 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
                 .map(|m| m.name.chars().count() as u16 + 8)
                 .max()
                 .unwrap_or(22)
-                .max(22),
-            6,
+                .max(22)
+                .max(effect_width),
+            5u16.saturating_add(effect_rows.max(1).min(u16::MAX as usize) as u16),
         )
     };
     let field = Rect {
@@ -1365,7 +1395,13 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
         let is_down = machine(a).is_some_and(down) || machine(b).is_some_and(down);
         let involved = selected.is_some_and(|s| s == a || s == b);
         let traffic = focus.traffic.link_rate(a, b) + focus.traffic.link_rate(b, a);
-        let (color, pattern, weight) = if cut.is_some() {
+        let previewed = app
+            .fault_form
+            .as_ref()
+            .is_some_and(|form| form.targets_link(a, b) || form.targets_link(b, a));
+        let (color, pattern, weight) = if previewed {
+            (ICE, Pattern::Dotted, 2)
+        } else if cut.is_some() {
             (if pulse { RED } else { RED_SOFT }, Pattern::Marching, 1)
         } else if is_down {
             (FAINT, Pattern::Dotted, 1)
@@ -1479,21 +1515,20 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
         let Some(c) = centre(&m.name) else {
             continue;
         };
-        let last = activity
-            .rows()
-            .filter(|item| {
-                item.lane == Lane::Machine(m.name.clone()) && item.state != State::Upcoming
-            })
-            .max_by_key(|item| (item.open(), item.end_ns.unwrap_or(item.start_ns)));
         let target = targets.contains(&m.name);
-        let rect = node_rect(c, field, box_width, box_height);
+        let height = if compact {
+            1
+        } else {
+            5u16.saturating_add(effects[index].len().max(1).min(u16::MAX as usize) as u16)
+        };
+        let rect = node_rect(c, field, box_width, height);
         app.hitboxes
             .borrow_mut()
             .push((rect, HitTarget::Machine(index)));
         if compact {
             badge(frame, focus, m, rect, target);
         } else {
-            node(frame, focus, m, rect, last, target, now);
+            node(frame, focus, m, rect, &effects[index], target, now);
         }
     }
     if inner.height > 2 && inner.width > 4 {
@@ -1597,7 +1632,7 @@ fn node_border(focus: &Focus, m: &MachineState, target: bool) -> (Color, bool) {
 fn badge(frame: &mut Frame, focus: &Focus, m: &MachineState, rect: Rect, target: bool) {
     let (state, mut color) = condition(focus, m);
     let (border, selected) = node_border(focus, m, target);
-    if m.condition == MachineCondition::Starting && !focus.terminal() {
+    if m.condition == MachineCondition::Starting && !focus.terminal() && !startup_paused(focus) {
         color = breathe(ICE_DIM, ICE_BRIGHT, 1600);
     }
     let glyph = state.chars().next().unwrap_or('●');
@@ -1625,19 +1660,35 @@ fn badge(frame: &mut Frame, focus: &Focus, m: &MachineState, rect: Rect, target:
     );
 }
 
+fn effect_label(item: &Item, now: u64) -> String {
+    let handle = item
+        .handle
+        .as_ref()
+        .map(|handle| format!(" {handle}"))
+        .unwrap_or_default();
+    format!(
+        "{} {}{handle} · {}",
+        glyph(&item.action, item.state),
+        item.action,
+        duration(now.saturating_sub(item.start_ns))
+    )
+}
+
 fn node(
     frame: &mut Frame,
     focus: &Focus,
     m: &MachineState,
     rect: Rect,
-    last: Option<&Item>,
+    effects: &[&Item],
     target: bool,
     now: u64,
 ) {
     let (mut border, selected) = node_border(focus, m, target);
-    let starting = m.condition == MachineCondition::Starting && !focus.terminal();
-    if !target && !selected && last.is_some_and(Item::open) && tick(500).is_multiple_of(2) {
-        border = last.map_or(border, |item| span_color(&item.action, false));
+    let starting =
+        m.condition == MachineCondition::Starting && !focus.terminal() && !startup_paused(focus);
+    let active: Vec<_> = effects.iter().copied().filter(|item| item.open()).collect();
+    if !target && !selected && !active.is_empty() && tick(500).is_multiple_of(2) {
+        border = span_color(&active[0].action, false);
     } else if !target && !selected && starting {
         border = breathe(BORDER_HI, ICE, 1600);
     }
@@ -1702,7 +1753,7 @@ fn node(
             )
         },
     ];
-    if starting && last.is_none_or(|item| !item.open()) {
+    if starting && active.is_empty() {
         let detail = match focus
             .resource
             .as_ref()
@@ -1714,26 +1765,13 @@ fn node(
             _ => "waiting for its ready signal".into(),
         };
         lines.push(Line::styled(detail, Style::new().fg(FAINT_TEXT)));
-    } else if let Some(item) = last {
-        let ago = now.saturating_sub(item.end_ns.unwrap_or(item.start_ns));
-        let color = if item.open() {
-            span_color(&item.action, true)
-        } else {
-            FAINT_TEXT
-        };
-        let suffix = if item.open() {
-            format!(" · {}", duration(now.saturating_sub(item.start_ns)))
-        } else {
-            format!(" · {} ago", coarse(ago))
-        };
-        lines.push(Line::styled(
-            format!(
-                "{} {}{suffix}",
-                glyph(&item.action, item.state),
-                item.action
-            ),
-            Style::new().fg(color),
-        ));
+    } else {
+        for item in active {
+            lines.push(Line::styled(
+                effect_label(item, now),
+                Style::new().fg(span_color(&item.action, true)),
+            ));
+        }
     }
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(b), rect);
@@ -1742,6 +1780,7 @@ fn node(
 fn condition(focus: &Focus, m: &MachineState) -> (String, Color) {
     let mut text = match m.condition {
         MachineCondition::Starting if focus.terminal() => ("◌ never ready".to_string(), FAINT_TEXT),
+        MachineCondition::Starting if startup_paused(focus) => ("❚❚ paused".to_string(), AMBER),
         MachineCondition::Starting => (
             format!(
                 "{} {}",
@@ -2287,7 +2326,14 @@ fn status_bar(
                 }
             }
             if !p.state.application_ready {
-                left.push(Span::styled(" · apps starting", Style::new().fg(YELLOW)));
+                left.push(Span::styled(
+                    if startup_paused(focus) {
+                        " · startup paused"
+                    } else {
+                        " · apps starting"
+                    },
+                    Style::new().fg(YELLOW),
+                ));
             }
         }
         if details {
@@ -2528,13 +2574,13 @@ fn summary_phase(s: &SimulationSummary) -> (&'static str, Color) {
     match s.status.phase {
         Phase::Queued => ("◌ queued", AMBER),
         Phase::Preparing => ("◌ preparing", YELLOW),
-        Phase::Running if s.status.stage == Some(seedbox_api::Stage::Booting) => {
-            ("◌ booting", YELLOW)
-        }
         Phase::Running if s.status.playback.as_ref().is_some_and(|p| p.state.stepping) => {
             ("▷ stepping", YELLOW)
         }
         Phase::Running if summary_paused(s) => ("❚❚ paused", AMBER),
+        Phase::Running if s.status.stage == Some(seedbox_api::Stage::Booting) => {
+            ("◌ booting", YELLOW)
+        }
         Phase::Running => ("● running", GREEN),
         Phase::Finalizing => ("◌ finalizing", YELLOW),
         Phase::Completed => ("■ completed", DIM),
@@ -3581,5 +3627,214 @@ mod tests {
         assert!(text.contains("❚❚ paused"), "{text}");
         assert!(text.contains("● running"), "{text}");
         assert!(text.contains("1 running · 1 paused"), "{text}");
+    }
+    #[test]
+    fn paused_startup_shows_resume_hint_instead_of_boot_progress() {
+        let app = crate::model::tests::booting_app(PlaybackRate::Paused);
+        let text = render(&app);
+        assert!(text.contains("startup paused"), "{text}");
+        assert!(text.contains("Press Space to resume startup"), "{text}");
+        assert!(!text.contains("booting"), "{text}");
+        assert!(!text.contains("apps starting"), "{text}");
+        let running = crate::model::tests::booting_app(PlaybackRate::Unlimited);
+        assert!(render(&running).contains("booting machines"));
+    }
+    #[test]
+    fn machine_card_omits_completed_events_and_preserves_active_downtime() {
+        let app = app(&["n1"]);
+        let focus = app.focus.as_ref().unwrap();
+        let machine = &focus.world.as_ref().unwrap().machines[0];
+        for (action, recovery, expected) in [
+            ("crashed", "reboot", "rebooted"),
+            ("paused", "resume", "resumed"),
+            ("exited 1", "ready", "exited"),
+        ] {
+            let mut item = Item {
+                key: crate::activity::Key::Transition(0),
+                lane: crate::activity::Lane::Machine("n1".into()),
+                action: action.into(),
+                target: "n1".into(),
+                handle: None,
+                start_ns: 3_072_000_000,
+                end_ns: Some(3_088_000_000),
+                closed_by: Some(recovery.into()),
+                state: State::Down,
+            };
+            let mut terminal = Terminal::new(TestBackend::new(32, 7)).unwrap();
+            terminal
+                .draw(|frame| {
+                    node(
+                        frame,
+                        focus,
+                        machine,
+                        frame.area(),
+                        &[&item],
+                        false,
+                        3_306_000_000,
+                    )
+                })
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(!text.contains(action), "{text}");
+            assert!(!text.contains(expected), "{text}");
+            assert!(!text.contains("ago"), "{text}");
+            item.end_ns = None;
+            item.closed_by = None;
+            terminal
+                .draw(|frame| {
+                    node(
+                        frame,
+                        focus,
+                        machine,
+                        frame.area(),
+                        &[&item],
+                        false,
+                        3_306_000_000,
+                    )
+                })
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains(action), "{text}");
+            assert!(!text.contains("ago"), "{text}");
+        }
+    }
+    #[test]
+    fn every_fault_card_hides_history_and_shows_only_active_effects() {
+        let app = app(&["n1"]);
+        let focus = app.focus.as_ref().unwrap();
+        let machine = &focus.world.as_ref().unwrap().machines[0];
+        for action in [
+            "drop_connection",
+            "stop",
+            "restart",
+            "pause_process",
+            "resume_process",
+            "partition",
+            "shape",
+            "heal",
+            "clock_skew",
+            "clock_drift",
+            "throttle",
+            "pause",
+            "resume",
+            "crash",
+            "reboot",
+            "future_fault",
+        ] {
+            for state in [
+                State::Active,
+                State::Closed,
+                State::Instant,
+                State::Failed,
+                State::Upcoming,
+            ] {
+                let item = Item {
+                    key: crate::activity::Key::Fault(1),
+                    lane: Lane::Machine("n1".into()),
+                    action: action.into(),
+                    target: "n1".into(),
+                    handle: Some("f1".into()),
+                    start_ns: 1_000_000_000,
+                    end_ns: (state == State::Closed).then_some(2_000_000_000),
+                    closed_by: (state == State::Closed).then(|| "heal".into()),
+                    state,
+                };
+                let mut terminal = Terminal::new(TestBackend::new(40, 7)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        node(
+                            frame,
+                            focus,
+                            machine,
+                            frame.area(),
+                            &[&item],
+                            false,
+                            3_000_000_000,
+                        )
+                    })
+                    .unwrap();
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                assert_eq!(
+                    text.contains(action),
+                    state == State::Active,
+                    "{action} {state:?}: {text}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn machine_tile_shows_concurrent_faults_and_removes_only_healed_ones() {
+        let mut app = app(&["n1", "n2", "n3", "oracle"]);
+        let mut w = world(&["n1", "n2", "n3", "oracle"]);
+        w.simulated_time_ns = 3_000_000_000;
+        for (id, action, handle) in [(1, "throttle", "t1"), (2, "clock_skew", "c1")] {
+            w.faults.push(FaultState {
+                input_key: None,
+                id,
+                action: action.into(),
+                machine: Some("n1".into()),
+                status: FaultStatus::Applied,
+                applied_time_ns: Some(1_000_000_000),
+                plan: Some(serde_json::json!({"action":action,"machine":"n1","handle":handle})),
+                active: true,
+            });
+        }
+        for healed in [false, true] {
+            w.revision += 1;
+            w.faults[0].active = !healed;
+            app.apply(Update::World(w.clone()));
+            let focus = app.focus.as_ref().unwrap();
+            let activity = crate::activity::derive(Some(&w), &[], &[], w.simulated_time_ns);
+            app.hitboxes.borrow_mut().clear();
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal
+                .draw(|frame| {
+                    map(
+                        frame,
+                        &app,
+                        focus,
+                        &activity,
+                        frame.area(),
+                        w.simulated_time_ns,
+                    )
+                })
+                .unwrap();
+            let rect = app
+                .hitboxes
+                .borrow()
+                .iter()
+                .find(|(_, target)| *target == HitTarget::Machine(0))
+                .unwrap()
+                .0;
+            let buffer = terminal.backend().buffer();
+            let mut tile = String::new();
+            for y in rect.y..rect.bottom() {
+                for x in rect.x..rect.right() {
+                    tile.push_str(buffer[(x, y)].symbol());
+                }
+                tile.push('\n');
+            }
+            assert_eq!(tile.contains("throttle t1 · 2.0s"), !healed, "{tile}");
+            assert!(tile.contains("clock_skew c1 · 2.0s"), "{tile}");
+            assert_eq!(rect.height, if healed { 6 } else { 7 });
+        }
     }
 }

@@ -2,7 +2,10 @@
 //! discovery, or artifact storage dependencies.
 
 mod fault_catalogue;
-pub use fault_catalogue::{FaultCatalogue, FaultDescriptor};
+pub use fault_catalogue::{
+    FaultCatalogue, FaultCategory, FaultDescriptor, FaultPreview, FaultPreviewLink,
+    FaultPreviewRequest,
+};
 mod events;
 mod logs;
 pub use logs::{LogDelivery, LogEntry, LogStream};
@@ -53,3 +56,6 @@ pub use timeline::{DeriveRequest, FaultTimeline, TimelineEntry, TimelineOrigin};
 
 mod comparison;
 pub use comparison::{ComparisonStatus, SimulationComparison};
+
+mod capacity;
+pub use capacity::{ExecutionCapacity, ExecutionOccupant, QueueReason, QueuedSimulation};

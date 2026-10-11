@@ -328,7 +328,8 @@ impl Tracker {
             }
             FaultAction::ClockSkew { handle, .. }
             | FaultAction::ClockDrift { handle, .. }
-            | FaultAction::Throttle { handle, .. } => {
+            | FaultAction::Throttle { handle, .. }
+            | FaultAction::DropConnection { handle, .. } => {
                 self.healable.insert(handle.clone(), id);
             }
             FaultAction::Heal { handle } => {
@@ -336,7 +337,6 @@ impl Tracker {
                 self.partitions.remove(handle);
                 self.shapes.remove(handle);
             }
-            _ => {}
         }
     }
 
@@ -535,6 +535,37 @@ mod tests {
             plan: Some(Box::new(serde_json::to_value(plan).unwrap())),
             input_key: None,
         }
+    }
+
+    #[test]
+    fn selected_connection_loss_is_discoverable_and_healable() {
+        let mut t = tracker();
+        let action: FaultAction = serde_json::from_value(serde_json::json!({
+            "action":"drop_connection", "handle":"selected", "connection":{
+                "from":"a", "to":"b", "src_addr":"10.0.0.1", "dst_addr":"10.0.0.2",
+                "src_port":1234, "dst_port":80, "incarnation":1
+            }
+        }))
+        .unwrap();
+        t.event(10, &fault(1, FaultStatus::Applied, action));
+        assert!(t.snapshot().faults[0].active);
+        let forms = crate::fault_catalogue::discover(&t.snapshot(), 1_000_000);
+        let heal = forms.faults.iter().find(|f| f.name == "heal").unwrap();
+        assert_eq!(
+            heal.schema["properties"]["handle"]["enum"],
+            serde_json::json!(["selected"])
+        );
+        t.event(
+            20,
+            &fault(
+                2,
+                FaultStatus::Applied,
+                FaultAction::Heal {
+                    handle: "selected".into(),
+                },
+            ),
+        );
+        assert!(!t.snapshot().faults[0].active);
     }
 
     fn plan_name(plan: &FaultAction) -> String {
