@@ -78,6 +78,14 @@ def futex_retries(text):
         '\t: "+r" (ret), "=&r" (val), "+Q" (*uaddr), "=&r" (tmp)\n'
         '\t: "r" (oldval), "r" (newval)\n')
 
+def polling(text):
+    # Kernel C polling only: do not charge raw exclusive retry assembly, whose
+    # retries may be caused by host interruptions rather than guest work.
+    text = replace(text, "static inline void cpu_relax(void)",
+                   "#ifndef BUILD_VDSO\nvoid seedbox_cpu_relax(void);\n#endif\n\nstatic inline void cpu_relax(void)")
+    return replace(text, '\tasm volatile("yield" ::: "memory");',
+                   '\tasm volatile("yield" ::: "memory");\n#ifndef BUILD_VDSO\n\tseedbox_cpu_relax();\n#endif')
+
 def changes(root, application=False):
     edits = {}
     def edit(path, fn):
@@ -90,6 +98,7 @@ def changes(root, application=False):
     edit("arch/arm64/kernel/time.c", time)
     edit("arch/arm64/kernel/process.c", counter_access)
     edit("arch/arm64/include/asm/futex.h", futex_retries)
+    edit("arch/arm64/include/asm/vdso/processor.h", polling)
     # Every return to EL0 crosses a guest exception/scheduling boundary, unlike
     # a host-only interruption. Publish its epoch and clear the physical
     # reservation before restoring user x0/x1; EL1 returns do not publish one.
@@ -115,7 +124,7 @@ def changes(root, application=False):
         s = replace(s, "#include <asm/syscall.h>",
                     "#include <asm/syscall.h>\n#include <asm/seedbox.h>")
         return replace(s, "\tadd_random_kstack_offset();",
-                       "\tseedbox_syscall_progress();\n\tadd_random_kstack_offset();")
+                       "\tseedbox_syscall_progress(regs, scno);\n\tadd_random_kstack_offset();")
     edit("arch/arm64/kernel/syscall.c", syscall)
 
     def generic_timer(s):
@@ -181,6 +190,8 @@ def changes(root, application=False):
         target = "arch/arm64/" + ("kernel/" if name.endswith(".c") else "include/asm/") + name
         if (root / target).exists(): raise ValueError(f"already patched: {target}")
         edits[target] = (HERE / name).read_text()
+    if not application:
+        edits["arch/arm64/kernel/seedbox.c"] += (HERE / "poll-test.c").read_text()
     if application:
         edit("drivers/char/Kconfig", lambda s: s + "\nconfig SEEDBOX_SUPERVISOR_IO\n\tbool \"Seedbox supervisor register device\"\n\tdepends on ARM64 && OF\n")
         edit("drivers/char/Makefile", lambda s: s + "\nobj-$(CONFIG_SEEDBOX_SUPERVISOR_IO) += supervisor-io.o\n")

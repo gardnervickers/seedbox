@@ -724,6 +724,13 @@ impl ExecutionService {
         // The first run and every resubmission use the same resolved private representation.
         // Source paths, image transport manifests and human metadata never enter experiment identity.
         let inputs = seedbox_application::definition::prepared(&definition, &self.store)?;
+        // Resolving per-machine RAM chooses the oracle's RAM as the legacy
+        // default. Bind execution to that canonical profile as well.
+        let executor = if executor.profile() == inputs.profile {
+            executor
+        } else {
+            self.backends.retained(&inputs, &self.store)?
+        };
         definition.runtime.execution =
             seedbox_application::definition::execution_settings(&inputs.profile)?;
         for (name, machine) in &mut definition.machines {
@@ -983,6 +990,158 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(execution.capacity().unwrap().occupying.is_empty());
+    }
+
+    #[test]
+    fn project_execution_uses_the_canonical_mixed_memory_profile() {
+        use seedbox_application::{execution::*, image::Launch};
+        #[derive(Clone)]
+        struct FixtureBackend(PreparedInputs);
+        impl PreparationBackend for FixtureBackend {
+            fn prepare(
+                &self,
+                _: &Simulation,
+                _: &ContentStore,
+            ) -> seedbox_application::Result<PreparedInputs> {
+                Ok(self.0.clone())
+            }
+            fn prepare_cancellable(
+                &self,
+                simulation: &Simulation,
+                store: &ContentStore,
+                _: &PreparationContext,
+            ) -> seedbox_application::Result<PreparedInputs> {
+                self.prepare(simulation, store)
+            }
+        }
+        impl ExecutionBackend for FixtureBackend {
+            fn profile(&self) -> ExecutionProfile {
+                self.0.profile.clone()
+            }
+            fn execute(
+                &self,
+                request: ExecutionRequest<'_>,
+            ) -> seedbox_application::Result<ExecutionReport> {
+                assert_eq!(request.prepared.profile, self.profile());
+                assert_eq!(request.prepared.memory_mb("app"), 2048);
+                assert_eq!(request.prepared.memory_mb("oracle"), 256);
+                assert_eq!(request.prepared.memory_mb("helper"), 1024);
+                Ok(ExecutionReport {
+                    simulated_time_ns: Some(1),
+                    host_wait_ns: 0,
+                    reason: StopReason::Completed,
+                    workload_exit: Some(WorkloadExit {
+                        service: "oracle".into(),
+                        code: 0,
+                    }),
+                    witness: Some(self.0.kernel.clone()),
+                    full_state: None,
+                    faults: vec![],
+                    detail: None,
+                })
+            }
+        }
+        struct Provider(FixtureBackend);
+        impl BackendProvider for Provider {
+            fn project(
+                &self,
+                _: &Simulation,
+                _: &ContentStore,
+                _: &CancellationToken,
+            ) -> seedbox_application::Result<Backends> {
+                Ok(Backends {
+                    preparation: Box::new(self.0.clone()),
+                    execution: Box::new(self.0.clone()),
+                })
+            }
+            fn retained(
+                &self,
+                inputs: &PreparedInputs,
+                _: &ContentStore,
+            ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
+                Ok(Box::new(FixtureBackend(inputs.clone())))
+            }
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(temporary.path().join("store"));
+        let digest = store.put(b"test-only-binary").unwrap();
+        let configuration = seedbox_application::config::parse_for_architecture(
+            "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\n",
+            Path::new("/project/seedbox.yaml"), &Default::default(),
+            if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 },
+        ).unwrap();
+        let image = PreparedImage {
+            manifest: digest.clone(),
+            config: digest.clone(),
+            layers: vec![],
+            launch: Launch {
+                argv: vec!["/app".into()],
+                environment: BTreeMap::new(),
+                working_dir: "/".into(),
+                user: "".into(),
+                volumes: vec![],
+                disk_volumes: vec![],
+            },
+        };
+        let inputs = PreparedInputs {
+            wall_clock_epoch: Some(86400),
+            kernel: digest.clone(),
+            images: BTreeMap::from([
+                ("app".into(), image.clone()),
+                ("helper".into(), image.clone()),
+                ("oracle".into(), image),
+            ]),
+            placement: BTreeMap::from([
+                ("app".into(), "app".into()),
+                ("helper".into(), "helper".into()),
+                ("oracle".into(), "oracle".into()),
+            ]),
+            guests: BTreeMap::from([
+                ("app".into(), digest.clone()),
+                ("helper".into(), digest.clone()),
+                ("oracle".into(), digest.clone()),
+            ]),
+            machine_memory_mb: BTreeMap::from([("app".into(), 2048), ("oracle".into(), 256)]),
+            profile: ExecutionProfile {
+                backend: Backend::Other("test".into()),
+                engine: digest,
+                witness_mode: WitnessMode::Exits,
+                semantic_parameters: SemanticParameters::new(1024),
+            },
+            auxiliary: BTreeMap::new(),
+            provenance: BTreeMap::new(),
+        };
+        let manager = Arc::new(Manager::new(catalogue::Catalogue::in_memory()));
+        let service = ExecutionService::new(
+            manager.clone(),
+            temporary.path().join("execution"),
+            store,
+            Arc::new(Provider(FixtureBackend(inputs))),
+        )
+        .unwrap();
+        let spec = SimulationSpec {
+            configuration,
+            inputs: InputSource::Project,
+            seed: Some(1),
+            program: vec![],
+            start_paused: false,
+        };
+        let resource = manager
+            .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
+                request_id: "mixed-memory".into(),
+                spec,
+            })
+            .unwrap()
+            .0;
+        service.execute(resource.metadata.id.clone()).unwrap();
+        let finished = manager.describe(&resource.metadata.id).unwrap();
+        assert_eq!(finished.status.oracle_exit_code, Some(0));
+        assert_eq!(
+            finished.status.termination,
+            Some(seedbox_api::ExecutionTermination::OracleExited)
+        );
     }
 
     #[test]

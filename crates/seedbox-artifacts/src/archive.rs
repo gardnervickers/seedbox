@@ -499,6 +499,7 @@ mod tests {
             },
             machines: BTreeMap::new(),
             oracle: Machine {
+                cpu: Default::default(),
                 image: None,
                 name: None,
                 boot_archive: asset,
@@ -521,7 +522,6 @@ mod tests {
                 links: Vec::new(),
             },
             simulator: Simulator {
-                blocks_per_progress_call: std::num::NonZeroU32::MIN,
                 schedule: Default::default(),
                 disk: Default::default(),
                 oracle_control: false,

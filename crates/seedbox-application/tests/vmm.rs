@@ -26,6 +26,7 @@ fn typed(world: &serde_json::Value) -> WorldConfig {
 fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
     let hash = ContentDigest::of(b"retained input");
     let prepared = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: None,
         kernel: hash.clone(),
         images: BTreeMap::new(),
@@ -67,6 +68,22 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             bandwidth_bps: None,
             queue_bound_ns: None,
         },
+        cpus: &BTreeMap::from([
+            (
+                "client".into(),
+                seedbox_spec::project::Cpu {
+                    speed_hz: 2_000_000_000,
+                    jitter_percent: 5,
+                },
+            ),
+            (
+                "server".into(),
+                seedbox_spec::project::Cpu {
+                    speed_hz: 800_000_000,
+                    jitter_percent: 10,
+                },
+            ),
+        ]),
         schedule: &Schedule {
             timer_jitter_ns: 50_000,
             stop_tolerance_ns: 40_000,
@@ -219,6 +236,13 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         assert_eq!(world["machines"][0]["initrd"], "/verified/retained-input");
         assert_eq!(world["timer_jitter_ns"], 50_000);
         assert_eq!(world["stop_tolerance_ns"], 40_000);
+        assert_eq!(world["machines"][0]["cpu_speed_hz"], 2_000_000_000u64);
+        assert_eq!(world["machines"][0]["progress_ns"], 25_000);
+        assert_eq!(world["machines"][0]["progress_jitter_ns"], 1_250);
+        assert_eq!(world["machines"][1]["cpu_speed_hz"], 800_000_000u64);
+        assert_eq!(world["machines"][1]["progress_ns"], 62_500);
+        assert_eq!(world["machines"][1]["progress_jitter_ns"], 6_250);
+        assert!(world.get("cpu_speed_hz").is_none());
         assert_eq!(world["duration_ns"], 1_000_000_000);
         assert!(world["machines"]
             .as_array()
@@ -719,6 +743,8 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
         let control = seedbox_application::config::Control {
             service: "client".into(),
         };
+        let mut cpus = base.cpus.clone();
+        cpus.insert("peer".into(), Default::default());
         let mut prepared = base.prepared.clone();
         prepared
             .guests
@@ -727,6 +753,7 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
             .placement
             .insert("peer".into(), "peer-machine".into());
         let request = ExecutionRequest {
+            cpus: &cpus,
             program: &[],
             intervention_history: None,
             start_paused: false,
@@ -841,6 +868,8 @@ fn baseline_links_resolve_service_names_to_prepared_machines() {
 fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides() {
     fixture(|base| {
         // Use a third machine as controller so both sides are in the failure model.
+        let mut cpus = base.cpus.clone();
+        cpus.insert("scenario".into(), Default::default());
         let mut prepared = base.prepared.clone();
         let hash = prepared.kernel.clone();
         prepared
@@ -857,6 +886,7 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            cpus: &cpus,
             program: &[],
             intervention_history: None,
             start_paused: false,
@@ -949,6 +979,8 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
 #[test]
 fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
     fixture(|base| {
+        let mut cpus = base.cpus.clone();
+        cpus.insert("scenario".into(), Default::default());
         let mut prepared = base.prepared.clone();
         let hash = prepared.kernel.clone();
         prepared
@@ -965,6 +997,7 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            cpus: &cpus,
             program: &[],
             intervention_history: None,
             start_paused: false,
@@ -1051,6 +1084,8 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
 #[test]
 fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
     fixture(|base| {
+        let mut cpus = base.cpus.clone();
+        cpus.insert("scenario".into(), Default::default());
         let mut prepared = base.prepared.clone();
         let hash = prepared.kernel.clone();
         prepared
@@ -1067,6 +1102,7 @@ fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            cpus: &cpus,
             program: &[],
             intervention_history: None,
             start_paused: false,
@@ -1131,6 +1167,8 @@ fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
 #[test]
 fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time() {
     fixture(|base| {
+        let mut cpus = base.cpus.clone();
+        cpus.insert("scenario".into(), Default::default());
         let mut prepared = base.prepared.clone();
         let hash = prepared.kernel.clone();
         prepared
@@ -1147,6 +1185,7 @@ fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time
             service: "scenario".into(),
         };
         let request = ExecutionRequest {
+            cpus: &cpus,
             program: &[],
             intervention_history: None,
             start_paused: false,
@@ -2232,5 +2271,75 @@ fn reports_correlate_retained_interventions_with_guest_faults_and_oracle_exit() 
         let result = parse(&raw, &request).unwrap();
         assert_eq!(result.workload_exit.unwrap().code, 7);
         assert_eq!(result.faults.len(), 2);
+    });
+}
+
+#[test]
+fn machine_memory_crosses_worker_config_and_binds_checkpoint_identity() {
+    fixture(|request| {
+        let original = engine_adapter::world(request).unwrap();
+        let mut prepared = request.prepared.clone();
+        prepared
+            .machine_memory_mb
+            .insert("server-machine".into(), 2048);
+        let changed = ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        };
+        let world = engine_adapter::world(&changed).unwrap();
+        assert_eq!(world.mem_mb, 512);
+        assert_eq!(
+            world
+                .machines
+                .iter()
+                .find(|m| m.name == "server-machine")
+                .unwrap()
+                .memory_mb(&world),
+            2048
+        );
+        assert_eq!(
+            world
+                .machines
+                .iter()
+                .find(|m| m.name == "client-machine")
+                .unwrap()
+                .memory_mb(&world),
+            512
+        );
+        let identity = |world: &WorldConfig| {
+            checkpoint_protocol::parent_identity(world, 1, "engine", false, false, |_| {
+                Ok("content".into())
+            })
+            .unwrap()
+        };
+        assert_ne!(identity(&world), identity(&original));
+        prepared.machine_memory_mb.insert("missing".into(), 256);
+        assert!(engine_adapter::world(&ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("unknown machine"));
+        prepared.machine_memory_mb.remove("missing");
+        prepared
+            .machine_memory_mb
+            .insert("server-machine".into(), 63);
+        assert!(engine_adapter::world(&ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        })
+        .is_err());
+        prepared.profile.backend = Backend::Hvf;
+        prepared
+            .machine_memory_mb
+            .insert("server-machine".into(), 4096);
+        assert!(engine_adapter::world(&ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("64..3072"));
     });
 }

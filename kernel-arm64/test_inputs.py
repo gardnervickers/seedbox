@@ -184,10 +184,37 @@ int main(void) {
             ], check=True, capture_output=True)
             subprocess.run([str(exe)], check=True, capture_output=True)
 
+    def test_kernel_poll_hook_is_active_only_outside_vdso(self):
+        header = 'static inline void cpu_relax(void)\n{\n\tasm volatile("yield" ::: "memory");\n}\n'
+        patched = apply.polling(header)
+        # The host may be x86. Replace only the architecture hint; compile the
+        # actual patched call and guard, then check the positive/negative cases.
+        patched = patched.replace('asm volatile("yield" ::: "memory")', 'asm volatile("" ::: "memory")')
+        fixture = '#include <assert.h>\nstatic unsigned reads;\n' + patched + '\n' + r"""
+void seedbox_cpu_relax(void) { ++reads; }
+int main(void) {
+    for (unsigned i = 0; i < 123; ++i) cpu_relax();
+#ifdef BUILD_VDSO
+    assert(reads == 0);
+#else
+    assert(reads == 123);
+#endif
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            c = Path(directory) / "relax.c"
+            exe = Path(directory) / "relax"
+            c.write_text(fixture)
+            for flags in [[], ["-DBUILD_VDSO"]]:
+                subprocess.run(shlex.split(os.environ.get("CC", "cc")) + flags + [
+                    "-Wall", "-Wextra", "-Werror", str(c), "-o", str(exe)
+                ], check=True, capture_output=True)
+                subprocess.run([str(exe)], check=True, capture_output=True)
+
     def test_poll_yield_preserves_caller_mask_and_retries_after_irq(self):
         source = (HERE / "seedbox.c").read_text()
-        read = source[source.index("u64 notrace seedbox_read(void)"):
-                      source.index("/* Charge syscall work")]
+        read = source[source.index("static u64 notrace seedbox_read_step(u64 step)"):
+                      source.index("/* splitmix64")]
         fixture = r"""
 #include <assert.h>
 #include <stdint.h>
@@ -228,18 +255,18 @@ int main(void) {
         storage.now = storage.last = storage.bound = 100;
         storage.deferred_irq_pending = 0;
         writes = synchronized = 0;
-        assert(seedbox_read() == (masked ? 101 : 106));
+        assert(seedbox_read() == (masked ? 200 : 205));
         assert(irq_flags == caller_flags && writes == 1);
-        assert(seedbox_read() == (masked ? 102 : 107));
+        assert(seedbox_read() == (masked ? 300 : 305));
         assert(irq_flags == caller_flags && writes == 1);
         assert(storage.deferred_irq_pending == (u64)masked);
         if (masked) {
             /* No idle or other MMIO: the next unmasked read delivers it. */
             caller_flags = irq_flags = 0x340;
-            assert(seedbox_read() == 106);
+            assert(seedbox_read() == 205);
             assert(irq_flags == caller_flags && writes == 2);
             assert(storage.deferred_irq_pending == 0);
-            assert(seedbox_read() == 107 && writes == 2);
+            assert(seedbox_read() == 305 && writes == 2);
         }
     }
 }
@@ -257,7 +284,7 @@ int main(void) {
         source = (HERE / "seedbox.c").read_text()
         page = source[source.index("struct seedbox_page {"):
                       source.index("static struct seedbox_page *page;")]
-        helpers = source[source.index("u64 notrace seedbox_read(void)"):
+        helpers = source[source.index("static u64 notrace seedbox_read_step(u64 step)"):
                          source.index("static u64 cs_read")]
         fixture = r"""
 #include <assert.h>
@@ -268,9 +295,14 @@ typedef uint64_t u64;
 #define notrace
 #define unlikely(x) (x)
 #define panic(...) abort()
+struct pt_regs { unsigned long regs[31]; };
 """ + page + r"""
 _Static_assert(offsetof(struct seedbox_page, syscall_ns) == 48, "PV syscall cost ABI");
+_Static_assert(offsetof(struct seedbox_page, progress_ns) == 56, "progress charge ABI");
+_Static_assert(offsetof(struct seedbox_page, progress_jitter_ns) == 64, "progress jitter ABI");
+_Static_assert(offsetof(struct seedbox_page, progress_jitter_seed) == 72, "progress jitter ABI");
 static struct seedbox_page storage, *page = &storage;
+static struct pt_regs regs;
 static u64 early_last, next_cost, window;
 static unsigned long irq_flags;
 static unsigned int writes;
@@ -282,7 +314,10 @@ static void *event = registers;
 #define local_irq_restore(saved) do { irq_flags = (saved); } while (0)
 #define irqs_disabled_flags(saved) ((saved) & 128)
 #define isb() ((void)0)
-#define READ_ONCE(x) (assert(&(x) == &page->syscall_ns || (irq_flags & 128)), (x))
+#define READ_ONCE(x) (assert(&(x) == &page->syscall_ns || &(x) == &page->progress_ns \
+                             || &(x) == &page->progress_jitter_ns \
+                             || &(x) == &page->progress_jitter_seed || (irq_flags & 128)), (x))
+#define likely(x) (x)
 #define WRITE_ONCE(x, v) do { assert(irq_flags & 128); (x) = (v); } while (0)
 static void writeq(unsigned long value, void *address) {
     assert(value == 1 && address == registers + 24);
@@ -301,41 +336,98 @@ static void reset(u64 cost, u64 bound, u64 span, u64 replacement) {
     writes = 0;
 }
 int main(void) {
-    /* Ordinary clock reads still cost one, independently of CPU throttle. */
+    /* Ordinary clock reads cost 100 ns, independently of CPU throttle. */
     for (u64 cost = 1000; cost <= 4000; cost *= 4) {
         reset(cost, UINT64_MAX, 0, 0);
-        assert(seedbox_read() == 1);
-        seedbox_syscall_progress();
-        assert(page->last == cost + 1 && writes == 0);
+        assert(seedbox_read() == 100);
+        seedbox_syscall_progress(&regs, 0);
+        assert(page->last == cost + 100 && writes == 0);
         assert(irq_flags == 0);
     }
     reset(1000000, UINT64_MAX, 0, 0);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 1000000 && writes == 0);
 
     /* Throttling halfway through affects the next syscall, not owed work. */
     reset(1000, 500, 500, 4000);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 1000 && writes == 1 && page->syscall_ns == 4000);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 5000 && writes == 9);
 
     /* Healing halfway through likewise preserves the original charge. */
     reset(4000, 2000, 2000, 1000);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 4000 && writes == 1 && page->syscall_ns == 1000);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 5000 && writes == 2);
 
     /* Multiple bounded rendezvous neither lose nor duplicate work. */
     reset(1000, 250, 250, 0);
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, 0);
     assert(page->last == 1000 && writes == 3 && irq_flags == 0);
+
+    /* A marked progress call charges the published nominal cost instead of
+     * one syscall; without one it charges a syscall. Other syscalls and a
+     * plain getpid charge a syscall. */
+    reset(1000, UINT64_MAX, 0, 0);
+    regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == 1000);
+    page->progress_ns = 25000;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == 26000 && writes == 0);
+    seedbox_syscall_progress(&regs, 1);
+    regs.regs[0] = 0;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == 28000);
+
+    /* A throttle scales the compute charge like a syscall's. */
+    page->syscall_ns = 4000;
+    regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == 128000 && writes == 0);
+
+    /* A bulk charge rendezvous at every bound like single reads would. */
+    reset(1000, 10000, 10000, 0);
+    page->progress_ns = 25000;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == 25000 && writes == 2 && irq_flags == 0);
+
+    /* With a jitter bound each call draws within the bound either way; a zero
+     * bound charges every call the same, a changed seed restarts the stream,
+     * and the bound is capped at the nominal charge. */
+    reset(1000, UINT64_MAX, 0, 0);
+    page->progress_ns = 25000;
+    page->progress_jitter_ns = 5000;
+    page->progress_jitter_seed = 7;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    u64 first = page->last;
+    assert(first >= 20000 && first <= 30000 && writes == 0);
+    page->progress_jitter_seed = 8;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    u64 other = page->last - first;
+    assert(other >= 20000 && other <= 30000);
+    page->progress_jitter_seed = 7;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == first + other + first);
+    page->progress_jitter_ns = 0;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == first + other + first + 25000 && irq_flags == 0);
+    page->progress_jitter_ns = UINT64_MAX;
+    for (int i = 0; i != 64; ++i) {
+        u64 before = page->last;
+        seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+        assert(page->last - before <= 50000);
+    }
 
     /* Preserve the pre-initialization syscall behavior. */
     page = NULL;
-    seedbox_syscall_progress();
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
     assert(early_last == 1000 && irq_flags == 0);
+    regs.regs[0] = 0;
+    seedbox_syscall_progress(&regs, 1);
+    assert(early_last == 2000 && irq_flags == 0);
 }
 """
         with tempfile.TemporaryDirectory() as directory:

@@ -353,6 +353,7 @@ fn resolved_request(id: &str) -> SubmitRequest {
     request.metadata.name = "test".into();
     let binary = ContentDigest::of(b"catalogue-only-binary");
     let inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: Some(86400),
         kernel: binary.clone(),
         images: std::collections::BTreeMap::from([(

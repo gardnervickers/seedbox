@@ -31,6 +31,12 @@ pub fn resolve(
             .get(name)
             .ok_or_else(|| Error::Integrity(format!("missing resolved launch for {name}")))?;
         Ok(Machine {
+            cpu: configuration
+                .services
+                .get(name)
+                .ok_or_else(|| Error::Integrity(format!("missing CPU configuration for {name}")))?
+                .cpu
+                .clone(),
             image: Some(Image {
                 tag: configuration
                     .services
@@ -46,7 +52,7 @@ pub fn resolve(
             anonymous_volumes: image.launch.volumes.clone(),
             name: (name == oracle_name).then(|| name.clone()),
             boot_archive: asset(boot),
-            memory_bytes: u64::from(inputs.profile.semantic_parameters.memory_mb) * 1024 * 1024,
+            memory_bytes: u64::from(inputs.memory_mb(name)) * 1024 * 1024,
             process: Process {
                 argv: image.launch.argv.clone(),
                 environment: image.launch.environment.clone(),
@@ -96,7 +102,6 @@ pub fn resolve(
         oracle,
         network: configuration.network.clone(),
         simulator: Simulator {
-            blocks_per_progress_call: configuration.simulator.blocks_per_progress_call,
             schedule: configuration.schedule.clone(),
             disk: configuration.disk.clone(),
             oracle_control: configuration.control.is_some(),
@@ -164,6 +169,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
     let mut images = BTreeMap::new();
     let mut guests = BTreeMap::new();
     let mut placement = BTreeMap::new();
+    let mut machine_memory_mb = BTreeMap::new();
     for (name, machine) in definition
         .machines
         .iter()
@@ -173,10 +179,19 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
             &definition.oracle,
         )))
     {
-        if machine.memory_bytes != definition.oracle.memory_bytes {
-            return Err(Error::Setup(
-                "this backend requires equal memoryBytes for every machine".into(),
-            ));
+        if machine.memory_bytes == 0 || !machine.memory_bytes.is_multiple_of(1024 * 1024) {
+            return Err(Error::Setup(format!(
+                "machine {name}: memoryBytes must be a positive whole number of MiB"
+            )));
+        }
+        let memory_mb = u32::try_from(machine.memory_bytes / (1024 * 1024)).map_err(|_| {
+            Error::Setup(format!(
+                "machine {name}: memoryBytes exceeds supported memory"
+            ))
+        })?;
+        crate::preparation::validate_machine_memory(&profile, name, memory_mb)?;
+        if memory_mb != profile.semantic_parameters.memory_mb {
+            machine_memory_mb.insert(name.into(), memory_mb);
         }
         for volume in machine.volumes.values() {
             if volume.size_bytes != crate::engine_adapter::VOLUME_DISK_MIB * 1024 * 1024 {
@@ -190,6 +205,13 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
         } else {
             resolved_boot(definition, name, machine, store)?
         };
+        if !matches!(profile.backend, crate::execution::Backend::Other(_)) {
+            let archive_bytes = store.size(&boot)?;
+            let minimum = crate::guest::minimum_memory_mb(archive_bytes)?;
+            if memory_mb < minimum {
+                return Err(Error::Setup(format!("machine {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase memoryBytes (application memory may require more)")));
+            }
+        }
         images.insert(
             name.into(),
             PreparedImage {
@@ -217,6 +239,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
         placement.insert(name.into(), name.into());
     }
     let inputs = PreparedInputs {
+        machine_memory_mb,
         wall_clock_epoch: Some(definition.clock.epoch_seconds),
         kernel: digest(&definition.runtime.kernel)?,
         images,
@@ -412,14 +435,13 @@ fn resolved_boot(
             })
             .collect(),
     };
-    let mut recipe = crate::guest::launch_recipe_with_progress(
+    let mut recipe = crate::guest::launch_recipe(
         &launch,
         &format!("10.0.0.{}/24", index + 1),
         &hosts,
         name,
         &BTreeMap::new(),
         definition.clock.epoch_seconds,
-        definition.simulator.blocks_per_progress_call,
     )?;
     let mut input = tempfile::tempfile()?;
     store.copy_to(&digest(&machine.boot_archive)?, &mut input)?;
@@ -512,7 +534,7 @@ fn launch_configs(bytes: &[u8]) -> Result<&[u8]> {
             .ok_or_else(fail)?;
     }
     cursor = cursor
-        .checked_add(12)
+        .checked_add(16)
         .filter(|n| *n <= bytes.len())
         .ok_or_else(fail)?;
     for _ in 0..4 {
@@ -601,6 +623,7 @@ mod tests {
         )
         .unwrap();
         let inputs = PreparedInputs {
+            machine_memory_mb: Default::default(),
             wall_clock_epoch: Some(86400),
             kernel,
             images: BTreeMap::from([(
@@ -622,6 +645,44 @@ mod tests {
         (temporary, store, definition, boot)
     }
     #[test]
+    fn mixed_memory_roundtrips_through_saved_definitions_and_prepared_inputs() {
+        let (_temporary, store, mut definition, _) = fixture();
+        let mut app = definition.oracle.clone();
+        app.name = None;
+        app.memory_bytes = 2048 * 1024 * 1024;
+        definition.machines.insert("app".into(), app);
+        definition.oracle.memory_bytes = 256 * 1024 * 1024;
+        let saved: Definition =
+            serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&definition).unwrap()).unwrap();
+        let inputs = prepared(&saved, &store).unwrap();
+        assert_eq!(inputs.memory_mb("app"), 2048);
+        assert_eq!(inputs.memory_mb("oracle"), 256);
+        assert_eq!(
+            inputs.machine_memory_mb,
+            BTreeMap::from([("app".into(), 2048)])
+        );
+        let configuration = saved.configuration("mixed");
+        assert_eq!(configuration.services["app"].memory_mb, Some(2048));
+        assert_eq!(configuration.services["oracle"].memory_mb, Some(256));
+        let resolved =
+            resolve(&configuration, &inputs, saved.seed, saved.overrides.clone()).unwrap();
+        assert_eq!(
+            resolved.machines["app"].memory_bytes,
+            saved.machines["app"].memory_bytes
+        );
+        assert_eq!(resolved.oracle.memory_bytes, saved.oracle.memory_bytes);
+        for memory in [0, 64 * 1024 * 1024 + 1, 3073 * 1024 * 1024] {
+            definition.machines.get_mut("app").unwrap().memory_bytes = memory;
+            assert!(prepared(&definition, &store).is_err(), "{memory}");
+        }
+        definition.machines.get_mut("app").unwrap().memory_bytes = 64 * 1024 * 1024;
+        assert!(prepared(&definition, &store)
+            .unwrap_err()
+            .to_string()
+            .contains("archive boot floor"));
+    }
+
+    #[test]
     fn resolved_launch_is_identical_until_inline_fields_change() {
         let (_temporary, store, mut definition, original) = fixture();
         let prepared_inputs = prepared(&definition, &store).unwrap();
@@ -632,7 +693,6 @@ mod tests {
         );
         definition.oracle.process.argv.push("--changed".into());
         definition.clock.epoch_seconds += 1;
-        definition.simulator.blocks_per_progress_call = std::num::NonZeroU32::new(5000).unwrap();
         let changed = prepared(&definition, &store).unwrap();
         assert_ne!(changed.guests["oracle"], original);
         assert_eq!(
@@ -645,6 +705,25 @@ mod tests {
             .any(|v| v == b"preserve me"));
         assert!(bytes.windows(b"--changed".len()).any(|v| v == b"--changed"));
         store.verify(&original).unwrap();
+        // The CPU is the VMM's input, not the guest's: the recipe and the
+        // prepared guests do not change with it.
+        definition.oracle.cpu.speed_hz = 800_000_000;
+        definition.oracle.cpu.jitter_percent = 5;
+        let mut worker = definition.oracle.clone();
+        worker.cpu = Default::default();
+        definition.machines.insert("worker".into(), worker);
+        let restored: Definition =
+            serde_json::from_value(serde_json::to_value(&definition).unwrap()).unwrap();
+        let configuration = restored.configuration("roundtrip");
+        assert_eq!(configuration.services["oracle"].cpu, definition.oracle.cpu);
+        assert_eq!(configuration.services["worker"].cpu.speed_hz, 1_000_000_000);
+        assert_eq!(configuration.services["worker"].cpu.jitter_percent, 0);
+        definition.machines.remove("worker");
+        assert_eq!(
+            prepared(&definition, &store).unwrap().guests,
+            changed.guests
+        );
+        definition.oracle.cpu = Default::default();
     }
     #[test]
     fn checkpoint_binary_closure_survives_source_deletion_and_preserves_guest_paths() {

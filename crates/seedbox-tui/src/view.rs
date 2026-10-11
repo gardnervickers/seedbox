@@ -150,7 +150,8 @@ fn rate(per_second: f64) -> String {
     }
 }
 
-fn latency(ns: u64) -> String {
+/// A link delay in milliseconds, or microseconds below one.
+pub fn latency(ns: u64) -> String {
     if ns >= 1_000_000 {
         format!("{}ms", ns as f64 / 1e6)
     } else {
@@ -599,6 +600,7 @@ fn footer(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
                     Panel::Faults => "faults",
                     Panel::Links => "links",
                     Panel::Logs => "logs",
+                    Panel::Oracle => "oracle",
                 };
                 push("tab", format!("focus: {panel}"));
                 push("v", "details".into());
@@ -675,12 +677,15 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
             ("h", "heal the selected (or oldest) active fault"),
             ("c / b", "checkpoint · branch from the newest checkpoint"),
             ("r", "rerun with the same retained inputs"),
-            ("tab", "move focus: machines · faults · logs"),
+            (
+                "tab",
+                "move focus: machines · faults · links · logs · oracle",
+            ),
             ("↑ ↓  j k", "move within the focused panel"),
             ("a", "show every machine's logs"),
             ("e", "switch logs and raw server events"),
             ("[ ]", "zoom the time bar out / in"),
-            ("PgUp PgDn", "scroll logs · End follows again"),
+            ("PgUp PgDn", "scroll logs or the oracle · End follows again"),
             ("v", "technical details and request payloads"),
             ("1 2 3", "catalogue · simulation · timeline"),
             ("q", "quit"),
@@ -737,8 +742,10 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
         }
     }
     let wide = area.width >= 130 && area.height >= 34;
+    // Tall terminals give the time bar room for more lanes; what still does
+    // not fit is named on its last lane row.
     let timebar_height = if area.height >= 30 {
-        (lanes.len() as u16 + 4).clamp(5, 10)
+        (lanes.len() as u16 + 4).clamp(5, (area.height / 4).max(10))
     } else {
         (lanes.len() as u16 + 3).clamp(4, 5)
     };
@@ -824,7 +831,7 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
     app.logs_exclude.replace(oracle.clone());
     app.hitboxes.borrow_mut().push((logs_area, HitTarget::Logs));
     if let (Some(name), Some(area)) = (&oracle, oracle_area) {
-        oracle_logs(frame, focus, name, area);
+        oracle_logs(frame, app, focus, name, area);
     }
     match failure {
         Some(inspector) => {
@@ -869,6 +876,7 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
         checkpoints: &focus.checkpoints,
         traffic: &focus.traffic.history,
         selected: focus.fault_selected.as_ref(),
+        selected_machine: focus.selected.as_deref(),
         now: sim_now,
         zoom: app.zoom,
         focused: app.panel == Panel::Faults,
@@ -1868,11 +1876,27 @@ fn condition(focus: &Focus, m: &MachineState) -> (String, Color) {
             if m.exit_code == Some(0) { DIM } else { RED },
         ),
     };
-    if let Some(permille) = m.throttle_permille {
-        text.0
-            .push_str(&format!(" ×{:.1}", permille as f64 / 1000.0));
+    if let Some(hz) = m.throttle_speed_hz.or(m.cpu_speed_hz) {
+        text.0.push_str(&format!(" {}", frequency(hz)));
     }
     text
+}
+
+/// A CPU speed in its largest unit, with up to two decimals: `2GHz`,
+/// `1.5GHz`, `333.33MHz`, `800kHz`.
+pub fn frequency(hz: u64) -> String {
+    for (unit, scale) in [
+        ("GHz", 1_000_000_000u64),
+        ("MHz", 1_000_000),
+        ("kHz", 1_000),
+    ] {
+        if hz >= scale {
+            let hundredths = (hz * 100).div_ceil(scale);
+            let text = format!("{}.{:02}", hundredths / 100, hundredths % 100);
+            return format!("{}{unit}", text.trim_end_matches('0').trim_end_matches('.'));
+        }
+    }
+    format!("{hz}Hz")
 }
 
 fn tabbed_title(active: Panel) -> Line<'static> {
@@ -1929,14 +1953,23 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
         .unwrap_or(4)
         .clamp(4, 14)
         + 1;
-    let base = name_width + 2 + 14 + 7 + 7;
+    // Every state carries the machine's CPU speed, so size the column to the
+    // longest one rather than cutting a speed short.
+    let states: Vec<(String, Color)> = world.machines.iter().map(|m| condition(focus, m)).collect();
+    let state_width = states
+        .iter()
+        .map(|(state, _)| state.chars().count() + 1)
+        .max()
+        .unwrap_or(14)
+        .clamp(14, 24);
+    let base = name_width + 2 + state_width + 7 + 7;
     let show_drop = width >= base + 13;
     let show_spark = width >= base + 13 + 10;
     let mut header = vec![Span::styled(
         format!(
             "  {}{}{}{}",
             pad("NAME", name_width),
-            pad("STATE", 14),
+            pad("STATE", state_width),
             pad_left("TX/S", 7),
             pad_left("RX/S", 7)
         ),
@@ -1953,9 +1986,8 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
     }
     let mut lines = vec![Line::from(header)];
     let spark_width = width.saturating_sub(base + 13 + 2);
-    for (index, m) in world.machines.iter().enumerate() {
+    for (index, (m, (state, color))) in world.machines.iter().zip(states).enumerate() {
         let selected = focus.selected.as_deref() == Some(m.name.as_str());
-        let (state, color) = condition(focus, m);
         let dropped = focus.traffic.dropped_rate(&m.name);
         let mut spans = vec![
             Span::styled(if selected { "▸ " } else { "  " }, Style::new().fg(ICE)),
@@ -1973,7 +2005,7 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
                         Modifier::empty()
                     }),
             ),
-            Span::styled(pad(&state, 14), Style::new().fg(color)),
+            Span::styled(pad(&state, state_width), Style::new().fg(color)),
             Span::styled(
                 pad_left(&rate(focus.traffic.sent_rate(&m.name)), 7),
                 Style::new().fg(TEXT),
@@ -2422,7 +2454,13 @@ fn logs(frame: &mut Frame, app: &App, focus: &Focus, area: Rect) {
 }
 
 /// The oracle's own output with its state and the simulation's verdict.
-fn oracle_logs(frame: &mut Frame, focus: &Focus, name: &str, area: Rect) {
+/// It scrolls like the log pane: rows back from the newest, 0 following.
+fn oracle_logs(frame: &mut Frame, app: &App, focus: &Focus, name: &str, area: Rect) {
+    let focused = app.panel == Panel::Oracle;
+    app.hitboxes.borrow_mut().push((area, HitTarget::Oracle));
+    let height = area.height.saturating_sub(2) as usize;
+    let rows = log_rows(focus, area.width.saturating_sub(2), LogScope::Only(name));
+    let scroll = app.oracle_scroll.min(rows.len().saturating_sub(height));
     let mut right = Vec::new();
     if let Some(m) = focus
         .world
@@ -2442,7 +2480,11 @@ fn oracle_logs(frame: &mut Frame, focus: &Focus, name: &str, area: Rect) {
     }
     let b = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Color::Rgb(91, 63, 122)))
+        .border_style(Style::new().fg(if focused {
+            BORDER_HI
+        } else {
+            Color::Rgb(91, 63, 122)
+        }))
         .title(Line::from(vec![
             Span::styled(
                 format!(" {name} "),
@@ -2451,12 +2493,23 @@ fn oracle_logs(frame: &mut Frame, focus: &Focus, name: &str, area: Rect) {
             Span::styled("◆ ", Style::new().fg(MAGENTA)),
         ]))
         .title(Line::from(right).right_aligned());
-    let height = area.height.saturating_sub(2) as usize;
-    let rows = log_rows(focus, area.width.saturating_sub(2), LogScope::Only(name));
+    // The top border is full with the name, state and verdict.
+    let b = if scroll > 0 {
+        b.title_bottom(
+            Line::styled(
+                format!(" ↑ {scroll} rows back · End follows "),
+                Style::new().fg(AMBER),
+            )
+            .right_aligned(),
+        )
+    } else {
+        b
+    };
     let lines = if rows.is_empty() {
         vec![Line::styled("no oracle output yet", Style::new().fg(DIM))]
     } else {
-        rows[rows.len().saturating_sub(height)..].to_vec()
+        let end = rows.len() - scroll;
+        rows[end.saturating_sub(height)..end].to_vec()
     };
     frame.render_widget(Paragraph::new(lines).block(b), area);
 }
@@ -3567,6 +3620,52 @@ mod tests {
     }
 
     #[test]
+    fn every_machine_shows_its_configured_or_throttled_speed() {
+        assert_eq!(frequency(2_000_000_000), "2GHz");
+        assert_eq!(frequency(1_500_000_000), "1.5GHz");
+        assert_eq!(frequency(333_000_000), "333MHz");
+        assert_eq!(frequency(333_333_333), "333.34MHz");
+        assert_eq!(frequency(800_000), "800kHz");
+        assert_eq!(frequency(999), "999Hz");
+        let mut app = app(&["app", "oracle"]);
+        let text = render(&app);
+        assert!(text.matches("● ready 1GHz").count() >= 2, "{text}");
+        let mut baseline = world(&["app", "oracle"]);
+        baseline.machines[0].cpu_speed_hz = Some(2_000_000_000);
+        app.apply(Update::World(baseline.clone()));
+        let text = render(&app);
+        assert!(text.contains("● ready 2GHz"), "{text}");
+        assert!(text.contains("● ready 1GHz"), "{text}");
+        // Observations carry the effective speed, including a saturated
+        // throttle: a 2 GHz CPU requested at 1 kHz actually runs at 2 MHz.
+        for (effective, label) in [(500_000_000, "500MHz"), (2_000_000, "2MHz")] {
+            let mut w = baseline.clone();
+            w.machines[0].throttle_speed_hz = Some(effective);
+            app.apply(Update::World(w));
+            let text = render(&app);
+            assert!(text.contains(&format!("● ready {label}")), "{text}");
+            assert!(text.contains("● ready 1GHz"), "{text}");
+        }
+        app.apply(Update::World(baseline.clone()));
+        let text = render(&app);
+        assert!(text.contains("● ready 2GHz"), "{text}");
+        assert!(text.contains("● ready 1GHz"), "{text}");
+        assert!(!text.contains("2MHz"), "{text}");
+        // The machines table widens its state column instead of cutting a
+        // longer state's speed short.
+        let mut exited = baseline.clone();
+        exited.machines[1].condition = MachineCondition::Exited;
+        exited.machines[1].exit_code = Some(0);
+        app.apply(Update::World(exited));
+        let text = render(&app);
+        let row = text
+            .lines()
+            .find(|line| line.contains("oracle") && line.contains("exited"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(row.contains("exited 0 1GHz "), "{row}");
+    }
+
+    #[test]
     fn resolved_names_and_unbounded_playback_render_without_private_defaults() {
         let mut app = app(&["app", "oracle"]);
         let mut resource = crate::model::tests::timeline_resource(10);
@@ -3677,6 +3776,64 @@ mod tests {
             let text = render_at(&app, width, height);
             assert!(text.contains(&format!(" of {} links", all.len())));
         }
+    }
+
+    #[test]
+    fn the_oracle_panel_scrolls_back_and_holds_still_while_output_arrives() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app(&["a", "b", "oracle"]);
+        app.focus.as_mut().unwrap().selected = None;
+        let line = |sequence: u64| {
+            Update::Log(
+                "k7m2p9qx".parse().unwrap(),
+                LogDelivery::Entry {
+                    sequence,
+                    entry: LogEntry::Bytes {
+                        machine: "oracle".into(),
+                        incarnation: 0,
+                        simulated_time_ns: 0,
+                        stream: LogStream::Stdout,
+                        bytes: format!("step {sequence:03}\n").into_bytes(),
+                    },
+                },
+            )
+        };
+        for sequence in 1..=80 {
+            app.apply(line(sequence));
+        }
+        let press = |app: &mut App, code| {
+            app.input(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        let text = render(&app);
+        assert!(text.contains("step 080"));
+        // Tab reaches the oracle panel once it is shown.
+        while app.panel != Panel::Oracle {
+            press(&mut app, KeyCode::Tab);
+        }
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.oracle_scroll, 41);
+        // The application log pane did not move.
+        assert_eq!(app.logs_scroll, 0);
+        let text = render(&app);
+        assert!(!text.contains("step 080"));
+        assert!(text.contains("step 039"));
+        assert!(text.contains("41 rows back"));
+        // New output does not move the rows being read.
+        app.apply(line(81));
+        assert_eq!(app.oracle_scroll, 42);
+        assert!(render(&app).contains("step 039"));
+        // Scrolling stops at the first row; End follows again.
+        for _ in 0..20 {
+            press(&mut app, KeyCode::PageUp);
+        }
+        assert!(render(&app).contains("step 001"));
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.oracle_scroll, 0);
+        assert!(render(&app).contains("step 081"));
     }
 
     #[test]

@@ -1064,10 +1064,10 @@ mod tests {
         resource.spec = serde_json::from_value(serde_json::json!({
             "architecture":"aarch64", "seed":7, "clock":{"epochSeconds":86400},
             "runtime":{"kernel":asset,"engine":asset,"execution":{}},
-            "machines":{}, "oracle":{"bootArchive":asset,"memoryBytes":1073741824_u64,
+            "machines":{}, "oracle":{"cpu":{"speed":"800MHz","jitter":"5%"},"bootArchive":asset,"memoryBytes":1073741824_u64,
                 "process":{"argv":["/test"],"environment":{},"workingDirectory":"/","user":"0"},"volumes":{}},
             "network":{"name":"default","latency_ns":1000000,"jitter_ns":0},
-            "simulator":{"blocksPerProgressCall":17,"schedule":{"timer_jitter_ns":0,"stop_tolerance_ns":0},
+            "simulator":{"schedule":{"timer_jitter_ns":0,"stop_tolerance_ns":0},
                 "disk":{"torn_writes":false},"oracleControl":false},
             "start":{"kind":"fresh"},
             "overrides":[{"id":"external","atNs":42,"action":{"action":"future"}}]

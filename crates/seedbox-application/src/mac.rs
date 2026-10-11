@@ -267,7 +267,6 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
         .get(&request.prepared.kernel)
         .ok_or_else(|| Error::Integrity("missing retained kernel".into()))?;
     let kernel = fs::read(kernel_path)?;
-    let memory = u64::from(request.prepared.profile.semantic_parameters.memory_mb) * 1024 * 1024;
     let mut remaining: std::collections::BTreeSet<_> =
         request.prepared.guests.keys().map(String::as_str).collect();
     for row in report["machines"]
@@ -282,6 +281,7 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
                 "duplicate or unknown application machine".into(),
             ));
         }
+        let memory = u64::from(request.prepared.memory_mb(name)) * 1024 * 1024;
         let initrd_digest = request
             .prepared
             .guests

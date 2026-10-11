@@ -86,7 +86,6 @@ pub(super) fn parse(
         wall_clock_epoch: None,
         machine: MachineOptions::default(),
         disk: DiskOptions::default(),
-        simulator: project.simulator,
     })
 }
 
@@ -98,6 +97,18 @@ fn resolve_machine(
     architecture: crate::guest::Architecture,
     configs: &mut BTreeMap<String, PathBuf>,
 ) -> Result<Service> {
+    if let Some(memory) = machine.memory_mib {
+        let maximum = match architecture {
+            crate::guest::Architecture::Arm64 => 3072,
+            crate::guest::Architecture::Amd64 => 65536,
+        };
+        if !(64..=maximum).contains(&memory.get()) {
+            return invalid(
+                &format!("{path}.memoryMiB"),
+                format!("expected 64..{maximum} MiB"),
+            );
+        }
+    }
     let source = match (machine.image, machine.build) {
         (Some(reference), None) => ImageSource::Registry { reference },
         (None, Some(build)) => {
@@ -175,6 +186,8 @@ fn resolve_machine(
         });
     }
     Ok(Service {
+        memory_mb: machine.memory_mib.map(|memory| memory.get()),
+        cpu: machine.cpu,
         source,
         platform: architecture.platform().into(),
         entrypoint: machine.entrypoint,
@@ -272,6 +285,26 @@ mod tests {
         assert_eq!(sim.services["app"].platform, "linux/arm64");
         assert_eq!(sim.network.latency_ns, 2_500_000);
         assert_eq!(sim.limits.simulated_time_ns, u64::MAX);
+        assert_eq!(
+            sim.services["oracle"].cpu,
+            seedbox_spec::project::Cpu::default()
+        );
+        let sim =
+            parse_native("name: demo\nmachines: {app: {image: app, cpu: {speed: 2GHz, jitter: 10%}}}\noracle: {image: test, cpu: {speed: 800MHz, jitter: 5%}}\n")
+                .unwrap();
+        assert_eq!(sim.services["oracle"].cpu.speed_hz, 800_000_000);
+        assert_eq!(sim.services["oracle"].cpu.jitter_percent, 5);
+        assert_eq!(sim.services["app"].cpu.speed_hz, 2_000_000_000);
+        assert_eq!(sim.services["app"].cpu.jitter_percent, 10);
+        for cpu in ["{speed: 2}", "{jitter: 101%}", "{progressJitter: 5us}"] {
+            assert!(
+                parse_native(&format!(
+                    "name: demo\noracle: {{image: test, cpu: {cpu}}}\n"
+                ))
+                .is_err(),
+                "{cpu}"
+            );
+        }
     }
 
     #[test]

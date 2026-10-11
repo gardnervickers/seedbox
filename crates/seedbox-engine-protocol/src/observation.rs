@@ -127,5 +127,8 @@ pub enum MachineTransition {
     Resumed,
     Crashed,
     Rebooted,
-    Throttled { factor_permille: u64 },
+    /// Effective nominal speed after throttle rounding and clamping; None is healed.
+    Throttled {
+        speed_hz: Option<u64>,
+    },
 }

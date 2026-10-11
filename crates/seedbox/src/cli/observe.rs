@@ -262,15 +262,6 @@ fn seconds(ns: u64) -> String {
     format!("{}s", text.trim_end_matches('0').trim_end_matches('.'))
 }
 
-/// Link latency in the unit the TUI shows: milliseconds, or microseconds below one.
-fn latency(ns: u64) -> String {
-    if ns >= 1_000_000 {
-        format!("{}ms", ns as f64 / 1e6)
-    } else {
-        format!("{}µs", ns as f64 / 1e3)
-    }
-}
-
 /// Machines, links with their counters and faults as the server observes them now.
 pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(None)?;
@@ -302,7 +293,7 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
         println!();
         output::table(
             [
-                "FROM", "TO", "LATENCY", "LOSS", "FRAMES", "BYTES", "DROPPED", "FAULT",
+                "FROM", "TO", "LATENCY", "JITTER", "LOSS", "FRAMES", "BYTES", "DROPPED", "FAULT",
             ],
             world
                 .links
@@ -312,7 +303,8 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
                     [
                         l.from.clone(),
                         l.to.clone(),
-                        latency(l.policy.latency_ns),
+                        seedbox_tui::latency(l.policy.latency_ns),
+                        seedbox_tui::latency(l.policy.jitter_ns),
                         format!("{}ppm", l.policy.loss_ppm),
                         c.scheduled.to_string(),
                         c.bytes.to_string(),

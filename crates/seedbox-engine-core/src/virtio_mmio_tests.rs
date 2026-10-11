@@ -16,7 +16,7 @@ fn device(policy: Policy) -> Transport {
 }
 
 #[test]
-fn queue_profiles_preserve_validation_precedence_and_cursor_transitions() {
+fn queue_validation_and_cursor_transitions_match() {
     for policy in [
         Policy::Application,
         Policy::Console,
@@ -27,31 +27,15 @@ fn queue_profiles_preserve_validation_precedence_and_cursor_transitions() {
         t.write(0x30, 99).unwrap();
         assert_eq!(t.read(0x34), 0);
         assert_eq!(t.read(0x44), 0);
-        let invalid_selector = t.write(0x38, 0);
-        match policy {
-            Policy::Application => assert_eq!(
-                invalid_selector.unwrap_err(),
-                "virtio queue selection out of range"
-            ),
-            Policy::Console => assert_eq!(
-                invalid_selector.unwrap_err(),
-                "invalid console queue selector"
-            ),
-            Policy::Block | Policy::Network => assert_eq!(invalid_selector.unwrap(), Effect::None),
-        }
+        assert_eq!(
+            t.write(0x38, 0).unwrap_err(),
+            "virtio queue selection out of range"
+        );
         t.write(0x30, 0).unwrap();
-        let oversized = t.write(0x38, 65537);
-        if matches!(policy, Policy::Block | Policy::Network) {
-            assert_eq!(oversized.unwrap(), Effect::None);
-            assert_eq!(t.queues[0].num, 1);
-        } else {
+        for size in [0, 3, 257, 65537] {
             assert_eq!(
-                oversized.unwrap_err(),
-                if policy == Policy::Console {
-                    "invalid console queue size"
-                } else {
-                    "invalid virtio queue size"
-                }
+                t.write(0x38, size).unwrap_err(),
+                "invalid virtio queue size"
             );
             assert_eq!(t.queues[0].num, 0);
         }
@@ -60,45 +44,23 @@ fn queue_profiles_preserve_validation_precedence_and_cursor_transitions() {
         t.queues[0].last_avail = 5;
         t.queues[0].used_idx = 7;
         t.write(0x44, 1).unwrap();
+        assert_eq!((t.queues[0].last_avail, t.queues[0].used_idx), (5, 7));
         assert_eq!(
-            (t.queues[0].last_avail, t.queues[0].used_idx),
-            if policy == Policy::Console {
-                (5, 7)
-            } else {
-                (0, 0)
-            }
+            t.write(0x38, 0).unwrap_err(),
+            "virtio queue changed while ready"
         );
-        let mutation = t.write(0x38, 0);
-        if policy == Policy::Console {
-            assert_eq!(mutation.unwrap_err(), "console queue changed while ready");
-        } else if policy == Policy::Application {
-            assert_eq!(mutation.unwrap_err(), "invalid virtio queue size");
-        } else {
-            mutation.unwrap();
-            assert_eq!(t.queues[0].num, u16::from(policy == Policy::Network));
-        }
-        let invalid_ready = t.write(0x44, 2);
-        if matches!(policy, Policy::Block | Policy::Network) {
-            invalid_ready.unwrap();
-            assert!(!t.queues[0].ready);
-        } else {
-            assert_eq!(
-                invalid_ready.unwrap_err(),
-                if policy == Policy::Console {
-                    "invalid console queue ready value"
-                } else {
-                    "invalid virtio queue ready flag"
-                }
-            );
-            assert!(t.queues[0].ready);
-        }
+        assert_eq!(
+            t.write(0x44, 2).unwrap_err(),
+            "invalid virtio queue ready flag"
+        );
+        assert!(t.queues[0].ready);
         t.write(0x44, 0).unwrap();
         assert_eq!((t.queues[0].last_avail, t.queues[0].used_idx), (0, 0));
     }
 }
 
 #[test]
-fn notification_and_feature_errors_keep_existing_order_and_partial_status() {
+fn notifications_require_driver_and_supported_features_on_every_profile() {
     for policy in [
         Policy::Application,
         Policy::Console,
@@ -106,32 +68,19 @@ fn notification_and_feature_errors_keep_existing_order_and_partial_status() {
         Policy::Network,
     ] {
         let mut t = device(policy);
-        let invalid = t.write(0x50, 99);
-        match policy {
-            Policy::Application => assert_eq!(
-                invalid.unwrap_err(),
-                "virtio notification queue out of range"
-            ),
-            Policy::Console => assert_eq!(invalid.unwrap_err(), "invalid console notify queue"),
-            Policy::Block | Policy::Network => assert_eq!(invalid.unwrap(), Effect::None),
-        }
-        let early = t.write(0x50, 0);
-        if policy == Policy::Console {
-            assert_eq!(early.unwrap_err(), "console notify before DRIVER_OK");
-        } else {
-            assert_eq!(early.unwrap(), Effect::Notify(0));
-        }
-        let features = t.write(0x70, 12);
-        if policy == Policy::Console {
-            assert_eq!(
-                features.unwrap_err(),
-                "console DRIVER_OK without negotiated features"
-            );
-            assert_eq!(t.read(0x70), 4); // Existing error occurs after recording/clearing bits.
-        } else {
-            features.unwrap();
-            assert_eq!(t.read(0x70), 12);
-        }
+        assert_eq!(
+            t.write(0x50, 99).unwrap_err(),
+            "virtio notification queue out of range"
+        );
+        assert_eq!(
+            t.write(0x50, 0).unwrap_err(),
+            "virtio notify before DRIVER_OK"
+        );
+        assert_eq!(
+            t.write(0x70, 12).unwrap_err(),
+            "virtio DRIVER_OK without negotiated features"
+        );
+        assert_eq!(t.read(0x70), 4);
         for (offset, value) in [
             (0x20, 2),
             (0x24, 1),
@@ -142,13 +91,18 @@ fn notification_and_feature_errors_keep_existing_order_and_partial_status() {
         ] {
             t.write(offset, value).unwrap();
         }
-        assert_eq!(t.read(0x70), 15);
         assert_eq!(t.write(0x50, 0).unwrap(), Effect::Notify(0));
         t.isr = 3;
         t.write(0x64, 1).unwrap();
         assert_eq!(t.read(0x60), 2);
         t.write(0x64, 2).unwrap();
         assert_eq!(t.read(0x60), 0);
+        // This fixture is a multiport console, so MULTIPORT is mandatory.
+        t.write(0x24, 0).unwrap();
+        t.write(0x20, 0).unwrap();
+        assert!(t.write(0x70, 15).is_err());
+        t.write(0x20, 4).unwrap();
+        assert!(t.write(0x70, 15).is_err());
     }
 }
 

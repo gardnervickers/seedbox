@@ -10,6 +10,7 @@
 #include <linux/of_irq.h>
 #include <linux/sched_clock.h>
 #include <linux/sizes.h>
+#include <asm/ptrace.h>
 #include <asm/seedbox.h>
 #include <asm/sysreg.h>
 
@@ -18,7 +19,16 @@
 struct seedbox_page {
 	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
 	u64 syscall_ns;
+	/* The nominal charge per progress call (0 charges one syscall), the
+	 * bound on its seeded variation each way (0 is off), and the
+	 * VMM-seeded stream that variation is drawn from. */
+	u64 progress_ns, progress_jitter_ns, progress_jitter_seed;
 };
+/* Nominal virtual time one syscall costs; the page's syscall_ns is 1000 unthrottled. */
+#define SYSCALL_NS 1000ULL
+/* A progress call: getpid with this first argument (guest/progress/budget.h). */
+#define SEEDBOX_PROGRESS_NR 172
+#define SEEDBOX_PROGRESS_MARK 0x5eedb0c5UL
 static struct seedbox_page *page;
 static void __iomem *event;
 static u64 early_last;
@@ -27,23 +37,23 @@ static u64 early_last;
 u64 *seedbox_exclusive_epoch;
 static struct clock_event_device ce;
 
-u64 notrace seedbox_read(void)
+static u64 notrace seedbox_read_step(u64 step)
 {
 	unsigned long flags;
 	u64 value, last;
 	/* Serialize reads against IRQ clock reads on the one guest CPU. */
 	local_irq_save(flags);
 	if (unlikely(!page)) {
-		value = ++early_last;
+		value = early_last += step;
 		goto out;
 	}
 again:
 	value = READ_ONCE(page->now);
 	last = READ_ONCE(page->last);
-	if (value <= last)
-		value = last + 1;
-	if (unlikely(!value))
+	if (unlikely(last > ~0ULL - step))
 		panic("seedbox: clock overflow");
+	if (value < last + step)
+		value = last + step;
 	if (value > READ_ONCE(page->bound) ||
 	    (!irqs_disabled_flags(flags) && READ_ONCE(page->deferred_irq_pending))) {
 		/* Deliver at the yield when the caller permits IRQs. Restore the
@@ -69,19 +79,105 @@ out:
 	return value;
 }
 
-/* Charge syscall work through the existing bounded clock rendezvous. Keeping
- * each read bounded also preserves pending IRQ delivery at an exact deadline.
- * Load the charge once: throttle/heal changes at a rendezvous affect the next
- * syscall, while the remaining charge survives in guest registers or stack.
- */
-void seedbox_syscall_progress(void)
+/* Public clock reads and kernel polling use the same 100 ns policy as x86. */
+u64 notrace seedbox_read(void)
 {
-	u64 remaining = page ? READ_ONCE(page->syscall_ns) : 1000;
+	return seedbox_read_step(100);
+}
 
-	while (remaining) {
+/* Safe with locks held and IRQs masked. Early boot has no PV page yet. */
+void notrace seedbox_cpu_relax(void)
+{
+	if (page)
 		(void)seedbox_read();
-		--remaining;
+}
+
+/* splitmix64 on the page-seeded state. */
+static u64 jitter_next(u64 *state)
+{
+	u64 z = (*state += 0x9e3779b97f4a7c15ULL);
+
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+	return z ^ (z >> 31);
+}
+
+/* The compute a progress call stands for: the nominal charge the VMM
+ * publishes (the instructions between calls at the configured CPU speed) plus
+ * a seeded draw within the jitter bound either way, so equal work takes a
+ * little longer on some seeds than on others. Scaled like a syscall by the
+ * page's per-syscall cost, so a throttle slows compute too. The VMM seeds the
+ * stream per machine at boot, at a reboot and at a time fork; the state lives
+ * in guest RAM, so a snapshot continues its own stream. One guest CPU,
+ * syscall context only. */
+static u64 progress_charge(u64 syscall_ns)
+{
+	static u64 state, seeded;
+	u64 base = READ_ONCE(page->progress_ns) ?: SYSCALL_NS;
+	u64 bound = READ_ONCE(page->progress_jitter_ns);
+	u64 charge = base;
+
+	if (bound > base)
+		bound = base;
+	if (bound) {
+		u64 seed = READ_ONCE(page->progress_jitter_seed);
+
+		if (seed != seeded) {
+			state = seed;
+			seeded = seed;
+		}
+		charge += jitter_next(&state) % (2 * bound + 1) - bound;
 	}
+	return charge * syscall_ns / SYSCALL_NS;
+}
+
+/* Charge `ns` of CPU time: advance the clock as that many reads would, in as
+ * few steps as the bound allows. At the bound, or with a deferred IRQ to
+ * deliver, one read does the rendezvous with the same rules as every clock
+ * read, so pending IRQ delivery at an exact deadline is preserved. Before the
+ * page is mapped the early clock advances as reads would. */
+static void seedbox_charge(u64 ns)
+{
+	unsigned long flags;
+	u64 now, last, bound, step;
+
+	while (ns) {
+		local_irq_save(flags);
+		if (likely(page)) {
+			now = READ_ONCE(page->now);
+			last = READ_ONCE(page->last);
+			if (now < last)
+				now = last;
+			bound = READ_ONCE(page->bound);
+			step = now < bound ? bound - now : 0;
+			if (step > ns)
+				step = ns;
+			if (step && (irqs_disabled_flags(flags) ||
+				     !READ_ONCE(page->deferred_irq_pending))) {
+				WRITE_ONCE(page->last, now + step);
+				ns -= step;
+				local_irq_restore(flags);
+				continue;
+			}
+		}
+		local_irq_restore(flags);
+		(void)seedbox_read_step(1);
+		--ns;
+	}
+}
+
+/* Charge syscall work through the bounded clock rendezvous. Load the charge
+ * once: throttle/heal changes at a rendezvous affect the next syscall, while
+ * the remaining charge survives in guest registers or stack. A progress call
+ * charges the compute it stands for instead of one syscall.
+ */
+void seedbox_syscall_progress(struct pt_regs *regs, int scno)
+{
+	u64 ns = page ? READ_ONCE(page->syscall_ns) : SYSCALL_NS;
+
+	if (page && scno == SEEDBOX_PROGRESS_NR && regs->regs[0] == SEEDBOX_PROGRESS_MARK)
+		ns = progress_charge(ns);
+	seedbox_charge(ns);
 }
 
 static u64 cs_read(struct clocksource *cs) { return seedbox_read(); }

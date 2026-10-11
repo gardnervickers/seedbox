@@ -7,8 +7,8 @@ Each section links to the code that owns it.
 
 Reading the host counter would make a guest polling loop's iteration count
 depend on host scheduling. Kernel clock reads use a
-shared PV page. Repeated reads charge a fixed increment, and a read that would
-pass the published bound yields to the VMM before returning that time. This
+shared PV page. Repeated reads charge 100 ns on both architectures. A read that
+would pass the published bound yields to the VMM before returning that time. This
 bound is the latest time the guest may reach before the VMM must handle a
 pending event or scheduling boundary. The VMM processes that boundary and
 publishes a new bound.
@@ -29,21 +29,69 @@ Code: [x86 clock](../kernel/seedbox.c), [ARM clock](../kernel-arm64/seedbox.c).
 ## Progress from translated blocks
 
 A computation or spin loop that never reads the clock still needs to let other
-guest threads and machines make progress. The DynamoRIO client decrements a
-per-thread budget at every translated basic-block entry and issues a raw
-`getpid` syscall when the configured budget expires (10,000 entries by default).
-The kernel charges that syscall as PV progress. Existing executable code, shared libraries and JIT code go through the
+guest threads and machines make progress. The DynamoRIO client counts the
+instructions each thread executes. Every 50,000 instructions it issues a raw
+`getpid` syscall with a fixed first argument, which marks it as a progress
+call. Existing executable code, shared libraries and JIT code go through the
 translator without application-specific flags or recompilation.
 
-The budget measures block entries, not individual executed instructions. A basic
-block is a sequence of instructions with one entry and no internal control-flow
-branch. Translator-internal work and kernel execution are outside that counter.
+The count is taken per basic block: a sequence of instructions with one entry
+and no internal control-flow branch. Each block is charged its length at its
+entry, so a tight loop and straight-line code advance time at the same rate
+per instruction. A charge can cross the budget; the remainder carries into the
+next window. Translator-internal work and kernel execution are outside the
+count.
+
+The kernel recognizes the mark and charges the call the time those
+instructions take on that machine's virtual CPU. Each machine and the oracle
+has its own `cpu.speed` and `cpu.jitter` in `seedbox.yaml`. Speed defaults to
+1 GHz and jitter to zero, so a call nominally costs 50 µs by default. The
+instructions per call is a constant of the instrumentation, carried in the
+launch recipe so the guest and the simulator agree on what a call stands for.
+Saved definitions retain these settings on each machine.
+
+```yaml
+machines:
+  worker:
+    image: example/worker
+    cpu: {speed: 800MHz, jitter: 5%}
+oracle:
+  image: example/oracle # Defaults to 1 GHz with zero jitter.
+```
+
+Equal work interleaves the same way on every seed. `cpu.jitter`, a percentage,
+makes each call cost a seeded amount more or less than nominal, within that
+percentage. The kernel draws it from a stream the VMM seeds per machine on the
+time page. A run replays exactly, and a reboot or a time fork reseeds the
+stream with the others. The client itself draws nothing.
+
+On x86 the charge is counted in whole syscall costs, so the count-based plan
+stays linear. The remainder carries to the next call, and a count the hard
+stop cuts off stays owed to the next run. On ARM the charge advances the
+bounded clock in bulk, with the same rendezvous at every bound as single clock
+reads. A throttle fault scales the compute charge like every syscall's. Both
+backends start with a fixed 1,000 ns syscall charge. There is no implicit per-machine
+speed draw at boot or a time fork; only authored progress jitter consumes its
+own RNG stream. Snapshots retain charges and jitter continuation, and reboot
+reapplies active throttle faults.
+
 Instrumentation must leave the application's registers and comparison flags
 intact. On ARM, the client uses arithmetic that leaves those flags alone and a
-branch that tests a register directly (`CBNZ`, compare and branch if nonzero).
-DynamoRIO's drreg extension manages the temporary registers.
+branch that tests the sign bit directly (`TBZ`). DynamoRIO's drreg extension
+manages the temporary registers.
 
-Code: [progress client](../guest/progress/progress.c).
+Code: [progress client](../guest/progress/progress.c),
+[x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c).
+
+On x86 a charge can span several scheduling boundaries. Its unpaid time is
+retained with the machine and drained while the vCPU is stopped, before guest
+execution resumes. Timers can become pending during that interval; checkpoints
+preserve the remainder.
+
+The TUI shows each machine's configured nominal speed by default. While
+throttled it shows the effective nominal speed after backend rounding and
+clamping; healing restores that machine's configured speed. The fault's
+recorded input keeps the original request.
 
 ## Progress inside kernel polling
 
@@ -56,10 +104,14 @@ interrupts. Interrupt delivery stays deferred until the guest permits it.
 
 Each hook charges a 100 ns read and is inactive before PV activation.
 This covers the patched kernel `cpu_relax`/`rep_nop` paths. It does not cover
-arbitrary assembly `PAUSE`, early decompression, the vDSO, or every ARM kernel
-polling loop. Application polling is handled by binary instrumentation.
+arbitrary assembly `PAUSE`/`YIELD`, early decompression or the vDSO. ARM
+`cpu_relax()` uses the same bounded read. Its raw exclusive-store retry loops
+remain uncharged: host interruptions can cause those retries and must not
+advance guest time or the software reservation epoch. Application polling is
+handled by binary instrumentation.
 
-Code: [kernel clock](../kernel/seedbox.c), [patch sites](../kernel/apply.py).
+Code: [x86 clock](../kernel/seedbox.c), [x86 patch sites](../kernel/apply.py),
+[ARM clock](../kernel-arm64/seedbox.c), [ARM patch sites](../kernel-arm64/apply.py).
 
 ## Observation without guest progress
 
@@ -244,8 +296,26 @@ Virtio devices mutate guest RAM as well as host state. Payload, status, and
 used-ring writes must retain their order, and the x86 dirty journal must include
 every write. A malformed later request does not undo earlier completed requests.
 Interrupt and queue-cursor timing on error therefore affects observable state.
-The shared device models have backend-specific validation profiles; sharing
-code does not make those profiles identical.
+Both adapters use the same modern descriptor and register contracts. Block
+headers may span readable descriptors; the last writable byte is status. A
+flush ignores extra data, and transfers with invalid lengths return IOERR.
+Console data waits for the multiport open handshake, with a 64 KiB limit per
+chain rather than per notification. Network offloads that were not advertised
+are rejected, received frames are limited to 64 KiB, and an undersized receive
+chain retains the frame without writing a truncated payload.
+
+Each completed request publishes its interrupt state before the next request
+is validated. Earlier payload, status, used-ring writes and backlog removals
+survive a later failure; the failing request is not completed. MMIO rejects
+invalid selectors, sizes and ready values, protects ready queues from edits,
+and preserves cursors on repeated ready writes. Driver readiness requires
+VERSION_1 and a subset of advertised features; the control console also requires
+MULTIPORT because its protocol uses a named port and the open handshake.
+
+Adapter identities still select retained accounting and x86 network
+notification optimizations (EVENT_IDX, notification suppression and deferred
+TX). Those negotiated extensions can suppress an interrupt; they do not
+change request validation or completed-prefix mutation rules.
 
 The disk model separates stable and volatile writes. Flush and FUA affect what
 is stable; a crash applies the configured survival policy to volatile state.
