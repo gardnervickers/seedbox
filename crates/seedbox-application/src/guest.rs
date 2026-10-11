@@ -86,6 +86,9 @@ pub fn minimum_memory_mb(archive_bytes: u64) -> Result<u32> {
 
 /// The boot recipe format this build writes; the guest supervisor must accept it.
 pub const LAUNCH_MAGIC: &[u8; 10] = b"SBXLAUNCH5";
+/// The same format with the progress jitter after the block budget. Written
+/// only when jitter is on, so recipes without jitter keep their exact bytes.
+pub const LAUNCH_MAGIC_JITTER: &[u8; 10] = b"SBXLAUNCH6";
 
 /// Linux rejects a CLOCK_REALTIME earlier than the guest's uptime, so an epoch
 /// below this would stop every guest at the launch barrier.
@@ -108,11 +111,11 @@ pub fn launch_recipe(
         hostname,
         configs,
         wall_clock_epoch,
-        seedbox_spec::project::SimulatorDefaults::default().blocks_per_progress_call,
+        &seedbox_spec::project::SimulatorDefaults::default(),
     )
 }
 
-/// Encode the explicit PV block budget with the prepared guest inputs.
+/// Encode the explicit PV progress settings with the prepared guest inputs.
 pub fn launch_recipe_with_progress(
     launch: &Launch,
     ip: &str,
@@ -120,21 +123,38 @@ pub fn launch_recipe_with_progress(
     hostname: &str,
     configs: &BTreeMap<String, Vec<u8>>,
     wall_clock_epoch: u32,
-    blocks_per_progress_call: std::num::NonZeroU32,
+    progress: &seedbox_spec::project::SimulatorDefaults,
 ) -> Result<Vec<u8>> {
     if wall_clock_epoch < MIN_WALL_CLOCK_EPOCH {
         return Err(Error::Setup(format!(
             "wall-clock epoch {wall_clock_epoch} is below {MIN_WALL_CLOCK_EPOCH}; the guest kernel cannot set a time earlier than its uptime"
         )));
     }
-    let mut bytes = LAUNCH_MAGIC.to_vec();
+    let jitter = u32::try_from(progress.progress_jitter_ns)
+        .ok()
+        .filter(|ns| u64::from(*ns) <= seedbox_spec::project::MAX_PROGRESS_JITTER_NS)
+        .ok_or_else(|| {
+            Error::Setup(format!(
+                "progress jitter {} ns exceeds {} ns",
+                progress.progress_jitter_ns,
+                seedbox_spec::project::MAX_PROGRESS_JITTER_NS
+            ))
+        })?;
+    let mut bytes = if jitter == 0 {
+        LAUNCH_MAGIC.to_vec()
+    } else {
+        LAUNCH_MAGIC_JITTER.to_vec()
+    };
     for value in [ip, hosts, hostname, &launch.user, &launch.working_dir] {
         field(&mut bytes, value.as_bytes())?;
     }
     // A guest-wide default per service VM, retained with the launch inputs.
     bytes.extend_from_slice(&262144_u32.to_le_bytes()); // vm.max_map_count
     bytes.extend_from_slice(&wall_clock_epoch.to_le_bytes());
-    bytes.extend_from_slice(&blocks_per_progress_call.get().to_le_bytes());
+    bytes.extend_from_slice(&progress.blocks_per_progress_call.get().to_le_bytes());
+    if jitter != 0 {
+        bytes.extend_from_slice(&jitter.to_le_bytes());
+    }
     list(&mut bytes, &launch.argv)?;
     list(
         &mut bytes,

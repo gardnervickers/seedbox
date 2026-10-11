@@ -84,3 +84,44 @@ int main(int argc, char **argv) {
                 self.assertEqual(result.returncode, 2, budget)
             for option in ['--other', '--blocks-per-progress-call-extra', '--blocks-per-progress-cal']:
                 self.assertEqual(subprocess.run([str(probe), option, '1'], timeout=10).returncode, 2)
+
+
+class ProgressJitterTests(unittest.TestCase):
+    def test_jitter_option_is_bounded_and_draws_average_to_the_requested_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'jitter.c'
+            source.write_text(r'''#include "progress/budget.h"
+#include <stdio.h>
+int main(int argc, char **argv) {
+    uint32_t jitter = 0;
+    if (argc != 3 || !seedbox_progress_jitter(argv[1], argv[2], &jitter)) return 2;
+    uint64_t state = 42, again = 42, total = 0, max = 0;
+    for (int i = 0; i < 100000; ++i) {
+        uint32_t extra = seedbox_progress_extra_calls(&state, jitter);
+        if (extra != seedbox_progress_extra_calls(&again, jitter)) return 3;
+        total += extra;
+        if (extra > max) max = extra;
+    }
+    printf("%llu %llu\n", (unsigned long long)total, (unsigned long long)max);
+    return 0;
+}
+''')
+            probe = root / 'jitter'
+            subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
+                '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'guest'),
+                str(source), '-o', str(probe)], check=True, capture_output=True)
+            def run(value, option='--progress-jitter-ns'):
+                return subprocess.run([str(probe), option, value],
+                                      capture_output=True, text=True, timeout=10)
+            for jitter in [1, 999, 1000, 2500, 1000000]:
+                result = run(str(jitter))
+                self.assertEqual(result.returncode, 0, jitter)
+                total, most = map(int, result.stdout.split())
+                # Extra calls of 1 us each average jitter / 2 per checkpoint.
+                expected = 100000 * jitter / 2 / 1000
+                self.assertLess(abs(total - expected), max(60, expected * 0.02), jitter)
+                self.assertLessEqual(most, -(-jitter // 1000), jitter)
+            for jitter in ['', '0', '1000001', '-1', '1us', '4294967296']:
+                self.assertEqual(run(jitter).returncode, 2, jitter)
+            self.assertEqual(run('1', '--blocks-per-progress-call').returncode, 2)

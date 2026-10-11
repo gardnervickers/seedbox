@@ -272,6 +272,15 @@ mod tests {
         assert_eq!(sim.services["app"].platform, "linux/arm64");
         assert_eq!(sim.network.latency_ns, 2_500_000);
         assert_eq!(sim.limits.simulated_time_ns, u64::MAX);
+        assert_eq!(sim.simulator.progress_jitter_ns, 0);
+        let sim =
+            parse_native("name: demo\noracle: {image: test}\nsimulator: {progressJitter: 5us}\n")
+                .unwrap();
+        assert_eq!(sim.simulator.progress_jitter_ns, 5_000);
+        assert!(parse_native(
+            "name: demo\noracle: {image: test}\nsimulator: {progressJitter: 2ms}\n"
+        )
+        .is_err());
     }
 
     #[test]

@@ -43,7 +43,19 @@ intact. On ARM, the client uses arithmetic that leaves those flags alone and a
 branch that tests a register directly (`CBNZ`, compare and branch if nonzero).
 DynamoRIO's drreg extension manages the temporary registers.
 
-Code: [progress client](../guest/progress/progress.c).
+Every checkpoint costs the same, so equal work always interleaves the same way
+on every seed. `simulator.progressJitter` in `seedbox.yaml` (default 0, at most
+1ms) makes each checkpoint also issue a seeded number of extra `getpid` calls:
+it draws a time uniformly up to the bound and charges it in nominal 1 us calls,
+rounding the remainder up or down at random so the average is exact. Each
+machine's seeded speed scales the extra calls like any other syscall. Each
+thread seeds its own stream once, from the guest's deterministic `getrandom`,
+so a run replays exactly. A time fork reseeds guest entropy but not streams
+that threads already hold. With jitter off the client draws, allocates and
+charges nothing extra, and the launch recipe keeps its previous format.
+
+Code: [progress client](../guest/progress/progress.c),
+[jitter draw](../guest/progress/budget.h).
 
 ## Progress inside kernel polling
 

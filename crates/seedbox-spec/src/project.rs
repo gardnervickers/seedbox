@@ -137,6 +137,62 @@ impl Default for NetworkDefaults {
 pub struct SimulatorDefaults {
     #[serde(default = "progress_budget")]
     pub blocks_per_progress_call: NonZeroU32,
+    /// Seeded extra virtual time each progress call may add, from zero up to
+    /// this bound, authored as a duration (`progressJitter: 5us`). Zero, the
+    /// default, charges every call the same.
+    #[serde(
+        default,
+        rename = "progressJitter",
+        skip_serializing_if = "is_zero",
+        with = "progress_jitter"
+    )]
+    pub progress_jitter_ns: u64,
+}
+
+/// The largest progress jitter: each nominal microsecond costs the guest one
+/// extra progress call, so the bound also bounds the added work per call.
+pub const MAX_PROGRESS_JITTER_NS: u64 = 1_000_000;
+
+pub(crate) fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+mod progress_jitter {
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(ns: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("{ns}ns"))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        parse(&raw).map_err(D::Error::custom)
+    }
+
+    /// A whole number of ns, us or ms, or a bare 0, up to the maximum.
+    pub(super) fn parse(raw: &str) -> Result<u64, String> {
+        let invalid = || {
+            format!(
+                "progressJitter {raw:?}: expected a duration such as 5us, from 0 to {}ms",
+                super::MAX_PROGRESS_JITTER_NS / 1_000_000
+            )
+        };
+        let digits = raw.bytes().take_while(u8::is_ascii_digit).count();
+        let (number, unit) = raw.split_at(digits);
+        let scale = match unit {
+            "" if number == "0" => 1,
+            "ns" => 1,
+            "us" => 1_000,
+            "ms" => 1_000_000,
+            _ => return Err(invalid()),
+        };
+        number
+            .parse::<u64>()
+            .ok()
+            .and_then(|n| n.checked_mul(scale))
+            .filter(|ns| *ns <= super::MAX_PROGRESS_JITTER_NS)
+            .ok_or_else(invalid)
+    }
 }
 
 fn progress_budget() -> NonZeroU32 {
@@ -147,6 +203,7 @@ impl Default for SimulatorDefaults {
     fn default() -> Self {
         Self {
             blocks_per_progress_call: progress_budget(),
+            progress_jitter_ns: 0,
         }
     }
 }
@@ -195,5 +252,36 @@ mod tests {
             );
         }
         assert!(serde_yaml_ng::from_str::<SimulatorDefaults>("blocksPerProgressCall: 0").is_err());
+    }
+
+    #[test]
+    fn progress_jitter_is_an_optional_bounded_duration() {
+        let parse = |yaml: &str| serde_yaml_ng::from_str::<SimulatorDefaults>(yaml);
+        assert_eq!(parse("{}").unwrap().progress_jitter_ns, 0);
+        assert_eq!(
+            parse("progressJitter: 5us").unwrap().progress_jitter_ns,
+            5_000
+        );
+        assert_eq!(parse("progressJitter: '0'").unwrap().progress_jitter_ns, 0);
+        assert_eq!(
+            parse("progressJitter: 1ms").unwrap().progress_jitter_ns,
+            1_000_000
+        );
+        for bad in ["2ms", "1001us", "5", "-1us", "1.5us", "5 us", "1s", "''"] {
+            assert!(parse(&format!("progressJitter: '{bad}'")).is_err(), "{bad}");
+        }
+        // The default is omitted, so existing definitions serialize unchanged.
+        let default = serde_json::to_value(SimulatorDefaults::default()).unwrap();
+        assert!(default.get("progressJitter").is_none());
+        let jitter = SimulatorDefaults {
+            progress_jitter_ns: 2_500,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&jitter).unwrap();
+        assert_eq!(value["progressJitter"], "2500ns");
+        assert_eq!(
+            serde_json::from_value::<SimulatorDefaults>(value).unwrap(),
+            jitter
+        );
     }
 }

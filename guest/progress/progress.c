@@ -2,6 +2,12 @@
  * Each thread charges one PV syscall per configured number of counted block entries.
  * The budget is part of execution semantics, not a performance setting.
  *
+ * With progress jitter on, each checkpoint also charges a seeded number of extra
+ * calls (budget.h), so compute takes a little longer on some seeds than others.
+ * Each thread draws from its own stream, seeded from the guest's deterministic
+ * getrandom when the thread starts. With jitter off nothing extra is drawn,
+ * allocated or charged.
+ *
  * On AArch64 the patched translator implements software exclusive reservations.
  * Host-only retries stay inside one mangled store instruction, below this
  * client's block accounting. Guest boundaries may invalidate a reservation,
@@ -21,17 +27,23 @@
 #include "budget.h"
 
 static reg_t block_budget;
+static uint32_t jitter_ns;
 static reg_id_t budget_segment;
 static uint budget_offset;
+
+/* Raw TLS: the budget word, then the jitter stream when jitter is on. */
+static uint tls_slots(void)
+{
+    return jitter_ns ? 2 : 1;
+}
 
 static reg_t *budget(void)
 {
     return (reg_t *)((byte *)dr_get_dr_segment_base(budget_segment) + budget_offset);
 }
 
-static void checkpoint(void)
+static long progress_call(void)
 {
-    *budget() = block_budget;
 #ifdef X86_64
     long result;
     __asm__ volatile("syscall" : "=a"(result) : "a"(39L)
@@ -43,13 +55,46 @@ static void checkpoint(void)
 #else
 #error Unsupported progress architecture
 #endif
-    DR_ASSERT(result > 0);
+    return result;
+}
+
+static void checkpoint(void)
+{
+    *budget() = block_budget;
+    DR_ASSERT(progress_call() > 0);
+    if (jitter_ns) {
+        uint64_t *stream = (uint64_t *)(budget() + 1);
+        for (uint32_t extra = seedbox_progress_extra_calls(stream, jitter_ns); extra; --extra)
+            DR_ASSERT(progress_call() > 0);
+    }
+}
+
+static uint64_t jitter_seed(void)
+{
+    uint64_t seed;
+#ifdef X86_64
+    long result;
+    __asm__ volatile("syscall" : "=a"(result)
+                     : "a"(318L), "D"(&seed), "S"(sizeof(seed)), "d"(0L)
+                     : "rcx", "r11", "memory", "cc");
+#elif defined(AARCH64)
+    register long number __asm__("x8") = 278;
+    register long result __asm__("x0") = (long)&seed;
+    register long size __asm__("x1") = sizeof(seed);
+    register long flags __asm__("x2") = 0;
+    __asm__ volatile("svc #0" : "+r"(result) : "r"(number), "r"(size), "r"(flags)
+                     : "memory", "cc");
+#endif
+    DR_ASSERT(result == sizeof(seed));
+    return seed;
 }
 
 static void thread_init(void *context)
 {
     (void)context;
     *budget() = block_budget;
+    if (jitter_ns)
+        *(uint64_t *)(budget() + 1) = jitter_seed();
 }
 
 /* Insert the budget decrement and checkpoint call before `where`. */
@@ -115,7 +160,7 @@ static dr_emit_flags_t instrument(void *context, void *tag, instrlist_t *block,
 
 static void finished(void)
 {
-    DR_ASSERT(dr_raw_tls_cfree(budget_offset, 1));
+    DR_ASSERT(dr_raw_tls_cfree(budget_offset, tls_slots()));
     drreg_exit();
     drmgr_exit();
 }
@@ -123,8 +168,11 @@ static void finished(void)
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
 {
     uint32_t parsed_budget;
-    if (argc != 3 || !seedbox_progress_budget(argv[1], argv[2], &parsed_budget)) {
-        dr_fprintf(STDERR, "seedbox progress: expected --blocks-per-progress-call with a positive u32\n");
+    if ((argc != 3 && argc != 5) || !seedbox_progress_budget(argv[1], argv[2], &parsed_budget)
+        || (argc == 5 && !seedbox_progress_jitter(argv[3], argv[4], &jitter_ns))) {
+        dr_fprintf(STDERR, "seedbox progress: expected --blocks-per-progress-call with a positive u32"
+                   " and optionally --progress-jitter-ns with 1 to %u\n",
+                   SEEDBOX_PROGRESS_JITTER_MAX_NS);
         dr_abort();
         return;
     }
@@ -134,7 +182,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
     drreg_options_t options = {sizeof(options), 3, false};
     DR_ASSERT(drmgr_init());
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);
-    DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 1, 0));
+    DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, tls_slots(), 0));
     drmgr_register_thread_init_event(thread_init);
     drmgr_register_bb_app2app_event(neutralize_waits, NULL);
     drmgr_register_bb_instrumentation_event(NULL, instrument, NULL);

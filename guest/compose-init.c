@@ -40,6 +40,7 @@
 
 static int recipe_fd, management = -1;
 static uint32_t blocks_per_progress_call = 10000;
+static uint32_t progress_jitter_ns;
 #define RPC_FRAME_MAX 16384
 static int control_listener = -1, control_client = -1;
 static uint32_t relay_id, waiting_relay, session_id;
@@ -535,9 +536,11 @@ static pid_t start(void) {
         if (!arguments) die("resolve application interpreter");
         size_t count = 0;
         while (arguments[count]) ++count;
-        /* Translator arguments, the application's own, and execv's NULL. */
-        enum { PREFIX_MAX = 10 };
-        char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
+        /* Translator arguments, the application's own, and execv's NULL.
+         * Jitter's two arguments count only when present, so launches
+         * without jitter allocate exactly as before. */
+        size_t prefix_max = 10 + (progress_jitter_ns ? 2 : 0);
+        char **instrumented = calloc(prefix_max + count + 1, sizeof(*instrumented));
         if (!instrumented) die("instrumentation arguments");
         size_t prefix = 0;
         instrumented[prefix++] = "/seedbox/progress/bin64/drrun";
@@ -554,8 +557,14 @@ static pid_t start(void) {
         snprintf(progress_budget, sizeof(progress_budget), "%u", blocks_per_progress_call);
         instrumented[prefix++] = "--blocks-per-progress-call";
         instrumented[prefix++] = progress_budget;
+        char progress_jitter[11];
+        if (progress_jitter_ns) {
+            snprintf(progress_jitter, sizeof(progress_jitter), "%u", progress_jitter_ns);
+            instrumented[prefix++] = "--progress-jitter-ns";
+            instrumented[prefix++] = progress_jitter;
+        }
         instrumented[prefix++] = "--";
-        if (prefix > PREFIX_MAX) die("instrumentation prefix");
+        if (prefix > prefix_max) die("instrumentation prefix");
         for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
         instrumented[prefix + count] = NULL;
         execv(instrumented[0], instrumented);
@@ -786,12 +795,18 @@ int main(void) {
     recipe_fd = open("/seedbox/launch.bin", O_RDONLY|O_CLOEXEC);
     if (recipe_fd < 0) die("launch recipe");
     char magic[10]; read_exact(magic, sizeof(magic));
-    if (memcmp(magic, "SBXLAUNCH5", 10)) { errno = EINVAL; die("launch version"); }
+    /* Version 6 adds the progress jitter after the block budget. */
+    int jitter_format = !memcmp(magic, "SBXLAUNCH6", 10);
+    if (!jitter_format && memcmp(magic, "SBXLAUNCH5", 10)) { errno = EINVAL; die("launch version"); }
     char *ip = text(), *hosts = text(), *hostname = text(); user = text(); working_dir = text();
     uint32_t max_map_count = count();
     struct timespec wall_clock = {.tv_sec = count(), .tv_nsec = 0};
     blocks_per_progress_call = count();
     if (!blocks_per_progress_call) { errno = EINVAL; die("zero progress block budget"); }
+    if (jitter_format) {
+        progress_jitter_ns = count();
+        if (!progress_jitter_ns || progress_jitter_ns > 1000000) { errno = EINVAL; die("progress jitter"); }
+    }
     arguments = list(); environment = list(); char **volumes = list(); char **disk_volumes = list();
     if (!arguments[0] || !*arguments[0]) { errno = EINVAL; die("empty executable"); }
     configure_network(ip);

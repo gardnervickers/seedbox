@@ -1,5 +1,5 @@
 use seedbox_application::{
-    guest::{build_initramfs, launch_recipe},
+    guest::{build_initramfs, launch_recipe, launch_recipe_with_progress},
     image::Launch,
 };
 use std::{
@@ -157,6 +157,36 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
     assert_eq!(field(&recipe, &mut cursor), b"/config");
     assert_eq!(field(&recipe, &mut cursor), [0, 255, 10]);
     assert_eq!(cursor, recipe.len());
+
+    // Jitter adds one field after the block budget, under its own version.
+    let progress = |progress_jitter_ns| seedbox_spec::project::SimulatorDefaults {
+        progress_jitter_ns,
+        ..Default::default()
+    };
+    let recipe_with = |progress: &seedbox_spec::project::SimulatorDefaults| {
+        launch_recipe_with_progress(
+            &launch,
+            "10.0.0.1/24",
+            "10.0.0.1 app\n",
+            "app",
+            &BTreeMap::from([("/config".into(), vec![0, 255, 10])]),
+            1791500000,
+            progress,
+        )
+    };
+    assert_eq!(recipe_with(&progress(0)).unwrap(), recipe);
+    let jitter = recipe_with(&progress(2_500)).unwrap();
+    assert_eq!(&jitter[..10], b"SBXLAUNCH6");
+    let mut cursor = 10;
+    for _ in 0..5 {
+        field(&jitter, &mut cursor);
+    }
+    assert_eq!(count(&jitter, &mut cursor), 262144);
+    assert_eq!(count(&jitter, &mut cursor), 1791500000);
+    assert_eq!(count(&jitter, &mut cursor), 10000);
+    assert_eq!(count(&jitter, &mut cursor), 2_500);
+    assert_eq!(jitter[cursor..], recipe[cursor - 4..]);
+    assert!(recipe_with(&progress(1_000_001)).is_err());
 }
 
 #[test]

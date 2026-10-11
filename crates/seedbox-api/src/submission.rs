@@ -35,14 +35,22 @@ pub struct Submission {
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Simulator {
     pub blocks_per_progress_call: std::num::NonZeroU32,
+    /// Bound on the seeded extra charge per progress call; zero is off.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub progress_jitter_ns: u64,
     /// Expose world controls to the oracle process.
     pub oracle_control: bool,
 }
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl Default for Simulator {
     fn default() -> Self {
         Self {
             blocks_per_progress_call: project::SimulatorDefaults::default()
                 .blocks_per_progress_call,
+            progress_jitter_ns: 0,
             oracle_control: true,
         }
     }
@@ -251,6 +259,12 @@ impl Submission {
                 return Err("network.links: unknown machine or lossPpm exceeds 1000000".into());
             }
         }
+        if self.simulator.progress_jitter_ns > project::MAX_PROGRESS_JITTER_NS {
+            return Err(format!(
+                "simulator.progressJitterNs: exceeds {}",
+                project::MAX_PROGRESS_JITTER_NS
+            ));
+        }
         let configuration = seedbox_spec::Simulation {
             name: String::new(),
             source: PathBuf::new(),
@@ -259,6 +273,7 @@ impl Submission {
             network,
             simulator: project::SimulatorDefaults {
                 blocks_per_progress_call: self.simulator.blocks_per_progress_call,
+                progress_jitter_ns: self.simulator.progress_jitter_ns,
             },
             schedule: Default::default(),
             control: self
@@ -430,6 +445,7 @@ impl Submission {
             },
             simulator: Simulator {
                 blocks_per_progress_call: config.simulator.blocks_per_progress_call,
+                progress_jitter_ns: config.simulator.progress_jitter_ns,
                 oracle_control: config.control.is_some(),
             },
             overrides: spec
@@ -473,6 +489,21 @@ mod tests {
             "machines":{"app":{"image":"example/app:latest","entrypoint":[],"environment":{"REMOVE":null}}},
             "oracle":{"image":"example/oracle@sha256:abc"}
         })
+    }
+    #[test]
+    fn progress_jitter_round_trips_and_is_omitted_when_off() {
+        let spec: SimulationSpec = serde_json::from_value(partial()).unwrap();
+        assert_eq!(spec.configuration.simulator.progress_jitter_ns, 0);
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert!(wire["simulator"].get("progressJitterNs").is_none());
+        let mut value = partial();
+        value["simulator"] = serde_json::json!({"progressJitterNs": 5000});
+        let spec: SimulationSpec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(spec.configuration.simulator.progress_jitter_ns, 5_000);
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(wire["simulator"]["progressJitterNs"], 5000);
+        value["simulator"]["progressJitterNs"] = 1_000_001.into();
+        assert!(serde_json::from_value::<SimulationSpec>(value).is_err());
     }
     #[test]
     fn omitted_architecture_uses_server_and_partial_wire_has_no_project_wrapper() {

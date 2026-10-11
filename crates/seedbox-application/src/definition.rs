@@ -97,6 +97,7 @@ pub fn resolve(
         network: configuration.network.clone(),
         simulator: Simulator {
             blocks_per_progress_call: configuration.simulator.blocks_per_progress_call,
+            progress_jitter_ns: configuration.simulator.progress_jitter_ns,
             schedule: configuration.schedule.clone(),
             disk: configuration.disk.clone(),
             oracle_control: configuration.control.is_some(),
@@ -419,7 +420,10 @@ fn resolved_boot(
         name,
         &BTreeMap::new(),
         definition.clock.epoch_seconds,
-        definition.simulator.blocks_per_progress_call,
+        &seedbox_spec::project::SimulatorDefaults {
+            blocks_per_progress_call: definition.simulator.blocks_per_progress_call,
+            progress_jitter_ns: definition.simulator.progress_jitter_ns,
+        },
     )?;
     let mut input = tempfile::tempfile()?;
     store.copy_to(&digest(&machine.boot_archive)?, &mut input)?;
@@ -495,9 +499,14 @@ fn resolved_boot(
 }
 fn launch_configs(bytes: &[u8]) -> Result<&[u8]> {
     let fail = || Error::Integrity("invalid retained launch record".into());
-    if !bytes.starts_with(crate::guest::LAUNCH_MAGIC) {
+    // max_map_count, epoch and block budget, then the jitter in the jitter format.
+    let fixed = if bytes.starts_with(crate::guest::LAUNCH_MAGIC) {
+        12
+    } else if bytes.starts_with(crate::guest::LAUNCH_MAGIC_JITTER) {
+        16
+    } else {
         return Err(fail());
-    }
+    };
     let mut cursor = crate::guest::LAUNCH_MAGIC.len();
     fn number(bytes: &[u8], cursor: &mut usize) -> Option<usize> {
         let n = u32::from_le_bytes(bytes.get(*cursor..*cursor + 4)?.try_into().ok()?) as usize;
@@ -512,7 +521,7 @@ fn launch_configs(bytes: &[u8]) -> Result<&[u8]> {
             .ok_or_else(fail)?;
     }
     cursor = cursor
-        .checked_add(12)
+        .checked_add(fixed)
         .filter(|n| *n <= bytes.len())
         .ok_or_else(fail)?;
     for _ in 0..4 {
@@ -645,6 +654,25 @@ mod tests {
             .any(|v| v == b"preserve me"));
         assert!(bytes.windows(b"--changed".len()).any(|v| v == b"--changed"));
         store.verify(&original).unwrap();
+        // Jitter switches to the jitter recipe format; turning it off again
+        // restores the exact bytes, configs included.
+        definition.simulator.progress_jitter_ns = 5_000;
+        let jitter = prepared(&definition, &store).unwrap();
+        assert_ne!(jitter.guests, changed.guests);
+        let bytes = store.read(&jitter.guests["oracle"]).unwrap();
+        assert!(bytes.windows(10).any(|v| v == b"SBXLAUNCH6"));
+        assert!(bytes
+            .windows(b"preserve me".len())
+            .any(|v| v == b"preserve me"));
+        definition.simulator.progress_jitter_ns = 0;
+        definition.oracle.process.argv.pop();
+        let unjittered = prepared(&definition, &store).unwrap();
+        definition.oracle.process.argv.push("--changed".into());
+        assert_eq!(
+            prepared(&definition, &store).unwrap().guests,
+            changed.guests
+        );
+        assert_ne!(unjittered.guests, changed.guests);
     }
     #[test]
     fn checkpoint_binary_closure_survives_source_deletion_and_preserves_guest_paths() {

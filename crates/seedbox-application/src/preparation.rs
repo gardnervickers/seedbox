@@ -257,7 +257,7 @@ impl OciPreparer {
                 name,
                 &mounts,
                 wall_clock_epoch,
-                simulation.simulator.blocks_per_progress_call,
+                &simulation.simulator,
             )?;
             let archive = temporary.path().join(format!("{name}.cpio"));
             // Package only retained bootstrap bytes. The source paths may be

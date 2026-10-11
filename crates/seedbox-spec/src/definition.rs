@@ -165,6 +165,9 @@ impl Start {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Simulator {
     pub blocks_per_progress_call: std::num::NonZeroU32,
+    /// Bound on the seeded extra charge per progress call; zero is off.
+    #[serde(default, skip_serializing_if = "crate::project::is_zero")]
+    pub progress_jitter_ns: u64,
     pub schedule: crate::Schedule,
     pub disk: crate::DiskOptions,
     /// The oracle exposes the world control API.
@@ -261,6 +264,7 @@ impl Definition {
             disk: self.simulator.disk.clone(),
             simulator: crate::project::SimulatorDefaults {
                 blocks_per_progress_call: self.simulator.blocks_per_progress_call,
+                progress_jitter_ns: self.simulator.progress_jitter_ns,
             },
         }
     }
