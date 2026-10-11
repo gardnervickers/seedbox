@@ -131,15 +131,6 @@ pub fn duration(ns: u64) -> String {
 }
 
 /// A short elapsed time for tight spaces: seconds, then whole minutes or hours.
-fn coarse(ns: u64) -> String {
-    let seconds = ns / 1_000_000_000;
-    match seconds {
-        0..=59 => duration(ns),
-        60..=3599 => format!("{}m", seconds / 60),
-        _ => format!("{}h", seconds / 3600),
-    }
-}
-
 fn count(n: u64) -> String {
     match n {
         0..=9_999 => n.to_string(),
@@ -209,9 +200,9 @@ pub fn glyph(action: &str, state: State) -> char {
         "shape" => '≈',
         "heal" => '✚',
         "crash" | "crashed" => '✕',
-        "reboot" | "rebooted" | "restart" => '⟲',
+        "reboot" | "restart" => '⟲',
         "stop" | "pause" | "paused" => '◼',
-        "resume" | "resumed" => '▶',
+        "resume" => '▶',
         "throttle" => '▼',
         "clock_skew" | "clock_drift" | "skew" | "drift" => '◷',
         action if action.starts_with("exited") => '✕',
@@ -1742,33 +1733,15 @@ fn node(
             _ => "waiting for its ready signal".into(),
         };
         lines.push(Line::styled(detail, Style::new().fg(FAINT_TEXT)));
-    } else if let Some(item) = last {
-        let ago = now.saturating_sub(item.end_ns.unwrap_or(item.start_ns));
-        let color = if item.open() {
-            span_color(&item.action, true)
-        } else {
-            FAINT_TEXT
-        };
-        let suffix = if item.open() {
-            format!(" · {}", duration(now.saturating_sub(item.start_ns)))
-        } else {
-            format!(" · {} ago", coarse(ago))
-        };
-        // A closed downtime span is timed from recovery, so describe the
-        // recovery here. The faults history retains the original downtime.
-        let action = if item.state == State::Down && item.end_ns.is_some() {
-            match item.closed_by.as_deref() {
-                Some("reboot") => "rebooted",
-                Some("resume") => "resumed",
-                Some("ready") => "ready",
-                _ => &item.action,
-            }
-        } else {
-            &item.action
-        };
+    } else if let Some(item) = last.filter(|item| item.open()) {
         lines.push(Line::styled(
-            format!("{} {action}{suffix}", glyph(action, item.state)),
-            Style::new().fg(color),
+            format!(
+                "{} {} · {}",
+                glyph(&item.action, item.state),
+                item.action,
+                duration(now.saturating_sub(item.start_ns))
+            ),
+            Style::new().fg(span_color(&item.action, true)),
         ));
     }
     frame.render_widget(Clear, rect);
@@ -3605,14 +3578,14 @@ mod tests {
         assert!(render(&running).contains("booting machines"));
     }
     #[test]
-    fn recovered_machine_card_describes_recovery_instead_of_old_downtime() {
+    fn machine_card_omits_completed_events_and_preserves_active_downtime() {
         let app = app(&["n1"]);
         let focus = app.focus.as_ref().unwrap();
         let machine = &focus.world.as_ref().unwrap().machines[0];
         for (action, recovery, expected) in [
             ("crashed", "reboot", "rebooted"),
             ("paused", "resume", "resumed"),
-            ("exited 1", "ready", "ready"),
+            ("exited 1", "ready", "exited"),
         ] {
             let mut item = Item {
                 key: crate::activity::Key::Transition(0),
@@ -3646,10 +3619,9 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect();
-            assert!(text.contains(&format!("{expected} · 218ms ago")), "{text}");
-            if action != expected {
-                assert!(!text.contains(action), "{text}");
-            }
+            assert!(!text.contains(action), "{text}");
+            assert!(!text.contains(expected), "{text}");
+            assert!(!text.contains("ago"), "{text}");
             item.end_ns = None;
             item.closed_by = None;
             terminal
