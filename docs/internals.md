@@ -189,6 +189,24 @@ again.
 Code: [input program](../crates/seedbox-engine-core/src/input_program.rs),
 [coordinator](../crates/seedbox-engine-core/src/world.rs).
 
+## Simulated DNS
+
+Guests use `10.0.1.1` as their nameserver through an on-link route and keep
+only localhost and their own hostname in `/etc/hosts`. The coordinator answers
+ARP and UDP A/IN queries at that virtual address, using current machine names
+and their index-based `10.0.0.x` addresses. Unknown A names return NXDOMAIN;
+AAAA queries return empty answers. Positive answers have a five-second TTL,
+so an application that caches DNS can retain an earlier answer until expiry.
+Responses are scheduled on the deterministic frame queue after one minimum
+link delay. This virtual endpoint has no machine and is not subject to
+machine-to-machine link faults. Restart currently retains the same IP; changing
+addresses across restarts and intentional stale-answer faults require an address
+allocation and DNS-state policy rather than a DNS protocol change.
+
+Code: [wire replies](../crates/seedbox-engine-core/src/dns.rs),
+[coordinator routing](../crates/seedbox-engine-core/src/world_windowed.rs),
+[guest setup](../guest/compose-init.c).
+
 ## Checkpoints and lifecycle
 
 A checkpoint captures the world and its input-program cursor together. Restoring

@@ -1756,6 +1756,48 @@ fn rejected_interactive_state_does_not_terminate_the_world_or_add_fault_history(
 }
 
 #[test]
+fn virtual_dns_replies_return_to_sender_through_windowed_queue() {
+    let mut w = world(&["a", "b"]);
+    let mut arp = vec![0xff; 6];
+    arp.extend_from_slice(&[0x02, 0, 0, 0, 0, 1]);
+    arp.extend_from_slice(&[8, 6, 0, 1, 8, 0, 6, 4, 0, 1]);
+    arp.extend_from_slice(&[0x02, 0, 0, 0, 0, 1, 10, 0, 0, 1]);
+    arp.extend_from_slice(&[0; 6]);
+    arp.extend_from_slice(&crate::dns::IP);
+    let mut query = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    query.extend_from_slice(&[1, b'b', 0, 0, 1, 0, 1]);
+    let length = 20 + 8 + query.len();
+    let mut frame = crate::dns::MAC.to_vec();
+    frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 1, 8, 0]);
+    let mut ipv4 = [0; 20];
+    ipv4[0] = 0x45;
+    ipv4[2..4].copy_from_slice(&(length as u16).to_be_bytes());
+    ipv4[9] = 17;
+    ipv4[12..16].copy_from_slice(&[10, 0, 0, 1]);
+    ipv4[16..20].copy_from_slice(&crate::dns::IP);
+    frame.extend_from_slice(&ipv4);
+    frame.extend_from_slice(&[0x12, 0x34, 0, 53]);
+    frame.extend_from_slice(&((8 + query.len()) as u16).to_be_bytes());
+    frame.extend_from_slice(&[0, 0]);
+    frame.extend_from_slice(&query);
+    for (at, bytes) in [(5, arp), (25, frame)] {
+        let mut step = Step::new(at, Stop::Sent);
+        step.frames = vec![bytes];
+        w.machines[0].steps.push_back(step);
+    }
+    assert_eq!(run(&mut w, 70, None).unwrap(), "duration");
+    let received = trace(&w);
+    assert_eq!(
+        received
+            .iter()
+            .filter(|entry| entry.contains("a:frame:"))
+            .count(),
+        2
+    );
+    assert!(!received.iter().any(|entry| entry.contains("b:frame:")));
+}
+
+#[test]
 fn routed_frames_reach_observers_without_changing_the_world() {
     use seedbox_engine_protocol::observation::{
         Frame, FrameFate, Kind, Observation, MAX_DATAGRAM_BYTES,

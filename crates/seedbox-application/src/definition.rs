@@ -389,14 +389,14 @@ fn resolved_boot(
         .chain(std::iter::once(definition.oracle_name()))
         .collect();
     names.sort_unstable();
-    let mut hosts = String::from("127.0.0.1 localhost\n::1 localhost\n");
-    for (index, name) in names.iter().enumerate() {
-        hosts.push_str(&format!("10.0.0.{} {name}\n", index + 1));
-    }
     let index = names
         .iter()
         .position(|n| *n == name)
         .ok_or_else(|| Error::Integrity("missing machine address".into()))?;
+    let hosts = format!(
+        "127.0.0.1 localhost\n::1 localhost\n10.0.0.{} {name}\n",
+        index + 1
+    );
     let launch = Launch {
         argv: machine.process.argv.clone(),
         environment: machine.process.environment.clone(),

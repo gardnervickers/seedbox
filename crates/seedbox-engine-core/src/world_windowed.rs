@@ -1201,8 +1201,30 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
         if frame.len() < 14 {
             return;
         }
+        // The virtual nameserver has no guest machine. Its answers are
+        // scheduled through the same deterministic frame queue, but the
+        // machine-to-machine link fault policies do not apply to this endpoint.
+        let answer = crate::dns::arp_reply(&frame).or_else(|| {
+            crate::dns::reply(&frame, |name| {
+                self.names
+                    .iter()
+                    .position(|n| n == name)
+                    .and_then(|index| u8::try_from(index + 1).ok().map(|last| [10, 0, 0, last]))
+            })
+        });
+        if let Some(bytes) = answer {
+            out.push(sw::Delivery {
+                to: src,
+                at: sent_at.saturating_add(self.latency),
+                payload: Msg::Frame { from: src, bytes },
+            });
+            return;
+        }
         let mut dst_mac = [0; 6];
         dst_mac.copy_from_slice(&frame[0..6]);
+        if dst_mac == crate::dns::MAC {
+            return;
+        }
         for dst in links::candidates(src, dst_mac, self.macs) {
             let last = self.faults.links.last.get(&(src, dst)).copied();
             let cut = *self.partitioned.get(&(src, dst)).unwrap_or(&false);

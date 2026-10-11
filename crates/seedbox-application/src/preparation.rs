@@ -166,10 +166,6 @@ impl OciPreparer {
             .enumerate()
             .map(|(index, name)| (name, format!("10.0.0.{}", index + 1)))
             .collect();
-        let mut hosts = "127.0.0.1 localhost\n::1 localhost\n".to_owned();
-        for (name, address) in &addresses {
-            hosts.push_str(&format!("{address} {name}\n"));
-        }
         let temporary = tempfile::tempdir()?;
         let init = store.materialize(&auxiliary["guest-init"], &temporary.path().join("init"))?;
         architecture.validate_elf(&init)?;
@@ -250,6 +246,10 @@ impl OciPreparer {
             if let Some(context) = context {
                 context.progress(name, PreparationStage::Guest);
             }
+            let hosts = format!(
+                "127.0.0.1 localhost\n::1 localhost\n{} {name}\n",
+                addresses[name]
+            );
             let recipe = launch_recipe_with_progress(
                 &imported.image.launch,
                 &format!("{}/24", addresses[name]),
@@ -338,6 +338,7 @@ fn validate_config_target(path: &str) -> Result<()> {
     // its own contract. Other paths remain inside the guest chroot.
     if path == "/"
         || path == "/etc/hosts"
+        || path == "/etc/resolv.conf"
         || ["/dev", "/proc", "/sys"]
             .iter()
             .any(|reserved| path == *reserved || path.starts_with(&format!("{reserved}/")))
