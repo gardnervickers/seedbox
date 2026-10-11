@@ -209,9 +209,9 @@ pub fn glyph(action: &str, state: State) -> char {
         "shape" => '≈',
         "heal" => '✚',
         "crash" | "crashed" => '✕',
-        "reboot" | "restart" => '⟲',
+        "reboot" | "rebooted" | "restart" => '⟲',
         "stop" | "pause" | "paused" => '◼',
-        "resume" => '▶',
+        "resume" | "resumed" => '▶',
         "throttle" => '▼',
         "clock_skew" | "clock_drift" | "skew" | "drift" => '◷',
         action if action.starts_with("exited") => '✕',
@@ -1754,12 +1754,20 @@ fn node(
         } else {
             format!(" · {} ago", coarse(ago))
         };
+        // A closed downtime span is timed from recovery, so describe the
+        // recovery here. The faults history retains the original downtime.
+        let action = if item.state == State::Down && item.end_ns.is_some() {
+            match item.closed_by.as_deref() {
+                Some("reboot") => "rebooted",
+                Some("resume") => "resumed",
+                Some("ready") => "ready",
+                _ => &item.action,
+            }
+        } else {
+            &item.action
+        };
         lines.push(Line::styled(
-            format!(
-                "{} {}{suffix}",
-                glyph(&item.action, item.state),
-                item.action
-            ),
+            format!("{} {action}{suffix}", glyph(action, item.state)),
             Style::new().fg(color),
         ));
     }
@@ -3595,5 +3603,77 @@ mod tests {
         assert!(!text.contains("apps starting"), "{text}");
         let running = crate::model::tests::booting_app(PlaybackRate::Unlimited);
         assert!(render(&running).contains("booting machines"));
+    }
+    #[test]
+    fn recovered_machine_card_describes_recovery_instead_of_old_downtime() {
+        let app = app(&["n1"]);
+        let focus = app.focus.as_ref().unwrap();
+        let machine = &focus.world.as_ref().unwrap().machines[0];
+        for (action, recovery, expected) in [
+            ("crashed", "reboot", "rebooted"),
+            ("paused", "resume", "resumed"),
+            ("exited 1", "ready", "ready"),
+        ] {
+            let mut item = Item {
+                key: crate::activity::Key::Transition(0),
+                lane: crate::activity::Lane::Machine("n1".into()),
+                action: action.into(),
+                target: "n1".into(),
+                handle: None,
+                start_ns: 3_072_000_000,
+                end_ns: Some(3_088_000_000),
+                closed_by: Some(recovery.into()),
+                state: State::Down,
+            };
+            let mut terminal = Terminal::new(TestBackend::new(32, 7)).unwrap();
+            terminal
+                .draw(|frame| {
+                    node(
+                        frame,
+                        focus,
+                        machine,
+                        frame.area(),
+                        Some(&item),
+                        false,
+                        3_306_000_000,
+                    )
+                })
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains(&format!("{expected} · 218ms ago")), "{text}");
+            if action != expected {
+                assert!(!text.contains(action), "{text}");
+            }
+            item.end_ns = None;
+            item.closed_by = None;
+            terminal
+                .draw(|frame| {
+                    node(
+                        frame,
+                        focus,
+                        machine,
+                        frame.area(),
+                        Some(&item),
+                        false,
+                        3_306_000_000,
+                    )
+                })
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains(action), "{text}");
+            assert!(!text.contains("ago"), "{text}");
+        }
     }
 }
