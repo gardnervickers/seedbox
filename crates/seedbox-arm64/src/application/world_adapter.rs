@@ -994,7 +994,8 @@ mod tests {
             working_dir: b"/".to_vec(),
             max_map_count: 262144,
             wall_clock_epoch: 1_700_000_000,
-            blocks_per_progress_call: 64,
+            instructions_per_progress_call: 50000,
+            progress_points_per_block: 1,
             argv: vec![b"/bin/db".to_vec()],
             environment: vec![b"ROLE=old".to_vec()],
             volumes: vec![],
@@ -1027,6 +1028,12 @@ mod tests {
                 domain: "timer-jitter/db".into(),
                 jitter_ns: 3,
             }),
+            progress: Some(super::super::Progress {
+                speed_hz: 800_000_000,
+                ns: 0,
+                jitter_ns: 0,
+                seed: 5,
+            }),
         };
         let env = BTreeMap::from([("ROLE".into(), "new".into())]);
         let argv = ["/bin/joiner".into()];
@@ -1042,6 +1049,8 @@ mod tests {
         };
         let boot = ArmMachine::spawn_boot(&factory, &base, &spec).unwrap();
         assert_eq!(boot.mac, spec.mac);
+        assert_eq!(boot.memory_bytes, base.memory_bytes);
+        assert_eq!(boot.progress, base.progress);
         assert!(boot
             .command_line
             .ends_with("seedbox.index=2 seedbox.name=db-2"));

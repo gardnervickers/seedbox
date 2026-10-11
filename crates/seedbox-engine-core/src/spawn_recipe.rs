@@ -5,10 +5,10 @@
 use crate::world::SpawnSpec;
 
 /// The recipe version the guest init reads.
-const MAGIC: &[u8; 10] = b"SBXLAUNCH5";
+const MAGIC: &[u8; 10] = b"SBXLAUNCH6";
 const RECIPE: &str = "seedbox/launch.bin";
 
-/// The guest init's launch recipe (`SBXLAUNCH5`). Configs stay as encoded.
+/// The guest init's launch recipe (`SBXLAUNCH6`). Configs stay as encoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recipe {
     pub ip: Vec<u8>,
@@ -18,7 +18,8 @@ pub struct Recipe {
     pub working_dir: Vec<u8>,
     pub max_map_count: u32,
     pub wall_clock_epoch: u32,
-    pub blocks_per_progress_call: u32,
+    pub instructions_per_progress_call: u32,
+    pub progress_points_per_block: u32,
     pub argv: Vec<Vec<u8>>,
     pub environment: Vec<Vec<u8>>,
     pub volumes: Vec<Vec<u8>>,
@@ -41,7 +42,8 @@ impl Recipe {
             working_dir: r.field()?,
             max_map_count: r.u32()?,
             wall_clock_epoch: r.u32()?,
-            blocks_per_progress_call: r.u32()?,
+            instructions_per_progress_call: r.u32()?,
+            progress_points_per_block: r.u32()?,
             argv: r.list()?,
             environment: r.list()?,
             volumes: r.list()?,
@@ -63,7 +65,8 @@ impl Recipe {
         }
         out.extend_from_slice(&self.max_map_count.to_le_bytes());
         out.extend_from_slice(&self.wall_clock_epoch.to_le_bytes());
-        out.extend_from_slice(&self.blocks_per_progress_call.to_le_bytes());
+        out.extend_from_slice(&self.instructions_per_progress_call.to_le_bytes());
+        out.extend_from_slice(&self.progress_points_per_block.to_le_bytes());
         for items in [
             &self.argv,
             &self.environment,
@@ -245,7 +248,8 @@ mod tests {
             working_dir: b"/".to_vec(),
             max_map_count: 262144,
             wall_clock_epoch: 1_700_000_000,
-            blocks_per_progress_call: 64,
+            instructions_per_progress_call: 50_000,
+            progress_points_per_block: 1,
             argv: vec![b"/usr/local/bin/etcd".to_vec()],
             environment: vec![b"ETCD_NAME=etcd-1".to_vec(), b"PATH=/bin".to_vec()],
             volumes: vec![],
@@ -381,6 +385,6 @@ mod tests {
         let mut malformed_tail = archive(&recipe().encode());
         malformed_tail.extend_from_slice(b"070701");
         assert!(find(&malformed_tail, RECIPE).is_err());
-        assert!(Recipe::parse(b"SBXLAUNCH4").is_err());
+        assert!(Recipe::parse(b"SBXLAUNCH5").is_err());
     }
 }

@@ -293,8 +293,10 @@ impl Tracker {
                 self.machine_pauses.remove(machine);
                 self.process_effects.remove(machine);
             }
-            FaultAction::Spawn { machine, .. } => {
+            FaultAction::Spawn { machine, from, .. } => {
+                let cpu_speed_hz = self.machines.get(from).and_then(|m| m.cpu_speed_hz);
                 let spawned = self.machine(machine);
+                spawned.cpu_speed_hz = cpu_speed_hz;
                 spawned.condition = MachineCondition::Starting;
                 spawned.condition_since_ns = Some(at);
                 spawned.application = ApplicationState {
@@ -574,6 +576,7 @@ mod tests {
             .unwrap();
         assert_eq!(spawned.condition, MachineCondition::Starting);
         assert_eq!(spawned.condition_since_ns, Some(10));
+        assert_eq!(spawned.cpu_speed_hz, Some(800_000_000));
         assert_eq!(
             spawned.application.condition,
             ApplicationCondition::Starting

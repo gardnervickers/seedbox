@@ -601,6 +601,14 @@ mod spawn_tests {
         let recipe = seedbox_engine_core::spawn_recipe::Recipe::parse(&bytes).unwrap();
         assert_eq!(recipe.hostname, b"app");
         assert_eq!(recipe.wall_clock_epoch, MIN_WALL_CLOCK_EPOCH);
+        assert_eq!(
+            recipe.instructions_per_progress_call,
+            seedbox_spec::project::PROGRESS_INSTRUCTIONS
+        );
+        assert_eq!(
+            recipe.progress_points_per_block,
+            seedbox_spec::project::PROGRESS_POINTS
+        );
         assert_eq!(recipe.argv, [b"/bin/app".to_vec(), b"--flag".to_vec()]);
         assert_eq!(recipe.environment, [b"A=1".to_vec()]);
         assert_eq!(recipe.encode(), bytes);

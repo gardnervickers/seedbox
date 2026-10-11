@@ -233,8 +233,8 @@ again.
 A Python oracle may spawn a machine from an existing machine. The applied fault
 allocates its name and address; at the committed boundary the coordinator grows
 the world before admitting another same-time input or starting a new scheduling
-segment. The new boot recipe copies the source's launch settings with the supplied
-environment and command overrides. Reports bind spawned machines to applied fault
+segment. The new boot recipe copies the source's launch settings, memory and CPU speed,
+with the supplied environment and command overrides. Reports bind spawned machines to applied fault
 evidence, not to replies, because a reply can be lost after the spawn takes effect.
 
 Code: [input program](../crates/seedbox-engine-core/src/input_program.rs),

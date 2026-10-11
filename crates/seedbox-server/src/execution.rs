@@ -958,6 +958,7 @@ mod tests {
                     full_state: None,
                     faults: vec![],
                     detail: None,
+                    spawned: Vec::new(),
                 })
             }
         }
