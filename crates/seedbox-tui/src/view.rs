@@ -187,6 +187,17 @@ fn sparkline(focus: &Focus, machine: &str, width: usize) -> String {
     out
 }
 
+/// Recent achieved rates as bars, scaled to the fastest in view.
+fn rate_history(rates: &std::collections::VecDeque<f64>, width: usize) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let recent: Vec<f64> = rates.iter().rev().take(width).rev().copied().collect();
+    let peak = recent.iter().copied().fold(f64::MIN_POSITIVE, f64::max);
+    recent
+        .iter()
+        .map(|value| BARS[((value / peak) * 7.0).round().clamp(0.0, 7.0) as usize])
+        .collect()
+}
+
 /// A glyph for a fault action. Unknown actions get a neutral mark.
 pub fn glyph(action: &str, state: State) -> char {
     if state == State::Upcoming {
@@ -257,6 +268,7 @@ fn pad_left(text: &str, width: usize) -> String {
 pub fn draw(frame: &mut Frame, app: &App) {
     let now = Instant::now();
     app.hitboxes.borrow_mut().clear();
+    app.map_bottom.set(None);
     let area = frame.area();
     let banner = u16::from(!app.connected);
     let [top, banner_area, body, keys] = Layout::vertical([
@@ -323,7 +335,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     footer(frame, app, keys, now);
     if let Some(form) = &app.fault_form {
-        form.draw(frame, area);
+        form.draw(frame, area, app.map_bottom.get());
     }
     if app.help {
         help(frame, app, area);
@@ -585,6 +597,7 @@ fn footer(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
                 let panel = match app.panel {
                     Panel::Machines => "machines",
                     Panel::Faults => "faults",
+                    Panel::Links => "links",
                     Panel::Logs => "logs",
                 };
                 push("tab", format!("focus: {panel}"));
@@ -715,8 +728,14 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
 fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Instant) {
     let activity = focus.activity();
     let sim_now = focus.now_ns(now);
-    let lanes = activity.lanes(focus.world.as_ref());
     let present: Vec<String> = focus.machines();
+    // Every machine gets a lane for its traffic, then fault handles and the rest.
+    let mut lanes: Vec<Lane> = present.iter().cloned().map(Lane::Machine).collect();
+    for lane in activity.lanes(focus.world.as_ref()) {
+        if !lanes.contains(&lane) {
+            lanes.push(lane);
+        }
+    }
     let wide = area.width >= 130 && area.height >= 34;
     let timebar_height = if area.height >= 30 {
         (lanes.len() as u16 + 4).clamp(5, 10)
@@ -739,16 +758,31 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
         Layout::horizontal([Constraint::Min(20), Constraint::Length(side_width)]).areas(main);
     match focus.starting() {
         Some(phase) => startup(frame, app, focus, phase, map_area),
-        None => map(frame, app, focus, &activity, map_area, sim_now),
+        None => {
+            map(frame, app, focus, &activity, map_area, sim_now);
+            app.map_bottom.set(Some(map_area.y + map_area.height));
+        }
     }
-    if wide {
+    if wide && app.panel == Panel::Links {
+        // Focusing links expands them over the side panels.
+        links(frame, app, focus, side, None);
+    } else if wide {
         let machine_rows = (present.len() as u16 + 3).clamp(4, side.height / 2);
-        let [faults_area, machines_area] =
-            Layout::vertical([Constraint::Min(5), Constraint::Length(machine_rows)]).areas(side);
+        // Faults take what their rows need; links fill the rest of the side.
+        let fault_rows = (fault_entries(&activity) as u16 + 2).clamp(5, side.height / 3);
+        let [faults_area, links_area, machines_area] = Layout::vertical([
+            Constraint::Length(fault_rows),
+            Constraint::Min(4),
+            Constraint::Length(machine_rows),
+        ])
+        .areas(side);
         faults(frame, app, focus, &activity, faults_area, sim_now, None);
+        links(frame, app, focus, links_area, None);
         machines(frame, app, focus, machines_area, None);
     } else if app.panel == Panel::Machines {
         machines(frame, app, focus, side, Some(Panel::Machines));
+    } else if app.panel == Panel::Links {
+        links(frame, app, focus, side, Some(Panel::Links));
     } else {
         faults(
             frame,
@@ -760,10 +794,38 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
             Some(Panel::Faults),
         );
     }
-    app.hitboxes.borrow_mut().push((logs_area, HitTarget::Logs));
     let failure = app
         .inspector(now)
         .filter(|inspector| app.details || !inspector.ok);
+    // The oracle drives the test, so on wide terminals its output gets its own
+    // panel beside the application logs.
+    let oracle = focus
+        .world
+        .as_ref()
+        .and_then(|w| w.machines.iter().find(|m| m.oracle))
+        .map(|m| m.name.clone())
+        .filter(|_| {
+            failure.is_none()
+                && !app.events_tab
+                && focus.selected.is_none()
+                && logs_area.width >= 120
+                && logs_area.height >= 5
+        });
+    let (logs_area, oracle_area) = match &oracle {
+        Some(_) => {
+            let width = (logs_area.width * 34 / 100).clamp(40, 72);
+            let [left, right] =
+                Layout::horizontal([Constraint::Min(40), Constraint::Length(width)])
+                    .areas(logs_area);
+            (left, Some(right))
+        }
+        None => (logs_area, None),
+    };
+    app.logs_exclude.replace(oracle.clone());
+    app.hitboxes.borrow_mut().push((logs_area, HitTarget::Logs));
+    if let (Some(name), Some(area)) = (&oracle, oracle_area) {
+        oracle_logs(frame, focus, name, area);
+    }
     match failure {
         Some(inspector) => {
             let color = if inspector.ok { GREEN } else { RED };
@@ -805,6 +867,7 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
         lanes: &lanes,
         present: &present,
         checkpoints: &focus.checkpoints,
+        traffic: &focus.traffic.history,
         selected: focus.fault_selected.as_ref(),
         now: sim_now,
         zoom: app.zoom,
@@ -1400,7 +1463,7 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
             .as_ref()
             .is_some_and(|form| form.targets_link(a, b) || form.targets_link(b, a));
         let (color, pattern, weight) = if previewed {
-            (ICE, Pattern::Dotted, 2)
+            (MAGENTA, Pattern::Marching, 2)
         } else if cut.is_some() {
             (if pulse { RED } else { RED_SOFT }, Pattern::Marching, 1)
         } else if is_down {
@@ -1551,6 +1614,10 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
             ],
             key("✕ ", RED, "dropped"),
         ];
+        let mut legend = legend;
+        if app.fault_form.is_some() {
+            legend.insert(0, key("┅ ", MAGENTA, "previewed  "));
+        }
         // Whole legend entries only: drop trailing entries that do not fit.
         let budget = inner.width.saturating_sub(2) as usize;
         let mut fitted: Vec<Span> = Vec::new();
@@ -1593,7 +1660,7 @@ fn frame_color(bytes: u32) -> Color {
     }
 }
 
-fn dim(color: Color) -> Color {
+pub(crate) fn dim(color: Color) -> Color {
     match color {
         Color::Rgb(r, g, b) => Color::Rgb(r / 2 + 4, g / 2 + 6, b / 2 + 9),
         other => other,
@@ -1839,7 +1906,19 @@ fn tabbed_title(active: Panel) -> Line<'static> {
         tab("faults", active == Panel::Faults),
         Span::styled("│", Style::new().fg(BORDER)),
         tab("machines", active == Panel::Machines),
+        Span::styled("│", Style::new().fg(BORDER)),
+        tab("links", active == Panel::Links),
     ])
+}
+
+/// A short name for why frames were dropped.
+fn drop_cause(cause: &str) -> &'static str {
+    match cause {
+        "partition" => "cut",
+        "loss" => "loss",
+        "queue" => "queue",
+        _ => "rx",
+    }
 }
 
 fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Option<Panel>) {
@@ -1875,8 +1954,9 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
         .max()
         .unwrap_or(14)
         .clamp(14, 24);
-    let show_drop = width >= name_width + 2 + state_width + 14 + 6;
-    let show_spark = width >= name_width + 2 + state_width + 14 + 6 + 8;
+    let base = name_width + 2 + state_width + 7 + 7;
+    let show_drop = width >= base + 13;
+    let show_spark = width >= base + 13 + 10;
     let mut header = vec![Span::styled(
         format!(
             "  {}{}{}{}",
@@ -1889,7 +1969,7 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
     )];
     if show_drop {
         header.push(Span::styled(
-            pad_left("DROP", 6),
+            format!("{} {}", pad_left("DROP/S", 7), pad("CAUSE", 5)),
             Style::new().fg(FAINT_TEXT),
         ));
     }
@@ -1897,25 +1977,10 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
         header.push(Span::styled("  ACTIVITY", Style::new().fg(FAINT_TEXT)));
     }
     let mut lines = vec![Line::from(header)];
-    let spark_width = width.saturating_sub(name_width + 2 + state_width + 14 + 6 + 2);
+    let spark_width = width.saturating_sub(base + 13 + 2);
     for (index, (m, (state, color))) in world.machines.iter().zip(states).enumerate() {
         let selected = focus.selected.as_deref() == Some(m.name.as_str());
-        let dropped: u64 = world
-            .links
-            .iter()
-            .map(|l| {
-                let c = &l.counters;
-                (if l.from == m.name {
-                    c.partition_dropped + c.loss_dropped + c.queue_dropped
-                } else {
-                    0
-                }) + if l.to == m.name {
-                    c.receiver_dropped
-                } else {
-                    0
-                }
-            })
-            .sum();
+        let dropped = focus.traffic.dropped_rate(&m.name);
         let mut spans = vec![
             Span::styled(if selected { "▸ " } else { "  " }, Style::new().fg(ICE)),
             Span::styled(
@@ -1943,9 +2008,15 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
             ),
         ];
         if show_drop {
+            let total = dropped.total();
             spans.push(Span::styled(
-                pad_left(&count(dropped), 6),
-                Style::new().fg(if dropped > 0 { RED } else { DIM }),
+                pad_left(&rate(total), 7),
+                Style::new().fg(if total >= 0.5 { RED } else { DIM }),
+            ));
+            let cause = dropped.dominant().map_or("", drop_cause);
+            spans.push(Span::styled(
+                format!(" {}", pad(cause, 5)),
+                Style::new().fg(RED_SOFT),
             ));
         }
         if show_spark {
@@ -1963,6 +2034,170 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
         }
         let mut line = Line::from(spans);
         if selected {
+            line = line.style(Style::new().bg(SELECTED));
+        }
+        lines.push(line);
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Rows the faults panel needs: section titles, their items and the hint.
+fn fault_entries(activity: &Activity) -> usize {
+    let section = |items: &[Item]| usize::from(!items.is_empty()) + items.len();
+    let active = 1 + activity.active.len().max(1);
+    let rest = section(&activity.upcoming) + section(&activity.history);
+    let hint = if rest == 0 && activity.active.is_empty() {
+        2
+    } else {
+        0
+    };
+    active + rest + hint
+}
+
+/// Bytes per simulated second, compact.
+fn bytes_rate(per_second: f64) -> String {
+    match per_second {
+        r if r < 0.5 => "0".into(),
+        r if r < 1024.0 => format!("{r:.0}B"),
+        r if r < 1024.0 * 1024.0 => format!("{:.0}K", r / 1024.0),
+        r => format!("{:.1}M", r / (1024.0 * 1024.0)),
+    }
+}
+
+/// Every directed link with its policy, traffic, drops and any fault on it.
+/// Links of the selected machine come first, then cut or shaped links, each
+/// group by name so rows hold still while scrolling.
+fn links(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Option<Panel>) {
+    let focused = app.panel == Panel::Links;
+    let mut b = match tabbed {
+        Some(panel) => Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(if focused { BORDER_HI } else { BORDER }))
+            .title(tabbed_title(panel)),
+        None => block("links", focused),
+    }
+    .title_bottom(source("GET world", app.details));
+    let inner = b.inner(area);
+    app.hitboxes.borrow_mut().push((area, HitTarget::Links));
+    let Some(world) = &focus.world else {
+        frame.render_widget(b, area);
+        return;
+    };
+    let selected = focus.selected.as_deref();
+    let mut links: Vec<_> = world.links.iter().collect();
+    links.sort_by(|a, b| {
+        let rank = |l: &seedbox_api::LinkState| {
+            (
+                !selected.is_some_and(|s| l.from == s || l.to == s),
+                l.partitioned_by.is_none() && l.shaped_by.is_none(),
+            )
+        };
+        rank(a)
+            .cmp(&rank(b))
+            .then((&a.from, &a.to).cmp(&(&b.from, &b.to)))
+    });
+    let rows = inner.height.saturating_sub(1) as usize;
+    app.links_rows.set(rows);
+    let start = app.links_scroll.min(links.len().saturating_sub(rows));
+    let end = (start + rows).min(links.len());
+    let summary = if end - start < links.len() {
+        let hint = if focused { "↑↓" } else { "tab ↑↓" };
+        format!(" {}–{} of {} links · {hint} ", start + 1, end, links.len())
+    } else {
+        format!(" {} links ", links.len())
+    };
+    let title_width = if tabbed.is_some() { 30 } else { 9 };
+    let summary = Line::styled(summary, Style::new().fg(DIM)).right_aligned();
+    b = if title_width + summary.width() + 2 <= area.width as usize {
+        b.title(summary)
+    } else {
+        b.title_bottom(summary)
+    };
+    frame.render_widget(b, area);
+    let width = inner.width as usize;
+    let name_width = links
+        .iter()
+        .map(|l| l.from.chars().count() + l.to.chars().count() + 1)
+        .max()
+        .unwrap_or(6)
+        .clamp(6, 18)
+        + 1;
+    let show_total = width >= name_width + 1 + 7 * 5 + 8;
+    let fault_width = width.saturating_sub(name_width + 1 + 7 * 4 + if show_total { 7 } else { 0 });
+    let mut header = format!(
+        " {}{}{}{}",
+        pad("LINK", name_width),
+        pad_left("FR/S", 7),
+        pad_left("B/S", 7),
+        pad_left("DROP/S", 7),
+    );
+    if show_total {
+        header.push_str(&pad_left("DROPS", 7));
+    }
+    header.push_str(&pad_left("LAT", 7));
+    header.push_str(&format!(" {}", pad("FAULT", fault_width.saturating_sub(1))));
+    let mut lines = vec![Line::styled(header, Style::new().fg(FAINT_TEXT))];
+    for link in links.into_iter().skip(start).take(rows) {
+        let rates = focus.traffic.link(&link.from, &link.to);
+        let involved = selected.is_some_and(|s| link.from == s || link.to == s);
+        let counters = &link.counters;
+        let total = counters.partition_dropped
+            + counters.loss_dropped
+            + counters.queue_dropped
+            + counters.receiver_dropped;
+        let dropped = rates.dropped.total();
+        let (fault, fault_color) = if let Some(handle) = &link.partitioned_by {
+            (format!("✂ {handle}"), RED)
+        } else if let Some(handle) = &link.shaped_by {
+            let mut text = format!("≈ {handle}");
+            if link.policy.loss_ppm > 0 {
+                text.push_str(&format!(" {:.1}%", link.policy.loss_ppm as f64 / 1e4));
+            }
+            (text, YELLOW)
+        } else {
+            (
+                rates.dropped.dominant().map_or("", drop_cause).to_owned(),
+                RED_SOFT,
+            )
+        };
+        let mut spans = vec![
+            Span::styled(
+                format!(
+                    " {}",
+                    pad(&format!("{}→{}", link.from, link.to), name_width)
+                ),
+                Style::new().fg(if involved { WHITE } else { TEXT }),
+            ),
+            Span::styled(
+                pad_left(&rate(rates.frames), 7),
+                Style::new().fg(if rates.frames >= 0.5 { ICE } else { DIM }),
+            ),
+            Span::styled(pad_left(&bytes_rate(rates.bytes), 7), Style::new().fg(DIM)),
+            Span::styled(
+                pad_left(&rate(dropped), 7),
+                Style::new().fg(if dropped >= 0.5 { RED } else { DIM }),
+            ),
+        ];
+        if show_total {
+            spans.push(Span::styled(
+                pad_left(&count(total), 7),
+                Style::new().fg(if total > 0 { RED_SOFT } else { DIM }),
+            ));
+        }
+        spans.push(Span::styled(
+            pad_left(&latency(link.policy.latency_ns), 7),
+            Style::new().fg(if link.shaped_by.is_some() {
+                YELLOW
+            } else {
+                DIM
+            }),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", pad(&fault, fault_width.saturating_sub(1))),
+            Style::new().fg(fault_color),
+        ));
+        let mut line = Line::from(spans);
+        if involved {
             line = line.style(Style::new().bg(SELECTED));
         }
         lines.push(line);
@@ -2193,7 +2428,11 @@ fn logs(frame: &mut Frame, app: &App, focus: &Focus, area: Rect) {
             .right_aligned(),
         );
     let height = area.height.saturating_sub(2) as usize;
-    let rows = log_rows(focus, area.width.saturating_sub(2));
+    let excluded = app.logs_exclude.borrow();
+    let scope = excluded
+        .as_deref()
+        .map_or(LogScope::Default, LogScope::Except);
+    let rows = log_rows(focus, area.width.saturating_sub(2), scope);
     let end = rows
         .len()
         .saturating_sub(scroll.min(rows.len().saturating_sub(height)));
@@ -2206,17 +2445,72 @@ fn logs(frame: &mut Frame, app: &App, focus: &Focus, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(b), area);
 }
 
+/// The oracle's own output with its state and the simulation's verdict.
+fn oracle_logs(frame: &mut Frame, focus: &Focus, name: &str, area: Rect) {
+    let mut right = Vec::new();
+    if let Some(m) = focus
+        .world
+        .as_ref()
+        .and_then(|w| w.machines.iter().find(|m| m.name == name))
+    {
+        let (state, color) = condition(focus, m);
+        right.push(Span::styled(format!(" {state} "), Style::new().fg(color)));
+    }
+    if let Some(resource) = &focus.resource {
+        let (text, color) = verdict(resource.status.verdict());
+        right.push(Span::styled("· ", Style::new().fg(DIM)));
+        right.push(Span::styled(
+            format!("verdict {text} "),
+            Style::new().fg(color),
+        ));
+    }
+    let b = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::Rgb(91, 63, 122)))
+        .title(Line::from(vec![
+            Span::styled(
+                format!(" {name} "),
+                Style::new().fg(machine_color(name)).bold(),
+            ),
+            Span::styled("◆ ", Style::new().fg(MAGENTA)),
+        ]))
+        .title(Line::from(right).right_aligned());
+    let height = area.height.saturating_sub(2) as usize;
+    let rows = log_rows(focus, area.width.saturating_sub(2), LogScope::Only(name));
+    let lines = if rows.is_empty() {
+        vec![Line::styled("no oracle output yet", Style::new().fg(DIM))]
+    } else {
+        rows[rows.len().saturating_sub(height)..].to_vec()
+    };
+    frame.render_widget(Paragraph::new(lines).block(b), area);
+}
+
+/// Which machines' output a log pane shows. The selected machine, when there
+/// is one, always narrows the default scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LogScope<'a> {
+    Default,
+    /// Everything but one machine, whose output has its own panel.
+    Except(&'a str),
+    Only(&'a str),
+}
+
 /// Wrapped terminal rows are also the unit of scrolling and viewport anchoring.
 /// Application output is shown as written; fault markers come from the world.
-pub(super) fn log_rows(focus: &Focus, width: u16) -> Vec<Line<'static>> {
-    let selected = focus.selected.as_deref();
+pub(super) fn log_rows(focus: &Focus, width: u16, scope: LogScope) -> Vec<Line<'static>> {
+    let selected = match scope {
+        LogScope::Only(name) => Some(name),
+        _ => focus.selected.as_deref(),
+    };
+    let excluded = match scope {
+        LogScope::Except(name) => Some(name),
+        _ => None,
+    };
     let width = usize::from(width.max(1));
     let mut entries: Vec<(u64, u8, Line<'static>)> = Vec::new();
-    for (name, log) in focus
-        .logs
-        .iter()
-        .filter(|(name, _)| selected.is_none_or(|selected| selected == name.as_str()))
-    {
+    for (name, log) in focus.logs.iter().filter(|(name, _)| {
+        selected.is_none_or(|selected| selected == name.as_str()) && excluded != Some(name.as_str())
+    }) {
         let color = machine_color(name);
         for line in &log.lines {
             let mut spans = vec![Span::styled(
@@ -2331,6 +2625,16 @@ fn status_bar(
                         ),
                         Style::new().fg(DIM),
                     ));
+                    if let Some(latest) = focus.achieved.back() {
+                        left.push(Span::styled(
+                            format!(" {}", rate_history(&focus.achieved, 16)),
+                            Style::new().fg(ICE_MID),
+                        ));
+                        left.push(Span::styled(
+                            format!(" now {latest:.2}×"),
+                            Style::new().fg(DIM),
+                        ));
+                    }
                 }
             }
             if !p.state.application_ready {
@@ -3034,6 +3338,11 @@ fn event_text(kind: &EventKind) -> (String, String, Color) {
             format!("exited {code}"),
             if *code == 0 { GREEN } else { RED },
         ),
+        EventKind::PreparationProgress { machine, stage } => (
+            "prepare".into(),
+            format!("{machine} {}", format!("{stage:?}").to_lowercase()),
+            DIM,
+        ),
         EventKind::ExecutionTerminated { termination } => (
             "terminated".into(),
             format!("{termination:?}").to_lowercase(),
@@ -3047,6 +3356,33 @@ fn event_text(kind: &EventKind) -> (String, String, Color) {
                 .unwrap_or_default(),
             DIM,
         ),
+    }
+}
+
+/// The fault a control admitted, if it admitted one.
+fn admitted_fault(kind: &EventKind) -> Option<u64> {
+    let EventKind::ControlChanged { control } = kind else {
+        return None;
+    };
+    control["state"]["intervention"]["plan"]["id"].as_u64()
+}
+
+/// The server can report a fault as applied before the control that admitted
+/// it. Show the admission first when both happened at the same simulated time.
+fn admissions_first(events: &mut Vec<&seedbox_api::SimulationEvent>) {
+    let mut index = 0;
+    while index < events.len() {
+        let moved = admitted_fault(&events[index].event).and_then(|id| {
+            events[..index].iter().position(|earlier| {
+                earlier.simulated_time_ns == events[index].simulated_time_ns
+                    && matches!(&earlier.event, EventKind::FaultChanged { id: fault, .. } if u64::from(*fault) == id)
+            })
+        });
+        if let Some(to) = moved {
+            let admission = events.remove(index);
+            events.insert(to, admission);
+        }
+        index += 1;
     }
 }
 
@@ -3083,9 +3419,18 @@ fn events(
         .skip(scroll.min(focus.events.len().saturating_sub(height)))
         .take(height)
         .collect();
+    let mut visible: Vec<_> = visible.into_iter().rev().collect();
+    admissions_first(&mut visible);
+    let stamp = |e: &seedbox_api::SimulationEvent| {
+        e.simulated_time_ns.map(time).unwrap_or_else(|| "—".into())
+    };
+    let stamp_width = visible
+        .iter()
+        .map(|e| stamp(e).chars().count())
+        .max()
+        .unwrap_or(0);
     let lines: Vec<Line> = visible
         .into_iter()
-        .rev()
         .map(|e| {
             let (kind, mut text, color) = event_text(&e.event);
             if details {
@@ -3099,11 +3444,8 @@ fn events(
                 }
             }
             Line::from(vec![
-                Span::styled(
-                    e.simulated_time_ns.map(time).unwrap_or_else(|| "—".into()),
-                    Style::new().fg(DIM),
-                ),
-                Span::styled(format!(" {kind:<8} "), Style::new().fg(ICE_DIM)),
+                Span::styled(pad_left(&stamp(e), stamp_width), Style::new().fg(DIM)),
+                Span::styled(format!(" {kind:<9} "), Style::new().fg(ICE_DIM)),
                 Span::styled(text, Style::new().fg(color)),
             ])
         })
@@ -3328,6 +3670,143 @@ mod tests {
         assert!(text.contains(&time(2_000_000_000)));
         assert!(text.contains("unlimited"));
         assert!(!text.contains("18446744073"));
+    }
+
+    #[test]
+    fn admissions_show_before_the_faults_they_admitted() {
+        let event = |time, event| SimulationEvent {
+            simulation: "k7m2p9qx".parse().unwrap(),
+            revision: 1,
+            simulated_time_ns: Some(time),
+            position: None,
+            event,
+        };
+        let applied = |id| EventKind::FaultChanged {
+            id,
+            input_key: None,
+            action: "heal".into(),
+            machine: None,
+            status: FaultStatus::Applied,
+            applied_time_ns: Some(5),
+            plan: None,
+        };
+        let admitted = |id: u32| EventKind::ControlChanged {
+            control: Box::new(serde_json::json!({
+                "request": {"command": {"type": "injectFault", "action": {"action": "heal"}}},
+                "state": {"type": "acknowledged", "error": null, "intervention": {"plan": {"id": id}}}
+            })),
+        };
+        let earlier = event(1, applied(1));
+        let fault = event(5, applied(2));
+        let control = event(5, admitted(2));
+        let unrelated = event(6, admitted(1));
+        let mut events = vec![&earlier, &fault, &control, &unrelated];
+        admissions_first(&mut events);
+        assert!(std::ptr::eq(events[1], &control));
+        assert!(std::ptr::eq(events[2], &fault));
+        // Only an admission at the same simulated time moves.
+        assert!(std::ptr::eq(events[3], &unrelated));
+    }
+
+    #[test]
+    fn every_link_is_reachable_by_scrolling_at_compact_heights() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let names = ["n1", "n2", "n3", "n4", "oracle"];
+        let all: Vec<String> = names
+            .iter()
+            .flat_map(|a| {
+                names
+                    .iter()
+                    .filter(move |b| *b != a)
+                    .map(move |b| format!("{a}→{b}"))
+            })
+            .collect();
+        let press = |app: &mut App, code| {
+            app.input(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        // The smallest wide layout and a narrow one, where links are a tab.
+        for (width, height) in [(130, 36), (100, 30)] {
+            let mut app = app(&names);
+            app.focus.as_mut().unwrap().selected = None;
+            press(&mut app, KeyCode::Tab);
+            press(&mut app, KeyCode::Tab);
+            assert_eq!(app.panel, Panel::Links);
+            let mut seen = std::collections::BTreeSet::new();
+            for _ in 0..all.len() {
+                let text = render_at(&app, width, height);
+                for link in &all {
+                    if text.contains(link.as_str()) {
+                        seen.insert(link.clone());
+                    }
+                }
+                press(&mut app, KeyCode::Down);
+            }
+            assert_eq!(seen.len(), all.len(), "{width}x{height} missed links");
+            // Scrolling stops with the last page full.
+            assert_eq!(app.links_scroll, all.len() - app.links_rows.get());
+            let text = render_at(&app, width, height);
+            assert!(text.contains(&format!(" of {} links", all.len())));
+        }
+    }
+
+    #[test]
+    fn wide_screens_show_links_and_the_oracle_beside_application_logs() {
+        let mut app = app(&["a", "b", "oracle"]);
+        app.focus.as_mut().unwrap().selected = None;
+        let output = |machine: &str, sequence, bytes: &[u8]| {
+            Update::Log(
+                "k7m2p9qx".parse().unwrap(),
+                LogDelivery::Entry {
+                    sequence,
+                    entry: LogEntry::Bytes {
+                        machine: machine.into(),
+                        incarnation: 0,
+                        simulated_time_ns: 0,
+                        stream: LogStream::Stdout,
+                        bytes: bytes.to_vec(),
+                    },
+                },
+            )
+        };
+        app.apply(output("a", 1, b"application line\n"));
+        app.apply(output("oracle", 2, b"workload line\n"));
+        let mut cut = world(&["a", "b", "oracle"]);
+        cut.revision = 2;
+        for link in &mut cut.links {
+            if (link.from == "a") != (link.to == "a")
+                && link.to != "oracle"
+                && link.from != "oracle"
+            {
+                link.partitioned_by = Some("p1".into());
+            }
+        }
+        app.apply(Update::World(cut));
+        let text = render(&app);
+        assert!(text.contains("oracle ◆"));
+        assert!(text.contains("workload line"));
+        assert!(text.contains("application line"));
+        assert!(text.contains(" links "));
+        assert!(text.contains("a→b"));
+        assert!(text.contains("✂ p1"));
+        let logs = app
+            .hitboxes
+            .borrow()
+            .iter()
+            .find(|(_, target)| *target == HitTarget::Logs)
+            .unwrap()
+            .0;
+        assert!(logs.width < 160);
+        // The oracle's output is not repeated in the application log pane.
+        let rows = log_rows(
+            app.focus.as_ref().unwrap(),
+            logs.width,
+            LogScope::Except("oracle"),
+        );
+        assert!(rows.iter().all(|row| !row.to_string().contains("workload")));
+        // Selecting a machine returns to one full-width log pane.
+        app.focus.as_mut().unwrap().selected = Some("a".into());
+        let text = render(&app);
+        assert!(!text.contains("workload line"));
     }
 
     #[test]
