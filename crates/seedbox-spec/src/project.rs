@@ -231,7 +231,7 @@ pub mod frequency {
     pub fn format(hz: u64) -> String {
         let (unit, scale) = UNITS
             .iter()
-            .find(|(_, scale)| hz % scale == 0)
+            .find(|(_, scale)| hz.is_multiple_of(*scale))
             .copied()
             .unwrap_or(("Hz", 1));
         format!("{}{unit}", hz / scale)
