@@ -86,7 +86,7 @@ pub enum Change {
     Resumed,
     Rebooted,
     Ready,
-    Throttled(u64),
+    Throttled(Option<u64>),
 }
 
 impl Change {
@@ -96,7 +96,7 @@ impl Change {
             MachineTransition::Resumed => Change::Resumed,
             MachineTransition::Crashed => Change::Crashed,
             MachineTransition::Rebooted => Change::Rebooted,
-            MachineTransition::Throttled { factor_permille } => Change::Throttled(*factor_permille),
+            MachineTransition::Throttled { speed_hz } => Change::Throttled(*speed_hz),
         }
     }
 }
@@ -600,7 +600,8 @@ mod tests {
             incarnation: 0,
             condition: seedbox_api::MachineCondition::Ready,
             exit_code: None,
-            throttle_permille: None,
+            cpu_speed_hz: Some(1_000_000_000),
+            throttle_speed_hz: None,
             oracle: false,
             last_transition: None,
             last_transition_at_ns: None,

@@ -55,32 +55,37 @@ int main(int argc, char **argv) {
 
 
 class ProgressBudgetTests(unittest.TestCase):
-    def test_strict_budget_parser_accepts_u32_range_and_rejects_bad_options(self):
+    def test_strict_option_parser_accepts_u32_range_and_rejects_bad_options(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / 'budget.c'
-            source.write_text(r'''#include "progress/budget.h"
+            source.write_text(r"""#include "progress/budget.h"
 #include <stdio.h>
 int main(int argc, char **argv) {
-    uint32_t budget = 0;
-    if (argc != 3 || !seedbox_progress_budget(argv[1], argv[2], &budget)) return 2;
-    printf("%u\n", budget);
+    uint32_t budget = 0, points = 0;
+    if (!seedbox_progress_arguments(argc, (const char **)argv, &budget, &points)) return 2;
+    printf("%u %u\n", budget, points);
     return 0;
 }
-''')
+""")
             probe = root / 'budget'
             subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
                 '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'guest'),
                 str(source), '-o', str(probe)], check=True, capture_output=True)
-            for budget in ['1', '17', '10000', '4294967295']:
-                result = subprocess.run([str(probe), '--blocks-per-progress-call', budget],
-                                        capture_output=True, text=True, timeout=10)
+            def run(*args):
+                return subprocess.run([str(probe), *args], capture_output=True, text=True,
+                                      timeout=10)
+            budget, points = '--instructions-per-progress-call', '--progress-points-per-block'
+            for value in ['1', '17', '50000', '4294967295']:
+                result = run(budget, value, points, value)
                 self.assertEqual(result.returncode, 0)
-                self.assertEqual(result.stdout, budget + '\n')
-            for budget in ['', '0', '-1', '+1', ' 1', '1 ', '1x', '4294967296',
+                self.assertEqual(result.stdout, f'{value} {value}\n')
+            for value in ['', '0', '-1', '+1', ' 1', '1 ', '1x', '4294967296',
                            '999999999999999999999999999999']:
-                result = subprocess.run([str(probe), '--blocks-per-progress-call', budget],
-                                        capture_output=True, timeout=10)
-                self.assertEqual(result.returncode, 2, budget)
-            for option in ['--other', '--blocks-per-progress-call-extra', '--blocks-per-progress-cal']:
-                self.assertEqual(subprocess.run([str(probe), option, '1'], timeout=10).returncode, 2)
+                self.assertEqual(run(budget, value, points, '1').returncode, 2, value)
+                self.assertEqual(run(budget, '1', points, value).returncode, 2, value)
+            for args in [[budget, '1'], [points, '1', budget, '1'],
+                         [budget, '1', points, '1', '--other', '1'],
+                         ['--blocks-per-progress-call', '1', points, '1'],
+                         [budget + '-extra', '1', points, '1'], [budget[:-1], '1', points, '1']]:
+                self.assertEqual(run(*args).returncode, 2, args)

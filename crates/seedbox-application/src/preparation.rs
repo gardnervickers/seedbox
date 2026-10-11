@@ -5,7 +5,7 @@ use crate::limits::read_bounded;
 use crate::{
     config::Simulation,
     execution::{Backend, ExecutionProfile, PreparationBackend, PreparedInputs},
-    guest::{build_initramfs_with, launch_recipe_with_progress, minimum_memory_mb},
+    guest::{build_initramfs_with, launch_recipe, minimum_memory_mb},
     store::ContentStore,
     Error, Result,
 };
@@ -250,14 +250,13 @@ impl OciPreparer {
             if let Some(context) = context {
                 context.progress(name, PreparationStage::Guest);
             }
-            let recipe = launch_recipe_with_progress(
+            let recipe = launch_recipe(
                 &imported.image.launch,
                 &format!("{}/24", addresses[name]),
                 &hosts,
                 name,
                 &mounts,
                 wall_clock_epoch,
-                simulation.simulator.blocks_per_progress_call,
             )?;
             let archive = temporary.path().join(format!("{name}.cpio"));
             // Package only retained bootstrap bytes. The source paths may be

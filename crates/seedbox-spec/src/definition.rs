@@ -80,6 +80,8 @@ pub struct Image {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Machine {
+    #[serde(default)]
+    pub cpu: crate::project::Cpu,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<Image>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,7 +166,6 @@ impl Start {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Simulator {
-    pub blocks_per_progress_call: std::num::NonZeroU32,
     pub schedule: crate::Schedule,
     pub disk: crate::DiskOptions,
     /// The oracle exposes the world control API.
@@ -202,6 +203,7 @@ impl Definition {
             services.insert(
                 name.into(),
                 crate::Service {
+                    cpu: machine.cpu.clone(),
                     source: crate::ImageSource::Registry {
                         reference: "resolved-binary-input".into(),
                     },
@@ -259,9 +261,6 @@ impl Definition {
                 ..Default::default()
             },
             disk: self.simulator.disk.clone(),
-            simulator: crate::project::SimulatorDefaults {
-                blocks_per_progress_call: self.simulator.blocks_per_progress_call,
-            },
         }
     }
 }

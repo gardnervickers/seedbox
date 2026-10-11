@@ -1876,11 +1876,27 @@ fn condition(focus: &Focus, m: &MachineState) -> (String, Color) {
             if m.exit_code == Some(0) { DIM } else { RED },
         ),
     };
-    if let Some(permille) = m.throttle_permille {
-        text.0
-            .push_str(&format!(" ×{:.1}", permille as f64 / 1000.0));
+    if let Some(hz) = m.throttle_speed_hz.or(m.cpu_speed_hz) {
+        text.0.push_str(&format!(" {}", frequency(hz)));
     }
     text
+}
+
+/// A CPU speed in its largest unit, with up to two decimals: `2GHz`,
+/// `1.5GHz`, `333.33MHz`, `800kHz`.
+pub fn frequency(hz: u64) -> String {
+    for (unit, scale) in [
+        ("GHz", 1_000_000_000u64),
+        ("MHz", 1_000_000),
+        ("kHz", 1_000),
+    ] {
+        if hz >= scale {
+            let hundredths = (hz * 100).div_ceil(scale);
+            let text = format!("{}.{:02}", hundredths / 100, hundredths % 100);
+            return format!("{}{unit}", text.trim_end_matches('0').trim_end_matches('.'));
+        }
+    }
+    format!("{hz}Hz")
 }
 
 fn tabbed_title(active: Panel) -> Line<'static> {
@@ -1937,14 +1953,23 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
         .unwrap_or(4)
         .clamp(4, 14)
         + 1;
-    let base = name_width + 2 + 14 + 7 + 7;
+    // Every state carries the machine's CPU speed, so size the column to the
+    // longest one rather than cutting a speed short.
+    let states: Vec<(String, Color)> = world.machines.iter().map(|m| condition(focus, m)).collect();
+    let state_width = states
+        .iter()
+        .map(|(state, _)| state.chars().count() + 1)
+        .max()
+        .unwrap_or(14)
+        .clamp(14, 24);
+    let base = name_width + 2 + state_width + 7 + 7;
     let show_drop = width >= base + 13;
     let show_spark = width >= base + 13 + 10;
     let mut header = vec![Span::styled(
         format!(
             "  {}{}{}{}",
             pad("NAME", name_width),
-            pad("STATE", 14),
+            pad("STATE", state_width),
             pad_left("TX/S", 7),
             pad_left("RX/S", 7)
         ),
@@ -1961,9 +1986,8 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
     }
     let mut lines = vec![Line::from(header)];
     let spark_width = width.saturating_sub(base + 13 + 2);
-    for (index, m) in world.machines.iter().enumerate() {
+    for (index, (m, (state, color))) in world.machines.iter().zip(states).enumerate() {
         let selected = focus.selected.as_deref() == Some(m.name.as_str());
-        let (state, color) = condition(focus, m);
         let dropped = focus.traffic.dropped_rate(&m.name);
         let mut spans = vec![
             Span::styled(if selected { "▸ " } else { "  " }, Style::new().fg(ICE)),
@@ -1981,7 +2005,7 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
                         Modifier::empty()
                     }),
             ),
-            Span::styled(pad(&state, 14), Style::new().fg(color)),
+            Span::styled(pad(&state, state_width), Style::new().fg(color)),
             Span::styled(
                 pad_left(&rate(focus.traffic.sent_rate(&m.name)), 7),
                 Style::new().fg(TEXT),
@@ -3593,6 +3617,52 @@ mod tests {
         }));
         assert_eq!(app.screen, Screen::Timeline);
         assert_eq!(app.fault_menu, None);
+    }
+
+    #[test]
+    fn every_machine_shows_its_configured_or_throttled_speed() {
+        assert_eq!(frequency(2_000_000_000), "2GHz");
+        assert_eq!(frequency(1_500_000_000), "1.5GHz");
+        assert_eq!(frequency(333_000_000), "333MHz");
+        assert_eq!(frequency(333_333_333), "333.34MHz");
+        assert_eq!(frequency(800_000), "800kHz");
+        assert_eq!(frequency(999), "999Hz");
+        let mut app = app(&["app", "oracle"]);
+        let text = render(&app);
+        assert!(text.matches("● ready 1GHz").count() >= 2, "{text}");
+        let mut baseline = world(&["app", "oracle"]);
+        baseline.machines[0].cpu_speed_hz = Some(2_000_000_000);
+        app.apply(Update::World(baseline.clone()));
+        let text = render(&app);
+        assert!(text.contains("● ready 2GHz"), "{text}");
+        assert!(text.contains("● ready 1GHz"), "{text}");
+        // Observations carry the effective speed, including a saturated
+        // throttle: a 2 GHz CPU requested at 1 kHz actually runs at 2 MHz.
+        for (effective, label) in [(500_000_000, "500MHz"), (2_000_000, "2MHz")] {
+            let mut w = baseline.clone();
+            w.machines[0].throttle_speed_hz = Some(effective);
+            app.apply(Update::World(w));
+            let text = render(&app);
+            assert!(text.contains(&format!("● ready {label}")), "{text}");
+            assert!(text.contains("● ready 1GHz"), "{text}");
+        }
+        app.apply(Update::World(baseline.clone()));
+        let text = render(&app);
+        assert!(text.contains("● ready 2GHz"), "{text}");
+        assert!(text.contains("● ready 1GHz"), "{text}");
+        assert!(!text.contains("2MHz"), "{text}");
+        // The machines table widens its state column instead of cutting a
+        // longer state's speed short.
+        let mut exited = baseline.clone();
+        exited.machines[1].condition = MachineCondition::Exited;
+        exited.machines[1].exit_code = Some(0);
+        app.apply(Update::World(exited));
+        let text = render(&app);
+        let row = text
+            .lines()
+            .find(|line| line.contains("oracle") && line.contains("exited"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(row.contains("exited 0 1GHz "), "{row}");
     }
 
     #[test]

@@ -15,9 +15,28 @@ pub fn clock_plan(
     Some((soft, s0 + soft.saturating_sub(t0).div_ceil(ns).max(1)))
 }
 
+/// Charge a run's progress: the owed `debt` first, then the `elapsed` time of
+/// the counted syscalls, up to `remaining` before the hard stop. Returns the
+/// time charged and the debt left over.
+pub fn charge(debt: u64, elapsed: u64, remaining: u64) -> (u64, u64) {
+    let total = debt.saturating_add(elapsed);
+    let charged = total.min(remaining);
+    (charged, total - charged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hard_stop_defers_the_charge_it_cuts_off() {
+        assert_eq!(charge(0, 9_370, 1_000_000), (9_370, 0));
+        assert_eq!(charge(0, 25_000, 10_000), (10_000, 15_000));
+        assert_eq!(charge(15_000, 0, 100_000), (15_000, 0));
+        assert_eq!(charge(15_000, 2_000, 16_000), (16_000, 1_000));
+        assert_eq!(charge(0, 0, 0), (0, 0));
+        assert_eq!(charge(u64::MAX, 1, 5), (5, u64::MAX - 5));
+    }
 
     // The kernel only tightens the bound, retaining the original plan origin.
     fn arm(plan: (u64, u64), origin: (u64, u64), ns: u64, deadline: u64) -> (u64, u64) {

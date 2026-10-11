@@ -191,13 +191,13 @@ pub(crate) fn preview(
                 None => format!("Change clock rate by a seeded amount within ±{} ppb. The draw occurs only during execution; heal restores the nominal rate.", max_rate_ppb.unwrap_or(0)),
             }
         }
-        Action::Throttle {
-            factor_permille, ..
-        } => {
+        Action::Throttle { speed_hz, .. } => {
             result
                 .preconditions
                 .push("The machine must not already be throttled.".into());
-            format!("Scale the machine's seeded CPU cost to {factor_permille} thousandths until healed.")
+            format!(
+                "Run the machine's CPU at {speed_hz} Hz, below the machine's configured speed, until healed."
+            )
         }
     };
     if action.is_process() || action.is_lifecycle() {

@@ -804,6 +804,7 @@ impl<M: WorldMachine> Coord<'_, M> {
             return Err("lifecycle boundary is in committed machine past".into());
         }
         let previous_incarnation = guests[m].m.incarnation();
+        let mut applied_speed_hz = None;
         match op {
             faults::Lifecycle::Pause => {
                 self.paused_ingress[m] = 0;
@@ -838,8 +839,8 @@ impl<M: WorldMachine> Coord<'_, M> {
                 .and_then(|()| {
                     // The successor is not usable until its active throttle is
                     // restored. A failed RPC leaves the whole crash terminal.
-                    if let Some(factor) = self.faults.throttle(m) {
-                        guests[m].m.throttle(factor)?;
+                    if let Some(speed_hz) = self.faults.throttle(m) {
+                        guests[m].m.throttle(Some(speed_hz))?;
                     }
                     Ok(())
                 });
@@ -849,7 +850,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                     return Err(error);
                 }
             }
-            faults::Lifecycle::Throttle(factor) => guests[m].m.throttle(factor)?,
+            faults::Lifecycle::Throttle(speed_hz) => {
+                applied_speed_hz = guests[m].m.throttle(speed_hz)?;
+            }
             faults::Lifecycle::Reboot => {
                 // Frames that reached it before `t` belonged to the dead
                 // NIC and are dropped; later ones arrive normally.
@@ -878,9 +881,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                 faults::Lifecycle::Resume => MachineTransition::Resumed,
                 faults::Lifecycle::Crash => MachineTransition::Crashed,
                 faults::Lifecycle::Reboot => MachineTransition::Rebooted,
-                faults::Lifecycle::Throttle(factor_permille) => {
-                    MachineTransition::Throttled { factor_permille }
-                }
+                faults::Lifecycle::Throttle(_) => MachineTransition::Throttled {
+                    speed_hz: applied_speed_hz,
+                },
             };
             let incarnation = if op == faults::Lifecycle::Crash {
                 previous_incarnation

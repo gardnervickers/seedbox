@@ -1,6 +1,15 @@
 /* Automatic application progress, including shared libraries and JIT code.
- * Each thread charges one PV syscall per configured number of counted block entries.
- * The budget is part of execution semantics, not a performance setting.
+ * Each thread charges one PV syscall per configured number of executed
+ * application instructions. Every translated block is charged its own
+ * instruction count at one or more charge points; a charge that crosses the
+ * budget makes a progress call, and the overshoot carries into the next
+ * window. The budget and the charge points are part of execution semantics,
+ * not performance settings.
+ *
+ * A progress call is a getpid whose first argument is the progress mark. The
+ * kernel's PV syscall charge recognizes the mark and may add seeded progress
+ * jitter there, drawn from a stream the VMM seeds per machine; the client
+ * itself draws nothing.
  *
  * On AArch64 the patched translator implements software exclusive reservations.
  * Host-only retries stay inside one mangled store instruction, below this
@@ -20,59 +29,82 @@
 
 #include "budget.h"
 
-static reg_t block_budget;
+static ptr_int_t instruction_budget;
+static uint points_per_block;
 static reg_id_t budget_segment;
 static uint budget_offset;
 
-static reg_t *budget(void)
+/* Instructions left in this thread's window. It goes negative when a charge
+ * crosses the budget, and the checkpoint carries that overshoot. */
+static ptr_int_t *budget(void)
 {
-    return (reg_t *)((byte *)dr_get_dr_segment_base(budget_segment) + budget_offset);
+    return (ptr_int_t *)((byte *)dr_get_dr_segment_base(budget_segment) + budget_offset);
 }
 
-static void checkpoint(void)
+static void progress_call(void)
 {
-    *budget() = block_budget;
 #ifdef X86_64
     long result;
-    __asm__ volatile("syscall" : "=a"(result) : "a"(39L)
+    __asm__ volatile("syscall" : "=a"(result)
+                     : "a"(39L), "D"((long)SEEDBOX_PROGRESS_MARK)
                      : "rcx", "r11", "memory", "cc");
 #elif defined(AARCH64)
     register long number __asm__("x8") = 172;
-    register long result __asm__("x0");
-    __asm__ volatile("svc #0" : "=r"(result) : "r"(number) : "memory", "cc");
+    register long result __asm__("x0") = (long)SEEDBOX_PROGRESS_MARK;
+    __asm__ volatile("svc #0" : "+r"(result) : "r"(number) : "memory", "cc");
 #else
 #error Unsupported progress architecture
 #endif
     DR_ASSERT(result > 0);
 }
 
+/* One progress call per budget the charges have used, so a charge larger than
+ * the budget still advances virtual time in proportion to its instructions. */
+static void checkpoint(void)
+{
+    ptr_int_t *left = budget();
+    do {
+        *left += instruction_budget;
+        progress_call();
+    } while (*left < 0);
+}
+
 static void thread_init(void *context)
 {
     (void)context;
-    *budget() = block_budget;
+    *budget() = instruction_budget;
 }
 
-/* Insert the budget decrement and checkpoint call before `where`. */
-static void charge_before(void *context, instrlist_t *block, instr_t *where)
+/* Charge `instructions` before `where` and call the checkpoint when the charge
+ * leaves the budget negative. Instrumentation preserves application flags. */
+static void charge_before(void *context, instrlist_t *block, instr_t *where,
+                          uint instructions)
 {
     instr_t *skip = INSTR_CREATE_label(context);
 #ifdef X86_64
     DR_ASSERT(drreg_reserve_aflags(context, block, where) == DRREG_SUCCESS);
     instrlist_meta_preinsert(block, where, INSTR_CREATE_sub(context,
-        dr_raw_tls_opnd(context, budget_segment, budget_offset), OPND_CREATE_INT8(1)));
+        dr_raw_tls_opnd(context, budget_segment, budget_offset),
+        instructions <= 127 ? OPND_CREATE_INT8(instructions)
+                            : OPND_CREATE_INT32(instructions)));
     instrlist_meta_preinsert(block, where,
-        INSTR_CREATE_jcc(context, OP_jnz, opnd_create_instr(skip)));
+        INSTR_CREATE_jcc(context, OP_jns, opnd_create_instr(skip)));
 #elif defined(AARCH64)
-    /* Non-flag-setting arithmetic and CBNZ preserve application NZCV. */
+    /* Non-flag-setting arithmetic and TBZ preserve application NZCV. */
     reg_id_t scratch;
     DR_ASSERT(drreg_reserve_register(context, block, where, NULL, &scratch)
               == DRREG_SUCCESS);
     dr_insert_read_raw_tls(context, block, where, budget_segment, budget_offset, scratch);
-    instrlist_meta_preinsert(block, where, INSTR_CREATE_sub(context,
-        opnd_create_reg(scratch), opnd_create_reg(scratch), OPND_CREATE_INT(1)));
+    /* SUB takes a 12-bit immediate. */
+    for (uint left = instructions; left > 0;) {
+        uint step = left < 4095 ? left : 4095;
+        instrlist_meta_preinsert(block, where, INSTR_CREATE_sub(context,
+            opnd_create_reg(scratch), opnd_create_reg(scratch), OPND_CREATE_INT(step)));
+        left -= step;
+    }
     dr_insert_write_raw_tls(context, block, where, budget_segment, budget_offset, scratch);
-    instrlist_meta_preinsert(block, where, INSTR_CREATE_cbnz(context,
-        opnd_create_instr(skip), opnd_create_reg(scratch)));
+    instrlist_meta_preinsert(block, where, INSTR_CREATE_tbz(context,
+        opnd_create_instr(skip), opnd_create_reg(scratch), OPND_CREATE_INT(63)));
 #endif
     dr_insert_clean_call(context, block, where, (void *)checkpoint, false, 0);
     instrlist_meta_preinsert(block, where, skip);
@@ -104,12 +136,54 @@ static dr_emit_flags_t neutralize_waits(void *context, void *tag, instrlist_t *b
     return DR_EMIT_DEFAULT;
 }
 
+/* One block's charge points, built when the block is analyzed and consumed
+ * in order as its application instructions are instrumented. Point `p` starts
+ * at instruction p * length / points and charges the instructions up to the
+ * next point, so the points split the block as evenly as possible. */
+typedef struct {
+    uint length;
+    uint points;
+    uint index;
+    uint next;
+} charge_plan_t;
+
+static uint point_start(const charge_plan_t *plan, uint point)
+{
+    return (uint)((uint64)point * plan->length / plan->points);
+}
+
+static dr_emit_flags_t analyze(void *context, void *tag, instrlist_t *block, bool trace,
+                               bool translating, void **user)
+{
+    charge_plan_t *plan = dr_thread_alloc(context, sizeof(*plan));
+    plan->length = 0;
+    for (instr_t *instruction = instrlist_first_app(block); instruction != NULL;
+         instruction = instr_get_next_app(instruction))
+        plan->length++;
+    plan->points = plan->length < points_per_block ? plan->length : points_per_block;
+    plan->index = 0;
+    plan->next = 0;
+    *user = plan;
+    return DR_EMIT_DEFAULT;
+}
+
 static dr_emit_flags_t instrument(void *context, void *tag, instrlist_t *block,
                                  instr_t *instruction, bool trace,
                                  bool translating, void *user)
 {
-    if (drmgr_is_first_instr(context, instruction))
-        charge_before(context, block, instruction);
+    charge_plan_t *plan = user;
+    if (instr_is_app(instruction)) {
+        if (plan->next < plan->points && plan->index == point_start(plan, plan->next)) {
+            plan->next++;
+            charge_before(context, block, instruction,
+                          point_start(plan, plan->next) - plan->index);
+        }
+        plan->index++;
+    }
+    if (drmgr_is_last_instr(context, instruction)) {
+        DR_ASSERT(plan->index == plan->length && plan->next == plan->points);
+        dr_thread_free(context, plan, sizeof(*plan));
+    }
     return DR_EMIT_DEFAULT;
 }
 
@@ -122,22 +196,24 @@ static void finished(void)
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
 {
-    uint32_t parsed_budget;
-    if (argc != 3 || !seedbox_progress_budget(argv[1], argv[2], &parsed_budget)) {
-        dr_fprintf(STDERR, "seedbox progress: expected --blocks-per-progress-call with a positive u32\n");
+    uint32_t parsed_budget, parsed_points;
+    if (!seedbox_progress_arguments(argc, argv, &parsed_budget, &parsed_points)) {
+        dr_fprintf(STDERR, "seedbox progress: expected " SEEDBOX_PROGRESS_INSTRUCTIONS
+                   " and " SEEDBOX_PROGRESS_POINTS ", each with a positive u32\n");
         dr_abort();
         return;
     }
     /* Both supported ISAs use a 64-bit raw TLS word. Never encode the budget
-     * as an instruction immediate: the entire u32 range fits in reg_t. */
-    block_budget = (reg_t)parsed_budget;
+     * as an instruction immediate: the entire u32 range fits in ptr_int_t. */
+    instruction_budget = (ptr_int_t)parsed_budget;
+    points_per_block = parsed_points;
     drreg_options_t options = {sizeof(options), 3, false};
     DR_ASSERT(drmgr_init());
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);
     DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 1, 0));
     drmgr_register_thread_init_event(thread_init);
     drmgr_register_bb_app2app_event(neutralize_waits, NULL);
-    drmgr_register_bb_instrumentation_event(NULL, instrument, NULL);
+    drmgr_register_bb_instrumentation_event(analyze, instrument, NULL);
     /* The newer ARM SDK routes exit callbacks through drmgr. */
 #ifdef AARCH64
     drmgr_register_exit_event(finished);
