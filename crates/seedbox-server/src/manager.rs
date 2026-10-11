@@ -597,6 +597,23 @@ impl Manager {
         Ok(state.project(state.catalogue.get(id)?.clone(), Instant::now()))
     }
 
+    pub(crate) fn capacity(
+        &self,
+        slots: usize,
+        occupying: &std::collections::BTreeSet<SimulationId>,
+    ) -> Result<seedbox_api::ExecutionCapacity, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let now = Instant::now();
+        Ok(crate::capacity::project(
+            slots,
+            occupying,
+            state
+                .catalogue
+                .list()
+                .map(|s| state.project(s.clone(), now)),
+        ))
+    }
+
     pub fn list(&self, after: Option<&SimulationId>) -> Result<seedbox_api::SimulationList, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         let now = Instant::now();
