@@ -6,7 +6,10 @@ pkgs.stdenv.mkDerivation {
     url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/release_11.3.0-1.tar.gz";
     hash = "sha256-aj7BN0bravXAY72wVB37ZbTJvS+hZTxC61RAMiBDLsI=";
   };
-  patches = [ ../guest/progress/dynamorio-exclusives.patch ];
+  patches = [
+    ../guest/progress/dynamorio-exclusives.patch
+    ../guest/progress/dynamorio-sigreturn.patch
+  ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build
   # only drreg and its drmgr/drcontainers dependencies.
