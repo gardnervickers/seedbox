@@ -271,15 +271,25 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
 
     fn supports_speed_reseed(&self) -> bool;
     fn seed_speed(&mut self, seed: u64, domain: &str) -> Result<(), String>;
+    /// Restart the stream the guest kernel draws progress jitter from, at a
+    /// time fork (`seed_progress_jitter`) or in a checkpoint branch and at a
+    /// reboot (`seed_progress_jitter_branch`), next to the timer stream.
+    fn seed_progress_jitter(&mut self, seed: u64, domain: &str) -> Result<(), String>;
+    fn seed_progress_jitter_branch(
+        &mut self,
+        seed: u64,
+        identity: Option<&str>,
+        domain: &str,
+    ) -> Result<(), String>;
     /// Whether `throttle` can scale this machine's CPU cost.
     fn supports_throttle(&self) -> bool {
         false
     }
-    /// Charge CPU work at `factor_permille / 1000` times the seeded speed;
-    /// 1000 restores it. Takes effect from the machine's next slice.
-    fn throttle(&mut self, _factor_permille: u64) -> Result<(), String> {
-        Err("throttle is unsupported by this backend".into())
-    }
+    /// Run the CPU at `speed_hz` instead of the machine's configured speed, charging CPU
+    /// work by the ratio; `None` restores it. Takes effect from the machine's
+    /// next slice. Returns the effective nominal speed after backend rounding
+    /// and clamping, or `None` when healed.
+    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<Option<u64>, String>;
     fn exits(&self) -> u64;
     fn exit_witness(&mut self) -> Result<String, String>;
     /// Idempotently poison, close and reap owned worker transport without another
@@ -400,9 +410,18 @@ impl SliceObservation {
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Payload {
-    Frame { from: usize, bytes: Vec<u8> },
+    Frame {
+        from: usize,
+        bytes: Vec<u8>,
+    },
+    /// A virtual nameserver reply, with no machine-to-machine link identity.
+    DnsReply(Vec<u8>),
     Serial(Vec<u8>),
-    Partition { from: usize, to: usize, on: bool },
+    Partition {
+        from: usize,
+        to: usize,
+        on: bool,
+    },
 }
 pub fn entropy_seed(seed: u64, domain: &str) -> [u8; 32] {
     entropy_seed_branch(seed, None, domain)
@@ -752,6 +771,9 @@ impl<M: WorldMachine> World<M> {
                         self.count_link(at, from, m, DELIVERED);
                     }
                 }
+                Payload::DnsReply(bytes) => {
+                    mach.deliver_frame(&bytes)?;
+                }
                 Payload::Serial(b) => mach.deliver_serial(&b)?,
                 Payload::Partition { from, to, on } => {
                     self.partitioned.insert((from, to), on);
@@ -842,7 +864,9 @@ impl<M: WorldMachine> World<M> {
             faults::Lifecycle::Resume => self.machines[m].resume(t),
             faults::Lifecycle::Crash => self.crash(m, t),
             faults::Lifecycle::Reboot => self.reboot(m, t),
-            faults::Lifecycle::Throttle(factor) => self.machines[m].throttle(factor),
+            faults::Lifecycle::Throttle(speed_hz) => {
+                self.machines[m].throttle(speed_hz).map(|_| ())
+            }
         }
     }
 
@@ -872,8 +896,8 @@ impl<M: WorldMachine> World<M> {
             self.failure = Some(error.clone());
             return Err(error);
         }
-        if let Some(factor) = self.faults.throttle(m) {
-            self.machines[m].throttle(factor)?;
+        if let Some(speed_hz) = self.faults.throttle(m) {
+            self.machines[m].throttle(Some(speed_hz))?;
         }
         Ok(())
     }
@@ -889,7 +913,7 @@ impl<M: WorldMachine> World<M> {
                     self.dropped += 1;
                     self.count_link(at, from, m, RECEIVER_DROPPED);
                 }
-                Payload::Serial(_) => {}
+                Payload::DnsReply(_) | Payload::Serial(_) => {}
                 Payload::Partition { from, to, on } => {
                     self.partitioned.insert((from, to), on);
                 }
@@ -985,11 +1009,20 @@ pub(crate) fn crash_machine<M: WorldMachine>(
         );
         // A failed constructor owns cleanup of any partially booted worker.
         let mut fresh = M::boot(factory, &name, boot, false, seed)?;
-        if let Err(mut error) = fresh.seed_timer_branch(
-            run_seed,
-            branch_identity,
-            &format!("timer-jitter/{name}/{next}"),
-        ) {
+        if let Err(mut error) = fresh
+            .seed_timer_branch(
+                run_seed,
+                branch_identity,
+                &format!("timer-jitter/{name}/{next}"),
+            )
+            .and_then(|()| {
+                fresh.seed_progress_jitter_branch(
+                    run_seed,
+                    branch_identity,
+                    &format!("progress-jitter/{name}/{next}"),
+                )
+            })
+        {
             note_cleanup(&mut error, "fresh", fresh.terminate_worker());
             return Err(error);
         }
@@ -1241,6 +1274,7 @@ pub fn release_plan<M: WorldMachine>(
         }
         reseed.insert(names[i].clone(), json!(how.as_str()));
         mach.seed_timer(seed, &format!("timer-jitter/{}", names[i]))?;
+        mach.seed_progress_jitter(seed, &format!("progress-jitter/{}", names[i]))?;
         if mach.supports_speed_reseed() {
             mach.seed_speed(seed, &format!("pv-speed/{}", names[i]))?;
         }
@@ -1285,6 +1319,11 @@ pub fn reseed_checkpoint<M: WorldMachine>(
             seed,
             Some(identity),
             &format!("timer-jitter/{name}/{}", mach.incarnation),
+        )?;
+        mach.seed_progress_jitter_branch(
+            seed,
+            Some(identity),
+            &format!("progress-jitter/{name}/{}", mach.incarnation),
         )?;
         let status = if mach.down || matches!(mach.state, State::Exited(_)) {
             "not_up"

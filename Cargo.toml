@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 bollard = { version = "0.21", features = ["buildkit", "chrono"] }
 hex = "0.4"
+hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
 seedbox-artifacts = { path = "crates/seedbox-artifacts" }
 seedbox-application = { path = "crates/seedbox-application" }
 seedbox-server = { path = "crates/seedbox-server" }

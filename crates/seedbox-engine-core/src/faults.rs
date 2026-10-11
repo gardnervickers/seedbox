@@ -149,6 +149,13 @@ pub enum Life {
     Paused,
     Down,
 }
+
+/// Names selected by shape compilation, with no admission or execution effects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionTargets {
+    pub machines: Vec<String>,
+    pub links: Vec<(String, String)>,
+}
 /// A lifecycle transition applied at a fault boundary, for the world to carry
 /// out on the machine before anything else happens at that time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -157,8 +164,8 @@ pub enum Lifecycle {
     Resume,
     Crash,
     Reboot,
-    /// Charge CPU work at this many thousandths of the seeded speed.
-    Throttle(u64),
+    /// Run the CPU at this speed in Hz, or at the machine's configured speed again.
+    Throttle(Option<u64>),
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 enum Event {
@@ -189,7 +196,7 @@ pub struct Faults {
     pub readiness: Vec<Value>,
     handles: BTreeMap<String, BTreeSet<(usize, usize)>>,
     clocks: BTreeMap<String, Clock>,
-    /// Active throttle handles: machine and factor in thousandths.
+    /// Active throttle handles: machine and requested CPU speed in Hz.
     throttles: BTreeMap<String, (usize, u64)>,
     #[serde(with = "crate::checkpoint::ordered_map")]
     cuts: BTreeMap<(usize, usize), usize>,
@@ -275,6 +282,38 @@ impl Faults {
         })
         .map(|_| ())
     }
+
+    /// Compile only target selection. This never samples RNG, prepares an
+    /// admission, or assigns/reserves an ID. Heal targets need an observation
+    /// of the active handle and are deliberately not inferred here.
+    pub fn action_targets(&self, action: &Action) -> Result<ActionTargets, String> {
+        let entry = self.compile(Plan {
+            id: 0,
+            at_ns: 0,
+            deadline_ns: 0,
+            action: action.clone(),
+        })?;
+        let mut machines = BTreeSet::new();
+        if let Some(target) = entry.target {
+            machines.insert(self.names[target].clone());
+        }
+        let mut links: Vec<_> = entry
+            .pairs
+            .iter()
+            .map(|&(from, to)| (self.names[from].clone(), self.names[to].clone()))
+            .collect();
+        if let Action::DropConnection { connection, .. } = action {
+            links.push((connection.from.clone(), connection.to.clone()));
+        }
+        for (from, to) in &links {
+            machines.insert(from.clone());
+            machines.insert(to.clone());
+        }
+        Ok(ActionTargets {
+            machines: machines.into_iter().collect(),
+            links,
+        })
+    }
     fn compile(&self, plan: Plan) -> Result<Entry, String> {
         if plan.deadline_ns < plan.at_ns {
             return Err("fault deadline precedes request".into());
@@ -292,15 +331,11 @@ impl Faults {
             | Action::Reboot { machine }
             | Action::Throttle { machine, .. } => {
                 if let Action::Throttle {
-                    handle,
-                    factor_permille,
-                    ..
+                    handle, speed_hz, ..
                 } = &plan.action
                 {
-                    if handle.is_empty()
-                        || !seedbox_control::THROTTLE_PERMILLE.contains(factor_permille)
-                    {
-                        return Err("invalid throttle handle/factor".into());
+                    if handle.is_empty() || !seedbox_control::THROTTLE_SPEED_HZ.contains(speed_hz) {
+                        return Err("invalid throttle handle/speed".into());
                     }
                 }
                 target = Some(self.machine_index(machine, "unknown fault machine")?);
@@ -530,13 +565,13 @@ impl Faults {
         handles.sort();
         handles
     }
-    /// The factor of machine `m`'s active throttle, if any. A rebooted
+    /// The speed of machine `m`'s active throttle, if any. A rebooted
     /// incarnation takes it on again.
     pub fn throttle(&self, m: usize) -> Option<u64> {
         self.throttles
             .values()
             .find(|(machine, _)| *machine == m)
-            .map(|(_, factor)| *factor)
+            .map(|(_, speed_hz)| *speed_hz)
     }
     pub fn process_state(&self, machine: usize) -> &'static str {
         match self.life[machine] {
@@ -935,10 +970,8 @@ impl Faults {
                 self.heal_clock(i, now, handle, commands)
             }
             Action::Throttle {
-                handle,
-                factor_permille,
-                ..
-            } => self.apply_throttle(i, now, handle, factor_permille),
+                handle, speed_hz, ..
+            } => self.apply_throttle(i, now, handle, speed_hz),
             Action::Heal { handle } => self.heal(i, now, handle),
             action @ (Action::Pause { .. }
             | Action::Resume { .. }
@@ -1127,7 +1160,7 @@ impl Faults {
             }
         }
     }
-    fn apply_throttle(&mut self, i: usize, now: u64, handle: String, factor_permille: u64) {
+    fn apply_throttle(&mut self, i: usize, now: u64, handle: String, speed_hz: u64) {
         let m = self.entries[i].target.expect("a throttle has a target");
         if self.active_handles().contains(&handle) {
             return self.fail(i, "duplicate active handle".into());
@@ -1135,20 +1168,16 @@ impl Faults {
         if self.throttle(m).is_some() {
             return self.fail(i, "target machine is already throttled".into());
         }
-        self.throttles.insert(handle.clone(), (m, factor_permille));
-        self.applied(
-            i,
-            now,
-            format!("handle={handle}; factor_permille={factor_permille}"),
-        );
+        self.throttles.insert(handle.clone(), (m, speed_hz));
+        self.applied(i, now, format!("handle={handle}; speed_hz={speed_hz}"));
         self.lifecycle
-            .push((m, Lifecycle::Throttle(factor_permille)));
+            .push((m, Lifecycle::Throttle(Some(speed_hz))));
     }
     /// Heal a throttle, connection selector, shape layer or partition.
     fn heal(&mut self, i: usize, now: u64, handle: String) {
         if let Some((m, _)) = self.throttles.remove(&handle) {
-            self.applied(i, now, format!("handle={handle}; seeded speed restored"));
-            self.lifecycle.push((m, Lifecycle::Throttle(1_000)));
+            self.applied(i, now, format!("handle={handle}; project speed restored"));
+            self.lifecycle.push((m, Lifecycle::Throttle(None)));
             return;
         }
         if let Some(selection) = self.connections.selections.remove(&handle) {

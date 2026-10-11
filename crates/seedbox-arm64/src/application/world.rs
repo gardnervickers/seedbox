@@ -326,6 +326,13 @@ pub fn run(options: &Options) -> Result<Value> {
                 domain: format!("timer-jitter/{}", m.name),
                 jitter_ns: cfg.timer_jitter_ns,
             }),
+            progress: Some(super::Progress {
+                speed_hz: m.cpu_speed_hz,
+                ns: m.progress_ns,
+                jitter_ns: m.progress_jitter_ns,
+                seed: crate::rng::Rng::new(options.seed, &format!("progress-jitter/{}", m.name))
+                    .next(),
+            }),
         };
         machines.push(ArmMachine::boot(
             &factory,
@@ -522,6 +529,10 @@ pub fn run(options: &Options) -> Result<Value> {
             match payload {
                 Payload::Frame { from, bytes } => {
                     retained.push((key, Some(*from), bytes));
+                }
+                Payload::DnsReply(bytes) => {
+                    // A reserved witness identity for the virtual endpoint.
+                    retained.push((key, Some(usize::MAX), bytes));
                 }
                 Payload::Serial(_) | Payload::Partition { .. } => {
                     return Err("unsupported ARM world event in retained network state".into())

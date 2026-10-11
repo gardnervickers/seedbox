@@ -597,6 +597,23 @@ impl Manager {
         Ok(state.project(state.catalogue.get(id)?.clone(), Instant::now()))
     }
 
+    pub(crate) fn capacity(
+        &self,
+        slots: usize,
+        occupying: &std::collections::BTreeSet<SimulationId>,
+    ) -> Result<seedbox_api::ExecutionCapacity, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let now = Instant::now();
+        Ok(crate::capacity::project(
+            slots,
+            occupying,
+            state
+                .catalogue
+                .list()
+                .map(|s| state.project(s.clone(), now)),
+        ))
+    }
+
     pub fn list(&self, after: Option<&SimulationId>) -> Result<seedbox_api::SimulationList, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         let now = Instant::now();
@@ -935,6 +952,21 @@ impl Manager {
             &world,
             resource.spec.configuration.network.latency_ns,
         ))
+    }
+
+    /// Explain a proposed action from one observation without worker admission.
+    pub fn preview_fault(
+        &self,
+        id: &SimulationId,
+        action: &seedbox_api::FaultAction,
+    ) -> Result<seedbox_api::FaultPreview, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let resource = state.catalogue.get(id)?;
+        let world = match state.worlds.get(id) {
+            Some(world) => world.snapshot(),
+            None => crate::world::Tracker::new(id.clone(), &resource.spec.configuration).snapshot(),
+        };
+        crate::fault_preview::preview(&world, &resource.spec.configuration, action)
     }
 
     /// The observed world, or the configured one before any observation.

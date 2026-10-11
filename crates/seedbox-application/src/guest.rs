@@ -85,14 +85,37 @@ pub fn minimum_memory_mb(archive_bytes: u64) -> Result<u32> {
 }
 
 /// The boot recipe format this build writes; the guest supervisor must accept it.
-pub const LAUNCH_MAGIC: &[u8; 10] = b"SBXLAUNCH5";
+pub const LAUNCH_MAGIC: &[u8; 10] = b"SBXLAUNCH6";
 
 /// Linux rejects a CLOCK_REALTIME earlier than the guest's uptime, so an epoch
 /// below this would stop every guest at the launch barrier.
 pub const MIN_WALL_CLOCK_EPOCH: u32 = 86400;
 
+/// Bootstrap networking shared by image preparation and resolved-definition edits.
+/// Peer names are resolved through simulated DNS, never a frozen hosts file.
+pub(crate) struct Network {
+    pub cidr: String,
+    pub hosts: String,
+}
+
+impl Network {
+    pub fn new(index: usize, hostname: &str) -> Result<Self> {
+        let last = index
+            .checked_add(1)
+            .and_then(|last| u8::try_from(last).ok())
+            .ok_or_else(|| Error::Integrity("machine address exceeds the guest subnet".into()))?;
+        let address = format!("10.0.0.{last}");
+        Ok(Self {
+            cidr: format!("{address}/24"),
+            hosts: format!("127.0.0.1 localhost\n::1 localhost\n{address} {hostname}\n"),
+        })
+    }
+}
+
 /// This binary recipe is consumed by the small static Linux guest init. Length
 /// prefixes avoid shell evaluation of command, environment or config contents.
+/// The progress instrumentation's constants ride along, so the guest and the
+/// simulator agree on what one progress call stands for.
 pub fn launch_recipe(
     launch: &Launch,
     ip: &str,
@@ -100,27 +123,6 @@ pub fn launch_recipe(
     hostname: &str,
     configs: &BTreeMap<String, Vec<u8>>,
     wall_clock_epoch: u32,
-) -> Result<Vec<u8>> {
-    launch_recipe_with_progress(
-        launch,
-        ip,
-        hosts,
-        hostname,
-        configs,
-        wall_clock_epoch,
-        seedbox_spec::project::SimulatorDefaults::default().blocks_per_progress_call,
-    )
-}
-
-/// Encode the explicit PV block budget with the prepared guest inputs.
-pub fn launch_recipe_with_progress(
-    launch: &Launch,
-    ip: &str,
-    hosts: &str,
-    hostname: &str,
-    configs: &BTreeMap<String, Vec<u8>>,
-    wall_clock_epoch: u32,
-    blocks_per_progress_call: std::num::NonZeroU32,
 ) -> Result<Vec<u8>> {
     if wall_clock_epoch < MIN_WALL_CLOCK_EPOCH {
         return Err(Error::Setup(format!(
@@ -134,7 +136,8 @@ pub fn launch_recipe_with_progress(
     // A guest-wide default per service VM, retained with the launch inputs.
     bytes.extend_from_slice(&262144_u32.to_le_bytes()); // vm.max_map_count
     bytes.extend_from_slice(&wall_clock_epoch.to_le_bytes());
-    bytes.extend_from_slice(&blocks_per_progress_call.get().to_le_bytes());
+    bytes.extend_from_slice(&seedbox_spec::project::PROGRESS_INSTRUCTIONS.to_le_bytes());
+    bytes.extend_from_slice(&seedbox_spec::project::PROGRESS_POINTS.to_le_bytes());
     list(&mut bytes, &launch.argv)?;
     list(
         &mut bytes,

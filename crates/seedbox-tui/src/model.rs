@@ -43,6 +43,11 @@ pub enum Update {
     Resource(Simulation),
     World(WorldState),
     FaultTypes(FaultCatalogue),
+    FaultPreview(
+        serde_json::Value,
+        u64,
+        Result<seedbox_api::FaultPreview, String>,
+    ),
     Timeline(seedbox_api::FaultTimeline),
     FaultReceipt {
         title: String,
@@ -88,6 +93,7 @@ pub enum Request {
     Close,
     Control(SimulationId, ControlCommand),
     BeginFaultMenu(SimulationId),
+    PreviewFault(SimulationId, serde_json::Value, u64),
     EndFaultMenu(SimulationId, PlaybackRate),
     Fault(SimulationId, serde_json::Value, PlaybackRate),
     PauseThenStep(SimulationId),
@@ -205,6 +211,10 @@ pub struct Focus {
     pub fault_selected: Option<Key>,
     /// Per-machine preparation progress reported before execution.
     pub preparation: BTreeMap<String, seedbox_api::PreparationStage>,
+    /// Recent achieved rates between successive playback observations,
+    /// oldest first, in simulated seconds per wall-clock second.
+    pub achieved: VecDeque<f64>,
+    achieved_from: Option<seedbox_api::RateMeasurement>,
 }
 
 /// What the catalogue knows about a simulation beyond its summary.
@@ -226,26 +236,88 @@ pub struct Checkpoint {
 #[derive(Default)]
 pub struct Traffic {
     baseline: Option<(u64, LinkCounts)>,
-    /// Frames per simulated second on each directed link.
-    pub links: BTreeMap<(String, String), f64>,
+    /// Rates on each directed link over the newest window.
+    pub links: BTreeMap<(String, String), LinkRates>,
     /// Recent transmit rates per machine, oldest first.
     pub sent: BTreeMap<String, VecDeque<f64>>,
     pub received: BTreeMap<String, f64>,
+    /// Frames dropped per simulated second, charged as the counters are: the
+    /// sender for partition, loss and queue drops, the receiver for its own.
+    pub dropped: BTreeMap<String, Drops>,
+    /// Every window seen while watching, per machine, on simulated time.
+    pub history: BTreeMap<String, Vec<Sample>>,
 }
 
-/// Scheduled-frame counters per directed link.
-type LinkCounts = BTreeMap<(String, String), u64>;
+/// Counters per directed link, as last observed.
+type LinkCounts = BTreeMap<(String, String), seedbox_api::LinkCounters>;
+
+/// Frames per simulated second, by why they were dropped.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Drops {
+    pub partition: f64,
+    pub loss: f64,
+    pub queue: f64,
+    pub receiver: f64,
+}
+
+impl Drops {
+    pub fn total(&self) -> f64 {
+        self.partition + self.loss + self.queue + self.receiver
+    }
+
+    fn add(&mut self, other: &Drops) {
+        self.partition += other.partition;
+        self.loss += other.loss;
+        self.queue += other.queue;
+        self.receiver += other.receiver;
+    }
+
+    /// The largest cause, for a one-glyph summary.
+    pub fn dominant(&self) -> Option<&'static str> {
+        [
+            (self.partition, "partition"),
+            (self.loss, "loss"),
+            (self.queue, "queue"),
+            (self.receiver, "receiver"),
+        ]
+        .into_iter()
+        .filter(|(rate, _)| *rate >= 0.5)
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, cause)| cause)
+    }
+}
+
+/// Rates on one directed link over the newest window.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LinkRates {
+    pub frames: f64,
+    pub bytes: f64,
+    pub dropped: Drops,
+}
+
+/// One machine's traffic over the window `[from_ns, at_ns]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sample {
+    pub from_ns: u64,
+    pub at_ns: u64,
+    pub sent: f64,
+    pub dropped: f64,
+}
 
 const TRAFFIC_WINDOW_NS: u64 = 100_000_000;
 const TRAFFIC_SAMPLES: usize = 24;
+/// Retained samples per machine; older halves are merged pairwise so a long
+/// run keeps its whole shape at a coarser resolution.
+const HISTORY_SAMPLES: usize = 4096;
 const MAX_TRANSITIONS: usize = 2000;
+const ACHIEVED_SAMPLES: usize = 40;
 
 impl Traffic {
     fn observe(&mut self, world: &WorldState) {
-        let counts: BTreeMap<(String, String), u64> = world
+        let counts: LinkCounts = world
             .links
             .iter()
-            .map(|l| ((l.from.clone(), l.to.clone()), l.counters.scheduled))
+            .map(|l| ((l.from.clone(), l.to.clone()), l.counters.clone()))
             .collect();
         let Some((at, previous)) = &self.baseline else {
             self.baseline = Some((world.simulated_time_ns, counts));
@@ -260,24 +332,62 @@ impl Traffic {
             return;
         }
         let seconds = elapsed as f64 / 1e9;
+        let per_second = |now: u64, before: u64| now.saturating_sub(before) as f64 / seconds;
         let mut sent: BTreeMap<String, f64> = BTreeMap::new();
         let mut received: BTreeMap<String, f64> = BTreeMap::new();
+        let mut dropped: BTreeMap<String, Drops> = BTreeMap::new();
         self.links.clear();
-        for (key, count) in &counts {
-            let before = previous.get(key).copied().unwrap_or(0);
-            let rate = count.saturating_sub(before) as f64 / seconds;
-            self.links.insert(key.clone(), rate);
-            *sent.entry(key.0.clone()).or_default() += rate;
-            *received.entry(key.1.clone()).or_default() += rate;
+        for (key, now) in &counts {
+            let before = previous.get(key).cloned().unwrap_or_default();
+            let rates = LinkRates {
+                frames: per_second(now.scheduled, before.scheduled),
+                bytes: per_second(now.bytes, before.bytes),
+                dropped: Drops {
+                    partition: per_second(now.partition_dropped, before.partition_dropped),
+                    loss: per_second(now.loss_dropped, before.loss_dropped),
+                    queue: per_second(now.queue_dropped, before.queue_dropped),
+                    receiver: per_second(now.receiver_dropped, before.receiver_dropped),
+                },
+            };
+            *sent.entry(key.0.clone()).or_default() += rates.frames;
+            *received.entry(key.1.clone()).or_default() += rates.frames;
+            dropped.entry(key.0.clone()).or_default().add(&Drops {
+                receiver: 0.0,
+                ..rates.dropped
+            });
+            dropped.entry(key.1.clone()).or_default().receiver += rates.dropped.receiver;
+            self.links.insert(key.clone(), rates);
         }
         for machine in &world.machines {
+            let rate = sent.get(&machine.name).copied().unwrap_or(0.0);
             let history = self.sent.entry(machine.name.clone()).or_default();
-            history.push_back(sent.get(&machine.name).copied().unwrap_or(0.0));
+            history.push_back(rate);
             while history.len() > TRAFFIC_SAMPLES {
                 history.pop_front();
             }
+            let samples = self.history.entry(machine.name.clone()).or_default();
+            samples.push(Sample {
+                from_ns: *at,
+                at_ns: world.simulated_time_ns,
+                sent: rate,
+                dropped: dropped.get(&machine.name).map_or(0.0, Drops::total),
+            });
+            if samples.len() > HISTORY_SAMPLES {
+                let keep = samples.len() / 2;
+                let merged: Vec<Sample> = samples[..keep]
+                    .chunks(2)
+                    .map(|pair| Sample {
+                        from_ns: pair[0].from_ns,
+                        at_ns: pair[pair.len() - 1].at_ns,
+                        sent: pair.iter().map(|s| s.sent).sum::<f64>() / pair.len() as f64,
+                        dropped: pair.iter().map(|s| s.dropped).sum::<f64>() / pair.len() as f64,
+                    })
+                    .collect();
+                samples.splice(..keep, merged);
+            }
         }
         self.received = received;
+        self.dropped = dropped;
         self.baseline = Some((world.simulated_time_ns, counts));
     }
 
@@ -292,11 +402,19 @@ impl Traffic {
         self.received.get(machine).copied().unwrap_or(0.0)
     }
 
-    pub fn link_rate(&self, from: &str, to: &str) -> f64 {
+    pub fn dropped_rate(&self, machine: &str) -> Drops {
+        self.dropped.get(machine).copied().unwrap_or_default()
+    }
+
+    pub fn link(&self, from: &str, to: &str) -> LinkRates {
         self.links
             .get(&(from.to_owned(), to.to_owned()))
             .copied()
-            .unwrap_or(0.0)
+            .unwrap_or_default()
+    }
+
+    pub fn link_rate(&self, from: &str, to: &str) -> f64 {
+        self.link(from, to).frames
     }
 }
 
@@ -325,7 +443,39 @@ impl Focus {
             seen: Vec::new(),
             fault_selected: None,
             preparation: BTreeMap::new(),
+            achieved: VecDeque::new(),
+            achieved_from: None,
         }
+    }
+
+    /// Record the rate achieved since the previous observation. The server
+    /// measures from its last rate change, so a smaller wall time starts over.
+    fn observe_achieved(&mut self, sample: &PlaybackObservation) {
+        if matches!(sample.state.rate, PlaybackRate::Paused) {
+            self.achieved_from = None;
+            return;
+        }
+        let Some(now) = sample.state.achieved_rate else {
+            return;
+        };
+        if let Some(before) = self.achieved_from {
+            let wall = now
+                .wall_time_ns
+                .get()
+                .checked_sub(before.wall_time_ns.get());
+            let simulated = now.simulated_time_ns.checked_sub(before.simulated_time_ns);
+            match (wall, simulated) {
+                (Some(wall), Some(simulated)) if wall >= 50_000_000 => {
+                    self.achieved.push_back(simulated as f64 / wall as f64);
+                    while self.achieved.len() > ACHIEVED_SAMPLES {
+                        self.achieved.pop_front();
+                    }
+                }
+                (Some(_), Some(_)) => return,
+                _ => {}
+            }
+        }
+        self.achieved_from = Some(now);
     }
 
     /// Fault spans, upcoming inputs and machine downtime as of now.
@@ -363,7 +513,6 @@ impl Focus {
             })
             .unwrap_or_default();
         crate::fault_form::FormContext {
-            machines: self.machines(),
             selected: self.selected.clone(),
             handles,
             active: activity
@@ -483,6 +632,17 @@ impl Focus {
             })
     }
 
+    /// A published worker can accept playback controls before applications are ready.
+    pub fn playback_available(&self) -> bool {
+        self.executing()
+            || (!self.terminal()
+                && self.playback.is_some()
+                && self.resource.as_ref().is_some_and(|r| {
+                    r.status.phase == seedbox_api::Phase::Running
+                        && r.status.stage == Some(seedbox_api::Stage::Booting)
+                }))
+    }
+
     /// Whether this run starts from a checkpoint (a branch, or a rerun of one),
     /// so its machines are restored rather than booted.
     pub fn restoring(&self) -> bool {
@@ -584,7 +744,9 @@ pub(super) enum HitTarget {
     /// A row of the faults panel or a span on the time bar, by activity row.
     Fault(usize),
     Faults,
+    Links,
     Logs,
+    Oracle,
 }
 
 /// The simulation panel that arrow keys move within.
@@ -593,14 +755,27 @@ pub(super) enum Panel {
     #[default]
     Machines,
     Faults,
+    Links,
     Logs,
+    Oracle,
 }
 
 pub struct App {
     pub(super) hitboxes: std::cell::RefCell<Vec<(ratatui::layout::Rect, HitTarget)>>,
+    /// The bottom row of the network map as last drawn, so the inject form
+    /// can sit below it and leave previewed targets visible.
+    pub(super) map_bottom: std::cell::Cell<Option<u16>>,
+    /// A machine whose output has its own panel, left out of the log pane.
+    pub(super) logs_exclude: std::cell::RefCell<Option<String>>,
     pub(super) panel: Panel,
     pub(super) logs_scroll: usize,
     pub(super) events_scroll: usize,
+    /// First link row shown in the links pane.
+    pub(super) links_scroll: usize,
+    /// Link rows the links pane showed when last drawn, to bound scrolling.
+    pub(super) links_rows: std::cell::Cell<usize>,
+    /// Rows back from the oracle panel's newest output; 0 follows it.
+    pub(super) oracle_scroll: usize,
     /// Show raw server events in place of logs.
     pub(super) events_tab: bool,
     /// Keys typed while the inject palette is opening.
@@ -931,9 +1106,14 @@ impl App {
     pub fn new(focus: Option<SimulationId>) -> Self {
         Self {
             hitboxes: Default::default(),
+            map_bottom: Default::default(),
+            logs_exclude: Default::default(),
             panel: Panel::Machines,
             logs_scroll: 0,
             events_scroll: 0,
+            links_scroll: 0,
+            links_rows: Default::default(),
+            oracle_scroll: 0,
             events_tab: false,
             typeahead: Vec::new(),
             zoom: 0,
@@ -1039,6 +1219,23 @@ impl App {
         out
     }
 
+    /// Refresh the current form when its action or observed world revision changes.
+    fn fault_preview_requests(&mut self) -> Vec<Request> {
+        if !matches!(self.fault_menu, Some(FaultMenu::Editing(_))) {
+            return Vec::new();
+        }
+        let Some(focus) = &self.focus else {
+            return Vec::new();
+        };
+        let revision = focus.world.as_ref().map_or(0, |world| world.revision);
+        self.fault_form
+            .as_mut()
+            .and_then(|form| form.request_preview(revision))
+            .map(|action| Request::PreviewFault(focus.id.clone(), action, revision))
+            .into_iter()
+            .collect()
+    }
+
     /// Fetch the selected catalogue row and its source for the detail pane,
     /// at most every couple of seconds; completed runs are fetched once.
     fn preview_requests(&mut self) -> Vec<Request> {
@@ -1103,22 +1300,59 @@ impl App {
         let before = if self.logs_scroll > 0 {
             self.focus
                 .as_ref()
-                .map_or(0, |focus| crate::view::log_rows(focus, width).len())
+                .map_or(0, |focus| self.log_row_count(focus, width))
         } else {
             0
         };
+        let oracle_before = self.oracle_row_count();
         let mut requests = self.apply_update(update);
         requests.extend(self.preview_requests());
+        requests.extend(self.fault_preview_requests());
         if self.logs_scroll > 0 {
             let after = self
                 .focus
                 .as_ref()
-                .map_or(0, |focus| crate::view::log_rows(focus, width).len());
+                .map_or(0, |focus| self.log_row_count(focus, width));
             self.logs_scroll = self
                 .logs_scroll
                 .saturating_add(after.saturating_sub(before));
         }
+        if self.oracle_scroll > 0 {
+            let added = self.oracle_row_count().saturating_sub(oracle_before);
+            self.oracle_scroll = self.oracle_scroll.saturating_add(added);
+        }
         requests
+    }
+
+    /// Wrapped rows in the oracle panel as last laid out, or 0 when hidden.
+    fn oracle_row_count(&self) -> usize {
+        let shown = self.logs_exclude.borrow();
+        let (Some(name), Some(focus)) = (shown.as_deref(), self.focus.as_ref()) else {
+            return 0;
+        };
+        let width = self
+            .hitboxes
+            .borrow()
+            .iter()
+            .find(|(_, target)| *target == HitTarget::Oracle)
+            .map_or(40, |(rect, _)| rect.width.saturating_sub(2));
+        crate::view::log_rows(focus, width, crate::view::LogScope::Only(name)).len()
+    }
+
+    /// Move the oracle panel `step` rows back in its output, never past the first row.
+    fn scroll_oracle(&mut self, step: isize) {
+        let maximum = self.oracle_row_count();
+        self.oracle_scroll = self.oracle_scroll.saturating_add_signed(step).min(maximum);
+    }
+
+    /// Wrapped rows in the log pane as last laid out.
+    fn log_row_count(&self, focus: &Focus, width: u16) -> usize {
+        let excluded = self.logs_exclude.borrow();
+        let scope = excluded.as_deref().map_or(
+            crate::view::LogScope::Default,
+            crate::view::LogScope::Except,
+        );
+        crate::view::log_rows(focus, width, scope).len()
     }
 
     fn apply_update(&mut self, update: Update) -> Vec<Request> {
@@ -1263,6 +1497,7 @@ impl App {
                     if !matches!(sample.state.rate, PlaybackRate::Paused) {
                         focus.resume_rate = sample.state.rate;
                     }
+                    focus.observe_achieved(&sample);
                     focus.playback = Some((sample, Instant::now()));
                 }
                 self.close_terminal_menu();
@@ -1458,6 +1693,11 @@ impl App {
                     }
                 }
             }
+            Update::FaultPreview(action, revision, result) => {
+                if let Some(form) = self.fault_form.as_mut() {
+                    form.accept_preview(action, revision, result);
+                }
+            }
             Update::FaultTypes(catalogue) => {
                 if self
                     .focus
@@ -1646,6 +1886,7 @@ impl App {
     pub fn input(&mut self, event: Event) -> Vec<Request> {
         let mut requests = self.input_raw(event);
         requests.extend(self.preview_requests());
+        requests.extend(self.fault_preview_requests());
         let mut blocked = false;
         let mut requests: Vec<_> = requests
             .into_iter()
@@ -1791,6 +2032,12 @@ impl App {
                     return self.cancel_fault_menu();
                 }
                 FormOutcome::Submit(action) => {
+                    if !form.preview_ready(&action) {
+                        form.set_error(
+                            "Review the effect preview before pressing Enter to submit.",
+                        );
+                        return Vec::new();
+                    }
                     return self
                         .focus
                         .as_ref()
@@ -1850,7 +2097,9 @@ impl App {
                 KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
             )
         {
-            let offset = if self.events_tab {
+            let offset = if self.panel == Panel::Oracle {
+                &mut self.oracle_scroll
+            } else if self.events_tab {
                 &mut self.events_scroll
             } else {
                 &mut self.logs_scroll
@@ -1929,7 +2178,7 @@ impl App {
                     let maximum = self
                         .focus
                         .as_ref()
-                        .map_or(0, |focus| crate::view::log_rows(focus, width).len());
+                        .map_or(0, |focus| self.log_row_count(focus, width));
                     self.logs_scroll = if up {
                         self.logs_scroll.saturating_add(3).min(maximum)
                     } else {
@@ -1939,6 +2188,14 @@ impl App {
                 HitTarget::Fault(_) | HitTarget::Faults => {
                     self.panel = Panel::Faults;
                     self.move_fault_selection(if up { -1 } else { 1 });
+                }
+                HitTarget::Links => {
+                    self.panel = Panel::Links;
+                    self.scroll_links(if up { -3 } else { 3 });
+                }
+                HitTarget::Oracle => {
+                    self.panel = Panel::Oracle;
+                    self.scroll_oracle(if up { 3 } else { -3 });
                 }
                 HitTarget::Timeline(_) => {
                     return self.timeline_key(KeyEvent::new(
@@ -1963,7 +2220,9 @@ impl App {
             match target {
                 HitTarget::Machine(_) => self.panel = Panel::Machines,
                 HitTarget::Fault(_) | HitTarget::Faults => self.panel = Panel::Faults,
+                HitTarget::Links => self.panel = Panel::Links,
                 HitTarget::Logs => self.panel = Panel::Logs,
+                HitTarget::Oracle => self.panel = Panel::Oracle,
                 _ => {}
             }
             match target {
@@ -2008,6 +2267,17 @@ impl App {
             }
         }
         Vec::new()
+    }
+
+    /// Move the links pane by `step` rows, keeping its last page full.
+    fn scroll_links(&mut self, step: isize) {
+        let links = self
+            .focus
+            .as_ref()
+            .and_then(|focus| focus.world.as_ref())
+            .map_or(0, |world| world.links.len());
+        let last = links.saturating_sub(self.links_rows.get().max(1));
+        self.links_scroll = self.links_scroll.saturating_add_signed(step).min(last);
     }
 
     /// Move the faults panel selection through active, upcoming and history rows.
@@ -2135,9 +2405,20 @@ impl App {
             );
             return Vec::new();
         }
-        if live && !focus.executing() {
+        let playback_key = matches!(key.code, KeyCode::Char(' ' | '.' | '+' | '=' | '-'));
+        if live
+            && !(if playback_key {
+                focus.playback_available()
+            } else {
+                focus.executing()
+            })
+        {
             self.notify(
-                "playback controls start once the simulation is executing",
+                if playback_key {
+                    "waiting for the simulation worker"
+                } else {
+                    "fault and checkpoint controls start once applications are ready"
+                },
                 Tone::Info,
             );
             return Vec::new();
@@ -2152,9 +2433,16 @@ impl App {
             KeyCode::Esc => self.screen = Screen::Catalogue,
             KeyCode::Char('a') => focus.selected = None,
             KeyCode::Tab | KeyCode::BackTab => {
-                let order = [Panel::Machines, Panel::Faults, Panel::Logs];
+                let mut order = vec![Panel::Machines, Panel::Faults, Panel::Links, Panel::Logs];
+                if self.logs_exclude.borrow().is_some() {
+                    order.push(Panel::Oracle);
+                }
                 let index = order.iter().position(|p| *p == self.panel).unwrap_or(0);
-                let step = if key.code == KeyCode::Tab { 1 } else { 2 };
+                let step = if key.code == KeyCode::Tab {
+                    1
+                } else {
+                    order.len() - 1
+                };
                 self.panel = order[(index + step) % order.len()];
             }
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
@@ -2166,6 +2454,8 @@ impl App {
                 match self.panel {
                     Panel::Machines => select(focus, step),
                     Panel::Faults => self.move_fault_selection(step),
+                    Panel::Links => self.scroll_links(step),
+                    Panel::Oracle => self.scroll_oracle(-step),
                     Panel::Logs => {
                         let offset = if self.events_tab {
                             &mut self.events_scroll
@@ -2401,9 +2691,13 @@ pub(crate) mod tests {
                 incarnation: 0,
                 condition: MachineCondition::Ready,
                 exit_code: None,
-                throttle_permille: None,
+                cpu_speed_hz: Some(1_000_000_000),
+                throttle_speed_hz: None,
                 oracle: *n == "oracle",
                 last_transition: None,
+                last_transition_at_ns: None,
+                condition_since_ns: None,
+                application: Default::default(),
             })
             .collect();
         let mut links = Vec::new();
@@ -2444,8 +2738,84 @@ pub(crate) mod tests {
         app
     }
 
+    pub(crate) fn booting_app(rate: PlaybackRate) -> App {
+        let mut app = app(&["n1", "n2", "n3", "oracle"]);
+        for machine in &mut app.focus.as_mut().unwrap().world.as_mut().unwrap().machines {
+            machine.condition = MachineCondition::Starting;
+        }
+        let mut resource = timeline_resource(10);
+        resource.metadata.name = "etcd-demo".into();
+        resource.status.phase = seedbox_api::Phase::Running;
+        resource.status.stage = Some(seedbox_api::Stage::Booting);
+        app.apply(Update::Resource(resource));
+        app.apply(Update::Playback(PlaybackObservation {
+            state: seedbox_api::PlaybackStatus {
+                position: Default::default(),
+                rate,
+                achieved_rate: None,
+                stepping: false,
+                terminal: false,
+                application_ready: false,
+            },
+            age_ns: 0,
+        }));
+        app
+    }
+
     fn key(c: char) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn paused_startup_accepts_playback_but_keeps_faults_gated() {
+        for key_code in [' ', '.'] {
+            let mut app = booting_app(PlaybackRate::Paused);
+            assert!(!app.input(key(key_code)).is_empty(), "{key_code}");
+        }
+        for key_code in ['+', '-'] {
+            let mut app = booting_app(PlaybackRate::Unlimited);
+            assert!(!app.input(key(key_code)).is_empty());
+        }
+        for phase in [seedbox_api::Phase::Queued, seedbox_api::Phase::Preparing] {
+            let mut app = booting_app(PlaybackRate::Paused);
+            app.focus
+                .as_mut()
+                .unwrap()
+                .resource
+                .as_mut()
+                .unwrap()
+                .status
+                .phase = phase;
+            assert!(app.input(key(' ')).is_empty());
+        }
+        let mut app = booting_app(PlaybackRate::Paused);
+        assert!(matches!(
+            app.input(key(' ')).as_slice(),
+            [Request::Control(
+                _,
+                ControlCommand::SetRate {
+                    rate: PlaybackRate::Unlimited
+                }
+            )]
+        ));
+        for key_code in ['f', 'c'] {
+            let mut app = booting_app(PlaybackRate::Paused);
+            assert!(app.input(key(key_code)).is_empty());
+        }
+        let mut app = booting_app(PlaybackRate::Paused);
+        app.focus.as_mut().unwrap().playback = None;
+        assert!(app.input(key(' ')).is_empty());
+        let mut app = booting_app(PlaybackRate::Paused);
+        app.focus
+            .as_mut()
+            .unwrap()
+            .playback
+            .as_mut()
+            .unwrap()
+            .0
+            .state
+            .terminal = true;
+        assert!(app.input(key(' ')).is_empty());
     }
 
     #[test]
@@ -2639,12 +3009,23 @@ pub(crate) mod tests {
         )));
         assert!(app.logs_scroll > 0);
         let before = app.logs_scroll;
-        let rows_before = crate::view::log_rows(app.focus.as_ref().unwrap(), 40).len();
+        let rows_before = crate::view::log_rows(
+            app.focus.as_ref().unwrap(),
+            40,
+            crate::view::LogScope::Default,
+        )
+        .len();
         app.apply(output(
             2,
             b"a long message that wraps beyond the available width into multiple terminal rows\n",
         ));
-        let added = crate::view::log_rows(app.focus.as_ref().unwrap(), 40).len() - rows_before;
+        let added = crate::view::log_rows(
+            app.focus.as_ref().unwrap(),
+            40,
+            crate::view::LogScope::Default,
+        )
+        .len()
+            - rows_before;
         assert!(added > 1);
         assert_eq!(app.logs_scroll, before + added);
         app.input(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
@@ -2823,6 +3204,7 @@ pub(crate) mod tests {
         FaultCatalogue {
             simulation: "k7m2p9qx".parse().unwrap(),
             faults: vec![seedbox_api::FaultDescriptor {
+                category: seedbox_api::FaultCategory::Machine,
                 name: action.into(),
                 title: "Server fault".into(),
                 description: "Future behavior".into(),
@@ -2833,15 +3215,39 @@ pub(crate) mod tests {
         }
     }
 
+    fn respond_previews(app: &mut App, requests: Vec<Request>) {
+        for request in requests {
+            if let Request::PreviewFault(id, action, revision) = request {
+                app.apply(Update::FaultPreview(
+                    action,
+                    revision,
+                    Ok(seedbox_api::FaultPreview {
+                        simulation: id,
+                        revision,
+                        simulated_time_ns: 0,
+                        category: seedbox_api::FaultCategory::Application,
+                        machines: vec!["a".into()],
+                        links: Vec::new(),
+                        expected_effect: "Server expected effect".into(),
+                        observations: Vec::new(),
+                        preconditions: Vec::new(),
+                        limitations: vec!["Effects are not guaranteed.".into()],
+                    }),
+                ));
+            }
+        }
+    }
+
     fn submit_fault(app: &mut App) -> Vec<Request> {
         app.input(key('f'));
         if app.fault_menu == Some(FaultMenu::Opening) {
             app.apply(Update::FaultMenuReady(Ok(PlaybackRate::Paused)));
         }
-        app.input(Event::Key(KeyEvent::new(
+        let requests = app.input(Event::Key(KeyEvent::new(
             KeyCode::Enter,
             KeyModifiers::NONE,
         )));
+        respond_previews(app, requests);
         app.input(Event::Key(KeyEvent::new(
             KeyCode::BackTab,
             KeyModifiers::SHIFT,
@@ -2850,6 +3256,35 @@ pub(crate) mod tests {
             KeyCode::Enter,
             KeyModifiers::NONE,
         )))
+    }
+
+    #[test]
+    fn preview_is_required_and_stale_responses_cannot_authorize_edited_values() {
+        let mut app = app(&["a"]);
+        app.apply(Update::FaultTypes(fault_catalogue("future_server_fault")));
+        app.input(key('f'));
+        app.apply(Update::FaultMenuReady(Ok(PlaybackRate::Unlimited)));
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let first = app.input(enter.clone());
+        assert!(matches!(first.as_slice(), [Request::PreviewFault(..)]));
+        let second = app.input(key('x'));
+        respond_previews(&mut app, first);
+        app.input(Event::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
+        assert!(
+            app.input(enter.clone()).is_empty(),
+            "Old response must not submit changed values"
+        );
+        assert_eq!(
+            app.fault_menu,
+            Some(FaultMenu::Editing(PlaybackRate::Unlimited))
+        );
+        respond_previews(&mut app, second);
+        assert!(
+            matches!(app.input(enter).as_slice(), [Request::Fault(_, action, _)] if action["handle"] == "splitx")
+        );
     }
 
     #[test]
@@ -2863,7 +3298,8 @@ pub(crate) mod tests {
             KeyCode::Enter,
             KeyModifiers::NONE,
         )));
-        app.input(key('x'));
+        let requests = app.input(key('x'));
+        respond_previews(&mut app, requests);
         app.input(Event::Key(KeyEvent::new(
             KeyCode::BackTab,
             KeyModifiers::SHIFT,
@@ -3222,6 +3658,7 @@ pub(crate) mod tests {
         FaultCatalogue {
             simulation: "k7m2p9qx".parse().unwrap(),
             faults: vec![seedbox_api::FaultDescriptor {
+                category: seedbox_api::FaultCategory::Machine,
                 name: "heal".into(),
                 title: "Heal fault".into(),
                 description: String::new(),
@@ -3313,6 +3750,8 @@ pub(crate) mod tests {
         // Machine selection is untouched while faults have focus.
         assert_eq!(app.focus.as_ref().unwrap().selected.as_deref(), Some("b"));
         app.input(tab());
+        assert_eq!(app.panel, Panel::Links);
+        app.input(tab());
         assert_eq!(app.panel, Panel::Logs);
         app.input(key('k'));
         assert_eq!(app.logs_scroll, 1);
@@ -3355,6 +3794,76 @@ pub(crate) mod tests {
         assert!(tree.contains(&(2, "cccccccc".into())));
         // A cycle is listed once per member rather than looping.
         assert_eq!(tree.len(), 5);
+    }
+
+    #[test]
+    fn drops_are_charged_by_cause_and_history_keeps_the_whole_run() {
+        let mut traffic = Traffic::default();
+        let mut w = world(&["a", "b"]);
+        traffic.observe(&w);
+        w.simulated_time_ns = 1_000_000_000;
+        for link in &mut w.links {
+            if link.from == "a" {
+                link.counters.scheduled = 100;
+                link.counters.partition_dropped = 40;
+                link.counters.receiver_dropped = 10;
+                link.counters.bytes = 2048;
+            }
+        }
+        traffic.observe(&w);
+        let a = traffic.dropped_rate("a");
+        assert_eq!((a.partition, a.receiver), (40.0, 0.0));
+        assert_eq!(a.dominant(), Some("partition"));
+        // The receiver is charged for frames it refused.
+        assert_eq!(traffic.dropped_rate("b").receiver, 10.0);
+        assert_eq!(traffic.link("a", "b").bytes, 2048.0);
+        assert_eq!(traffic.history["a"].len(), 1);
+        assert_eq!(traffic.history["a"][0].dropped, 40.0);
+        // A long watch merges its oldest samples instead of forgetting them.
+        for step in 2..=(HISTORY_SAMPLES as u64 + 2) {
+            w.simulated_time_ns = step * 1_000_000_000;
+            traffic.observe(&w);
+        }
+        let history = &traffic.history["a"];
+        assert!(history.len() <= HISTORY_SAMPLES);
+        assert_eq!(history[0].at_ns, 2_000_000_000);
+        assert!(history.windows(2).all(|pair| pair[0].at_ns < pair[1].at_ns));
+    }
+
+    #[test]
+    fn achieved_rate_history_measures_between_observations() {
+        let mut app = app(&["a"]);
+        let sample = |simulated: u64, wall: u64, rate| {
+            Update::Playback(PlaybackObservation {
+                state: seedbox_api::PlaybackStatus {
+                    position: Default::default(),
+                    rate,
+                    achieved_rate: Some(seedbox_api::RateMeasurement {
+                        simulated_time_ns: simulated,
+                        wall_time_ns: wall.try_into().unwrap(),
+                    }),
+                    stepping: false,
+                    terminal: false,
+                    application_ready: true,
+                },
+                age_ns: 0,
+            })
+        };
+        app.apply(sample(
+            1_000_000_000,
+            1_000_000_000,
+            PlaybackRate::Unlimited,
+        ));
+        app.apply(sample(
+            5_000_000_000,
+            2_000_000_000,
+            PlaybackRate::Unlimited,
+        ));
+        assert_eq!(app.focus.as_ref().unwrap().achieved, [4.0]);
+        // A new rate restarts the server's measurement; that is not a sample.
+        app.apply(sample(100_000_000, 500_000_000, PlaybackRate::Unlimited));
+        app.apply(sample(400_000_000, 1_500_000_000, PlaybackRate::Unlimited));
+        assert_eq!(app.focus.as_ref().unwrap().achieved, [4.0, 0.3]);
     }
 
     #[test]

@@ -1,5 +1,10 @@
 //! Deterministic Ethernet/IPv4/UDP DNS answers for the virtual nameserver.
 
+use hickory_proto::{
+    op::{Edns, Message, MessageType, OpCode, ResponseCode},
+    rr::{rdata::A, DNSClass, RData, Record, RecordType},
+};
+
 pub const IP: [u8; 4] = [10, 0, 1, 1];
 pub const MAC: [u8; 6] = [0x02, 0x53, 0x42, 0x58, 0x00, 0x01];
 pub const TTL_SECONDS: u32 = 5;
@@ -24,7 +29,7 @@ pub fn arp_reply(frame: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Reply to a single-question A/IN DNS query sent to the virtual nameserver.
+/// Reply to a DNS query sent to the virtual nameserver.
 /// Unknown names receive NXDOMAIN; unrelated or malformed packets are ignored.
 /// The caller owns name-to-address policy and the response's delivery time.
 pub fn reply(frame: &[u8], records: impl Fn(&str) -> Option<[u8; 4]>) -> Option<Vec<u8>> {
@@ -52,57 +57,7 @@ pub fn reply(frame: &[u8], records: impl Fn(&str) -> Option<[u8; 4]>) -> Option<
     if udp[2..4] != [0, 53] || udp_len < 20 || udp_len > udp.len() {
         return None;
     }
-    let query = &udp[8..udp_len];
-    let flags = u16::from_be_bytes([query[2], query[3]]);
-    if flags & 0xf800 != 0 || query[4..6] != [0, 1] || query[6..12] != [0; 6] {
-        return None;
-    }
-    let mut pos = 12;
-    let mut name = String::new();
-    loop {
-        let len = usize::from(*query.get(pos)?);
-        pos += 1;
-        if len == 0 {
-            break;
-        }
-        // Queries need not use compression; rejecting pointers also avoids loops.
-        if len > 63 || pos + len > query.len() || pos + len + 5 > query.len() {
-            return None;
-        }
-        let label = &query[pos..pos + len];
-        if !label.iter().all(u8::is_ascii) || name.len() + len + 1 > 253 {
-            return None;
-        }
-        if !name.is_empty() {
-            name.push('.');
-        }
-        name.push_str(&String::from_utf8_lossy(label).to_ascii_lowercase());
-        pos += len;
-    }
-    if pos + 4 != query.len() || query[pos + 2..pos + 4] != [0, 1] {
-        return None;
-    }
-    let kind = u16::from_be_bytes([query[pos], query[pos + 1]]);
-    if kind != 1 && kind != 28 {
-        return None;
-    }
-    let found = (kind == 1).then(|| records(&name)).flatten();
-    let unknown = kind == 1 && found.is_none();
-    let mut answer = Vec::with_capacity(query.len() + 16);
-    answer.extend_from_slice(&query[..2]);
-    answer.extend_from_slice(
-        &(0x8000u16 | (flags & 0x0100) | 0x0400 | (u16::from(unknown) * 3)).to_be_bytes(),
-    );
-    answer.extend_from_slice(&1u16.to_be_bytes());
-    answer.extend_from_slice(&u16::from(found.is_some()).to_be_bytes());
-    answer.extend_from_slice(&[0; 4]);
-    answer.extend_from_slice(&query[12..]);
-    if let Some(address) = found {
-        answer.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1]);
-        answer.extend_from_slice(&TTL_SECONDS.to_be_bytes());
-        answer.extend_from_slice(&4u16.to_be_bytes());
-        answer.extend_from_slice(&address);
-    }
+    let answer = dns_response(&udp[8..udp_len], records)?;
     let wire_len = 20 + 8 + answer.len();
     let mut out = Vec::with_capacity(14 + wire_len);
     out.extend_from_slice(&frame[6..12]);
@@ -136,6 +91,50 @@ pub fn reply(frame: &[u8], records: impl Fn(&str) -> Option<[u8; 4]>) -> Option<
     Some(out)
 }
 
+fn dns_response(query: &[u8], records: impl Fn(&str) -> Option<[u8; 4]>) -> Option<Vec<u8>> {
+    let query = Message::from_vec(query).ok()?;
+    if query.metadata.message_type != MessageType::Query {
+        return None;
+    }
+    // Explicit IDs avoid the library's random query constructor. Hickory owns
+    // DNS parsing, name compression and encoding; the simulation owns records.
+    let mut answer = Message::response(query.metadata.id, query.metadata.op_code);
+    answer.metadata.recursion_desired = query.metadata.recursion_desired;
+    if query.edns.is_some() {
+        let mut edns = Edns::new();
+        edns.set_max_payload(1232);
+        answer.edns = Some(edns);
+    }
+    if query.version() != 0 {
+        answer.metadata.response_code = ResponseCode::BADVERS;
+    } else if query.metadata.op_code != OpCode::Query {
+        answer.metadata.response_code = ResponseCode::NotImp;
+    } else if query.queries.len() != 1 {
+        answer.metadata.response_code = ResponseCode::FormErr;
+    } else {
+        let question = &query.queries[0];
+        answer.add_query(question.clone());
+        if question.query_class() != DNSClass::IN {
+            answer.metadata.response_code = ResponseCode::Refused;
+        } else {
+            answer.metadata.authoritative = true;
+            let name = question.name().to_lowercase().to_ascii();
+            match records(name.trim_end_matches('.')) {
+                Some(address) if question.query_type() == RecordType::A => {
+                    answer.add_answer(Record::from_rdata(
+                        question.name().clone(),
+                        TTL_SECONDS,
+                        RData::A(A(address.into())),
+                    ));
+                }
+                Some(_) => {} // Existing name with no records of the requested type.
+                None => answer.metadata.response_code = ResponseCode::NXDomain,
+            }
+        }
+    }
+    answer.to_vec().ok()
+}
+
 fn checksum(data: &[u8]) -> u16 {
     let (pairs, remainder) = data.as_chunks::<2>();
     let mut sum: u32 = pairs
@@ -162,6 +161,10 @@ mod tests {
             dns.extend_from_slice(label);
         }
         dns.extend_from_slice(&[0, 0, 1, 0, 1]);
+        packet(&dns)
+    }
+
+    fn packet(dns: &[u8]) -> Vec<u8> {
         let ip_len = 20 + 8 + dns.len();
         let mut out = Vec::from(MAC);
         out.extend_from_slice(&[2, 0, 0, 0, 0, 2, 8, 0]);
@@ -176,7 +179,7 @@ mod tests {
         out.extend_from_slice(&[0xab, 0xcd, 0, 53]);
         out.extend_from_slice(&((dns.len() + 8) as u16).to_be_bytes());
         out.extend_from_slice(&[0, 0]);
-        out.extend_from_slice(&dns);
+        out.extend_from_slice(dns);
         out
     }
 
@@ -197,6 +200,10 @@ mod tests {
         assert_eq!(&reply[42..44], &[0x12, 0x34]);
         assert_eq!(&reply[48..50], &[0, 1]);
         assert_eq!(&reply[reply.len() - 4..], &[10, 0, 0, 3]);
+        let message = Message::from_vec(&reply[42..]).unwrap();
+        assert_eq!(message.answers[0].ttl, TTL_SECONDS);
+        assert!(message.metadata.authoritative);
+        assert!(!message.metadata.recursion_available);
         let negative = super::reply(&query, |_| None).unwrap();
         assert_eq!(&negative[44..46], &[0x85, 0x03]);
         assert_eq!(&negative[48..50], &[0, 0]);
@@ -222,14 +229,103 @@ mod tests {
     }
 
     #[test]
-    fn aaaa_known_and_unknown_names_have_empty_success_answers() {
+    fn known_names_without_the_requested_type_differ_from_unknown_names() {
         let mut query = request(b"node");
         let kind = query.len() - 4;
         query[kind + 1] = 28;
-        for address in [Some([10, 0, 0, 3]), None] {
+        for (address, code) in [
+            (Some([10, 0, 0, 3]), ResponseCode::NoError),
+            (None, ResponseCode::NXDomain),
+        ] {
             let answer = reply(&query, |_| address).unwrap();
-            assert_eq!(&answer[44..46], &[0x85, 0]);
-            assert_eq!(&answer[48..50], &[0, 0]);
+            let message = Message::from_vec(&answer[42..]).unwrap();
+            assert_eq!(message.metadata.response_code, code);
+            assert!(message.answers.is_empty());
+        }
+    }
+
+    #[test]
+    fn edns_and_compressed_names_are_decoded_by_hickory() {
+        let frame = request(b"Node");
+        let mut dns = frame[42..].to_vec();
+        // Compress the root suffix against the earlier zero byte in the header.
+        dns.splice(17..18, [0xc0, 0x04]);
+        dns[11] = 1;
+        // OPT: 1232-byte payload, version zero, no options.
+        dns.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 0]);
+        let response = reply(&packet(&dns), |name| {
+            assert_eq!(name, "node");
+            Some([10, 0, 0, 3])
+        })
+        .unwrap();
+        let message = Message::from_vec(&response[42..]).unwrap();
+        assert_eq!(message.metadata.id, 0x1234);
+        assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(message.answers.len(), 1);
+        assert_eq!(message.edns.unwrap().version(), 0);
+        // Repeating the identical request cannot sample host randomness.
+        assert_eq!(
+            response,
+            reply(&packet(&dns), |_| Some([10, 0, 0, 3])).unwrap()
+        );
+    }
+
+    #[test]
+    fn each_query_uses_current_membership_and_address_without_a_dns_cache() {
+        use std::{cell::RefCell, collections::BTreeMap};
+        let records = RefCell::new(BTreeMap::new());
+        let lookup = |name: &str| records.borrow().get(name).copied();
+        let query = request(b"node");
+        for address in [None, Some([10, 0, 0, 3]), None, Some([10, 0, 0, 7])] {
+            records.borrow_mut().clear();
+            if let Some(address) = address {
+                records.borrow_mut().insert("node".to_owned(), address);
+            }
+            let response = reply(&query, lookup).unwrap();
+            let message = Message::from_vec(&response[42..]).unwrap();
+            assert_eq!(
+                message.metadata.response_code,
+                if address.is_some() {
+                    ResponseCode::NoError
+                } else {
+                    ResponseCode::NXDomain
+                }
+            );
+            if let Some(address) = address {
+                assert_eq!(&response[response.len() - 4..], &address);
+            } else {
+                assert!(message.answers.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_requests_receive_dns_errors_instead_of_timing_out() {
+        let query = Message::from_vec(&request(b"node")[42..]).unwrap();
+        let mut multiple = query.clone();
+        multiple.queries.push(query.queries[0].clone());
+        let mut opcode = query.clone();
+        opcode.metadata.op_code = OpCode::Status;
+        let mut class = query.clone();
+        class.queries[0].set_query_class(DNSClass::CH);
+        let mut version = query;
+        let mut edns = Edns::new();
+        edns.set_version(1);
+        version.edns = Some(edns);
+        for (query, code) in [
+            (multiple, ResponseCode::FormErr),
+            (opcode, ResponseCode::NotImp),
+            (class, ResponseCode::Refused),
+            (version, ResponseCode::BADVERS),
+        ] {
+            let response = reply(&packet(&query.to_vec().unwrap()), |_| {
+                panic!("invalid query must not consult the registry")
+            })
+            .unwrap();
+            let message = Message::from_vec(&response[42..]).unwrap();
+            // BADVERS and BADSIG share wire code 16; Hickory decodes the alias.
+            assert_eq!(u16::from(message.metadata.response_code), u16::from(code));
+            assert!(message.answers.is_empty());
         }
     }
 
@@ -242,6 +338,14 @@ mod tests {
         query[42 + 12] = 0xc0;
         assert!(reply(&query, |_| Some([10, 0, 0, 3])).is_none());
         let query = request(b"node");
-        assert!(reply(&query[..query.len() - 2], |_| None).is_none());
+        for length in 0..query.len() {
+            assert!(reply(&query[..length], |_| None).is_none());
+        }
+        let mut fragment = query.clone();
+        fragment[20] = 0x20;
+        assert!(reply(&fragment, |_| None).is_none());
+        let mut response = query;
+        response[44] = 0x80;
+        assert!(reply(&response, |_| None).is_none());
     }
 }

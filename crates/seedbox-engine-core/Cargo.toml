@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 hex.workspace = true
+hickory-proto.workspace = true
 seedbox-engine-protocol.workspace = true
 seedbox-control.workspace = true
 serde.workspace = true

@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 hex.workspace = true
+hickory-proto.workspace = true
 seedbox-engine-protocol = { package = "seedbox-vmm-protocol", path = "../protocol" }
 seedbox-control = { package = "seedbox-vmm-control", path = "../control" }
 serde.workspace = true

@@ -115,7 +115,7 @@ def changes(root, application=False):
         s = replace(s, "#include <asm/syscall.h>",
                     "#include <asm/syscall.h>\n#include <asm/seedbox.h>")
         return replace(s, "\tadd_random_kstack_offset();",
-                       "\tseedbox_syscall_progress();\n\tadd_random_kstack_offset();")
+                       "\tseedbox_syscall_progress(regs, scno);\n\tadd_random_kstack_offset();")
     edit("arch/arm64/kernel/syscall.c", syscall)
 
     def generic_timer(s):

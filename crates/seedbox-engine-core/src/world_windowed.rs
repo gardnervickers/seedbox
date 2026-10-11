@@ -78,6 +78,8 @@ impl From<sw::Error> for String {
 pub enum Msg {
     /// A frame on the wire, sent by `from`.
     Frame { from: usize, bytes: Vec<u8> },
+    /// A virtual nameserver reply; excluded from machine-to-machine counters.
+    DnsReply(Vec<u8>),
     /// Scenario serial input: delivered up to `early` ahead, like a frame.
     Serial(Vec<u8>),
     /// A management command or control reply. Never delivered early: its
@@ -308,6 +310,9 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
                 Msg::Frame { from, bytes } => {
                     let accepted = self.m.deliver_frame(bytes)?;
                     self.received.push((e.key.at, *from, accepted));
+                }
+                Msg::DnsReply(bytes) => {
+                    self.m.deliver_frame(bytes)?;
                 }
                 Msg::Serial(bytes) => self.m.deliver_serial(bytes)?,
                 Msg::Control(bytes) => {
@@ -804,6 +809,7 @@ impl<M: WorldMachine> Coord<'_, M> {
             return Err("lifecycle boundary is in committed machine past".into());
         }
         let previous_incarnation = guests[m].m.incarnation();
+        let mut applied_speed_hz = None;
         match op {
             faults::Lifecycle::Pause => {
                 self.paused_ingress[m] = 0;
@@ -838,8 +844,8 @@ impl<M: WorldMachine> Coord<'_, M> {
                 .and_then(|()| {
                     // The successor is not usable until its active throttle is
                     // restored. A failed RPC leaves the whole crash terminal.
-                    if let Some(factor) = self.faults.throttle(m) {
-                        guests[m].m.throttle(factor)?;
+                    if let Some(speed_hz) = self.faults.throttle(m) {
+                        guests[m].m.throttle(Some(speed_hz))?;
                     }
                     Ok(())
                 });
@@ -849,7 +855,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                     return Err(error);
                 }
             }
-            faults::Lifecycle::Throttle(factor) => guests[m].m.throttle(factor)?,
+            faults::Lifecycle::Throttle(speed_hz) => {
+                applied_speed_hz = guests[m].m.throttle(speed_hz)?;
+            }
             faults::Lifecycle::Reboot => {
                 // Frames that reached it before `t` belonged to the dead
                 // NIC and are dropped; later ones arrive normally.
@@ -859,7 +867,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                             *self.dropped += 1;
                             self.count(key.at, from, m, RECEIVER_DROPPED);
                         }
-                        Msg::Serial(_) | Msg::Control(_) => {}
+                        Msg::DnsReply(_) | Msg::Serial(_) | Msg::Control(_) => {}
                         Msg::Partition { from, to, on } => {
                             self.partitioned.insert((from, to), on);
                         }
@@ -878,9 +886,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                 faults::Lifecycle::Resume => MachineTransition::Resumed,
                 faults::Lifecycle::Crash => MachineTransition::Crashed,
                 faults::Lifecycle::Reboot => MachineTransition::Rebooted,
-                faults::Lifecycle::Throttle(factor_permille) => {
-                    MachineTransition::Throttled { factor_permille }
-                }
+                faults::Lifecycle::Throttle(_) => MachineTransition::Throttled {
+                    speed_hz: applied_speed_hz,
+                },
             };
             let incarnation = if op == faults::Lifecycle::Crash {
                 previous_incarnation
@@ -1196,7 +1204,7 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
                 self.partitioned.insert((from, to), on);
                 return;
             }
-            Msg::Serial(_) | Msg::Control(_) => return,
+            Msg::DnsReply(_) | Msg::Serial(_) | Msg::Control(_) => return,
         };
         if frame.len() < 14 {
             return;
@@ -1208,7 +1216,7 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
             crate::dns::reply(&frame, |name| {
                 self.names
                     .iter()
-                    .position(|n| n == name)
+                    .position(|n| n.eq_ignore_ascii_case(name))
                     .and_then(|index| u8::try_from(index + 1).ok().map(|last| [10, 0, 0, last]))
             })
         });
@@ -1216,7 +1224,7 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
             out.push(sw::Delivery {
                 to: src,
                 at: sent_at.saturating_add(self.latency),
-                payload: Msg::Frame { from: src, bytes },
+                payload: Msg::DnsReply(bytes),
             });
             return;
         }
@@ -1538,6 +1546,7 @@ where
         for ((at, _), p) in std::mem::take(q) {
             let msg = match p {
                 Payload::Frame { from, bytes } => Msg::Frame { from, bytes },
+                Payload::DnsReply(bytes) => Msg::DnsReply(bytes),
                 Payload::Serial(bytes) => Msg::Serial(bytes),
                 Payload::Partition { from, to, on } => Msg::Partition { from, to, on },
             };
@@ -1631,6 +1640,9 @@ where
                         bytes: bytes.clone(),
                     },
                 );
+            }
+            Msg::DnsReply(bytes) => {
+                events[to].insert((key.at, *seq), Payload::DnsReply(bytes.clone()));
             }
             Msg::Serial(bytes) => {
                 events[to].insert((key.at, *seq), Payload::Serial(bytes.clone()));

@@ -223,6 +223,9 @@ pub struct BootInputs {
     disk: Option<disk::Disk>,
     tolerance: u64,
     timer_jitter: u64,
+    cpu_speed_hz: u64,
+    progress_ns: u64,
+    progress_jitter: u64,
     exact_timer_ppm: u64,
     console_limit: Option<usize>,
     features: MachineFeatures,
@@ -293,6 +296,10 @@ fn boot_machine(
     mach.tolerance = b.tolerance;
     mach.timer_jitter = b.timer_jitter;
     mach.exact_timer_ppm = b.exact_timer_ppm;
+    // The charge and its bound; the jitter stream's seed follows from the
+    // boot seed (first boot) or the incarnation (`succeed`).
+    mach.set_progress(b.progress_ns, b.progress_jitter, 0);
+    mach.cpu_speed_hz = b.cpu_speed_hz;
     Ok(mach)
 }
 
@@ -651,6 +658,9 @@ pub fn run(
             disk,
             tolerance: cfg.stop_tolerance_ns,
             timer_jitter: cfg.timer_jitter_ns,
+            cpu_speed_hz: mc.cpu_speed_hz,
+            progress_ns: mc.progress_ns,
+            progress_jitter: mc.progress_jitter_ns,
             exact_timer_ppm: cfg.exact_timer_ppm.unwrap_or(0),
             console_limit,
             features,
@@ -664,6 +674,9 @@ pub fn run(
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
         mach.syscall_ns =
             machine::pv::syscall_ns(&mut Rng::new(boot_seed, &format!("pv-speed/{}", names[i])));
+        mach.seed_progress_jitter(
+            Rng::new(boot_seed, &format!("progress-jitter/{}", names[i])).next(),
+        );
         if options.trace {
             let f = std::fs::File::create(format!("{out}/{}.trace", names[i]))
                 .map_err(|e| e.to_string())?;
@@ -1020,9 +1033,13 @@ fn network_witness(world: &World) -> sha2::digest::Output<Sha256> {
     let mut frames = Vec::new();
     for (to, events) in world.events().iter().enumerate() {
         for (&(at, seq), payload) in events {
-            if let Payload::Frame { from, bytes } = payload {
-                frames.push((at, seq, *from, to, Sha256::digest(bytes)));
-            }
+            let (from, bytes) = match payload {
+                Payload::Frame { from, bytes } => (*from, bytes),
+                // A reserved witness identity for the virtual endpoint.
+                Payload::DnsReply(bytes) => (usize::MAX, bytes),
+                Payload::Serial(_) | Payload::Partition { .. } => continue,
+            };
+            frames.push((at, seq, from, to, Sha256::digest(bytes)));
         }
     }
     frames.sort_by_key(|f| (f.0, f.1, f.2, f.3));
@@ -1046,9 +1063,12 @@ fn network_witness(world: &World) -> sha2::digest::Output<Sha256> {
 fn world_witness_prefix(world: &World, network_witness: &[u8]) -> Result<Sha256, String> {
     let mut world_witness = Sha256::new();
     world.control().triggers.hash_into(&mut world_witness)?;
-    // Only a run that uses link policy carries the network witness, so a run
-    // without it keeps the world witness it had before link policy existed.
-    if world.faults().links.in_use() || world.faults().connections.used {
+    // Retain virtual replies even without machine-to-machine link policy.
+    let pending_dns = world
+        .events()
+        .iter()
+        .any(|events| events.values().any(|p| matches!(p, Payload::DnsReply(_))));
+    if world.faults().links.in_use() || world.faults().connections.used || pending_dns {
         world_witness.update(network_witness);
     }
     if world.control().controller.is_some() {

@@ -74,7 +74,3 @@ impl PreparationContext {
         Ok(())
     }
 }
-
-// Fork/process tests in other modules share one process-creation lock.
-#[cfg(test)]
-pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

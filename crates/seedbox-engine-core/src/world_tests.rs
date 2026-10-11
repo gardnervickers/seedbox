@@ -911,6 +911,7 @@ fn original_coordinator_receipts() {
                     .iter()
                     .map(|(key, value)| match value {
                         Payload::Frame { from, bytes } => json!([key, "frame", from, bytes]),
+                        Payload::DnsReply(bytes) => json!([key, "dns", bytes]),
                         Payload::Serial(bytes) => json!([key, "serial", bytes]),
                         Payload::Partition { from, to, on } => {
                             json!([key, "partition", from, to, on])

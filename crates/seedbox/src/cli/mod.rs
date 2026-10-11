@@ -702,6 +702,11 @@ pub fn main() -> ExitCode {
     }
     match run(Cli::parse_from(arguments)) {
         Ok(code) => ExitCode::from(code),
+        // The reader stopped early, as `seedbox events ID | head` does; the
+        // output it took was complete, so there is nothing to report.
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::from(2)
@@ -800,6 +805,7 @@ fn run(cli: Cli) -> Result<u8> {
                 Some(id) => simulations::seed_range(&id, json),
                 None => simulations::list(json),
             },
+            CollectionArg::Capacity { json } => simulations::capacity(json),
             CollectionArg::Checkpoints { id, json } => simulations::checkpoints(&id, None, json),
             CollectionArg::World { id, json } => observe::world(&id, json),
             CollectionArg::Timeline { id, json } => observe::timeline(&id, json),
@@ -1213,6 +1219,12 @@ enum DeleteArg {
 
 #[derive(Subcommand)]
 enum CollectionArg {
+    /// Show resident execution slots, paused occupants and queue reasons.
+    Capacity {
+        /// Print JSON instead of tables.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one simulation and optionally watch its status.
     Simulation {
         /// Short simulation ID.
@@ -1240,7 +1252,7 @@ enum CollectionArg {
         #[arg(long)]
         json: bool,
     },
-    /// Show a simulation's machines, altered links and faults as observed now.
+    /// Show a simulation's machines, links and faults as observed now.
     World {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,

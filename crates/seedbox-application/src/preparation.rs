@@ -5,7 +5,7 @@ use crate::limits::read_bounded;
 use crate::{
     config::Simulation,
     execution::{Backend, ExecutionProfile, PreparationBackend, PreparedInputs},
-    guest::{build_initramfs_with, launch_recipe_with_progress, minimum_memory_mb},
+    guest::{build_initramfs_with, launch_recipe, minimum_memory_mb},
     store::ContentStore,
     Error, Result,
 };
@@ -160,12 +160,6 @@ impl OciPreparer {
         if let Some(context) = context {
             context.setup_inputs(&auxiliary, &engine, &kernel)?;
         }
-        let addresses: BTreeMap<_, _> = simulation
-            .services
-            .keys()
-            .enumerate()
-            .map(|(index, name)| (name, format!("10.0.0.{}", index + 1)))
-            .collect();
         let temporary = tempfile::tempdir()?;
         let init = store.materialize(&auxiliary["guest-init"], &temporary.path().join("init"))?;
         architecture.validate_elf(&init)?;
@@ -242,22 +236,18 @@ impl OciPreparer {
                 })?
             }
         };
-        for (name, service, mounts, imported) in launches {
+        for (index, (name, service, mounts, imported)) in launches.into_iter().enumerate() {
             if let Some(context) = context {
                 context.progress(name, PreparationStage::Guest);
             }
-            let hosts = format!(
-                "127.0.0.1 localhost\n::1 localhost\n{} {name}\n",
-                addresses[name]
-            );
-            let recipe = launch_recipe_with_progress(
+            let network = crate::guest::Network::new(index, name)?;
+            let recipe = launch_recipe(
                 &imported.image.launch,
-                &format!("{}/24", addresses[name]),
-                &hosts,
+                &network.cidr,
+                &network.hosts,
                 name,
                 &mounts,
                 wall_clock_epoch,
-                simulation.simulator.blocks_per_progress_call,
             )?;
             let archive = temporary.path().join(format!("{name}.cpio"));
             // Package only retained bootstrap bytes. The source paths may be

@@ -979,6 +979,7 @@ fn receipt(w: &World<Mock>, outcome: &str) -> Value {
                 .iter()
                 .map(|(key, value)| match value {
                     Payload::Frame { from, bytes } => json!([key, "frame", from, bytes]),
+                    Payload::DnsReply(bytes) => json!([key, "dns", bytes]),
                     Payload::Serial(bytes) => json!([key, "serial", bytes]),
                     Payload::Partition { from, to, on } => {
                         json!([key, "partition", from, to, on])
@@ -1072,105 +1073,109 @@ fn an_event_already_due_is_delivered_even_when_the_machine_stands_past_the_slice
 
 #[test]
 fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across_workers() {
-    let mut reference = None;
-    for workers in [0, 1, 2, 4] {
-        use seedbox_engine_protocol::observation::{
-            Kind, MachineTransition, Observation, MAX_DATAGRAM_BYTES,
-        };
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("observer");
-        let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
-        receiver.set_nonblocking(true).unwrap();
-        let mut w = world(&["a", "b"])
-            .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
-        for (at, action) in [
-            (
-                10,
-                json!({"action":"throttle","handle":"t","machine":"b","factor_permille":4000}),
-            ),
-            (20, json!({"action":"crash","machine":"b"})),
-            (25, json!({"action":"reboot","machine":"b"})),
-            (30, json!({"action":"heal","handle":"t"})),
-        ] {
-            let mut action = action;
-            action["id"] = json!(0);
-            action["at_ns"] = json!(at);
-            action["deadline_ns"] = json!(at);
-            w.faults
-                .append(serde_json::from_value(action).unwrap())
-                .unwrap();
-        }
-        for at in [5, 15, 27, 35] {
-            w.machines[1].steps.push_back(Step::new(at, Stop::Sent));
-        }
-        run_with(&mut w, 60, None, workers, Duration::from_micros(3)).unwrap();
-        let mut delivered = Vec::new();
-        let mut bytes = [0; MAX_DATAGRAM_BYTES];
-        loop {
-            match receiver.recv(&mut bytes) {
-                Ok(count) => {
-                    let event: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
-                    if let Kind::MachineLifecycle { transition } = event.kind {
-                        delivered.push((
-                            event.simulated_time_ns,
-                            event.machine,
-                            event.incarnation,
-                            transition,
-                        ));
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => panic!("{error}"),
-            }
-        }
-        assert_eq!(
-            delivered,
-            vec![
+    for (requested, effective) in [
+        (500_000_000u64, 500_000_000u64),
+        (1000, 2_000_000),
+        (3_000_000_000, 2_000_000_000),
+    ] {
+        let mut reference = None;
+        for workers in [0, 1, 2, 4] {
+            use seedbox_engine_protocol::observation::{
+                Kind, MachineTransition, Observation, MAX_DATAGRAM_BYTES,
+            };
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("observer");
+            let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+            receiver.set_nonblocking(true).unwrap();
+            let mut w = world(&["a", "b"])
+                .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
+            for (at, action) in [
                 (
                     10,
-                    "b".into(),
-                    0,
-                    MachineTransition::Throttled {
-                        factor_permille: 4000
-                    }
+                    json!({"action":"throttle","handle":"t","machine":"b","speed_hz":requested}),
                 ),
-                (20, "b".into(), 0, MachineTransition::Crashed),
-                (25, "b".into(), 1, MachineTransition::Rebooted),
-                (
-                    30,
-                    "b".into(),
-                    1,
-                    MachineTransition::Throttled {
-                        factor_permille: 1000
+                (20, json!({"action":"crash","machine":"b"})),
+                (25, json!({"action":"reboot","machine":"b"})),
+                (30, json!({"action":"heal","handle":"t"})),
+            ] {
+                let mut action = action;
+                action["id"] = json!(0);
+                action["at_ns"] = json!(at);
+                action["deadline_ns"] = json!(at);
+                w.faults
+                    .append(serde_json::from_value(action).unwrap())
+                    .unwrap();
+            }
+            for at in [5, 15, 27, 35] {
+                w.machines[1].steps.push_back(Step::new(at, Stop::Sent));
+            }
+            run_with(&mut w, 60, None, workers, Duration::from_micros(3)).unwrap();
+            let mut delivered = Vec::new();
+            let mut bytes = [0; MAX_DATAGRAM_BYTES];
+            loop {
+                match receiver.recv(&mut bytes) {
+                    Ok(count) => {
+                        let event: Observation = serde_json::from_slice(&bytes[..count]).unwrap();
+                        if let Kind::MachineLifecycle { transition } = event.kind {
+                            delivered.push((
+                                event.simulated_time_ns,
+                                event.machine,
+                                event.incarnation,
+                                transition,
+                            ));
+                        }
                     }
-                ),
-            ]
-        );
-        let throttles: Vec<String> = machine_trace(&w, "b")
-            .into_iter()
-            .filter(|line| line.contains(":throttle/"))
-            .collect();
-        // Each change lands with the machine at its exact boundary; the
-        // crash's fresh incarnation is throttled again.
-        assert_eq!(
-            throttles,
-            [
-                "b:throttle/4000:10",
-                "b:throttle/4000:20",
-                "b:throttle/1000:30"
-            ]
-        );
-        assert!(w.faults.active_handles().is_empty());
-        assert!(w
-            .faults
-            .log
-            .iter()
-            .all(|row| row.status == RowStatus::Applied));
-        let observed = (throttles, w.faults.log.clone());
-        if let Some(want) = &reference {
-            assert_eq!(&observed, want);
-        } else {
-            reference = Some(observed);
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            assert_eq!(
+                delivered,
+                vec![
+                    (
+                        10,
+                        "b".into(),
+                        0,
+                        MachineTransition::Throttled {
+                            speed_hz: Some(effective)
+                        }
+                    ),
+                    (20, "b".into(), 0, MachineTransition::Crashed),
+                    (25, "b".into(), 1, MachineTransition::Rebooted),
+                    (
+                        30,
+                        "b".into(),
+                        1,
+                        MachineTransition::Throttled { speed_hz: None }
+                    ),
+                ]
+            );
+            let throttles: Vec<String> = machine_trace(&w, "b")
+                .into_iter()
+                .filter(|line| line.contains(":throttle/"))
+                .collect();
+            // Each change lands with the machine at its exact boundary; the
+            // crash's fresh incarnation is throttled again.
+            assert_eq!(
+                throttles,
+                [
+                    format!("b:throttle/{requested}:10"),
+                    format!("b:throttle/{requested}:20"),
+                    "b:throttle/full:30".to_owned()
+                ]
+            );
+            assert!(w.faults.active_handles().is_empty());
+            assert!(w
+                .faults
+                .log
+                .iter()
+                .all(|row| row.status == RowStatus::Applied));
+            let observed = (throttles, w.faults.log.clone());
+            if let Some(want) = &reference {
+                assert_eq!(&observed, want);
+            } else {
+                reference = Some(observed);
+            }
         }
     }
 }
@@ -1182,7 +1187,7 @@ fn failed_successor_throttle_terminates_workers_and_prevents_world_reuse() {
         for (at, action) in [
             (
                 5,
-                json!({"action":"throttle","handle":"t","machine":"b","factor_permille":4000}),
+                json!({"action":"throttle","handle":"t","machine":"b","speed_hz":500_000_000}),
             ),
             (10, json!({"action":"crash","machine":"b"})),
         ] {
@@ -1203,7 +1208,7 @@ fn failed_successor_throttle_terminates_workers_and_prevents_world_reuse() {
         assert_eq!(
             failed_trace
                 .iter()
-                .filter(|line| line.contains(":throttle/4000:"))
+                .filter(|line| line.contains(":throttle/500000000:"))
                 .count(),
             2
         );
@@ -1224,8 +1229,7 @@ fn throttle_of_an_unsupported_machine_is_a_recoverable_unsupported_error() {
     let mut w = world(&["a", "b"]);
     configure_control(&mut w);
     w.machines[1].throttleable = false;
-    let request =
-        json!({"version":1,"id":1,"op":"throttle","target":{"machine":"b"},"factor_permille":2000});
+    let request = json!({"version":1,"id":1,"op":"throttle","target":{"machine":"b"},"speed_hz":1_000_000_000});
     w.control
         .request(0, 0, format!("SBX_RPC1 1 1 {request}").as_bytes(), 0)
         .unwrap();
@@ -1756,8 +1760,10 @@ fn rejected_interactive_state_does_not_terminate_the_world_or_add_fault_history(
 }
 
 #[test]
-fn virtual_dns_replies_return_to_sender_through_windowed_queue() {
+fn virtual_dns_replies_survive_checkpoints_and_ignore_partitions_and_worker_count() {
     let mut w = world(&["a", "b"]);
+    w.early = 0;
+    plan(&mut w, 1, partition("cut"));
     let mut arp = vec![0xff; 6];
     arp.extend_from_slice(&[0x02, 0, 0, 0, 0, 1]);
     arp.extend_from_slice(&[8, 6, 0, 1, 8, 0, 6, 4, 0, 1]);
@@ -1785,16 +1791,34 @@ fn virtual_dns_replies_return_to_sender_through_windowed_queue() {
         step.frames = vec![bytes];
         w.machines[0].steps.push_back(step);
     }
-    assert_eq!(run(&mut w, 70, None).unwrap(), "duration");
-    let received = trace(&w);
     assert_eq!(
-        received
-            .iter()
-            .filter(|entry| entry.contains("a:frame:"))
-            .count(),
-        2
+        segment(&mut w, 70, None, None, Some(30), true).unwrap(),
+        "checkpoint"
     );
-    assert!(!received.iter().any(|entry| entry.contains("b:frame:")));
+    assert!(trace(&w).contains(&"a:frame:15".into()));
+    let queued: Vec<_> = w.events[0].values().collect();
+    assert!(matches!(&queued[..], [Payload::DnsReply(_)]));
+    // Exercise the retained JSON representation as well as snapshot restoration.
+    for payload in w.events[0].values_mut() {
+        *payload = serde_json::from_value(serde_json::to_value(&*payload).unwrap()).unwrap();
+    }
+    let snapshot = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    for workers in [0, 1, 4] {
+        snapshot.restore_checkpoint(&mut w).unwrap();
+        w.factory.lock().unwrap().clear();
+        assert_eq!(
+            run_with(&mut w, 70, None, workers, Duration::from_micros(3))
+                .unwrap()
+                .0,
+            "duration"
+        );
+        let received: Vec<_> = trace(&w)
+            .into_iter()
+            .filter(|entry| entry.contains(":frame:"))
+            .collect();
+        assert_eq!(received, ["a:frame:35"]);
+        assert!(w.network_snapshot().is_empty());
+    }
 }
 
 #[test]

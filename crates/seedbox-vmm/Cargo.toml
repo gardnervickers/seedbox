@@ -16,6 +16,7 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
+hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
 hex = "0.4"
 tempfile = "3"
 clap = { version = "4", features = ["derive", "env"] }

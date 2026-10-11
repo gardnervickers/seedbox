@@ -12,6 +12,7 @@
     "guest/barrier.h",
     "guest/control.h",
     "guest/io.h",
+    "guest/world-clock.h",
     "kernel-arm64/supervisor-io.h",
     "nix/progress.nix",
     "guest/progress/progress.c",

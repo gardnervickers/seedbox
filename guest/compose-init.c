@@ -28,6 +28,7 @@
 #include "application-output.h"
 #include "barrier.h"
 #include "progress-launch.h"
+#include "world-clock.h"
 #include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -40,7 +41,7 @@
 #include <unistd.h>
 
 static int recipe_fd, management = -1;
-static uint32_t blocks_per_progress_call = 10000;
+static uint32_t instructions_per_progress_call = 50000, progress_points_per_block = 1;
 #define RPC_FRAME_MAX 16384
 static int control_listener = -1, control_client = -1;
 static uint32_t relay_id, waiting_relay, session_id;
@@ -549,7 +550,7 @@ static pid_t start(void) {
         size_t count = 0;
         while (arguments[count]) ++count;
         /* Translator arguments, the application's own, and execv's NULL. */
-        enum { PREFIX_MAX = 10 };
+        enum { PREFIX_MAX = 12 };
         char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
         if (!instrumented) die("instrumentation arguments");
         size_t prefix = 0;
@@ -563,10 +564,13 @@ static pid_t start(void) {
 #endif
         instrumented[prefix++] = "-c";
         instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
-        char progress_budget[11];
-        snprintf(progress_budget, sizeof(progress_budget), "%u", blocks_per_progress_call);
-        instrumented[prefix++] = "--blocks-per-progress-call";
+        char progress_budget[11], progress_points[11];
+        snprintf(progress_budget, sizeof(progress_budget), "%u", instructions_per_progress_call);
+        snprintf(progress_points, sizeof(progress_points), "%u", progress_points_per_block);
+        instrumented[prefix++] = "--instructions-per-progress-call";
         instrumented[prefix++] = progress_budget;
+        instrumented[prefix++] = "--progress-points-per-block";
+        instrumented[prefix++] = progress_points;
         instrumented[prefix++] = "--";
         if (prefix > PREFIX_MAX) die("instrumentation prefix");
         for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
@@ -799,12 +803,14 @@ int main(void) {
     recipe_fd = open("/seedbox/launch.bin", O_RDONLY|O_CLOEXEC);
     if (recipe_fd < 0) die("launch recipe");
     char magic[10]; read_exact(magic, sizeof(magic));
-    if (memcmp(magic, "SBXLAUNCH5", 10)) { errno = EINVAL; die("launch version"); }
+    if (memcmp(magic, "SBXLAUNCH6", 10)) { errno = EINVAL; die("launch version"); }
     char *ip = text(), *hosts = text(), *hostname = text(); user = text(); working_dir = text();
     uint32_t max_map_count = count();
-    struct timespec wall_clock = {.tv_sec = count(), .tv_nsec = 0};
-    blocks_per_progress_call = count();
-    if (!blocks_per_progress_call) { errno = EINVAL; die("zero progress block budget"); }
+    uint32_t wall_clock_epoch = count();
+    instructions_per_progress_call = count();
+    if (!instructions_per_progress_call) { errno = EINVAL; die("zero progress instruction budget"); }
+    progress_points_per_block = count();
+    if (!progress_points_per_block) { errno = EINVAL; die("zero progress points per block"); }
     arguments = list(); environment = list(); char **volumes = list(); char **disk_volumes = list();
     if (!arguments[0] || !*arguments[0]) { errno = EINVAL; die("empty executable"); }
     configure_network(ip);
@@ -843,6 +849,7 @@ int main(void) {
     relay_socket("/proc/cmdline", "/run/seedbox/control.sock");
     /* Everything before this point is fixed by the boot seed; the application
      * starts after the world is released under the run seed. */
+    struct timespec wall_clock = seedbox_wall_clock_at(wall_clock_epoch, seedbox_world_time_ns());
     if (clock_settime(CLOCK_REALTIME, &wall_clock)) die("set recorded wall clock");
     if (seedbox_launch_barrier("/proc/cmdline", "/dev/urandom")) die("launch barrier");
     watch_children();
