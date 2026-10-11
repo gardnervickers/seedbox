@@ -488,6 +488,17 @@ impl Focus {
             })
     }
 
+    /// A published worker can accept playback controls before applications are ready.
+    pub fn playback_available(&self) -> bool {
+        self.executing()
+            || (!self.terminal()
+                && self.playback.is_some()
+                && self.resource.as_ref().is_some_and(|r| {
+                    r.status.phase == seedbox_api::Phase::Running
+                        && r.status.stage == Some(seedbox_api::Stage::Booting)
+                }))
+    }
+
     /// Whether this run starts from a checkpoint (a branch, or a rerun of one),
     /// so its machines are restored rather than booted.
     pub fn restoring(&self) -> bool {
@@ -2170,9 +2181,20 @@ impl App {
             );
             return Vec::new();
         }
-        if live && !focus.executing() {
+        let playback_key = matches!(key.code, KeyCode::Char(' ' | '.' | '+' | '=' | '-'));
+        if live
+            && !(if playback_key {
+                focus.playback_available()
+            } else {
+                focus.executing()
+            })
+        {
             self.notify(
-                "playback controls start once the simulation is executing",
+                if playback_key {
+                    "waiting for the simulation worker"
+                } else {
+                    "fault and checkpoint controls start once applications are ready"
+                },
                 Tone::Info,
             );
             return Vec::new();
@@ -2482,8 +2504,84 @@ pub(crate) mod tests {
         app
     }
 
+    pub(crate) fn booting_app(rate: PlaybackRate) -> App {
+        let mut app = app(&["n1", "n2", "n3", "oracle"]);
+        for machine in &mut app.focus.as_mut().unwrap().world.as_mut().unwrap().machines {
+            machine.condition = MachineCondition::Starting;
+        }
+        let mut resource = timeline_resource(10);
+        resource.metadata.name = "etcd-demo".into();
+        resource.status.phase = seedbox_api::Phase::Running;
+        resource.status.stage = Some(seedbox_api::Stage::Booting);
+        app.apply(Update::Resource(resource));
+        app.apply(Update::Playback(PlaybackObservation {
+            state: seedbox_api::PlaybackStatus {
+                position: Default::default(),
+                rate,
+                achieved_rate: None,
+                stepping: false,
+                terminal: false,
+                application_ready: false,
+            },
+            age_ns: 0,
+        }));
+        app
+    }
+
     fn key(c: char) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn paused_startup_accepts_playback_but_keeps_faults_gated() {
+        for key_code in [' ', '.'] {
+            let mut app = booting_app(PlaybackRate::Paused);
+            assert!(!app.input(key(key_code)).is_empty(), "{key_code}");
+        }
+        for key_code in ['+', '-'] {
+            let mut app = booting_app(PlaybackRate::Unlimited);
+            assert!(!app.input(key(key_code)).is_empty());
+        }
+        for phase in [seedbox_api::Phase::Queued, seedbox_api::Phase::Preparing] {
+            let mut app = booting_app(PlaybackRate::Paused);
+            app.focus
+                .as_mut()
+                .unwrap()
+                .resource
+                .as_mut()
+                .unwrap()
+                .status
+                .phase = phase;
+            assert!(app.input(key(' ')).is_empty());
+        }
+        let mut app = booting_app(PlaybackRate::Paused);
+        assert!(matches!(
+            app.input(key(' ')).as_slice(),
+            [Request::Control(
+                _,
+                ControlCommand::SetRate {
+                    rate: PlaybackRate::Unlimited
+                }
+            )]
+        ));
+        for key_code in ['f', 'c'] {
+            let mut app = booting_app(PlaybackRate::Paused);
+            assert!(app.input(key(key_code)).is_empty());
+        }
+        let mut app = booting_app(PlaybackRate::Paused);
+        app.focus.as_mut().unwrap().playback = None;
+        assert!(app.input(key(' ')).is_empty());
+        let mut app = booting_app(PlaybackRate::Paused);
+        app.focus
+            .as_mut()
+            .unwrap()
+            .playback
+            .as_mut()
+            .unwrap()
+            .0
+            .state
+            .terminal = true;
+        assert!(app.input(key(' ')).is_empty());
     }
 
     #[test]

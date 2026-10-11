@@ -873,6 +873,14 @@ fn spinner() -> char {
     SPINNER[(ms / 90) as usize % SPINNER.len()]
 }
 
+fn startup_paused(focus: &Focus) -> bool {
+    focus.paused()
+        && focus
+            .playback
+            .as_ref()
+            .is_some_and(|(p, _)| !p.state.stepping)
+}
+
 /// In place of the map while a simulation is queued, preparing or booting:
 /// what it is waiting for, progress so far and how long it has taken.
 fn startup(frame: &mut Frame, app: &App, focus: &Focus, phase: Phase, area: Rect) {
@@ -1004,7 +1012,14 @@ fn startup(frame: &mut Frame, app: &App, focus: &Focus, phase: Phase, area: Rect
             ));
         }
         _ => {
-            lines.push(heading("booting machines".into()));
+            if startup_paused(focus) {
+                lines.push(Line::styled(
+                    "❚❚  startup paused",
+                    Style::new().fg(AMBER).bold(),
+                ));
+            } else {
+                lines.push(heading("booting machines".into()));
+            }
             lines.push(Line::raw(""));
             if let Some(world) = &focus.world {
                 let width = world
@@ -1022,7 +1037,13 @@ fn startup(frame: &mut Frame, app: &App, focus: &Focus, phase: Phase, area: Rect
                     ]));
                 }
             }
-            if let Some(elapsed) = stage_elapsed(Stage::Booting) {
+            if startup_paused(focus) {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    "Press Space to resume startup",
+                    Style::new().fg(TEXT),
+                ));
+            } else if let Some(elapsed) = stage_elapsed(Stage::Booting) {
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
                     format!("booting for {elapsed}"),
@@ -1603,7 +1624,7 @@ fn node_border(focus: &Focus, m: &MachineState, target: bool) -> (Color, bool) {
 fn badge(frame: &mut Frame, focus: &Focus, m: &MachineState, rect: Rect, target: bool) {
     let (state, mut color) = condition(focus, m);
     let (border, selected) = node_border(focus, m, target);
-    if m.condition == MachineCondition::Starting && !focus.terminal() {
+    if m.condition == MachineCondition::Starting && !focus.terminal() && !startup_paused(focus) {
         color = breathe(ICE_DIM, ICE_BRIGHT, 1600);
     }
     let glyph = state.chars().next().unwrap_or('●');
@@ -1641,7 +1662,8 @@ fn node(
     now: u64,
 ) {
     let (mut border, selected) = node_border(focus, m, target);
-    let starting = m.condition == MachineCondition::Starting && !focus.terminal();
+    let starting =
+        m.condition == MachineCondition::Starting && !focus.terminal() && !startup_paused(focus);
     if !target && !selected && last.is_some_and(Item::open) && tick(500).is_multiple_of(2) {
         border = last.map_or(border, |item| span_color(&item.action, false));
     } else if !target && !selected && starting {
@@ -1748,6 +1770,7 @@ fn node(
 fn condition(focus: &Focus, m: &MachineState) -> (String, Color) {
     let mut text = match m.condition {
         MachineCondition::Starting if focus.terminal() => ("◌ never ready".to_string(), FAINT_TEXT),
+        MachineCondition::Starting if startup_paused(focus) => ("❚❚ paused".to_string(), AMBER),
         MachineCondition::Starting => (
             format!(
                 "{} {}",
@@ -2277,7 +2300,14 @@ fn status_bar(
                 }
             }
             if !p.state.application_ready {
-                left.push(Span::styled(" · apps starting", Style::new().fg(YELLOW)));
+                left.push(Span::styled(
+                    if startup_paused(focus) {
+                        " · startup paused"
+                    } else {
+                        " · apps starting"
+                    },
+                    Style::new().fg(YELLOW),
+                ));
             }
         }
         if details {
@@ -2518,13 +2548,13 @@ fn summary_phase(s: &SimulationSummary) -> (&'static str, Color) {
     match s.status.phase {
         Phase::Queued => ("◌ queued", AMBER),
         Phase::Preparing => ("◌ preparing", YELLOW),
-        Phase::Running if s.status.stage == Some(seedbox_api::Stage::Booting) => {
-            ("◌ booting", YELLOW)
-        }
         Phase::Running if s.status.playback.as_ref().is_some_and(|p| p.state.stepping) => {
             ("▷ stepping", YELLOW)
         }
         Phase::Running if summary_paused(s) => ("❚❚ paused", AMBER),
+        Phase::Running if s.status.stage == Some(seedbox_api::Stage::Booting) => {
+            ("◌ booting", YELLOW)
+        }
         Phase::Running => ("● running", GREEN),
         Phase::Finalizing => ("◌ finalizing", YELLOW),
         Phase::Completed => ("■ completed", DIM),
@@ -3554,5 +3584,16 @@ mod tests {
         assert!(text.contains("❚❚ paused"), "{text}");
         assert!(text.contains("● running"), "{text}");
         assert!(text.contains("1 running · 1 paused"), "{text}");
+    }
+    #[test]
+    fn paused_startup_shows_resume_hint_instead_of_boot_progress() {
+        let app = crate::model::tests::booting_app(PlaybackRate::Paused);
+        let text = render(&app);
+        assert!(text.contains("startup paused"), "{text}");
+        assert!(text.contains("Press Space to resume startup"), "{text}");
+        assert!(!text.contains("booting"), "{text}");
+        assert!(!text.contains("apps starting"), "{text}");
+        let running = crate::model::tests::booting_app(PlaybackRate::Unlimited);
+        assert!(render(&running).contains("booting machines"));
     }
 }
