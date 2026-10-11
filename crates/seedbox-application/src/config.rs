@@ -295,6 +295,8 @@ pub fn parse_for_architecture(
         services.insert(
             key,
             Service {
+                memory_mb: None,
+                cpu: Default::default(),
                 source: image_source,
                 platform,
                 entrypoint: command(svc.get("entrypoint"), &format!("{p}.entrypoint"))?,
@@ -554,7 +556,6 @@ pub fn parse_for_architecture(
         services,
         configs,
         network,
-        simulator: Default::default(),
         schedule,
         control,
         limits,

@@ -52,6 +52,7 @@ fn fixture() -> (tempfile::TempDir, ContentStore, Definition, ContentDigest) {
     )
     .unwrap();
     let inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: Some(86400),
         kernel,
         images: BTreeMap::from([(
@@ -73,6 +74,43 @@ fn fixture() -> (tempfile::TempDir, ContentStore, Definition, ContentDigest) {
     (temporary, store, definition, boot)
 }
 #[test]
+fn mixed_memory_roundtrips_through_saved_definitions_and_prepared_inputs() {
+    let (_temporary, store, mut definition, _) = fixture();
+    let mut app = definition.oracle.clone();
+    app.name = None;
+    app.memory_bytes = 2048 * 1024 * 1024;
+    definition.machines.insert("app".into(), app);
+    definition.oracle.memory_bytes = 256 * 1024 * 1024;
+    let saved: Definition =
+        serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&definition).unwrap()).unwrap();
+    let inputs = prepared(&saved, &store).unwrap();
+    assert_eq!(inputs.memory_mb("app"), 2048);
+    assert_eq!(inputs.memory_mb("oracle"), 256);
+    assert_eq!(
+        inputs.machine_memory_mb,
+        BTreeMap::from([("app".into(), 2048)])
+    );
+    let configuration = saved.configuration("mixed");
+    assert_eq!(configuration.services["app"].memory_mb, Some(2048));
+    assert_eq!(configuration.services["oracle"].memory_mb, Some(256));
+    let resolved = resolve(&configuration, &inputs, saved.seed, saved.overrides.clone()).unwrap();
+    assert_eq!(
+        resolved.machines["app"].memory_bytes,
+        saved.machines["app"].memory_bytes
+    );
+    assert_eq!(resolved.oracle.memory_bytes, saved.oracle.memory_bytes);
+    for memory in [0, 64 * 1024 * 1024 + 1, 3073 * 1024 * 1024] {
+        definition.machines.get_mut("app").unwrap().memory_bytes = memory;
+        assert!(prepared(&definition, &store).is_err(), "{memory}");
+    }
+    definition.machines.get_mut("app").unwrap().memory_bytes = 64 * 1024 * 1024;
+    assert!(prepared(&definition, &store)
+        .unwrap_err()
+        .to_string()
+        .contains("archive boot floor"));
+}
+
+#[test]
 fn resolved_launch_is_identical_until_inline_fields_change() {
     let (_temporary, store, mut definition, original) = fixture();
     let prepared_inputs = prepared(&definition, &store).unwrap();
@@ -83,7 +121,6 @@ fn resolved_launch_is_identical_until_inline_fields_change() {
     );
     definition.oracle.process.argv.push("--changed".into());
     definition.clock.epoch_seconds += 1;
-    definition.simulator.blocks_per_progress_call = std::num::NonZeroU32::new(5000).unwrap();
     let changed = prepared(&definition, &store).unwrap();
     assert_ne!(changed.guests["oracle"], original);
     assert_eq!(
@@ -96,6 +133,25 @@ fn resolved_launch_is_identical_until_inline_fields_change() {
         .any(|v| v == b"preserve me"));
     assert!(bytes.windows(b"--changed".len()).any(|v| v == b"--changed"));
     store.verify(&original).unwrap();
+    // The CPU is the VMM's input, not the guest's: the recipe and the
+    // prepared guests do not change with it.
+    definition.oracle.cpu.speed_hz = 800_000_000;
+    definition.oracle.cpu.jitter_percent = 5;
+    let mut worker = definition.oracle.clone();
+    worker.cpu = Default::default();
+    definition.machines.insert("worker".into(), worker);
+    let restored: Definition =
+        serde_json::from_value(serde_json::to_value(&definition).unwrap()).unwrap();
+    let configuration = restored.configuration("roundtrip");
+    assert_eq!(configuration.services["oracle"].cpu, definition.oracle.cpu);
+    assert_eq!(configuration.services["worker"].cpu.speed_hz, 1_000_000_000);
+    assert_eq!(configuration.services["worker"].cpu.jitter_percent, 0);
+    definition.machines.remove("worker");
+    assert_eq!(
+        prepared(&definition, &store).unwrap().guests,
+        changed.guests
+    );
+    definition.oracle.cpu = Default::default();
 }
 #[test]
 fn checkpoint_binary_closure_survives_source_deletion_and_preserves_guest_paths() {

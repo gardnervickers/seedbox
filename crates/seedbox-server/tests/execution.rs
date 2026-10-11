@@ -82,6 +82,7 @@ impl ExecutionBackend for Backend {
 struct Server {
     directory: Arc<tempfile::TempDir>,
     manager: Arc<Manager>,
+    execution: Arc<ExecutionService>,
     client: Client,
     definition: seedbox_spec::definition::Definition,
     shutdown: CancellationToken,
@@ -94,6 +95,12 @@ impl Server {
             + Sync
             + 'static,
     ) -> Self {
+        Self::with_provider(
+            Arc::new(Provider(Arc::new(script))),
+            NonZeroUsize::new(2).unwrap(),
+        )
+    }
+    fn with_provider(provider: Arc<dyn BackendProvider>, slots: NonZeroUsize) -> Self {
         let directory = Arc::new(
             tempfile::Builder::new()
                 .prefix("seedbox-server-test-")
@@ -106,33 +113,28 @@ impl Server {
             Catalogue::open(&directory.path().join("catalogue")).unwrap(),
         ));
         let execution = Arc::new(
-            ExecutionService::new(
-                manager.clone(),
-                directory.path().into(),
-                store,
-                Arc::new(Provider(Arc::new(script))),
-            )
-            .unwrap(),
+            ExecutionService::new(manager.clone(), directory.path().into(), store, provider)
+                .unwrap(),
         );
         let socket = directory.path().join("api.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let shutdown = CancellationToken::default();
-        let (owner, token, files) = (manager.clone(), shutdown.clone(), directory.clone());
+        let (owner, token, files, service) = (
+            manager.clone(),
+            shutdown.clone(),
+            directory.clone(),
+            execution.clone(),
+        );
         let task = tokio::spawn(async move {
             let _files = files; // Keep fixtures alive through cleanup even if an assertion panics.
-            seedbox_server::serve(
-                listener,
-                owner,
-                execution,
-                NonZeroUsize::new(2).unwrap(),
-                token,
-            )
-            .await
-            .unwrap();
+            seedbox_server::serve(listener, owner, service, slots, token)
+                .await
+                .unwrap();
         });
         Self {
             directory,
             manager,
+            execution,
             client: Client::connect_to(&socket).unwrap(),
             definition,
             shutdown,
@@ -244,6 +246,7 @@ fn definition(root: &Path, store: &ContentStore) -> seedbox_spec::definition::De
         "name: test\nservices:\n  oracle:\n    image: example/oracle\n  other:\n    image: example/other\n",
         Path::new("/project/compose.yaml"), &Default::default(), if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 }).unwrap();
     let inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: Some(86400),
         kernel: store.put(b"kernel").unwrap(),
         images: ["oracle", "other"]
@@ -1130,5 +1133,262 @@ async fn deletion_and_completion_drain_in_flight_control_before_retiring_files()
         assert!(server.manager.describe(&id).is_err());
         drop(peer_owner.lock().unwrap().take());
         server.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn capacity_api_tracks_real_admission_and_releases_joined_tasks() {
+    let server = Server::with_provider(
+        Arc::new(WaitingProvider(AtomicBool::new(false))),
+        NonZeroUsize::MIN,
+    );
+    let mut configuration = seedbox_application::config::parse(
+        "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+        Path::new("/project/compose.yaml"),
+        &Default::default(),
+    )
+    .unwrap();
+    for service in configuration.services.values_mut() {
+        service.platform.clear();
+    }
+    let request = |name: &str| SubmitRequest {
+        metadata: Default::default(),
+        options: Default::default(),
+        request_id: name.into(),
+        spec: SimulationSpec {
+            program: vec![],
+            start_paused: false,
+            seed: Some(1),
+            inputs: seedbox_api::InputSource::Project,
+            configuration: configuration.clone(),
+        },
+    };
+    let first = server
+        .client
+        .submit(&request("first"))
+        .await
+        .unwrap()
+        .metadata
+        .id;
+    let second = server
+        .client
+        .submit(&request("second"))
+        .await
+        .unwrap()
+        .metadata
+        .id;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let capacity = server.client.capacity().await.unwrap();
+            if capacity.occupying.iter().any(|o| o.simulation == first) {
+                assert_eq!(capacity.slots, 1);
+                assert_eq!(capacity.occupying.len(), 1);
+                assert_eq!(capacity.queued.len(), 1);
+                assert_eq!(capacity.queued[0].simulation, second);
+                assert_eq!(
+                    capacity.queued[0].reason,
+                    seedbox_api::QueueReason::ResidentCapacity
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    server.client.stop(&first).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let capacity = server.client.capacity().await.unwrap();
+            if capacity.occupying.iter().any(|o| o.simulation == second) {
+                assert_eq!(capacity.occupying.len(), 1);
+                assert!(capacity.queued.is_empty());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let execution = server.execution.clone();
+    server.finish().await;
+    assert!(execution.capacity().unwrap().occupying.is_empty());
+}
+
+#[tokio::test]
+async fn project_execution_uses_the_canonical_mixed_memory_profile() {
+    use seedbox_application::{execution::*, image::Launch};
+    #[derive(Clone)]
+    struct FixtureBackend(PreparedInputs);
+    impl PreparationBackend for FixtureBackend {
+        fn prepare(
+            &self,
+            _: &seedbox_application::config::Simulation,
+            store: &ContentStore,
+        ) -> seedbox_application::Result<PreparedInputs> {
+            store.put(b"test-only-binary")?;
+            Ok(self.0.clone())
+        }
+        fn prepare_cancellable(
+            &self,
+            simulation: &seedbox_application::config::Simulation,
+            store: &ContentStore,
+            _: &seedbox_application::preparation::PreparationContext,
+        ) -> seedbox_application::Result<PreparedInputs> {
+            self.prepare(simulation, store)
+        }
+    }
+    impl ExecutionBackend for FixtureBackend {
+        fn profile(&self) -> ExecutionProfile {
+            self.0.profile.clone()
+        }
+        fn execute(
+            &self,
+            request: ExecutionRequest<'_>,
+        ) -> seedbox_application::Result<ExecutionReport> {
+            assert_eq!(request.prepared.profile, self.profile());
+            assert_eq!(request.prepared.memory_mb("app"), 2048);
+            assert_eq!(request.prepared.memory_mb("oracle"), 256);
+            assert_eq!(request.prepared.memory_mb("helper"), 1024);
+            Ok(ExecutionReport {
+                simulated_time_ns: Some(1),
+                host_wait_ns: 0,
+                reason: StopReason::Completed,
+                workload_exit: Some(WorkloadExit {
+                    service: "oracle".into(),
+                    code: 0,
+                }),
+                witness: Some(self.0.kernel.clone()),
+                full_state: None,
+                faults: vec![],
+                detail: None,
+            })
+        }
+    }
+    struct Provider(FixtureBackend);
+    impl BackendProvider for Provider {
+        fn project(
+            &self,
+            _: &seedbox_application::config::Simulation,
+            _: &ContentStore,
+            _: &CancellationToken,
+        ) -> seedbox_application::Result<Backends> {
+            Ok(Backends {
+                preparation: Box::new(self.0.clone()),
+                execution: Box::new(self.0.clone()),
+            })
+        }
+        fn retained(
+            &self,
+            inputs: &PreparedInputs,
+            _: &ContentStore,
+        ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
+            Ok(Box::new(FixtureBackend(inputs.clone())))
+        }
+    }
+    let temporary = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(temporary.path().join("store"));
+    let digest = store.put(b"test-only-binary").unwrap();
+    let configuration = seedbox_application::config::parse_for_architecture(
+            "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\n",
+            Path::new("/project/seedbox.yaml"), &Default::default(),
+            if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 },
+        ).unwrap();
+    let image = PreparedImage {
+        manifest: digest.clone(),
+        config: digest.clone(),
+        layers: vec![],
+        launch: Launch {
+            argv: vec!["/app".into()],
+            environment: BTreeMap::new(),
+            working_dir: "/".into(),
+            user: "".into(),
+            volumes: vec![],
+            disk_volumes: vec![],
+        },
+    };
+    let inputs = PreparedInputs {
+        wall_clock_epoch: Some(86400),
+        kernel: digest.clone(),
+        images: BTreeMap::from([
+            ("app".into(), image.clone()),
+            ("helper".into(), image.clone()),
+            ("oracle".into(), image),
+        ]),
+        placement: BTreeMap::from([
+            ("app".into(), "app".into()),
+            ("helper".into(), "helper".into()),
+            ("oracle".into(), "oracle".into()),
+        ]),
+        guests: BTreeMap::from([
+            ("app".into(), digest.clone()),
+            ("helper".into(), digest.clone()),
+            ("oracle".into(), digest.clone()),
+        ]),
+        machine_memory_mb: BTreeMap::from([("app".into(), 2048), ("oracle".into(), 256)]),
+        profile: ExecutionProfile {
+            backend: Backend::Other("test".into()),
+            engine: digest,
+            witness_mode: WitnessMode::Exits,
+            semantic_parameters: SemanticParameters::new(1024),
+        },
+        auxiliary: BTreeMap::new(),
+        provenance: BTreeMap::new(),
+    };
+    let server = Server::with_provider(
+        Arc::new(Provider(FixtureBackend(inputs))),
+        NonZeroUsize::MIN,
+    );
+    let spec = SimulationSpec {
+        configuration,
+        inputs: seedbox_api::InputSource::Project,
+        seed: Some(1),
+        program: vec![],
+        start_paused: false,
+    };
+    let resource = server
+        .client
+        .submit(&SubmitRequest {
+            metadata: Default::default(),
+            options: Default::default(),
+            request_id: "mixed-memory".into(),
+            spec,
+        })
+        .await
+        .unwrap();
+    let finished = server
+        .wait(&resource.metadata.id, |r| {
+            r.status.phase == Phase::Completed
+        })
+        .await;
+    assert_eq!(finished.status.oracle_exit_code, Some(0));
+    assert_eq!(
+        finished.status.termination,
+        Some(seedbox_api::ExecutionTermination::OracleExited)
+    );
+    server.finish().await;
+}
+
+struct WaitingProvider(AtomicBool);
+impl BackendProvider for WaitingProvider {
+    fn project(
+        &self,
+        _: &seedbox_application::config::Simulation,
+        _: &ContentStore,
+        cancellation: &CancellationToken,
+    ) -> seedbox_application::Result<Backends> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !cancellation.is_cancelled() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        self.0.store(cancellation.is_cancelled(), Ordering::Release);
+        Err(seedbox_application::Error::PreparationCancelled)
+    }
+    fn retained(
+        &self,
+        _: &PreparedInputs,
+        _: &ContentStore,
+    ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
+        panic!("preparation timeout must not launch retained execution")
     }
 }

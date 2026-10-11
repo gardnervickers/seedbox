@@ -15,7 +15,12 @@ use std::{collections::BTreeSet, rc::Rc, time::Instant};
 
 const EXCLUSIVE_EPOCH_OFFSET: usize = 40;
 const SYSCALL_NS_OFFSET: usize = 48;
-const SYSCALL_NS: u64 = 1_000;
+use seedbox_engine_core::cpu_charge::{throttled_ns, SYSCALL_NS};
+/// A progress call's nominal charge, jitter bound and stream seed
+/// (kernel-arm64/seedbox.c).
+const PROGRESS_NS_OFFSET: usize = 56;
+const PROGRESS_JITTER_NS_OFFSET: usize = 64;
+const PROGRESS_JITTER_SEED_OFFSET: usize = 72;
 
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -245,8 +250,16 @@ impl<B: Backend> Machine<B> {
         if !seedbox_control::THROTTLE_PERMILLE.contains(&factor_permille) {
             return Err("invalid ARM throttle factor".into());
         }
-        // The default charge is 1000 ns, so permille maps exactly to ns.
-        unsafe { self.page.set_word(SYSCALL_NS_OFFSET, factor_permille) }
+        unsafe {
+            self.page
+                .set_word(SYSCALL_NS_OFFSET, throttled_ns(SYSCALL_NS, factor_permille))
+        }
+    }
+
+    /// Restart the progress jitter stream from `seed` while the vCPU is
+    /// stopped; the guest kernel picks it up at its next progress call.
+    pub fn seed_progress_jitter(&mut self, seed: u64) -> Result<()> {
+        unsafe { self.page.set_word(PROGRESS_JITTER_SEED_OFFSET, seed) }
     }
 
     pub fn seed_timer(&mut self, seed: u64, domain: &str) -> Result<()> {
@@ -322,6 +335,24 @@ impl<B: Backend> Machine<B> {
 
     pub fn console(&self) -> &[u8] {
         &self.uart.console
+    }
+
+    /// Publish what a progress call costs, its jitter bound and the seed of
+    /// the stream the guest kernel draws the jitter from, before the first
+    /// instruction. The page is part of every snapshot, so a branch keeps its
+    /// own stream.
+    pub fn with_progress(self, progress: &application::Progress) -> Result<Self> {
+        if self.raw_exits != 0 {
+            return Err("the progress charge must be set before the machine runs".into());
+        }
+        unsafe {
+            self.page.set_word(PROGRESS_NS_OFFSET, progress.ns)?;
+            self.page
+                .set_word(PROGRESS_JITTER_NS_OFFSET, progress.jitter_ns)?;
+            self.page
+                .set_word(PROGRESS_JITTER_SEED_OFFSET, progress.seed)?;
+        }
+        Ok(self)
     }
 
     pub fn with_timer_policy(mut self, policy: application::TimerPolicy) -> Result<Self> {

@@ -194,7 +194,7 @@ fn handles_connection_evidence_and_trigger_receipts_survive_explicit_reconnects(
     let calls = json!([
         {"method":"partition","args":[["client"],[{"$machine":"server-vm"}]],"save":"cut"},
         {"method":"heal","args":[{"$ref":"cut"}],"reconnect":true},
-        {"method":"throttle","args":["server",2.5],"save":"slow"},
+        {"method":"throttle","args":["server","800MHz"],"save":"slow"},
         call("heal",json!([{"$ref":"slow"}])),
         {"method":"clock_skew","args":["server"],"kwargs":{"max_offset":1000},"save":"skew"},
         {"method":"clock_drift","args":[{"$machine":"db-vm"}],"kwargs":{"ppb":5},"save":"drift"},
@@ -238,7 +238,7 @@ fn handles_connection_evidence_and_trigger_receipts_survive_explicit_reconnects(
     assert_eq!(requests[0]["id"], 1);
     assert_eq!(requests[1]["id"], 1);
     assert_eq!(requests[1]["handle"], "retained-p1");
-    assert_eq!(requests[2]["factor_permille"], 2500);
+    assert_eq!(requests[2]["speed_hz"], 800_000_000);
     assert_eq!(requests[4]["max_offset_ns"], 1000);
     assert_eq!(values[4]["value"]["offset_ns"], -7);
     assert_eq!(requests[5]["rate_ppb"], 5);
@@ -342,15 +342,18 @@ fn invalid_arguments_never_emit_a_frame() {
     ] {
         calls.push(call("sleep", json!([value])));
     }
-    for factor in [
-        json!(0.5),
-        json!(1000.5),
-        json!(1.0001),
+    for speed in [
+        json!("2"),
+        json!("2ghz"),
+        json!("999Hz"),
+        json!("1.1THz"),
+        json!("0.5Hz"),
+        json!(2.5),
         json!(true),
         json!("x"),
-        json!({"$float":"inf"}),
+        json!(0),
     ] {
-        calls.push(call("throttle", json!(["server", factor])));
+        calls.push(call("throttle", json!(["server", speed])));
     }
     calls.push(call("partition", json!(["client", ["server"]])));
     for options in [
@@ -473,7 +476,7 @@ fn malformed_responses_close_transport_and_never_retry() {
         ),
         (
             "throttle",
-            json!([{"$machine":"server"},1]),
+            json!([{"$machine":"server"},"1GHz"]),
             json!({}),
             json!({}),
         ),
@@ -510,4 +513,18 @@ fn malformed_responses_close_transport_and_never_retry() {
         assert_eq!(values[0]["error"], "ProtocolError");
         assert_eq!(values[1]["error"], "ProtocolError");
     }
+}
+
+#[test]
+fn numeric_throttle_speed_is_sent_as_hz() {
+    let (_, requests) = exercise(
+        json!([call("throttle", json!(["server", 1_500_000_000]))]),
+        vec![vec![frame(&reply(1, json!({"handle":"p4"})))]],
+    );
+    assert_eq!(
+        requests,
+        vec![
+            json!({"version":1,"id":1,"op":"throttle","target":{"service":"server"},"speed_hz":1_500_000_000})
+        ]
+    );
 }

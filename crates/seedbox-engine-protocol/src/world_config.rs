@@ -69,6 +69,11 @@ pub struct WorldConfig {
     pub kill_restart: Option<KillRestart>,
 }
 
+/// The spec's default CPU speed, for world documents written before it existed.
+fn default_cpu_speed_hz() -> u64 {
+    1_000_000_000
+}
+
 fn default_mem_mb() -> u64 {
     DEFAULT_MEM_MB
 }
@@ -128,6 +133,21 @@ pub struct LinkConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineConfig {
+    /// RAM override in MiB; omission inherits WorldConfig.mem_mb.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_mb: Option<u64>,
+    /// This machine's CPU speed in Hz; a throttle is a lower speed than this.
+    #[serde(default = "default_cpu_speed_hz")]
+    pub cpu_speed_hz: u64,
+    /// Nominal virtual time the guest kernel charges each PV progress call:
+    /// the instructions between calls at the configured CPU speed. Zero
+    /// charges a call like one syscall.
+    #[serde(default)]
+    pub progress_ns: u64,
+    /// Bound on the seeded variation of that charge, each way, drawn from a
+    /// per-machine stream; zero charges every call the same.
+    #[serde(default)]
+    pub progress_jitter_ns: u64,
     pub name: String,
     pub initrd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +155,12 @@ pub struct MachineConfig {
     /// Appended to the generated kernel command line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmdline: Option<String>,
+}
+
+impl MachineConfig {
+    pub fn memory_mb(&self, world: &WorldConfig) -> u64 {
+        self.mem_mb.unwrap_or(world.mem_mb)
+    }
 }
 
 /// `{"size_mib": N}` for a zeroed disk, or `{"image": PATH}` for a raw image
@@ -361,6 +387,20 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<WorldConfig>(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn per_machine_memory_is_optional_in_legacy_worlds() {
+        let world: WorldConfig = serde_json::from_value(serde_json::json!({
+            "kernel":"kernel", "mem_mb":256,
+            "machines":[{"name":"app","initrd":"app","mem_mb":2048},{"name":"oracle","initrd":"oracle"}]
+        })).unwrap();
+        assert_eq!(world.machines[0].memory_mb(&world), 2048);
+        assert_eq!(world.machines[1].memory_mb(&world), 256);
+        let raw = serde_json::to_value(&world).unwrap();
+        assert_eq!(raw["machines"][0]["mem_mb"], 2048);
+        assert!(raw["machines"][1].get("mem_mb").is_none());
+        assert_eq!(serde_json::from_value::<WorldConfig>(raw).unwrap(), world);
     }
 
     #[test]

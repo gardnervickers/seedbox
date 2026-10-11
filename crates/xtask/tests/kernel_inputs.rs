@@ -311,8 +311,8 @@ int main(int argc, char **argv) {{
 fn polling_preserves_the_callers_irq_mask_and_retries_after_irq_progress() {
     let read = section(
         "kernel-arm64/seedbox.c",
-        "u64 notrace seedbox_read(void)",
-        "/* Charge syscall work",
+        "static u64 notrace seedbox_read_step(u64 step)",
+        "/* splitmix64",
     );
     let source = format!(
         r#"
@@ -375,15 +375,15 @@ int main(int argc, char **argv) {{
             assert_eq!(
                 results,
                 [
-                    "RESULT 101 960 1 1",
-                    "RESULT 102 960 1 1",
-                    "RESULT 106 832 2 0",
-                    "RESULT 107 832 2 0"
+                    "RESULT 200 960 1 1",
+                    "RESULT 300 960 1 1",
+                    "RESULT 205 832 2 0",
+                    "RESULT 305 832 2 0"
                 ]
             );
             assert_eq!(writes, ["WRITE 1 24 960 0", "WRITE 1 24 832 1"]);
         } else {
-            assert_eq!(results, ["RESULT 106 832 1 0", "RESULT 107 832 1 0"]);
+            assert_eq!(results, ["RESULT 205 832 1 0", "RESULT 305 832 1 0"]);
             assert_eq!(writes, ["WRITE 1 24 832 1"]);
         }
     }
@@ -398,7 +398,7 @@ fn syscall_charge_preserves_owed_work_across_throttle_heal_and_multiple_bounds()
     );
     let helpers = section(
         "kernel-arm64/seedbox.c",
-        "u64 notrace seedbox_read(void)",
+        "static u64 notrace seedbox_read_step(u64 step)",
         "static u64 cs_read",
     );
     let source = format!(
@@ -411,7 +411,10 @@ typedef uint64_t u64;
 #define notrace
 #define unlikely(x) (x)
 #define panic(...) abort()
+#define likely(x) (x)
+struct pt_regs {{ unsigned long regs[31]; }};
 {page}
+static struct pt_regs regs;
 static struct seedbox_page storage, *page = &storage;
 static u64 early_last, next_cost, window;
 static unsigned long irq_flags;
@@ -424,7 +427,7 @@ static void *event = registers;
 #define local_irq_restore(saved) do {{ irq_flags = (saved); }} while (0)
 #define irqs_disabled_flags(saved) ((saved) & 128)
 #define isb() ((void)0)
-#define READ_ONCE(x) (printf("ACCESS %d %lu\n", &(x) == &page->syscall_ns, irq_flags), (x))
+#define READ_ONCE(x) (printf("ACCESS %d %lu\n", (&(x) == &page->syscall_ns || &(x) == &page->progress_ns || &(x) == &page->progress_jitter_ns || &(x) == &page->progress_jitter_seed), irq_flags), (x))
 #define WRITE_ONCE(x, v) do {{ printf("ACCESS 0 %lu\n", irq_flags); (x) = (v); }} while (0)
 static void writeq(unsigned long value, void *address) {{
     printf("WRITE %lu %ld %lu %d\n", value, (char *)address - registers, irq_flags, page->last == page->bound);
@@ -432,15 +435,58 @@ static void writeq(unsigned long value, void *address) {{
     if (next_cost) page->syscall_ns = next_cost;
 }}
 {helpers}
+static void reset(u64 cost, u64 bound, u64 span, u64 replacement) {{
+    storage = (struct seedbox_page){{.syscall_ns = cost, .bound = bound}};
+    window = span; next_cost = replacement; writes = 0;
+}}
+static void progress(void) {{
+    reset(1000, UINT64_MAX, 0, 0);
+    regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    printf("PROGRESS %llu %u %lu\n", (unsigned long long)page->last, writes, irq_flags);
+    page->progress_ns = 25000;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    printf("PROGRESS %llu %u %lu\n", (unsigned long long)page->last, writes, irq_flags);
+    seedbox_syscall_progress(&regs, 1);
+    regs.regs[0] = 0;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    printf("PROGRESS %llu %u %lu\n", (unsigned long long)page->last, writes, irq_flags);
+    page->syscall_ns = 4000; regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    printf("PROGRESS %llu %u %lu\n", (unsigned long long)page->last, writes, irq_flags);
+    reset(1000, 10000, 10000, 0); page->progress_ns = 25000;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    printf("PROGRESS %llu %u %lu\n", (unsigned long long)page->last, writes, irq_flags);
+    reset(1000, UINT64_MAX, 0, 0);
+    page->progress_ns = 25000; page->progress_jitter_ns = 5000; page->progress_jitter_seed = 7;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    u64 first = page->last;
+    page->progress_jitter_seed = 8;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    u64 other = page->last - first;
+    page->progress_jitter_seed = 7;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    printf("JITTER %llu %llu %llu\n", (unsigned long long)first, (unsigned long long)other, (unsigned long long)page->last);
+    page->progress_jitter_ns = 0;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    printf("ZERO %llu %lu\n", (unsigned long long)page->last, irq_flags);
+    page->progress_jitter_ns = UINT64_MAX;
+    for (int i = 0; i != 64; ++i) {{
+        u64 before = page->last;
+        seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+        printf("CAPPED %llu %lu\n", (unsigned long long)(page->last - before), irq_flags);
+    }}
+}}
 int main(int argc, char **argv) {{
+    if (argc == 2) {{ progress(); return 0; }}
     if (argc != 8) return 3;
     storage.syscall_ns = strtoull(argv[1], NULL, 10); storage.bound = strtoull(argv[2], NULL, 10);
     window = strtoull(argv[3], NULL, 10); next_cost = strtoull(argv[4], NULL, 10);
-    printf("OFFSET %zu\n", offsetof(struct seedbox_page, syscall_ns));
+    printf("OFFSET %zu %zu %zu %zu\n", offsetof(struct seedbox_page, syscall_ns), offsetof(struct seedbox_page, progress_ns), offsetof(struct seedbox_page, progress_jitter_ns), offsetof(struct seedbox_page, progress_jitter_seed));
     if (atoi(argv[6])) {{ u64 value = seedbox_read(); printf("READ %llu\n", (unsigned long long)value); }}
     if (atoi(argv[7])) page = NULL;
     for (int i = 0; i < atoi(argv[5]); ++i) {{
-        seedbox_syscall_progress();
+        seedbox_syscall_progress(&regs, 0);
         if (page) printf("RESULT %llu %u %llu %lu\n", (unsigned long long)page->last, writes, (unsigned long long)page->syscall_ns, irq_flags);
         else printf("EARLY %llu %lu\n", (unsigned long long)early_last, irq_flags);
     }}
@@ -451,11 +497,11 @@ int main(int argc, char **argv) {{
     for (args, expected) in [
         (
             ["1000", "18446744073709551615", "0", "0", "1", "1", "0"],
-            vec!["RESULT 1001 0 1000 0"],
+            vec!["RESULT 1100 0 1000 0"],
         ),
         (
             ["4000", "18446744073709551615", "0", "0", "1", "1", "0"],
-            vec!["RESULT 4001 0 4000 0"],
+            vec!["RESULT 4100 0 4000 0"],
         ),
         (
             ["1000000", "18446744073709551615", "0", "0", "1", "0", "0"],
@@ -473,11 +519,14 @@ int main(int argc, char **argv) {{
             ["1000", "250", "250", "0", "1", "0", "0"],
             vec!["RESULT 1000 3 1000 0"],
         ),
-        (["1000", "0", "0", "0", "1", "0", "1"], vec!["EARLY 1000 0"]),
+        (
+            ["1000", "0", "0", "0", "2", "0", "1"],
+            vec!["EARLY 1000 0", "EARLY 2000 0"],
+        ),
     ] {
         let output = support::success(std::process::Command::new(&binary).args(args));
         let text = String::from_utf8(output.stdout).unwrap();
-        assert!(text.contains("OFFSET 48\n"));
+        assert!(text.contains("OFFSET 48 56 64 72\n"));
         for line in text.lines().filter_map(|l| l.strip_prefix("ACCESS 0 ")) {
             assert_ne!(line.parse::<u64>().unwrap() & 128, 0);
         }
@@ -490,7 +539,209 @@ int main(int argc, char **argv) {{
             .collect();
         assert_eq!(results, expected);
         if args[5] == "1" {
-            assert!(text.contains("READ 1\n"));
+            assert!(text.contains("READ 100\n"));
+        }
+    }
+
+    let output = support::success(std::process::Command::new(&binary).arg("progress"));
+    let text = String::from_utf8(output.stdout).unwrap();
+    let records: Vec<Vec<u64>> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("PROGRESS "))
+        .map(|l| l.split_whitespace().map(|v| v.parse().unwrap()).collect())
+        .collect();
+    assert_eq!(
+        records,
+        vec![
+            vec![1000, 0, 0],
+            vec![26000, 0, 0],
+            vec![28000, 0, 0],
+            vec![128000, 0, 0],
+            vec![25000, 2, 0]
+        ]
+    );
+    let jitter: Vec<u64> = text
+        .lines()
+        .find_map(|l| l.strip_prefix("JITTER "))
+        .unwrap()
+        .split_whitespace()
+        .map(|v| v.parse().unwrap())
+        .collect();
+    assert!((20000..=30000).contains(&jitter[0]));
+    assert!((20000..=30000).contains(&jitter[1]));
+    assert_eq!(jitter[2], 2 * jitter[0] + jitter[1]);
+    assert!(text.contains(&format!("ZERO {} 0\n", jitter[2] + 25000)));
+    let capped: Vec<_> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("CAPPED "))
+        .collect();
+    assert_eq!(capped.len(), 64);
+    for record in capped {
+        let values: Vec<u64> = record
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert!(values[0] <= 50000);
+        assert_eq!(values[1], 0);
+    }
+    for line in text.lines().filter_map(|l| l.strip_prefix("ACCESS 0 ")) {
+        assert_ne!(line.parse::<u64>().unwrap() & 128, 0);
+    }
+}
+
+#[test]
+fn kernel_poll_hook_advances_only_outside_vdso() {
+    let header =
+        "static inline void cpu_relax(void)\n{\n\tasm volatile(\"yield\" ::: \"memory\");\n}\n";
+    let expression = format!(
+        "subject.polling({})",
+        serde_json::to_string(header).unwrap()
+    );
+    let patched = result(&python_api("kernel-arm64/apply.py", &expression, &[]));
+    let patched = patched.as_str().unwrap().replace(
+        "asm volatile(\"yield\" ::: \"memory\")",
+        "asm volatile(\"\" ::: \"memory\")",
+    );
+    for (guard, expected) in [("", "123\n"), ("#define BUILD_VDSO", "0\n")] {
+        let source = format!(
+            r#"
+#include <stdio.h>
+{guard}
+static unsigned reads;
+{patched}
+void seedbox_cpu_relax(void) {{ ++reads; }}
+int main(void) {{ for (unsigned i = 0; i < 123; ++i) cpu_relax(); printf("%u\n", reads); }}
+"#
+        );
+        let (_directory, binary) = compile(&source);
+        assert_eq!(
+            support::success(&mut std::process::Command::new(binary)).stdout,
+            expected.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn both_kernel_clocks_charge_100ns_and_respect_scheduling_bounds() {
+    let common = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+typedef uint64_t u64;
+#define notrace
+#define noinstr
+#define likely(x) (x)
+#define unlikely(x) (x)
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x) = (v))
+#define panic(...) abort()
+static unsigned long irq_flags;
+#define local_irq_save(f) do { (f) = irq_flags; irq_flags |= 128; } while (0)
+#define local_irq_restore(f) (irq_flags = (f))
+#define local_irq_enable() (irq_flags = 0)
+#define local_irq_disable() (irq_flags = 128)
+#define irqs_disabled_flags(f) ((f) & 128)
+#define isb() ((void)0)
+static unsigned yields;
+static void advance(void);
+"#;
+    for architecture in ["arm64", "x86"] {
+        let (functions, setup) = if architecture == "arm64" {
+            (
+                section(
+                    "kernel-arm64/seedbox.c",
+                    "static u64 notrace seedbox_read_step",
+                    "/* splitmix64",
+                ),
+                r#"
+static struct { u64 now, last, bound, abi, deferred_irq_pending; } state, *page = &state;
+static u64 early_last;
+static char registers[64];
+static void *event = registers;
+static void writeq(u64 value, void *address) {
+    printf("YIELD %llu %ld\n", (unsigned long long)value, (char *)address - registers); advance();
+}
+#define read_clock seedbox_read
+#define state_now state.now
+"#
+                .to_owned(),
+            )
+        } else {
+            let header = fs::read_to_string(support::root().join("kernel/seedbox.h")).unwrap();
+            let constant = header
+                .lines()
+                .find(|l| l.starts_with("#define SEEDBOX_PV_READ_NS"))
+                .unwrap();
+            (
+                section(
+                    "kernel/seedbox.c",
+                    "noinstr unsigned long long seedbox_rdtsc",
+                    "bool seedbox_emulate_user_tsc",
+                ),
+                format!(
+                    "{constant}\n{}",
+                    r#"
+struct seedbox_time_page { u64 tsc, last, bound; };
+static struct seedbox_time_page state, *seedbox_page = &state;
+static unsigned long long seedbox_early_last;
+#define SEEDBOX_PORT_YIELD 1
+#define SEEDBOX_PORT_TIME_LO 2
+#define SEEDBOX_PORT_TIME_HI 3
+static void outl(unsigned value, unsigned port) {
+    printf("YIELD %u %u\n", value, port); advance();
+}
+static unsigned inl(unsigned port) { (void)port; abort(); }
+#define read_clock seedbox_rdtsc
+#define state_now state.tsc
+"#
+                ),
+            )
+        };
+        let main = r#"
+static void advance(void) { ++yields; state_now = state.bound; state.bound += 250; }
+static void observe(void) {
+    u64 value = read_clock();
+    printf("READ %llu %llu %lu %u\n", (unsigned long long)value, (unsigned long long)state.bound, irq_flags, yields);
+}
+int main(void) {
+    for (int masked = 0; masked < 2; ++masked) {
+        irq_flags = masked ? 128 : 0;
+        state_now = state.last = 0; state.bound = 250; yields = 0;
+        for (unsigned i = 0; i != 100; ++i) observe();
+        state_now = 20000; state.bound = 20100;
+        observe(); observe(); observe();
+    }
+}
+"#;
+        let (_directory, binary) = compile(&format!("{common}\n{setup}\n{functions}\n{main}"));
+        let output = support::success(&mut std::process::Command::new(binary));
+        let text = String::from_utf8(output.stdout).unwrap();
+        for line in text.lines().filter(|l| l.starts_with("YIELD ")) {
+            assert_eq!(
+                line,
+                if architecture == "arm64" {
+                    "YIELD 1 24"
+                } else {
+                    "YIELD 1 1"
+                }
+            );
+        }
+        let records: Vec<Vec<u64>> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("READ "))
+            .map(|l| l.split_whitespace().map(|v| v.parse().unwrap()).collect())
+            .collect();
+        assert_eq!(records.len(), 206);
+        for (masked, cohort) in records.as_chunks::<103>().0.iter().enumerate() {
+            for (index, values) in cohort[..100].iter().enumerate() {
+                assert_eq!(values[0], (index as u64 + 1) * 100, "{architecture}");
+                assert!(values[0] <= values[1]);
+                assert_eq!(values[2], masked as u64 * 128);
+            }
+            assert_eq!(cohort[99][3], 39);
+            assert_eq!(cohort[100], vec![20000, 20100, masked as u64 * 128, 39]);
+            assert_eq!(cohort[101], vec![20100, 20100, masked as u64 * 128, 39]);
+            assert_eq!(cohort[102], vec![20200, 20350, masked as u64 * 128, 40]);
         }
     }
 }

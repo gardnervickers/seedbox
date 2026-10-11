@@ -101,18 +101,35 @@ impl WorldMachine for Machine {
         Ok(())
     }
     fn supports_speed_reseed(&self) -> bool {
-        true
+        false
     }
-    fn seed_speed(&mut self, seed: u64, domain: &str) -> Result<(), String> {
-        self.syscall_ns = crate::machine::pv::syscall_ns(&mut Rng::new(seed, domain));
+    fn seed_speed(&mut self, _: u64, _: &str) -> Result<(), String> {
+        Err("machine speed reseeding is unsupported".into())
+    }
+    fn seed_progress_jitter(&mut self, seed: u64, domain: &str) -> Result<(), String> {
+        Machine::seed_progress_jitter(self, Rng::new(seed, domain).next());
+        Ok(())
+    }
+    fn seed_progress_jitter_branch(
+        &mut self,
+        seed: u64,
+        identity: Option<&str>,
+        domain: &str,
+    ) -> Result<(), String> {
+        Machine::seed_progress_jitter(self, Rng::branch(seed, identity, domain).next());
         Ok(())
     }
     fn supports_throttle(&self) -> bool {
         true
     }
-    fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
-        self.throttle_permille = Some(factor_permille);
-        Ok(())
+    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<Option<u64>, String> {
+        // Healed is a factor of one, not `None`: the first throttle switches
+        // this machine to planned costs for good (see `PvClock::prepare`).
+        let factor = speed_hz.map_or(1000, |speed_hz| {
+            seedbox_control::throttle_permille(self.cpu_speed_hz, speed_hz)
+        });
+        self.throttle_permille = Some(factor);
+        Ok(speed_hz.map(|_| seedbox_control::effective_throttle_speed(self.cpu_speed_hz, factor)))
     }
     fn exits(&self) -> u64 {
         self.stats.exits

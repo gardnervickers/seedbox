@@ -145,6 +145,36 @@ fn ram_pages_are_read_where_the_vmm_writes_them() {
 }
 
 #[test]
+fn ram_page_files_use_the_named_machine_memory_override() {
+    let (a, b) = ram_pair();
+    let directory = tempfile::tempdir().unwrap();
+    for (name, raw, changed) in [("a", &a, false), ("b", &b, true)] {
+        let path = directory.path().join(name);
+        let mut record = fixture();
+        record
+            .identity
+            .inputs
+            .machine_memory_mb
+            .insert("server".into(), 256);
+        write_fixture(&path, &mut record, Some(raw), None);
+        let mut bytes = vec![0u8; 256 * 2048];
+        if changed {
+            bytes[3 * 8] = 1;
+        }
+        std::fs::write(path.join("output/machines/server.pages"), &bytes).unwrap();
+        record
+            .logs
+            .insert("machines/server.pages".into(), ContentDigest::of(&bytes));
+        write_fixture(&path, &mut record, Some(raw), None);
+    }
+    let report = diff(&directory.path().join("a"), &directory.path().join("b")).unwrap();
+    assert_eq!(
+        report.machines[0].ram_pages.as_ref().unwrap().first_pfns,
+        [3]
+    );
+}
+
+#[test]
 fn ram_pages_count_all_pfns_and_bound_the_sample() {
     let (a, b) = ram_pair();
     let dir = tempfile::tempdir().unwrap();

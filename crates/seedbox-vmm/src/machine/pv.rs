@@ -4,16 +4,23 @@
 //! - exits the guest makes anyway (I/O, MMIO, HLT), with their usual costs,
 //! - guest clock reads, `SEEDBOX_PV_READ_NS` (100 ns) each (`seedbox_rdtsc`),
 //! - syscalls, counted by the guest in the time page, each costing the
-//!   machine's `Machine::syscall_ns`: `SYSCALL_NS` scaled by a seeded
-//!   per-machine speed (see `syscall_ns`).
+//!   machine's `Machine::syscall_ns`: a fixed `SYSCALL_NS`, scaled only by
+//!   an explicit throttle.
 //!
 //! So a run needs no counted stop: the guest kernel exits by itself when its
 //! clock would pass the soft stop (the `bound` we publish) or at the syscall
 //! that reaches it (`syscall_target`). Every exit is a deterministic point.
 //! Application code makes progress through the guest's automatic
-//! instrumentation (guest/progress), which charges a syscall every 10,000
-//! translated blocks per thread, and the kernel's syscall and `cpu_relax`
-//! hooks.
+//! instrumentation (guest/progress): every so many executed instructions a
+//! thread makes a progress call, which the kernel counts as the syscalls
+//! that compute costs at the configured CPU speed (plus seeded jitter it
+//! draws from a stream this VMM seeds on the time page), and the kernel's
+//! syscall and `cpu_relax` hooks.
+//!
+//! The count is the guest's; the hard stop is ours. Syscalls counted past
+//! the stop are not lost: the time they owe is a debt the machine carries
+//! (`Machine::pv_debt_ns`) and the next run charges first, so a progress
+//! call that straddles a stop costs what it should.
 //!
 //! A loop with no exit at all would never end and never let time move. A
 //! watchdog (host CPU time, a performance setting) interrupts a run with no
@@ -25,33 +32,10 @@
 //! limit, which follows from the model: such a loop waits on something only
 //! virtual time could bring.
 
-use super::Machine;
+use super::{pv_plan::charge, Machine};
 use std::time::Duration;
 
-/// Nominal virtual time one syscall costs. Part of the PV clock's semantics.
-pub const SYSCALL_NS: u64 = 1000;
-/// Spread of per-machine syscall cost around `SYSCALL_NS`, in percent.
-pub const SPEED_SPREAD_PCT: u64 = 10;
-
-/// One machine's syscall cost, drawn from `rng`: uniform within
-/// `SPEED_SPREAD_PCT` of `SYSCALL_NS`.
-///
-/// Compute is free in this model, so identical machines booting the same
-/// image would otherwise make the same syscalls at the same nanoseconds
-/// forever. Real machines never run in lockstep, and software relies on it:
-/// etcd seeds raft's election timeouts from the clock, and three members in
-/// lockstep split every vote. A seeded speed per machine, like the varying
-/// cost of real CPUs, separates them.
-pub fn syscall_ns(rng: &mut crate::rng::Rng) -> u64 {
-    let spread = SYSCALL_NS * SPEED_SPREAD_PCT / 100;
-    SYSCALL_NS - spread + rng.below(2 * spread + 1)
-}
-
-/// The cost a throttle charges: the seeded `syscall_ns` times
-/// `factor_permille / 1000`, rounded up so a throttle never speeds a machine up.
-pub fn throttled_ns(syscall_ns: u64, factor_permille: u64) -> u64 {
-    syscall_ns.saturating_mul(factor_permille).div_ceil(1000)
-}
+pub use seedbox_engine_core::cpu_charge::{throttled_ns, SYSCALL_NS};
 
 /// Per-thread PV execution context: the watchdog timer and per-run scratch.
 /// A clock may serve any machine; nothing in it is specific to one.
@@ -104,6 +88,7 @@ impl PvClock {
         legal: bool,
     ) -> Result<(), String> {
         self.remaining = remaining;
+        debug_assert!(!legal || m.pv_debt_ns == 0);
         let (time, seeded, throttle, timer) = (
             m.time,
             m.syscall_ns,
@@ -119,11 +104,14 @@ impl PvClock {
         self.syscalls0 = syscalls;
     }
 
-    /// Progress made by the run, from the syscall count after KVM_RUN.
-    pub(crate) fn read(&mut self, syscalls: u64) -> u64 {
-        (syscalls - self.syscalls0)
-            .saturating_mul(self.syscall_ns)
-            .min(self.remaining)
+    /// Progress made by the run, from the syscall count after KVM_RUN: the
+    /// owed time first, then the counted syscalls, up to the hard stop. What
+    /// the stop cuts off stays owed.
+    pub(crate) fn read(&mut self, debt: &mut u64, syscalls: u64) -> u64 {
+        let elapsed = (syscalls - self.syscalls0).saturating_mul(self.syscall_ns);
+        let (charged, owed) = charge(*debt, elapsed, self.remaining);
+        *debt = owed;
+        charged
     }
 }
 

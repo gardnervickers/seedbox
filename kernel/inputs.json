@@ -20,6 +20,7 @@
     "kernel-arm64/check-config.py",
     "kernel-arm64/config.fragment",
     "kernel-arm64/seedbox.c",
+    "kernel-arm64/poll-test.c",
     "kernel-arm64/seedbox.h",
     "kernel-arm64/supervisor-io.c",
     "kernel-arm64/supervisor-io.h"

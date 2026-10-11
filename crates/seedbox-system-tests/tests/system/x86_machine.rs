@@ -465,3 +465,69 @@ pub fn event_idx_polls_on_entry_slice_boundary_and_halt_without_kicks(kvm: &Kvm)
         }
     }
 }
+
+pub fn progress_debt_stops_execution_and_survives_restore(kvm: &Kvm) {
+    // Real KVM instruction entry is needed to prove the guest cannot execute
+    // ahead while stopped CPU charge remains, including watchdog and restore.
+    let mut code = vec![];
+    negotiate(&mut code, 4);
+    store(&mut code, 0xd0000070, 15_000); // arm through the real guest ABI
+    code.extend_from_slice(&[
+        0xc7, 0x05, 0x18, 0, 0, 0xd0, 25, 0, 0, 0, // syscalls = 25
+        0xb9, 0, 0, 0, 1, 0x49, 0x75, 0xfd, // force watchdog interruptions
+        0xba, 0x2c, 0x05, 0, 0, 0x31, 0xc0, 0xee, // yield(0)
+        0xba, 0xe9, 0, 0, 0, 0xb0, b'X', 0xee, // console
+        0xba, 0xf4, 0, 0, 0, 0x31, 0xc0, 0xee, // exit(0)
+    ]);
+    let mut reference = None;
+    for watchdog in [Duration::from_secs(10), Duration::from_micros(100)] {
+        let mut m = machine(kvm, &code, true);
+        let mut clock = PvClock::new(watchdog).unwrap();
+        let mut frames = Vec::new();
+        assert_eq!(
+            m.run_until(&mut clock, 10_000, 0, &mut frames).unwrap(),
+            Stop::Reached
+        );
+        assert_eq!(m.time, 10_000);
+        assert!(m.com1.out.is_empty());
+        if watchdog == Duration::from_micros(100) {
+            assert!(m.stats.eintr > 0, "exercise watchdog landings with debt");
+        }
+        let saved = m.snapshot().unwrap();
+        let MachineSnapshot::Memory(memory) = &saved else {
+            panic!("expected in-memory snapshot");
+        };
+        assert_eq!(
+            serde_json::to_value(&**memory.as_ref()).unwrap()["pv_debt_ns"],
+            15_000
+        );
+        for restored in [false, true] {
+            if restored {
+                m.restore(&saved).unwrap();
+                clock.restore_boundary().unwrap();
+            }
+            assert_eq!(m.next_deadline(), 15_000);
+            let exits = m.stats.exits;
+            assert_eq!(
+                m.run_until(&mut clock, 20_000, 0, &mut frames).unwrap(),
+                Stop::Reached
+            );
+            assert_eq!(m.time, 20_000);
+            assert_eq!(m.stats.exits, exits, "debt must drain without KVM_RUN");
+            assert!(m.com1.out.is_empty());
+            assert_eq!(m.next_deadline(), u64::MAX);
+            assert_eq!(
+                m.run_until(&mut clock, 30_000, 0, &mut frames).unwrap(),
+                Stop::Exited
+            );
+            assert_eq!(m.time, 25_000);
+            assert_eq!(m.com1.out, b"X");
+            let result = (m.time, m.exit_witness(), m.com1.out.clone());
+            if let Some(want) = &reference {
+                assert_eq!(&result, want);
+            } else {
+                reference = Some(result);
+            }
+        }
+    }
+}

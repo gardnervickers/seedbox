@@ -15,6 +15,7 @@ fn native() {
     xsave::ymm_presence_changes_storage_but_only_nonzero_values_change_guest_registers(&kvm);
     machine::event_idx_polls_on_entry_slice_boundary_and_halt_without_kicks(&kvm);
     machine::page_timer_and_watchdog(&kvm);
+    machine::progress_debt_stops_execution_and_survives_restore(&kvm);
     machine::changing_idle_periods_and_clock_adoption(&kvm);
     machine::checkpoint_and_interrupted_compute(&kvm);
 }

@@ -1,12 +1,16 @@
 { pkgs }:
 pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio";
-  version = "11.3.0-1";
+  version = "11.91.20735";
   src = pkgs.fetchurl {
-    url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/release_11.3.0-1.tar.gz";
-    hash = "sha256-aj7BN0bravXAY72wVB37ZbTJvS+hZTxC61RAMiBDLsI=";
+    url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/cronbuild-11.91.20735.tar.gz";
+    hash = "sha256-VNzTsfM80ByTlTeHGTDqE5cKa48oAWiNgdZ6oKCpOZo=";
   };
-  patches = [ ../guest/progress/dynamorio-exclusives.patch ];
+  patches = [
+    ../guest/progress/dynamorio-exclusives.patch
+    # Rebuilding a block discards its region list and must recheck the start.
+    ../guest/progress/dynamorio-rebuild-vmareas.patch
+  ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build
   # only drreg and its drmgr/drcontainers dependencies.
@@ -23,7 +27,8 @@ pkgs.stdenv.mkDerivation {
     "-DCMAKE_BUILD_TYPE=Release"
     # Upstream compiles C as gnu99 but probes types before setting that flag.
     # GCC 16 defaults to C23, whose built-in bool would misconfigure the core.
-    "-DCMAKE_REQUIRED_FLAGS=-std=gnu99"
+    # Select the C standard without adding C flags to upstream C++ probes.
+    "-DCMAKE_C_STANDARD=99"
     # The AArch64 codec scripts use this spelling; find_package(Python3) sets
     # Python3_EXECUTABLE, so without it CMake would exec the scripts directly.
     "-DPYTHON3_EXECUTABLE=${pkgs.python3}/bin/python3"

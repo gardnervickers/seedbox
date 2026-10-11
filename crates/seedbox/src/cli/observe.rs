@@ -262,7 +262,7 @@ fn seconds(ns: u64) -> String {
     format!("{}s", text.trim_end_matches('0').trim_end_matches('.'))
 }
 
-/// Machines, altered links and faults as the server observes them now.
+/// Machines, links with their counters and faults as the server observes them now.
 pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(None)?;
     let world = super::simulations::runtime()?
@@ -289,29 +289,39 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
             })
             .collect(),
     )?;
-    let altered: Vec<[String; 4]> = world
-        .links
-        .iter()
-        .filter(|l| l.partitioned_by.is_some() || l.shaped_by.is_some())
-        .map(|l| {
-            [
-                l.from.clone(),
-                l.to.clone(),
-                if l.partitioned_by.is_some() {
-                    "cut".into()
-                } else {
-                    "shaped".into()
-                },
-                l.partitioned_by
-                    .clone()
-                    .or_else(|| l.shaped_by.clone())
-                    .unwrap_or_default(),
-            ]
-        })
-        .collect();
-    if !altered.is_empty() {
+    if !world.links.is_empty() {
         println!();
-        output::table(["FROM", "TO", "LINK", "HANDLE"], altered)?;
+        output::table(
+            [
+                "FROM", "TO", "LATENCY", "JITTER", "LOSS", "FRAMES", "BYTES", "DROPPED", "FAULT",
+            ],
+            world
+                .links
+                .iter()
+                .map(|l| {
+                    let c = &l.counters;
+                    [
+                        l.from.clone(),
+                        l.to.clone(),
+                        seedbox_tui::latency(l.policy.latency_ns),
+                        seedbox_tui::latency(l.policy.jitter_ns),
+                        format!("{}ppm", l.policy.loss_ppm),
+                        c.scheduled.to_string(),
+                        c.bytes.to_string(),
+                        (c.partition_dropped
+                            + c.loss_dropped
+                            + c.queue_dropped
+                            + c.receiver_dropped)
+                            .to_string(),
+                        match (&l.partitioned_by, &l.shaped_by) {
+                            (Some(handle), _) => format!("cut {handle}"),
+                            (None, Some(handle)) => format!("shaped {handle}"),
+                            (None, None) => "-".into(),
+                        },
+                    ]
+                })
+                .collect(),
+        )?;
     }
     if !world.faults.is_empty() {
         println!();

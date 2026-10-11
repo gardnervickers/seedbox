@@ -40,6 +40,9 @@ pub(super) fn publish_entropy(page: &mut impl Fields, entropy: &[u32; ENTROPY_WO
     page.set(PAGE_ENTROPY_GEN, generation);
     generation
 }
+// An ABI-4 arm consists of guest loads and stores. A watchdog resume must
+// retain its published plan and cost until a legal exit: rewriting even an
+// equivalent plan could tear those loads or relax an overdue bound.
 pub(super) fn prepare(
     page: &mut impl Fields,
     time: u64,
@@ -72,13 +75,13 @@ pub(super) fn prepare(
 mod tests {
     use super::*;
     struct Page {
-        words: [u64; 19],
+        words: [u64; 22],
         writes: Vec<usize>,
     }
     impl Page {
         fn fresh() -> Self {
             Self {
-                words: [0; 19],
+                words: [0; 22],
                 writes: Vec::new(),
             }
         }

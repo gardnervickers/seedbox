@@ -220,15 +220,34 @@ impl WorldMachine for Mock {
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<(), String> {
         Ok(())
     }
+    fn seed_progress_jitter(&mut self, _: u64, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn seed_progress_jitter_branch(
+        &mut self,
+        _: u64,
+        _: Option<&str>,
+        _: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn supports_throttle(&self) -> bool {
         self.throttleable
     }
-    fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
-        self.record(&format!("throttle/{factor_permille}"));
+    fn throttle(&mut self, speed_hz: Option<u64>) -> Result<Option<u64>, String> {
+        match speed_hz {
+            Some(speed_hz) => self.record(&format!("throttle/{speed_hz}")),
+            None => self.record("throttle/full"),
+        }
         if self.bad == Some("throttle") {
             return Err("throttle ACK lost".into());
         }
-        Ok(())
+        Ok(speed_hz.map(|hz| {
+            seedbox_control::effective_throttle_speed(
+                2_000_000_000,
+                seedbox_control::throttle_permille(2_000_000_000, hz),
+            )
+        }))
     }
     fn exits(&self) -> u64 {
         0

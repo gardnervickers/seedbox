@@ -64,6 +64,9 @@ fn rx_device(available: bool) -> (virtio_net::VirtioNet, Vec<u8>) {
     memory[0x10c..0x10e].copy_from_slice(&2u16.to_le_bytes());
     memory[0x202..0x204].copy_from_slice(&u16::from(available).to_le_bytes());
     for (offset, value) in [
+        (0x024, 1),
+        (0x020, 1),
+        (0x070, 15),
         (0x030, 0),
         (0x038, 1),
         (0x080, 0x100),
@@ -160,19 +163,22 @@ fn tx_chains_preserve_opaque_bytes_and_complete_each_available_head_once() {
     let mut memory = vec![0; 4096];
     let frame = b"\xff\x00\x80\xfe\x01\x02\x00\x03\x04\x05\x06\x07\x88\xb5\x00\xff\n\r\x80payload";
     let second = b"\x00\xff\x80\x00second\n";
-    let mut packet = vec![0x5a; 12]; // Nonzero virtio header must be stripped, not interpreted as payload.
+    let mut packet = vec![0; 12]; // No offload features were negotiated.
     packet.extend_from_slice(frame);
     // Follow descriptor links 2 -> 0 -> 3, not descriptor or guest-address order.
     // The header itself crosses a descriptor boundary.
     tx_descriptor(&mut memory, 2, 0x700, &packet[..8], Some(0));
     tx_descriptor(&mut memory, 0, 0x500, &packet[8..19], Some(3));
     tx_descriptor(&mut memory, 3, 0x600, &packet[19..], None);
-    let mut packet_two = vec![0xa5; 12];
+    let mut packet_two = vec![0; 12];
     packet_two.extend_from_slice(second);
     tx_descriptor(&mut memory, 1, 0x800, &packet_two, None);
     memory[0x204..0x206].copy_from_slice(&2u16.to_le_bytes());
     memory[0x206..0x208].copy_from_slice(&1u16.to_le_bytes());
     for (offset, value) in [
+        (0x024, 1),
+        (0x020, 1),
+        (0x070, 15),
         (0x030, 1),
         (0x038, 4),
         (0x080, 0x100),
@@ -230,7 +236,7 @@ fn malformed_receive_chains_fail_without_consuming_or_writing() {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "malformed_receive_chains_fail_without_consuming_or_writing",
+                "device_tests::malformed_receive_chains_fail_without_consuming_or_writing",
                 "--nocapture",
             ])
             .env("SEEDBOX_NET_HOSTILE_CHILD", "1")
@@ -261,10 +267,13 @@ fn malformed_receive_chains_fail_without_consuming_or_writing() {
             5 => memory[0x10c..0x10e].copy_from_slice(&6u16.to_le_bytes()),
             6 => memory[0x10c..0x10e].copy_from_slice(&0u16.to_le_bytes()),
             7 => {
-                net.write(&mut memory, 0x038, 3).unwrap();
+                assert!(net.write(&mut memory, 0x038, 3).is_err());
+                continue;
             }
             8 => {
+                net.write(&mut memory, 0x044, 0).unwrap();
                 net.write(&mut memory, 0x0a0, 4092).unwrap();
+                net.write(&mut memory, 0x044, 1).unwrap();
             }
             _ => unreachable!(),
         }
@@ -287,9 +296,11 @@ fn malformed_receive_chains_fail_without_consuming_or_writing() {
         memory[0x10c..0x10e].copy_from_slice(&2u16.to_le_bytes());
         memory[0x202..0x204].copy_from_slice(&1u16.to_le_bytes());
         memory[0x204..0x206].fill(0);
+        net.write(&mut memory, 0x044, 0).unwrap();
         net.write(&mut memory, 0x038, 1).unwrap();
         net.write(&mut memory, 0x0a0, 0x300).unwrap();
-        assert!(net.receive(&mut memory, b"frame").unwrap().irq);
+        net.write(&mut memory, 0x044, 1).unwrap();
+        assert!(net.write(&mut memory, 0x050, 0).unwrap().irq);
         assert_eq!(net.stats().rx_frames, 1);
         assert_eq!(&memory[0x302..0x304], &[1, 0]);
     }
@@ -298,7 +309,9 @@ fn malformed_receive_chains_fail_without_consuming_or_writing() {
 #[test]
 fn receive_drain_keeps_completed_prefix_and_failed_backlog_head() {
     let (mut net, mut memory) = rx_device(false);
+    net.write(&mut memory, 0x044, 0).unwrap();
     net.write(&mut memory, 0x038, 2).unwrap();
+    net.write(&mut memory, 0x044, 1).unwrap();
     assert!(net.receive(&mut memory, b"first").unwrap().accepted);
     assert!(net.receive(&mut memory, b"second").unwrap().accepted);
     memory[0x110..0x118].copy_from_slice(&u64::MAX.to_le_bytes());
@@ -308,7 +321,7 @@ fn receive_drain_keeps_completed_prefix_and_failed_backlog_head() {
     memory[0x206..0x208].copy_from_slice(&1u16.to_le_bytes());
     assert!(net.write(&mut memory, 0x050, 0).is_err());
     assert_eq!(net.stats().rx_frames, 1);
-    assert_eq!(net.read(0x060), 0);
+    assert_eq!(net.read(0x060), 1);
     assert_eq!(&memory[0x40c..0x411], b"first");
     assert_eq!(&memory[0x500..0x520], &[0; 32]);
     assert_eq!(&memory[0x302..0x304], &[1, 0]);
@@ -343,7 +356,7 @@ fn transmit_late_error_preserves_completed_dma_and_retries_failed_head() {
     memory[0x206..0x208].copy_from_slice(&1u16.to_le_bytes());
     assert!(net.write(&mut memory, 0x050, 1).is_err());
     assert_eq!(net.stats().tx_frames, 1);
-    assert_eq!(net.read(0x060), 0);
+    assert_eq!(net.read(0x060), 1);
     assert_eq!(net.dirty, vec![(0x300, 2), (0x304, 8), (0x302, 2)]);
     memory[0x11c..0x11e].fill(0);
     let output = net.write(&mut memory, 0x050, 1).unwrap();
@@ -355,14 +368,14 @@ fn transmit_late_error_preserves_completed_dma_and_retries_failed_head() {
 #[test]
 fn receive_frame_limit_is_checked_before_backlog_admission() {
     let (mut net, mut memory) = rx_device(false);
-    let frame = vec![0x5a; (4 << 20) - 12];
+    let frame = vec![0x5a; 65536];
     assert!(net.receive(&mut memory, &frame).unwrap().accepted);
     let oversized = vec![0; frame.len() + 1];
     assert!(net.receive(&mut memory, &oversized).is_err());
     assert_eq!(net.stats().rx_dropped, 0);
     // The maximum accepted frame fits exactly in a maximum-size chain.
-    memory.resize(0x400 + (4 << 20), 0);
-    memory[0x108..0x10c].copy_from_slice(&(4u32 << 20).to_le_bytes());
+    memory.resize(0x400 + 12 + frame.len(), 0);
+    memory[0x108..0x10c].copy_from_slice(&((12 + frame.len()) as u32).to_le_bytes());
     memory[0x202..0x204].copy_from_slice(&1u16.to_le_bytes());
     assert!(net.write(&mut memory, 0x050, 0).unwrap().irq);
     assert_eq!(&memory[0x40c..], frame);
@@ -384,10 +397,12 @@ fn transmit_empty_short_and_limit_boundaries_are_explicit() {
         ] {
             net.write(&mut memory, offset, value).unwrap();
         }
-        tx_descriptor(&mut memory, 0, 0x400, &vec![0x5a; size], None);
+        let mut packet = vec![0x5a; size];
+        packet[..size.min(12)].fill(0);
+        tx_descriptor(&mut memory, 0, 0x400, &packet, None);
         memory[0x202..0x204].copy_from_slice(&1u16.to_le_bytes());
         let output = net.write(&mut memory, 0x050, 1);
-        if size > 4 << 20 {
+        if !(12..=4 << 20).contains(&size) {
             assert!(output.is_err());
             // The legacy drain suppresses guest kicks before validating the
             // request; that flag write remains journaled when DMA validation fails.

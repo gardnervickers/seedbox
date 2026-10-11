@@ -26,6 +26,29 @@ fn serialized_devices_resume_pending_dma_with_the_same_bytes_cursors_and_interru
         memory[0x10c..0x10e].copy_from_slice(&2u16.to_le_bytes()); // Writable buffer.
         let mut net = Network::new([2, 0, 0, 0, 0, 1], NetworkPolicy::Application);
         let mut console = Console::new(ConsolePolicy::Application);
+        if !network {
+            // Open the port through its control queue before snapshotting RX.
+            transport.queues[3] = seedbox_engine_core::virtqueue::Queue {
+                num: 8,
+                ready: true,
+                desc: 0x600,
+                avail: 0x700,
+                used: 0x800,
+                ..Default::default()
+            };
+            memory[0x600..0x608].copy_from_slice(&0x900u64.to_le_bytes());
+            memory[0x608..0x60c].copy_from_slice(&8u32.to_le_bytes());
+            for (i, (id, event)) in [(u32::MAX, 0u16), (0, 3), (0, 6)].into_iter().enumerate() {
+                memory[0x900..0x904].copy_from_slice(&id.to_le_bytes());
+                memory[0x904..0x906].copy_from_slice(&event.to_le_bytes());
+                memory[0x906..0x908].copy_from_slice(&1u16.to_le_bytes());
+                memory[0x702..0x704].copy_from_slice(&(i as u16 + 1).to_le_bytes());
+                console
+                    .notify(&mut transport, &mut memory, 0, 3, |_, _| {})
+                    .unwrap();
+            }
+            transport.isr = 0;
+        }
         let payload = b"pending before checkpoint";
         // The queue exists but the guest has not offered a receive buffer yet.
         if network {

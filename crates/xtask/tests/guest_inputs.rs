@@ -118,7 +118,7 @@ int main(int argc, char **argv) {
 }
 
 #[test]
-fn progress_budget_requires_an_exact_option_and_positive_u32_decimal() {
+fn progress_options_require_exact_order_and_positive_u32_decimals() {
     let directory = tempfile::tempdir().unwrap();
     let binary = probe(
         directory.path(),
@@ -127,17 +127,30 @@ fn progress_budget_requires_an_exact_option_and_positive_u32_decimal() {
 #include "progress/budget.h"
 #include <stdio.h>
 int main(int argc, char **argv) {
-    uint32_t budget = 0;
-    if (argc != 3 || !seedbox_progress_budget(argv[1], argv[2], &budget)) return 2;
-    printf("%u\n", budget);
+    uint32_t budget = 0, points = 0;
+    if (!seedbox_progress_arguments(argc, (const char **)argv, &budget, &points)) return 2;
+    printf("%u %u\n", budget, points);
 }
 "#,
     );
-    for value in ["1", "17", "10000", "4294967295"] {
-        let output =
-            support::success(Command::new(&binary).args(["--blocks-per-progress-call", value]));
-        assert_eq!(output.stdout, format!("{value}\n").as_bytes());
+    let budget = "--instructions-per-progress-call";
+    let points = "--progress-points-per-block";
+    for value in ["1", "17", "50000", "4294967295"] {
+        let output = support::success(Command::new(&binary).args([budget, value, points, value]));
+        assert_eq!(output.stdout, format!("{value} {value}\n").as_bytes());
     }
+    let rejects = |args: &[&str]| {
+        assert_eq!(
+            Command::new(&binary)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .code(),
+            Some(2),
+            "{args:?}"
+        );
+    };
     for value in [
         "",
         "0",
@@ -149,30 +162,17 @@ int main(int argc, char **argv) {
         "4294967296",
         "999999999999999999999999999999",
     ] {
-        assert_eq!(
-            Command::new(&binary)
-                .args(["--blocks-per-progress-call", value])
-                .output()
-                .unwrap()
-                .status
-                .code(),
-            Some(2),
-            "{value}"
-        );
+        rejects(&[budget, value, points, "1"]);
+        rejects(&[budget, "1", points, value]);
     }
-    for option in [
-        "--other",
-        "--blocks-per-progress-call-extra",
-        "--blocks-per-progress-cal",
+    for args in [
+        vec![budget, "1"],
+        vec![points, "1", budget, "1"],
+        vec![budget, "1", points, "1", "--other", "1"],
+        vec!["--blocks-per-progress-call", "1", points, "1"],
+        vec!["--instructions-per-progress-call-extra", "1", points, "1"],
+        vec!["--instructions-per-progress-cal", "1", points, "1"],
     ] {
-        assert_eq!(
-            Command::new(&binary)
-                .args([option, "1"])
-                .output()
-                .unwrap()
-                .status
-                .code(),
-            Some(2)
-        );
+        rejects(&args);
     }
 }

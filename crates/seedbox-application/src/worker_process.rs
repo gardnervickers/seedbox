@@ -589,6 +589,7 @@ mod tests {
                 ExecutableKind::ArmWorld => Some(crate::engine::arm_descriptor()),
             };
             let prepared = PreparedInputs {
+                machine_memory_mb: Default::default(),
                 wall_clock_epoch: None,
                 kernel: hash.clone(),
                 images: BTreeMap::new(),
@@ -646,6 +647,10 @@ mod tests {
                     bandwidth_bps: None,
                     queue_bound_ns: None,
                 },
+                cpus: &["client", "server"]
+                    .into_iter()
+                    .map(|name| (name.into(), Default::default()))
+                    .collect(),
                 schedule: &Schedule {
                     timer_jitter_ns: 50_000,
                     stop_tolerance_ns: 40_000,

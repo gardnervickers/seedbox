@@ -138,6 +138,7 @@ fn any_engine_and_kernel_pair_is_admitted() {
         let backend =
             VmmExecutor::from_engine_digest(engine.clone(), 512, WitnessMode::Exits).unwrap();
         let inputs = PreparedInputs {
+            machine_memory_mb: Default::default(),
             wall_clock_epoch: None,
             profile: backend.profile(),
             kernel: kernel.clone(),

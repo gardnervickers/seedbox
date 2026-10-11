@@ -30,62 +30,40 @@ fn setup(policy: Policy, tx: bool) -> (Network, Transport, Vec<u8>) {
     (model, transport, memory)
 }
 #[test]
-fn header_profiles_retain_distinct_admission() {
+fn header_admission_rejects_unnegotiated_offloads() {
     for policy in [Policy::Application, Policy::Network] {
         let (mut model, mut transport, mut memory) = setup(policy, true);
         memory[0x400] = 1;
-        let mut dirty = vec![];
-        let result = model.notify(&mut transport, &mut memory, 0, 1, |a, n| dirty.push((a, n)));
-        if policy == Policy::Application {
-            assert_eq!(result.err().unwrap(), "unnegotiated virtio network offload");
-            assert!(dirty.is_empty());
-            assert_eq!(transport.queues[1].last_avail, 0);
-        } else {
-            assert_eq!(result.unwrap().frames, vec![vec![0; 20]]);
-            assert_eq!(dirty, vec![(0x300, 2), (0x304, 8), (0x302, 2), (0x300, 2)]);
-        }
+        let result = model.notify(&mut transport, &mut memory, 0, 1, |_, _| {});
+        assert_eq!(result.err().unwrap(), "unnegotiated virtio network offload");
+        assert_eq!(transport.queues[1].last_avail, 0);
+        assert_eq!(transport.isr, 0);
     }
 }
 #[test]
-fn receive_error_retains_application_backlog_and_network_direct_request() {
+fn short_receive_preserves_backlog_without_partial_payload_dma() {
     for policy in [Policy::Application, Policy::Network] {
         let (mut model, mut transport, mut memory) = setup(policy, false);
         memory[0x108..0x10c].copy_from_slice(&12u32.to_le_bytes());
-        let before = memory.clone();
-        let mut dirty = vec![];
-        let received = model.receive(&mut transport, &mut memory, 0, b"frame", |a, n| {
-            dirty.push((a, n))
-        });
-        if policy == Policy::Application {
-            assert!(received.is_err());
-            assert_eq!(memory, before);
-            assert!(dirty.is_empty());
-            assert_eq!(model.backlog.len(), 1);
-        } else {
-            assert_eq!(
-                received.unwrap(),
-                super::Received {
-                    accepted: true,
-                    irq: true
-                }
-            );
-            assert_eq!(&memory[0x400..0x40c], &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
-            assert_eq!(dirty, [(0x400, 12), (0x304, 8), (0x302, 2)]);
-            assert!(model.backlog.is_empty());
-            assert_eq!(model.stats.rx_frames, 1);
-            continue;
-        }
+        let before = memory[0x400..0x420].to_vec();
+        assert!(model
+            .receive(&mut transport, &mut memory, 0, b"frame", |_, _| {})
+            .is_err());
+        assert_eq!(&memory[0x400..0x420], before);
+        assert_eq!(model.backlog.len(), 1);
+        assert_eq!(transport.queues[0].used_idx, 0);
+        assert_eq!(transport.isr, 0);
         memory[0x108..0x10c].copy_from_slice(&32u32.to_le_bytes());
         model
-            .notify(&mut transport, &mut memory, 0, 0, |a, n| dirty.push((a, n)))
+            .notify(&mut transport, &mut memory, 0, 0, |_, _| {})
             .unwrap();
-        assert_eq!(dirty, vec![(0x400, 17), (0x304, 8), (0x302, 2)]);
         assert_eq!(&memory[0x40c..0x411], b"frame");
         assert_eq!(transport.isr, 1);
         assert!(model.backlog.is_empty());
         assert_eq!(model.stats.rx_frames, u64::from(policy == Policy::Network));
     }
 }
+
 #[test]
 fn late_transmit_error_preserves_profile_interrupt_boundary() {
     for policy in [Policy::Application, Policy::Network] {
@@ -105,7 +83,7 @@ fn late_transmit_error_preserves_profile_interrupt_boundary() {
                 vec![(0x300, 2), (0x304, 8), (0x302, 2)]
             }
         );
-        assert_eq!(transport.isr, u32::from(policy == Policy::Application));
+        assert_eq!(transport.isr, 1);
     }
 }
 
@@ -136,7 +114,7 @@ fn application_profile_never_enables_ring_extensions_or_deferred_tx() {
     let projection = model.projection();
     model.set_deferred_tx(true);
     transport.write(0x20, EVENT_IDX).unwrap();
-    transport.write(0x70, 15).unwrap();
+    transport.status = 15;
     assert!(!model.deferred_tx());
     assert!(!model.event_idx(&transport));
     assert_eq!(model.projection(), projection);
@@ -188,4 +166,47 @@ fn notification_extensions_validate_ring_spans_before_dma() {
     assert!(!queue
         .arm_notify(&mut [], 0, true, true, |_, _| panic!("unready DMA"))
         .unwrap());
+}
+
+#[test]
+fn aliased_receive_dma_preserves_the_same_completed_prefix() {
+    let mut reference = None;
+    for policy in [Policy::Application, Policy::Network] {
+        let (mut model, mut transport, mut memory) = setup(policy, false);
+        // The first payload overwrites the next descriptor. Validation of that
+        // next request must use the mutated RAM, without rolling back the first.
+        memory[0x100..0x108].copy_from_slice(&0x110u64.to_le_bytes());
+        memory[0x110..0x118].copy_from_slice(&0x500u64.to_le_bytes());
+        memory[0x118..0x11c].copy_from_slice(&32u32.to_le_bytes());
+        memory[0x11c..0x11e].copy_from_slice(&2u16.to_le_bytes());
+        memory[0x202..0x204].copy_from_slice(&2u16.to_le_bytes());
+        memory[0x206..0x208].copy_from_slice(&1u16.to_le_bytes());
+        model
+            .backlog
+            .extend([b"first".to_vec(), b"second".to_vec()]);
+        let mut dirty = Vec::new();
+        assert!(model
+            .notify(&mut transport, &mut memory, 0, 0, |a, n| dirty.push((a, n)))
+            .is_err());
+        assert_eq!(
+            (
+                transport.queues[0].last_avail,
+                transport.queues[0].used_idx,
+                transport.isr
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(model.backlog, VecDeque::from([b"second".to_vec()]));
+        assert_eq!(&memory[0x11c..0x121], b"first");
+        // x86's explicit notification optimization journals its flag writes too.
+        // Compare all payload and completion DMA, in their original order.
+        dirty.retain(|&(a, _)| a != 0x300);
+        assert_eq!(dirty, [(0x110, 17), (0x304, 8), (0x302, 2)]);
+        memory[0x300..0x302].fill(0);
+        if let Some(want) = &reference {
+            assert_eq!(&memory, want);
+        } else {
+            reference = Some(memory);
+        }
+    }
 }

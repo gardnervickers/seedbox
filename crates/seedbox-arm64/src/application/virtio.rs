@@ -267,6 +267,7 @@ mod tests {
         wr16(m, at + 14, next);
     }
     fn setup(device: &mut Virtio, memory: &mut [u8], queue: u32) {
+        device.transport.status = 15;
         for (offset, value) in [
             (0x30, queue),
             (0x38, 8),
@@ -283,6 +284,18 @@ mod tests {
     fn console_counts_payload_transmission_and_only_completed_receive_dma() {
         let mut tx = vec![0; 0x4000];
         let mut device = Virtio::console();
+        // Drive the real multiport handshake before data admission.
+        let mut control = vec![0; 0x4000];
+        setup(&mut device, &mut control, 3);
+        for (i, (id, event)) in [(u32::MAX, 0u16), (0, 3), (0, 6)].into_iter().enumerate() {
+            descriptor(&mut control, 0, DATA, 8, 0, 0);
+            wr32(&mut control, DATA, id);
+            wr16(&mut control, DATA + 4, event);
+            wr16(&mut control, DATA + 6, 1);
+            wr16(&mut control, AVAIL + 2, i as u16 + 1);
+            device.write(&mut control, 0x50, 4, 3).unwrap();
+        }
+        device.transport.queues[3].ready = false;
         descriptor(&mut tx, 0, DATA, 5, 0, 0);
         tx[DATA..DATA + 5].copy_from_slice(b"hello");
         setup(&mut device, &mut tx, 1);

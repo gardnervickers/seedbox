@@ -148,8 +148,10 @@ fn actual_supervisor_reaps_before_ack_and_checks_exec_success() {
     expected.extend([
         "-c",
         "/seedbox/progress/libseedbox_progress.so",
-        "--blocks-per-progress-call",
+        "--instructions-per-progress-call",
         "4294967295",
+        "--progress-points-per-block",
+        "4294967294",
         "--",
         child.to_str().unwrap(),
         "child",

@@ -13,13 +13,14 @@ use seedbox_application::{
     store::{ContentDigest, ContentStore},
 };
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -75,6 +76,7 @@ pub struct ExecutionService {
     store: ContentStore,
     backends: Arc<dyn BackendProvider>,
     preparation_limit: Duration,
+    admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
 }
 
 impl ExecutionService {
@@ -92,7 +94,18 @@ impl ExecutionService {
             store,
             backends,
             preparation_limit: crate::preparation_budget::DEFAULT_LIMIT,
+            admission: Mutex::new((0, BTreeMap::new())),
         })
+    }
+
+    /// Reservations cover preparation, paused RAM and final worker cleanup.
+    pub fn capacity(&self) -> Result<seedbox_api::ExecutionCapacity, Error> {
+        let admission = self
+            .admission
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        let occupying: BTreeSet<_> = admission.1.values().cloned().collect();
+        Ok(self.manager.capacity(admission.0, &occupying)?)
     }
 
     /// Foreground cascading deletion: stop the frozen ownership tree, wait for
@@ -317,6 +330,10 @@ impl ExecutionService {
         capacity: NonZeroUsize,
         shutdown: CancellationToken,
     ) -> Result<(), Error> {
+        self.admission
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?
+            .0 = capacity.get();
         let recovery = self.clone();
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
             for id in recovery
@@ -346,9 +363,17 @@ impl ExecutionService {
                 return failure.map_or(Ok(()), Err);
             }
             tokio::select! {
-                result = tasks.join_next(), if !tasks.is_empty() => {
+                result = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                    let task_id = match &result {
+                        Some(Ok((id, _))) => Some(*id),
+                        Some(Err(error)) => Some(error.id()),
+                        None => None,
+                    };
+                    if let Some(id) = task_id {
+                        self.admission.lock().map_err(|_| catalogue::Error::StorageFailed)?.1.remove(&id);
+                    }
                     let error = match result {
-                        Some(Ok(Err(error))) => Some(error),
+                        Some(Ok((_, Err(error)))) => Some(error),
                         Some(Err(error)) => Some(Error::Task(error)),
                         _ => None,
                     };
@@ -361,7 +386,10 @@ impl ExecutionService {
                     match id {
                         Some(id) => {
                             let service = self.clone();
-                            tasks.spawn_blocking(move || service.execute(id));
+                            let mut admission = self.admission.lock().map_err(|_| catalogue::Error::StorageFailed)?;
+                            let admitted = id.clone();
+                            let task = tasks.spawn_blocking(move || service.execute(id));
+                            admission.1.insert(task.id(), admitted);
                         }
                         None => stopping = true,
                     }
@@ -612,6 +640,13 @@ impl ExecutionService {
         // The first run and every resubmission use the same resolved private representation.
         // Source paths, image transport manifests and human metadata never enter experiment identity.
         let inputs = seedbox_application::definition::prepared(&definition, &self.store)?;
+        // Resolving per-machine RAM chooses the oracle's RAM as the legacy
+        // default. Bind execution to that canonical profile as well.
+        let executor = if executor.profile() == inputs.profile {
+            executor
+        } else {
+            self.backends.retained(&inputs, &self.store)?
+        };
         definition.runtime.execution =
             seedbox_application::definition::execution_settings(&inputs.profile)?;
         for (name, machine) in &mut definition.machines {

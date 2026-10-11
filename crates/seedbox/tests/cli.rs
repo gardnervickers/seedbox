@@ -513,16 +513,24 @@ fn explicit_inputs_must_exist() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn missing_helpers_explain_the_asset_build_without_searching_path() {
-    let (directory, args) = runtime_project();
-    let args: Vec<_> = args.iter().map(String::as_str).collect();
-    let output = seedbox(&args, directory.path());
+fn explicit_missing_helpers_do_not_fall_back_to_embedded_assets() {
+    let (directory, mut args) = runtime_project();
     let archive = directory
         .path()
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("runtime.tar.gz");
-    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass --runtime-assets PATH\n", archive.display()));
+    // Exercise a missing archive even when this binary embeds built assets.
+    args.extend([
+        "--runtime-assets".into(),
+        archive.to_string_lossy().into_owned(),
+    ]);
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let output = seedbox(&args, directory.path());
+    assert_eq!(
+        stderr(&output),
+        format!("error: --runtime-assets {}: not found\n", archive.display())
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -705,6 +713,7 @@ fn old_records_stay_inspectable_and_transferable() {
     let store = ContentStore::new(root.join("state/objects"));
     let object = store.put(b"opaque retained fixture").unwrap();
     let inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: None,
         kernel: object.clone(),
         profile: ExecutionProfile {
@@ -2245,4 +2254,114 @@ fn native_project_discovery_prefers_seedbox_yaml_and_validates_oracle() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("--wall-time"));
     assert!(stderr(&output).contains("duration must be positive"));
+}
+
+#[test]
+fn capacity_help_explains_resident_slots_and_accepts_json() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = seedbox(&["get", "capacity", "--help"], directory.path());
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("resident execution slots"));
+    assert!(stdout.contains("--json"));
+    let output = seedbox(&["get", "capacity", "--unexpected"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("--unexpected"));
+}
+
+#[test]
+fn get_world_prints_machine_and_link_tables() {
+    use seedbox_api::{
+        LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, WorldState,
+    };
+    use std::io::{Read, Write};
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join(".local/state/seedbox");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&state)
+        .unwrap();
+    let machine = |name: &str, oracle| MachineState {
+        name: name.into(),
+        incarnation: 0,
+        condition: MachineCondition::Ready,
+        exit_code: None,
+        cpu_speed_hz: None,
+        throttle_speed_hz: None,
+        oracle,
+        last_transition: None,
+        last_transition_at_ns: None,
+        condition_since_ns: None,
+        application: Default::default(),
+    };
+    let link = |from: &str, to: &str, cut: Option<&str>| LinkState {
+        from: from.into(),
+        to: to.into(),
+        policy: LinkPolicy {
+            latency_ns: 2_500_000,
+            jitter_ns: 500_000,
+            loss_ppm: 100,
+            bandwidth_bps: None,
+        },
+        partitioned_by: cut.map(Into::into),
+        shaped_by: None,
+        counters: LinkCounters {
+            scheduled: 12,
+            partition_dropped: 3,
+            loss_dropped: 1,
+            bytes: 960,
+            ..Default::default()
+        },
+    };
+    let world = WorldState {
+        override_rejections: Default::default(),
+        simulation: "k7m2p9qx".parse().unwrap(),
+        revision: 3,
+        simulated_time_ns: 1_000_000_000,
+        machines: vec![machine("n1", false), machine("oracle", true)],
+        links: vec![link("n1", "oracle", None), link("oracle", "n1", Some("p1"))],
+        faults: Vec::new(),
+    };
+    let body = serde_json::to_string(&world).unwrap();
+    // A stand-in server answering the one world request on the default socket.
+    let listener = std::os::unix::net::UnixListener::bind(state.join("server.sock")).unwrap();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&buffer[..n]),
+                }
+            }
+            if !request.starts_with(b"GET /v1/simulations/k7m2p9qx/world ") {
+                continue;
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            return;
+        }
+    });
+    let output = seedbox(&["get", "world", "k7m2p9qx"], directory.path());
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+MACHINE  CONDITION  INCARNATION  EXIT  ORACLE
+n1       ready      0            -     -
+oracle   ready      0            -     yes
+
+FROM    TO      LATENCY  JITTER  LOSS    FRAMES  BYTES  DROPPED  FAULT
+n1      oracle  2.5ms    500µs   100ppm  12      960    4        -
+oracle  n1      2.5ms    500µs   100ppm  12      960    4        cut p1
+
+simulated time: 1s
+"
+    );
 }

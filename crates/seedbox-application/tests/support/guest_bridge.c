@@ -146,7 +146,7 @@ int64_t sb_call(const char *operation, const char *a, const char *b, int64_t val
         fixture_arguments[0] = strdup(a); fixture_arguments[1] = b ? strdup(b) : NULL;
         arguments = fixture_arguments;
         environment = normal_environment;
-        user = ""; working_dir = "/"; blocks_per_progress_call = UINT32_MAX;
+        user = ""; working_dir = "/"; instructions_per_progress_call = UINT32_MAX; progress_points_per_block = UINT32_MAX - 1;
         return 0;
     }
     if (!strcmp(operation, "start")) return fixture_child = start();

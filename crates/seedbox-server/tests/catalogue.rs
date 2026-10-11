@@ -465,7 +465,7 @@ fn malformed_timeline_actions_reject_but_state_dependent_heals_are_admitted() {
         seedbox_control::Action::Throttle {
             machine: "oracle".into(),
             handle: "slow".into(),
-            factor_permille: 0,
+            speed_hz: 0,
         },
     ] {
         let mut invalid = request();

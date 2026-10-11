@@ -86,7 +86,7 @@ edit("arch/x86/kernel/traps.c", "#include <asm/traps.h>\n", "#include <asm/traps
 edit(
     "arch/x86/entry/common.c",
     "\tinstrumentation_begin();\n\n\tif (!do_syscall_x64(regs, nr)",
-    "\tinstrumentation_begin();\n\tseedbox_syscall_hook();\n\n\tif (!do_syscall_x64(regs, nr)",
+    "\tinstrumentation_begin();\n\tseedbox_syscall_hook(regs, nr);\n\n\tif (!do_syscall_x64(regs, nr)",
 )
 edit("arch/x86/entry/common.c", "#include <asm/traps.h>\n", "#include <asm/traps.h>\n#include <asm/seedbox.h>\n")
 
