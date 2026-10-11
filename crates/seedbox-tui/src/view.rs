@@ -1294,6 +1294,23 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
     if inner.width < 8 || inner.height < 3 {
         return;
     }
+    let effects: Vec<Vec<&Item>> = world
+        .machines
+        .iter()
+        .map(|machine| {
+            activity
+                .rows()
+                .filter(|item| item.open() && item.lane == Lane::Machine(machine.name.clone()))
+                .collect()
+        })
+        .collect();
+    let effect_rows = effects.iter().map(Vec::len).max().unwrap_or(0);
+    let effect_width = effects
+        .iter()
+        .flatten()
+        .map(|item| effect_label(item, now).chars().count() as u16 + 2)
+        .max()
+        .unwrap_or(0);
     let compact = inner.width < 64 || inner.height < 16;
     let (box_width, box_height) = if compact {
         (
@@ -1313,8 +1330,9 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
                 .map(|m| m.name.chars().count() as u16 + 8)
                 .max()
                 .unwrap_or(22)
-                .max(22),
-            6,
+                .max(22)
+                .max(effect_width),
+            5u16.saturating_add(effect_rows.max(1).min(u16::MAX as usize) as u16),
         )
     };
     let field = Rect {
@@ -1497,19 +1515,20 @@ fn map(frame: &mut Frame, app: &App, focus: &Focus, activity: &Activity, area: R
         let Some(c) = centre(&m.name) else {
             continue;
         };
-        let last = activity
-            .rows()
-            .filter(|item| item.lane == Lane::Machine(m.name.clone()) && item.open())
-            .max_by_key(|item| item.start_ns);
         let target = targets.contains(&m.name);
-        let rect = node_rect(c, field, box_width, box_height);
+        let height = if compact {
+            1
+        } else {
+            5u16.saturating_add(effects[index].len().max(1).min(u16::MAX as usize) as u16)
+        };
+        let rect = node_rect(c, field, box_width, height);
         app.hitboxes
             .borrow_mut()
             .push((rect, HitTarget::Machine(index)));
         if compact {
             badge(frame, focus, m, rect, target);
         } else {
-            node(frame, focus, m, rect, last, target, now);
+            node(frame, focus, m, rect, &effects[index], target, now);
         }
     }
     if inner.height > 2 && inner.width > 4 {
@@ -1641,20 +1660,35 @@ fn badge(frame: &mut Frame, focus: &Focus, m: &MachineState, rect: Rect, target:
     );
 }
 
+fn effect_label(item: &Item, now: u64) -> String {
+    let handle = item
+        .handle
+        .as_ref()
+        .map(|handle| format!(" {handle}"))
+        .unwrap_or_default();
+    format!(
+        "{} {}{handle} · {}",
+        glyph(&item.action, item.state),
+        item.action,
+        duration(now.saturating_sub(item.start_ns))
+    )
+}
+
 fn node(
     frame: &mut Frame,
     focus: &Focus,
     m: &MachineState,
     rect: Rect,
-    last: Option<&Item>,
+    effects: &[&Item],
     target: bool,
     now: u64,
 ) {
     let (mut border, selected) = node_border(focus, m, target);
     let starting =
         m.condition == MachineCondition::Starting && !focus.terminal() && !startup_paused(focus);
-    if !target && !selected && last.is_some_and(Item::open) && tick(500).is_multiple_of(2) {
-        border = last.map_or(border, |item| span_color(&item.action, false));
+    let active: Vec<_> = effects.iter().copied().filter(|item| item.open()).collect();
+    if !target && !selected && !active.is_empty() && tick(500).is_multiple_of(2) {
+        border = span_color(&active[0].action, false);
     } else if !target && !selected && starting {
         border = breathe(BORDER_HI, ICE, 1600);
     }
@@ -1719,7 +1753,7 @@ fn node(
             )
         },
     ];
-    if starting && last.is_none_or(|item| !item.open()) {
+    if starting && active.is_empty() {
         let detail = match focus
             .resource
             .as_ref()
@@ -1731,16 +1765,13 @@ fn node(
             _ => "waiting for its ready signal".into(),
         };
         lines.push(Line::styled(detail, Style::new().fg(FAINT_TEXT)));
-    } else if let Some(item) = last.filter(|item| item.open()) {
-        lines.push(Line::styled(
-            format!(
-                "{} {} · {}",
-                glyph(&item.action, item.state),
-                item.action,
-                duration(now.saturating_sub(item.start_ns))
-            ),
-            Style::new().fg(span_color(&item.action, true)),
-        ));
+    } else {
+        for item in active {
+            lines.push(Line::styled(
+                effect_label(item, now),
+                Style::new().fg(span_color(&item.action, true)),
+            ));
+        }
     }
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(b), rect);
@@ -3604,7 +3635,7 @@ mod tests {
                         focus,
                         machine,
                         frame.area(),
-                        Some(&item),
+                        &[&item],
                         false,
                         3_306_000_000,
                     )
@@ -3629,7 +3660,7 @@ mod tests {
                         focus,
                         machine,
                         frame.area(),
-                        Some(&item),
+                        &[&item],
                         false,
                         3_306_000_000,
                     )
@@ -3695,7 +3726,7 @@ mod tests {
                             focus,
                             machine,
                             frame.area(),
-                            Some(&item),
+                            &[&item],
                             false,
                             3_000_000_000,
                         )
@@ -3714,6 +3745,68 @@ mod tests {
                     "{action} {state:?}: {text}"
                 );
             }
+        }
+    }
+    #[test]
+    fn machine_tile_shows_concurrent_faults_and_removes_only_healed_ones() {
+        let mut app = app(&["n1", "n2", "n3", "oracle"]);
+        let mut w = world(&["n1", "n2", "n3", "oracle"]);
+        w.simulated_time_ns = 3_000_000_000;
+        for (id, action, handle) in [
+            (1, "throttle", "t1"),
+            (2, "clock_skew", "c1"),
+            (3, "throttle", "t2"),
+        ] {
+            w.faults.push(FaultState {
+                input_key: None,
+                id,
+                action: action.into(),
+                machine: Some("n1".into()),
+                status: FaultStatus::Applied,
+                applied_time_ns: Some(1_000_000_000),
+                plan: Some(serde_json::json!({"action":action,"machine":"n1","handle":handle})),
+                active: true,
+            });
+        }
+        for healed in [false, true] {
+            w.revision += 1;
+            w.faults[0].active = !healed;
+            app.apply(Update::World(w.clone()));
+            let focus = app.focus.as_ref().unwrap();
+            let activity = crate::activity::derive(Some(&w), &[], &[], w.simulated_time_ns);
+            app.hitboxes.borrow_mut().clear();
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal
+                .draw(|frame| {
+                    map(
+                        frame,
+                        &app,
+                        focus,
+                        &activity,
+                        frame.area(),
+                        w.simulated_time_ns,
+                    )
+                })
+                .unwrap();
+            let rect = app
+                .hitboxes
+                .borrow()
+                .iter()
+                .find(|(_, target)| *target == HitTarget::Machine(0))
+                .unwrap()
+                .0;
+            let buffer = terminal.backend().buffer();
+            let mut tile = String::new();
+            for y in rect.y..rect.bottom() {
+                for x in rect.x..rect.right() {
+                    tile.push_str(buffer[(x, y)].symbol());
+                }
+                tile.push('\n');
+            }
+            assert_eq!(tile.contains("throttle t1 · 2.0s"), !healed, "{tile}");
+            assert!(tile.contains("clock_skew c1 · 2.0s"), "{tile}");
+            assert!(tile.contains("throttle t2 · 2.0s"), "{tile}");
+            assert_eq!(rect.height, if healed { 7 } else { 8 });
         }
     }
 }
