@@ -57,8 +57,6 @@ fn document_metadata<'de, D: serde::Deserializer<'de>>(
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum InputSource {
     Project,
-    /// Legacy Compose configuration, preserved without native partial conversion.
-    LegacyProject,
     Resolved {
         definition: Box<seedbox_spec::definition::Definition>,
     },
@@ -153,10 +151,7 @@ impl<'de> Deserialize<'de> for SimulationSpec {
             Ok(Self {
                 start_paused: false,
                 seed: project.seed,
-                inputs: match project.inputs {
-                    InputSource::Project => InputSource::LegacyProject,
-                    inputs => inputs,
-                },
+                inputs: project.inputs,
                 configuration: project.configuration,
                 program: project.program,
             })

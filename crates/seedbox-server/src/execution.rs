@@ -529,7 +529,7 @@ impl ExecutionService {
                 )?;
                 (inputs, None, checkpoint, executor)
             }
-            InputSource::Project | InputSource::LegacyProject => {
+            InputSource::Project => {
                 let backends = self.backends.project(
                     &spec.configuration,
                     &self.store,

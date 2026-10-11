@@ -372,9 +372,7 @@ impl Catalogue {
                 .ok_or_else(|| Error::Invalid("seed range overflows u64".into()))?;
         }
         let reference = match &spec.inputs {
-            InputSource::Project | InputSource::LegacyProject | InputSource::Resolved { .. } => {
-                None
-            }
+            InputSource::Project | InputSource::Resolved { .. } => None,
             InputSource::Retained { simulation }
             | InputSource::Prepared { simulation }
             | InputSource::Checkpoint { simulation, .. } => Some(simulation),
@@ -395,7 +393,7 @@ impl Catalogue {
                 }
                 None
             }
-            InputSource::Project | InputSource::LegacyProject => {
+            InputSource::Project => {
                 let config = &spec.configuration;
                 if config.check.exit_code != 0 {
                     return Err(Error::Invalid(
