@@ -57,11 +57,7 @@ fn load_spec(
             program: Vec::new(),
             start_paused: false,
             seed: None,
-            inputs: if document.get("machines").is_some() || document.get("oracle").is_some() {
-                InputSource::Project
-            } else {
-                InputSource::LegacyProject
-            },
+            inputs: InputSource::Project,
             configuration: seedbox_application::config::parse_for_architecture(
                 &source,
                 &path,
@@ -826,7 +822,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn acceptance_projects_round_trip_through_submission_json_without_losing_settings() {
+    fn native_acceptance_projects_round_trip_through_submission_json() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../harness/acceptance/workloads");
         let mut tested = 0;
@@ -845,17 +841,19 @@ mod tests {
             let bytes =
                 serde_json::to_vec(&spec).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             let restored: SimulationSpec = serde_json::from_slice(&bytes).unwrap();
-            if matches!(spec.inputs, InputSource::LegacyProject) {
-                assert_eq!(restored, spec, "{}", path.display());
-                // Saved pre-native documents used `project` inside the same
-                // full configuration wrapper. They must retain these settings too.
-                let mut old = serde_json::to_value(&spec).unwrap();
-                old["inputs"]["kind"] = "project".into();
-                let old: SimulationSpec = serde_json::from_value(old).unwrap();
-                assert_eq!(old, spec, "{}", path.display());
-            } else {
-                assert!(matches!(restored.inputs, InputSource::Project));
-            }
+            let project: seedbox_spec::project::Project =
+                serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                project.machines.len() + 1,
+                spec.configuration.services.len()
+            );
+            assert!(matches!(restored.inputs, InputSource::Project));
+            assert_eq!(
+                serde_json::to_value(&restored).unwrap(),
+                serde_json::to_value(&spec).unwrap(),
+                "{}",
+                path.display()
+            );
             tested += 1;
         }
         assert!(tested >= 7);

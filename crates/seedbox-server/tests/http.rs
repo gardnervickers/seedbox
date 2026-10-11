@@ -509,7 +509,7 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
 }
 
 #[tokio::test]
-async fn legacy_acceptance_submissions_preserve_configuration_over_unix_http() {
+async fn native_acceptance_submissions_round_trip_over_unix_http() {
     let temp = tempfile::tempdir().unwrap();
     let manager = Arc::new(seedbox_server::manager::Manager::new(
         Catalogue::open(&temp.path().join("catalogue")).unwrap(),
@@ -541,8 +541,8 @@ async fn legacy_acceptance_submissions_preserve_configuration_over_unix_http() {
             .canonicalize()
             .unwrap();
         let mut request = support::request();
-        request.request_id = format!("legacy-{name}");
-        request.spec.inputs = seedbox_api::InputSource::LegacyProject;
+        request.request_id = format!("native-{name}");
+        request.spec.inputs = seedbox_api::InputSource::Project;
         request.spec.configuration = seedbox_application::config::load_for_architecture(
             &path,
             &Default::default(),
@@ -555,7 +555,8 @@ async fn legacy_acceptance_submissions_preserve_configuration_over_unix_http() {
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(pending.recv().await.unwrap(), simulation.metadata.id);
         assert_eq!(
-            simulation.spec.configuration, request.spec.configuration,
+            serde_json::to_value(&simulation.spec).unwrap(),
+            serde_json::to_value(&request.spec).unwrap(),
             "{name}"
         );
         assert_eq!(

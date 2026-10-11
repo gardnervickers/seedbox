@@ -1,31 +1,35 @@
 name: connection-selectors
-services:
+machines:
   server:
     image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/connections.py, server]
-    configs:
-      - {source: driver, target: /scenario/connections.py}
+    entrypoint:
+    - python3
+    - "/scenario/connections.py"
+    - server
+    files:
+    - source: "../driver/connections.py"
+      target: "/scenario/connections.py"
   client:
     image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/connections.py, client]
-    configs:
-      - {source: driver, target: /scenario/connections.py}
-  scenario:
-    image: docker.io/library/python:3.13-alpine
-    entrypoint: [python3, /scenario/connections.py, scenario]
-    configs:
-      - {source: driver, target: /scenario/connections.py}
-      - {source: api-package, target: /scenario/seedbox/__init__.py}
-      - {source: api-control, target: /scenario/seedbox/control.py}
-configs:
-  driver: {file: ../driver/connections.py}
-  api-package: {file: ../../../python/seedbox/__init__.py}
-  api-control: {file: ../../../python/seedbox/control.py}
-x-seedbox:
-  version: 1
-  seed: 61
-  limits: {simulated_time: 60s, wall_time: 30m}
-  network: {latency: 1ms, jitter: 200us}
-  schedule: {timer_jitter: 1ms}
-  control: {service: scenario}
-  check: {service: scenario}
+    entrypoint:
+    - python3
+    - "/scenario/connections.py"
+    - client
+    files:
+    - source: "../driver/connections.py"
+      target: "/scenario/connections.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/connections.py"
+  - scenario
+  files:
+  - source: "../driver/connections.py"
+    target: "/scenario/connections.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms
