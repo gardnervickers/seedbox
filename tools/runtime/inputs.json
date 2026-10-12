@@ -27,6 +27,7 @@
     "guest/progress/dynamorio-owned-progress.patch",
     "guest/progress/dynamorio-tls-permission-query.patch",
     "guest/progress/dynamorio-icache-index.patch",
+    "guest/progress/dynamorio-predicate-wait-end.patch",
     "guest/progress/progress.c",
     "guest/progress/budget.h",
     "guest/progress/CMakeLists.txt",

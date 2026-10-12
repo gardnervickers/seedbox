@@ -1,0 +1,83 @@
+--- a/core/globals.h
++++ b/core/globals.h
+@@ -370,6 +370,7 @@
+         uint payments;
+     } progress;
+     bool progress_callback_active;
++    bool predicate_wait_active;
+ #endif
+     /* field for use by user via exported API */
+     void *user_field;
+--- a/core/os_shared.h
++++ b/core/os_shared.h
+@@ -959,6 +959,7 @@
+ void
+ os_app_predicate_wait(volatile int *predicate, int value, volatile int *acknowledgement,
+                       priv_mcontext_t *mc);
++void os_app_predicate_wait_end(dcontext_t *dcontext);
+ #endif
+ void
+ mutex_notify_released_lock(mutex_t *lock);
+--- a/core/dispatch.c
++++ b/core/dispatch.c
+@@ -2391,6 +2391,9 @@
+ {
+     app_pc cur_xsp;
+     bool using_initstack = false;
++#if defined(LINUX) && defined(AARCH64)
++    os_app_predicate_wait_end(dcontext);
++#endif
+     copy_mcontext(mc, get_mcontext(dcontext));
+     GET_STACK_PTR(cur_xsp);
+     if (is_on_initstack(cur_xsp))
+--- a/core/unix/os.c
++++ b/core/unix/os.c
+@@ -10835,6 +10835,17 @@
+
+ #ifdef LINUX
+ void
++os_app_predicate_wait_end(dcontext_t *dcontext)
++{
++    if (dcontext->client_data != NULL && dcontext->client_data->predicate_wait_active) {
++        /* A signal or redirect may abandon the private C stack. End its
++         * context capability before core storage is reused by the dispatcher. */
++        set_synch_state(dcontext, THREAD_SYNCH_NONE);
++        dcontext->client_data->predicate_wait_active = false;
++    }
++}
++
++void
+ os_app_predicate_wait(volatile int *predicate, int value, volatile int *acknowledgement,
+                       priv_mcontext_t *mc)
+ {
+@@ -10848,6 +10859,9 @@
+     *get_mcontext(dcontext) = *mc;
+     LOG(THREAD, LOG_SYNCH, 1, "predicate-wait owned pc=" PFX " sp=" PFX "\n",
+         mc->pc, mc->xsp);
++    ASSERT(dcontext->client_data != NULL &&
++           !dcontext->client_data->predicate_wait_active);
++    dcontext->client_data->predicate_wait_active = true;
+     set_synch_state(dcontext, THREAD_SYNCH_VALID_MCONTEXT);
+     __atomic_store_n(acknowledgement, value, __ATOMIC_RELEASE);
+     dynamorio_syscall(SYS_futex, 6, acknowledgement, 129 /* FUTEX_WAKE_PRIVATE */,
+@@ -10857,7 +10871,7 @@
+         dynamorio_syscall(SYS_futex, 6, predicate, 128 /* FUTEX_WAIT_PRIVATE */,
+                           value, NULL, NULL, 0);
+     }
+-    set_synch_state(dcontext, THREAD_SYNCH_NONE);
++    os_app_predicate_wait_end(dcontext);
+     LOG(THREAD, LOG_SYNCH, 1, "predicate-wait complete pc=" PFX "\n", mc->pc);
+ }
+ #endif
+--- a/core/unix/signal.c
++++ b/core/unix/signal.c
+@@ -4090,6 +4090,9 @@
+                                            bool is_kernel_xfer)
+ {
+     sigcontext_t *sc = SIGCXT_FROM_UCXT(uc);
++#if defined(LINUX) && defined(AARCH64)
++    os_app_predicate_wait_end(dcontext);
++#endif
+     if (is_kernel_xfer) {
+         sig_full_cxt_t sc_interrupted_full = { sc_interrupted, NULL /*not provided*/ };
+         sig_full_cxt_t sc_full;

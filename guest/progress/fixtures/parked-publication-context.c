@@ -24,6 +24,7 @@ static struct parked_state expected, returned;
 static atomic_int req, ack, signal_seen, publication_done, finished, ready;
 static unsigned faults, signals, bad;
 static int progress_case;
+static int abandon_wait;
 static const char *case_name = "restartable";
 static struct parked_progress_diagnostic progress_diag;
 static pid_t consumer;
@@ -59,8 +60,16 @@ static void check_context(ucontext_t *uc, int poll)
     uint64_t pc = (uintptr_t)heap + (poll ? 8 : 0);
     if (uc->uc_mcontext.pc != pc || uc->uc_mcontext.sp != expected.sp ||
         (uc->uc_mcontext.pstate & 0xf0000000) != expected.nzcv ||
-        (uintptr_t)__builtin_thread_pointer() != expected.tls)
+        (uintptr_t)__builtin_thread_pointer() != expected.tls) {
+        fprintf(stderr, "BAD CONTEXT poll=%d pc=%llx/%llx sp=%llx/%llx nzcv=%llx/%llx tls=%llx/%llx\n",
+                poll, (unsigned long long)uc->uc_mcontext.pc, (unsigned long long)pc,
+                (unsigned long long)uc->uc_mcontext.sp, (unsigned long long)expected.sp,
+                (unsigned long long)(uc->uc_mcontext.pstate & 0xf0000000),
+                (unsigned long long)expected.nzcv,
+                (unsigned long long)(uintptr_t)__builtin_thread_pointer(),
+                (unsigned long long)expected.tls);
         fail("PC/SP/NZCV/TLS");
+    }
     for (int i = 0; i < 31; ++i) {
         uint64_t want = poll && i == 8 ? (uintptr_t)poll_page :
                         poll && i == 9 ? load_value : expected.gpr[i];
@@ -111,6 +120,14 @@ static void handler(int sig, siginfo_t *info, void *context)
         ++signals;
         atomic_store_explicit(&signal_seen, signals, memory_order_release);
         wake(&signal_seen);
+        if (abandon_wait) {
+            /* Publication must finish while this application handler holds the
+             * interrupted frame. Return after req clears, so the old helper is
+             * never entered again to clean up its synchronization capability. */
+            wait_equal(&req, 0);
+            if (atomic_load(&publication_done) != (int)signals)
+                fail("predicate released before publication");
+        }
         return; /* Must recheck req before any application body instruction. */
     }
     if (sig != SIGSEGV || info->si_addr != poll_page || iteration != 0 ||
@@ -162,6 +179,8 @@ int main(int argc, char **argv)
 {
     if (argc == 3 && !strcmp(argv[2], "progress")) {
         progress_case = 1; case_name = "progress";
+    } else if (argc == 3 && !strcmp(argv[2], "abandon")) {
+        abandon_wait = 1;
     } else if (argc == 3 && !strcmp(argv[2], "zero")) {
         progress_case = 2; case_name = "zero";
     } else if (argc != 2) fail("usage: parked-publication-context TARGET_FILE [progress]");

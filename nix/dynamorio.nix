@@ -29,6 +29,8 @@ pkgs.stdenv.mkDerivation {
     ../guest/progress/dynamorio-tls-permission-query.patch
     # Backing/anonymous-birth page index; unknown ownership flushes conservatively.
     ../guest/progress/dynamorio-icache-index.patch
+    # Signal/API transfer abandons a predicate wait's context capability.
+    ../guest/progress/dynamorio-predicate-wait-end.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build
