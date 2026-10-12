@@ -1,5 +1,8 @@
-//! Drive two Linux guests on one clock and observe their different sleep times.
+//! Drive two Linux guests with seeded random sleeps of one to four seconds.
 //! Run inside `nix develop`: cargo run -p seedbox-machine --example tcg
+
+#[cfg(unix)]
+mod support;
 
 #[cfg(unix)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,27 +32,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
         },
     };
-    // Put the long sleeper first so insertion order cannot explain wake order.
-    let guests = [("slow", "2"), ("fast", "1")];
+    let guests = support::sleeping_guests();
     let qemu = input("SEEDBOX_TCG_QEMU")?;
-    let mut driver = Driver::new(Timestamp::from_nanos(0), (), |clock| {
-        guests
-            .iter()
-            .map(|(name, sleep)| {
-                let mut manifest = manifest.clone();
-                if let Boot::Linux { command_line, .. } = &mut manifest.boot {
-                    command_line.push_str(&format!(" seedbox_name={name} seedbox_sleep={sleep}"));
-                }
-                TcgMachine::new(&qemu, manifest, clock.clone())
-            })
-            .collect()
-    })?;
+    let mut driver = Driver::new(
+        Timestamp::from_nanos(0),
+        std::time::Duration::from_millis(1),
+        2,
+        || Ok(()),
+        |clock| {
+            guests
+                .iter()
+                .map(|(name, sleep)| {
+                    let mut manifest = manifest.clone();
+                    if let Boot::Linux { command_line, .. } = &mut manifest.boot {
+                        command_line
+                            .push_str(&format!(" seedbox_name={name} seedbox_sleep={sleep}"));
+                    }
+                    TcgMachine::new(&qemu, manifest, clock.clone())
+                })
+                .collect()
+        },
+    )?;
     let ids: Vec<_> =
         driver.with_barrier(|barrier| Ok(barrier.machines().map(|(id, _)| id).collect()))?;
     let mut now = Timestamp::from_nanos(0);
     let mut printed = [0; 2];
     let mut exited = [false; 2];
     let mut console = io::stdout().lock();
+    writeln!(
+        console,
+        "[seed={}, sleep range=1..=4 seconds]",
+        support::SEED
+    )?;
+    for (name, sleep) in guests {
+        writeln!(console, "[{name} sleeping for {sleep} seconds]")?;
+    }
     const QUANTUM_NS: u64 = 1_000_000; // One millisecond of simulated execution.
 
     // Each round brings both guests to a common boundary or a blocked/exit state.
@@ -60,6 +77,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             StepOutcome::BarrierReached { at }
             | StepOutcome::Blocked { at }
             | StepOutcome::Finished { at } => at,
+            StepOutcome::Waiting { .. }
+            | StepOutcome::BeforeAction { .. }
+            | StepOutcome::Stopped { .. } => {
+                return Err("unexpected playback control in example".into())
+            }
         };
         let observations: Vec<_> = driver.with_barrier(|barrier| {
             ids.iter()

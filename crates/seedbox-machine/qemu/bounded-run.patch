@@ -8,7 +8,7 @@
  #include "qemu/error-report.h"
  #include "system/cpus.h"
  #include "system/qtest.h"
-@@ -53,6 +54,159 @@
+@@ -53,6 +54,171 @@
  /* Do not count executed instructions */
  ICountMode use_icount = ICOUNT_DISABLED;
 
@@ -35,7 +35,9 @@
 +        seedbox_active = false;
 +        if (state == RUN_STATE_SHUTDOWN) {
 +            seedbox_reason = SEEDBOX_STOP_REASON_SHUTDOWN;
-+        } else if (state != RUN_STATE_PAUSED) {
++        } else if (state != RUN_STATE_PAUSED &&
++                   state != RUN_STATE_FINISH_MIGRATE &&
++                   state != RUN_STATE_POSTMIGRATE) {
 +            seedbox_reason = SEEDBOX_STOP_REASON_ERROR;
 +        }
 +    }
@@ -44,11 +46,8 @@
 +void qmp_seedbox_advance(int64_t time, Error **errp)
 +{
 +    int64_t now = icount_get();
-+    int64_t delay = qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL,
-+                                               QEMU_TIMER_ATTR_ALL);
-+    if (runstate_is_running() || seedbox_active || time < now ||
-+        (delay >= 0 && time - now > delay)) {
-+        error_setg(errp, "advance requires a stopped VM and must not skip a timer");
++    if (runstate_is_running() || seedbox_active || time < now) {
++        error_setg(errp, "advance requires a stopped VM and monotonic time");
 +        return;
 +    }
 +    seqlock_write_lock(&timers_state.vm_clock_seqlock,
@@ -57,7 +56,20 @@
 +                timers_state.qemu_icount_bias + time - now);
 +    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
 +                         &timers_state.vm_clock_lock);
++    /* Elapsed stopped time executes no guest instructions. Timers overdue
++     * during the gap observe the adopted time when their callbacks run. */
 +    qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
++}
++
++void qmp_seedbox_capture_complete(Error **errp)
++{
++    if (!runstate_check(RUN_STATE_POSTMIGRATE) || seedbox_active) {
++        error_setg(errp, "capture completion requires a stopped migration source");
++        return;
++    }
++    /* POSTMIGRATE cannot migrate again. PRELAUNCH is a legal stopped
++     * transition; do not start CPUs or service clock/timer/device work. */
++    runstate_set(RUN_STATE_PRELAUNCH);
 +}
 +
 +void qmp_seedbox_run(int64_t time, int64_t budget, Error **errp)
@@ -215,7 +227,7 @@
  #endif /* EXEC_ICOUNT_H */
 --- a/qapi/run-state.json
 +++ b/qapi/run-state.json
-@@ -749,3 +749,72 @@
+@@ -749,3 +749,83 @@
  ##
  { 'enum': 'NotifyVmexitOption',
    'data': [ 'run', 'internal-error', 'disable' ] }
@@ -280,7 +292,8 @@
 +# @seedbox-advance:
 +#
 +# Advance a stopped VM's virtual time, delivering due timers without
-+# executing guest instructions.  Must not skip an earlier timer.
++# executing guest instructions.  Overdue timers observe the adopted
++# time.
 +#
 +# @time: New simulation time in nanoseconds.
 +#
@@ -288,6 +301,16 @@
 +##
 +{ 'command': 'seedbox-advance', 'data': { 'time': 'int' },
 +  'if': 'CONFIG_TCG' }
++
++##
++# @seedbox-capture-complete:
++#
++# Return a completed outgoing migration source to stopped control.
++# CPU, RAM, virtual time and timer/interrupt state remain unchanged.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-capture-complete', 'if': 'CONFIG_TCG' }
 --- a/system/runstate.c
 +++ b/system/runstate.c
 @@ -30,6 +30,7 @@

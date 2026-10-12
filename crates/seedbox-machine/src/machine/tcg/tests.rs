@@ -61,6 +61,9 @@ fn step(driver: &mut Driver<TcgMachine>, id: MachineId, now: &mut Timestamp, qua
     *now = match driver.step(upto).unwrap() {
         StepOutcome::BarrierReached { at } | StepOutcome::Finished { at } => at,
         StepOutcome::Blocked { .. } => panic!("guest blocked without a timer"),
+        StepOutcome::Waiting { .. }
+        | StepOutcome::BeforeAction { .. }
+        | StepOutcome::Stopped { .. } => panic!("unexpected playback control in test"),
     };
 }
 
@@ -121,12 +124,18 @@ const SHUTDOWN: [u32; 4] = [
 
 #[test]
 fn driver_starts_at_its_clock_and_records_early_exit() {
-    let mut driver = Driver::new(at(37), (), |clock| {
-        let machine =
-            TcgMachine::new(Path::new("qemu-system-riscv64"), manifest(&SHUTDOWN), clock)?;
-        assert_eq!(machine.reached, at(37));
-        Ok(vec![machine])
-    })
+    let mut driver = Driver::new(
+        at(37),
+        std::time::Duration::from_millis(1),
+        2,
+        || Ok(()),
+        |clock| {
+            let machine =
+                TcgMachine::new(Path::new("qemu-system-riscv64"), manifest(&SHUTDOWN), clock)?;
+            assert_eq!(machine.reached, at(37));
+            Ok(vec![machine])
+        },
+    )
     .unwrap();
     let id = machine_id(&mut driver);
     assert_eq!(
@@ -143,7 +152,7 @@ fn driver_starts_at_its_clock_and_records_early_exit() {
 }
 
 #[test]
-fn execution_does_not_advance_shared_clock_or_allow_skipped_work() {
+fn execution_does_not_advance_shared_clock_and_adopts_elapsed_time() {
     let clock = clock(0);
     let mut machine = TcgMachine::new(
         Path::new("qemu-system-riscv64"),
@@ -155,8 +164,13 @@ fn execution_does_not_advance_shared_clock_or_allow_skipped_work() {
     assert_eq!(clock.now(), 0);
     assert_eq!(registers(&mut machine)[10], 5);
     clock.0.store(11, Ordering::Relaxed);
-    assert!(machine.run(&mut (), at(20)).is_err());
+    assert_eq!(
+        machine.run(&mut (), at(11)).unwrap(),
+        StopReason::BoundaryReached
+    );
     assert_eq!(registers(&mut machine)[10], 5);
+    machine.run(&mut (), at(20)).unwrap();
+    assert_eq!(registers(&mut machine)[10], 10);
 }
 
 #[test]
@@ -236,8 +250,14 @@ fn idle_reports_timer_and_restored_guest_resumes_at_its_deadline() {
     .unwrap();
     assert_eq!(machine.run(&mut (), at(500)).unwrap(), blocked);
     resumed_clock.0.store(1004, Ordering::Relaxed);
-    assert!(machine.run(&mut (), at(1050)).is_err());
-    // Restore the environment consistently after demonstrating the invalid jump.
+    assert_eq!(
+        machine.run(&mut (), at(1050)).unwrap(),
+        StopReason::Exited {
+            reached: at(1008),
+            reason: ExitReason::Shutdown,
+        }
+    );
+    // A second restored branch delivers the timer exactly at its deadline.
     let mut machine =
         TcgMachine::from_snapshot(Path::new("qemu-system-riscv64"), &snapshot, clock(1003))
             .unwrap();
@@ -331,22 +351,28 @@ fn linux_boots_sleeps_and_shuts_down_with_the_machine_driver() {
             .into()
     }
     let assets = input("SEEDBOX_TCG_LINUX");
-    let mut driver = Driver::new(at(0), (), |clock| {
-        TcgMachine::new(
-            &input("SEEDBOX_TCG_QEMU"),
-            Manifest {
-                memory_mib: 256,
-                boot: Boot::Linux {
-                    kernel: fs::read(assets.join("kernel")).unwrap(),
-                    initramfs: fs::read(assets.join("initramfs")).unwrap(),
-                    firmware: fs::read(input("SEEDBOX_TCG_FIRMWARE")).unwrap(),
-                    command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
+    let mut driver = Driver::new(
+        at(0),
+        std::time::Duration::from_millis(1),
+        2,
+        || Ok(()),
+        |clock| {
+            TcgMachine::new(
+                &input("SEEDBOX_TCG_QEMU"),
+                Manifest {
+                    memory_mib: 256,
+                    boot: Boot::Linux {
+                        kernel: fs::read(assets.join("kernel")).unwrap(),
+                        initramfs: fs::read(assets.join("initramfs")).unwrap(),
+                        firmware: fs::read(input("SEEDBOX_TCG_FIRMWARE")).unwrap(),
+                        command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
+                    },
                 },
-            },
-            clock,
-        )
-        .map(|machine| vec![machine])
-    })
+                clock,
+            )
+            .map(|machine| vec![machine])
+        },
+    )
     .unwrap();
     let index = machine_id(&mut driver);
     let mut now = at(0);
@@ -401,10 +427,16 @@ fn linux_boots_sleeps_and_shuts_down_with_the_machine_driver() {
     // Restore after source destruction and drive with a different quantum.
     // The remaining console bytes and final simulation position must agree.
     let fork = fork.expect("Linux slept after its boot marker");
-    let mut driver = Driver::new(fork.reached, (), |clock| {
-        TcgMachine::from_snapshot(&input("SEEDBOX_TCG_QEMU"), &fork, clock)
-            .map(|machine| vec![machine])
-    })
+    let mut driver = Driver::new(
+        fork.reached,
+        std::time::Duration::from_millis(1),
+        2,
+        || Ok(()),
+        |clock| {
+            TcgMachine::from_snapshot(&input("SEEDBOX_TCG_QEMU"), &fork, clock)
+                .map(|machine| vec![machine])
+        },
+    )
     .unwrap();
     let index = machine_id(&mut driver);
     let mut now = fork.reached;
@@ -451,33 +483,39 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
     };
     let started = Instant::now();
     let mut reference = None;
-    for (guests, quantum) in [
-        ([("slow", "2"), ("fast", "1")], 1_000_000),
-        ([("fast", "1"), ("slow", "2")], 131_071),
+    for (guests, step_limit, workers) in [
+        ([("slow", "2"), ("fast", "1")], 1_000_000, 1),
+        ([("slow", "2"), ("fast", "1")], 1_000_000, 2),
+        ([("fast", "1"), ("slow", "2")], 131_071, 4),
     ] {
-        let mut driver = Driver::new(at(0), (), |clock| {
-            guests
-                .iter()
-                .map(|(name, sleep)| {
-                    let mut boot = boot.clone();
-                    if let Boot::Linux { command_line, .. } = &mut boot {
-                        command_line
-                            .push_str(&format!(" seedbox_name={name} seedbox_sleep={sleep}"));
-                    }
-                    TcgMachine::new(
-                        &input("SEEDBOX_TCG_QEMU"),
-                        Manifest {
-                            boot,
-                            memory_mib: 256,
-                        },
-                        clock.clone(),
-                    )
-                })
-                .collect()
-        })
+        let mut driver = Driver::new(
+            at(0),
+            std::time::Duration::from_millis(1),
+            workers,
+            || Ok(()),
+            |clock| {
+                guests
+                    .iter()
+                    .map(|(name, sleep)| {
+                        let mut boot = boot.clone();
+                        if let Boot::Linux { command_line, .. } = &mut boot {
+                            command_line
+                                .push_str(&format!(" seedbox_name={name} seedbox_sleep={sleep}"));
+                        }
+                        TcgMachine::new(
+                            &input("SEEDBOX_TCG_QEMU"),
+                            Manifest {
+                                boot,
+                                memory_mib: 256,
+                            },
+                            clock.clone(),
+                        )
+                    })
+                    .collect()
+            },
+        )
         .unwrap();
         // Machines and their read-only clock can be transferred to workers.
-        // Dispatch remains serial until the effect/assignment contract is added.
         fn assert_send<T: Send>() {}
         assert_send::<Driver<TcgMachine>>();
         let ids: Vec<_> = driver
@@ -493,11 +531,14 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
                 "paired Linux boot timed out"
             );
             let before = now;
-            let upto = at(before.as_nanos() + quantum);
+            let upto = at(before.as_nanos() + step_limit);
             let outcome = driver.step(upto).unwrap();
             now = match outcome {
                 StepOutcome::BarrierReached { at } | StepOutcome::Finished { at } => at,
                 StepOutcome::Blocked { .. } => panic!("Linux guests blocked without timers"),
+                StepOutcome::Waiting { .. }
+                | StepOutcome::BeforeAction { .. }
+                | StepOutcome::Stopped { .. } => panic!("unexpected playback control in test"),
             };
             assert!(now >= before && now <= upto);
             driver
@@ -555,5 +596,93 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
         } else {
             reference = Some(exits);
         }
+    }
+}
+
+#[test]
+fn driver_playback_controls_preserve_real_machine_execution_and_pre_crash_state() {
+    use crate::driver::{Action, PlaybackRate};
+    let code = [0x0015_0513, 0xffdf_f06f]; // Increment a0; jump back one instruction.
+    let mut reference = None;
+    for workers in [1, 2, 4] {
+        let mut driver = Driver::new(
+            at(0),
+            Duration::from_nanos(10),
+            workers,
+            || Ok(()),
+            |clock| {
+                TcgMachine::new(Path::new("qemu-system-riscv64"), manifest(&code), clock)
+                    .map(|guest| vec![guest])
+            },
+        )
+        .unwrap();
+        let id = machine_id(&mut driver);
+        driver
+            .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Paused))
+            .unwrap();
+        assert!(
+            matches!(driver.step(at(100)).unwrap(), StepOutcome::Waiting { at: reached, .. } if reached == at(0))
+        );
+        driver
+            .with_barrier(|barrier| {
+                assert_eq!(barrier.machine(id)?.reached, at(0));
+                barrier.step_quantum()
+            })
+            .unwrap();
+        assert_eq!(
+            driver.step(at(3)).unwrap(),
+            StepOutcome::BarrierReached { at: at(3) }
+        );
+        assert_eq!(
+            driver.step(at(100)).unwrap(),
+            StepOutcome::BarrierReached { at: at(10) }
+        );
+        let saved = driver
+            .with_barrier(|barrier| {
+                assert!(!barrier.playback().stepping);
+                barrier.snapshot(id)
+            })
+            .unwrap();
+        let mut restored =
+            TcgMachine::from_snapshot(Path::new("qemu-system-riscv64"), &saved, clock(10)).unwrap();
+        let registers = registers(&mut restored);
+        assert_eq!(registers[10], 5);
+        if let Some(reference) = reference {
+            assert_eq!(registers, reference);
+        } else {
+            reference = Some(registers);
+        }
+        driver
+            .with_barrier(|barrier| {
+                barrier.schedule(at(15), Action::Crash(id))?;
+                barrier.pause_before_next_crash(PlaybackRate::Unlimited)
+            })
+            .unwrap();
+        let held = StepOutcome::BeforeAction {
+            at: at(15),
+            action: Action::Crash(id),
+        };
+        assert_eq!(driver.step(at(100)).unwrap(), held);
+        for _ in 0..2 {
+            assert_eq!(driver.step(at(100)).unwrap(), held);
+        }
+        driver
+            .with_barrier(|barrier| {
+                assert_eq!(barrier.machine(id)?.reached, at(15));
+                assert!(matches!(barrier.machine(id)?.state, State::Ready));
+                barrier.set_rate(PlaybackRate::Unlimited)
+            })
+            .unwrap();
+        assert_eq!(
+            driver.step(at(100)).unwrap(),
+            StepOutcome::Finished { at: at(15) }
+        );
+        assert_eq!(
+            stopped(&mut driver, id),
+            StopReason::Exited {
+                reached: at(15),
+                reason: ExitReason::Crashed
+            }
+        );
     }
 }

@@ -9,9 +9,10 @@ Each section links to the code that owns it.
 software emulation. Run its Linux example inside `nix develop` with
 `cargo run -p seedbox-machine --example tcg`. The development shell builds the
 patched QEMU and prepares the kernel, firmware, and initramfs inputs. The example
-boots two Linux guests on one shared clock. Their init processes sleep for two
-seconds and one second respectively, print wakeup markers, and shut down. The
-shorter sleeper finishes first even though it was inserted second. This example
+boots two Linux guests on one shared clock. A seeded `RngStream` chooses each
+sleep uniformly from one through four seconds. Their init processes sleep,
+print wakeup markers, and shut down. Seed 7 gives guest `a` four seconds and
+`b` two seconds; the shorter sleeper finishes first despite being inserted second. This example
 is separate from the production `seedbox run` backends.
 
 The driver repeatedly calls `Machine::run`. A private QMP command limits QEMU's
@@ -20,12 +21,41 @@ nanosecond. QEMU stops at that budget or when the CPU becomes idle; it cannot
 automatically jump forward through idle time. `Blocked` reports the next virtual
 timer deadline. The [driver](../crates/seedbox-machine/src/driver.rs)
 tracks each machine's execution position and next timer, advancing the shared
-clock only when no runnable work or timer remains before it. Each round brings
-all machines to its boundary, a blocked state, or exit. The machine observes the
+clock only when no eligible runnable work or timer remains before it. Each round
+brings active machines to its boundary, a blocked state, or exit. The machine observes the
 injected read-only clock on its next `run`, delivering due timers before executing
-more instructions. Guest shutdown returns `Exited`. The driver runs machines
-serially and admits machine access, additions, and scheduled wake/crash actions
-through barrier callbacks. Each step respects its requested time limit. Packet
+more instructions. Guest shutdown returns `Exited`. The driver runs ready machines
+on a persistent thread pool, holding the shared clock fixed until every call in
+the batch returns. Each worker creates and retains its own execution context.
+Worker count does not change simulation results. Machine access, additions, and
+scheduled wake/pause/resume/crash actions go through barrier callbacks.
+
+An individually paused machine receives no execution or timer wakeups while
+other machines advance. Resuming calls `run` at the current time with a zero
+execution budget: elapsed time is adopted, overdue timers become deliverable,
+and no instructions from the paused interval are executed. A machine with no
+wakeup remains blocked. Pausing is driver state; `Machine` needs no separate
+pause or resume methods.
+
+Both reference machines implement hard reboot through `Machine::reboot`.
+Driver-mediated reboot and externally requested graceful shutdown are not yet
+implemented; the guest fixtures currently have no shutdown request channel.
+
+Playback controls can change at every barrier. Paused playback holds all work,
+including current-time actions; limited rational rates wait on the host without
+changing execution bounds. A single-quantum admission survives intermediate
+barriers and completes at the next fixed quantum boundary. Status distinguishes
+committed boundary positions from completed quanta. A one-shot pre-crash stop
+retains the exact queued occurrence before its effect; ordinary wakeups and
+crashes of exited machines do not consume the arm. Rearming resumes the held
+occurrence and targets the next effective crash. Permanent stop prevents further
+execution without crashing machines. The driver never sleeps or preempts an
+active `Machine::run`; callers service controls and cancellation between steps.
+
+The quantum is fixed at construction, with boundaries anchored at the initial
+time. Each step respects both its requested time limit and the next quantum
+boundary; intermediate barriers do not shift that boundary. Both examples use
+two workers and a one-millisecond quantum. Packet
 routing is not implemented; console chunks are observed after each round rather
 than timestamped byte by byte.
 GDB is used only by tests to inspect stopped register and RAM state.
@@ -38,6 +68,21 @@ and is not emitted again by restoring its snapshot.
 Code: [TCG machine](../crates/seedbox-machine/src/machine/tcg.rs),
 [driver example](../crates/seedbox-machine/examples/tcg.rs),
 [QEMU patch](../crates/seedbox-machine/qemu/bounded-run.patch).
+
+## Reference PV machine
+
+`cargo run -p seedbox-machine --example pv` drives two native ARM64 Linux guests
+through the same driver, using the same seeded sleep durations as the TCG example.
+Set `SEEDBOX_PV_KERNEL` to the prepared ARM PV kernel (`build/assets/kernel`) and
+`SEEDBOX_PV_WORKER` to the standalone ARM worker executable. Build the worker with
+`cargo build-arm64` inside `nix develop`; on macOS, sign it with
+`bash crates/seedbox-arm64/codesign.sh`. The example generates a minimal initramfs
+whose init program calls Linux `nanosleep` and powers off. It reports each guest's
+shutdown time through the driver's barrier API. It requires ARM64 KVM on Linux or
+HVF on macOS. Each machine owns a separate worker process.
+
+Code: [PV example](../crates/seedbox-machine/examples/pv.rs),
+[shared example RNG](../crates/seedbox-machine/examples/support/mod.rs).
 
 ## Bounded virtual clock reads
 

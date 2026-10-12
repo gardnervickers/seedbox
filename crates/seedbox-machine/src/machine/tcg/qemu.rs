@@ -75,6 +75,7 @@ impl Process {
         qemu: &Path,
         manifest: &Manifest,
         image: Option<&[u8]>,
+        seed: u64,
     ) -> Result<Self, Error> {
         // macOS has short Unix socket paths, even if TMPDIR itself is long.
         let directory = tempfile::Builder::new()
@@ -101,8 +102,6 @@ impl Process {
             "none",
             "-S",           // Start stopped; only seedbox-run may execute code.
             "-no-shutdown", // Retain the stopped guest so it can be inspected/snapshotted.
-            "-seed",
-            "0", // Fixed reference-machine firmware/CPU entropy.
             "-rtc",
             "base=2000-01-01T00:00:00,clock=vm", // No host wall-clock input.
             "-icount",
@@ -110,6 +109,7 @@ impl Process {
             "-global",
             "migration.store-global-state=off", // Lifecycle is saved separately.
         ]);
+        command.arg("-seed").arg(seed.to_string());
         command.arg("-m").arg(format!("{}M", manifest.memory_mib));
         command
             .arg("-serial")
@@ -187,7 +187,7 @@ impl Process {
                         _ => {
                             return Err(Error(format!(
                                 "restore did not reach a stopped state: {status}"
-                            )))
+                            )));
                         }
                     }
                 }
@@ -229,6 +229,11 @@ impl Process {
     }
 
     #[cfg(test)]
+    pub(super) fn stopped_result(&mut self) -> Result<Value, Error> {
+        self.qmp.command("query-seedbox-run", json!({}))
+    }
+
+    #[cfg(test)]
     pub(super) fn registers(&mut self) -> Result<[u64; 33], Error> {
         // GDB core registers are x0..x31 then PC, each eight little-endian bytes.
         let bytes = decode_hex(&self.gdb.request("g")?)?;
@@ -252,9 +257,26 @@ impl Process {
         loop {
             let status = self.qmp.command("query-migrate", json!({}))?;
             match status["status"].as_str() {
-                Some("completed") => return Ok(fs::read(path)?),
+                Some("completed") => {
+                    // Migration's worker can publish completion before its
+                    // main-thread cleanup places the source in POSTMIGRATE.
+                    let state = self.qmp.command("query-status", json!({}))?;
+                    if state["status"] != "postmigrate" {
+                        if started.elapsed() < TIMEOUT {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        return Err(Error(format!("snapshot source did not stop: {state}")));
+                    }
+                    let image = fs::read(path).map_err(Error::from);
+                    // Clear completed-migration bookkeeping while remaining
+                    // stopped, even if reading the snapshot failed. No guest
+                    // instruction or clock advancement is needed for recapture.
+                    self.qmp.command("seedbox-capture-complete", json!({}))?;
+                    return image;
+                }
                 Some("failed" | "cancelled") => {
-                    return Err(Error(format!("snapshot failed: {status}")))
+                    return Err(Error(format!("snapshot failed: {status}")));
                 }
                 _ if started.elapsed() < TIMEOUT => std::thread::sleep(Duration::from_millis(5)),
                 _ => {

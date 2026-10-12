@@ -17,8 +17,14 @@ use seedbox_arm64::{
     disk::DiskFaultModel,
     machine::MachineStop,
 };
+use seedbox_engine_core::rng::Rng;
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Write, path::Path, sync::Arc};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tempfile::TempDir;
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -36,6 +42,7 @@ struct Capture {
     reached: u64,
     state: State,
     checkpoint: Option<Checkpoint>,
+    boot_rng: Rng,
 }
 
 /// A real PV guest implementing the shared machine contract.
@@ -50,6 +57,8 @@ pub struct PVMachine {
     worker: Option<OwnedWorker>,
     directory: TempDir,
     console: Vec<u8>,
+    executable: PathBuf,
+    boot_rng: Rng,
 }
 
 impl PVMachine {
@@ -121,6 +130,8 @@ impl PVMachine {
             worker: Some(worker),
             directory,
             console: Vec::new(),
+            executable: executable.to_owned(),
+            boot_rng: Rng::new(seed, "pv/reboot-entropy"),
         })
     }
 
@@ -133,13 +144,12 @@ impl PVMachine {
     fn execute(&mut self, upto: u64) -> Result<StopReason, String> {
         let now = self.clock.now();
         if now > self.reached {
-            match self.state {
-                State::Blocked(deadline) if deadline.is_none_or(|at| now <= at) => {}
-                _ => return Err("PV clock skipped runnable work or a timer deadline".into()),
-            }
+            // Adopt elapsed simulation time without running the vCPU. The
+            // worker coalesces expired timers at this time, rather than running
+            // guest work or publishing effects at their former deadlines.
             self.worker()?.call(Operation::ResumeAt(now))?;
             self.reached = now;
-            if matches!(self.state, State::Blocked(Some(deadline)) if deadline == now) {
+            if matches!(self.state, State::Blocked(Some(deadline)) if deadline <= now) {
                 self.state = State::Ready;
             }
         }
@@ -228,6 +238,7 @@ impl PVMachine {
                 reached: self.reached,
                 state: self.state,
                 checkpoint,
+                boot_rng: self.boot_rng.clone(),
             },
         )?;
         for blob in [
@@ -270,6 +281,7 @@ impl PVMachine {
         }
         machine.reached = capture.reached;
         machine.state = capture.state;
+        machine.boot_rng = capture.boot_rng;
         Ok(machine)
     }
 }
@@ -331,7 +343,41 @@ impl Machine for PVMachine {
     fn snapshot(&mut self) -> Result<Vec<u8>, std::io::Error> {
         self.capture().map_err(std::io::Error::other)
     }
+
+    /// This diskless reset discards RAM/devices. Boot entropy is a fresh draw
+    /// from the machine's deterministic stream, which snapshots preserve.
+    fn reboot(&mut self, at: Timestamp) -> Result<(), std::io::Error> {
+        let at = at.as_nanos();
+        if self.state == State::Invalid {
+            return Err(std::io::Error::other("cannot reboot an invalid PV machine"));
+        }
+        if at != self.clock.now() || at < self.reached || at == u64::MAX {
+            return Err(std::io::Error::other(
+                "PV reboot requires the current finite simulation barrier",
+            ));
+        }
+        self.state = State::Invalid;
+        if let Some(mut worker) = self.worker.take() {
+            worker.terminate().map_err(std::io::Error::other)?;
+        }
+        let seed = self.boot_rng.next();
+        let mut replacement = Self::construct(
+            &self.executable,
+            self.kernel.clone(),
+            self.initrd.clone(),
+            seed,
+            self.clock.clone(),
+        )
+        .map_err(std::io::Error::other)?;
+        replacement.boot_rng = self.boot_rng.clone();
+        replacement.console = std::mem::take(&mut self.console);
+        *self = replacement;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lifecycle_tests;

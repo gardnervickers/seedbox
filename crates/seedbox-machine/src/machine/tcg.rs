@@ -7,10 +7,10 @@
 //! There are no per-instruction host round trips or guest-specific yield calls.
 //! The clock must stay fixed during each call. Guest time follows the machine's
 //! instruction progress within the budget, without changing the shared clock.
-//! On the next call, a blocked machine adopts any newer clock time and delivers
-//! due timers before executing. The driver must not skip a reported deadline or
-//! advance the clock past runnable work. Shared time may lag local progress while
-//! the driver brings other machines to the same barrier.
+//! On the next call, the machine adopts any newer clock time and delivers due
+//! timers before executing. No instructions execute during the elapsed gap;
+//! an overdue timer becomes deliverable at the adopted time. Shared time may
+//! lag local progress while the driver brings other machines to the same barrier.
 //!
 //! Both flat programs and Linux boot inputs are supported. Snapshots own the
 //! boot inputs, RAM, CPU/device state, virtual timers, and lifecycle position.
@@ -20,9 +20,10 @@
 
 use super::{ExitReason, Machine, StopReason, Timestamp};
 use crate::clock::Clock;
+use seedbox_engine_core::rng::Rng;
 use serde_json::Value;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod qemu;
@@ -56,6 +57,8 @@ pub struct Snapshot {
     reached: Timestamp,
     state: State,
     image: Option<Vec<u8>>,
+    boot_seed: u64,
+    boot_rng: Rng,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +76,10 @@ pub struct TcgMachine {
     reached: Timestamp,
     state: State,
     process: Option<Process>,
+    executable: PathBuf,
+    boot_seed: u64,
+    boot_rng: Rng,
+    console: Vec<u8>,
 }
 
 /// Setup, protocol, or execution failure.
@@ -119,7 +126,7 @@ impl TcgMachine {
                 ));
             }
         }
-        let mut process = Process::start(qemu, &manifest, None)?;
+        let mut process = Process::start(qemu, &manifest, None, 0)?;
         process.advance(reached)?;
         Ok(Self {
             clock,
@@ -127,6 +134,10 @@ impl TcgMachine {
             reached,
             state: State::Ready,
             process: Some(process),
+            executable: qemu.to_owned(),
+            boot_seed: 0,
+            boot_rng: Rng::new(0, "tcg/reboot-entropy"),
+            console: Vec::new(),
         })
     }
 
@@ -141,7 +152,7 @@ impl TcgMachine {
         let process = snapshot
             .image
             .as_deref()
-            .map(|image| Process::start(qemu, &snapshot.manifest, Some(image)))
+            .map(|image| Process::start(qemu, &snapshot.manifest, Some(image), snapshot.boot_seed))
             .transpose()?;
         Ok(Self {
             clock,
@@ -149,17 +160,21 @@ impl TcgMachine {
             reached: snapshot.reached,
             state: snapshot.state,
             process,
+            executable: qemu.to_owned(),
+            boot_seed: snapshot.boot_seed,
+            boot_rng: snapshot.boot_rng.clone(),
+            console: Vec::new(),
         })
     }
 
     /// Read the serial output produced by this instance since creation/restore.
     /// Already emitted output is external observation, not replayed by restore.
     pub fn console(&self) -> Result<Vec<u8>, Error> {
-        let process = self
-            .process
-            .as_ref()
-            .ok_or_else(|| Error("machine has no execution process".into()))?;
-        process.console()
+        let mut console = self.console.clone();
+        if let Some(process) = &self.process {
+            console.extend(process.console()?);
+        }
+        Ok(console)
     }
 
     fn process(&mut self) -> Result<&mut Process, Error> {
@@ -223,21 +238,17 @@ impl Machine for TcgMachine {
             ));
         }
         if now > self.reached {
-            match self.state {
-                State::Blocked { deadline } if !deadline.is_some_and(|at| now > at) => {}
-                _ => {
-                    return Err(Error(
-                        "clock skipped runnable work or a timer deadline".into(),
-                    ))
-                }
-            }
             if let Err(error) = self.process()?.advance(now) {
                 self.state = State::Invalid;
                 drop(self.process.take());
                 return Err(error);
             }
             self.reached = now;
-            self.state = State::Ready;
+            // Adoption itself executes no instructions. Keep a blocked machine
+            // blocked unless its reported timer has become due at this time.
+            if matches!(self.state, State::Blocked { deadline: Some(at) } if at <= now) {
+                self.state = State::Ready;
+            }
         }
         if self.reached < upto && self.state == State::Ready {
             if let Err(error) = self.execute(upto) {
@@ -272,9 +283,37 @@ impl Machine for TcgMachine {
         }
         self.state = State::Invalid;
         if let Some(mut process) = self.process.take() {
+            self.console.extend(process.console()?);
             process.terminate()?;
         }
         self.state = State::Exited(ExitReason::Crashed);
+        Ok(())
+    }
+
+    /// This diskless reset destroys RAM/devices. Each reboot draws a fresh
+    /// deterministic QEMU entropy seed from a snapshot-owned boot stream.
+    fn reboot(&mut self, at: Timestamp) -> Result<(), Error> {
+        if self.state == State::Invalid {
+            return Err(Error("cannot reboot an invalid machine".into()));
+        }
+        if at.as_nanos() != self.clock.now() || at < self.reached || at.as_nanos() > i64::MAX as u64
+        {
+            return Err(Error(
+                "reboot requires the current simulation barrier within QEMU's time range".into(),
+            ));
+        }
+        self.state = State::Invalid;
+        if let Some(mut process) = self.process.take() {
+            self.console.extend(process.console()?);
+            process.terminate()?;
+        }
+        let boot_seed = self.boot_rng.next();
+        let mut process = Process::start(&self.executable, &self.manifest, None, boot_seed)?;
+        process.advance(at)?;
+        self.process = Some(process);
+        self.boot_seed = boot_seed;
+        self.reached = at;
+        self.state = State::Ready;
         Ok(())
     }
 
@@ -288,9 +327,17 @@ impl Machine for TcgMachine {
             reached: self.reached,
             state: self.state,
             image,
+            boot_seed: self.boot_seed,
+            boot_rng: self.boot_rng.clone(),
         })
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lifecycle_tests;
+
+#[cfg(test)]
+mod elapsed_tests;

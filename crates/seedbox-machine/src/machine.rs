@@ -40,9 +40,24 @@ pub trait Machine {
     /// # Time and execution boundaries
     ///
     /// All timestamps use simulation time, before guest clock offset or skew.
-    /// The caller must provide `upto` at or after the machine's current execution
-    /// position. Execution must not expose effects beyond `upto`. Returned
-    /// `reached` timestamps never move backwards or exceed `upto`.
+    /// Execution starts at the later of the machine's current execution position
+    /// and the current simulation time supplied by its environment. The caller
+    /// must provide `upto` at or after both. Execution must not expose effects
+    /// beyond `upto`. Returned `reached` timestamps never move backwards or
+    /// exceed `upto`.
+    ///
+    /// The caller may withhold execution while simulation time advances. On the
+    /// next call, the machine adopts the later time without executing CPU work
+    /// for the elapsed interval. Timers that became due during that interval
+    /// become eligible for delivery at the adopted time, never retroactively at
+    /// their original deadlines. Other newly delivered effects also belong to
+    /// the adopted time or later. Adopting time does not advance the shared clock.
+    ///
+    /// With `upto` equal to the starting time, the machine may adopt time and
+    /// make due wakeups visible, but must not execute program instructions.
+    /// A runnable machine remains eligible for subsequent calls; no separate
+    /// pause or resume operation is required. An exited machine still requires
+    /// an explicit reboot before execution can continue.
     ///
     /// A successful return describes an accepted simulation boundary, with no
     /// speculative state or effects exposed to the caller.
@@ -51,7 +66,7 @@ pub trait Machine {
     /// # Handling the result
     ///
     /// - [`StopReason::BoundaryReached`]: the machine reached `upto` and is
-    ///   paused. The caller should record that position, process events due at
+    ///   stopped. The caller should record that position, process events due at
     ///   that boundary in simulation order, and schedule another call when the
     ///   machine is allowed to execute further.
     /// - [`StopReason::Blocked`]: all work in the machine is blocked at `reached`.
@@ -101,7 +116,7 @@ pub trait Machine {
     /// undone, and existing snapshots remain unchanged.
     ///
     /// The caller must remove the machine from runnable work. Further execution
-    /// requires an explicit restart; calling `run` is not a restart. The caller
+    /// requires an explicit [`Machine::reboot`]; calling `run` is not a reboot. The caller
     /// records the crash at the barrier where it applied this operation, without
     /// calling `run` to obtain an exit result.
     ///
@@ -110,6 +125,29 @@ pub trait Machine {
     /// `Err` does not establish that the crash completed or that the machine is
     /// resumable. The caller must stop scheduling it and propagate the failure.
     fn crash(&mut self) -> Result<(), Self::Error>;
+
+    /// Reset the machine to a fresh, runnable boot at `at`.
+    ///
+    /// The caller must hold a valid machine at a simulation barrier and prevent
+    /// concurrent external inputs. `at` is that barrier's simulation time and
+    /// must not precede the machine's accepted execution position. A machine
+    /// may reboot while live, after natural exit, or after a crash; an invalid
+    /// machine must reject reboot.
+    ///
+    /// Reboot is immediate, without graceful shutdown. Resetting a live machine
+    /// discards volatile state with the same disk effects as [`Machine::crash`].
+    /// Each implementation documents persistent state and boot entropy. Reboot
+    /// must not rewind a machine-owned random stream. Pending operations and
+    /// timers from the old boot are discarded; existing snapshots and previously
+    /// committed external effects remain unchanged.
+    ///
+    /// This call executes no guest work and advances no simulation time. On
+    /// success, the caller records a runnable machine at `at`; subsequent work
+    /// executes only through [`Machine::run`]. Reboot is not snapshot restoration.
+    /// Repeated calls perform separate resets. An error does not guarantee a
+    /// resumable machine; the caller must stop scheduling it and propagate the
+    /// failure.
+    fn reboot(&mut self, at: Timestamp) -> Result<(), Self::Error>;
 
     /// Capture the stopped machine without advancing execution.
     ///
@@ -160,7 +198,7 @@ pub trait Machine {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    /// The machine was able to run successfully to the requested timestamp and is now paused.
+    /// The machine reached the requested timestamp and is stopped.
     BoundaryReached,
     /// All work is blocked until an external stimulus or a timer wakeup.
     Blocked {
@@ -172,7 +210,7 @@ pub enum StopReason {
         /// stimulus can wake the machine.
         deadline: Option<Timestamp>,
     },
-    /// The machine has exited. Calling `run` again requires an explicit restart.
+    /// The machine has exited. Calling `run` again requires an explicit reboot.
     Exited {
         /// The machine has exited at this timestamp.
         reached: Timestamp,

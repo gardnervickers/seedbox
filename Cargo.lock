@@ -2050,6 +2050,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "seedbox-arm64",
+ "seedbox-engine-core",
  "serde",
  "serde_json",
  "tempfile",

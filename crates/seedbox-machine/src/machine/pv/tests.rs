@@ -46,19 +46,25 @@ fn invalid_inputs_fail_before_spawning_worker() {
 fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let executable = Path::new(&executable);
-    let mut driver = Driver::new(at(0), (), |clock| {
-        (0..2)
-            .map(|_| {
-                PVMachine::new(
-                    executable,
-                    timed_guest(),
-                    b"initrd".to_vec(),
-                    7,
-                    clock.clone(),
-                )
-            })
-            .collect()
-    })
+    let mut driver = Driver::new(
+        at(0),
+        std::time::Duration::from_millis(1),
+        2,
+        || Ok(()),
+        |clock| {
+            (0..2)
+                .map(|_| {
+                    PVMachine::new(
+                        executable,
+                        timed_guest(),
+                        b"initrd".to_vec(),
+                        7,
+                        clock.clone(),
+                    )
+                })
+                .collect()
+        },
+    )
     .unwrap();
     assert_eq!(
         driver.step(at(1)).unwrap(),
@@ -95,10 +101,16 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
     );
     drop(driver);
     // The checkpoint survives the workers and temporary boot/checkpoint files.
-    let mut restored = Driver::new(at(0), (), |clock| {
-        Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
-            .map_err(std::io::Error::other)?])
-    })
+    let mut restored = Driver::new(
+        at(0),
+        std::time::Duration::from_millis(1),
+        2,
+        || Ok(()),
+        |clock| {
+            Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
+                .map_err(std::io::Error::other)?])
+        },
+    )
     .unwrap();
     assert_eq!(
         restored.step(at(1)).unwrap(),
@@ -112,10 +124,16 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
         restored.step(at(10)).unwrap(),
         StepOutcome::Finished { at: at(5) }
     );
-    let mut second = Driver::new(at(0), (), |clock| {
-        Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
-            .map_err(std::io::Error::other)?])
-    })
+    let mut second = Driver::new(
+        at(0),
+        std::time::Duration::from_millis(1),
+        2,
+        || Ok(()),
+        |clock| {
+            Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
+                .map_err(std::io::Error::other)?])
+        },
+    )
     .unwrap();
     assert_eq!(
         second.step(at(1)).unwrap(),
@@ -269,15 +287,21 @@ fn native_linux_boot_and_program_poweroff_use_the_driver() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let kernel_path = std::env::var_os("SEEDBOX_PV_KERNEL").expect("set SEEDBOX_PV_KERNEL");
     let kernel = fs::read(kernel_path).unwrap();
-    let mut driver = Driver::new(at(0), (), |clock| {
-        Ok(vec![PVMachine::new(
-            Path::new(&executable),
-            kernel,
-            linux_initrd(),
-            7,
-            clock,
-        )?])
-    })
+    let mut driver = Driver::new(
+        at(0),
+        std::time::Duration::from_millis(1),
+        2,
+        || Ok(()),
+        |clock| {
+            Ok(vec![PVMachine::new(
+                Path::new(&executable),
+                kernel,
+                linux_initrd(),
+                7,
+                clock,
+            )?])
+        },
+    )
     .unwrap();
     for tick in 1..=10_000 {
         match driver.step(at(tick * 1_000_000)).unwrap() {
@@ -313,15 +337,21 @@ fn native_horizon_is_accepted_before_following_poweroff() {
         0xf2b0_8000,
         0xd400_0002, // PSCI power off.
     ]);
-    let mut driver = Driver::new(at(0), (), |clock| {
-        Ok(vec![PVMachine::new(
-            executable,
-            code,
-            b"initrd".to_vec(),
-            1,
-            clock,
-        )?])
-    })
+    let mut driver = Driver::new(
+        at(0),
+        std::time::Duration::from_millis(1),
+        2,
+        || Ok(()),
+        |clock| {
+            Ok(vec![PVMachine::new(
+                executable,
+                code,
+                b"initrd".to_vec(),
+                1,
+                clock,
+            )?])
+        },
+    )
     .unwrap();
     assert_eq!(
         driver.step(at(40)).unwrap(),
@@ -339,13 +369,173 @@ fn native_horizon_is_accepted_before_following_poweroff() {
         StepOutcome::Finished { at: at(40) }
     );
     drop(driver);
-    let mut branch = Driver::new(at(40), (), |clock| {
-        Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
-            .map_err(std::io::Error::other)?])
-    })
+    let mut branch = Driver::new(
+        at(40),
+        std::time::Duration::from_millis(1),
+        2,
+        || Ok(()),
+        |clock| {
+            Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
+                .map_err(std::io::Error::other)?])
+        },
+    )
     .unwrap();
     assert_eq!(
         branch.step(at(50)).unwrap(),
         StepOutcome::Finished { at: at(40) }
+    );
+}
+
+#[test]
+#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+fn native_runnable_gap_adopts_time_without_executing_guest_work() {
+    let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
+    let executable = Path::new(&executable);
+    let clock = Arc::new(crate::clock::SimulationClock::new(0));
+    let code = kernel(&[
+        0xd2a1_4021, // MOV X1, #0x0a010000 (PV event page).
+        0xd280_0060, // MOV X0, #3 (ABI).
+        0xf900_1020, // STR X0, [X1,#32] (ready).
+        0xf900_0c20, // STR X0, [X1,#24] (yield to published bound).
+        0xd280_0100, // MOV X0, #8.
+        0xf2b0_8000, // MOVK X0, #0x8400, LSL #16 (PSCI SYSTEM_OFF).
+        0xd400_0002, // HVC #0.
+    ]);
+    let mut machine =
+        PVMachine::new(executable, code, b"initrd".to_vec(), 7, clock.clone()).unwrap();
+    assert_eq!(
+        machine.run(&mut (), at(10)).unwrap(),
+        StopReason::BoundaryReached
+    );
+    let snapshot = machine.snapshot().unwrap();
+    clock.set(30);
+    assert!(machine.run(&mut (), at(29)).is_err());
+    assert_eq!(machine.reached, 10); // Invalid budget did not adopt time or execute.
+    assert_eq!(
+        machine.run(&mut (), at(30)).unwrap(),
+        StopReason::BoundaryReached
+    );
+    assert_eq!(machine.reached, 30);
+    assert_eq!(clock.now(), 30);
+    // The instruction following the old boundary powers off. It must still be
+    // pending after time adoption, and executes at 30 rather than at 10.
+    assert_eq!(
+        machine.run(&mut (), at(31)).unwrap(),
+        StopReason::Exited {
+            reached: at(30),
+            reason: ExitReason::Shutdown,
+        }
+    );
+    assert!(machine.run(&mut (), at(31)).is_err());
+    let mut branch = PVMachine::from_snapshot(executable, &snapshot, clock).unwrap();
+    assert_eq!(
+        branch.run(&mut (), at(30)).unwrap(),
+        StopReason::BoundaryReached
+    );
+    assert_eq!(
+        branch.run(&mut (), at(31)).unwrap(),
+        StopReason::Exited {
+            reached: at(30),
+            reason: ExitReason::Shutdown,
+        }
+    );
+}
+
+#[test]
+#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+fn native_overdue_timer_is_delivered_at_adopted_time_after_a_gap() {
+    let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
+    let executable = Path::new(&executable);
+    let clock = Arc::new(crate::clock::SimulationClock::new(0));
+    let mut machine = PVMachine::new(
+        executable,
+        timed_guest(),
+        b"initrd".to_vec(),
+        7,
+        clock.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        machine.run(&mut (), at(1)).unwrap(),
+        StopReason::Blocked {
+            reached: at(0),
+            deadline: Some(at(5)),
+        }
+    );
+    let snapshot = machine.snapshot().unwrap();
+    // Adoption before the deadline must preserve the original timer.
+    clock.set(3);
+    assert_eq!(
+        machine.run(&mut (), at(3)).unwrap(),
+        StopReason::Blocked {
+            reached: at(3),
+            deadline: Some(at(5)),
+        }
+    );
+    clock.set(30);
+    assert_eq!(
+        machine.run(&mut (), at(30)).unwrap(),
+        StopReason::BoundaryReached
+    );
+    assert_eq!(
+        machine.run(&mut (), at(31)).unwrap(),
+        StopReason::Exited {
+            reached: at(30),
+            reason: ExitReason::Shutdown,
+        }
+    );
+    let mut branch = PVMachine::from_snapshot(executable, &snapshot, clock).unwrap();
+    assert_eq!(
+        branch.run(&mut (), at(31)).unwrap(),
+        StopReason::Exited {
+            reached: at(30),
+            reason: ExitReason::Shutdown,
+        }
+    );
+}
+
+#[test]
+#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+fn native_time_adoption_does_not_wake_indefinitely_blocked_work() {
+    let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
+    let clock = Arc::new(crate::clock::SimulationClock::new(0));
+    let code = kernel(&[
+        0xd2a1_4021, // MOV X1, #0x0a010000 (PV event page).
+        0xd280_0060, // MOV X0, #3 (ABI).
+        0xf900_1020, // STR X0, [X1,#32] (ready).
+        0xf900_0820, // STR X0, [X1,#16] (idle, with no timer armed).
+        0xd280_0100, // MOV X0, #8.
+        0xf2b0_8000, // MOVK X0, #0x8400, LSL #16 (PSCI SYSTEM_OFF).
+        0xd400_0002, // HVC #0: must remain unexecuted without a wakeup.
+    ]);
+    let mut machine = PVMachine::new(
+        Path::new(&executable),
+        code,
+        b"initrd".to_vec(),
+        7,
+        clock.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        machine.run(&mut (), at(1)).unwrap(),
+        StopReason::Blocked {
+            reached: at(0),
+            deadline: None,
+        }
+    );
+    clock.set(30);
+    assert_eq!(
+        machine.run(&mut (), at(30)).unwrap(),
+        StopReason::Blocked {
+            reached: at(30),
+            deadline: None,
+        }
+    );
+    assert_eq!(
+        machine.run(&mut (), at(100)).unwrap(),
+        StopReason::Blocked {
+            reached: at(30),
+            deadline: None,
+        }
     );
 }
