@@ -1,0 +1,194 @@
+diff --git a/core/os_shared.h b/core/os_shared.h
+index b09ab93..40026b9 100644
+--- a/core/os_shared.h
++++ b/core/os_shared.h
+@@ -201,6 +201,10 @@ void
+ os_thread_sleep(uint64 milliseconds);
+ bool
+ os_thread_suspend(thread_record_t *tr);
++#ifdef UNIX
++bool
++os_thread_suspend_unless_vfork(thread_record_t *tr, bool *skipped);
++#endif
+ bool
+ os_thread_resume(thread_record_t *tr);
+ bool
+diff --git a/core/synch.c b/core/synch.c
+index bcb7336..2d5c58f 100644
+--- a/core/synch.c
++++ b/core/synch.c
+@@ -1016,7 +1016,30 @@ synch_with_thread(thread_id_t id, bool block, bool hold_initexit_lock,
+                 adjust_wait_at_safe_spot(trec->dcontext, 1);
+                 first_loop = false;
+             }
++#ifdef UNIX
++            /* A vfork parent cannot be suspended until its child execs or exits,
++             * which may wait on this very synch: count it as synched unless it
++             * is to be cleaned up or terminated.
++             */
++            bool vfork_skipped = false;
++            if (!THREAD_SYNCH_IS_CLEANED(desired_state) &&
++                !THREAD_SYNCH_IS_TERMINATED(desired_state)) {
++                bool suspended = os_thread_suspend_unless_vfork(trec, &vfork_skipped);
++                if (suspended && vfork_skipped) {
++                    LOG(THREAD, LOG_SYNCH, 2,
++                        "Thread " TIDFMT " waits in vfork: counted as synched\n", id);
++                    res = THREAD_SYNCH_RESULT_SUCCESS;
++                    actually_suspended = false;
++                    break;
++                }
++                if (!suspended)
++                    goto synch_suspend_failed;
++            } else
++#endif
+             if (!os_thread_suspend(trec)) {
++#ifdef UNIX
++            synch_suspend_failed:
++#endif
+                 /* XXX : eventually should be a real assert once we figure out
+                  * how to handle threads with low privilege handles */
+                 /* For dr_api_exit, we may have missed a thread exit. */
+diff --git a/core/unix/os.c b/core/unix/os.c
+index d1dd466..6d9d935 100644
+--- a/core/unix/os.c
++++ b/core/unix/os.c
+@@ -3944,8 +3944,30 @@ send_suspend_signal(thread_record_t *tr, pid_t pid, thread_id_t tid)
+ #endif
+ }
+ 
++static bool
++os_thread_suspend_internal(thread_record_t *tr, bool *vfork_skipped);
++
+ bool
+ os_thread_suspend(thread_record_t *tr)
++{
++    return os_thread_suspend_internal(tr, NULL);
++}
++
++/* Like os_thread_suspend(), but a thread waiting in a vfork-style clone is left
++ * running and reported through *skipped: it cannot take the suspend signal until
++ * its child execs or exits, and it runs no app code before os_vfork_post() waits
++ * for the synch that skipped it. The check and the suspend are atomic under
++ * suspend_lock, which os_vfork_pre() also takes to set vfork_waiting.
++ */
++bool
++os_thread_suspend_unless_vfork(thread_record_t *tr, bool *skipped)
++{
++    *skipped = false;
++    return os_thread_suspend_internal(tr, skipped);
++}
++
++static bool
++os_thread_suspend_internal(thread_record_t *tr, bool *vfork_skipped)
+ {
+     os_thread_data_t *ostd = (os_thread_data_t *)tr->dcontext->os_field;
+     ASSERT(ostd != NULL);
+@@ -3953,6 +3975,12 @@ os_thread_suspend(thread_record_t *tr)
+      * prevents prematurely sending a re-suspend signal.
+      */
+     d_r_mutex_lock(&ostd->suspend_lock);
++    if (vfork_skipped != NULL && ostd->vfork_waiting) {
++        ostd->vfork_skips++;
++        *vfork_skipped = true;
++        d_r_mutex_unlock(&ostd->suspend_lock);
++        return true;
++    }
+     ostd->suspend_count++;
+     ASSERT(ostd->suspend_count > 0);
+     /* If already suspended, do not send another signal.  However, we do
+@@ -4010,6 +4038,12 @@ os_thread_resume(thread_record_t *tr)
+      * atomic_dec_becomes_zero on suspend_count.
+      */
+     d_r_mutex_lock(&ostd->suspend_lock);
++    if (ostd->suspend_count == 0 && ostd->vfork_skips > 0) {
++        /* os_thread_suspend_unless_vfork() left this thread running. */
++        ostd->vfork_skips--;
++        d_r_mutex_unlock(&ostd->suspend_lock);
++        return true;
++    }
+     ASSERT(ostd->suspend_count > 0);
+     /* PR 479750: if do get here and target is not suspended then abort
+      * to avoid possible deadlocks
+@@ -7227,6 +7261,46 @@ os_switch_seg_to_context(dcontext_t *dcontext, reg_id_t seg, bool to_app)
+ }
+ 
+ #ifdef LINUX
++/* A thread about to wait in a vfork-style clone. Synch-all users may count it
++ * as synched while it waits (os_thread_suspend_unless_vfork()); "no xfer" keeps
++ * flushes from redirecting it. A suspend already pending is taken first: this
++ * thread is in DR code and handles the signal before entering the kernel.
++ */
++static void
++os_vfork_pre(dcontext_t *dcontext)
++{
++    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
++    set_synch_state(dcontext, THREAD_SYNCH_NO_LOCKS_NO_XFER);
++    while (true) {
++        d_r_mutex_lock(&ostd->suspend_lock);
++        if (ostd->suspend_count == 0) {
++            ostd->vfork_waiting = true;
++            d_r_mutex_unlock(&ostd->suspend_lock);
++            return;
++        }
++        d_r_mutex_unlock(&ostd->suspend_lock);
++        os_thread_yield();
++    }
++}
++
++/* The vfork-style clone returned in the parent. A synch-all that counted this
++ * thread as synched may still be running: wait for it before going on.
++ */
++static void
++os_vfork_post(dcontext_t *dcontext)
++{
++    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
++    d_r_mutex_lock(&ostd->suspend_lock);
++    bool waited = ostd->vfork_waiting;
++    ostd->vfork_waiting = false;
++    d_r_mutex_unlock(&ostd->suspend_lock);
++    if (!waited)
++        return;
++    d_r_mutex_lock(&all_threads_synch_lock);
++    d_r_mutex_unlock(&all_threads_synch_lock);
++    set_synch_state(dcontext, THREAD_SYNCH_NONE);
++}
++
+ static bool
+ handle_clone_pre(dcontext_t *dcontext)
+ {
+@@ -7372,6 +7446,8 @@ handle_clone_pre(dcontext_t *dcontext)
+         }
+         os_clone_pre(dcontext);
+         os_new_thread_pre();
++        if (TESTANY(CLONE_VFORK, flags))
++            os_vfork_pre(dcontext);
+     } else {
+         /* This is really a fork. */
+         if (dcontext->sys_num == SYS_clone3) {
+@@ -9426,6 +9502,7 @@ post_system_call(dcontext_t *dcontext)
+         /* in /usr/src/linux/arch/i386/kernel/process.c */
+         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: clone returned " PFX "\n",
+             MCXT_SYSCALL_RES(mc));
++        os_vfork_post(dcontext);
+         /* TODO i#5221: Handle clone3 returning errors other than ENOSYS. */
+         /* We switch the lib tls segment back to dr's privlib segment.
+          * Please refer to comment on os_switch_lib_tls.
+diff --git a/core/unix/os_private.h b/core/unix/os_private.h
+index b09211d..bb2c384 100644
+--- a/core/unix/os_private.h
++++ b/core/unix/os_private.h
+@@ -157,6 +157,14 @@ typedef struct _os_thread_data_t {
+      */
+     mutex_t suspend_lock;
+     int suspend_count;
++    /* Set, under suspend_lock, while this thread waits in a vfork-style clone
++     * (CLONE_VFORK). The kernel holds it until the child execs or exits and it
++     * cannot take a suspend signal there, so synch-all counts it as synched
++     * without suspending it; vfork_skips counts those synchs for
++     * os_thread_resume(). See os_vfork_pre() and os_vfork_post().
++     */
++    bool vfork_waiting;
++    int vfork_skips;
+ 
+     /* Thread synchronization data held across a fork. */
+     thread_record_t **fork_threads;

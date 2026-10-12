@@ -23,6 +23,18 @@ pkgs.stdenv.mkDerivation {
     ../guest/progress/dynamorio-cleancall-simd.patch
     # The translator marks its own syscalls so the guest charges them less.
     ../guest/progress/dynamorio-translator-syscalls.patch
+    # A vfork child's handler copy must not make later signals to
+    # initializing threads fatal ("multiple native handlers").
+    ../guest/progress/dynamorio-vfork-handlers.patch
+    # A thread forking during another thread's stop-all-threads flush must be
+    # resumed in place; redirecting it skipped the fork syscall.
+    ../guest/progress/dynamorio-fork-synch.patch
+    # A vfork parent cannot take the suspend signal until its child execs, so
+    # stop-all-threads synchronization counts it as stopped instead of waiting.
+    ../guest/progress/dynamorio-vfork-synch.patch
+    # Signals that arrive while a thread is suspended must still reach it when
+    # it resumes into a blocking syscall.
+    ../guest/progress/dynamorio-suspend-pending.patch
   ] else [
     # The same translator syscall mark, in rbx.
     ../guest/progress/dynamorio-x86-translator-syscalls.patch

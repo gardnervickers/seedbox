@@ -1,0 +1,81 @@
+diff --git a/core/unix/signal.c b/core/unix/signal.c
+index 135b89d..3f9c6ed 100644
+--- a/core/unix/signal.c
++++ b/core/unix/signal.c
+@@ -1404,6 +1404,56 @@ free_pending_signal(thread_sig_info_t *info, int sig)
+     info->num_pending--;
+ }
+ 
++static void
++count_pending_signals(thread_sig_info_t *info, byte counts[SIGARRAY_SIZE])
++{
++    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
++        uint n = 0;
++        for (sigpending_t *p = info->sigpending[sig]; p != NULL; p = p->next)
++            n++;
++        counts[sig] = (byte)(n > 255 ? 255 : n);
++    }
++}
++
++/* A signal that arrives while this thread waits in handle_suspend_signal()
++ * interrupts DR, so record_pending_signal() queues it for when the thread next
++ * enters DR. The suspend handler then returns straight to the interrupted
++ * context; if that is a blocking syscall (a futex wait, for instance) the
++ * thread may never enter DR again and the signal is never delivered. Hand
++ * the signals queued during the wait back to the kernel, addressed to this
++ * thread with their original siginfo: they arrive at the interrupted context
++ * once the suspend handler returns and are delivered from there as usual.
++ * Signals the app blocks stay queued here, as DR emulates the app's mask.
++ */
++static void
++requeue_signals_pending_since(dcontext_t *dcontext, thread_sig_info_t *info,
++                              const byte before[SIGARRAY_SIZE])
++{
++    bool requeued = false;
++    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
++        uint n = 0;
++        for (sigpending_t *p = info->sigpending[sig]; p != NULL; p = p->next)
++            n++;
++        if (n <= before[sig] || kernel_sigismember(&info->app_sigblocked, sig))
++            continue;
++        /* New entries are pushed at the head of the list. */
++        for (uint k = n - before[sig]; k > 0; k--) {
++            kernel_siginfo_t siginfo = info->sigpending[sig]->rt_frame.info;
++            free_pending_signal(info, sig);
++            LOG(THREAD, LOG_ASYNCH, 2,
++                "handle_suspend_signal: re-sending signal %d received while suspended\n",
++                sig);
++            dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(),
++                              get_sys_thread_id(), sig, &siginfo);
++            requeued = true;
++        }
++    }
++    if (requeued) {
++        dcontext->signals_pending = 0;
++        check_signals_pending(dcontext, info);
++    }
++}
++
+ /* This is split from os_fork_init() so the new logfiles are available
+  * (xref i#189/PR 452168).  It had to be after dynamo_other_thread_exit()
+  * called in dynamorio_fork_init() after os_fork_init() else we clean
+@@ -8826,6 +8876,10 @@ handle_suspend_signal(dcontext_t *dcontext, kernel_siginfo_t *siginfo,
+     ksynch_set_value(&ostd->suspended, 1);
+     ksynch_wake_all(&ostd->suspended);
+ 
++    thread_sig_info_t *sig_info = (thread_sig_info_t *)dcontext->signal_field;
++    byte pending_before[SIGARRAY_SIZE];
++    count_pending_signals(sig_info, pending_before);
++
+     bool unblocked_sigs = false;
+     /*
+      * Avoid various race conditions seen at detach time if a signal is
+@@ -8878,6 +8932,8 @@ handle_suspend_signal(dcontext_t *dcontext, kernel_siginfo_t *siginfo,
+ 
+         sigprocmask_syscall(SIG_BLOCK, &mask, NULL, sizeof(mask));
+     }
++    if (unblocked_sigs)
++        requeue_signals_pending_since(dcontext, sig_info, pending_before);
+     ostd->suspended_sigcxt = NULL;
+ 
+     /* Notify os_thread_resume that it can return now, which (assuming
