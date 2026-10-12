@@ -176,7 +176,7 @@ static void *publisher(void *unused)
         if (syscall(SYS_rt_tgsigqueueinfo, getpid(), consumer, SIGUSR1, &si)) fail("nested send");
         wait_equal(&nested_seen, i);
         wait_for_kernel_read(); /* The unchanged nested return really restarted read. */
-        code[0] = 0xc85f7d49; /* An entry restart would alter the expected path. */
+        code[0] = 0x91000529; /* add x9,x9,#1: a wrong entry restart is observable. */
         code[2] = 0xd503201f; /* saved middle-body fault PC becomes NOP */
         code[3] = 0xd2800000 | ((0x600U + i) << 5);
         code[EDIT_WORD] = 0xd503201f;
