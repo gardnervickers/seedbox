@@ -3,6 +3,9 @@
 #[cfg(unix)]
 pub mod tcg;
 
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+pub mod pv;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(u64);
 

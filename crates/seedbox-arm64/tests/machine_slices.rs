@@ -248,3 +248,43 @@ fn zero_boundary_and_poweroff_never_reenter_guest() {
     );
     OBSERVED.with(|o| assert_eq!(o.borrow().entries.len(), 2));
 }
+
+#[test]
+fn opt_in_idle_stop_preserves_deadline_until_owner_resumes() {
+    let mut m = machine(&[
+        Action::Ready(10),
+        Action::Arm(100),
+        Action::Idle,
+        Action::Off,
+    ]);
+    assert_eq!(
+        m.run_until_idle(40).unwrap(),
+        MachineStop::Blocked {
+            time_ns: 10,
+            deadline: Some(100)
+        }
+    );
+    assert_eq!(m.time_ns(), 10);
+    assert_eq!(m.stopped_observation().next_deadline, 100);
+    OBSERVED.with(|o| {
+        let o = o.borrow();
+        assert_eq!(o.completions, 3);
+        assert_eq!(o.timers, 0);
+    });
+    m.resume_at(100).unwrap();
+    assert_eq!(m.run_until_idle(120).unwrap(), MachineStop::PoweredOff);
+    assert_eq!(m.time_ns(), 100);
+}
+
+#[test]
+fn opt_in_idle_without_timer_is_indefinitely_blocked() {
+    let mut m = machine(&[Action::Ready(10), Action::Idle]);
+    assert_eq!(
+        m.run_until_idle(40).unwrap(),
+        MachineStop::Blocked {
+            time_ns: 10,
+            deadline: None
+        }
+    );
+    assert_eq!(m.time_ns(), 10);
+}

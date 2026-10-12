@@ -20,11 +20,25 @@ const SYSCALL_NS: u64 = 1_000;
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MachineStop {
-    Horizon { time_ns: u64 },
+    Horizon {
+        time_ns: u64,
+    },
     PoweredOff,
-    Device { time_ns: u64 },
-    Console { time_ns: u64 },
-    ApplicationExit { code: u8, setup_error: bool },
+    /// An opt-in idle stop; no idle time has been consumed.
+    Blocked {
+        time_ns: u64,
+        deadline: Option<u64>,
+    },
+    Device {
+        time_ns: u64,
+    },
+    Console {
+        time_ns: u64,
+    },
+    ApplicationExit {
+        code: u8,
+        setup_error: bool,
+    },
     Barrier,
 }
 
@@ -196,7 +210,7 @@ impl<B: Backend> Machine<B> {
             return Ok(MachineStop::PoweredOff);
         }
         self.clock.set_horizon(Some(horizon))?;
-        self.advance(before_run, false)
+        self.advance(before_run, false, false)
     }
 
     /// Slack permits an earlier stop; this cooperative backend uses the exact limit.
@@ -207,8 +221,15 @@ impl<B: Backend> Machine<B> {
         observe_console: bool,
     ) -> Result<MachineStop> {
         self.clock.set_horizon(Some(hard_limit))?;
-        self.advance(|| {}, observe_console)
+        self.advance(|| {}, observe_console, false)
     }
+    /// Execute to a horizon or genuine idle point without consuming idle time.
+    /// The caller owns wakeups and must call resume_at before entering again.
+    pub fn run_until_idle(&mut self, hard_limit: u64) -> Result<MachineStop> {
+        self.clock.set_horizon(Some(hard_limit))?;
+        self.advance(|| {}, false, true)
+    }
+
     pub fn stopped_observation(&self) -> application::worker::StoppedObservation {
         application::worker::StoppedObservation {
             time_ns: self.clock.now(),
@@ -535,7 +556,7 @@ impl<B: Backend> Machine<B> {
         }
         let start = Instant::now();
         self.clock.set_horizon(None)?;
-        if self.advance(before_run, false)? != MachineStop::PoweredOff {
+        if self.advance(before_run, false, false)? != MachineStop::PoweredOff {
             return Err("fixture stopped before power-off".into());
         }
         let console = String::from_utf8_lossy(&self.uart.console).into_owned();
@@ -579,6 +600,7 @@ impl<B: Backend> Machine<B> {
         &mut self,
         mut before_run: impl FnMut(),
         observe_console: bool,
+        stop_at_idle: bool,
     ) -> Result<MachineStop> {
         let console_start = self.uart.console.len();
         if self.powered_off {
@@ -744,7 +766,7 @@ impl<B: Backend> Machine<B> {
                 self.inject_spi(UART_SPI, uart_irq)?;
                 self.uart_irq = uart_irq;
             }
-            if self.clock.judge(idle)? {
+            if self.clock.judge(idle && !stop_at_idle)? {
                 self.inject_spi(TIMER_SPI, true)?;
                 // A timer expiry at the guest clock-read rendezvous with
                 // PSTATE.I set proves the masked-deadline path was exercised.
@@ -767,6 +789,13 @@ impl<B: Backend> Machine<B> {
                 return Ok(MachineStop::PoweredOff);
             }
             self.backend.complete(response)?;
+            if stop_at_idle && self.application.is_none() {
+                self.log_capture.append(
+                    application::log_capture::Stream::Console,
+                    self.clock.now(),
+                    self.uart.console.len() - console_before,
+                );
+            }
             if let Some(devices) = &self.application {
                 use application::log_capture::Stream;
                 // Append only after the guest write has successfully committed.
@@ -800,6 +829,17 @@ impl<B: Backend> Machine<B> {
             if observe_console && self.uart.console.len() > console_start {
                 return Ok(MachineStop::Console {
                     time_ns: self.clock.now(),
+                });
+            }
+            if stop_at_idle
+                && idle
+                && !self.clock.is_pending()
+                && self.deferred_spis.is_empty()
+                && self.asserted_spis.is_empty()
+            {
+                return Ok(MachineStop::Blocked {
+                    time_ns: self.clock.now(),
+                    deadline: self.clock.deadline(),
                 });
             }
             if self.clock.at_horizon() {

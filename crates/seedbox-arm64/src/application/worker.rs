@@ -55,6 +55,17 @@ impl Boot {
             None => Ok(machine),
         }
     }
+    fn fixture<B: Backend>(&self) -> Result<Machine<B>> {
+        let kernel = std::fs::read(&self.kernel).map_err(|e| format!("fixture kernel: {e}"))?;
+        let initrd = std::fs::read(&self.initrd).map_err(|e| format!("fixture initrd: {e}"))?;
+        Machine::from_spec(BootSpec::for_application(
+            &kernel,
+            &initrd,
+            self.seed,
+            self.memory_bytes,
+            &self.command_line,
+        )?)
+    }
     fn disk(&self) -> Result<Option<Disk>> {
         if self.disk_image.is_none() && self.disk_sectors.is_none() {
             return Ok(None);
@@ -138,6 +149,12 @@ struct CheckpointHeader {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Operation {
     Boot(Boot),
+    /// Diskless, networkless PV personality for the machine interface.
+    BootFixture(Boot),
+    /// Stop before advancing through an idle interval.
+    AdvanceUntilIdle {
+        hard_limit: u64,
+    },
     Advance {
         hard_limit: u64,
         early_slack: u64,
@@ -187,6 +204,8 @@ pub struct Request {
 pub enum Answer {
     Ready,
     Snapshot(Checkpoint),
+    /// Capture failed without changing the valid stopped source machine.
+    SnapshotFailed(String),
     Restored(Checkpoint),
     Advanced {
         stop: MachineStop,
@@ -291,6 +310,7 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
     let mut console_offset = 0usize;
     let mut install_available = false;
     let mut boot_inputs: Option<Boot> = None;
+    let mut fixture = false;
     while let Some(request) = read_message::<Request>(input)? {
         if request.sequence != sequence {
             return Err("worker request sequence mismatch".into());
@@ -300,7 +320,11 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
             Some(current) if current != &request.expected => {
                 return Err("worker request identity mismatch".into())
             }
-            None if !matches!(request.operation, Operation::Boot(_)) => {
+            None if !matches!(
+                request.operation,
+                Operation::Boot(_) | Operation::BootFixture(_)
+            ) =>
+            {
                 return Err("unbound worker requires boot".into())
             }
             _ => (),
@@ -312,12 +336,18 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
             request.operation,
             Operation::Quit | Operation::CrashExport { .. }
         );
+        let is_capture = matches!(request.operation, Operation::Snapshot { .. });
         let result = (|| -> Result<Answer> {
-            if let Operation::Boot(boot) = &request.operation {
+            if let Operation::Boot(boot) | Operation::BootFixture(boot) = &request.operation {
                 if identity.is_some() || request.expected.incarnation != 0 {
                     return Err("worker already bound or invalid initial incarnation".into());
                 }
-                machine = Some(boot.machine(boot.disk()?)?);
+                fixture = matches!(request.operation, Operation::BootFixture(_));
+                machine = Some(if fixture {
+                    boot.fixture()?
+                } else {
+                    boot.machine(boot.disk()?)?
+                });
                 boot_inputs = Some(boot.clone());
                 identity = Some(request.expected.clone());
                 install_available = true;
@@ -350,9 +380,12 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 // HVF allows one VM per process and requires architectural restore
                 // into a never-entered replacement. Failure terminates this worker.
                 drop(machine.take());
-                let restored = boot
-                    .machine::<B>(boot.disk()?)?
-                    .restore_checkpoint(&mut file)?;
+                let replacement = if fixture {
+                    boot.fixture::<B>()?
+                } else {
+                    boot.machine::<B>(boot.disk()?)?
+                };
+                let restored = replacement.restore_checkpoint(&mut file)?;
                 if restored.stopped_observation() != saved.observation
                     || saved.console_offset > restored.console().len()
                 {
@@ -369,6 +402,19 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
             }
             let vm = machine.as_mut().ok_or("worker has no live machine")?;
             match request.operation {
+                Operation::AdvanceUntilIdle { hard_limit } => {
+                    install_available = false;
+                    let stop = vm.run_until_idle(hard_limit)?;
+                    let console = vm.console()[console_offset..].to_vec();
+                    console_offset = vm.console().len();
+                    Ok(Answer::Advanced {
+                        stop,
+                        time_ns: vm.time_ns(),
+                        events: vm.take_events(),
+                        console,
+                        log_chunks: vm.take_log_chunks(),
+                    })
+                }
                 Operation::Advance {
                     hard_limit,
                     early_slack,
@@ -547,8 +593,15 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 _ => Err("invalid worker operation".into()),
             }
         })();
-        let failed = result.is_err();
-        let answer = result.unwrap_or_else(Answer::Error);
+        let capture_failed = result.is_err() && is_capture;
+        let failed = result.is_err() && !capture_failed;
+        let answer = result.unwrap_or_else(|error| {
+            if capture_failed {
+                Answer::SnapshotFailed(error)
+            } else {
+                Answer::Error(error)
+            }
+        });
         let observation = if failed {
             None
         } else {
@@ -671,10 +724,10 @@ impl OwnedWorker {
         }
     }
     fn exchange(&mut self, operation: Operation) -> Result<Answer> {
-        if !self.bound && !matches!(operation, Operation::Boot(_)) {
+        if !self.bound && !matches!(operation, Operation::Boot(_) | Operation::BootFixture(_)) {
             return Err("unbound worker requires boot".into());
         }
-        if self.bound && matches!(operation, Operation::Boot(_)) {
+        if self.bound && matches!(operation, Operation::Boot(_) | Operation::BootFixture(_)) {
             return Err("worker is already bound".into());
         }
         if let Operation::InstallSuccession(transfer) = &operation {
@@ -692,7 +745,9 @@ impl OwnedWorker {
                 return Err("worker crash predecessor mismatch".into());
             }
         }
-        if let Operation::Advance { hard_limit, .. } = &operation {
+        if let Operation::Advance { hard_limit, .. } | Operation::AdvanceUntilIdle { hard_limit } =
+            &operation
+        {
             if *hard_limit == u64::MAX
                 || self
                     .observation
@@ -752,6 +807,7 @@ impl OwnedWorker {
             (&request.operation, &response.answer),
             (
                 Operation::Boot(_)
+                    | Operation::BootFixture(_)
                     | Operation::Control(_)
                     | Operation::Release { .. }
                     | Operation::ResumeAt(_)
@@ -759,12 +815,17 @@ impl OwnedWorker {
                     | Operation::SeedTimer { .. }
                     | Operation::Throttle { .. },
                 Answer::Ready
-            ) | (Operation::Advance { .. }, Answer::Advanced { .. })
-                | (Operation::Frame(_), Answer::Accepted(_))
+            ) | (
+                Operation::Advance { .. } | Operation::AdvanceUntilIdle { .. },
+                Answer::Advanced { .. }
+            ) | (Operation::Frame(_), Answer::Accepted(_))
                 | (Operation::Evidence { .. }, Answer::Evidence(_))
                 | (Operation::CrashExport { .. }, Answer::Crashed { .. })
                 | (Operation::InstallSuccession(_), Answer::Installed { .. })
-                | (Operation::Snapshot { .. }, Answer::Snapshot(_))
+                | (
+                    Operation::Snapshot { .. },
+                    Answer::Snapshot(_) | Answer::SnapshotFailed(_)
+                )
                 | (Operation::Restore(_), Answer::Restored(_))
                 | (Operation::Quit, Answer::Bye)
         );
@@ -799,6 +860,12 @@ impl OwnedWorker {
             }
             match &request.operation {
                 Operation::Snapshot { artifact } => {
+                    if matches!(response.answer, Answer::SnapshotFailed(_)) {
+                        if self.observation.as_ref() != Some(observation) {
+                            return Err("failed snapshot changed stopped observation".into());
+                        }
+                        return Ok(());
+                    }
                     let Answer::Snapshot(saved) = &response.answer else {
                         unreachable!()
                     };
@@ -820,7 +887,7 @@ impl OwnedWorker {
                         return Err("checkpoint restore acknowledgement mismatch".into());
                     }
                 }
-                Operation::Boot(_) => {
+                Operation::Boot(_) | Operation::BootFixture(_) => {
                     if observation.time_ns != 0
                         || observation.exits != 0
                         || observation.abi != 0
@@ -846,7 +913,7 @@ impl OwnedWorker {
                         return Err("successor acknowledgement transfer mismatch".into());
                     }
                 }
-                Operation::Advance { .. } => {
+                Operation::Advance { .. } | Operation::AdvanceUntilIdle { .. } => {
                     let old = self
                         .observation
                         .as_ref()
@@ -912,12 +979,16 @@ impl OwnedWorker {
             {
                 validate_evidence(evidence, observation, *full_state)?;
             }
-            if let Operation::Advance {
-                hard_limit,
-                observe_console,
-                ..
-            } = &request.operation
+            if let Operation::Advance { hard_limit, .. }
+            | Operation::AdvanceUntilIdle { hard_limit } = &request.operation
             {
+                let observe_console = matches!(
+                    request.operation,
+                    Operation::Advance {
+                        observe_console: true,
+                        ..
+                    }
+                );
                 let Answer::Advanced {
                     stop,
                     time_ns,
@@ -950,7 +1021,7 @@ impl OwnedWorker {
                         .ok_or("missing previous worker observation")?
                         .time_ns,
                     *time_ns,
-                    *observe_console,
+                    observe_console,
                 )?;
                 let stop_valid = match stop {
                     MachineStop::Horizon { time_ns: t } => {
@@ -969,8 +1040,21 @@ impl OwnedWorker {
                     }
                     MachineStop::Console { time_ns: t } => {
                         *t == *time_ns
-                            && *observe_console
+                            && observe_console
                             && console.len() == 1
+                            && !observation.powered_off
+                            && observation.exit.is_none()
+                            && !observation.barrier
+                    }
+                    MachineStop::Blocked {
+                        time_ns: t,
+                        deadline,
+                    } => {
+                        matches!(request.operation, Operation::AdvanceUntilIdle { .. })
+                            && *t == *time_ns
+                            && !observation.pending_irq
+                            && deadline.map_or(u64::MAX, |d| d) == observation.next_deadline
+                            && deadline.is_none_or(|d| d > *t)
                             && !observation.powered_off
                             && observation.exit.is_none()
                             && !observation.barrier

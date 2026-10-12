@@ -2049,6 +2049,8 @@ name = "seedbox-machine"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "seedbox-arm64",
+ "serde",
  "serde_json",
  "tempfile",
 ]
