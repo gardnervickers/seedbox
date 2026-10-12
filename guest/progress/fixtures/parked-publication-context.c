@@ -91,6 +91,9 @@ static void handler(int sig, siginfo_t *info, void *context)
 {
     int iteration = atomic_load_explicit(&req, memory_order_acquire);
     if (sig == SIGUSR1) {
+        if (info->si_code != SI_QUEUE || info->si_pid != getpid() ||
+            info->si_uid != getuid() || info->si_value.sival_int != 0x4301 + (int)signals)
+            fail("wait/progress signal payload");
         if (progress_case) {
             int i = progress_diag.iteration;
             int calls = i % 2 ? 1 : 3;
@@ -125,7 +128,10 @@ static void *publisher(void *unused)
         wait_equal(&ready, i);
         wait_equal(&ack, 1);
         if (atomic_load(&req) != 1) fail("ack without request");
-        if (syscall(SYS_tgkill, getpid(), consumer, SIGUSR1)) fail("tgkill");
+        siginfo_t si = {0};
+        si.si_signo = SIGUSR1; si.si_code = SI_QUEUE;
+        si.si_pid = getpid(); si.si_uid = getuid(); si.si_value.sival_int = 0x4300 + i;
+        if (syscall(SYS_rt_tgsigqueueinfo, getpid(), consumer, SIGUSR1, &si)) fail("queued signal");
         if (!progress_case) wait_equal(&signal_seen, i);
         else if (atomic_load(&signal_seen) != i - 1)
             fail("signal abandoned outstanding progress payment");
