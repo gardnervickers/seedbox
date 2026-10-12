@@ -71,6 +71,24 @@ def validate(text, row, mode):
     return metrics
 
 
+def validate_short(text, mode):
+    match = re.search(r"^EXECUTOR_BENCH (.*)$", text, re.M)
+    if not match or "EXECUTOR_FAIL" in text or "EXECUTOR_PANIC" in text:
+        raise ValueError("missing short result or failed fixture")
+    metrics = dict(item.split("=", 1) for item in match[1].split())
+    for key, value in list(metrics.items()):
+        if re.fullmatch(r"-?\d+", value):
+            metrics[key] = int(value)
+    expected = dict(iterations=10000000, rounds=1, checksum=40000000, logical=60000002,
+                    kind="Short", gate="false", native="false" if mode == "candidate" else "true")
+    if mode == "candidate":
+        expected.update(payments=1200, remaining=49998, translations=4)
+    for key, value in expected.items():
+        if metrics[key] != value:
+            raise ValueError(f"short {key}: {metrics[key]} != {value}")
+    return metrics
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("binary", type=Path)
@@ -79,6 +97,7 @@ def main():
     p.add_argument("--batches", type=int, default=96)
     p.add_argument("--cap-seconds", type=int, default=480)
     p.add_argument("--variant", type=Path, help="Stage B binary; rotate it against the frozen baseline candidate and unchanged native/DR binary.")
+    p.add_argument("--short-control", action="store_true", help="Inherited six-instruction call/return control instead of publication rows.")
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     binary, reference = args.binary.resolve(), args.reference.resolve()
@@ -88,22 +107,25 @@ def main():
         ["native", "dr", "baseline", "candidate"], ["candidate", "baseline", "dr", "native"],
         ["dr", "candidate", "native", "baseline"], ["baseline", "native", "candidate", "dr"],
         ["dr", "baseline", "native", "candidate"]]
-    plan = dict(rows=ROWS, orders=orders, batches=args.batches, cap_seconds=args.cap_seconds,
+    rows = ["short"] if args.short_control else ROWS
+    plan = dict(rows=rows, orders=orders, batches=args.batches, cap_seconds=args.cap_seconds,
                 variant=str(args.variant.resolve()) if args.variant else None, binary=str(binary), reference=str(reference),
                 note="Separate fresh-process batches; no launch time in inner total; all raw outputs retained.")
     (args.output / "plan.json").write_text(json.dumps(plan, indent=2) + "\n")
     deadline = time.monotonic() + args.cap_seconds
     with (args.output / "samples.jsonl").open("x") as saved:
         for repeat, order in enumerate(orders):
-            for row in ROWS:
+            for row in rows:
                 for mode in order:
                     sums = {}
                     for batch in range(args.batches):
                         if time.monotonic() >= deadline:
                             raise SystemExit("timing cap reached; partial evidence retained, no abandoned child")
+                        metered = mode in ("candidate", "baseline")
+                        argument = f"{'bench' if metered else 'native'}-short" if args.short_control else f"jit-{'linked' if metered else 'native'}-{row}"
                         command = (reference_command(reference) if mode == "dr" else []) + [
                             str(args.variant.resolve() if args.variant and mode == "candidate" else binary),
-                            f"jit-{'linked' if mode in ('candidate', 'baseline') else 'native'}-{row}"]
+                            argument]
                         sample = dict(repeat=repeat, row=row, mode=mode, batch=batch, command=command,
                                       load_before=os.getloadavg(), started_unix=time.time())
                         start = time.monotonic_ns()
@@ -121,8 +143,9 @@ def main():
                         try:
                             if sample["exit"] != 0:
                                 raise ValueError(f"exit {sample['exit']}")
-                            sample["metrics"] = validate(text, row, "candidate" if mode == "baseline" else mode)
-                        except ValueError as error:
+                            checked_mode = "candidate" if mode == "baseline" else mode
+                            sample["metrics"] = validate_short(text, checked_mode) if args.short_control else validate(text, row, checked_mode)
+                        except (ValueError, KeyError, TypeError) as error:
                             sample["failure"] = str(error)
                         saved.write(json.dumps(sample) + "\n")
                         saved.flush()

@@ -36,6 +36,13 @@ class MeasurementAdmission(unittest.TestCase):
             with self.assertRaises(ValueError):
                 measure.validate(text, "patch-high", "candidate")
 
+    def test_short_control_checks_its_distinct_charge_stream(self):
+        text = "EXECUTOR_BENCH kind=Short native=false gate=false iterations=10000000 rounds=1 checksum=40000000 logical=60000002 payments=1200 remaining=49998 translations=4"
+        self.assertEqual(measure.validate_short(text, "candidate")["payments"], 1200)
+        for old, new in [("40000000", "40000001"), ("60000002", "60000000"), ("49998", "50000")]:
+            with self.assertRaises(ValueError):
+                measure.validate_short(text.replace(old, new), "candidate")
+
     def test_nested_clocks_cannot_be_summed_as_disjoint(self):
         with self.assertRaises(ValueError):
             measure.validate(self.record(total_ns=59), "patch-high", "candidate")

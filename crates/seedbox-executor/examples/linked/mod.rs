@@ -461,6 +461,10 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                 if tls != c.tls.address as u64 {
                     fail("hook tls", tls)
                 }
+                // First-visit header/helper hooks precede every loop ADD. The
+                // terminal branch follows exactly one completed ADD; the first
+                // due stub follows floor(max(initial budget, 0)/256) bodies.
+                // None of these expectations reads reconstructed application X0.
                 let expected_x0 = if pin.entry == base + 4
                     && matches!(map.phase, Phase::Debited { .. })
                     && map.pc >= pin.value.memory.address as u64 + 269 * 4
