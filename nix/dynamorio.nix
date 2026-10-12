@@ -53,6 +53,10 @@ pkgs.stdenv.mkDerivation {
     "-DBUILD_CLIENTS=OFF"
     "-DBUILD_EXT=ON"
     "-DBUILD_DOCS=OFF"
+  ] ++ pkgs.lib.optionals (!arm) [
+    # 11.3 probes bool before applying that standard unless try_compile
+    # honours it (policy CMP0067).
+    "-DCMAKE_POLICY_DEFAULT_CMP0067=NEW"
   ];
   ninjaFlags = [ "dynamorio" "drreg" ];
   installPhase = ''
