@@ -177,6 +177,18 @@ The crate's `tools/build-linked.sh` builds this opt-in ELF. Its fixed-work modes
 separate install, first-pass and warm execution; ordinary Linux wall measurements
 are not PV-time or full-runtime qualification.
 
+The separate [matched JIT fixture](../crates/seedbox-executor/examples/linked/jit.rs)
+executes every published version and a neighboring function through the same
+finite revocable gates. Append/recompile and four-byte patch rows have matched
+no-publication controls, exact per-version call checks, and disjoint outer
+publication/first-use/warm clocks. Its controlled driver runs natively for the
+candidate but is instrumented by DR; diagnostic plans distinguish real DR
+emission from fault-context reconstruction. These clocks include completion
+faults and driver work, not just translator cost. The
+[measurement tool](../crates/seedbox-executor/tools/measure-jit.py) bounds fresh
+finite-arena batches and preserves failed samples instead of treating them as
+speedups. No application/runtime selection is added.
+
 ARM LL/SC cannot simply be copied: host-only exits may lose the physical
 exclusive monitor and make STXR failures host-timed. A future implementation
 must retain the [guest-epoch reservation contract](#software-exclusive-reservations),

@@ -7,6 +7,7 @@
 #[path = "../proof/aarch64.rs"]
 mod arch;
 mod bench;
+mod jit;
 #[path = "../proof/linux.rs"]
 mod linux;
 use alloc::{
@@ -60,7 +61,9 @@ struct Config {
     child: usize,
     loop_budget: i64,
     benchmark: Option<bench::Bench>,
+    jit: Option<jit::Jit>,
     gateway_fault: bool,
+    corrupt_boundary_x0: bool,
     target_register: Option<(usize, u64)>,
 }
 struct Code {
@@ -193,7 +196,11 @@ impl Engine {
         }
         // Test hooks only on the old loop, not production emission. Every
         // instrumentation PC starts trapped and is restored on first visit.
-        if c.benchmark.is_none() && matches!(offset, 0 | 4 | 1536) && self.translations < 4 {
+        if c.benchmark.is_none()
+            && c.jit.is_none()
+            && matches!(offset, 0 | 4 | 1536)
+            && self.translations < 4
+        {
             for m in &block.maps {
                 if m.instrumentation {
                     let word = unsafe { (m.pc as *const u32).read() };
@@ -208,7 +215,7 @@ impl Engine {
         memory.protect(5);
         self.translations += 1;
         self.emitted += block.bytes.len();
-        if c.benchmark.is_none() && c.loop_budget == 49996 && !c.gateway_fault {
+        if c.benchmark.is_none() && c.jit.is_none() && c.loop_budget == 49996 && !c.gateway_fault {
             let digits = b"0123456789abcdef";
             let hex: Vec<u8> = block
                 .bytes
@@ -237,7 +244,13 @@ impl Engine {
         p
     }
     fn invalidate(&mut self, offset: u64) -> usize {
-        let removed = self.index.invalidate(span(offset, offset + 4)).unwrap();
+        self.invalidate_range(offset, 4).0
+    }
+    fn invalidate_range(&mut self, offset: u64, width: u64) -> (usize, usize) {
+        let (removed, probes) = self
+            .index
+            .invalidate_counted(span(offset, offset + width))
+            .unwrap();
         // There is no executable task while this transaction runs. Revoke all
         // shared incoming gates BEFORE the caller commits any source store.
         for slot in 0..self.generations.len() {
@@ -247,7 +260,7 @@ impl Engine {
                 self.revoked += 1;
             }
         }
-        removed.len()
+        (removed.len(), probes)
     }
     fn at(&self, pc: u64) -> Option<(Pin<Code>, linked::Map)> {
         self.codes
@@ -314,19 +327,13 @@ fn verify(ctx: &mut arch::Context, loops: u64) {
         c.guard.address as u64,
     );
 }
-fn verify_at(ctx: &mut arch::Context, source: u64) {
+fn verify_at(ctx: &mut arch::Context, source: u64, expected_x0: u64) {
     let c = config();
     let base = c.source.address as u64;
     let before_helper = source == base || source == base + 1536;
     for n in 0..31 {
         let expected = match n {
-            0 => {
-                if before_helper {
-                    0
-                } else {
-                    ctx.machine.regs[0]
-                }
-            }
+            0 => expected_x0,
             2 => {
                 if before_helper {
                     pattern(2)
@@ -388,6 +395,10 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
         let ctx = &mut *ctx;
         let c = config();
         let base = c.source.address as u64;
+        if let Some(b) = c.jit {
+            jit::signal(sig, info, ctx, b);
+            return;
+        }
         if let Some(b) = c.benchmark {
             bench::signal(sig, info, ctx, b);
             return;
@@ -448,7 +459,25 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                 if tls != c.tls.address as u64 {
                     fail("hook tls", tls)
                 }
-                verify_at(ctx, map.source);
+                let expected_x0 = if pin.entry == base + 4
+                    && matches!(map.phase, Phase::Debited { .. })
+                    && map.pc >= pin.value.memory.address as u64 + 269 * 4
+                {
+                    (c.loop_budget.max(0) / 256) as u64
+                } else if pin.entry == base + 4
+                    && map.pc == pin.value.memory.address as u64 + 268 * 4
+                {
+                    1
+                } else {
+                    0
+                };
+                if c.corrupt_boundary_x0
+                    && pin.entry == base + 4
+                    && map.pc == pin.value.memory.address as u64 + 268 * 4
+                {
+                    ctx.machine.regs[0] ^= 1;
+                }
+                verify_at(ctx, map.source, expected_x0);
                 let offset = (map.pc - pin.value.memory.address as u64) / 4;
                 if pin.entry == base + 4 {
                     if offset == 0 {
@@ -536,7 +565,11 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                 fail("unpopulated indirect target", (*STATE.0.get()).target)
             }
             let pin = engine().index.lookup(pc).unwrap();
-            verify_at(ctx, pc);
+            let completed = ((c.loop_budget + *PAYMENTS.0.get() as i64 * 50000
+                - (*STATE.0.get()).left
+                - charge as i64)
+                / 256) as u64;
+            verify_at(ctx, pc, completed);
             let mut meter = Meter::from_inline_debit(
                 DEFAULT_BUDGET,
                 (*STATE.0.get()).left,
@@ -617,13 +650,18 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
         } else {
             b"default"
         };
-        let benchmark = bench::Bench::parse(mode);
-        let loop_budget = if benchmark.is_some() {
+        let jit = jit::Jit::parse(mode);
+        let benchmark = if jit.is_none() {
+            bench::Bench::parse(mode)
+        } else {
+            None
+        };
+        let loop_budget = if benchmark.is_some() || jit.is_some() {
             49996
         } else {
             match mode {
-                b"default" | b"gateway-fault" | b"indirect16" | b"indirect17" | b"return16"
-                | b"return17" => 49996,
+                b"default" | b"gateway-fault" | b"boundary-x0-fault" | b"indirect16"
+                | b"indirect17" | b"return16" | b"return17" => 49996,
                 b"zero" => 256,
                 b"negative" => 0,
                 b"overshoot" => -100001,
@@ -647,7 +685,10 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
         let source = Memory::map(4096, 5, 1, fd);
         let alias = Memory::map(4096, 3, 1, fd);
         checked(syscall(nr::CLOSE, fd, 0, 0, 0, 0, 0));
-        let mut bytes = benchmark.map_or_else(arch::source, bench::Bench::source);
+        let mut bytes = jit.map_or_else(
+            || benchmark.map_or_else(arch::source, bench::Bench::source),
+            jit::Jit::source,
+        );
         let target_register = match mode {
             b"indirect16" | b"indirect17" => {
                 let register = if mode == b"indirect16" { 16 } else { 17 };
@@ -683,7 +724,16 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
                 b.kind
             ));
         }
-        let offsets = benchmark.map_or_else(|| vec![0, 4, 8, 1536, 2048], bench::Bench::offsets);
+        if let Some(j) = jit {
+            log(format_args!(
+                "JIT_CORPUS base={base:#x} bytes=4096 kind={:?} calls_per_target={} slots=8\n",
+                j.kind, j.calls
+            ));
+        }
+        let offsets = jit.map_or_else(
+            || benchmark.map_or_else(|| vec![0, 4, 8, 1536, 2048], bench::Bench::offsets),
+            jit::Jit::offsets,
+        );
         let targets: Vec<_> = offsets
             .iter()
             .enumerate()
@@ -707,7 +757,9 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
             child: 0,
             loop_budget,
             benchmark,
+            jit,
             gateway_fault: mode == b"gateway-fault",
+            corrupt_boundary_x0: mode == b"boundary-x0-fault",
             target_register,
         });
         *ENGINE.0.get() = Some(Engine {
@@ -724,13 +776,13 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
             revoked: 0,
         });
         let start = bench::now();
-        if !benchmark.is_some_and(|b| b.native) {
+        if jit.is_none() && !benchmark.is_some_and(|b| b.native) {
             for offset in benchmark.map_or_else(|| vec![0, 4, 8, 1536], bench::Bench::initial) {
                 engine().lookup(base + offset);
             }
         }
         bench::cold(bench::now() - start);
-        if benchmark.is_some() {
+        if benchmark.is_some() || jit.is_some() {
             proof_boot();
             fail("benchmark returned", 0)
         }
@@ -739,7 +791,7 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
         linux::write("EXECUTOR_UNMARKED_RETURN\n");
         // This expected fatal helper fault occurs before any payment. Do not
         // create a writer that would remain blocked after the diagnostic exits.
-        let child = if config().gateway_fault {
+        let child = if config().gateway_fault || config().corrupt_boundary_x0 {
             0
         } else {
             checked(proof_clone(

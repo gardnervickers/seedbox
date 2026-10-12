@@ -83,12 +83,19 @@ impl<T> SourceIndex<T> {
     /// Remove every dependent translation, including all its other spans.
     /// Existing pins keep maps alive; this never waits for a parked task.
     pub fn invalidate(&mut self, write: Span) -> Result<Vec<u64>, Error> {
+        self.invalidate_counted(write).map(|(ids, _)| ids)
+    }
+    /// Same conservative prefix query, with its actual visited-entry count.
+    /// This is an observation counter, not a different overlap algorithm.
+    pub fn invalidate_counted(&mut self, write: Span) -> Result<(Vec<u64>, usize), Error> {
         if write.bytes.start >= write.bytes.end {
             return Err(Error::Range);
         }
+        let mut probes = 0;
         let ids: BTreeSet<_> = self
             .starts
             .range((write.backing, 0, 0)..(write.backing, write.bytes.end, 0))
+            .inspect(|_| probes += 1)
             .filter_map(|((_, _, id), end)| (*end > write.bytes.start).then_some(*id))
             .collect();
         for id in &ids {
@@ -99,7 +106,7 @@ impl<T> SourceIndex<T> {
                 }
             }
         }
-        Ok(ids.into_iter().collect())
+        Ok((ids.into_iter().collect(), probes))
     }
     pub fn len(&self) -> usize {
         self.live.len()
@@ -176,6 +183,15 @@ mod tests {
         assert!(weak.upgrade().is_some());
         drop(inner);
         assert!(weak.upgrade().is_none());
+    }
+    #[test]
+    fn counted_invalidation_reports_prefix_not_only_overlaps() {
+        let mut t = SourceIndex::default();
+        t.install(0, vec![span(0, 4)], ()).unwrap();
+        let p = t.install(8, vec![span(8, 16)], ()).unwrap();
+        assert_eq!(t.invalidate_counted(span(16, 20)).unwrap(), (vec![], 2));
+        assert_eq!(t.invalidate_counted(span(12, 16)).unwrap(), (vec![p.id], 2));
+        assert_eq!(t.len(), 1);
     }
     #[test]
     fn generation_exhaustion_fails_without_installing() {
