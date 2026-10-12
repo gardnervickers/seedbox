@@ -139,6 +139,9 @@ static void charge_before(void *context, instrlist_t *block, instr_t *where,
 #ifdef X86_64
     DR_ASSERT(drreg_unreserve_aflags(context, block, where) == DRREG_SUCCESS);
 #else
+    /* A fault can expose a register that is dead on the straight-line path.
+     * Restore before the application instruction, not at its next normal read. */
+    DR_ASSERT(drreg_get_app_value(context, block, where, scratch, scratch) == DRREG_SUCCESS);
     DR_ASSERT(drreg_unreserve_register(context, block, where, scratch) == DRREG_SUCCESS);
 #endif
 }
@@ -236,6 +239,10 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
     instruction_budget = (ptr_int_t)parsed_budget;
     points_per_block = parsed_points;
     drreg_options_t options = {sizeof(options), 3, false};
+#ifdef AARCH64
+    /* Normal-path liveness does not describe exception-state liveness. */
+    options.conservative = true;
+#endif
     DR_ASSERT(drmgr_init());
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);
     DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 1, 0));

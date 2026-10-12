@@ -1,0 +1,320 @@
+--- a/core/dispatch.c
++++ b/core/dispatch.c
+@@ -966,11 +966,28 @@
+             /* XXX: This could probably be moved to the outer scope. */
+             priv_mcontext_t *mcontext = get_mcontext(dcontext);
+             mcontext->pc = get_fcache_target(dcontext);
+
+-            flush_fragments_from_region(
+-                dcontext, begin, end - begin, true, THREAD_SYNCH_VALID_MCONTEXT,
+-                NULL /*flush_completion_callback*/, NULL /*user_data*/);
++            /* Invalidate eagerly, retaining the all-thread continuation protocol.
++             * Removing the page from executable_areas also clears its historical
++             * VM_EXECUTED_FROM state: subsequent lines of a publication need no
++             * synchronization unless code on this page is translated again.
++             * A larger invalidation is conservative; never defer an IC to ISB,
++             * since another thread can synchronize before the writer's ISB.
++             */
++            /* NULL is an open top query, POINTER_MAX a numeric exclusive end.
++             * Local-list flushing, exec removal and IBL removal honor that same
++             * distinction. Do not shrink the original interval on overflow.
++             */
++            ASSERT(begin < end || end == NULL);
++            vm_area_expand_to_page(&begin, &end, PAGE_SIZE);
++            size_t size = (ptr_uint_t)end - (ptr_uint_t)begin;
++            flush_fragments_in_region_start(
++                dcontext, begin, size, false /*don't own initexit*/,
++                false /*don't free futures*/, true /*exec invalid*/,
++                true /*force synchall*/, THREAD_SYNCH_VALID_MCONTEXT _IF_DGCDIAG(NULL));
++            remove_executable_region(begin, size, true /*have lock*/);
++            flush_fragments_in_region_finish(dcontext, false);
+         }
+ #endif
+
+         if (TESTANY(LINK_SPECIAL_EXIT, dcontext->last_exit->flags)) {
+--- a/core/vmareas.h
++++ b/core/vmareas.h
+@@ -51,8 +51,26 @@
+ #define UNIVERSAL_REGION_SIZE POINTER_MAX
+ /* really open-ended would make this wrap around to 0 */
+ #define UNIVERSAL_REGION_END ((app_pc)POINTER_MAX)
+
++/* Query ends may be NULL for the open top of the address space. Stored
++ * vmareas still have numeric, non-NULL ends (add_vm_area's existing contract).
++ * POINTER_MAX remains an ordinary exclusive end, not an alias for NULL.
++ */
++static inline bool
++vm_area_query_overlaps(app_pc start, app_pc end, app_pc area_start, app_pc area_end)
++{
++    return start < area_end && (end == NULL || end > area_start);
++}
++
++static inline void
++vm_area_expand_to_page(app_pc *start, app_pc *end, size_t page_size)
++{
++    *start = (app_pc)ALIGN_BACKWARD(*start, page_size);
++    if (*end != NULL && (ptr_uint_t)*end <= POINTER_MAX - (page_size - 1))
++        *end = (app_pc)ALIGN_FORWARD(*end, page_size);
++}
++
+ /* opaque struct */
+ struct vm_area_t;
+
+ enum {
+--- a/core/vmareas.c
++++ b/core/vmareas.c
+@@ -1337,15 +1337,15 @@
+     LOG(GLOBAL, LOG_VMAREAS, 4, "in remove_vm_area " PFX " " PFX "\n", start, end);
+     /* N.B.: removed area could span multiple areas! */
+     for (i = 0; i < v->length; i++) {
+         /* look for overlap */
+-        if (start < v->buf[i].end && end > v->buf[i].start) {
++        if (vm_area_query_overlaps(start, end, v->buf[i].start, v->buf[i].end)) {
+             if (overlap_start == -1)
+                 overlap_start = i;
+         } else if (overlap_start > -1) {
+             overlap_end = i; /* not inclusive */
+             break;
+-        } else if (end <= v->buf[i].start)
++        } else if (end != NULL && end <= v->buf[i].start)
+             break;
+     }
+     if (overlap_start == -1)
+         return false;
+@@ -1355,9 +1355,10 @@
+      * we just delete entire intervals affected, and shorten non-entire
+      */
+     if (start > v->buf[overlap_start].start) {
+         /* need to split? */
+-        if (overlap_start == overlap_end - 1 && end < v->buf[overlap_start].end) {
++        if (overlap_start == overlap_end - 1 && end != NULL &&
++            end < v->buf[overlap_start].end) {
+             /* don't call add_vm_area now, that will mess up our vector */
+             new_area = v->buf[overlap_start]; /* make a copy */
+             new_area.start = end;
+             /* rest of fields are correct */
+@@ -1367,9 +1368,10 @@
+         LOG(GLOBAL, LOG_VMAREAS, 3, "\tchanging " PFX "-" PFX " to " PFX "-" PFX "\n",
+             v->buf[overlap_start].start, v->buf[overlap_start].end,
+             v->buf[overlap_start].start, start);
+         if (restore_prot && DR_MADE_READONLY(v->buf[overlap_start].vm_flags)) {
+-            vm_make_writable(start, end - start);
++            vm_make_writable(start,
++                             (end == NULL ? v->buf[overlap_start].end : end) - start);
+         }
+         v->buf[overlap_start].end = start;
+         /* XXX: add a vmvector callback function for changing bounds? */
+         if (TESTANY(FRAG_COARSE_GRAIN, v->buf[overlap_start].frag_flags) &&
+@@ -1377,9 +1379,9 @@
+             adjust_coarse_unit_bounds(&v->buf[overlap_start], false /*leave invalid*/);
+         }
+         overlap_start++; /* don't delete me */
+     }
+-    if (end < v->buf[overlap_end - 1].end) {
++    if (end != NULL && end < v->buf[overlap_end - 1].end) {
+         /* move starting bound forward */
+         LOG(GLOBAL, LOG_VMAREAS, 3, "\tchanging " PFX "-" PFX " to " PFX "-" PFX "\n",
+             v->buf[overlap_end - 1].start, v->buf[overlap_end - 1].end, end,
+             v->buf[overlap_end - 1].end);
+@@ -10103,10 +10105,10 @@
+ #endif
+         d_r_read_lock(&executable_areas->lock); /* no need to write */
+         for (i = 0; i < executable_areas->length; i++) {
+             if (TESTANY(FRAG_COARSE_GRAIN, executable_areas->buf[i].frag_flags) &&
+-                start < executable_areas->buf[i].end &&
+-                end > executable_areas->buf[i].start) {
++                vm_area_query_overlaps(start, end, executable_areas->buf[i].start,
++                                       executable_areas->buf[i].end)) {
+                 coarse_info_t *coarse =
+                     (coarse_info_t *)executable_areas->buf[i].custom.client;
+                 bool do_flush = (coarse != NULL);
+ #ifdef HOT_PATCHING_INTERFACE
+@@ -10134,9 +10136,10 @@
+                 if (do_flush) {
+                     vm_area_flush_coarse_unit(dcontext, coarse, &executable_areas->buf[i],
+                                               all_synched,
+                                               start <= executable_areas->buf[i].start &&
+-                                                  end >= executable_areas->buf[i].end);
++                                                  (end == NULL ||
++                                                   end >= executable_areas->buf[i].end));
+                     DODEBUG({ num_coarse++; });
+                     if (TESTANY(VM_ADD_TO_SHARED_DATA,
+                                 executable_areas->buf[i].vm_flags)) {
+                         LOG(THREAD, LOG_FRAGMENT | LOG_VMAREAS, 2,
+@@ -10162,10 +10165,10 @@
+     /* walk backwards to avoid O(n^2)
+      * XXX case 9819: could use executable_area_overlap_bounds() to avoid linear walk
+      */
+     for (i = v->length - 1; i >= 0; i--) {
+-        if (start < v->buf[i].end && end > v->buf[i].start) {
+-            if (v->buf[i].start < start || v->buf[i].end > end) {
++        if (vm_area_query_overlaps(start, end, v->buf[i].start, v->buf[i].end)) {
++            if (v->buf[i].start < start || (end != NULL && v->buf[i].end > end)) {
+                 /* see comments in vm_area_unlink_fragments() */
+                 LOG(THREAD, LOG_FRAGMENT | LOG_VMAREAS, 2,
+                     "\tWARNING: region " PFX ".." PFX " is larger than flush area"
+                     " " PFX ".." PFX "\n",
+@@ -11894,7 +11897,46 @@
+     found = binary_search(&v, container->end, INT_TO_PC(0), &container, &index, true);
+     EXPECT(found, false);
+     EXPECT(index, 2);
+
++    remove_vm_area(&v, INT_TO_PC(0), UNIVERSAL_REGION_END, false);
++    app_pc high = INT_TO_PC(POINTER_MAX - 2 * PAGE_SIZE + 1);
++    add_vm_area(&v, high, UNIVERSAL_REGION_END, VM_EXECUTED_FROM, 0,
++                NULL _IF_DEBUG("top"));
++    EXPECT(vm_area_query_overlaps(high, NULL, v.buf[0].start, v.buf[0].end), true);
++    EXPECT(remove_vm_area(&v, high + PAGE_SIZE, NULL, false), true);
++    check_vec(&v, 0, high, high + PAGE_SIZE, VM_EXECUTED_FROM, 0, NULL);
++    EXPECT(remove_vm_area(&v, high, NULL, false), true);
++    EXPECT(v.length, 0);
++    /* An unaligned numeric end must still split, not turn into top. */
++    add_vm_area(&v, high, UNIVERSAL_REGION_END, VM_EXECUTED_FROM, 0,
++                NULL _IF_DEBUG("top"));
++    EXPECT(remove_vm_area(&v, high + 1, high + PAGE_SIZE, false), true);
++    EXPECT(v.length, 2);
++    check_vec(&v, 0, high, high + 1, VM_EXECUTED_FROM, 0, NULL);
++    check_vec(&v, 1, high + PAGE_SIZE, UNIVERSAL_REGION_END, VM_EXECUTED_FROM, 0, NULL);
++    EXPECT(remove_vm_area(&v, high, NULL, false), true);
++    EXPECT(v.length, 0);
++    /* Test expansion at runtime and alternate page sizes, multi-page original
++     * lines, aligned end, both rounding overflow boundaries and both sentinels. */
++    size_t pages[] = { PAGE_SIZE, 4096, 65536 };
++    for (int p = 0; p < sizeof(pages) / sizeof(pages[0]); ++p) {
++        size_t page = pages[p];
++        app_pc high_page = INT_TO_PC(POINTER_MAX - 2 * page + 1);
++        app_pc starts[] = { INT_TO_PC(page + 1), INT_TO_PC(page + 1), INT_TO_PC(page),
++                            high_page, high_page, high_page, high_page };
++        app_pc ends[] = { INT_TO_PC(page + 2), INT_TO_PC(4 * page + 1), INT_TO_PC(4 * page),
++                         INT_TO_PC(POINTER_MAX - page + 1),
++                         INT_TO_PC(POINTER_MAX - page + 2), UNIVERSAL_REGION_END, NULL };
++        for (int k = 0; k < sizeof(ends) / sizeof(ends[0]); ++k) {
++            app_pc start = starts[k], end = ends[k];
++            vm_area_expand_to_page(&start, &end, page);
++            EXPECT(start <= starts[k], true);
++            EXPECT(ends[k] == NULL ? end == NULL : end >= ends[k], true);
++            EXPECT(vm_area_query_overlaps(start, end, starts[k],
++                                          ends[k] == NULL ? UNIVERSAL_REGION_END : ends[k]),
++                   true);
++        }
++    }
+     vmvector_tests();
+ }
+ #endif /* STANDALONE_UNIT_TEST */
+--- a/core/fragment.c
++++ b/core/fragment.c
+@@ -625,8 +625,10 @@
+ /* compiler won't let me use null_fragment.tag here */
+ static const fragment_entry_t fe_empty = { NULL_TAG, HASHLOOKUP_NULL_START_PC };
+ static const fragment_entry_t fe_sentinel = { NULL_TAG, HASHLOOKUP_SENTINEL_START_PC };
+ #define ENTRY_TAG(fe) ((ptr_uint_t)(fe).tag_fragment)
++/* Open-top executable queries exclude FAKE_TAG, the invalid-entry marker. */
++#define HASHTABLE_RANGE_END_IS_TOP(end) ((end) == 0)
+ #define ENTRY_EMPTY (fe_empty)
+ #define ENTRY_SENTINEL (fe_sentinel)
+ #define IBL_ENTRY_IS_EMPTY(fe)                     \
+     ((fe).tag_fragment == fe_empty.tag_fragment && \
+@@ -8720,4 +8722,30 @@
+     ASSERT_CURIOSITY(ALIGNED((*htable)->table, sizeof(app_pc)));
+ }
+
+ /*******************************************************************************/
++
++#ifdef STANDALONE_UNIT_TEST
++void
++unit_test_ibl_top_range(void)
++{
++    ibl_table_t table = { 0 };
++    const ptr_uint_t high = POINTER_MAX - PAGE_SIZE;
++    fragment_entry_t low = { (app_pc)PAGE_SIZE, (cache_pc)PAGE_SIZE };
++    fragment_entry_t top = { (app_pc)high, (cache_pc)PAGE_SIZE };
++    fragment_entry_t last = { (app_pc)(POINTER_MAX - 1), (cache_pc)PAGE_SIZE };
++    hashtable_ibl_myinit(GLOBAL_DCONTEXT, &table, 4, 80, HASH_FUNCTION_NONE, 0,
++                        IBL_BRANCH_TYPE_START, false,
++                        FRAG_TABLE_SHARED | FRAG_TABLE_TARGET_SHARED
++                            _IF_DEBUG("top range test"));
++    TABLE_RWLOCK(&table, write, lock);
++    hashtable_ibl_add(GLOBAL_DCONTEXT, low, &table);
++    hashtable_ibl_add(GLOBAL_DCONTEXT, top, &table);
++    hashtable_ibl_add(GLOBAL_DCONTEXT, last, &table);
++    EXPECT(hashtable_ibl_range_remove(GLOBAL_DCONTEXT, &table, high, POINTER_MAX - 1, NULL), 1);
++    EXPECT(table.entries, 2);
++    EXPECT(hashtable_ibl_range_remove(GLOBAL_DCONTEXT, &table, high, 0, NULL), 1);
++    EXPECT(table.entries, 1);
++    TABLE_RWLOCK(&table, write, unlock);
++    hashtable_ibl_myfree(GLOBAL_DCONTEXT, &table);
++}
++#endif
+--- a/core/hashtablex.h
++++ b/core/hashtablex.h
+@@ -77,8 +77,11 @@
+  *   HTLOCK_RANK
+  *     table_rwlock will work for most users.
+  *     Needs higher rank than memory alloc locks.
+  * optional for main table:
++ *    bool HASHTABLE_RANGE_END_IS_TOP(end)
++ *      Allow an open-top range query (IBL uses zero), without changing the
++ *      default numeric exclusive-end contract for generic key tables.
+  *    bool TAGS_ARE_EQUAL(table, tag1, tag2)
+  *
+  * for lookuptable:
+  *  if HASHTABLE_USE_LOOKUPTABLE is defined:
+@@ -152,8 +155,12 @@
+ #define EXPANDKEY(pre, key, post) pre##key##post
+ #define HTNAME(pre, key, post) EXPANDKEY(pre, key, post)
+ #define KEY_STRING STRINGIFY(NAME_KEY)
+
++#ifndef HASHTABLE_RANGE_END_IS_TOP
++#    define HASHTABLE_RANGE_END_IS_TOP(end) false
++#endif
++
+ #define ENTRY_IS_REAL(e) \
+     (!ENTRY_IS_EMPTY(e) && !ENTRY_IS_SENTINEL(e) && !ENTRY_IS_INVALID(e))
+
+ #ifdef HASHTABLE_USE_LOOKUPTABLE
+@@ -1501,9 +1508,11 @@
+      * efficiently delete all entries */
+     i = table->capacity - 1 - 1 /* sentinel */;
+     while (i >= 0) {
+         e = table->table[i];
+-        if (!ENTRY_IS_EMPTY(e) && ENTRY_TAG(e) >= tag_start && ENTRY_TAG(e) < tag_end &&
++        if (!ENTRY_IS_EMPTY(e) && ENTRY_TAG(e) >= tag_start &&
++            (HASHTABLE_RANGE_END_IS_TOP(tag_end) ? !ENTRY_IS_INVALID(e)
++                                                : ENTRY_TAG(e) < tag_end) &&
+             (filter == NULL || filter(e))) {
+             if (HTNAME(hashtable_, NAME_KEY, _remove_helper)(table, i,
+                                                              &table->table[i])) {
+                 /* Pulled a chain across the wraparound, so we must start over
+@@ -2209,8 +2218,9 @@
+ #undef ENTRY_TYPE
+ #undef AUX_ENTRY_TYPE
+ #undef CUSTOM_FIELDS
+
++#undef HASHTABLE_RANGE_END_IS_TOP
+ #undef ENTRY_TAG
+ #undef ENTRY_IS_EMPTY
+ #undef ENTRY_IS_SENTINEL
+ #undef ENTRY_IS_INVALID
+--- a/core/unit_tests.c
++++ b/core/unit_tests.c
+@@ -53,8 +53,10 @@
+ unit_test_options(void);
+ void
+ unit_test_vmareas(void);
+ void
++unit_test_ibl_top_range(void);
++void
+ unit_test_utils(void);
+ void
+ unit_test_opnd_shared(void);
+ #ifdef WINDOWS
+@@ -87,8 +89,9 @@
+     unit_test_utils();
+     unit_test_opnd_shared();
+     unit_test_options();
+     unit_test_vmareas();
++    unit_test_ibl_top_range();
+ #ifdef WINDOWS
+     unit_test_drwinapi();
+ #endif
+     unit_test_asm(dc);

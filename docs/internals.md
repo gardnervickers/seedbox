@@ -78,7 +78,9 @@ reapplies active throttle faults.
 Instrumentation must leave the application's registers and comparison flags
 intact. On ARM, the client uses arithmetic that leaves those flags alone and a
 branch that tests the sign bit directly (`TBZ`). DynamoRIO's drreg extension
-manages the temporary registers.
+manages the temporary registers. Its ARM reservations are conservative and
+restore scratch before the application instruction: a fault handler can observe
+a register even when it is dead on the normal path.
 
 Guest signals arrive only at progress calls, so when the ARM translator
 synchronizes all threads, for example to flush code a JIT has rewritten, it
@@ -89,7 +91,8 @@ ARM progress call therefore leaves through the translator's dispatcher at the
 charged instruction, which waits for a pending synchronization. The charge
 there runs again, so the call gives it back first. The translator patch saves
 each vector register of the call in its own context slot, so that exit
-restores them exactly.
+restores them exactly. This redirection happens after the private call completes;
+it does not make an arbitrarily blocked clean call transferable during a flush.
 
 The ARM translator detects rewritten code through the application's `IC IVAU`
 cache-maintenance instructions (`-no_hw_cache_consistency`). Translated reads of
@@ -99,6 +102,11 @@ option in release builds. Enabled `hw_cache_consistency` instead uses code-page
 write protection and self-modifying-code sandboxing. In the observed Kafka
 startup, that mode grew a broker's memory to about 2 GB and it was killed;
 with application-driven invalidation, it used about 250 MB and kept starting.
+The eager IC path invalidates the containing executable pages and clears their
+historical execution bookkeeping. It preserves the whole original range when a
+cache line spans pages or its exclusive end wraps to the top of the address space.
+Publication is not deferred to the writer's ISB: another thread can synchronize
+before that ISB.
 
 Code: [progress client](../guest/progress/progress.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
