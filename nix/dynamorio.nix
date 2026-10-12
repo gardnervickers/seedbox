@@ -15,6 +15,8 @@ pkgs.stdenv.mkDerivation {
     ../guest/progress/dynamorio-cleancall-simd.patch
     # Eager IC invalidation, including multi-page and open-top query consumers.
     ../guest/progress/dynamorio-ic-ivau.patch
+    # SME-only Linux can supply an inactive, header-only SVE record with VL=0.
+    ../guest/progress/dynamorio-sme-empty-context.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build

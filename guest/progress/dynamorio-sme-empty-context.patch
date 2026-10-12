@@ -1,0 +1,130 @@
+--- a/core/unix/include/sigcontext.h
++++ b/core/unix/include/sigcontext.h
+@@ -387,7 +387,9 @@
+ struct sve_context {
+     struct _aarch64_ctx head; /* 8 bytes */
+     __u16 vl;                 /* 2 bytes */
+-    __u16 __reserved[3];      /* 6 bytes */
++    __u16 flags;              /* SVE_SIG_FLAG_SM describes streaming mode. */
++    __u16 __reserved[2];
++
+ };
+ 
+ /*
+--- a/core/unix/signal_linux_aarch64.c
++++ b/core/unix/signal_linux_aarch64.c
+@@ -277,6 +277,19 @@
+ #endif
+ }
+ 
++/* Linux arm64 restore_sve_fpsimd_context explicitly accepts this SME-only,
++ * non-streaming header with no payload (VL=0). FPSIMD owns all vector state;
++ * leave the header and following records intact rather than inventing SVE state.
++ * A populated, streaming, truncated or differing-VL record is NOT this case.
++ */
++static bool
++sve_is_non_sve_fpsimd_header(const struct sve_context *sve, size_t available,
++                            bool has_sve)
++{
++    return !has_sve && available >= sizeof(*sve) && sve->head.magic == SVE_MAGIC &&
++        sve->head.size == sizeof(*sve) && sve->vl == 0 && sve->flags == 0;
++}
++
+ void
+ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
+ {
+@@ -316,7 +329,9 @@
+     struct _aarch64_ctx *terminator_record = next_head;
+     ASSERT(terminator_record->magic == 0);
+ 
+-    if (sve != NULL) {
++    if (sve != NULL &&
++        !sve_is_non_sve_fpsimd_header(
++            sve, (byte *)terminator_record - (byte *)sve, proc_has_feature(FEATURE_SVE))) {
+         /* Check that we have a full SVE record with space for the register data.
+          * The kernel only includes space for register data if it considers the SVE state
+          * to be "live" for the current thread.
+@@ -414,3 +429,60 @@
+ {
+     /* Nothing. */
+ }
++
++#ifdef STANDALONE_UNIT_TEST
++void
++unit_test_non_sve_signal_context(void)
++{
++    struct sve_context header = { 0 };
++    header.head.magic = SVE_MAGIC;
++    header.head.size = sizeof(header);
++    EXPECT(sve_is_non_sve_fpsimd_header(&header, sizeof(header), false), true);
++    EXPECT(sve_is_non_sve_fpsimd_header(&header, sizeof(header) - 1, false), false);
++    EXPECT(sve_is_non_sve_fpsimd_header(&header, sizeof(header), true), false);
++    header.flags = 1; /* streaming state is never classified as FPSIMD-only */
++    EXPECT(sve_is_non_sve_fpsimd_header(&header, sizeof(header), false), false);
++    header.flags = 0;
++    header.vl = 16;
++    EXPECT(sve_is_non_sve_fpsimd_header(&header, sizeof(header), false), false);
++    header.vl = 0;
++    header.head.size += 16;
++    EXPECT(sve_is_non_sve_fpsimd_header(&header, sizeof(header) + 16, false), false);
++    header.head.size = 8;
++    EXPECT(sve_is_non_sve_fpsimd_header(&header, sizeof(header), false), false);
++    header.head.size = sizeof(header);
++    header.head.magic = 0;
++    EXPECT(sve_is_non_sve_fpsimd_header(&header, sizeof(header), false), false);
++    header.head.magic = SVE_MAGIC;
++    if (!proc_has_feature(FEATURE_SVE)) {
++        sigcontext_t sc = { 0 };
++        sig_full_cxt_t full = { 0 };
++        full.sc = &sc;
++        full.fp_simd_state = sc.__reserved;
++        struct fpsimd_context *fp = (void *)sc.__reserved;
++        fp->head.magic = FPSIMD_MAGIC;
++        fp->head.size = sizeof(*fp);
++        struct sve_context *sve = (void *)(fp + 1);
++        *sve = header;
++        struct _aarch64_ctx *tail = (void *)(sve + 1);
++        tail->magic = 0x54504902; /* A following TPIDR2 header is not shifted. */
++        tail->size = 16;
++        priv_mcontext_t before = { 0 }, after = { 0 };
++        before.fpsr = 0x08000000;
++        before.fpcr = 0x00400000;
++        for (int i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; ++i)
++            memset(&before.simd[i].q, i + 1, sizeof(before.simd[i].q));
++        mcontext_to_sigcontext_simd(&full, &before);
++        EXPECT(memcmp(sve, &header, sizeof(header)), 0);
++        EXPECT(tail->magic, 0x54504902);
++        EXPECT(tail->size, 16);
++        sigcontext_to_mcontext_simd(&after, &full);
++        EXPECT(after.fpsr, before.fpsr);
++        EXPECT(after.fpcr, before.fpcr);
++        for (int i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; ++i)
++            EXPECT(memcmp(&after.simd[i].q, &before.simd[i].q,
++                          sizeof(before.simd[i].q)), 0);
++    }
++    print_file(STDERR, "non-SVE signal header: passed\n");
++}
++#endif
+--- a/core/unit_tests.c
++++ b/core/unit_tests.c
+@@ -70,6 +70,10 @@
+ void
+ unit_test_jit_fragment_tree(void);
+ 
++#ifdef AARCH64
++void unit_test_non_sve_signal_context(void);
++#endif
++
+ int
+ main(int argc, char **argv, char **envp)
+ {
+@@ -91,6 +95,9 @@
+     unit_test_options();
+     unit_test_vmareas();
+     unit_test_ibl_top_range();
++#ifdef AARCH64
++    unit_test_non_sve_signal_context();
++#endif
+ #ifdef WINDOWS
+     unit_test_drwinapi();
+ #endif
