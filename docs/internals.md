@@ -114,6 +114,56 @@ throttled it shows the effective nominal speed after backend rounding and
 clamping; healing restores that machine's configured speed. The fault's
 recorded input keeps the original request.
 
+## Experimental block executor proof
+
+[`seedbox-executor`](../crates/seedbox-executor/src/lib.rs) is an opt-in,
+Linux-only same-ISA experiment, not the normal application runtime. Its
+transport-independent Rust core decodes bounded blocks, emits native interiors
+and source-PC maps, tracks source intervals by backing identity, and owns the
+signed precharge state machine. AArch64 uses an explicit small classifier;
+x86-64 uses iced-x86. Unknown instructions and out-of-range relocations fail
+before the block executes. Both proof subsets reject atomics and application
+syscalls; there is no native escape for unsupported code.
+
+The libc-free [`linux-proof`](../crates/seedbox-executor/examples/linux-proof.rs)
+ELF uses executor-owned traps and Linux signal return for diagnostic dispatch.
+Linux saves the application state before any metering helper runs. A due charge
+makes a raw marked `getpid` from a stable gateway, refunds the old block and
+looks up the current generation before precharging again. A native fault keeps
+its block's precharge. No register is reserved. This trap-per-block mechanism
+adds kernel charges and is **not** the intended linked-edge hot path, a timing
+equivalence claim, or a selected production signal architecture.
+
+The controlled fixture has one explicitly shared memfd backing, an R-X source
+view and a private RW writer view. While task A is parked with an old map pin,
+task B's precise protected stores append neighboring code and overwrite two
+overlapping source spans. Invalidation removes lookup permission without waiting
+for A; immutable maps/cache memory survive until their final continuation pin is
+released. The source view is never made writable. This does not remap private
+anonymous memory into shared memory or implement COW, arbitrary writers, kernel
+writes, mapping lifecycle, or nested application signal handling. The deliberate
+fault is reconstructed and asserted in the diagnostic handler, not delivered to
+an arbitrary application's handler.
+
+The fixture covers original-address call/return, a syscall-free backward loop,
+PC-relative address formation, SIMD arithmetic and a protected-load fault after
+invalidation. It checks all scalar registers (including dead scratch), flags,
+SP/TLS, all ARM Q registers and FP controls, or x86 XMM registers and FP controls.
+General x86 extended-state patterns, fault/restart/handler edits, loader/process
+integration and snapshots remain outside this proof. Build the ELF with the
+crate's `tools/build-proof.sh` inside the project Linux development shell; its
+`tools/initramfs.py` wraps that ELF as PID 1. The ignored
+[HVF proof test](../crates/seedbox-arm64/tests/executor_proof.rs) checks actual VMM
+horizon returns between marked-call console delimiters against an unmarked
+control. Native-container syscall completion alone is not PV evidence.
+
+ARM LL/SC cannot simply be copied: host-only exits may lose the physical
+exclusive monitor and make STXR failures host-timed. A future implementation
+must retain the [guest-epoch reservation contract](#software-exclusive-reservations),
+including ABA detection, per-attempt consumption and precise faults; LSE requires
+separate native-semantics tests. The proof currently rejects LL/SC, CLREX and
+LSE rather than claiming those obligations are implemented.
+
 ## Progress inside kernel polling
 
 An x86 kernel `cpu_relax()` loop may hold a lock with interrupts disabled. It

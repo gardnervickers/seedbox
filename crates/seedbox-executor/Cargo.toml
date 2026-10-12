@@ -1,0 +1,17 @@
+[package]
+name = "seedbox-executor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "encoder", "no_std"] }
+
+[features]
+# Builds only the explicit Linux signal-gated diagnostic, never the normal worker.
+linux-proof = []
+
+[[example]]
+name = "linux-proof"
+required-features = ["linux-proof"]
+test = false
