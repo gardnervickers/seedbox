@@ -32,6 +32,7 @@ static int application_execv(const char *path, char *const argv[]) {
     assert(!strcmp(argv[index++], "-ldstex2cas"));
     assert(!strcmp(argv[index++], "-no_hw_cache_consistency"));
     assert(!strcmp(argv[index++], "-fake_ctr_dic"));
+    assert(!strcmp(argv[index++], "-seedbox_icache_images"));
 #endif
     assert(!strcmp(argv[index++], "-c"));
     assert(!strcmp(argv[index++], "/seedbox/progress/libseedbox_progress.so"));

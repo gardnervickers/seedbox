@@ -1,0 +1,12 @@
+name: alias-jit
+machines:
+  publisher:
+    build:
+      context: .
+    memoryMiB: 256
+oracle:
+  build:
+    context: ./oracle
+  memoryMiB: 384
+network:
+  latency: 1ms

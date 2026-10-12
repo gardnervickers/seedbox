@@ -1,0 +1,12 @@
+name: java-jit
+machines:
+  java:
+    build:
+      context: .
+    memoryMiB: 1536
+oracle:
+  build:
+    context: ./oracle
+  memoryMiB: 384
+network:
+  latency: 1ms

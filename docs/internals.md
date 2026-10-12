@@ -98,10 +98,16 @@ callback safe. A separate context-aware predicate wait can instead be abandoned
 at its complete application context: that entry must recheck the still-set
 predicate before any application instruction, and completion always redirects.
 The wait cannot own irreversible effects, locks or cache-generation references.
+Its synchronization capability ends on normal completion and before a signal or
+API redirect abandons its private stack. Otherwise a later fault could mistake
+reused dispatcher storage for the saved application context.
 
 The translator patch saves each vector register of the clean call in its own
 context slot. Conservative scratch restoration, full-state capture and dispatcher
 re-entry preserve exception-visible state as well as normal-path values.
+Inactive SME-only SVE signal headers are preserved without expansion; these
+patches do not implement active SME/streaming state or per-thread vector-length
+changes.
 
 The ARM translator detects rewritten code through the application's `IC IVAU`
 cache-maintenance instructions (`-no_hw_cache_consistency`). Translated reads of
@@ -111,15 +117,34 @@ option in release builds. Enabled `hw_cache_consistency` instead uses code-page
 write protection and self-modifying-code sandboxing. In the observed Kafka
 startup, that mode grew a broker's memory to about 2 GB and it was killed;
 with application-driven invalidation, it used about 250 MB and kept starting.
-The eager IC path invalidates the containing executable pages and clears their
-historical execution bookkeeping. It preserves the whole original range when a
-cache line spans pages or its exclusive end wraps to the top of the address space.
-Publication is not deferred to the writer's ISB: another thread can synchronize
-before that ISB.
+Each emitted ARM fragment owns immutable, page-separated decoded source spans,
+including followed and elided branches. A backing-page index selects dependencies
+of the published cache line, including executable aliases of a writable mapping.
+Comparing only those depended-on bytes preserves unchanged same-line neighbors.
+Position-independent architectural HINTs retain their owned raw encoding; they
+remain valid when an optional feature such as BTI is absent. PC-relative operands
+still require relocation.
+
+Private anonymous keys require an observed successful mapping birth. Shared file
+keys use device, inode and file offset, checked against the mapped interval.
+Preexisting or unresolved mappings and private file/COW publication take the
+conservative path. Mapping, permission and discard transitions revoke admission;
+in-flight changes cannot authorize equality. Unknown alias-producing operations
+also disable indexed admission. Logical backing identity is not a physical-frame
+or host-time identifier, and equal bytes cannot restore a revoked incarnation.
+
+Actual overlaps and unresolved ownership retain DR's full synchronization and
+context protocol before deletion; the index does not provide arbitrary no-wait
+retirement. Publication is not deferred to the writer's ISB: another thread can
+synchronize before that ISB. The baseline eager page path retains complete
+multi-page and open-top ranges. Code modified by deliberate publication bypasses,
+such as proc-memory injection, is outside this cooperative testing contract.
 
 Code: [progress client](../guest/progress/progress.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
-[vector context patch](../guest/progress/dynamorio-cleancall-simd.patch).
+[vector context patch](../guest/progress/dynamorio-cleancall-simd.patch),
+[dependency index](../guest/progress/dynamorio-icache-index.patch),
+[predicate capability lifetime](../guest/progress/dynamorio-predicate-wait-end.patch).
 
 On x86 a charge can span several scheduling boundaries. Its unpaid time is
 retained with the machine and drained while the vCPU is stopped, before guest

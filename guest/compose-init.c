@@ -537,7 +537,7 @@ static pid_t start(void) {
         size_t count = 0;
         while (arguments[count]) ++count;
         /* Translator arguments, the application's own, and execv's NULL. */
-        enum { PREFIX_MAX = 13 };
+        enum { PREFIX_MAX = 14 };
         char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
         if (!instrumented) die("instrumentation arguments");
         size_t prefix = 0;
@@ -554,6 +554,7 @@ static pid_t start(void) {
          * cannot legally omit the IC IVAU that invalidates cached code. */
         instrumented[prefix++] = "-no_hw_cache_consistency";
         instrumented[prefix++] = "-fake_ctr_dic";
+        instrumented[prefix++] = "-seedbox_icache_images";
 #endif
         instrumented[prefix++] = "-c";
         instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
