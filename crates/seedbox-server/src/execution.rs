@@ -1,6 +1,9 @@
 //! Server-owned application preparation and execution. Platform discovery is
 //! injected by the executable; clients never own worker lifetimes or leases.
 
+mod bundles;
+mod diagnostics;
+
 use crate::{catalogue, manager::Manager};
 use seedbox_api::{ExecutionTermination, InputSource, Phase, SimulationId, Stage};
 use seedbox_application::{
@@ -66,6 +69,8 @@ pub enum Error {
     Storage(#[from] std::io::Error),
     #[error("simulation evidence: {0}")]
     Evidence(#[from] seedbox_application::Error),
+    #[error("simulation bundle: {0}")]
+    Bundle(String),
     #[error("simulation worker task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
 }
@@ -76,6 +81,7 @@ pub struct ExecutionService {
     store: ContentStore,
     backends: Arc<dyn BackendProvider>,
     preparation_limit: Duration,
+    evidence: Mutex<()>,
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
 }
 
@@ -94,6 +100,7 @@ impl ExecutionService {
             store,
             backends,
             preparation_limit: crate::preparation_budget::DEFAULT_LIMIT,
+            evidence: Mutex::new(()),
             admission: Mutex::new((0, BTreeMap::new())),
         })
     }
@@ -111,6 +118,10 @@ impl ExecutionService {
     /// Foreground cascading deletion: stop the frozen ownership tree, wait for
     /// execution cleanup, then remove dependents before their parents.
     pub fn delete(&self, id: &SimulationId) -> Result<(), Error> {
+        let _evidence = self
+            .evidence
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
         let targets = self.manager.begin_delete(id)?;
         // Join control transport and journal I/O without holding the catalogue
         // mutex. Retirement prevents already cloned handles from starting later.
@@ -151,7 +162,14 @@ impl ExecutionService {
     /// Block new branches before removing the completed simulation's capture.
     /// Repeated deletion retries cleanup using the retained attempt reference.
     pub fn delete_checkpoint(&self, id: &SimulationId, name: &str) -> Result<(), Error> {
+        let _evidence = self
+            .evidence
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
         self.manager.delete_checkpoint(id, name)?;
+        if self.manager.read(|catalogue| catalogue.is_imported(id))? {
+            return Ok(());
+        }
         let inputs: RetainedInputs = serde_json::from_reader(fs::File::open(
             self.root.join("inputs").join(format!("{id}.json")),
         )?)
@@ -239,6 +257,14 @@ impl ExecutionService {
         name: &str,
     ) -> Result<seedbox_api::Simulation, Error> {
         self.manager.captured_checkpoint(id, name)?;
+        if let Some(definition) = self
+            .manager
+            .read(|catalogue| catalogue.imported_checkpoint(id, name))?
+        {
+            let mut resource = self.describe(id)?;
+            resource.spec = seedbox_api::SimulationSpec::resolved(definition);
+            return Ok(resource);
+        }
         let mut resource = self.describe(id)?;
         let seedbox_api::InputSource::Resolved { definition } = &mut resource.spec.inputs else {
             return Err(Error::Evidence(seedbox_application::Error::Setup(
@@ -256,8 +282,28 @@ impl ExecutionService {
             .join("output")
             .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR)
             .join(format!("checkpoint-{name}.json"));
+        definition.overrides = resource
+            .spec
+            .program
+            .iter()
+            .map(|input| seedbox_spec::definition::Override {
+                id: input.key.clone(),
+                at_ns: input.at_ns,
+                action: input.action.clone(),
+                timeout_ns: input.timeout_ns,
+            })
+            .collect();
         definition.start =
             seedbox_application::definition::capture_start(&path, &attempt, &self.store)?;
+        let frozen = seedbox_artifacts::interventions::read(
+            &attempt.join(format!("checkpoint-{name}-interventions.json")),
+        )?;
+        seedbox_artifacts::checkpoint::project(
+            &mut definition.start,
+            &definition.overrides,
+            &frozen,
+        )
+        .map_err(|e| Error::Bundle(format!("checkpoint {name}: {e}")))?;
         resource
             .metadata
             .annotations
@@ -272,6 +318,10 @@ impl ExecutionService {
         baseline: &SimulationId,
         simulation: &SimulationId,
     ) -> seedbox_application::Result<seedbox_api::SimulationComparison> {
+        let _evidence = self
+            .evidence
+            .lock()
+            .map_err(|_| seedbox_application::Error::Setup("evidence lock failed".into()))?;
         let record = |id: &SimulationId| {
             let resource = self
                 .manager
@@ -282,25 +332,55 @@ impl ExecutionService {
                     "simulation {id} is not complete"
                 )));
             }
+            if self
+                .manager
+                .read(|catalogue| catalogue.is_imported(id))
+                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
+            {
+                let snapshot = self
+                    .imported_snapshot(id)
+                    .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
+                return Ok(snapshot.record);
+            }
             let path = self.root.join("inputs").join(format!("{id}.json"));
-            let file = fs::File::open(&path).map_err(|error| {
-                seedbox_application::Error::Setup(format!(
-                    "simulation {id} retained inputs: {error}"
-                ))
-            })?;
+            let file = match fs::File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(seedbox_application::Error::Setup(format!(
+                        "simulation {id} retained inputs: {error}"
+                    )))
+                }
+            };
             let inputs: RetainedInputs = serde_json::from_reader(file)?;
-            let attempt = inputs.attempt.ok_or_else(|| {
-                seedbox_application::Error::Setup(format!(
-                    "simulation {id} has no retained execution"
-                ))
-            })?;
-            seedbox_application::orchestration::inspect(&attempt)
+            let Some(attempt) = inputs.attempt else {
+                return Ok(None);
+            };
+            seedbox_application::orchestration::inspect(&attempt).map(Some)
         };
-        let first = record(baseline)?;
-        let second = record(simulation)?;
+        let (Some(first), Some(second)) = (record(baseline)?, record(simulation)?) else {
+            return Ok(seedbox_api::SimulationComparison {
+                baseline: baseline.clone(),
+                simulation: simulation.clone(),
+                status: seedbox_api::ComparisonStatus::NotComparable,
+                outcome_matches: false,
+                witness_matches: None,
+                full_state_matches: None,
+                fault_history_matches: false,
+            });
+        };
         let comparison = seedbox_artifacts::record::compare(&first, &second);
         use seedbox_api::ComparisonStatus;
-        let status = if first.identity != second.identity {
+        let first_definition = self.portable_simulation(baseline)?.spec.inputs;
+        let second_definition = self.portable_simulation(simulation)?.spec.inputs;
+        let compatible = match (first_definition, second_definition) {
+            (
+                InputSource::Resolved { definition: first },
+                InputSource::Resolved { definition: second },
+            ) => bundles::semantic_definition(first)? == bundles::semantic_definition(second)?,
+            _ => false,
+        };
+        let status = if !compatible {
             ComparisonStatus::NotComparable
         } else {
             match comparison.status {

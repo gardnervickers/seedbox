@@ -213,7 +213,8 @@ The CLI lives in `crates/seedbox/src/cli/`:
 - `output.rs`: status lines, `key: value` fields and their value formats.
 - `defaults.rs`: how each runtime input is found when no flag is given.
 - `backends.rs`: platform backend selection and guest-asset lookup.
-- `diagnostics.rs`: excerpts of local execution diagnostics for text output.
+- `diagnostics.rs`: completed server-owned raw console/management/worker evidence.
+- `bundles.rs`: server export/import and atomic no-clobber output publication.
 - `signals.rs`: cancellation.
 - `simulations.rs`: server-client commands and durable control receipts.
 - `observe.rs`: read-only observation (`logs`, `events`, `get world`, `get timeline`, `wait`).
@@ -234,12 +235,14 @@ deliberately change one.
 - Required flags are a last resort. Every runtime input needs a sensible
   default or a search, so `seedbox run` works with no arguments on a set-up
   host. The only required inputs are those with no possible default (`init
-  DIRECTORY`, `prepare --output`, `diff RUN_A RUN_B`).
-- A command's main object is positional: the Compose path (default `.`,
-  and a directory resolves to its `compose.yaml`), a simulation ID, or an offline run directory.
+  DIRECTORY`, `prepare --output`, `compare BASELINE SIMULATION`, `import BUNDLE`).
+- A command's main object is positional: the project path (default `.`,
+  and a directory resolves to its `seedbox.yaml`), a simulation ID, or an import bundle file.
   `run`, `explore`, `rerun` and `replay` submit through the server; clients never
   launch execution directly. `replay ID` reruns then compares; `rerun ID` reports
-  the oracle verdict. Offline bundle catalogue import is still pending.
+  the oracle verdict. `export ID` saves a completed resolved resource; `import BUNDLE`
+  registers a fresh independent completed resource without executing it. Imports
+  are non-idempotent; never automatically retry an uncertain upload.
 - Flags are long kebab-case. Don't add short flags except `-o`/`-h`/`-V`.
   Boolean flags are presence-only (`--json`, `--detach`).
 - A choice from a fixed set uses `#[derive(ValueEnum)]` with a doc comment on
@@ -280,7 +283,7 @@ deliberately change one.
   options, "Runtime inputs", and "Performance (never changes results)". A flag
   takes the heading of the group declared before it, so flatten
   general-purpose groups (`StateArg`) before `RuntimeInputs`.
-- `run`, `replay` and `diff` show `EXIT_CODES` in `after_help`.
+- `run`, `replay` and `compare` show `EXIT_CODES` in `after_help`.
 - Check the result with `cargo run -- help <command>`.
 
 ### Output
@@ -301,7 +304,9 @@ deliberately change one.
   Logs keep bounded history in a shared 64 MiB server budget and events in their
   own 16 MiB budget, for completed simulations too. Observation commands never
   block by default; `wait ID --for CONDITION` is the explicit way to block.
-  The legacy `retained-logs RUN` reader retains its single JSON document contract.
+  `diagnostics ID [NAME]` lists completed raw evidence or streams the exact retained
+  file bytes. Its `--json` prints one metadata or lossless hex-payload document.
+  Diagnostic names are allowlisted record keys, never client host paths.
 - `run` and `rerun` print `OUTCOME: simulation-id`; detached submission prints
   `CREATED: simulation-id`. `replay` and `compare` print
   `MATCH|MISMATCH|NOT_COMPARABLE: simulation-id`. Exactly one status line is
@@ -351,6 +356,9 @@ not read arguments/environment or print. It creates no state/run and never prepa
 images or executes guests. Compatibility readiness is not replay qualification.
 
 ## Current stage
+
+Obsolete formats, APIs and CLI commands are replaced outright. There is no backward
+compatibility requirement; do not add legacy readers, aliases or migration shims.
 
 - Seedbox is under heavy development. Don't add pins, allowlists,
   qualification lists, admission policies, provenance markers or similar

@@ -32,6 +32,7 @@ seedbox-vmm = { path = "../seedbox-vmm" }
 seedbox-arm64 = { path = "../seedbox-arm64" }
 
 [dev-dependencies]
+seedbox-artifacts.workspace = true
 seedbox-engine-core.workspace = true
 tar.workspace = true
 

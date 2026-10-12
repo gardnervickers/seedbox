@@ -1,5 +1,5 @@
 //! Per-machine exit trace lines (`NAME.trace`), written by the engine when
-//! tracing is on and compared by `seedbox diff`. Observation only: the exit
+//! tracing is on and used in retained evidence comparisons. Observation only: the exit
 //! witness hashes the same event separately, not these bytes.
 
 use std::{fmt, str::FromStr};
