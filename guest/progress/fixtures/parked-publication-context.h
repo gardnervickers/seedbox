@@ -8,7 +8,7 @@ struct parked_state {
 };
 struct parked_progress_diagnostic {
     uint64_t old_charge, fresh_charge;
-    int64_t initial_budget, after_add, before_signal, zero_budget;
+    int64_t initial_budget, after_add, before_signal, zero_budget, fresh_before, fresh_after;
     uint64_t result;
     int iteration, armed, payments, deferred, released;
 };

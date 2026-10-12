@@ -232,18 +232,21 @@ int main(int argc, char **argv)
         }
         if (result != 0x600U + i || faults != (unsigned)i || signals != (unsigned)i)
             fail("stale body, missing fault or signal");
-        if (progress_case && progress_diag.fresh_charge != 7) fail("fresh charge");
+        if (progress_case && (progress_diag.fresh_charge != 7 ||
+            progress_diag.fresh_after != progress_diag.fresh_before - 7)) fail("fresh debit");
         printf("ITERATION case=%s iteration=%d faults=1 signals=1 bad=0 "
                "body=%llu all_gpr=31 all_q=32 state=valid\n", case_name, i,
                (unsigned long long)result);
         if (progress_case)
             printf("LEDGER iteration=%d old_charge=%llu fresh_charge=%llu initial=%lld "
-                   "after_add=%lld payments=%d before_signal=%lld released=%d deferred=%d\n",
+                   "after_add=%lld payments=%d before_signal=%lld released=%d deferred=%d "
+                   "fresh_before=%lld fresh_after=%lld\n",
                    i, (unsigned long long)progress_diag.old_charge,
                    (unsigned long long)progress_diag.fresh_charge,
                    (long long)progress_diag.initial_budget, (long long)progress_diag.after_add,
                    progress_diag.payments, (long long)progress_diag.before_signal,
-                   progress_diag.released, progress_diag.deferred);
+                   progress_diag.released, progress_diag.deferred,
+                   (long long)progress_diag.fresh_before, (long long)progress_diag.fresh_after);
         atomic_store_explicit(&finished, i, memory_order_release);
         wake(&finished);
     }

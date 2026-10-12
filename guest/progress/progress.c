@@ -159,7 +159,7 @@ static void charge_before(void *context, instrlist_t *block, instr_t *where,
     DR_ASSERT(drreg_unreserve_register(context, block, where, scratch) == DRREG_SUCCESS);
 #endif
 #ifdef SEEDBOX_PARKED_PROGRESS_DIAGNOSTIC
-    parked_progress_instrument_zero(context, block, where);
+    parked_progress_instrument_after_charge(context, block, where);
 #endif
 }
 

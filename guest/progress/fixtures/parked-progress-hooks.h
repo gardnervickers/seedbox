@@ -67,6 +67,7 @@ static void parked_progress_seed(uint instructions)
     struct parked_progress_diagnostic *d = parked_progress_diag;
     if (__atomic_load_n(parked_progress_req, __ATOMIC_ACQUIRE) == 0) {
         d->fresh_charge = instructions;
+        d->fresh_before = *budget();
         return;
     }
     DR_ASSERT(d->armed == 0); /* A restarted paid helper must fail, not pay again. */
@@ -94,17 +95,21 @@ static void parked_progress_instrument(void *context, instrlist_t *bb, instr_t *
                              OPND_CREATE_INT32(instructions));
 }
 
-static void parked_progress_zero(void)
+static void parked_progress_after_charge(void)
 {
-    parked_progress_diag->zero_budget = *budget();
-    parked_progress_diag->armed = 0;
-    __atomic_store_n(parked_progress_req, 0, __ATOMIC_RELEASE);
+    if (parked_progress_failure == 4) {
+        parked_progress_diag->zero_budget = *budget();
+        parked_progress_diag->armed = 0;
+        __atomic_store_n(parked_progress_req, 0, __ATOMIC_RELEASE);
+    } else if (__atomic_load_n(parked_progress_req, __ATOMIC_ACQUIRE) == 0) {
+        parked_progress_diag->fresh_after = *budget();
+    }
 }
 
-static void parked_progress_instrument_zero(void *context, instrlist_t *bb, instr_t *where)
+static void parked_progress_instrument_after_charge(void *context, instrlist_t *bb, instr_t *where)
 {
-    if (parked_progress_failure == 4 && instr_get_app_pc(where) == parked_progress_target)
-        dr_insert_clean_call(context, bb, where, (void *)parked_progress_zero, false, 0);
+    if (instr_get_app_pc(where) == parked_progress_target)
+        dr_insert_clean_call(context, bb, where, (void *)parked_progress_after_charge, false, 0);
 }
 
 static ptr_int_t parked_progress_after_payment(ptr_int_t result)

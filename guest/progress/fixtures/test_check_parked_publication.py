@@ -44,14 +44,14 @@ class ProgressLedgerEvidence(unittest.TestCase):
             initial, calls = (2, 1) if i % 2 else (-99998, 3)
             text += (f'\nLEDGER iteration={i} old_charge=5 fresh_charge=7 initial={initial} '
                      f'after_add={initial-5+50000} payments={calls} before_signal=50002 '
-                     'released=1 deferred=1')
+                     'released=1 deferred=1 fresh_before=49000 fresh_after=48993')
         return text
 
     def test_actual_old_ledger(self):
         self.assertEqual(check(self.evidence(), 0)['case'], 'progress')
         for old, new in [('payments=3', 'payments=2'), ('old_charge=5', 'old_charge=7'),
                          ('before_signal=50002', 'before_signal=50004'),
-                         ('after_add=-50003', 'after_add=-100003'), ('deferred=1', 'deferred=0')]:
+                         ('after_add=-50003', 'after_add=-100003'), ('deferred=1', 'deferred=0'), ('fresh_after=48993', 'fresh_after=48995')]:
             with self.assertRaises(ValueError): check(self.evidence().replace(old, new), 0)
 
 
