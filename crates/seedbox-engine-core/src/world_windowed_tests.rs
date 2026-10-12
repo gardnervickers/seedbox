@@ -979,6 +979,7 @@ fn receipt(w: &World<Mock>, outcome: &str) -> Value {
                 .iter()
                 .map(|(key, value)| match value {
                     Payload::Frame { from, bytes } => json!([key, "frame", from, bytes]),
+                    Payload::DnsReply(bytes) => json!([key, "dns", bytes]),
                     Payload::Serial(bytes) => json!([key, "serial", bytes]),
                     Payload::Partition { from, to, on } => {
                         json!([key, "partition", from, to, on])
@@ -1755,6 +1756,68 @@ fn rejected_interactive_state_does_not_terminate_the_world_or_add_fault_history(
         assert_eq!(outcome, RunOutcome::Duration);
         assert!(w.faults.error.is_none());
         assert_eq!(w.faults.log.len(), usize::from(paused));
+    }
+}
+
+#[test]
+fn virtual_dns_replies_survive_checkpoints_and_ignore_partitions_and_worker_count() {
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    plan(&mut w, 1, partition("cut"));
+    let mut arp = vec![0xff; 6];
+    arp.extend_from_slice(&[0x02, 0, 0, 0, 0, 1]);
+    arp.extend_from_slice(&[8, 6, 0, 1, 8, 0, 6, 4, 0, 1]);
+    arp.extend_from_slice(&[0x02, 0, 0, 0, 0, 1, 10, 0, 0, 1]);
+    arp.extend_from_slice(&[0; 6]);
+    arp.extend_from_slice(&crate::dns::IP);
+    let mut query = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    query.extend_from_slice(&[1, b'b', 0, 0, 1, 0, 1]);
+    let length = 20 + 8 + query.len();
+    let mut frame = crate::dns::MAC.to_vec();
+    frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 1, 8, 0]);
+    let mut ipv4 = [0; 20];
+    ipv4[0] = 0x45;
+    ipv4[2..4].copy_from_slice(&(length as u16).to_be_bytes());
+    ipv4[9] = 17;
+    ipv4[12..16].copy_from_slice(&[10, 0, 0, 1]);
+    ipv4[16..20].copy_from_slice(&crate::dns::IP);
+    frame.extend_from_slice(&ipv4);
+    frame.extend_from_slice(&[0x12, 0x34, 0, 53]);
+    frame.extend_from_slice(&((8 + query.len()) as u16).to_be_bytes());
+    frame.extend_from_slice(&[0, 0]);
+    frame.extend_from_slice(&query);
+    for (at, bytes) in [(5, arp), (25, frame)] {
+        let mut step = Step::new(at, Stop::Sent);
+        step.frames = vec![bytes];
+        w.machines[0].steps.push_back(step);
+    }
+    assert_eq!(
+        segment(&mut w, 70, None, None, Some(30), true).unwrap(),
+        "checkpoint"
+    );
+    assert!(trace(&w).contains(&"a:frame:15".into()));
+    let queued: Vec<_> = w.events[0].values().collect();
+    assert!(matches!(&queued[..], [Payload::DnsReply(_)]));
+    // Exercise the retained JSON representation as well as snapshot restoration.
+    for payload in w.events[0].values_mut() {
+        *payload = serde_json::from_value(serde_json::to_value(&*payload).unwrap()).unwrap();
+    }
+    let snapshot = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    for workers in [0, 1, 4] {
+        snapshot.restore_checkpoint(&mut w).unwrap();
+        w.factory.lock().unwrap().clear();
+        assert_eq!(
+            run_with(&mut w, 70, None, workers, Duration::from_micros(3))
+                .unwrap()
+                .0,
+            "duration"
+        );
+        let received: Vec<_> = trace(&w)
+            .into_iter()
+            .filter(|entry| entry.contains(":frame:"))
+            .collect();
+        assert_eq!(received, ["a:frame:35"]);
+        assert!(w.network_snapshot().is_empty());
     }
 }
 

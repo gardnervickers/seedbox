@@ -1038,9 +1038,13 @@ fn network_witness(world: &World) -> sha2::digest::Output<Sha256> {
     let mut frames = Vec::new();
     for (to, events) in world.events().iter().enumerate() {
         for (&(at, seq), payload) in events {
-            if let Payload::Frame { from, bytes } = payload {
-                frames.push((at, seq, *from, to, Sha256::digest(bytes)));
-            }
+            let (from, bytes) = match payload {
+                Payload::Frame { from, bytes } => (*from, bytes),
+                // A reserved witness identity for the virtual endpoint.
+                Payload::DnsReply(bytes) => (usize::MAX, bytes),
+                Payload::Serial(_) | Payload::Partition { .. } => continue,
+            };
+            frames.push((at, seq, from, to, Sha256::digest(bytes)));
         }
     }
     frames.sort_by_key(|f| (f.0, f.1, f.2, f.3));
@@ -1064,9 +1068,12 @@ fn network_witness(world: &World) -> sha2::digest::Output<Sha256> {
 fn world_witness_prefix(world: &World, network_witness: &[u8]) -> Result<Sha256, String> {
     let mut world_witness = Sha256::new();
     world.control().triggers.hash_into(&mut world_witness)?;
-    // Only a run that uses link policy carries the network witness, so a run
-    // without it keeps the world witness it had before link policy existed.
-    if world.faults().links.in_use() || world.faults().connections.used {
+    // Retain virtual replies even without machine-to-machine link policy.
+    let pending_dns = world
+        .events()
+        .iter()
+        .any(|events| events.values().any(|p| matches!(p, Payload::DnsReply(_))));
+    if world.faults().links.in_use() || world.faults().connections.used || pending_dns {
         world_witness.update(network_witness);
     }
     if world.control().controller.is_some() {

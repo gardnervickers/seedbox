@@ -123,7 +123,10 @@ fn preparation_retains_kernel_before_transport_changes_source() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    let (preparer, simulation, store) = fixture(root.path());
+    let (preparer, mut simulation, store) = fixture(root.path());
+    simulation
+        .services
+        .insert("zpeer".into(), simulation.services["app"].clone());
     let context =
         PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
     let inputs = preparer
@@ -131,12 +134,44 @@ fn preparation_retains_kernel_before_transport_changes_source() {
         .unwrap();
     assert_eq!(fs::read(&preparer.kernel).unwrap(), b"changed");
     assert_eq!(store.read(&inputs.kernel).unwrap(), b"kernel");
+    for (name, own, peer) in [
+        ("app", "10.0.0.1 app\n", "10.0.0.2 zpeer\n"),
+        ("zpeer", "10.0.0.2 zpeer\n", "10.0.0.1 app\n"),
+    ] {
+        let archive = store.read(&inputs.guests[name]).unwrap();
+        let hosts = format!("127.0.0.1 localhost\n::1 localhost\n{own}");
+        assert!(archive
+            .windows(hosts.len())
+            .any(|bytes| bytes == hosts.as_bytes()));
+        assert!(!archive
+            .windows(peer.len())
+            .any(|bytes| bytes == peer.as_bytes()));
+    }
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(context.directory.join("setup.json")).unwrap()).unwrap();
     assert_eq!(
         receipt["kernel"],
         serde_json::to_value(inputs.kernel).unwrap()
     );
+}
+
+#[test]
+fn name_resolution_files_are_reserved_before_import() {
+    for target in ["/etc/hosts", "/etc/resolv.conf"] {
+        let root = tempfile::tempdir().unwrap();
+        let (preparer, mut simulation, store) = fixture(root.path());
+        simulation.services.get_mut("app").unwrap().configs.push(
+            seedbox_application::config::ConfigMount {
+                source: "unused".into(),
+                target: target.into(),
+            },
+        );
+        assert!(preparer
+            .prepare(&simulation, &store)
+            .unwrap_err()
+            .to_string()
+            .contains(target));
+    }
 }
 
 #[test]

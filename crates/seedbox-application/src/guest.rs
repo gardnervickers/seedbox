@@ -91,6 +91,27 @@ pub const LAUNCH_MAGIC: &[u8; 10] = b"SBXLAUNCH6";
 /// below this would stop every guest at the launch barrier.
 pub const MIN_WALL_CLOCK_EPOCH: u32 = 86400;
 
+/// Bootstrap networking shared by image preparation and resolved-definition edits.
+/// Peer names are resolved through simulated DNS, never a frozen hosts file.
+pub(crate) struct Network {
+    pub cidr: String,
+    pub hosts: String,
+}
+
+impl Network {
+    pub fn new(index: usize, hostname: &str) -> Result<Self> {
+        let last = index
+            .checked_add(1)
+            .and_then(|last| u8::try_from(last).ok())
+            .ok_or_else(|| Error::Integrity("machine address exceeds the guest subnet".into()))?;
+        let address = format!("10.0.0.{last}");
+        Ok(Self {
+            cidr: format!("{address}/24"),
+            hosts: format!("127.0.0.1 localhost\n::1 localhost\n{address} {hostname}\n"),
+        })
+    }
+}
+
 /// This binary recipe is consumed by the small static Linux guest init. Length
 /// prefixes avoid shell evaluation of command, environment or config contents.
 /// The progress instrumentation's constants ride along, so the guest and the

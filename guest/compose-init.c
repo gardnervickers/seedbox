@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <net/route.h>
 #include <sys/ioctl.h>
 #include <dirent.h>
 #include <errno.h>
@@ -324,6 +325,8 @@ static void application_hostname(const char *hostname, const char *hosts) {
     write_file("/etc/hostname", line, (size_t)size, 0644);
     /* Preparation already includes this service's address and name. */
     write_file("/etc/hosts", hosts, strlen(hosts), 0644);
+    static const char resolv[] = "nameserver 10.0.1.1\n";
+    write_file("/etc/resolv.conf", resolv, sizeof(resolv) - 1, 0644);
 }
 /* Docker's default nofile limit, which applications see unchanged. */
 #define APPLICATION_NOFILE 1048576
@@ -390,6 +393,16 @@ static void configure_network(const char *cidr) {
     memcpy(&request.ifr_netmask, &value, sizeof(value));
     if (ioctl(fd, SIOCSIFNETMASK, &request)) die("set guest IPv4 netmask");
     interface_up(fd, "eth0");
+    /* The simulated DNS service is outside the machine address pool. */
+    struct rtentry dns_route = {0};
+    struct sockaddr_in destination = {.sin_family = AF_INET};
+    if (inet_pton(AF_INET, "10.0.1.1", &destination.sin_addr) != 1) die("DNS service address");
+    memcpy(&dns_route.rt_dst, &destination, sizeof(destination));
+    destination.sin_addr.s_addr = INADDR_BROADCAST;
+    memcpy(&dns_route.rt_genmask, &destination, sizeof(destination));
+    dns_route.rt_flags = RTF_UP;
+    dns_route.rt_dev = "eth0";
+    if (ioctl(fd, SIOCADDRT, &dns_route)) die("route guest DNS service");
     if (close(fd)) die("close guest network control");
 }
 /* ext4 on the retained disk, formatted on the machine's first boot. Fixed

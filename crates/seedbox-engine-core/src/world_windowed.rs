@@ -78,6 +78,8 @@ impl From<sw::Error> for String {
 pub enum Msg {
     /// A frame on the wire, sent by `from`.
     Frame { from: usize, bytes: Vec<u8> },
+    /// A virtual nameserver reply; excluded from machine-to-machine counters.
+    DnsReply(Vec<u8>),
     /// Scenario serial input: delivered up to `early` ahead, like a frame.
     Serial(Vec<u8>),
     /// A management command or control reply. Never delivered early: its
@@ -308,6 +310,9 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
                 Msg::Frame { from, bytes } => {
                     let accepted = self.m.deliver_frame(bytes)?;
                     self.received.push((e.key.at, *from, accepted));
+                }
+                Msg::DnsReply(bytes) => {
+                    self.m.deliver_frame(bytes)?;
                 }
                 Msg::Serial(bytes) => self.m.deliver_serial(bytes)?,
                 Msg::Control(bytes) => {
@@ -862,7 +867,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                             *self.dropped += 1;
                             self.count(key.at, from, m, RECEIVER_DROPPED);
                         }
-                        Msg::Serial(_) | Msg::Control(_) => {}
+                        Msg::DnsReply(_) | Msg::Serial(_) | Msg::Control(_) => {}
                         Msg::Partition { from, to, on } => {
                             self.partitioned.insert((from, to), on);
                         }
@@ -1199,13 +1204,35 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
                 self.partitioned.insert((from, to), on);
                 return;
             }
-            Msg::Serial(_) | Msg::Control(_) => return,
+            Msg::DnsReply(_) | Msg::Serial(_) | Msg::Control(_) => return,
         };
         if frame.len() < 14 {
             return;
         }
+        // The virtual nameserver has no guest machine. Its answers are
+        // scheduled through the same deterministic frame queue, but the
+        // machine-to-machine link fault policies do not apply to this endpoint.
+        let answer = crate::dns::arp_reply(&frame).or_else(|| {
+            crate::dns::reply(&frame, |name| {
+                self.names
+                    .iter()
+                    .position(|n| n.eq_ignore_ascii_case(name))
+                    .and_then(|index| u8::try_from(index + 1).ok().map(|last| [10, 0, 0, last]))
+            })
+        });
+        if let Some(bytes) = answer {
+            out.push(sw::Delivery {
+                to: src,
+                at: sent_at.saturating_add(self.latency),
+                payload: Msg::DnsReply(bytes),
+            });
+            return;
+        }
         let mut dst_mac = [0; 6];
         dst_mac.copy_from_slice(&frame[0..6]);
+        if dst_mac == crate::dns::MAC {
+            return;
+        }
         for dst in links::candidates(src, dst_mac, self.macs) {
             let last = self.faults.links.last.get(&(src, dst)).copied();
             let cut = *self.partitioned.get(&(src, dst)).unwrap_or(&false);
@@ -1519,6 +1546,7 @@ where
         for ((at, _), p) in std::mem::take(q) {
             let msg = match p {
                 Payload::Frame { from, bytes } => Msg::Frame { from, bytes },
+                Payload::DnsReply(bytes) => Msg::DnsReply(bytes),
                 Payload::Serial(bytes) => Msg::Serial(bytes),
                 Payload::Partition { from, to, on } => Msg::Partition { from, to, on },
             };
@@ -1612,6 +1640,9 @@ where
                         bytes: bytes.clone(),
                     },
                 );
+            }
+            Msg::DnsReply(bytes) => {
+                events[to].insert((key.at, *seq), Payload::DnsReply(bytes.clone()));
             }
             Msg::Serial(bytes) => {
                 events[to].insert((key.at, *seq), Payload::Serial(bytes.clone()));

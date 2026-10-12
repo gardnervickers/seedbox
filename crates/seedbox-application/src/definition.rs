@@ -412,14 +412,11 @@ fn resolved_boot(
         .chain(std::iter::once(definition.oracle_name()))
         .collect();
     names.sort_unstable();
-    let mut hosts = String::from("127.0.0.1 localhost\n::1 localhost\n");
-    for (index, name) in names.iter().enumerate() {
-        hosts.push_str(&format!("10.0.0.{} {name}\n", index + 1));
-    }
     let index = names
         .iter()
         .position(|n| *n == name)
         .ok_or_else(|| Error::Integrity("missing machine address".into()))?;
+    let network = crate::guest::Network::new(index, name)?;
     let launch = Launch {
         argv: machine.process.argv.clone(),
         environment: machine.process.environment.clone(),
@@ -437,8 +434,8 @@ fn resolved_boot(
     };
     let mut recipe = crate::guest::launch_recipe(
         &launch,
-        &format!("10.0.0.{}/24", index + 1),
-        &hosts,
+        &network.cidr,
+        &network.hosts,
         name,
         &BTreeMap::new(),
         definition.clock.epoch_seconds,
@@ -712,6 +709,20 @@ mod tests {
         let mut worker = definition.oracle.clone();
         worker.cpu = Default::default();
         definition.machines.insert("worker".into(), worker);
+        let expanded = prepared(&definition, &store).unwrap();
+        for (name, own, peer) in [
+            ("oracle", "10.0.0.1 oracle\n", "10.0.0.2 worker\n"),
+            ("worker", "10.0.0.2 worker\n", "10.0.0.1 oracle\n"),
+        ] {
+            let archive = store.read(&expanded.guests[name]).unwrap();
+            let hosts = format!("127.0.0.1 localhost\n::1 localhost\n{own}");
+            assert!(archive
+                .windows(hosts.len())
+                .any(|bytes| bytes == hosts.as_bytes()));
+            assert!(!archive
+                .windows(peer.len())
+                .any(|bytes| bytes == peer.as_bytes()));
+        }
         let restored: Definition =
             serde_json::from_value(serde_json::to_value(&definition).unwrap()).unwrap();
         let configuration = restored.configuration("roundtrip");

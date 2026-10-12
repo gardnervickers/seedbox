@@ -410,9 +410,18 @@ impl SliceObservation {
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Payload {
-    Frame { from: usize, bytes: Vec<u8> },
+    Frame {
+        from: usize,
+        bytes: Vec<u8>,
+    },
+    /// A virtual nameserver reply, with no machine-to-machine link identity.
+    DnsReply(Vec<u8>),
     Serial(Vec<u8>),
-    Partition { from: usize, to: usize, on: bool },
+    Partition {
+        from: usize,
+        to: usize,
+        on: bool,
+    },
 }
 pub fn entropy_seed(seed: u64, domain: &str) -> [u8; 32] {
     entropy_seed_branch(seed, None, domain)
@@ -762,6 +771,9 @@ impl<M: WorldMachine> World<M> {
                         self.count_link(at, from, m, DELIVERED);
                     }
                 }
+                Payload::DnsReply(bytes) => {
+                    mach.deliver_frame(&bytes)?;
+                }
                 Payload::Serial(b) => mach.deliver_serial(&b)?,
                 Payload::Partition { from, to, on } => {
                     self.partitioned.insert((from, to), on);
@@ -901,7 +913,7 @@ impl<M: WorldMachine> World<M> {
                     self.dropped += 1;
                     self.count_link(at, from, m, RECEIVER_DROPPED);
                 }
-                Payload::Serial(_) => {}
+                Payload::DnsReply(_) | Payload::Serial(_) => {}
                 Payload::Partition { from, to, on } => {
                     self.partitioned.insert((from, to), on);
                 }

@@ -4,6 +4,7 @@ pub mod connections;
 pub mod control;
 pub mod cpu_charge;
 pub mod disk;
+pub mod dns;
 pub mod faults;
 pub mod host_control;
 pub mod input_program;

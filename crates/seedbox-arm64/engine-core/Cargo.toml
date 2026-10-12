@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 hex.workspace = true
+hickory-proto.workspace = true
 seedbox-engine-protocol = { package = "seedbox-arm64-protocol", path = "../protocol" }
 seedbox-control = { package = "seedbox-arm64-control", path = "../control" }
 serde.workspace = true

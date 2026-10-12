@@ -266,6 +266,29 @@ again.
 Code: [input program](../crates/seedbox-engine-core/src/input_program.rs),
 [coordinator](../crates/seedbox-engine-core/src/world.rs).
 
+## Simulated DNS
+
+Guests use `10.0.1.1` as their nameserver through an on-link route and keep
+only localhost and their own hostname in `/etc/hosts`. The coordinator answers
+ARP and UDP DNS queries at that virtual address, using machine names
+and their index-based `10.0.0.x` addresses. Hickory handles DNS wire parsing and
+encoding, including compressed names and EDNS. Name matching ignores ASCII case.
+Every query calls the coordinator's name-to-address lookup; the DNS endpoint
+keeps no record cache or independent membership list.
+Unknown names return NXDOMAIN; known names return an IPv4 address for A/IN and
+empty answers for other record types, including AAAA. Positive answers have a
+five-second TTL, so an application can cache an earlier answer until expiry.
+Responses are scheduled on the deterministic frame queue after one minimum
+link delay. This virtual endpoint has no machine and is not subject to
+machine-to-machine link faults or counters. Queued replies are retained in
+checkpoints and included in each backend's network witness. Restart currently
+retains the same IP; changing addresses across restarts and intentional stale
+answers require an address allocation and DNS-state policy.
+
+Code: [wire replies](../crates/seedbox-engine-core/src/dns.rs),
+[coordinator routing](../crates/seedbox-engine-core/src/world_windowed.rs),
+[guest setup](../guest/compose-init.c).
+
 ## Fault discovery and previews
 
 The server owns categories, parameter schemas and effect explanations.

@@ -536,6 +536,10 @@ pub fn run(options: &Options) -> Result<Value> {
                 Payload::Frame { from, bytes } => {
                     retained.push((key, Some(*from), bytes));
                 }
+                Payload::DnsReply(bytes) => {
+                    // A reserved witness identity for the virtual endpoint.
+                    retained.push((key, Some(usize::MAX), bytes));
+                }
                 Payload::Serial(_) | Payload::Partition { .. } => {
                     return Err("unsupported ARM world event in retained network state".into())
                 }
