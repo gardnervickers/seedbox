@@ -117,8 +117,11 @@ option in release builds. Enabled `hw_cache_consistency` instead uses code-page
 write protection and self-modifying-code sandboxing. In the observed Kafka
 startup, that mode grew a broker's memory to about 2 GB and it was killed;
 with application-driven invalidation, it used about 250 MB and kept starting.
-Each emitted ARM fragment owns immutable, page-separated decoded source spans,
-including followed and elided branches. A backing-page index selects dependencies
+The normal eager IC path invalidates executable pages and clears their historical
+execution bookkeeping. The experimental `-seedbox_icache_images` option is not
+enabled by the normal guest launcher. It gives each emitted ARM fragment immutable,
+page-separated decoded source spans, including followed and elided branches.
+A backing-page index selects dependencies
 of the published cache line, including executable aliases of a writable mapping.
 Comparing only those depended-on bytes preserves unchanged same-line neighbors.
 Position-independent architectural HINTs retain their owned raw encoding; they
