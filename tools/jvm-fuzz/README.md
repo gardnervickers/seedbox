@@ -17,6 +17,17 @@ This is a diagnostic tool, like `tools/mac-tcg`; it is not an acceptance suite.
   Each takes `SEED SCALE`, prints deterministic `key value` lines and ends with
   `OK <probe> <hash>`. `Race` prints schedule- and entropy-dependent values on
   purpose; it is only compared with its replay.
+- Translator probes aim at what DynamoRIO's progress client must get right:
+  signals landing in compiled code (`SignalBomb`, `InterruptedSyscalls`,
+  `AsyncClose`, `MappedSigbus`), code written while other threads run it
+  (`IcStorm`, `DeoptStorm`, `Redefine` through a Java agent, `CodeChurn`
+  through HotSpot's WhiteBox API), the thread register x28 and vector
+  registers (`X28Storm`, `FpRegPressure`), copy and encoding stubs
+  (`ArrayCopyStubs`), memory maps (`MmapChurn`, `AddressSpace`), thread and
+  process lifetime (`ThreadChurn`, `VthreadStorm`, `ExitMatrix`) and timers
+  (`SleepSort`, `Clocks`). `probes/preview` use the JDK 21 foreign-function
+  preview; `probes/whitebox` compile against the WhiteBox sources the image
+  downloads for its JDK update.
 - `randprog.py`: seeded random programs (arithmetic edge cases, caught
   arithmetic and bounds exceptions, virtual calls, monitors, string building)
   run through interpreter, C1 and C2 phases with a checksum after each.
@@ -50,8 +61,17 @@ docker buildx build --load -t jvmfuzz-jcstress:samples jcstress
 ```
 
 `gen --only REGEX` selects probes; `--profiles a,b` restricts flag profiles.
+`gen --jit-noise` adds a thread to every probe that keeps compiling and
+dropping hidden classes, so each probe also runs during code modification.
 `native` pins each container to one CPU with the guest's memory so JVM
-ergonomics match the 1-vCPU guest.
+ergonomics match the 1-vCPU guest; `--unconfined` drops the engine's seccomp
+filter, which the guest does not have. `sim --variant NAME --seed-offset K
+--jitter P` reruns the corpus into `sim-NAME` with other simulation seeds and
+CPU jitter; the report gives each variant its own verdicts.
+
+A probe whose expected exit status is not 0 lists it per argument variant
+(`exit_codes` in `PROBES`); a probe that can hang its JVM is `isolate`d in a
+simulation of its own.
 
 ## Verdicts
 

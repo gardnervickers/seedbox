@@ -64,6 +64,23 @@ PROFILES = {
                  "-XX:StressSeed=@SEED@"],
     "smallstack": ["-Xss256k", "-XX:MaxJavaStackTraceDepth=64"],
     "noinline": ["-XX:-Inline", "-XX:-UseOnStackReplacement"],
+    # Monitors always inflated (no mark-word CAS), or JDK 21's lightweight locking.
+    "lm0": ["-XX:+UnlockExperimentalVMOptions", "-XX:LockingMode=0"],
+    "lm2": ["-XX:+UnlockExperimentalVMOptions", "-XX:LockingMode=2"],
+    # Thread-register traffic: a safepoint poll every loop iteration and tiny TLABs.
+    "x28storm": ["-XX:+UseCountedLoopSafepoints", "-XX:LoopStripMiningIter=1", "-XX:TLABSize=2k",
+                 "-XX:-ResizeTLAB", "-XX:MinTLABSize=1k"],
+    # Every implicit null check stays a signal, an uncommon trap and a recompilation.
+    "deoptstorm": ["-XX:PerBytecodeTrapLimit=1000000", "-XX:PerMethodTrapLimit=1000000",
+                   "-XX:PerMethodRecompilationCutoff=-1", "-XX:-OmitStackTraceInFastThrow"],
+    # Scalar paths of the hand-written copy, compare and zeroing stubs.
+    "stubflags": ["-XX:-UseSIMDForMemoryOps", "-XX:-UseSIMDForArrayEquals", "-XX:-UseSimpleArrayEquals",
+                  "-XX:+AvoidUnalignedAccesses", "-XX:BlockZeroingLowLimit=64"],
+    # Heap verification around every collection localizes corruption to the first bad GC.
+    "verifygc": ["-XX:+UnlockDiagnosticVMOptions", "-XX:+VerifyBeforeGC", "-XX:+VerifyAfterGC"],
+    # A stuck safepoint aborts with a report instead of hanging.
+    "sptimeout": ["-XX:+UnlockDiagnosticVMOptions", "-XX:+SafepointTimeout", "-XX:SafepointTimeoutDelay=20000",
+                  "-XX:+AbortVMOnSafepointTimeout"],
 }
 
 # Probes and what they need. "det": the output is expected to be identical to a
@@ -75,10 +92,19 @@ PROBES = {
     "ArraysSimd": {}, "VectorApi": {"extra": ["--add-modules", "jdk.incubator.vector"]},
     "Crypto": {}, "BigNumbers": {}, "Collections": {}, "Serialization": {}, "Compression": {},
     "FileIo": {}, "OffHeap": {}, "Sockets": {}, "Http": {},
-    "Processes": {"variants": [["-Djdk.lang.Process.launchMechanism=POSIX_SPAWN"],
+    "Processes": {"isolate": True, "variants": [["-Djdk.lang.Process.launchMechanism=POSIX_SPAWN"],
                                ["-Djdk.lang.Process.launchMechanism=FORK"],
                                ["-Djdk.lang.Process.launchMechanism=VFORK"]]},
-    "Signals": {}, "Safepoints": {}, "Time": {}, "Preemption": {},
+    "Signals": {"isolate": True}, "Safepoints": {}, "Time": {}, "Preemption": {},
+    "SignalBomb": {"preview": True, "isolate": True}, "InterruptedSyscalls": {"preview": True, "isolate": True},
+    "AsyncClose": {"isolate": True}, "DeoptStorm": {}, "X28Storm": {}, "FpRegPressure": {}, "ThreadChurn": {},
+    "AddressSpace": {"det": False},
+    "IcStorm": {}, "MappedSigbus": {}, "ArrayCopyStubs": {}, "SleepSort": {"det": False}, "Clocks": {}, "MmapChurn": {},
+    "VthreadStorm": {"extra": ["-Djdk.virtualThreadScheduler.parallelism=4"]},
+    # "exit_codes": the expected exit status for each argument variant.
+    "Redefine": {"extra": ["-javaagent:/fuzz/classes/agent.jar"]}, "CodeChurn": {"whitebox": True},
+    "ExitMatrix": {"isolate": True, "arg_variants": ["daemons", "exit7", "halt5", "uncaught"],
+                   "exit_codes": {"daemons": 0, "exit7": 7, "halt5": 5, "uncaught": 1}},
     "Jfr": {"arg_variants": ["all 1", "exec 1", "exec 10", "alloc,monitor,park 1", "none 1"]},
     "Race": {"det": False},
 }
@@ -117,27 +143,40 @@ def cmd_gen(a):
     src.mkdir(parents=True)
     for f in sorted((HERE / "probes").glob("*.java")):
         shutil.copy(f, src / f.name)
-    instances = []  # (main, args, extra flags, det)
+    # Preview probes use the foreign-function API, still a preview in JDK 21; WhiteBox probes
+    # compile against HotSpot's test API.
+    for sub in ("preview", "whitebox"):
+        (src / sub).mkdir()
+        for f in sorted((HERE / "probes" / sub).glob("*.java")):
+            shutil.copy(f, src / sub / f.name)
+    instances = []  # (main, args, extra flags, det, expected exit)
     probes = [p for p in PROBES if not a.only or re.search(a.only, p)]
     for name in probes:
         spec = PROBES[name]
         for k in range(a.probe_seeds):
             pseed = rnd.randrange(1, 10**6)
-            extra = list(spec.get("extra", []))
+            extra = list(spec.get("extra", [])) + (["--enable-preview", "--enable-native-access=ALL-UNNAMED"] if spec.get("preview") else [])
+            if spec.get("whitebox"):
+                extra += ["-Xbootclasspath/a:/fuzz/wb", "-XX:+UnlockDiagnosticVMOptions", "-XX:+WhiteBoxAPI"]
+            if a.jit_noise:
+                extra.append("-Dfz.jitnoise=true")
             if "variants" in spec:
                 extra += rnd.choice(spec["variants"])
             args = f"{pseed} {a.scale}"
+            expect_exit = 0
             if "arg_variants" in spec:
-                args += " " + rnd.choice(spec["arg_variants"])
-            instances.append((name, args, extra, spec.get("det", True)))
+                variant = rnd.choice(spec["arg_variants"])
+                args += " " + variant
+                expect_exit = spec.get("exit_codes", {}).get(variant, 0)
+            instances.append((name, args, extra, spec.get("det", True), expect_exit))
     for k in range(a.random):
         rseed = rnd.randrange(1, 10**9)
         cls = f"R{rseed}"
         (src / f"{cls}.java").write_text(randprog.generate(rseed, cls))
-        instances.append((cls, str(rnd.randrange(10**6)), [], True))
+        instances.append((cls, str(rnd.randrange(10**6)), [], True, 0))
     profiles = [p for p in PROFILES if not a.profiles or p in a.profiles.split(",")]
     cases = []
-    for main, args, extra, det in instances:
+    for main, args, extra, det, expect_exit in instances:
         chosen = []
         if "default" in profiles and rnd.random() < 0.5:
             chosen.append("default")
@@ -150,12 +189,13 @@ def cmd_gen(a):
             if a.skip_known and any(re.search(k, cid) for k in KNOWN_ISSUES):
                 continue
             cases.append({"id": cid, "main": main, "args": args, "profile": prof,
-                          "flags": flags, "det": det, "timeout": CASE_TIMEOUT})
+                          "flags": flags, "det": det, "timeout": CASE_TIMEOUT, "exit": expect_exit})
     rnd.shuffle(cases)
-    batches = {}
-    for i in range(0, len(cases), a.batch_size):
-        b = f"b{i // a.batch_size:03d}"
-        batches[b] = [c["id"] for c in cases[i:i + a.batch_size]]
+    # Probes that can hang get a simulation of their own, so a hang cuts no other case.
+    isolated = [c for c in cases if PROBES.get(c["main"], {}).get("isolate")]
+    shared = [c for c in cases if not PROBES.get(c["main"], {}).get("isolate")]
+    groups = [shared[i:i + a.batch_size] for i in range(0, len(shared), a.batch_size)] + [[c] for c in isolated]
+    batches = {f"b{i:03d}": [c["id"] for c in group] for i, group in enumerate(groups)}
     bdir = out / "batches"
     bdir.mkdir()
     by_id = {c["id"]: c for c in cases}
@@ -166,7 +206,8 @@ def cmd_gen(a):
     shutil.copy(HERE / "runtime" / "Dockerfile", out / "Dockerfile")
     shutil.copy(HERE / "runtime" / "run-batch.sh", out / "run-batch.sh")
     digest = hashlib.sha256()
-    for f in sorted(list(src.iterdir()) + list(bdir.iterdir()) + [out / "Dockerfile", out / "run-batch.sh"]):
+    for f in sorted(list(src.glob("**/*.java")) + list(bdir.iterdir())
+                    + [out / "Dockerfile", out / "run-batch.sh"]):
         digest.update(f.name.encode() + f.read_bytes())
     tag = digest.hexdigest()[:12]
     meta = {"seed": a.seed, "tag": tag, "image": f"jvmfuzz:{tag}", "cases": cases, "batches": batches}
@@ -208,8 +249,9 @@ def cmd_native(a):
         subprocess.run(["docker", "rm", "-f", name], env=engine_env(), capture_output=True)
         t0 = time.time()
         try:
+            confine = ["--security-opt", "seccomp=unconfined"] if a.unconfined else []
             p = subprocess.run(["docker", "run", "--rm", "--name", name, f"--cpuset-cpus={cpu}", f"--memory={SIM_MEMORY_MIB}m",
-                                f"--memory-swap={SIM_MEMORY_MIB}m", meta["image"], b],
+                                f"--memory-swap={SIM_MEMORY_MIB}m", *confine, meta["image"], b],
                                env=engine_env(), capture_output=True, text=True, timeout=batch_timeout(meta, b))
             text = p.stdout + (f"\n@@STDERR\n{p.stderr}" if p.stderr.strip() else "")
         except subprocess.TimeoutExpired as e:
@@ -243,7 +285,7 @@ def seedbox(a, *args, timeout=None):
 
 
 def sim_batch(a, meta, b, index):
-    d = Path(a.corpus) / "sim" / b
+    d = Path(a.corpus) / ("sim-" + a.variant if a.variant else "sim") / b
     d.mkdir(parents=True, exist_ok=True)
     result = d / "result.json"
     if result.exists() and not a.force:
@@ -255,11 +297,13 @@ def sim_batch(a, meta, b, index):
         "machines": {},
         "oracle": {"image": meta["image"], "memoryMiB": SIM_MEMORY_MIB, "command": [b]},
     }
+    if a.jitter:
+        project["oracle"]["cpu"] = {"jitter": f"{a.jitter}%"}
     (d / "seedbox.yaml").write_text(json.dumps(project, indent=1) + "\n")
     info = json.loads(result.read_text()) if result.exists() and not a.force else {}
     t0 = time.time()
     if "id" not in info:
-        seed = (meta["seed"] * 1000 + index) % (2**31)
+        seed = (meta["seed"] * 1000 + index + a.seed_offset * 7919) % (2**31)
         p = seedbox(a, "run", str(d), "--seed", str(seed), "--wall-time", a.wall_time)
         (d / "run.stdout").write_text(p.stdout)
         (d / "run.stderr").write_text(p.stderr)
@@ -345,6 +389,47 @@ def failure_kind(r):
     return "SIM_FAIL"
 
 
+def sim_dirs(corpus):
+    """The main simulation directory first, then variants (sim-<name>)."""
+    dirs = [corpus / "sim"] if (corpus / "sim").exists() else []
+    return dirs + sorted(d for d in corpus.glob("sim-*") if d.is_dir())
+
+
+def case_verdict(c, ns, s, p, simulated):
+    """Verdict and notes for one case in one simulation directory."""
+    stable = len(ns) >= 1 and all(same(ns[0], n) for n in ns[1:])
+    want = c.get("exit", 0)
+    native_ok = bool(ns) and all(n["exit"] == want for n in ns)
+    notes = []
+    if not ns:
+        verdict = "NO_NATIVE"
+    elif not native_ok:
+        verdict = "NATIVE_FAIL"
+        notes += ns[0]["lines"][-15:]
+    else:
+        verdict = None
+    if s is None:
+        v2 = "SIM_NOT_REACHED" if simulated else "NO_SIM"
+    elif s["exit"] != want:
+        v2 = failure_kind(s)
+        notes += s["lines"][-25:] + s["hserr"][:60]
+    elif c["det"] and stable and ns:
+        v2 = "OK" if same(ns[0], s) else "MISMATCH"
+        if v2 == "MISMATCH":
+            notes += diff(ns[0], s, "native", "sim")
+    else:
+        v2 = "OK_NONDET"
+    if p is not None and s is not None and not same(s, p):
+        v2 = "REPLAY_DIVERGE"
+        notes += diff(s, p, "sim", "replay")
+    if verdict is None or verdict == "NATIVE_FAIL" and v2.startswith("SIM"):
+        verdict = v2 if verdict is None else f"{verdict}+{v2}"
+    if c["det"] and native_ok and not stable and verdict.startswith("OK"):
+        verdict = "NATIVE_UNSTABLE"
+        notes += diff(ns[0], ns[1], "native-r1", "native-r2")
+    return verdict, notes
+
+
 def cmd_report(a):
     corpus = Path(a.corpus)
     meta = load(corpus)
@@ -354,56 +439,30 @@ def cmd_report(a):
         for b in meta["batches"]:
             for cid, r in parse(run / f"{b}.out").items():
                 native.setdefault(cid, []).append(r)
-    sim, replay, simmeta = {}, {}, {}
-    for b in meta["batches"]:
-        d = corpus / "sim" / b
-        sim.update(parse(d / "run.out"))
-        replay.update(parse(d / "replay.out"))
-        if (d / "result.json").exists():
-            simmeta[b] = json.loads((d / "result.json").read_text())
     batch_of = {cid: b for b, ids in meta["batches"].items() for cid in ids}
-    rows, details = [], []
-    for c in meta["cases"]:
-        cid = c["id"]
-        ns = native.get(cid, [])
-        s, p = sim.get(cid), replay.get(cid)
-        stable = len(ns) >= 1 and all(same(ns[0], n) for n in ns[1:])
-        native_ok = bool(ns) and all(n["exit"] == 0 for n in ns)
-        notes = []
-        if not ns:
-            verdict = "NO_NATIVE"
-        elif not native_ok:
-            verdict = "NATIVE_FAIL"
-            notes += ns[0]["lines"][-15:]
-        else:
-            verdict = None
-        if s is None:
-            v2 = "NO_SIM" if batch_of[cid] not in simmeta else "SIM_NOT_REACHED"
-        elif s["exit"] != 0 or s["exit"] is None:
-            v2 = failure_kind(s)
-            notes += s["lines"][-25:] + s["hserr"][:60]
-        elif c["det"] and stable and ns:
-            v2 = "OK" if same(ns[0], s) else "MISMATCH"
-            if v2 == "MISMATCH":
-                notes += diff(ns[0], s, "native", "sim")
-        else:
-            v2 = "OK_NONDET"
-        if p is not None and s is not None and not same(s, p):
-            v2 = "REPLAY_DIVERGE"
-            notes += diff(s, p, "sim", "replay")
-        if verdict is None or verdict == "NATIVE_FAIL" and v2.startswith("SIM"):
-            verdict = v2 if verdict is None else f"{verdict}+{v2}"
-        if c["det"] and native_ok and not stable and verdict.startswith("OK"):
-            verdict = "NATIVE_UNSTABLE"
-            notes += diff(ns[0], ns[1], "native-r1", "native-r2")
-        rows.append({"id": cid, "batch": batch_of[cid], "profile": c["profile"], "main": c["main"], "verdict": verdict,
-                     "replayed": p is not None})
-        if not verdict.startswith("OK") and verdict != "NO_SIM":
-            details.append((cid, verdict, notes))
+    dirs = sim_dirs(corpus) or [corpus / "sim"]
+    rows, details, simmeta = [], [], {}
+    for d in dirs:
+        label = d.name
+        sim, replay, meta_d = {}, {}, {}
+        for b in meta["batches"]:
+            sim.update(parse(d / b / "run.out"))
+            replay.update(parse(d / b / "replay.out"))
+            if (d / b / "result.json").exists():
+                meta_d[b] = json.loads((d / b / "result.json").read_text())
+        simmeta[label] = meta_d
+        for c in meta["cases"]:
+            cid = c["id"]
+            p = replay.get(cid)
+            verdict, notes = case_verdict(c, native.get(cid, []), sim.get(cid), p, batch_of[cid] in meta_d)
+            rows.append({"id": cid, "batch": batch_of[cid], "profile": c["profile"], "main": c["main"],
+                         "sim": label, "verdict": verdict, "replayed": p is not None})
+            if not verdict.startswith("OK") and verdict != "NO_SIM":
+                details.append((cid, verdict, notes, label))
     # Profile invariance: one program and argument list must print the same thing under every flag profile.
     groups = {}
     for c in meta["cases"]:
-        if c["det"] and native.get(c["id"]) and native[c["id"]][0]["exit"] == 0:
+        if c["det"] and native.get(c["id"]) and native[c["id"]][0]["exit"] == c.get("exit", 0):
             groups.setdefault((c["main"], c["args"]), []).append(c)
     variants = []
     for (main, args), cs in groups.items():
@@ -414,19 +473,23 @@ def cmd_report(a):
                 variants.append((cs[0]["id"], c["id"], diff(base, other, cs[0]["profile"], c["profile"], 20)))
     counts = {}
     for r in rows:
-        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+        key = r["verdict"] if r["sim"] == "sim" else f"{r['verdict']} ({r['sim']})"
+        counts[key] = counts.get(key, 0) + 1
     lines = [f"# JVM fuzz report: {corpus.name}", "",
              f"Corpus seed {meta['seed']}, image `{meta['image']}`, {len(meta['cases'])} cases in {len(meta['batches'])} batches; "
              f"{len(runs)} native run(s) per case.", "", "| Verdict | Cases |", "| --- | --- |"]
     lines += [f"| {k} | {v} |" for k, v in sorted(counts.items())]
-    lines += ["", "## Simulations", "", "| Batch | Status | Simulation | Wall s | Replay | Replay simulation |", "| --- | --- | --- | --- | --- | --- |"]
-    for b, m in simmeta.items():
-        lines.append(f"| {b} | {m.get('status')} | {m.get('id')} | {m.get('wall_seconds')} | {m.get('replay_status', '-')} | {m.get('replay_id', '-')} |")
+    lines += ["", "## Simulations", "", "| Run | Batch | Status | Simulation | Wall s | Replay | Replay simulation |",
+              "| --- | --- | --- | --- | --- | --- | --- |"]
+    for label, per_batch in simmeta.items():
+        for b, m in per_batch.items():
+            lines.append(f"| {label} | {b} | {m.get('status')} | {m.get('id')} | {m.get('wall_seconds')} | "
+                         f"{m.get('replay_status', '-')} | {m.get('replay_id', '-')} |")
     if details:
         lines += ["", "## Findings", ""]
-        for cid, verdict, notes in details:
+        for cid, verdict, notes, label in details:
             c = next(x for x in meta["cases"] if x["id"] == cid)
-            lines += [f"### {verdict}: `{cid}` ({batch_of[cid]})", "",
+            lines += [f"### {verdict}: `{cid}` ({label}/{batch_of[cid]})", "",
                       f"`java {' '.join(c['flags'])} {c['main']} {c['args']}`", "", "```"] + notes + ["```", ""]
     if variants:
         lines += ["", "## Native profile variance (probe nondeterminism or JIT bug)", ""]
@@ -562,6 +625,8 @@ def main():
     g.add_argument("--scale", type=int, default=1, help="Probe work multiplier.")
     g.add_argument("--batch-size", type=int, default=12, help="Cases per container run or simulation.")
     g.add_argument("--skip-known", action="store_true", help="Leave out cases matching KNOWN_ISSUES.")
+    g.add_argument("--jit-noise", action="store_true",
+                   help="Run a thread in every probe that keeps compiling and dropping hidden classes.")
     b = sub.add_parser("build", help="Compile the corpus into its image.")
     b.add_argument("corpus")
     n = sub.add_parser("native", help="Run every batch in a container pinned to one CPU.")
@@ -569,6 +634,8 @@ def main():
     n.add_argument("--runs", type=int, default=2, help="Native runs per batch (stability check).")
     n.add_argument("--jobs", type=int, default=4, help="Concurrent containers.")
     n.add_argument("--force", action="store_true", help="Rerun batches with existing output.")
+    n.add_argument("--unconfined", action="store_true",
+                   help="Run without the engine's seccomp filter, as the guest has none.")
     s = sub.add_parser("sim", help="Run every batch as a Seedbox simulation (server must be running).")
     s.add_argument("corpus")
     s.add_argument("--seedbox", default=os.environ.get("SEEDBOX_BIN", "seedbox"), help="Seedbox executable.")
@@ -577,6 +644,9 @@ def main():
     s.add_argument("--replay", action="store_true", help="Also replay each simulation and compare its output.")
     s.add_argument("--batches", help="Comma-separated batch subset.")
     s.add_argument("--force", action="store_true", help="Rerun batches with existing results.")
+    s.add_argument("--variant", help="Store results as sim-VARIANT, compared with native like the main run.")
+    s.add_argument("--seed-offset", type=int, default=0, help="Shift simulation seeds (for variants).")
+    s.add_argument("--jitter", type=int, default=0, help="Oracle CPU jitter percent (for variants).")
     r = sub.add_parser("report", help="Compare native, simulation and replay output.")
     r.add_argument("corpus")
     j = sub.add_parser("jcstress", help="Run jcstress groups natively and/or as simulations, comparing verdicts.")

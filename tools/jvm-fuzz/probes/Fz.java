@@ -13,6 +13,33 @@ final class Fz {
         seed = args.length > 0 ? Long.parseLong(args[0]) : 1;
         scale = args.length > 1 ? Integer.parseInt(args[1]) : 1;
         rnd = new SplittableRandom(seed);
+        if (Boolean.getBoolean("fz.jitnoise")) jitNoise();
+    }
+
+    static volatile long noiseSink;
+
+    /**
+     * gen --jit-noise: a daemon thread keeps defining, compiling and dropping hidden classes, so
+     * code is written and invalidated while the probe runs. It prints nothing.
+     */
+    private static void jitNoise() {
+        Thread t = new Thread(() -> {
+            try (java.io.InputStream in = Fz.class.getResourceAsStream("/Payload.class")) {
+                byte[] bytes = in.readAllBytes();
+                long s = 0;
+                while (true) {
+                    Class<?> c = java.lang.invoke.MethodHandles.lookup().defineHiddenClass(bytes, false).lookupClass();
+                    var op = (java.util.function.LongUnaryOperator) c.getDeclaredConstructor().newInstance();
+                    for (int i = 0; i < 20_000; i++) s += op.applyAsLong(i);
+                    noiseSink = s;
+                    Thread.sleep(20);
+                }
+            } catch (Exception e) {
+                noiseSink = -1;
+            }
+        }, "fz-jit-noise");
+        t.setDaemon(true);
+        t.start();
     }
 
     static void mix(long v) {
