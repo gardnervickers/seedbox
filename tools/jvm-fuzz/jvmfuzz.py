@@ -99,13 +99,15 @@ PROBES = {
                                                 for jit in ([], ["-Xint"], ["-Xbatch", "-XX:CICompilerCount=1",
                                                                              "-XX:TieredStopAtLevel=1"])]},
     "Signals": {"isolate": True}, "Safepoints": {}, "Time": {}, "Preemption": {},
-    "SignalBomb": {"preview": True, "isolate": True}, "InterruptedSyscalls": {"preview": True, "isolate": True},
+    # Under lock-mode and heap-verification profiles its JIT patches code often enough that
+    # translator synch-alls make it take about 230 s of simulated time.
+    "SignalBomb": {"preview": True, "isolate": True, "timeout": 600}, "InterruptedSyscalls": {"preview": True, "isolate": True},
     "AsyncClose": {"isolate": True}, "DeoptStorm": {}, "X28Storm": {}, "FpRegPressure": {}, "ThreadChurn": {},
     "AddressSpace": {"det": False},
     "IcStorm": {}, "MappedSigbus": {}, "ArrayCopyStubs": {}, "SleepSort": {"det": False}, "Clocks": {}, "MmapChurn": {},
     "VthreadStorm": {"extra": ["-Djdk.virtualThreadScheduler.parallelism=4"]},
     # "exit_codes": the expected exit status for each argument variant.
-    "SigquitAttach": {"preview": True}, "SafepointsNative": {}, "Durability": {}, "ClassStorm": {},
+    "SigquitAttach": {"preview": True}, "Ffm": {"preview": True}, "SafepointsNative": {}, "Durability": {}, "ClassStorm": {},
     "CodeReuse": {"extra": ["-XX:ReservedCodeCacheSize=6m", "-XX:-SegmentedCodeCache"]},
     # Deliberate deaths: the exit status must match; the report is compared with the replay only.
     "Crash": {"det": False, "isolate": True, "extra": ["-Xmx96m", "-XX:+CrashOnOutOfMemoryError"],
@@ -114,6 +116,14 @@ PROBES = {
     "Redefine": {"extra": ["-javaagent:/fuzz/classes/agent.jar"]}, "CodeChurn": {"whitebox": True},
     "ExitMatrix": {"isolate": True, "arg_variants": ["daemons", "exit7", "halt5", "uncaught"],
                    "exit_codes": {"daemons": 0, "exit7": 7, "halt5": 5, "uncaught": 1}},
+    # Native AArch64 probes (probes/c/cfz.c), one test each, run without a JVM.
+    **{f"C.{name}": {"native": name} for name in (
+        "casp", "lse2", "ldapr", "dczva", "carry", "fpcr", "tbi", "rwrx", "mremapcode", "membarrier",
+        "dlopen", "segvbarrier", "siglongjmp", "ucontext", "pthreadcancel", "seccomp", "autodisarm",
+        "signalfd", "pselect", "cputimer", "futexwaitv", "epolloneshot", "pidfd", "clone3", "memfdexec",
+        "vmops", "timerfd", "rseq", "iouring", "ptrace", "wipeonfork", "scmrights", "ifunc")},
+    # What the host offers; differences from native describe the guest ("info").
+    "C.capabilities": {"native": "capabilities", "info": True},
     "Jfr": {"arg_variants": ["all 1", "exec 1", "exec 10", "alloc,monitor,park 1", "none 1",
                              "exec 1 soe", "exec 1 npe", "exec 1 alloc", "exec 5 lock", "exec 1 native",
                              "exec,threaddump 1 vthread", "native 1 native", "threaddump 1 lock",
@@ -124,8 +134,6 @@ PROBES = {
 # Open translator bugs, as case-id patterns (see repros/README.md).
 # `gen --skip-known` leaves these out so a run reports only new problems.
 KNOWN_ISSUES = {
-    r"^SignalBomb\.[0-9]+\.(lm0|lm2|verifygc)$": "translator synch-all deadlock in simulation: every "
-        "thread parked, including the one synching (under investigation)",
 }
 
 CASE_TIMEOUT = 240
@@ -158,9 +166,9 @@ def cmd_gen(a):
         shutil.copy(f, src / f.name)
     # Preview probes use the foreign-function API, still a preview in JDK 21; WhiteBox probes
     # compile against HotSpot's test API.
-    for sub in ("preview", "whitebox"):
+    for sub in ("preview", "whitebox", "c"):
         (src / sub).mkdir()
-        for f in sorted((HERE / "probes" / sub).glob("*.java")):
+        for f in sorted(list((HERE / "probes" / sub).glob("*.java")) + list((HERE / "probes" / sub).glob("*.c"))):
             shutil.copy(f, src / sub / f.name)
     instances = []  # (main, args, extra flags, det, expected exit)
     probes = [p for p in PROBES if not a.only or re.search(a.only, p)]
@@ -176,6 +184,9 @@ def cmd_gen(a):
             if "variants" in spec:
                 extra += rnd.choice(spec["variants"])
             args = f"{pseed} {a.scale}"
+            if "native" in spec:
+                instances.append((name, f"{spec['native']} {args}", None, spec.get("det", True), 0))
+                continue
             expect_exit = 0
             if "arg_variants" in spec:
                 variant = rnd.choice(spec["arg_variants"])
@@ -190,6 +201,12 @@ def cmd_gen(a):
     profiles = [p for p in PROFILES if not a.profiles or p in a.profiles.split(",")]
     cases = []
     for main, args, extra, det, expect_exit in instances:
+        if extra is None:  # a native probe: no JVM, so no flag profiles
+            seed_tag = args.split()[1]
+            cases.append({"id": f"{main}.{seed_tag}.native", "main": "/fuzz/bin/cfz", "args": args,
+                          "profile": "native", "flags": ["-"], "det": det, "timeout": CASE_TIMEOUT,
+                          "exit": 0, "info": PROBES[main].get("info", False), "probe": main})
+            continue
         chosen = []
         if "default" in profiles and rnd.random() < 0.5:
             chosen.append("default")
@@ -202,7 +219,8 @@ def cmd_gen(a):
             if a.skip_known and any(re.search(k, cid) for k in KNOWN_ISSUES):
                 continue
             cases.append({"id": cid, "main": main, "args": args, "profile": prof,
-                          "flags": flags, "det": det, "timeout": CASE_TIMEOUT, "exit": expect_exit})
+                          "flags": flags, "det": det, "timeout": PROBES.get(main, {}).get("timeout", CASE_TIMEOUT),
+                          "exit": expect_exit})
     rnd.shuffle(cases)
     # Probes that can hang get a simulation of their own, so a hang cuts no other case.
     isolated = [c for c in cases if PROBES.get(c["main"], {}).get("isolate")]
@@ -219,7 +237,7 @@ def cmd_gen(a):
     shutil.copy(HERE / "runtime" / "Dockerfile", out / "Dockerfile")
     shutil.copy(HERE / "runtime" / "run-batch.sh", out / "run-batch.sh")
     digest = hashlib.sha256()
-    for f in sorted(list(src.glob("**/*.java")) + list(bdir.iterdir())
+    for f in sorted(list(src.glob("**/*.java")) + list(src.glob("**/*.c")) + list(bdir.iterdir())
                     + [out / "Dockerfile", out / "run-batch.sh"]):
         digest.update(f.name.encode() + f.read_bytes())
     tag = digest.hexdigest()[:12]
@@ -437,6 +455,8 @@ def case_verdict(c, ns, s, p, simulated):
         notes += diff(s, p, "sim", "replay")
     if verdict is None or verdict == "NATIVE_FAIL" and v2.startswith("SIM"):
         verdict = v2 if verdict is None else f"{verdict}+{v2}"
+    if c.get("info") and verdict == "MISMATCH":
+        verdict = "GUEST_DIFF"  # informational: what the guest offers differs from the host
     if c["det"] and native_ok and not stable and verdict.startswith("OK"):
         verdict = "NATIVE_UNSTABLE"
         notes += diff(ns[0], ns[1], "native-r1", "native-r2")

@@ -30,6 +30,18 @@ This is a diagnostic tool, like `tools/mac-tcg`; it is not an acceptance suite.
   timers (`SleepSort`, `Clocks`). `probes/preview` use the JDK 21 foreign-function
   preview; `probes/whitebox` compile against the WhiteBox sources the image
   downloads for its JDK update.
+- `probes/c/cfz.c`: native AArch64 probes, one test per `C.<name>` probe, run
+  without a JVM: LSE pair atomics, `DC ZVA`, flags and FPCR across progress
+  calls, tagged pointers, RW/RX code aliases and moved code, `membarrier`,
+  `dlopen` churn, SIGSEGV write barriers, `siglongjmp` out of faults,
+  `ucontext` with x28 live, thread cancellation, seccomp `SIGSYS` emulation,
+  `SS_AUTODISARM`, `signalfd`, `pselect`, CPU-time timers, `futex_waitv`,
+  `EPOLLONESHOT`, pidfds, `clone3`, `memfd` exec, `madvise`/`mremap` and seals,
+  `timerfd`, a real `rseq` critical section, raw `io_uring`, `ptrace` register
+  reads, `MADV_WIPEONFORK`, `SCM_RIGHTS` and `IFUNC`. `C.capabilities` lists the host's CPU features, syscalls and files;
+  its differences from native are reported as `GUEST_DIFF`, not failures. Run
+  native passes with `--unconfined`, or the engine's seccomp filter hides some
+  syscalls.
 - `randprog.py`: seeded random programs (arithmetic edge cases, caught
   arithmetic and bounds exceptions, virtual calls, monitors, string building)
   run through interpreter, C1 and C2 phases with a checksum after each.
@@ -86,6 +98,7 @@ simulation of its own.
 | `SIM_CUT`, `SIM_NOT_REACHED` | The simulation ended during or before the case. |
 | `REPLAY_DIVERGE` | The replay printed different output from the original simulation. |
 | `NATIVE_FAIL`, `NATIVE_UNSTABLE` | The probe itself is broken or nondeterministic; fix the probe. |
+| `GUEST_DIFF` | An informational probe (`C.capabilities`) found the guest differs from the host. |
 
 The report also lists programs whose native output changes with the flag
 profile: a probe bug or a HotSpot bug, independent of Seedbox.

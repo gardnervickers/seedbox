@@ -11,8 +11,15 @@ while IFS="$tab" read -r id limit flags main args; do
     # Each case gets its own temporary directory, removed afterwards, so files a
     # crashed JVM leaves (a JFR repository, a heap dump) cannot fill the disk.
     mkdir -p /tmp/fzcase
-    timeout -s KILL "$limit" java $flags -Djava.io.tmpdir=/tmp/fzcase -XX:ErrorFile=/tmp/hs_err_$id.log \
-        -cp /fuzz/classes "$main" $args < /dev/null 2>&1
+    case "$main" in
+    /*) # A native probe binary.
+        # shellcheck disable=SC2086
+        (cd /tmp/fzcase && timeout -s KILL "$limit" "$main" $args < /dev/null 2>&1) ;;
+    *)
+        # shellcheck disable=SC2086
+        timeout -s KILL "$limit" java $flags -Djava.io.tmpdir=/tmp/fzcase -XX:ErrorFile=/tmp/hs_err_$id.log \
+            -cp /fuzz/classes "$main" $args < /dev/null 2>&1 ;;
+    esac
     code=$?
     rm -rf /tmp/fzcase /tmp/.java_pid* /tmp/.attach_pid*
     if [ -f "/tmp/hs_err_$id.log" ]; then

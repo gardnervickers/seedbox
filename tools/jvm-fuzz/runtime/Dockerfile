@@ -20,9 +20,17 @@ RUN mkdir /wb && javac --release 21 -nowarn -XDsuppressNotes -d /wb /wbsrc/*.jav
     if ls /src/whitebox/*.java > /dev/null 2>&1; then \
         javac --release 21 -XDsuppressNotes -cp /classes:/wb -d /classes /src/whitebox/*.java; fi
 
+# Native probes, built against the runtime image's glibc (Ubuntu 22.04).
+FROM docker.io/library/eclipse-temurin:21-jdk-jammy AS native
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gcc libc6-dev > /dev/null
+COPY src/c /src/c
+RUN mkdir /native && gcc -O2 -pthread -o /native/cfz /src/c/cfz.c -ldl && \
+    gcc -O2 -shared -fPIC -o /native/libfzdl.so /src/c/fzdl.c
+
 FROM docker.io/library/eclipse-temurin:21-jre-jammy
 COPY --from=compile /classes /fuzz/classes
 COPY --from=compile /wb /fuzz/wb
+COPY --from=native /native /fuzz/bin
 COPY batches /fuzz/batches
 COPY run-batch.sh /fuzz/run-batch.sh
 ENTRYPOINT ["/fuzz/run-batch.sh"]
