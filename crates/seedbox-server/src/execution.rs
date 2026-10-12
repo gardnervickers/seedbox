@@ -753,11 +753,16 @@ impl ExecutionService {
         if budget.finish() || cancellation.is_cancelled() {
             return Err(seedbox_application::Error::PreparationCancelled);
         }
+        let engine = executor.engine().map(|engine| seedbox_api::EngineBuild {
+            version: engine.simulator_version,
+            revision: engine.revision,
+        });
         self.manager
             .update(id, |s| {
                 s.spec = seedbox_api::SimulationSpec::resolved(definition);
                 s.status.phase = Phase::Running;
                 s.status.stage = Some(Stage::Booting);
+                s.status.engine = engine;
             })
             .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
         let observations = crate::observations::Receiver::start(self.manager.clone(), id.clone())?;
@@ -1104,7 +1109,6 @@ mod tests {
             machine_memory_mb: BTreeMap::from([("app".into(), 2048), ("oracle".into(), 256)]),
             profile: ExecutionProfile {
                 backend: Backend::Other("test".into()),
-                engine: digest,
                 witness_mode: WitnessMode::Exits,
                 semantic_parameters: SemanticParameters::new(1024),
             },

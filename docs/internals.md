@@ -462,11 +462,10 @@ by already-admitted inputs remain consumed; oracle calls are not reinjected.
 Unavailable captures remain explicit receipts, not fabricated checkpoints.
 
 Server comparison uses complete resolved execution definitions plus ordered
-external overrides. It ignores only image reference provenance, descriptive
-EngineDescriptor version/platform/backend/timebase fields, and HVF host release
-and CPU features. Actual architecture/backend, runtime asset digests, engine launch
-kind/owner-pipe/live-observation settings, clock, policies, configuration, overrides
-and checkpoint state/cursor/assets still participate. Original records are not
+external overrides. It ignores only image reference provenance and HVF host
+release and CPU features; resolved definitions do not mention the engine. Actual
+architecture/backend, runtime asset digests, clock, policies, configuration,
+overrides and checkpoint state/cursor/assets still participate. Original records are not
 rewritten. Compatible inputs still need actual witness/full-state/fault evidence;
 missing evidence yields NOT_COMPARABLE and differing results yield MISMATCH.
 

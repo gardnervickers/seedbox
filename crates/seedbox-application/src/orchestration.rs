@@ -12,8 +12,6 @@ pub use seedbox_artifacts::record::*;
 #[derive(Clone, Debug, Default)]
 pub struct ReplayOptions {
     pub cancellation: CancellationToken,
-    /// Semantic settings must still match. A new engine gives a new identity.
-    pub allow_engine_change: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -167,7 +165,7 @@ impl Orchestrator {
             configuration: simulation.clone(),
             inputs,
         };
-        self.execute(identity, executor, &options, None, false, progress)
+        self.execute(identity, executor, &options, None, progress)
     }
 
     /// Fresh execution with the original seed and retained artifacts. There is
@@ -183,7 +181,6 @@ impl Orchestrator {
             executor,
             ReplayOptions {
                 cancellation: cancellation.clone(),
-                ..Default::default()
             },
         )
     }
@@ -198,14 +195,8 @@ impl Orchestrator {
         // Refuse settings drift before creating an attempt or executing anything.
         let requested = executor.profile();
         drift(&baseline.identity.inputs.profile, &requested)?;
-        let mut identity = baseline.identity.clone();
-        if options.allow_engine_change {
-            identity.inputs.profile.engine = requested.engine;
-            // A new executable can use different argv without changing the
-            // simulation's retained memory, timebase, faults or other settings.
-            identity.inputs.profile.semantic_parameters.engine =
-                requested.semantic_parameters.engine;
-        }
+        // Replay always runs the current engine; its build is provenance.
+        let identity = baseline.identity.clone();
         let mut run = self.execute(
             identity,
             executor,
@@ -214,7 +205,6 @@ impl Orchestrator {
                 ..Default::default()
             },
             Some(&baseline),
-            options.allow_engine_change,
             |_| Ok(()),
         )?;
         if let Some(comparison) = &mut run.record.replay {
@@ -250,7 +240,6 @@ impl Orchestrator {
         executor: &dyn ExecutionBackend,
         options: &RunOptions,
         baseline: Option<&RunRecord>,
-        allow_engine_change: bool,
         mut progress: impl FnMut(RunProgress<'_>) -> Result<()>,
     ) -> Result<Run> {
         let cancellation = &options.cancellation;
@@ -269,7 +258,7 @@ impl Orchestrator {
                 .into_owned(),
             identity,
             performance_parameters: executor.performance_parameters(),
-            allow_engine_change,
+            engine: executor.engine(),
             log_policy: self.log_policy.clone(),
             omitted_logs: BTreeMap::new(),
             outcome: Outcome::Incomplete,

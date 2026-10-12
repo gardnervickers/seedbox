@@ -41,12 +41,12 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
   dependency features across one build. The public CLI links its library only
-  on Linux x86-64 and retains the complete CLI executable as the new engine.
-  Standalone low-level fixtures keep a separate lockfile and identity. Build
+  on Linux x86-64; the running CLI executable is the engine of every run and
+  replay. Standalone low-level fixtures keep a separate lockfile. Build
   and test those from the repository root with the aliases in `.cargo/config.toml`:
   `cargo build-vmm` and `cargo test-vmm`. Both already pass `--locked`; adding
   it again is an error. It builds into `crates/seedbox-vmm/target`. Public
-  runtime commands never invoke Cargo or search for a separate VMM by default.
+  runtime commands never invoke Cargo or launch a separate VMM.
   Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
   so it would also move standalone crate builds and break their scripts.
@@ -149,16 +149,19 @@ the canonical crate; do not restore sibling source inclusion for these policies.
 
 - A run's witness and a `seedbox replay` MATCH are how determinism is checked.
   Server-owned performance settings (watchdog interval and machine workers) must never change results.
-- Determinism is about results, not source or build bytes. Don't hash or
-  stamp the source tree, Git revision, build flags or compiled binaries, and
-  don't add compiler wrappers, reproducible-build checks, or formatting
-  exceptions (`#[rustfmt::skip]`, `rustfmt.toml`) to keep engine bytes stable.
-  Reformatting, moving code and changing build flags are ordinary changes;
-  run `cargo fmt` on the VMM like any other crate.
-- The linked CLI uses the root lockfile and records an explicit internal-worker
-  contract; profiles without it start a standalone `seedbox-vmm`. Both read one
-  JSON launch request (`seedbox_engine_core::launch::WorkerRequest`, written as
-  `output/worker-request.json`); the standalone VMM also builds it from its flags. Platform/version metadata never gates development replay.
+- Determinism is about results, not source or build bytes. Runs never retain
+  the engine executable; replay always uses the current engine and compares
+  results. Each run records the engine's Git revision (`-dirty` with
+  uncommitted changes) as provenance only: nothing gates, compares or keys
+  caches on it. Don't add compiler wrappers, reproducible-build checks, or
+  formatting exceptions (`#[rustfmt::skip]`, `rustfmt.toml`) to keep engine
+  bytes stable. Reformatting, moving code and changing build flags are
+  ordinary changes; run `cargo fmt` on the VMM like any other crate.
+- The CLI runs worlds through its own `__engine` worker entry points. The worker
+  reads one JSON launch request (`seedbox_engine_core::launch::WorkerRequest`,
+  written as `output/worker-request.json`); the standalone VMM builds the same
+  request from its flags for low-level fixtures. Platform/version metadata never
+  gates replay.
 
 ## Checks
 
@@ -186,8 +189,7 @@ Keep VMM engine tests compiled by default; conditional `ignore` attributes enabl
 hardware execution through features. Other feature-gated tests must be built by
 the portable `--no-run` checks. Add no per-test registration lists. The runner
 builds as the current user and signs disposable HVF test copies. Workers use
-normal host scheduling; Seedbox does not reserve cores or pin CPUs. Check other revisions in a Git worktree;
-do not stamp Git revisions or checkout cleanliness in the runner.
+normal host scheduling; Seedbox does not reserve cores or pin CPUs. Check other revisions in a Git worktree.
 
 ## Native project and resolved simulation definitions
 
@@ -361,13 +363,15 @@ Obsolete formats, APIs and CLI commands are replaced outright. There is no backw
 compatibility requirement; do not add legacy readers, aliases or migration shims.
 
 - Seedbox is under heavy development. Don't add pins, allowlists,
-  qualification lists, admission policies, provenance markers or similar
-  gates; #142 and #143 removed the engine, kernel, CPU and host-policy pins.
+  qualification lists, admission policies or similar gates; #142 and #143
+  removed the engine, kernel, CPU and host-policy pins. Provenance such as the
+  engine revision is recorded, never checked.
   When a test depends on such a check, change or drop the test. Text elsewhere
   about qualification or re-pinning is historical.
-- Old runs replay on the engine executable retained in the run directory. To
-  compare across engine changes, make a fresh run and check its witness against
-  the old run's.
+- Replay runs the current engine. A MATCH against an older run shows the current
+  engine reproduces its results; a MISMATCH after an engine change is either an
+  intended change in results or a determinism bug. Checkpoints whose snapshot
+  format an engine no longer reads fail to restore.
 - There is one engine mode: PV time with automatic application progress
   from binary instrumentation (`docs/internals.md`). Do not require
   application-specific flags or environment overrides to make replay succeed.

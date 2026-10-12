@@ -24,7 +24,6 @@ fn invoke(
     let mut command = Command::new(cli);
     command
         .args(args)
-        .env_remove("SEEDBOX_VMM")
         .env("SEEDBOX_STATE", state)
         .stdout(log.try_clone().map_err(|error| error.to_string())?)
         .stderr(log);

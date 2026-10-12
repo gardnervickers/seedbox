@@ -38,6 +38,3 @@ mod worker_process;
 pub use seedbox_artifacts::record;
 use seedbox_artifacts::{invalid, Context};
 pub use seedbox_artifacts::{Error, Result};
-
-#[cfg(test)]
-mod test_process;

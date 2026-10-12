@@ -18,6 +18,14 @@ use std::{
 
 pub use seedbox_artifacts::execution::*;
 
+/// The running Seedbox executable, which every run and replay launches, and
+/// the source revision it was built from. The revision is provenance only.
+#[derive(Clone, Debug)]
+pub struct Engine {
+    pub executable: PathBuf,
+    pub revision: Option<String>,
+}
+
 /// Resolves/builds images and retains their entire input closure in `store`.
 /// No guest execution, CPU pinning, or host-state mutation is allowed here.
 pub trait PreparationBackend: Send + Sync {
@@ -96,6 +104,10 @@ pub trait ExecutionBackend: Send + Sync {
     }
     /// Must exactly match the recorded profile before execution can begin.
     fn profile(&self) -> ExecutionProfile;
+    /// The engine build that executes runs, recorded as provenance only.
+    fn engine(&self) -> Option<EngineDescriptor> {
+        None
+    }
     /// Only knobs whose witness invariance has been qualified belong here.
     fn performance_parameters(&self) -> BTreeMap<String, String> {
         BTreeMap::new()

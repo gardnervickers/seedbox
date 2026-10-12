@@ -152,7 +152,7 @@ class SelectionTests(unittest.TestCase):
     def test_complete_build_replaces_ambient_runtime_overrides(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            environment = {key: "/stale" for key in ("SEEDBOX_ASSET_DIR", "SEEDBOX_BUILD_HELPERS", "SEEDBOX_GUEST_INIT", "SEEDBOX_MKE2FS", "SEEDBOX_VMM", "SEEDBOX_KERNEL", "SEEDBOX_RUNTIME_ASSETS")}
+            environment = {key: "/stale" for key in ("SEEDBOX_ASSET_DIR", "SEEDBOX_BUILD_HELPERS", "SEEDBOX_GUEST_INIT", "SEEDBOX_MKE2FS", "SEEDBOX_KERNEL", "SEEDBOX_RUNTIME_ASSETS")}
             with self.assertRaises(ValueError): check.select_build(environment, root)
             for name in ("seedbox", "kernel", "runtime.tar.gz"): (root / name).touch()
             check.select_build(environment, root)

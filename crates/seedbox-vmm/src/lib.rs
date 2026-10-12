@@ -753,13 +753,9 @@ pub fn run(
         let kills = arm_seed(&mut world, cfg.seed_plan(), &names, seed, 0)?;
         live_checkpoints.kills = kills.clone();
         if !checkpoint_times.is_empty() {
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let engine =
-                seedbox_engine_core::sha256_hex(std::fs::read(exe).map_err(|e| e.to_string())?);
             let parent = checkpoint::parent_identity(
                 &cfg,
                 seed,
-                &engine,
                 features.deferred_tx,
                 features.page_timer,
                 |p| {

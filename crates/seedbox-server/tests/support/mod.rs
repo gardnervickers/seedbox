@@ -58,7 +58,6 @@ pub fn resolved_request(id: &str) -> SubmitRequest {
         guests: std::collections::BTreeMap::from([("oracle".into(), binary.clone())]),
         profile: ExecutionProfile {
             backend: Backend::Other("catalogue-test".into()),
-            engine: binary,
             witness_mode: WitnessMode::Exits,
             semantic_parameters: SemanticParameters::new(1024),
         },

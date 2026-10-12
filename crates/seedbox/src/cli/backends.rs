@@ -110,7 +110,7 @@ impl PreparationBackend for Preparer {
                 docker: self.inputs.docker.clone(),
                 cancellation: context.cancellation.clone(),
                 progress: preparation_progress,
-                export_cache: Some(self.inputs.profile.engine.clone()),
+                export_cache: true,
             },
         )
     }
