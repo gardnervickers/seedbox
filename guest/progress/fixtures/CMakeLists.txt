@@ -9,6 +9,7 @@ use_DynamoRIO_extension(ic_observer drmgr)
 add_executable(ic-dependencies ic-dependencies.c)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+  add_executable(ic-kernel-write ic-kernel-write.c)
   enable_language(ASM)
   add_library(parked_progress_client SHARED ../progress.c)
   target_compile_definitions(parked_progress_client PRIVATE SEEDBOX_PARKED_PROGRESS_DIAGNOSTIC)
