@@ -382,6 +382,26 @@ int main(void) {
     seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
     assert(page->last == 28000);
 
+    /* Time syscalls charge nothing here; their clock read costs 100 ns. */
+    reset(1000, UINT64_MAX, 0, 0);
+    seedbox_syscall_progress(&regs, SEEDBOX_CLOCK_GETTIME_NR);
+    seedbox_syscall_progress(&regs, SEEDBOX_CLOCK_GETRES_NR);
+    seedbox_syscall_progress(&regs, SEEDBOX_GETTIMEOFDAY_NR);
+    assert(page->last == 0 && writes == 0);
+    seedbox_syscall_progress(&regs, 0);
+    assert(page->last == 1000);
+    /* Translator syscalls cost a tenth of a syscall, scaled by throttle. */
+    regs.regs[7] = SEEDBOX_TRANSLATOR_MARK;
+    seedbox_syscall_progress(&regs, 98);
+    assert(page->last == 1100);
+    page->syscall_ns = 4000;
+    seedbox_syscall_progress(&regs, 98);
+    assert(page->last == 1500);
+    page->syscall_ns = 1000;
+    regs.regs[7] = 0;
+    page->last = 28000;
+    page->progress_ns = 25000;
+
     /* A throttle scales the compute charge like a syscall's. */
     page->syscall_ns = 4000;
     regs.regs[0] = SEEDBOX_PROGRESS_MARK;

@@ -13,6 +13,8 @@ pkgs.stdenv.mkDerivation {
     # Clean calls without SVE must save each vector register in its own
     # context slot, where dr_get_mcontext() and redirection read it.
     ../guest/progress/dynamorio-cleancall-simd.patch
+    # The translator marks its own syscalls so the guest charges them less.
+    ../guest/progress/dynamorio-translator-syscalls.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build

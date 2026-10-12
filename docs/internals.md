@@ -75,6 +75,17 @@ speed draw at boot or a time fork; only authored progress jitter consumes its
 own RNG stream. Snapshots retain charges and jitter continuation, and reboot
 reapplies active throttle faults.
 
+Some syscalls are not application work at full price. On ARM the PV clock
+disables the vDSO, so `clock_gettime`, `clock_getres` and `gettimeofday`
+are syscalls; they cost only the clock read they make, as x86 vDSO reads do
+through RDTSC emulation. The ARM translator also makes syscalls for itself:
+suspending threads to flush rewritten code, returning from its signal
+handler and waiting on futexes. Its syscall stubs put a fixed mark in x7,
+which arm64 syscalls leave unused, and the kernel charges a marked syscall a
+tenth of a syscall. A JVM makes millions of these while it starts, about ten
+times its own progress calls, and at full price they dominated simulated
+startup time.
+
 Instrumentation must leave the application's registers and comparison flags
 intact. On ARM, the client uses arithmetic that leaves those flags alone and a
 branch that tests the sign bit directly (`TBZ`). DynamoRIO's drreg extension

@@ -29,6 +29,15 @@ struct seedbox_page {
 /* A progress call: getpid with this first argument (guest/progress/budget.h). */
 #define SEEDBOX_PROGRESS_NR 172
 #define SEEDBOX_PROGRESS_MARK 0x5eedb0c5UL
+/* Time syscalls (clock_gettime, clock_getres, gettimeofday). */
+#define SEEDBOX_CLOCK_GETTIME_NR 113
+#define SEEDBOX_CLOCK_GETRES_NR 114
+#define SEEDBOX_GETTIMEOFDAY_NR 169
+/* x7 of a syscall the translator makes for itself
+ * (guest/progress/dynamorio-translator-syscalls.patch). */
+#define SEEDBOX_TRANSLATOR_MARK 0x5eedd1a900000000UL
+/* Translator syscalls cost this fraction of an application syscall. */
+#define SEEDBOX_TRANSLATOR_DIVISOR 10
 static struct seedbox_page *page;
 static void __iomem *event;
 static u64 early_last;
@@ -173,10 +182,22 @@ static void seedbox_charge(u64 ns)
  */
 void seedbox_syscall_progress(struct pt_regs *regs, int scno)
 {
-	u64 ns = page ? READ_ONCE(page->syscall_ns) : SYSCALL_NS;
+	u64 ns;
+
+	/* Time syscalls stand in for the vDSO, which the PV clock disables. They
+	 * cost only the clock read they make, so frequent application time reads
+	 * do not each advance the clock by a syscall. */
+	if (scno == SEEDBOX_CLOCK_GETTIME_NR || scno == SEEDBOX_CLOCK_GETRES_NR ||
+	    scno == SEEDBOX_GETTIMEOFDAY_NR)
+		return;
+	ns = page ? READ_ONCE(page->syscall_ns) : SYSCALL_NS;
 
 	if (page && scno == SEEDBOX_PROGRESS_NR && regs->regs[0] == SEEDBOX_PROGRESS_MARK)
 		ns = progress_charge(ns);
+	/* The translator's own syscalls (thread suspension, signal returns,
+	 * futex waits) are bookkeeping, not application work. */
+	else if (regs->regs[7] == SEEDBOX_TRANSLATOR_MARK)
+		ns /= SEEDBOX_TRANSLATOR_DIVISOR;
 	seedbox_charge(ns);
 }
 
