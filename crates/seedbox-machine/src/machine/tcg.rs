@@ -3,8 +3,14 @@
 //! One RV64 CPU runs with one simulation nanosecond per instruction. A small
 //! QEMU patch caps its native instruction budget and returns when that budget
 //! expires, the CPU becomes idle, or the guest shuts down. Idle time advances
-//! only through an explicit [`TcgMachine::wake`] from the simulation driver.
+//! only when the simulation driver advances the injected clock.
 //! There are no per-instruction host round trips or guest-specific yield calls.
+//! The clock must stay fixed during each call. Guest time follows the machine's
+//! instruction progress within the budget, without changing the shared clock.
+//! On the next call, a blocked machine adopts any newer clock time and delivers
+//! due timers before executing. The driver must not skip a reported deadline or
+//! advance the clock past runnable work. Shared time may lag local progress while
+//! the driver brings other machines to the same barrier.
 //!
 //! Both flat programs and Linux boot inputs are supported. Snapshots own the
 //! boot inputs, RAM, CPU/device state, virtual timers, and lifecycle position.
@@ -13,9 +19,11 @@
 //! CPU only. It uses software emulation on macOS and Linux.
 
 use super::{ExitReason, Machine, StopReason, Timestamp};
+use crate::clock::Clock;
 use serde_json::Value;
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 mod qemu;
 use qemu::Process;
@@ -60,6 +68,7 @@ enum State {
 
 /// A QEMU process and its accepted simulation state.
 pub struct TcgMachine {
+    clock: Arc<dyn Clock + Send + Sync>,
     manifest: Manifest,
     reached: Timestamp,
     state: State,
@@ -89,7 +98,15 @@ impl From<serde_json::Error> for Error {
 
 impl TcgMachine {
     /// Start stopped, using the project's patched qemu-system-riscv64 binary.
-    pub fn new(qemu: &Path, manifest: Manifest) -> Result<Self, Error> {
+    pub fn new(
+        qemu: &Path,
+        manifest: Manifest,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Result<Self, Error> {
+        let reached = Timestamp::from_nanos(clock.now());
+        if reached.as_nanos() > i64::MAX as u64 {
+            return Err(Error("clock exceeds QEMU's time range".into()));
+        }
         if manifest.memory_mib == 0 {
             return Err(Error("guest memory must be nonzero".into()));
         }
@@ -102,56 +119,37 @@ impl TcgMachine {
                 ));
             }
         }
-        let process = Process::start(qemu, &manifest, None)?;
+        let mut process = Process::start(qemu, &manifest, None)?;
+        process.advance(reached)?;
         Ok(Self {
+            clock,
             manifest,
-            reached: Timestamp::from_nanos(0),
+            reached,
             state: State::Ready,
             process: Some(process),
         })
     }
 
     /// Reconstruct a snapshot without the source machine or its temporary files.
-    pub fn from_snapshot(qemu: &Path, snapshot: &Snapshot) -> Result<Self, Error> {
+    /// The clock belongs to the caller's environment and is supplied again;
+    /// restoring machine state does not rewind that clock.
+    pub fn from_snapshot(
+        qemu: &Path,
+        snapshot: &Snapshot,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Result<Self, Error> {
         let process = snapshot
             .image
             .as_deref()
             .map(|image| Process::start(qemu, &snapshot.manifest, Some(image)))
             .transpose()?;
         Ok(Self {
+            clock,
             manifest: snapshot.manifest.clone(),
             reached: snapshot.reached,
             state: snapshot.state,
             process,
         })
-    }
-
-    /// Advance a blocked machine to a coordinator-selected wakeup time.
-    ///
-    /// Due virtual timers are delivered without executing guest instructions.
-    /// The caller must not skip the returned timer deadline. Advancing to an
-    /// earlier external event is allowed, but time alone need not make the CPU
-    /// runnable: `run` may report `Blocked` again.
-    pub fn wake(&mut self, at: Timestamp) -> Result<(), Error> {
-        let State::Blocked { deadline } = self.state else {
-            return Err(Error("wake requires a blocked machine".into()));
-        };
-        if at < self.reached
-            || deadline.is_some_and(|deadline| at > deadline)
-            || at.as_nanos() > i64::MAX as u64
-        {
-            return Err(Error(
-                "wake must not move backwards or skip a timer deadline".into(),
-            ));
-        }
-        if let Err(error) = self.process()?.advance(at) {
-            self.state = State::Invalid;
-            drop(self.process.take());
-            return Err(error);
-        }
-        self.reached = at;
-        self.state = State::Ready;
-        Ok(())
     }
 
     /// Read the serial output produced by this instance since creation/restore.
@@ -218,10 +216,28 @@ impl Machine for TcgMachine {
         if matches!(self.state, State::Exited(_) | State::Invalid) {
             return Err(Error("machine is exited or invalid".into()));
         }
-        if upto < self.reached || upto.as_nanos() > i64::MAX as u64 {
+        let now = Timestamp::from_nanos(self.clock.now());
+        if upto < self.reached || upto < now || upto.as_nanos() > i64::MAX as u64 {
             return Err(Error(
                 "execution boundary is backwards or exceeds QEMU's time range".into(),
             ));
+        }
+        if now > self.reached {
+            match self.state {
+                State::Blocked { deadline } if !deadline.is_some_and(|at| now > at) => {}
+                _ => {
+                    return Err(Error(
+                        "clock skipped runnable work or a timer deadline".into(),
+                    ))
+                }
+            }
+            if let Err(error) = self.process()?.advance(now) {
+                self.state = State::Invalid;
+                drop(self.process.take());
+                return Err(error);
+            }
+            self.reached = now;
+            self.state = State::Ready;
         }
         if self.reached < upto && self.state == State::Ready {
             if let Err(error) = self.execute(upto) {

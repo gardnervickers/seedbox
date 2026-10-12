@@ -9,16 +9,26 @@ Each section links to the code that owns it.
 software emulation. Run its Linux example inside `nix develop` with
 `cargo run -p seedbox-machine --example tcg`. The development shell builds the
 patched QEMU and prepares the kernel, firmware, and initramfs inputs. The example
-boots Linux, runs an init process that sleeps and prints a wakeup marker, then
-shuts down. It is separate from the production `seedbox run` backends.
+boots two Linux guests on one shared clock. Their init processes sleep for two
+seconds and one second respectively, print wakeup markers, and shut down. The
+shorter sleeper finishes first even though it was inserted second. This example
+is separate from the production `seedbox run` backends.
 
 The driver repeatedly calls `Machine::run`. A private QMP command limits QEMU's
 native instruction budget, with one instruction mapped to one simulation
 nanosecond. QEMU stops at that budget or when the CPU becomes idle; it cannot
 automatically jump forward through idle time. `Blocked` reports the next virtual
-timer deadline, and the driver explicitly advances to it through `wake` before
-resuming. Guest shutdown returns `Exited`. GDB is used only by tests to inspect
-stopped register and RAM state.
+timer deadline. The [driver](../crates/seedbox-machine/src/driver.rs)
+tracks each machine's execution position and next timer, advancing the shared
+clock only when no runnable work or timer remains before it. Each round brings
+all machines to its boundary, a blocked state, or exit. The machine observes the
+injected read-only clock on its next `run`, delivering due timers before executing
+more instructions. Guest shutdown returns `Exited`. The driver runs machines
+serially and admits machine access, additions, and scheduled wake/crash actions
+through barrier callbacks. Each step respects its requested time limit. Packet
+routing is not implemented; console chunks are observed after each round rather
+than timestamped byte by byte.
+GDB is used only by tests to inspect stopped register and RAM state.
 
 Snapshots own their boot inputs and QEMU migration state, including RAM, CPU,
 devices, and virtual timers. The QEMU process and control connection are recreated
