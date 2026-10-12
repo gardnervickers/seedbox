@@ -124,8 +124,8 @@ PROBES = {
 # Open translator bugs, as case-id patterns (see repros/README.md).
 # `gen --skip-known` leaves these out so a run reports only new problems.
 KNOWN_ISSUES = {
-    r"^Jfr\.[0-9]+(\.|_[a-z,]*(all|exec))": "JFR execution sampling crashes C2-compiled code",
-    r"^(SignalBomb|InterruptedSyscalls)\.": "thread-directed signals (tgkill) crash C2-compiled code, as JFR sampling does",
+    r"^SignalBomb\.[0-9]+\.(lm0|lm2|verifygc)$": "translator synch-all deadlock in simulation: every "
+        "thread parked, including the one synching (under investigation)",
 }
 
 CASE_TIMEOUT = 240
