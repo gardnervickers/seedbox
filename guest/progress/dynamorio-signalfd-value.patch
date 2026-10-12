@@ -1,0 +1,14 @@
+diff --git a/core/unix/signal_linux.c b/core/unix/signal_linux.c
+index 4d9e654..aede917 100644
+--- a/core/unix/signal_linux.c
++++ b/core/unix/signal_linux.c
+@@ -514,6 +514,9 @@ notify_signalfd(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
+         towrite.ssi_trapno = frame->info.si_trapno;
+ #endif
+         towrite.ssi_addr = (ptr_int_t)frame->info.si_addr;
++        /* The queued value of sigqueue(), POSIX timers and message queues. */
++        towrite.ssi_int = frame->info.si_int;
++        towrite.ssi_ptr = (ptr_uint_t)frame->info.si_ptr;
+ 
+         /* XXX: if the pipe is full, don't write to it as it could block.  We
+          * can poll to determine.  This is quite unlikely (kernel buffer is 64K

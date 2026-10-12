@@ -12,7 +12,7 @@ they always print `OK`.
 | `sigext ROUNDS` | process-directed signals from a child while code is patched | passes; the JVM form (`Signals` probe) lost them, see below |
 | `regcheck ROUNDS [SPINS [x28]]` | x0–x26 and q0–q31 across progress checkpoints and x28-based accesses | passes |
 | `srsample SAMPLES` | HotSpot-style suspend/resume sampling (JFR's protocol) against fixed registers | passes |
-| `sigregs WORKERS SIGNALS [SPINS [x28\|ibl]]` | x0–x26 and q0–q31 across `tgkill` signals whose handler posts a semaphore | passes with the client; without it, `ibl` (a `blr`/`ret` loop) hangs on the second signal to a thread |
+| `sigregs WORKERS SIGNALS [SPINS [x28\|ibl]]` | x0–x26 and q0–q31 across `tgkill` signals whose handler posts a semaphore | `ibl` (a `blr`/`ret` loop, no client) hung in about one run in five |
 
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple
 `posix_spawn` into `fork`; it separated the two spawn bugs.
@@ -44,6 +44,14 @@ The fixes are in [`guest/progress`](../../../guest/progress):
   corruption; C2's code for it deoptimizes through an implicit null check whose
   handler saves a register that straight-line liveness considers dead.
 
-Still open: without the client, `sigregs 1 2 2000 ibl` hangs (a second signal to
-a thread looping through indirect branches is not delivered). Seedbox always runs
-the client, whose checkpoints pass through dispatch, so it does not see this.
+- `dynamorio-ibl-hit-signals.patch`: a signal on the indirect-branch lookup's hit
+  path, after the app's x2 is restored, now finds the target fragment through the
+  hashtable entry, so a thread looping through indirect branches still exits to
+  receive it (`sigregs ... ibl`).
+- Emulation gaps found by the `C.*` probes (`probes/c/cfz.c`):
+  `dynamorio-sigaltstack-autodisarm.patch` (handlers ran with the alternate stack
+  still armed), `dynamorio-signalfd-value.patch` (`ssi_int`/`ssi_ptr` were zero),
+  `dynamorio-fork-pending-signals.patch` (a signal sent to a fork child before
+  its translator initialized was dropped, so `kill` right after `fork` or through
+  a pidfd did nothing) and `dynamorio-clone-clear-sighand.patch` (`clone3`'s
+  `CLONE_CLEAR_SIGHAND` left the parent's handlers in the child).

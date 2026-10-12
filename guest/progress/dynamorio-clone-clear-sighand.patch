@@ -1,0 +1,122 @@
+diff --git a/core/unix/os.c b/core/unix/os.c
+index 9e4d1e2..e7d574c 100644
+--- a/core/unix/os.c
++++ b/core/unix/os.c
+@@ -207,6 +207,11 @@ char **our_environ;
+ #endif
+ #include "../module_shared.h"
+ #include "os_private.h"
++
++#ifndef CLONE_CLEAR_SIGHAND_FLAG
++/* clone3 only: reset the child's signal handlers to SIG_DFL (SIG_IGN stays). */
++#    define CLONE_CLEAR_SIGHAND_FLAG 0x100000000ULL
++#endif
+ #include "ptrace_private.h"
+ #include "../synch.h"
+ #include "memquery.h"
+@@ -2825,7 +2830,7 @@ os_fork_pre(dcontext_t *dcontext)
+      */
+     d_r_mutex_unlock(&thread_initexit_lock);
+     d_r_mutex_unlock(&all_threads_synch_lock);
+-    signal_fork_pre(dcontext);
++    signal_fork_pre(dcontext, false);
+ }
+ 
+ /* Happens after the fork in both the parent and child. */
+@@ -7451,6 +7456,8 @@ handle_clone_pre(dcontext_t *dcontext)
+             os_vfork_pre(dcontext);
+     } else {
+         /* This is really a fork. */
++        bool clear_sighand = dcontext->sys_num == SYS_clone3 &&
++            TESTANY(CLONE_CLEAR_SIGHAND_FLAG, (uint64)flags);
+         if (dcontext->sys_num == SYS_clone3) {
+             /* We free this memory before the actual fork, to avoid having to free
+              * it in the parent *and* the child later.
+@@ -7463,6 +7470,8 @@ handle_clone_pre(dcontext_t *dcontext)
+             dcontext->sys_param2 = 0;
+         }
+         os_fork_pre(dcontext);
++        if (clear_sighand)
++            signal_fork_pre(dcontext, true);
+     }
+     return true;
+ }
+diff --git a/core/unix/os_exports.h b/core/unix/os_exports.h
+index 37cdacf..1885f9f 100644
+--- a/core/unix/os_exports.h
++++ b/core/unix/os_exports.h
+@@ -608,7 +608,7 @@ os_clone_post(dcontext_t *dcontext);
+ void
+ signal_fork_init(dcontext_t *dcontext);
+ void
+-signal_fork_pre(dcontext_t *dcontext);
++signal_fork_pre(dcontext_t *dcontext, bool clear_sighand);
+ 
+ void
+ signal_remove_alarm_handlers(dcontext_t *dcontext);
+diff --git a/core/unix/signal.c b/core/unix/signal.c
+index a17f38c..feb1cd2 100644
+--- a/core/unix/signal.c
++++ b/core/unix/signal.c
+@@ -282,6 +282,9 @@ set_handler_and_record_app(dcontext_t *dcontext, thread_sig_info_t *info, int si
+ static void
+ intercept_signal(dcontext_t *dcontext, thread_sig_info_t *info, int sig);
+ 
++static void
++set_our_handler_sigact(kernel_sigaction_t *act, int sig);
++
+ static void
+ signal_info_init_sigaction(dcontext_t *dcontext, thread_sig_info_t *info);
+ 
+@@ -1417,10 +1420,11 @@ count_pending_signals(thread_sig_info_t *info, byte counts[SIGARRAY_SIZE])
+ 
+ /* Called in the forking thread just before its fork syscall. */
+ void
+-signal_fork_pre(dcontext_t *dcontext)
++signal_fork_pre(dcontext_t *dcontext, bool clear_sighand)
+ {
+     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+     count_pending_signals(info, info->pending_at_fork);
++    info->fork_clear_sighand = clear_sighand;
+ }
+ 
+ /* A signal that arrives while this thread waits in handle_suspend_signal()
+@@ -1532,6 +1536,25 @@ signal_fork_init(dcontext_t *dcontext)
+     }
+     if (info->num_pending > 0)
+         check_signals_pending(dcontext, info);
++    if (info->fork_clear_sighand) {
++        /* CLONE_CLEAR_SIGHAND: the kernel reset every handler, ours included, to
++         * SIG_DFL (ignored signals stay ignored). Do the same to the app's
++         * handlers and re-arm ours for the signals we intercept.
++         */
++        info->fork_clear_sighand = false;
++        for (i = 1; i <= MAX_SIGNUM; i++) {
++            kernel_sigaction_t *app = info->sighand->action[i];
++            if (app != NULL && app->handler != (handler_t)SIG_IGN) {
++                handler_free(dcontext, app, sizeof(kernel_sigaction_t));
++                info->sighand->action[i] = NULL;
++            }
++            if (info->sighand->we_intercept[i]) {
++                kernel_sigaction_t act;
++                set_our_handler_sigact(&act, i);
++                sigaction_syscall(i, &act, NULL);
++            }
++        }
++    }
+     if (INTERNAL_OPTION(profile_pcs)) {
+         pcprofile_fork_init(dcontext);
+     }
+diff --git a/core/unix/signal_private.h b/core/unix/signal_private.h
+index b112b40..bfcab9a 100644
+--- a/core/unix/signal_private.h
++++ b/core/unix/signal_private.h
+@@ -471,6 +471,8 @@ typedef struct _thread_sig_info_t {
+      * discards these inherited entries but keeps signals that arrived later.
+      */
+     byte pending_at_fork[SIGARRAY_SIZE];
++    /* The next fork is a clone3 with CLONE_CLEAR_SIGHAND. */
++    bool fork_clear_sighand;
+     /* are the pending still on one special heap unit? */
+     bool multiple_pending_units;
+     /* "lock" to prevent interrupting signal from messing up sigpending array */

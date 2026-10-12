@@ -1,0 +1,19 @@
+diff --git a/core/unix/signal.c b/core/unix/signal.c
+index 379e7ae..547eb89 100644
+--- a/core/unix/signal.c
++++ b/core/unix/signal.c
+@@ -4031,6 +4031,14 @@ copy_frame_to_stack(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
+         LOG(THREAD, LOG_ASYNCH, 3, "updated uc_stack @" PFX " to " PFX "\n",
+             &f_new->uc.uc_stack, info->app_sigstack.ss_sp);
+         f_new->uc.uc_stack = info->app_sigstack;
++        /* Like the kernel's __save_altstack(): with SS_AUTODISARM the handler runs
++         * with no alternate stack, and sigreturn restores the saved one.
++         */
++        if (TESTANY(SS_AUTODISARM, info->app_sigstack.ss_flags)) {
++            info->app_sigstack.ss_sp = NULL;
++            info->app_sigstack.ss_size = 0;
++            info->app_sigstack.ss_flags = SS_DISABLE;
++        }
+ #endif
+ 
+         /* Store the prior mask, for restoring in sigreturn. */

@@ -39,6 +39,17 @@ pkgs.stdenv.mkDerivation {
     # spot is delayed; running its handler at once skipped the wait's
     # epilogue and left the thread marked safe while it ran in the cache.
     ../guest/progress/dynamorio-safe-spot-signals.patch
+    # Signal emulation gaps found by the native corpus probes: SS_AUTODISARM,
+    # signalfd's queued value, signals sent to a fork child before it
+    # initialized, and clone3's CLONE_CLEAR_SIGHAND.
+    ../guest/progress/dynamorio-sigaltstack-autodisarm.patch
+    ../guest/progress/dynamorio-signalfd-value.patch
+    ../guest/progress/dynamorio-fork-pending-signals.patch
+    ../guest/progress/dynamorio-clone-clear-sighand.patch
+    # A signal on the indirect-branch lookup's hit path must still find the
+    # fragment to unlink, or a thread looping through indirect branches never
+    # receives it.
+    ../guest/progress/dynamorio-ibl-hit-signals.patch
   ] else [
     # The same translator syscall mark, in rbx.
     ../guest/progress/dynamorio-x86-translator-syscalls.patch
