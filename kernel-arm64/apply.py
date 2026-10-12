@@ -99,6 +99,21 @@ def changes(root, application=False):
     edit("arch/arm64/kernel/process.c", counter_access)
     edit("arch/arm64/include/asm/futex.h", futex_retries)
     edit("arch/arm64/include/asm/vdso/processor.h", polling)
+    # Kernel retry loops that wait for another task, such as shrink_dcache_parent
+    # waiting for a concurrent dentry kill, yield only through cond_resched().
+    # Kernel code charges no guest time, so the tick that sets need_resched never
+    # comes and the other task never runs. A cond_resched() that does not
+    # reschedule polls like cpu_relax(): one bounded PV read.
+    edit("kernel/sched/core.c", lambda s: replace(s,
+        "\tif (should_resched(0) && !irqs_disabled()) {\n"
+        "\t\tpreempt_schedule_common();\n"
+        "\t\treturn 1;\n"
+        "\t}\n",
+        "\tif (should_resched(0) && !irqs_disabled()) {\n"
+        "\t\tpreempt_schedule_common();\n"
+        "\t\treturn 1;\n"
+        "\t}\n"
+        "\tcpu_relax();\n"))
     # Every return to EL0 crosses a guest exception/scheduling boundary, unlike
     # a host-only interruption. Publish its epoch and clear the physical
     # reservation before restoring user x0/x1; EL1 returns do not publish one.

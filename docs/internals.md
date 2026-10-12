@@ -163,6 +163,13 @@ remain uncharged: host interruptions can cause those retries and must not
 advance guest time or the software reservation epoch. Application polling is
 handled by binary instrumentation.
 
+Kernel code charges no guest time of its own, so a kernel loop that waits for
+another task to run would never see the tick that sets `need_resched` on the
+single guest CPU. Such loops yield through `cond_resched()`: on ARM, a call that
+does not reschedule makes the same bounded read as `cpu_relax()`. Without it a
+JVM exiting several threads hung in `shrink_dcache_parent`, retrying while the
+task killing a `/proc` dentry stayed preempted. The x86 kernel lacks this hook.
+
 Code: [x86 clock](../kernel/seedbox.c), [x86 patch sites](../kernel/apply.py),
 [ARM clock](../kernel-arm64/seedbox.c), [ARM patch sites](../kernel-arm64/apply.py).
 
