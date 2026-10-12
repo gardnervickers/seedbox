@@ -1,0 +1,28 @@
+[package]
+name = "seedbox-executor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "encoder", "no_std"] }
+
+[features]
+# Builds only the explicit Linux signal-gated diagnostic, never the normal worker.
+linux-proof = []
+# Separate opt-in return prediction experiment; the baseline emitter stays default.
+linked-return-hint = ["linux-proof"]
+# Scratch-carrying ABI; baseline remains available for controlled comparisons.
+linked-region = ["linux-proof"]
+# Same carried ABI with a stable raw getpid-only payment gateway.
+linked-raw = ["linked-region"]
+
+[[example]]
+name = "linux-proof"
+required-features = ["linux-proof"]
+test = false
+
+[[example]]
+name = "linked-proof"
+required-features = ["linux-proof"]
+test = false

@@ -1250,6 +1250,9 @@ name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
+dependencies = [
+ "spin",
+]
 
 [[package]]
 name = "libbz2-rs-sys"
@@ -2052,6 +2055,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-executor"
+version = "0.1.0"
+dependencies = [
+ "iced-x86",
+]
+
+[[package]]
 name = "seedbox-server"
 version = "0.1.0"
 dependencies = [
@@ -2104,7 +2114,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hex",
- "iced-x86",
  "kvm-bindings",
  "kvm-ioctls 0.25.0",
  "libc",
@@ -2318,6 +2327,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "stable_deref_trait"

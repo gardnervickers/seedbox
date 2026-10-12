@@ -159,6 +159,128 @@ throttled it shows the effective nominal speed after backend rounding and
 clamping; healing restores that machine's configured speed. The fault's
 recorded input keeps the original request.
 
+## Experimental block executor proof
+
+[`seedbox-executor`](../crates/seedbox-executor/src/lib.rs) is an opt-in,
+Linux-only same-ISA experiment, not the normal application runtime. Its
+transport-independent Rust core decodes bounded blocks, emits native interiors
+and source-PC maps, tracks source intervals by backing identity, and owns the
+signed precharge state machine. AArch64 uses an explicit small classifier;
+x86-64 uses iced-x86. Unknown instructions and out-of-range relocations fail
+before the block executes. Both proof subsets reject atomics and application
+syscalls; there is no native escape for unsupported code.
+
+The libc-free [`linux-proof`](../crates/seedbox-executor/examples/linux-proof.rs)
+ELF uses executor-owned traps and Linux signal return for diagnostic dispatch.
+Linux saves the application state before any metering helper runs. A due charge
+makes a raw marked `getpid` from a stable gateway, refunds the old block and
+looks up the current generation before precharging again. A native fault keeps
+its block's precharge. No register is reserved. This trap-per-block mechanism
+adds kernel charges and is **not** the intended linked-edge hot path, a timing
+equivalence claim, or a selected production signal architecture.
+
+The controlled fixture has one explicitly shared memfd backing, an R-X source
+view and a private RW writer view. While task A is parked with an old map pin,
+task B's precise protected stores append neighboring code and overwrite two
+overlapping source spans. Invalidation removes lookup permission without waiting
+for A; immutable maps/cache memory survive until their final continuation pin is
+released. The source view is never made writable. This does not remap private
+anonymous memory into shared memory or implement COW, arbitrary writers, kernel
+writes, mapping lifecycle, or nested application signal handling. The deliberate
+fault is reconstructed and asserted in the diagnostic handler, not delivered to
+an arbitrary application's handler.
+
+The fixture covers original-address call/return, a syscall-free backward loop,
+PC-relative address formation, SIMD arithmetic and a protected-load fault after
+invalidation. It checks all scalar registers (including dead scratch), flags,
+SP/TLS, all ARM Q registers and FP controls, or x86 XMM registers and FP controls.
+General x86 extended-state patterns, fault/restart/handler edits, loader/process
+integration and snapshots remain outside this proof. Build the ELF with the
+crate's `tools/build-proof.sh` inside the project Linux development shell; its
+`tools/initramfs.py` wraps that ELF as PID 1. The ignored
+[HVF proof test](../crates/seedbox-arm64/tests/executor_proof.rs) checks actual VMM
+horizon returns between marked-call console delimiters against an unmarked
+control. Native-container syscall completion alone is not PV evidence.
+
+The separate ARM [`linked-proof`](../crates/seedbox-executor/examples/linked/mod.rs)
+uses the [linked emitter](../crates/seedbox-executor/src/aarch64/linked.rs): inline
+signed precharge, direct edges and fully tagged finite indirect caches branch
+through revocable per-entry gates. Only a due payment or unresolved gate traps;
+unknown indirect targets fail closed. Code/maps remain pinned independently of
+gate permission. Source mutation revokes incoming direct and indirect access
+before publication, without waiting for the parked task.
+
+This cache belongs to one execution task. Its seven-instruction scratch spill
+transiently puts X16 in TPIDR_EL0; original TLS and X16/X17 are retained in private
+resident state, with a reconstruction map at each emitted instruction. TLS is
+restored before application execution. A suspended internal sequence must resume
+with its exact hardware TLS and PC; the diagnostic trap handler is TLS-independent.
+No application stack slot or register is reserved. This is not multi-task cache
+sharing, arbitrary asynchronous signal delivery, or a new kernel ABI. Deterministic
+boundary traps and a separate instrumentation-fault case test that distinction.
+The crate's `tools/build-linked.sh` builds this opt-in ELF. Its fixed-work modes
+separate install, first-pass and warm execution; ordinary Linux wall measurements
+are not PV-time or full-runtime qualification.
+
+The separate [matched JIT fixture](../crates/seedbox-executor/examples/linked/jit.rs)
+executes every published version and a neighboring function through the same
+finite revocable gates. Append/recompile and four-byte patch rows have matched
+no-publication controls, exact per-version call checks, and disjoint outer
+publication/first-use/warm clocks. Its controlled driver runs natively for the
+candidate but is instrumented by DR; diagnostic plans distinguish real DR
+emission from fault-context reconstruction. These clocks include completion
+faults and driver work, not just translator cost. The
+[measurement tool](../crates/seedbox-executor/tools/measure-jit.py) bounds fresh
+finite-arena batches and preserves failed samples instead of treating them as
+speedups. No application/runtime selection is added.
+
+The opt-in `linked-return-hint` example feature tests one separate hot-path
+variant: a fully tagged RET-X30 prediction before the existing indirect lookup.
+It compares actual original LR, preserves NZCV and scratch maps, and enters the
+same revocable gate. A wrong prediction uses the full existing lookup; unknown
+targets still fail closed. It neither shares scratch across blocks nor changes
+charge points. The default emitter has no hint.
+
+The opt-in `linked-region` proof carries scratch ownership between revocable
+entries. Each generation has a native entry that spills X16/X17 and a carried
+entry with X16 pointing to private State and both original values saved. Every
+original block still loads, subtracts, commits and tests its own charge. Source
+instructions that use either scratch register restore both before execution and
+respill after architectural completion; implicit faults therefore retain even
+scratch values dead on the successful path. PC-relative operands are relocated
+after these transitions. Indirect arms compare the complete original target
+without modifying NZCV or updating LR before a match. Both entry gates revoke
+before publication; keeping scratch across edges does not combine source spans
+or increase the generation's invalidation range. This adapts explicit entry
+conventions and lazy restore/respill mechanisms inspected in DynamoRIO's
+`core/arch/aarch64/emit_utils.c` and `ext/drreg/drreg.c`, not its trace charge plan.
+The native writer and TLS-independent diagnostic handler never enter translated
+code while an outer scratch transaction is active. General nested application
+signals and shared multi-execution-task caches remain unsupported.
+
+The `linked-raw` proof uses that carried ABI with a stable getpid-only gateway
+([emitter](../crates/seedbox-executor/src/aarch64/linked/gateway.rs)). It additionally
+saves X0/X8 in private State, issues the marked raw syscall, commits the quantum
+and counter, refunds the captured old charge, restores X0/X8, and branches to
+the original entry's revocable carried gate. It never returns to a cache-body PC.
+SP, LR, TLS, NZCV and FP/SIMD are untouched; no C/Rust call or application stack
+frame is needed. Maps distinguish syscall return from budget/counter/refund
+commits. Unknown indirect targets and unexpected syscall failures remain fatal.
+The diagnostic observer pins old maps before the real syscall, parks the writer
+after payment, and resumes the exact raw continuation after invalidation. It
+uses extra observational traps; those add real kernel charges and are absent
+from wall timing. Neither that observer nor the native writer can reenter
+translated application code. Normal raw execution permits no uncontrolled
+writer or application signal; arbitrary nested/kernel continuations require
+additional ownership, not permission inferred from these entry gates.
+
+ARM LL/SC cannot simply be copied: host-only exits may lose the physical
+exclusive monitor and make STXR failures host-timed. A future implementation
+must retain the [guest-epoch reservation contract](#software-exclusive-reservations),
+including ABA detection, per-attempt consumption and precise faults; LSE requires
+separate native-semantics tests. The proof currently rejects LL/SC, CLREX and
+LSE rather than claiming those obligations are implemented.
+
 ## Progress inside kernel polling
 
 An x86 kernel `cpu_relax()` loop may hold a lock with interrupts disabled. It
