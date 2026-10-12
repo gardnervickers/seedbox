@@ -22,6 +22,8 @@ pkgs.stdenv.mkDerivation {
     ../guest/progress/dynamorio-icache-images.patch
     # Stored-info Debug validation walks the retained cache, not singleton IR.
     ../guest/progress/dynamorio-translation-lookahead.patch
+    # Transferable, restartable predicate wait with an owned app context.
+    ../guest/progress/dynamorio-predicate-wait.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build

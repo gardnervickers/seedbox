@@ -1,0 +1,113 @@
+--- a/core/lib/dr_tools.h
++++ b/core/lib/dr_tools.h
+@@ -868,6 +868,29 @@
+ void
+ dr_app_recurlock_lock(void *reclock, dr_mcontext_t *mc);
+
++#ifdef LINUX
++DR_API
++/**
++ * Waits while the aligned, process-private predicate equals \p value. The
++ * acknowledgement is set to value (release ordered) only after a full copy of
++ * \p mc is owned by the core and the wait is transferable. Both words must
++ * remain mapped until the wait completes or is abandoned. The publisher wakes
++ * predicate with FUTEX_WAKE_PRIVATE after changing it.
++ *
++ * Like dr_app_recurlock_lock(), this operation may abandon the private wait and
++ * resume the supplied application context. The PC must recheck the predicate
++ * BEFORE executing any application instruction. The caller must hold no locks,
++ * cache-generation references, resources, or outstanding irreversible effects.
++ * The acknowledgement must be idempotent. This is not a general blocking-call
++ * annotation. Supply DR_MC_ALL, including an explicit application PC (which
++ * dr_get_mcontext() does not fill). On normal completion this operation also
++ * redirects to that PC: it NEVER returns to the calling clean call.
++ */
++void
++dr_app_predicate_wait(volatile int *predicate, int value, volatile int *acknowledgement,
++                      dr_mcontext_t *mc);
++#endif
++
+ DR_API
+ /** Decrements the ownership count of \p reclock and releases if zero. */
+ void
+--- a/core/lib/instrument.c
++++ b/core/lib/instrument.c
+@@ -3859,6 +3859,26 @@
+     acquire_recursive_app_lock((recursive_lock_t *)reclock,
+                                dr_mcontext_as_priv_mcontext(mc));
+ }
++
++#ifdef LINUX
++DR_API void
++dr_app_predicate_wait(volatile int *predicate, int value, volatile int *acknowledgement,
++                      dr_mcontext_t *mc)
++{
++    CLIENT_ASSERT(mc != NULL && mc->flags == DR_MC_ALL && mc->pc != NULL,
++                  "predicate wait requires full application context and PC");
++    CLIENT_ASSERT(predicate != NULL && acknowledgement != NULL &&
++                      predicate != acknowledgement && ALIGNED(predicate, sizeof(int)) &&
++                      ALIGNED(acknowledgement, sizeof(int)),
++                  "predicate wait requires distinct aligned live words");
++    os_app_predicate_wait(predicate, value, acknowledgement,
++                          dr_mcontext_as_priv_mcontext(mc));
++    /* os_app_predicate_wait has left the transferable interval. Even an
++     * uncontended wait must not return to an obsolete clean-call continuation. */
++    dr_redirect_execution(mc);
++    CLIENT_ASSERT(false, "predicate wait redirect returned");
++}
++#endif
+
+ DR_API
+ void
+--- a/core/os_shared.h
++++ b/core/os_shared.h
+@@ -951,6 +951,11 @@
+  */
+ void
+ mutex_wait_contended_lock(mutex_t *lock, priv_mcontext_t *mc);
++#ifdef LINUX
++void
++os_app_predicate_wait(volatile int *predicate, int value, volatile int *acknowledgement,
++                      priv_mcontext_t *mc);
++#endif
+ void
+ mutex_notify_released_lock(mutex_t *lock);
+ void
+--- a/core/unix/os.c
++++ b/core/unix/os.c
+@@ -10713,6 +10713,35 @@
+ extern void
+ deadlock_avoidance_unlock(mutex_t *lock, bool ownable);
+
++#ifdef LINUX
++void
++os_app_predicate_wait(volatile int *predicate, int value, volatile int *acknowledgement,
++                      priv_mcontext_t *mc)
++{
++    dcontext_t *dcontext = get_thread_private_dcontext();
++    ASSERT(dcontext != NULL && !IS_CLIENT_THREAD(dcontext));
++    ASSERT_OWN_NO_LOCKS();
++    /* Same ownership and synch_lock transition discipline as the application
++     * recursive-lock wait below. mc was obtained with dr_get_mcontext: raw
++     * dstack bytes would have the wrong app SP and stolen register. No heap or
++     * generation record is needed: the private operation can be abandoned. */
++    *get_mcontext(dcontext) = *mc;
++    LOG(THREAD, LOG_SYNCH, 1, "predicate-wait owned pc=" PFX " sp=" PFX "\n",
++        mc->pc, mc->xsp);
++    set_synch_state(dcontext, THREAD_SYNCH_VALID_MCONTEXT);
++    __atomic_store_n(acknowledgement, value, __ATOMIC_RELEASE);
++    dynamorio_syscall(SYS_futex, 6, acknowledgement, 129 /* FUTEX_WAKE_PRIVATE */,
++                      1, NULL, NULL, 0);
++    while (__atomic_load_n(predicate, __ATOMIC_ACQUIRE) == value) {
++        /* EINTR and spurious wakes simply recheck: there is no consumed result. */
++        dynamorio_syscall(SYS_futex, 6, predicate, 128 /* FUTEX_WAIT_PRIVATE */,
++                          value, NULL, NULL, 0);
++    }
++    set_synch_state(dcontext, THREAD_SYNCH_NONE);
++    LOG(THREAD, LOG_SYNCH, 1, "predicate-wait complete pc=" PFX "\n", mc->pc);
++}
++#endif
++
+ void
+ mutex_wait_contended_lock(mutex_t *lock, priv_mcontext_t *mc)
+ {
