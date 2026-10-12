@@ -50,7 +50,7 @@ public final class SigquitAttach {
         for (int i = 0; i < 3000 && !Files.exists(socket); i++) Thread.sleep(10);
         Fz.expect(Files.exists(socket), "attach listener started");
         Files.deleteIfExists(trigger);
-        Path dump = Path.of("/tmp/fz-" + pid + ".hprof");
+        Path dump = Path.of(System.getProperty("java.io.tmpdir"), "fz-" + pid + ".hprof");
         String[] commands = java.util.Arrays.copyOf(COMMANDS, COMMANDS.length + 1);
         commands[COMMANDS.length] = "GC.heap_dump " + dump;
         for (String command : commands) {

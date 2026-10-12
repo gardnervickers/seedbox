@@ -58,7 +58,10 @@ public final class Jfr {
             if (all || events.contains("monitor")) r.enable("jdk.JavaMonitorEnter").withThreshold(Duration.ZERO);
             if (all || events.contains("park")) r.enable("jdk.ThreadPark").withThreshold(Duration.ZERO);
             if (all || events.contains("native")) r.enable("jdk.NativeMethodSample").withPeriod(Duration.ofMillis(period));
-            if (all || events.contains("threaddump")) r.enable("jdk.ThreadDump").withPeriod(Duration.ofMillis(10 * period));
+            // A full thread dump per period: keep it slow, and the recording bounded, so the
+            // repository fits a small guest disk.
+            if (all || events.contains("threaddump")) r.enable("jdk.ThreadDump").withPeriod(Duration.ofMillis(100 * period));
+            r.setMaxSize(32L << 20);
             if (all || events.contains("exceptions")) r.enable("jdk.JavaExceptionThrow");
             if (!events.equals("none")) r.start();
             Thread[] ts = new Thread[3];
