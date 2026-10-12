@@ -41,7 +41,11 @@ static ptr_int_t *budget(void)
     return (ptr_int_t *)((byte *)dr_get_dr_segment_base(budget_segment) + budget_offset);
 }
 
-static void progress_call(void)
+#ifdef SEEDBOX_PARKED_PROGRESS_DIAGNOSTIC
+#include "fixtures/parked-progress-hooks.h"
+#endif
+
+static ptr_int_t progress_call(void)
 {
 #ifdef X86_64
     long result;
@@ -55,7 +59,10 @@ static void progress_call(void)
 #else
 #error Unsupported progress architecture
 #endif
-    DR_ASSERT(result > 0);
+#ifdef SEEDBOX_PARKED_PROGRESS_DIAGNOSTIC
+    result = parked_progress_after_payment(result);
+#endif
+    return result;
 }
 
 /* One progress call per budget the charges have used, so a charge larger than
@@ -65,26 +72,30 @@ static void checkpoint(void)
     ptr_int_t *left = budget();
     do {
         *left += instruction_budget;
-        progress_call();
+        ptr_int_t result = progress_call();
+        DR_ASSERT(result > 0);
     } while (*left < 0);
 }
 
 #ifdef AARCH64
-/* Guest signals arrive only at progress calls, so the translator's request to
- * synchronize all threads always finds a busy thread inside this clean call,
- * where it cannot translate the thread's state. Returning into the code cache
- * would let that request retry forever while every other thread stays
- * suspended. Leave through the dispatcher instead, which waits for a pending
- * request at a safe spot. `resume` is the application address of the charged
- * instruction; the charge there runs again, so give its `charged` back. */
+/* The core owns the finite payment on a fresh dispatcher stack. Its record
+ * captures this old charge before publication can change the app block. */
 static void checkpoint_and_dispatch(app_pc resume, ptr_int_t charged)
 {
-    checkpoint();
-    *budget() += charged;
     dr_mcontext_t context = {sizeof(context), DR_MC_ALL};
     DR_ASSERT(dr_get_mcontext(dr_get_current_drcontext(), &context));
     context.pc = resume;
-    dr_redirect_execution(&context);
+#ifdef SEEDBOX_PARKED_PROGRESS_DIAGNOSTIC
+    if (parked_progress_diag != NULL && parked_progress_diag->armed) {
+        if (parked_progress_failure == 5) instruction_budget = 0;
+        if (parked_progress_failure == 6)
+            dr_app_progress_exit(&context, (ptr_int_t *)&parked_progress_diag->initial_budget,
+                                 instruction_budget, charged, progress_call);
+        if (parked_progress_failure == 7) charged = 0;
+        if (parked_progress_failure == 8) *budget() = 0;
+    }
+#endif
+    dr_app_progress_exit(&context, budget(), instruction_budget, charged, progress_call);
     DR_ASSERT(false);
 }
 #endif
@@ -100,6 +111,9 @@ static void thread_init(void *context)
 static void charge_before(void *context, instrlist_t *block, instr_t *where,
                           uint instructions)
 {
+#ifdef SEEDBOX_PARKED_PROGRESS_DIAGNOSTIC
+    parked_progress_instrument(context, block, where, instructions);
+#endif
     instr_t *skip = INSTR_CREATE_label(context);
 #ifdef X86_64
     DR_ASSERT(drreg_reserve_aflags(context, block, where) == DRREG_SUCCESS);
@@ -143,6 +157,9 @@ static void charge_before(void *context, instrlist_t *block, instr_t *where,
      * Restore before the application instruction, not at its next normal read. */
     DR_ASSERT(drreg_get_app_value(context, block, where, scratch, scratch) == DRREG_SUCCESS);
     DR_ASSERT(drreg_unreserve_register(context, block, where, scratch) == DRREG_SUCCESS);
+#endif
+#ifdef SEEDBOX_PARKED_PROGRESS_DIAGNOSTIC
+    parked_progress_instrument_zero(context, block, where);
 #endif
 }
 
@@ -227,6 +244,15 @@ static void finished(void)
 
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
 {
+#ifdef SEEDBOX_PARKED_PROGRESS_DIAGNOSTIC
+    if (argc != 6 && argc != 7) dr_abort();
+    if (argc == 7) {
+        if (argv[6][0] < '1' || argv[6][0] > '8' || argv[6][1] != 0) dr_abort();
+        parked_progress_failure = argv[6][0] - '0';
+    }
+    parked_progress_target_path = argv[5];
+    argc = 5;
+#endif
     uint32_t parsed_budget, parsed_points;
     if (!seedbox_progress_arguments(argc, argv, &parsed_budget, &parsed_points)) {
         dr_fprintf(STDERR, "seedbox progress: expected " SEEDBOX_PROGRESS_INSTRUCTIONS
@@ -246,6 +272,9 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
     DR_ASSERT(drmgr_init());
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);
     DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 1, 0));
+#ifdef SEEDBOX_PARKED_PROGRESS_DIAGNOSTIC
+    drmgr_register_signal_event(parked_progress_signal);
+#endif
     drmgr_register_thread_init_event(thread_init);
     drmgr_register_bb_app2app_event(neutralize_waits, NULL);
     drmgr_register_bb_instrumentation_event(analyze, instrument, NULL);

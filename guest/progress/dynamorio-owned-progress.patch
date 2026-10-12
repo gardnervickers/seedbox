@@ -1,0 +1,224 @@
+--- a/core/dispatch.c
++++ b/core/dispatch.c
+@@ -1263,6 +1263,9 @@
+     }
+ #endif
+
++#if defined(LINUX) && defined(AARCH64)
++    instrument_finish_progress(dcontext);
++#endif
+ #if defined(UNIX) && !defined(LINUX_KERNEL)
+     if (dcontext->signals_pending != 0) {
+         /* XXX: We can overflow the app stack if we stack up too many signals
+--- a/core/globals.h
++++ b/core/globals.h
+@@ -359,6 +359,18 @@
+
+ /* Client interface-specific data for dcontexts */
+ typedef struct _client_data_t {
++#if defined(LINUX) && defined(AARCH64)
++    /* Fixed, thread-owned progress obligation: no cache-generation pointers. */
++    struct {
++        app_pc resume;
++        ptr_int_t *budget;
++        ptr_int_t quantum;
++        ptr_int_t charged;
++        ptr_int_t (*pay)(void);
++        uint payments;
++    } progress;
++    bool progress_callback_active;
++#endif
+     /* field for use by user via exported API */
+     void *user_field;
+     client_todo_list_t *to_do;
+--- a/core/lib/dr_tools.h
++++ b/core/lib/dr_tools.h
+@@ -868,6 +868,32 @@
+ void
+ dr_app_recurlock_lock(void *reclock, dr_mcontext_t *mc);
+
++#if defined(LINUX) && defined(AARCH64)
++DR_API
++/**
++ * Leaves a due progress clean call through the dispatcher with a fixed owned
++ * obligation. budget must be an allocated raw-TLS slot of the calling thread,
++ * negative on entry, and retained until thread exit. quantum and charged must
++ * be positive and at most UINT_MAX. mc must contain DR_MC_ALL and explicit app PC.
++ *
++ * After complete cache-exit processing on a fresh dstack, the core adds quantum
++ * BEFORE each payment, repeating while budget is negative. It then refunds the
++ * captured old charged count exactly once, releases the record, and resolves
++ * the application PC again. This function never returns to the clean call.
++ *
++ * pay must be a stable client-library function executing only a finite marked
++ * progress syscall, returning its positive result, without locks, DR calls,
++ * cache references, or application effects. It is not an arbitrary blocking
++ * callback interface. Only this owned private interval is non-transferable;
++ * delayable application signals remain pending until payment/refund completes.
++ * Synchronous faults retain their ordinary DR fault handling. Recursive entry
++ * is invalid. The caller must not free the TLS allocation during the obligation.
++ */
++void
++dr_app_progress_exit(dr_mcontext_t *mc, ptr_int_t *budget, ptr_int_t quantum,
++                     ptr_int_t charged, ptr_int_t (*pay)(void));
++#endif
++
+ #ifdef LINUX
+ DR_API
+ /**
+--- a/core/lib/instrument.c
++++ b/core/lib/instrument.c
+@@ -3859,6 +3859,85 @@
+     acquire_recursive_app_lock((recursive_lock_t *)reclock,
+                                dr_mcontext_as_priv_mcontext(mc));
+ }
++
++#if defined(LINUX) && defined(AARCH64)
++static void
++progress_require(bool condition, const char *message)
++{
++    if (!condition) {
++        CLIENT_ASSERT(false, message);
++        dr_abort();
++    }
++}
++
++DR_API void
++dr_app_progress_exit(dr_mcontext_t *mc, ptr_int_t *budget, ptr_int_t quantum,
++                     ptr_int_t charged, ptr_int_t (*pay)(void))
++{
++    dcontext_t *dc = get_thread_private_dcontext();
++    progress_require(dc != NULL && !IS_CLIENT_THREAD(dc), "progress needs an app thread");
++    progress_require(mc != NULL && mc->size == sizeof(*mc) && mc->flags == DR_MC_ALL &&
++                      mc->pc != NULL, "progress requires full app context and PC");
++    progress_require(dc->client_data->progress.pay == NULL &&
++                      !dc->client_data->progress_callback_active,
++                  "recursive progress obligation");
++    progress_require(quantum > 0 && quantum <= UINT_MAX && charged > 0 && charged <= UINT_MAX,
++                  "invalid progress quantum or charge");
++    progress_require(pay != NULL && is_in_client_lib_ignore_aux((app_pc)pay),
++                  "progress payment must have stable client-library code");
++    progress_require(os_current_thread_owns_raw_tls(budget),
++                  "progress budget must be this thread's allocated raw TLS");
++    progress_require(*budget < 0, "progress exit must be due");
++    ASSERT_OWN_NO_LOCKS();
++    dc->client_data->progress.resume = mc->pc;
++    dc->client_data->progress.budget = budget;
++    dc->client_data->progress.quantum = quantum;
++    dc->client_data->progress.charged = charged;
++    dc->client_data->progress.payments = 0;
++    dc->client_data->progress.pay = pay;
++    dr_redirect_execution(mc);
++    progress_require(false, "progress redirect returned");
++}
++
++void
++instrument_finish_progress(dcontext_t *dcontext)
++{
++    client_data_t *cd = dcontext->client_data;
++    if (cd->progress.pay == NULL)
++        return;
++    ASSERT_OWN_NO_LOCKS();
++    /* Called after monitor_cache_exit, before pending application signals. The
++     * old clean-call stack has been discarded by transfer_to_dispatch. */
++    ASSERT(dcontext->last_exit == get_client_linkstub() || LINKSTUB_FAKE(dcontext->last_exit));
++    ASSERT(dcontext->next_tag == cd->progress.resume);
++    ASSERT(get_mcontext(dcontext)->pc == cd->progress.resume);
++    enter_nolinking(dcontext, NULL, false);
++    LOG(THREAD, LOG_SYNCH, 1,
++        "progress owned pc=" PFX " old_charge=" PIFX " debt=" PIFX "\n",
++        cd->progress.resume, cd->progress.charged, *cd->progress.budget);
++    do {
++        *cd->progress.budget += cd->progress.quantum;
++        LOG(THREAD, LOG_SYNCH, 1, "progress added debt=" PIFX "\n", *cd->progress.budget);
++        cd->progress_callback_active = true;
++        set_synch_state(dcontext, THREAD_SYNCH_VALID_MCONTEXT_NO_XFER);
++        ptr_int_t result = cd->progress.pay();
++        set_synch_state(dcontext, THREAD_SYNCH_NONE);
++        cd->progress_callback_active = false;
++        progress_require(result > 0, "marked progress payment failed");
++        ++cd->progress.payments;
++        LOG(THREAD, LOG_SYNCH, 1, "progress paid count=%u result=" PIFX " debt=" PIFX "\n",
++            cd->progress.payments, result, *cd->progress.budget);
++    } while (*cd->progress.budget < 0);
++    *cd->progress.budget += cd->progress.charged;
++    LOG(THREAD, LOG_SYNCH, 1,
++        "progress refunded pc=" PFX " old_charge=" PIFX " debt=" PIFX " payments=%u\n",
++        cd->progress.resume, cd->progress.charged, *cd->progress.budget,
++        cd->progress.payments);
++    memset(&cd->progress, 0, sizeof(cd->progress));
++    LOG(THREAD, LOG_SYNCH, 1, "progress record released\n");
++    enter_couldbelinking(dcontext, NULL, false);
++}
++#endif
+
+ #ifdef LINUX
+ DR_API void
+--- a/core/lib/instrument.h
++++ b/core/lib/instrument.h
+@@ -61,6 +61,11 @@
+ /* to make our own code shorter */
+ #define MINSERT instrlist_meta_preinsert
+
++#if defined(LINUX) && defined(AARCH64)
++void
++instrument_finish_progress(dcontext_t *dcontext);
++#endif
++
+ void
+ instrument_load_client_libs(void);
+ void
+--- a/core/os_shared.h
++++ b/core/os_shared.h
+@@ -279,6 +279,10 @@
+
+ bool
+ os_tls_cfree(uint offset, uint num_slots);
++#if defined(LINUX) && defined(AARCH64)
++bool
++os_current_thread_owns_raw_tls(ptr_int_t *slot);
++#endif
+
+ bool
+ os_should_swap_state(void);
+--- a/core/unix/os.c
++++ b/core/unix/os.c
+@@ -2652,6 +2652,22 @@
+     return ok;
+ }
+
++#if defined(LINUX) && defined(AARCH64)
++bool
++os_current_thread_owns_raw_tls(ptr_int_t *slot)
++{
++    ptr_uint_t base = (ptr_uint_t)&get_os_tls()->client_tls[0];
++    ptr_uint_t addr = (ptr_uint_t)slot;
++    if (addr < base || addr - base >= sizeof(get_os_tls()->client_tls) ||
++        !ALIGNED(addr - base, sizeof(void *)))
++        return false;
++    d_r_mutex_lock(&client_tls_lock);
++    bool allocated = client_tls_allocated[(addr - base) / sizeof(void *)];
++    d_r_mutex_unlock(&client_tls_lock);
++    return allocated;
++}
++#endif
++
+ /* os_data is a clone_record_t for signal_thread_inherit */
+ void
+ os_thread_init(dcontext_t *dcontext, void *os_data)
+--- a/core/unix/signal.c
++++ b/core/unix/signal.c
+@@ -5116,6 +5116,13 @@
+          * post-syscall handling)
+          */
+     } else if (thread_synch_check_state(dcontext, THREAD_SYNCH_NO_LOCKS) &&
++#if defined(LINUX) && defined(AARCH64)
++               /* An owned finite payment has not committed its refund yet.
++                * Use the existing pending queue only for delayable app signals;
++                * synchronous faults retain the normal DR fault path below. */
++               !(dcontext->client_data != NULL &&
++                 dcontext->client_data->progress_callback_active) &&
++#endif
+                /* Avoid grabbing locks for xl8 while in a suspended state (i#3026). */
+                ksynch_get_value(&ostd->suspended) == 0) {
+         /* The signal interrupted DR or the client but it's at a safe spot so

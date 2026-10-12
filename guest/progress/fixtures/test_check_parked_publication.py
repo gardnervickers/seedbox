@@ -37,5 +37,23 @@ class ParkedPublicationEvidence(unittest.TestCase):
             with self.assertRaises(ValueError): check(text, 0)
 
 
+class ProgressLedgerEvidence(unittest.TestCase):
+    def evidence(self):
+        text = evidence().replace('case=restartable', 'case=progress')
+        for i in range(1, 21):
+            initial, calls = (2, 1) if i % 2 else (-99998, 3)
+            text += (f'\nLEDGER iteration={i} old_charge=5 fresh_charge=7 initial={initial} '
+                     f'after_add={initial-5+50000} payments={calls} before_signal=50002 '
+                     'released=1 deferred=1')
+        return text
+
+    def test_actual_old_ledger(self):
+        self.assertEqual(check(self.evidence(), 0)['case'], 'progress')
+        for old, new in [('payments=3', 'payments=2'), ('old_charge=5', 'old_charge=7'),
+                         ('before_signal=50002', 'before_signal=50004'),
+                         ('after_add=-50003', 'after_add=-100003'), ('deferred=1', 'deferred=0')]:
+            with self.assertRaises(ValueError): check(self.evidence().replace(old, new), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

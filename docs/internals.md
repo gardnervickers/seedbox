@@ -82,17 +82,26 @@ manages the temporary registers. Its ARM reservations are conservative and
 restore scratch before the application instruction: a fault handler can observe
 a register even when it is dead on the normal path.
 
-Guest signals arrive only at progress calls, so when the ARM translator
-synchronizes all threads, for example to flush code a JIT has rewritten, it
-always finds a busy thread inside the progress call. The translator cannot
-translate a thread's state there. If the thread returned into translated code,
-the request would retry forever while every other thread stayed suspended. The
-ARM progress call therefore leaves through the translator's dispatcher at the
-charged instruction, which waits for a pending synchronization. The charge
-there runs again, so the call gives it back first. The translator patch saves
-each vector register of the call in its own context slot, so that exit
-restores them exactly. This redirection happens after the private call completes;
-it does not make an arbitrarily blocked clean call transferable during a flush.
+The ARM due path captures full application state, the original charged PC and
+old block charge, then leaves the clean call through the dispatcher. A fixed
+thread-owned record retains the budget's raw TLS slot, quantum and finite
+payment callback. After complete cache-exit processing on a fresh dispatcher
+stack, the core adds a quantum before each marked syscall, repeats negative
+overshoot, and refunds the old charge once before looking up current code.
+There is no return edge to the old fragment and no fragment pointer in the record.
+
+Only the finite, lock-free payment callback is non-transferable during thread
+synchronization. Delayable application signals remain in the existing pending
+queue until payment, refund and record release complete; synchronous private
+faults retain DR's fault handling. This does not make an arbitrary blocked
+callback safe. A separate context-aware predicate wait can instead be abandoned
+at its complete application context: that entry must recheck the still-set
+predicate before any application instruction, and completion always redirects.
+The wait cannot own irreversible effects, locks or cache-generation references.
+
+The translator patch saves each vector register of the clean call in its own
+context slot. Conservative scratch restoration, full-state capture and dispatcher
+re-entry preserve exception-visible state as well as normal-path values.
 
 The ARM translator detects rewritten code through the application's `IC IVAU`
 cache-maintenance instructions (`-no_hw_cache_consistency`). Translated reads of

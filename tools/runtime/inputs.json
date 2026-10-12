@@ -24,6 +24,7 @@
     "guest/progress/dynamorio-icache-images.patch",
     "guest/progress/dynamorio-translation-lookahead.patch",
     "guest/progress/dynamorio-predicate-wait.patch",
+    "guest/progress/dynamorio-owned-progress.patch",
     "guest/progress/progress.c",
     "guest/progress/budget.h",
     "guest/progress/CMakeLists.txt",
