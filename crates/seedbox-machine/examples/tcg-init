@@ -1,0 +1,10 @@
+#!/bin/sh
+# PID 1 for the Linux reference example. The sleep forces real kernel idle and
+# timer wakeup before shutdown, rather than merely testing early boot output.
+set -eu
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+exec </dev/console >/dev/console 2>&1
+echo 'seedbox: Linux userspace booted'
+/bin/busybox sleep 100 
+echo 'seedbox: Linux timer woke'
+/bin/busybox poweroff -f

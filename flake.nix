@@ -8,6 +8,8 @@
         let
           pkgs = import nixpkgs { inherit system; };
           filesystemTools = (import ./nix/runtime.nix { inherit pkgs; }).filesystemTools;
+          tcgQemu = import ./nix/tcg.nix { inherit pkgs; };
+          tcgLinux = import ./nix/tcg-linux.nix { inherit pkgs; };
           linuxEnvironment = {
             SEEDBOX_STATIC_CC = "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc";
             SEEDBOX_IP = "${pkgs.iproute2}/bin/ip";
@@ -26,10 +28,14 @@
         in {
           default = pkgs.mkShell ({
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+            SEEDBOX_TCG_LINUX = "${tcgLinux}";
+            SEEDBOX_TCG_QEMU = "${tcgQemu}/bin/qemu-system-riscv64";
+            SEEDBOX_TCG_FIRMWARE = "${tcgQemu}/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin";
             packages = with pkgs; [
               rustc cargo rustfmt clippy pkg-config stdenv.cc git
               cpio gzip curl jq python3 gnumake bc bison flex perl
-              docker-client podman qemu_full
+              docker-client podman
+              tcgQemu
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 go util-linux
             ];
@@ -43,6 +49,8 @@
       packages = nixpkgs.lib.genAttrs systems (system:
         let pkgs = import nixpkgs { inherit system; }; in {
           networkTools = pkgs.iproute2;
+          tcgQemu = import ./nix/tcg.nix { inherit pkgs; };
+          tcgLinux = import ./nix/tcg-linux.nix { inherit pkgs; };
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # Name outputs explicitly so selecting helpers never imports the kernel recipe.
           inherit (import ./nix/runtime.nix { inherit pkgs; }) runtimeAssets runtimeArchive runtimeSources;

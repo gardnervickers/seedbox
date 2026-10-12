@@ -3,6 +3,32 @@
 These mechanisms depend on ordering or state that is easy to overlook.
 Each section links to the code that owns it.
 
+## Reference TCG machine
+
+`seedbox-machine` has a diskless, single-CPU RV64 reference backend using QEMU
+software emulation. Run its Linux example inside `nix develop` with
+`cargo run -p seedbox-machine --example tcg`. The development shell builds the
+patched QEMU and prepares the kernel, firmware, and initramfs inputs. The example
+boots Linux, runs an init process that sleeps and prints a wakeup marker, then
+shuts down. It is separate from the production `seedbox run` backends.
+
+The driver repeatedly calls `Machine::run`. A private QMP command limits QEMU's
+native instruction budget, with one instruction mapped to one simulation
+nanosecond. QEMU stops at that budget or when the CPU becomes idle; it cannot
+automatically jump forward through idle time. `Blocked` reports the next virtual
+timer deadline, and the driver explicitly advances to it through `wake` before
+resuming. Guest shutdown returns `Exited`. GDB is used only by tests to inspect
+stopped register and RAM state.
+
+Snapshots own their boot inputs and QEMU migration state, including RAM, CPU,
+devices, and virtual timers. The QEMU process and control connection are recreated
+on restore. Serial output already emitted by an instance is external observation
+and is not emitted again by restoring its snapshot.
+
+Code: [TCG machine](../crates/seedbox-machine/src/machine/tcg.rs),
+[driver example](../crates/seedbox-machine/examples/tcg.rs),
+[QEMU patch](../crates/seedbox-machine/qemu/bounded-run.patch).
+
 ## Bounded virtual clock reads
 
 Reading the host counter would make a guest polling loop's iteration count

@@ -1,0 +1,322 @@
+--- a/accel/tcg/icount-common.c
++++ b/accel/tcg/icount-common.c
+@@ -26,6 +26,7 @@
+ #include "qemu/cutils.h"
+ #include "migration/vmstate.h"
+ #include "qapi/error.h"
++#include "qapi/qapi-commands-run-state.h"
+ #include "qemu/error-report.h"
+ #include "system/cpus.h"
+ #include "system/qtest.h"
+@@ -53,6 +54,159 @@
+ /* Do not count executed instructions */
+ ICountMode use_icount = ICOUNT_DISABLED;
+
++/* Seedbox owns idle-time advancement once it starts bounded execution. */
++static bool seedbox_controlled;
++static bool seedbox_active;
++static int64_t seedbox_target;
++static SeedboxStopReason seedbox_reason = SEEDBOX_STOP_REASON_BOUNDARY;
++static int64_t seedbox_deadline = -1;
++
++/* Guest MMIO shutdown must stop its CPU at the requesting instruction,
++ * rather than running until the main thread happens to process the request. */
++void seedbox_icount_shutdown(void)
++{
++    if (seedbox_controlled) {
++        cpu_stop_current();
++    }
++}
++
++/* Called only at stopped boundaries under the BQL. */
++static void seedbox_state_changed(void *opaque, bool running, RunState state)
++{
++    if (!running) {
++        seedbox_active = false;
++        if (state == RUN_STATE_SHUTDOWN) {
++            seedbox_reason = SEEDBOX_STOP_REASON_SHUTDOWN;
++        } else if (state != RUN_STATE_PAUSED) {
++            seedbox_reason = SEEDBOX_STOP_REASON_ERROR;
++        }
++    }
++}
++
++void qmp_seedbox_advance(int64_t time, Error **errp)
++{
++    int64_t now = icount_get();
++    int64_t delay = qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL,
++                                               QEMU_TIMER_ATTR_ALL);
++    if (runstate_is_running() || seedbox_active || time < now ||
++        (delay >= 0 && time - now > delay)) {
++        error_setg(errp, "advance requires a stopped VM and must not skip a timer");
++        return;
++    }
++    seqlock_write_lock(&timers_state.vm_clock_seqlock,
++                       &timers_state.vm_clock_lock);
++    qatomic_set(&timers_state.qemu_icount_bias,
++                timers_state.qemu_icount_bias + time - now);
++    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
++                         &timers_state.vm_clock_lock);
++    qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
++}
++
++void qmp_seedbox_run(int64_t time, int64_t budget, Error **errp)
++{
++    int64_t now = icount_get();
++    int64_t count = icount_get_raw();
++
++    /* Single CPU keeps this first implementation's instruction/time mapping
++     * explicit. Multi-CPU scheduling is not part of the reference contract. */
++    if (icount_enabled() != ICOUNT_PRECISE ||
++        timers_state.icount_time_shift != 0 || icount_sleep ||
++        icount_align_option || replay_mode != REPLAY_MODE_NONE ||
++        !first_cpu || CPU_NEXT(first_cpu)) {
++        error_setg(errp, "seedbox-run needs one CPU and icount shift=0,align=off,sleep=off");
++        return;
++    }
++    if (runstate_is_running() || seedbox_active ||
++        runstate_check(RUN_STATE_SHUTDOWN)) {
++        error_setg(errp, "seedbox-run requires a stopped, non-exited machine");
++        return;
++    }
++    if (time < now || budget <= 0 || budget > INT64_MAX - time ||
++        budget > INT64_MAX - count) {
++        error_setg(errp, "invalid simulation time or instruction budget");
++        return;
++    }
++    if (!seedbox_controlled) {
++        qemu_add_vm_change_state_handler(seedbox_state_changed, NULL);
++        seedbox_controlled = true;
++    }
++    /* The coordinator explicitly advances idle time; this bias is already
++     * included in QEMU's timer migration state. No guest instruction runs. */
++    seqlock_write_lock(&timers_state.vm_clock_seqlock,
++                       &timers_state.vm_clock_lock);
++    qatomic_set(&timers_state.qemu_icount_bias,
++                timers_state.qemu_icount_bias + time - now);
++    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
++                         &timers_state.vm_clock_lock);
++    seedbox_target = count + budget;
++    seedbox_deadline = -1;
++    seedbox_reason = SEEDBOX_STOP_REASON_ERROR;
++    seedbox_active = true;
++    vm_start();
++    /* Service events due at the supplied wake time before classifying idle. */
++    qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
++}
++
++SeedboxRunResult *qmp_query_seedbox_run(Error **errp)
++{
++    SeedboxRunResult *result;
++    if (runstate_is_running() || seedbox_active) {
++        error_setg(errp, "seedbox result requires a completed stop");
++        return NULL;
++    }
++    result = g_new0(SeedboxRunResult, 1);
++    result->reason = seedbox_reason;
++    result->time = icount_get();
++    result->has_deadline = seedbox_reason == SEEDBOX_STOP_REASON_BLOCKED &&
++                           seedbox_deadline >= 0;
++    result->deadline = seedbox_deadline;
++    return result;
++}
++
++/* Called by the single TCG CPU thread while preparing a translated-block
++ * budget. icount already splits a block exactly at this instruction limit. */
++int64_t seedbox_icount_limit(int64_t limit)
++{
++    if (seedbox_active) {
++        return MIN(limit, MAX(0, seedbox_target - icount_get_raw()));
++    }
++    return limit;
++}
++
++/* Called under the BQL between CPU executions, never from a translated block.
++ * Stop before the idle loop can wait or the main loop can warp virtual time. */
++void seedbox_icount_poll(void)
++{
++    int64_t delay;
++    if (!seedbox_active || !runstate_is_running()) {
++        return;
++    }
++    if (icount_get_raw() >= seedbox_target) {
++        seedbox_reason = SEEDBOX_STOP_REASON_BOUNDARY;
++    } else if (all_cpu_threads_idle()) {
++        delay = qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL,
++                                           QEMU_TIMER_ATTR_ALL);
++        if (delay == 0) {
++            qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
++            if (!all_cpu_threads_idle()) {
++                return;
++            }
++            delay = qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL,
++                                               QEMU_TIMER_ATTR_ALL);
++            if (delay == 0) {
++                qemu_notify_event();
++                return;
++            }
++        }
++        seedbox_reason = SEEDBOX_STOP_REASON_BLOCKED;
++        seedbox_deadline = delay < 0 ? -1 : icount_get() + delay;
++    } else {
++        return;
++    }
++    seedbox_active = false;
++    vm_stop(RUN_STATE_PAUSED);
++}
++
+ static void icount_enable_precise(void)
+ {
+     /* Fixed conversion of insn to ns via "shift" option */
+@@ -295,6 +449,10 @@
+     int64_t deadline;
+
+     assert(icount_enabled());
++
++    if (seedbox_controlled) {
++        return; /* Only the coordinator may advance time while CPUs are idle. */
++    }
+
+     /*
+      * Nothing to do if the VM is stopped: QEMU_CLOCK_VIRTUAL timers
+--- a/accel/tcg/tcg-accel-ops-icount.c
++++ b/accel/tcg/tcg-accel-ops-icount.c
+@@ -60,7 +60,7 @@
+             deadline = INT32_MAX;
+         }
+
+-        return icount_round(deadline);
++        return seedbox_icount_limit(icount_round(deadline));
+     } else {
+         return replay_get_instructions();
+     }
+--- a/accel/tcg/tcg-accel-ops-rr.c
++++ b/accel/tcg/tcg-accel-ops-rr.c
+@@ -224,6 +224,8 @@
+              */
+             qatomic_set(&cpu->exit_request, false);
+         }
++
++        seedbox_icount_poll();
+
+         if (icount_enabled() && all_cpu_threads_idle()) {
+             /*
+--- a/include/exec/icount.h
++++ b/include/exec/icount.h
+@@ -73,4 +73,9 @@
+ void icount_account_warp_timer(void);
+ void icount_notify_exit(void);
+
++/* Seedbox bounded execution, supported by single-threaded system TCG. */
++int64_t seedbox_icount_limit(int64_t limit);
++void seedbox_icount_poll(void);
++void seedbox_icount_shutdown(void);
++
+ #endif /* EXEC_ICOUNT_H */
+--- a/qapi/run-state.json
++++ b/qapi/run-state.json
+@@ -749,3 +749,72 @@
+ ##
+ { 'enum': 'NotifyVmexitOption',
+   'data': [ 'run', 'internal-error', 'disable' ] }
++
++##
++# @SeedboxStopReason:
++#
++# Why a bounded execution stopped.
++#
++# @boundary: The instruction budget was exhausted.
++# @blocked: All CPUs are idle, with no event due now.
++# @shutdown: The guest requested shutdown.
++# @error: An unexpected stop requires caller diagnosis.
++#
++# Since: 11.1
++##
++{ 'enum': 'SeedboxStopReason',
++  'data': ['boundary', 'blocked', 'shutdown', 'error'],
++  'if': 'CONFIG_TCG' }
++
++##
++# @SeedboxRunResult:
++#
++# Accepted stopped execution state.
++#
++# @reason: The stop reason.
++# @time: Simulation nanoseconds at the stop.
++# @deadline: Earliest pending timer, in simulation nanoseconds.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxRunResult',
++  'data': { 'reason': 'SeedboxStopReason', 'time': 'int', '*deadline': 'int' },
++  'if': 'CONFIG_TCG' }
++
++##
++# @seedbox-run:
++#
++# Start bounded execution.  Wait for STOP, then query-seedbox-run.
++#
++# @time: Simulation time at which execution starts.
++# @budget: Maximum number of instructions to execute.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-run', 'data': { 'time': 'int', 'budget': 'int' },
++  'if': 'CONFIG_TCG' }
++
++##
++# @query-seedbox-run:
++#
++# Read the accepted result after STOP.
++#
++# Returns: The stopped position, reason and optional timer deadline.
++#
++# Since: 11.1
++##
++{ 'command': 'query-seedbox-run', 'returns': 'SeedboxRunResult',
++  'if': 'CONFIG_TCG' }
++
++##
++# @seedbox-advance:
++#
++# Advance a stopped VM's virtual time, delivering due timers without
++# executing guest instructions.  Must not skip an earlier timer.
++#
++# @time: New simulation time in nanoseconds.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-advance', 'data': { 'time': 'int' },
++  'if': 'CONFIG_TCG' }
+--- a/system/runstate.c
++++ b/system/runstate.c
+@@ -30,6 +30,7 @@
+ #include "crypto/cipher.h"
+ #include "crypto/init.h"
+ #include "exec/cpu-common.h"
++#include "exec/icount.h"
+ #include "gdbstub/syscalls.h"
+ #include "hw/core/boards.h"
+ #include "hw/core/resettable.h"
+@@ -840,6 +841,9 @@
+ void qemu_system_shutdown_request(ShutdownCause reason)
+ {
+     trace_qemu_system_shutdown_request(reason);
++#ifdef CONFIG_TCG
++    seedbox_icount_shutdown();
++#endif
+     replay_shutdown_request(reason);
+     shutdown_requested = reason;
+     if (reason == SHUTDOWN_CAUSE_HOST_QMP_QUIT) {
+--- a/target/riscv/tcg/insn_trans/trans_privileged.c.inc
++++ b/target/riscv/tcg/insn_trans/trans_privileged.c.inc
+@@ -145,6 +145,9 @@
+     decode_save_opc(ctx, 0);
+     gen_update_pc(ctx, ctx->cur_insn_len);
+     gen_helper_wfi(tcg_env);
++    /* WFI exits the CPU loop. End the TB here so its icount pre-decrement
++     * cannot charge instructions after WFI which have not executed. */
++    ctx->base.is_jmp = DISAS_NORETURN;
+     return true;
+ #else
+     return false;
