@@ -25,10 +25,11 @@
             (with pkgs; [ pkg-config elfutils elfutils.dev openssl.dev ]);
         in {
           default = pkgs.mkShell ({
+            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             packages = with pkgs; [
               rustc cargo rustfmt clippy pkg-config stdenv.cc git
               cpio gzip curl jq python3 gnumake bc bison flex perl
-              docker-client podman
+              docker-client podman qemu_full
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 go util-linux
             ];

@@ -2045,6 +2045,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-machine"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "seedbox-server"
 version = "0.1.0"
 dependencies = [
