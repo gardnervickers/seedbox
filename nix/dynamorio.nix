@@ -26,6 +26,8 @@ pkgs.stdenv.mkDerivation {
     ../guest/progress/dynamorio-predicate-wait.patch
     # Fixed, thread-owned progress debt completed off the code cache.
     ../guest/progress/dynamorio-owned-progress.patch
+    # Thread-exit TLS validation needs permissions, not a faulting ELF probe.
+    ../guest/progress/dynamorio-tls-permission-query.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build

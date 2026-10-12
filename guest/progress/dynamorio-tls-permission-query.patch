@@ -1,0 +1,18 @@
+--- a/core/unix/os.c
++++ b/core/unix/os.c
+@@ -7160,8 +7160,13 @@
+         if (os_tls->app_lib_tls_base == NULL)
+             app_mem_valid = false;
+         else {
+-            uint prot;
+-            bool rc = get_memory_info(os_tls->app_lib_tls_base, NULL, NULL, &prot);
++            dr_mem_info_t info;
++            bool have_type;
++            /* Thread exit can reach here after fault handling is unavailable.
++             * Only permissions are needed: querying an ELF type may probe an
++             * unmapped VMA prefix while another thread releases its stack. */
++            bool rc = memquery_from_os(os_tls->app_lib_tls_base, &info, &have_type);
++            uint prot = rc ? info.prot : MEMPROT_NONE;
+             /* Rule out a garbage value, which happens in our own test
+              * common.allasm_aarch_isa.
+              * Also rule out an unwritable region, which seems to happen on arm

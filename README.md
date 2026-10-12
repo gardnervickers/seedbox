@@ -7,6 +7,10 @@ Seedbox runs Linux applications in virtual machines with controlled time,
 networking, and disk faults. A seed and recorded inputs let you repeat a
 simulation and compare its results.
 
+Seedbox tests cooperative programs; it is not a hostile-code sandbox or a
+security isolation guarantee. Programs must follow normal code-publication
+contracts rather than deliberately bypassing the translator.
+
 ![Inject and heal an etcd network partition in the Seedbox TUI](docs/assets/seedbox-tui.gif)
 
 ## Try it
