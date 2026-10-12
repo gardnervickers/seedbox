@@ -17,8 +17,7 @@ pkgs.stdenv.mkDerivation {
     ../guest/progress/dynamorio-ic-ivau.patch
     # SME-only Linux can supply an inactive, header-only SVE record with VL=0.
     ../guest/progress/dynamorio-sme-empty-context.patch
-    # Opt-in correctness discriminator only; the normal launch recipe does not
-    # enable its all-image scan or change the existing retirement protocol.
+    # Generation-owned decoded images and selective retirement.
     ../guest/progress/dynamorio-icache-images.patch
     # Stored-info Debug validation walks the retained cache, not singleton IR.
     ../guest/progress/dynamorio-translation-lookahead.patch
@@ -28,6 +27,8 @@ pkgs.stdenv.mkDerivation {
     ../guest/progress/dynamorio-owned-progress.patch
     # Thread-exit TLS validation needs permissions, not a faulting ELF probe.
     ../guest/progress/dynamorio-tls-permission-query.patch
+    # Backing/anonymous-birth page index; unknown ownership flushes conservatively.
+    ../guest/progress/dynamorio-icache-index.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build
@@ -57,12 +58,19 @@ pkgs.stdenv.mkDerivation {
     "-DBUILD_DOCS=OFF"
   ];
   ninjaFlags = [ "dynamorio" "drreg" ];
+  # Upstream already separates/strips the runtime; keep the companion symbols.
+  dontStrip = true;
   installPhase = ''
     runHook preInstall
     mkdir -p "$out/lib64/release"
     cp lib64/release/libdynamorio.so "$out/lib64/release/"
+    # Retain symbols for native crash diagnosis; the guest bundle copies only .so.
+    cp lib64/release/libdynamorio.so.debug "$out/lib64/release/"
     mkdir -p "$out/ext/lib64/release"
     cp ext/lib64/release/libdrmgr.so ext/lib64/release/libdrreg.so "$out/ext/lib64/release/"
+    # The progress client uses the core-owned continuation API. Its compile-time
+    # declarations must come from this same patched core, not the stock SDK.
+    cp -R include "$out/include"
     runHook postInstall
   '';
 }

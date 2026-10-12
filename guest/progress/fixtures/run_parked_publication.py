@@ -34,8 +34,8 @@ def execute(command, log, target=None, diagnostic=False):
                             for task in (proc / 'task').iterdir():
                                 try:
                                     evidence['tasks'][task.name] = (task / 'syscall').read_text().strip()
-                                except (FileNotFoundError, ProcessLookupError):
-                                    pass
+                                except (FileNotFoundError, ProcessLookupError, PermissionError) as error:
+                                    evidence.setdefault('unavailable_tasks', {})[task.name] = str(error)
                             if target is not None and target.exists():
                                 addresses = [int(x, 16) for x in target.read_text().split()[:3]]
                                 with (proc / 'mem').open('rb', buffering=0) as memory:
@@ -43,8 +43,11 @@ def execute(command, log, target=None, diagnostic=False):
                                         memory.seek(address)
                                         evidence[name] = int.from_bytes(memory.read(4), 'little')
                             sampled = True
-                        except (FileNotFoundError, ProcessLookupError):
-                            pass  # A completed positive still needs full output and exit 0.
+                        except (FileNotFoundError, ProcessLookupError, PermissionError) as error:
+                            # A terminating contract-failure process can already be
+                            # nondumpable. Output/exit and negative handshake checks
+                            # remain mandatory; unavailable sampling is not success.
+                            evidence['sampling_error'] = str(error)
                 time.sleep(0.005)
             if process.poll() is None:
                 timed_out = True

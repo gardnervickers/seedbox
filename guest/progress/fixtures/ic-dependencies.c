@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -13,6 +14,7 @@ static uint32_t *rw;
 static char *rx;
 static size_t page;
 static unsigned checks, failures;
+static int writer_only;
 
 static void phase(unsigned n)
 {
@@ -21,7 +23,8 @@ static void phase(unsigned n)
 static void publish(size_t offset, size_t size)
 {
     __builtin___clear_cache((char *)rw + offset, (char *)rw + offset + size);
-    __builtin___clear_cache(rx + offset, rx + offset + size);
+    if (!writer_only && rx != (char *)rw)
+        __builtin___clear_cache(rx + offset, rx + offset + size);
 }
 static uint32_t mov(unsigned value) { return 0x52800000u | (value << 5); }
 static uint32_t add(unsigned value) { return 0x11000000u | (value << 10); }
@@ -34,17 +37,26 @@ static void expect(size_t offset, int argument, int expected)
         fprintf(stderr, "offset=%zu expected=%d actual=%d\n", offset, expected, actual);
     }
 }
-int main(void)
+int main(int argc, char **argv)
 {
+    int anonymous = argc == 2 && strcmp(argv[1], "--anonymous") == 0;
+    writer_only = argc == 2 && strcmp(argv[1], "--writer-only") == 0;
+    if (argc != 1 && !anonymous && !writer_only) return 2;
     long size = sysconf(_SC_PAGESIZE);
     if (size <= 0) return 2;
     page = (size_t)size;
-    int fd = memfd_create("ic-dependencies", 0);
-    if (fd < 0 || ftruncate(fd, 2 * page)) return 2;
-    rw = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    rx = mmap(NULL, 2 * page, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+    if (anonymous) {
+        rw = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE | PROT_EXEC,
+                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        rx = (char *)rw;
+    } else {
+        int fd = memfd_create("ic-dependencies", 0);
+        if (fd < 0 || ftruncate(fd, 2 * page)) return 2;
+        rw = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        rx = mmap(NULL, 2 * page, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+        close(fd);
+    }
     if (rw == MAP_FAILED || rx == MAP_FAILED) return 2;
-    close(fd);
     rw[0] = mov(1); rw[1] = add(2); rw[2] = 0xd65f03c0;
     rw[8] = mov(77); rw[9] = 0xd65f03c0;
     rw[32] = 0x14000010; /* B +64: followed/elided, discontiguous dependency. */
@@ -86,6 +98,7 @@ int main(void)
     expect(32, 0, 77);
     phase(6);
     printf("ic-dependencies: checks=%u failures=%u\n", checks, failures);
-    munmap(rw, 2 * page); munmap(rx, 2 * page);
+    munmap(rw, 2 * page);
+    if (rx != (char *)rw) munmap(rx, 2 * page);
     return failures != 0;
 }

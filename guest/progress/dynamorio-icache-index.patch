@@ -1,0 +1,822 @@
+--- a/core/fragment.c
++++ b/core/fragment.c
+@@ -84,25 +84,41 @@
+ #endif
+
+ #ifdef AARCH64
+-/* This is a correctness/lifetime discriminator, not an indexed JIT fast path.
+- * Every IC compares ALL live source images, including executable aliases outside
+- * the named line. The platform's normal DSB/IC publication contract still applies.
+- * The builder decodes from these immutable bytes, never from a later reread.
+- * Mapping changes retain the existing VM/syscall flush protocol and revoke equality
+- * admission through an additional global incarnation. Equality is not permission.
+- */
++#include "unix/memquery.h"
++/* A key describes a page of a logical backing, never a physical frame or a
++ * host-time epoch. Anonymous keys require an observed private mapping birth. */
++typedef struct {
++    uint64 identity, offset;
++    uint major, minor;
++    bool file;
++} source_key_t;
++typedef struct _source_mapping_t {
++    struct _source_mapping_t *next;
++    app_pc begin, end;
++    uint prot;
++    uint64 birth, inode;
++    uint major, minor;
++    size_t offset;
++    bool shared, trusted;
++} source_mapping_t;
++#define SOURCE_INDEX_BITS 12
++#define SOURCE_INDEX_SIZE (1U << SOURCE_INDEX_BITS)
+ #define SOURCE_SPAN_CAPACITY 256
+ typedef struct _source_span_t {
+     struct _source_span_t *next;
+     app_pc pc;
+     uint size;
++    struct _fragment_source_t *owner;
++    struct _source_span_t *index_next, *index_prev;
++    source_key_t key;
++    bool trusted, indexed;
+     byte bytes[SOURCE_SPAN_CAPACITY];
+ } source_span_t;
+ struct _fragment_source_t {
+     struct _fragment_source_t *next, *prev;
+     source_span_t *first, *last;
+     uint64 incarnation;
+-    bool published, live, selected;
++    bool published, live, selected, unresolved;
+ };
+ DECLARE_CXTSWPROT_VAR(static mutex_t fragment_source_lock, INIT_LOCK_FREE(fragment_source_lock));
+ DECLARE_NEVERPROT_VAR(static fragment_source_t *fragment_sources, NULL);
+@@ -116,6 +132,276 @@
+ DECLARE_NEVERPROT_VAR(static uint64 source_emitted, 0);
+ DECLARE_NEVERPROT_VAR(static uint64 source_reclaimed, 0);
+ DECLARE_NEVERPROT_VAR(static uint64 source_selected, 0);
++DECLARE_NEVERPROT_VAR(static uint64 source_queries, 0);
++DECLARE_NEVERPROT_VAR(static uint64 source_birth_id, 0);
++DECLARE_NEVERPROT_VAR(static uint source_mutations, 0);
++DECLARE_NEVERPROT_VAR(static uint source_unresolved, 0);
++DECLARE_NEVERPROT_VAR(static bool source_invalidated, false);
++DECLARE_NEVERPROT_VAR(static bool source_index_disabled, false);
++DECLARE_NEVERPROT_VAR(static source_mapping_t *source_births, NULL);
++DECLARE_NEVERPROT_VAR(static source_mapping_t *source_maps, NULL);
++static source_span_t *source_index[SOURCE_INDEX_SIZE];
++
++static uint
++source_key_hash(source_key_t key)
++{
++    uint64 h = key.identity ^ (key.offset >> 12) ^ ((uint64)key.major << 32) ^ key.minor;
++    h ^= h >> 32;
++    h ^= h >> 16;
++    return (uint)h & (SOURCE_INDEX_SIZE - 1);
++}
++
++static bool
++source_key_equal(source_key_t a, source_key_t b)
++{
++    return a.identity == b.identity && a.offset == b.offset && a.major == b.major &&
++        a.minor == b.minor && a.file == b.file;
++}
++
++static void
++source_maps_clear(source_mapping_t **head)
++{
++    while (*head != NULL) {
++        source_mapping_t *next = (*head)->next;
++        global_heap_free(*head, sizeof(**head) HEAPACCT(ACCT_FRAGMENT));
++        *head = next;
++    }
++}
++
++static void
++source_births_revoke(app_pc begin, app_pc end)
++{
++    source_mapping_t **p = &source_births;
++    while (*p != NULL) {
++        source_mapping_t *m = *p;
++        if (end == NULL || (begin < m->end && end > m->begin)) {
++            *p = m->next;
++            global_heap_free(m, sizeof(*m) HEAPACCT(ACCT_FRAGMENT));
++        } else
++            p = &m->next;
++    }
++}
++
++/* Lock order uses the no-allocation /proc iterator. Allocate only after stop.
++ * Cache queried VMAs until the next intercepted mapping transition. */
++static source_mapping_t *
++source_map(app_pc pc)
++{
++    for (source_mapping_t *m = source_maps; m != NULL; m = m->next) {
++        if (pc >= m->begin && pc < m->end)
++            return m;
++    }
++    source_mapping_t found = { 0 };
++    memquery_iter_t iter;
++    source_queries++;
++    if (!memquery_iterator_start(&iter, pc, false))
++        return NULL;
++    while (memquery_iterator_next(&iter)) {
++        if (pc >= iter.vm_start && pc < iter.vm_end) {
++            found.begin = iter.vm_start;
++            found.end = iter.vm_end;
++            found.prot = iter.prot;
++            found.inode = iter.inode;
++            found.major = iter.device_major;
++            found.minor = iter.device_minor;
++            found.offset = iter.offset;
++            found.shared = iter.is_shared;
++            break;
++        }
++    }
++    memquery_iterator_stop(&iter);
++    if (found.end == NULL)
++        return NULL;
++    /* A query outside an observed birth must not cache a merged anonymous
++     * VMA over that birth and hide its identity from a later query. */
++    app_pc original_begin = found.begin;
++    for (source_mapping_t *birth = source_births; birth != NULL; birth = birth->next) {
++        if (birth->end <= pc)
++            found.begin = MAX(found.begin, birth->end);
++        else if (birth->begin > pc)
++            found.end = MIN(found.end, birth->begin);
++    }
++    found.offset += found.begin - original_begin;
++    for (source_mapping_t *birth = source_births; birth != NULL; birth = birth->next) {
++        if (pc < birth->begin || pc >= birth->end)
++            continue;
++        /* Clamp a merged VMA to the interval whose birth we actually observed. */
++        app_pc start = MAX(found.begin, birth->begin);
++        found.offset += start - found.begin;
++        found.begin = start;
++        found.end = MIN(found.end, birth->end);
++        if (birth->birth != 0 && found.inode == 0 && !found.shared) {
++            found.birth = birth->birth;
++            found.trusted = true;
++        } else if (birth->inode != 0 && birth->inode == found.inode &&
++                   birth->major == found.major && birth->minor == found.minor) {
++            found.trusted = found.shared;
++        }
++        break;
++    }
++    source_mapping_t *m = global_heap_alloc(sizeof(*m) HEAPACCT(ACCT_FRAGMENT));
++    *m = found;
++    m->next = source_maps;
++    source_maps = m;
++    return m;
++}
++
++static bool
++source_address_key(app_pc pc, source_key_t *key, bool *trusted, uint *prot)
++{
++    source_mapping_t *m = source_map(pc);
++    if (m == NULL)
++        return false;
++    *prot = m->prot;
++    *trusted = m->trusted;
++    memset(key, 0, sizeof(*key));
++    key->file = m->inode != 0;
++    if (key->file) {
++        key->identity = m->inode;
++        key->major = m->major;
++        key->minor = m->minor;
++        key->offset = m->offset + (pc - m->begin);
++    } else {
++        if (m->birth == 0)
++            return false;
++        key->identity = m->birth;
++        key->offset = (ptr_uint_t)pc;
++    }
++    key->offset = ALIGN_BACKWARD(key->offset, PAGE_SIZE);
++    return true;
++}
++
++/* Bracket kernel mapping operations without holding a lock across a syscall.
++ * A concurrent builder remains conservatively invalid until completion; failed
++ * and skipped operations revoke too. There is no wait on a blocked application. */
++void
++fragment_source_mutation_begin(dcontext_t *dc, app_pc begin, size_t size,
++                               bool revoke_all, bool disable)
++{
++    if (!DYNAMO_OPTION(seedbox_icache_images))
++        return;
++    d_r_mutex_lock(&fragment_source_lock);
++    ASSERT(!dc->source_mutation);
++    dc->source_mutation = true;
++    source_mutations++;
++    source_invalidated = true;
++    ++source_incarnation;
++    source_maps_clear(&source_maps);
++    app_pc end = size > POINTER_MAX - (ptr_uint_t)begin ? NULL : begin + size;
++    if (revoke_all || size != 0)
++        source_births_revoke(begin, revoke_all ? NULL : end);
++    source_index_disabled |= disable;
++    d_r_mutex_unlock(&fragment_source_lock);
++}
++
++void
++fragment_source_mutation_end(dcontext_t *dc, app_pc birth, size_t size,
++                             bool anonymous, uint64 inode, uint major, uint minor)
++{
++    if (!DYNAMO_OPTION(seedbox_icache_images) || !dc->source_mutation)
++        return;
++    d_r_mutex_lock(&fragment_source_lock);
++    ASSERT(source_mutations > 0);
++    --source_mutations;
++    dc->source_mutation = false;
++    ++source_incarnation;
++    source_invalidated = true;
++    source_maps_clear(&source_maps);
++    if (birth != NULL && size != 0 && size <= POINTER_MAX - (ptr_uint_t)birth &&
++        size <= POINTER_MAX - (PAGE_SIZE - 1) && (anonymous || inode != 0)) {
++        size = ALIGN_FORWARD(size, PAGE_SIZE);
++        if (size <= POINTER_MAX - (ptr_uint_t)birth) {
++            source_births_revoke(birth, birth + size);
++            source_mapping_t *m = global_heap_alloc(sizeof(*m) HEAPACCT(ACCT_FRAGMENT));
++            memset(m, 0, sizeof(*m));
++            m->begin = birth;
++            m->end = birth + size;
++            m->birth = anonymous ? ++source_birth_id : 0;
++            if (anonymous && source_birth_id == 0)
++                source_index_disabled = true;
++            m->inode = inode;
++            m->major = major;
++            m->minor = minor;
++            m->next = source_births;
++            source_births = m;
++        }
++    }
++    d_r_mutex_unlock(&fragment_source_lock);
++}
++
++static void
++source_span_index(source_span_t *span, fragment_source_t *source)
++{
++    uint prot;
++    span->owner = source;
++    if (!source_address_key(span->pc, &span->key, &span->trusted, &prot)) {
++        /* A successfully queried preexisting anonymous VMA cannot alias a
++         * fresh private anonymous birth. A failed query proves no such thing. */
++        source->unresolved |= source_map(span->pc) == NULL;
++        return;
++    }
++    span->trusted &= TESTALL(MEMPROT_READ | MEMPROT_EXEC, prot);
++    uint bucket = source_key_hash(span->key);
++    span->index_next = source_index[bucket];
++    if (span->index_next != NULL)
++        span->index_next->index_prev = span;
++    source_index[bucket] = span;
++    span->indexed = true;
++}
++
++static void
++source_span_unindex(source_span_t *span)
++{
++    if (!span->indexed)
++        return;
++    if (span->index_prev != NULL)
++        span->index_prev->index_next = span->index_next;
++    else
++        source_index[source_key_hash(span->key)] = span->index_next;
++    if (span->index_next != NULL)
++        span->index_next->index_prev = span->index_prev;
++}
++
++/* Return false if ownership is unresolved. Otherwise inspect only indexed
++ * dependencies of this page/line, including RX aliases of an RW IC operand.
++ * Private file/COW spans are indexed conservatively, never admitted equal. */
++static bool
++source_line_select(app_pc begin, app_pc end, bool select, bool *changed)
++{
++    source_key_t key;
++    bool trusted;
++    uint prot;
++    if (source_index_disabled || source_mutations != 0 || source_unresolved != 0 ||
++        source_invalidated ||
++        end == NULL || end <= begin || PAGE_START(begin) != PAGE_START(end - 1) ||
++        !source_address_key(begin, &key, &trusted, &prot) || !trusted)
++        return false;
++    uint low = (ptr_uint_t)begin & (PAGE_SIZE - 1);
++    uint high = low + (end - begin);
++    for (source_span_t *span = source_index[source_key_hash(key)]; span != NULL;
++         span = span->index_next) {
++        if (!span->owner->live || !source_key_equal(key, span->key))
++            continue;
++        uint first = (ptr_uint_t)span->pc & (PAGE_SIZE - 1);
++        uint last = first + span->size;
++        if (first >= high || last <= low)
++            continue;
++        uint from = MAX(first, low) - first;
++        uint size = MIN(last, high) - (first + from);
++        byte current[SOURCE_SPAN_CAPACITY];
++        source_scanned_bytes += size;
++        bool hit = !span->trusted || span->owner->incarnation != source_incarnation ||
++            !d_r_safe_read(span->pc + from, size, current) ||
++            memcmp(current, span->bytes + from, size) != 0;
++        if (hit) {
++            *changed = true;
++            if (select)
++                span->owner->selected = true;
++        }
++    }
++    return true;
++}
++
+
+ fragment_source_t *
+ fragment_source_create(void)
+@@ -155,6 +441,13 @@
+     *(uint *)copy = *(const uint *)pc;
+     span->size += AARCH64_INSTR_SIZE;
+     byte *next = decode_from_copy(dcontext, copy, pc, instr);
++    /* A64 HINTs are position independent and remain valid without their
++     * optional feature (for example BTI on a non-BTI CPU). The encoder gates
++     * optional opcodes, whereas normal decode retains their raw bytes. Keep
++     * that behavior using our owned copy, never the mutable application bytes.
++     * Any client/mangler operand or opcode edit invalidates these raw bits. */
++    if (next != NULL && (*(uint *)copy & 0xfffff01fU) == 0xd503201fU)
++        instr_set_raw_bits(instr, copy, AARCH64_INSTR_SIZE);
+     return next == NULL ? NULL : pc + AARCH64_INSTR_SIZE;
+ }
+
+@@ -165,6 +458,10 @@
+         source = fragment_source_create(); /* unknown => must invalidate */
+     f->source = source;
+     d_r_mutex_lock(&fragment_source_lock);
++    for (source_span_t *span = source->first; span != NULL; span = span->next)
++        source_span_index(span, source);
++    source->unresolved |= source->first == NULL;
++    source_unresolved += source->unresolved;
+     source->published = source->live = true;
+     source->next = fragment_sources;
+     if (fragment_sources != NULL)
+@@ -180,6 +477,8 @@
+     if (f->source == NULL)
+         return;
+     d_r_mutex_lock(&fragment_source_lock);
++    if (f->source->live && f->source->unresolved)
++        --source_unresolved;
+     f->source->live = false;
+     d_r_mutex_unlock(&fragment_source_lock);
+ }
+@@ -191,6 +490,10 @@
+         return;
+     d_r_mutex_lock(&fragment_source_lock);
+     if (source->published) {
++        if (source->live && source->unresolved)
++            --source_unresolved;
++        for (source_span_t *span = source->first; span != NULL; span = span->next)
++            source_span_unindex(span);
+         if (source->prev != NULL)
+             source->prev->next = source->next;
+         else
+@@ -216,6 +519,8 @@
+         return;
+     d_r_mutex_lock(&fragment_source_lock);
+     ++source_incarnation;
++    source_invalidated = true;
++    source_maps_clear(&source_maps);
+     /* Never let a wrapped incarnation bless an old image. */
+     if (source_incarnation == 0) {
+         for (fragment_source_t *s = fragment_sources; s != NULL; s = s->next)
+@@ -225,6 +530,7 @@
+     d_r_mutex_unlock(&fragment_source_lock);
+ }
+
++#ifdef STANDALONE_UNIT_TEST
+ static bool
+ fragment_source_unchanged(fragment_source_t *source)
+ {
+@@ -247,16 +553,26 @@
+     return true;
+ }
+
+-/* Called under the full synchronization before any fragment/IBL deletion. */
++#endif
++
++/* Recompute after full context synchronization, before any IBL/link deletion. */
+ static void
+-fragment_source_select(void)
++fragment_source_select(dcontext_t *dc)
+ {
+     uint64 start = query_time_micros();
+     d_r_mutex_lock(&fragment_source_lock);
++    for (fragment_source_t *s = fragment_sources; s != NULL; s = s->next)
++        s->selected = false;
++    bool changed = false;
++    bool precise = source_line_select(dc->source_ic_begin, dc->source_ic_end,
++                                      true, &changed);
+     for (fragment_source_t *s = fragment_sources; s != NULL; s = s->next) {
+-        s->selected = s->live && !fragment_source_unchanged(s);
++        if (!precise)
++            s->selected = s->live;
+         source_selected += s->selected;
+     }
++    if (source_mutations == 0)
++        source_invalidated = false;
+     source_scan_us += query_time_micros() - start;
+     d_r_mutex_unlock(&fragment_source_lock);
+ }
+@@ -336,6 +652,94 @@
+     EXPECT(fragment_source_unchanged(source), false);
+     d_r_mutex_unlock(&fragment_source_lock);
+     fragment_source_destroy(source);
++    /* HINT publication is valid without the optional BTI feature, and uses
++     * the immutable bytes. PC-relative instructions still require relocation. */
++    bool bti = proc_has_feature(FEATURE_BTI);
++    proc_set_feature(FEATURE_BTI, false);
++    word[0] = 0xd503245f; /* BTI c: backwards-compatible architectural HINT. */
++    source = NULL;
++    fragment_source_decode(dc, &source, code, &instr);
++    EXPECT(instr_get_opcode(&instr), OP_bti);
++    word[0] = 0xd503201f;
++    uint encoded = 0;
++    EXPECT(instr_encode(dc, &instr, (byte *)&encoded), (byte *)&encoded + 4);
++    EXPECT(encoded, 0xd503245f);
++    instr_set_opcode(&instr, OP_nop);
++    instr_set_num_opnds(dc, &instr, 0, 0);
++    EXPECT(instr_encode(dc, &instr, (byte *)&encoded), (byte *)&encoded + 4);
++    EXPECT(encoded, 0xd503201f);
++    instr_reset(dc, &instr);
++    fragment_source_destroy(source);
++    proc_set_feature(FEATURE_BTI, bti);
++    word[0] = 0x10000000; /* ADR x0, current PC: must not retain raw bits. */
++    source = NULL;
++    fragment_source_decode(dc, &source, code, &instr);
++    EXPECT(instr_raw_bits_valid(&instr), false);
++    EXPECT(opnd_get_addr(instr_get_src(&instr, 0)), code);
++    instr_reset(dc, &instr);
++    fragment_source_destroy(source);
++    /* Observed births, exact line selection and mutation exclusion. */
++    bool images = dynamo_options.seedbox_icache_images;
++    dynamo_options.seedbox_icache_images = true;
++    fragment_source_mutation_begin(dc, code, 2 * PAGE_SIZE, false, false);
++    d_r_mutex_lock(&fragment_source_lock);
++    bool changed = false;
++    EXPECT(source_line_select(code, code + 64, false, &changed), false);
++    d_r_mutex_unlock(&fragment_source_lock);
++    fragment_source_mutation_end(dc, code, 2 * PAGE_SIZE, true, 0, 0, 0);
++    source = NULL;
++    fragment_source_decode(dc, &source, code, &instr);
++    instr_reset(dc, &instr);
++    fragment_source_publish(&f, source);
++    d_r_mutex_lock(&fragment_source_lock);
++    /* A first IC takes broad invalidation before equality is admitted. */
++    EXPECT(source_line_select(code, code + 64, false, &changed), false);
++    source_invalidated = false;
++    EXPECT(source_line_select(code, code + 64, false, &changed), true);
++    EXPECT(changed, false);
++    word[8] ^= 1; /* Same-line append outside the original dependency. */
++    EXPECT(source_line_select(code, code + 64, false, &changed), true);
++    EXPECT(changed, false);
++    word[0] ^= 1;
++    EXPECT(source_line_select(code, code + 64, true, &changed), true);
++    EXPECT(changed, true);
++    EXPECT(source->selected, true);
++    source_key_t old_key = source->first->key;
++    d_r_mutex_unlock(&fragment_source_lock);
++    fragment_source_retire(&f);
++    fragment_source_destroy(source);
++    /* Empty brk/query intervals do not revoke an unrelated mapping birth. */
++    fragment_source_mutation_begin(dc, NULL, 0, false, false);
++    fragment_source_mutation_end(dc, NULL, 0, false, 0, 0, 0);
++    d_r_mutex_lock(&fragment_source_lock);
++    source_key_t key;
++    bool trusted;
++    uint prot;
++    EXPECT(source_address_key(code, &key, &trusted, &prot), true);
++    EXPECT(source_key_equal(old_key, key), true);
++    d_r_mutex_unlock(&fragment_source_lock);
++    /* A partial permission/reuse operation revokes the whole old birth. */
++    fragment_source_mutation_begin(dc, code + PAGE_SIZE, PAGE_SIZE, false, false);
++    fragment_source_mutation_end(dc, NULL, 0, false, 0, 0, 0);
++    d_r_mutex_lock(&fragment_source_lock);
++    EXPECT(source_address_key(code, &key, &trusted, &prot), false);
++    d_r_mutex_unlock(&fragment_source_lock);
++    fragment_source_mutation_begin(dc, code, 2 * PAGE_SIZE, false, false);
++    fragment_source_mutation_end(dc, code, 2 * PAGE_SIZE, true, 0, 0, 0);
++    d_r_mutex_lock(&fragment_source_lock);
++    EXPECT(source_address_key(code, &key, &trusted, &prot), true);
++    EXPECT(source_key_equal(old_key, key), false);
++    /* Fork/COW/remap revocation cannot preserve a byte-identical old key. */
++    d_r_mutex_unlock(&fragment_source_lock);
++    fragment_source_mutation_begin(dc, NULL, 0, true, false);
++    fragment_source_mutation_end(dc, NULL, 0, false, 0, 0, 0);
++    d_r_mutex_lock(&fragment_source_lock);
++    EXPECT(source_address_key(code, &key, &trusted, &prot), false);
++    source_maps_clear(&source_maps);
++    source_maps_clear(&source_births);
++    EXPECT(source_mutations, 0);
++    d_r_mutex_unlock(&fragment_source_lock);
++    dynamo_options.seedbox_icache_images = images;
+     heap_munmap(code, 2 * PAGE_SIZE, VMM_SPECIAL_MMAP);
+     print_file(STDERR, "fragment source images: passed\n");
+ }
+@@ -346,11 +750,13 @@
+ {
+     if (!DYNAMO_OPTION(seedbox_icache_images))
+         return;
+-    print_file(STDERR, "seedbox-ic-images: ic=" UINT64_FORMAT_STRING
++    source_maps_clear(&source_maps);
++    source_maps_clear(&source_births);
++    print_file(STDERR, "seedbox-ic-images: index_disabled=%u mutations=%u queries=" UINT64_FORMAT_STRING " ic=" UINT64_FORMAT_STRING
+                " admissions=" UINT64_FORMAT_STRING " scanned_bytes=" UINT64_FORMAT_STRING
+                " scan_us=" UINT64_FORMAT_STRING " emitted=" UINT64_FORMAT_STRING
+                " selected=" UINT64_FORMAT_STRING " reclaimed=" UINT64_FORMAT_STRING "\n",
+-               source_ics, source_admissions, source_scanned_bytes, source_scan_us,
++               source_index_disabled, source_mutations, source_queries, source_ics, source_admissions, source_scanned_bytes, source_scan_us,
+                source_emitted, source_selected, source_reclaimed);
+ }
+ #endif
+@@ -2476,6 +2882,17 @@
+ void
+ fragment_fork_init(dcontext_t *dcontext)
+ {
++#ifdef AARCH64
++    if (DYNAMO_OPTION(seedbox_icache_images)) {
++        d_r_mutex_lock(&fragment_source_lock);
++        source_maps_clear(&source_maps);
++        source_maps_clear(&source_births);
++        source_mutations = dcontext->source_mutation ? 1 : 0;
++        source_invalidated = true;
++        ++source_incarnation;
++        d_r_mutex_unlock(&fragment_source_lock);
++    }
++#endif
+     /* XXX: what about global file? */
+     per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
+     if (TRACEDUMP_ENABLED() && PRIVATE_TRACES_ENABLED()) {
+@@ -6188,7 +6605,7 @@
+ #endif
+
+ #ifdef AARCH64
+-static void fragment_source_select(void);
++static void fragment_source_select(dcontext_t *dc);
+ #endif
+
+ static void
+@@ -6269,7 +6686,7 @@
+ #ifdef AARCH64
+     source_selective_flush = source_images;
+     if (source_images)
+-        fragment_source_select();
++        fragment_source_select(my_dcontext);
+ #endif
+     LOG(GLOBAL, LOG_FRAGMENT, 2, "flush_fragments_synchall_start: walking the threads\n");
+     /* We rely on coarse fragments not touching more than one vmarea region
+@@ -7170,25 +7587,20 @@
+ fragment_source_icache(dcontext_t *dcontext, app_pc begin, app_pc end)
+ {
+     ASSERT(begin < end || end == NULL);
+-    bool unchanged = true;
++    bool changed = false;
+     bool precise = DYNAMO_OPTION(disable_traces) && !DYNAMO_OPTION(coarse_units);
+     uint64 start = query_time_micros();
+-    /* Serialize with complete shared BB decode+publication, not just index insert.
+-     * Private builders without this lock always use the full synchronization. */
++    dcontext->source_ic_begin = begin;
++    dcontext->source_ic_end = end;
+     if (precise && USE_BB_BUILDING_LOCK()) {
+         SHARED_BB_LOCK();
+         d_r_mutex_lock(&fragment_source_lock);
+         source_ics++;
+-        for (fragment_source_t *s = fragment_sources; s != NULL; s = s->next) {
+-            if (s->live && !fragment_source_unchanged(s)) {
+-                unchanged = false;
+-                break;
+-            }
+-        }
++        bool known = source_line_select(begin, end, false, &changed);
+         source_scan_us += query_time_micros() - start;
+         d_r_mutex_unlock(&fragment_source_lock);
+         SHARED_BB_UNLOCK();
+-        if (unchanged)
++        if (known && !changed)
+             return;
+     } else {
+         d_r_mutex_lock(&fragment_source_lock);
+--- a/core/fragment.h
++++ b/core/fragment.h
+@@ -248,6 +248,10 @@
+ fragment_source_t *bb_build_take_source(dcontext_t *dcontext, instrlist_t *ilist);
+ void fragment_source_publish(fragment_t *f, fragment_source_t *source);
+ void fragment_source_mapping_changed(void);
++void fragment_source_mutation_begin(dcontext_t *dc, app_pc begin, size_t size,
++                                     bool revoke_all, bool disable);
++void fragment_source_mutation_end(dcontext_t *dc, app_pc birth, size_t size,
++                                   bool anonymous, uint64 inode, uint major, uint minor);
+ bool fragment_source_selected(fragment_t *f);
+ bool fragment_source_flushing(void);
+ void fragment_source_icache(dcontext_t *dcontext, app_pc begin, app_pc end);
+--- a/core/globals.h
++++ b/core/globals.h
+@@ -861,6 +861,13 @@
+     fragment_t *last_fragment;      /* cached value of linkstub_fragment(last_exit) */
+
+     int sys_num; /* holds normalized syscall number */
++#ifdef AARCH64
++    bool source_mutation;
++    bool source_mmap_anonymous;
++    uint64 source_mmap_inode;
++    uint source_mmap_major, source_mmap_minor;
++    app_pc source_ic_begin, source_ic_end;
++#endif
+ #ifdef WINDOWS
+     reg_t *sys_param_base; /* used for post_system_call */
+ #endif
+--- a/core/unix/os.c
++++ b/core/unix/os.c
+@@ -71,6 +71,9 @@
+ #include "../globals.h"
+ #include "../hashtable.h"
+ #include "../native_exec.h"
++#ifdef AARCH64
++static bool source_extra_mapping_syscall(int number);
++#endif
+ #include <unistd.h> /* for write and usleep and _exit */
+ #include <limits.h>
+
+@@ -5425,6 +5428,10 @@
+ static bool
+ ignorable_system_call_normalized(int num)
+ {
++#ifdef AARCH64
++    if (DYNAMO_OPTION(seedbox_icache_images) && source_extra_mapping_syscall(num))
++        return false;
++#endif
+     switch (num) {
+ #if defined(SYS_exit_group)
+     case SYS_exit_group:
+@@ -7426,16 +7433,83 @@
+ /* XXX: split out specific handlers into separate routines
+  */
+ #ifdef AARCH64
++static bool
++source_extra_mapping_syscall(int number)
++{
++    return number == SYS_madvise || number == SYS_remap_file_pages ||
++        number == SYS_shmat || number == SYS_shmdt || number == SYS_userfaultfd ||
++        number == SYS_ioctl;
++}
++
+ static void
+-fragment_source_mapping_syscall(int number)
+-{
+-    /* A mapping/permission incarnation changes even if the bytes and final
+-     * permissions are equal. Both sides bracket an in-flight kernel change;
+-     * ordinary DR mapping invalidation and syscall continuation remain intact. */
+-    if (number == SYS_mmap || number == SYS_munmap || number == SYS_mprotect ||
+-        number == SYS_mremap)
+-        fragment_source_mapping_changed();
+-}
++fragment_source_mapping_syscall(dcontext_t *dc)
++{
++    if (!DYNAMO_OPTION(seedbox_icache_images))
++        return;
++    int number = dc->sys_num;
++    bool mutation = false, revoke_all = false, disable = false;
++    app_pc begin = NULL;
++    size_t size = 0;
++    dc->source_mmap_anonymous = false;
++    dc->source_mmap_inode = 0;
++    if (number == SYS_mmap) {
++        uint flags = (uint)sys_param(dc, 3);
++        mutation = true;
++        begin = (app_pc)sys_param(dc, 0);
++        size = (size_t)sys_param(dc, 1);
++        dc->source_mmap_anonymous = TESTANY(MAP_ANONYMOUS, flags) && (flags & MAP_TYPE) == MAP_PRIVATE;
++        if (!TESTANY(MAP_ANONYMOUS, flags)) {
++            struct stat64 st;
++            if (dynamorio_syscall(SYS_fstat, 2, (int)sys_param(dc, 4), &st) == 0 &&
++                S_ISREG(st.st_mode)) {
++                dc->source_mmap_inode = st.st_ino;
++                dc->source_mmap_major = ((st.st_dev >> 8) & 0xfff) |
++                    ((st.st_dev >> 32) & ~0xfffULL);
++                dc->source_mmap_minor = (st.st_dev & 0xff) |
++                    ((st.st_dev >> 12) & ~0xffULL);
++            } else
++                disable = true; /* Unknown/device backing can expose aliases. */
++        } else if (!dc->source_mmap_anonymous)
++            disable = true;
++    } else if (number == SYS_munmap || number == SYS_mprotect || number == SYS_madvise) {
++        mutation = true;
++        begin = (app_pc)sys_param(dc, 0);
++        size = (size_t)sys_param(dc, 1);
++        if (number == SYS_madvise) {
++            int advice = (int)sys_param(dc, 2);
++            /* Placement/access hints do not replace logical backing or bytes.
++             * Unknown and discard/COW-changing advice remains conservative. */
++            mutation = advice != MADV_NORMAL && advice != MADV_RANDOM &&
++                advice != MADV_SEQUENTIAL && advice != MADV_WILLNEED &&
++                advice != MADV_HUGEPAGE && advice != MADV_NOHUGEPAGE &&
++                advice != MADV_DONTDUMP && advice != MADV_DODUMP;
++            dc->sys_param0 = (reg_t)begin;
++            dc->sys_param1 = size;
++        }
++    } else if (number == SYS_mremap || number == SYS_remap_file_pages ||
++               number == SYS_shmat || number == SYS_shmdt || number == SYS_execve ||
++               number == SYS_userfaultfd) {
++        mutation = revoke_all = true;
++        disable = number == SYS_shmat || number == SYS_userfaultfd;
++    } else if (number == SYS_brk) {
++        mutation = true;
++    } else if (number == SYS_clone || number == SYS_clone3) {
++        uint64 flags = sys_param(dc, 0);
++        if (number == SYS_clone3 &&
++            !d_r_safe_read((void *)sys_param(dc, 0), sizeof(flags), &flags))
++            flags = 0;
++        /* CLONE_VM threads share this registry. Fork/COW and vfork cannot
++         * inherit births, even when the syscall ultimately fails. */
++        mutation = revoke_all = !TESTANY(CLONE_VM, flags) || TESTANY(CLONE_VFORK, flags);
++    } else if (number == SYS_ioctl && ((sys_param(dc, 1) >> 8) & 0xff) == 0xaa) {
++        /* Linux userfaultfd ioctls can arrive through inherited descriptors. */
++        mutation = revoke_all = disable = true;
++        dc->sys_param1 = sys_param(dc, 1);
++    }
++    if (mutation)
++        fragment_source_mutation_begin(dc, begin, size, revoke_all, disable);
++}
++
+ #endif
+
+ bool
+@@ -7457,7 +7531,7 @@
+      * in syscall itself)
+      */
+     dcontext->sys_num = os_normalized_sysnum((int)MCXT_SYSNUM_REG(mc), NULL, dcontext);
+-    IF_AARCH64(fragment_source_mapping_syscall(dcontext->sys_num);)
++    IF_AARCH64(fragment_source_mapping_syscall(dcontext);)
+
+     RSTATS_INC(pre_syscall);
+     DOSTATS({
+@@ -8707,6 +8781,10 @@
+
+     } /* end switch */
+
++#ifdef AARCH64
++    if (!execute_syscall)
++        fragment_source_mutation_end(dcontext, NULL, 0, false, 0, 0, 0);
++#endif
+     dcontext->whereami = old_whereami;
+     return execute_syscall;
+ }
+@@ -9136,7 +9214,6 @@
+     dr_where_am_i_t old_whereami;
+     DEBUG_DECLARE(bool ok;)
+
+-    IF_AARCH64(fragment_source_mapping_syscall(sysnum);)
+     RSTATS_INC(post_syscall);
+
+     old_whereami = dcontext->whereami;
+@@ -9269,6 +9346,13 @@
+         }
+ #endif
+         process_mmap(dcontext, base, size, prot, flags _IF_DEBUG(map_type));
++#ifdef AARCH64
++        fragment_source_mutation_end(dcontext, base, size,
++                                     dcontext->source_mmap_anonymous,
++                                     dcontext->source_mmap_inode,
++                                     dcontext->source_mmap_major,
++                                     dcontext->source_mmap_minor);
++#endif
+         break;
+     }
+     case SYS_munmap: {
+@@ -9818,6 +9902,21 @@
+     });
+
+ exit_post_system_call:
++#ifdef AARCH64
++    bool source_madvise_flush = dcontext->source_mutation && sysnum == SYS_madvise &&
++        dcontext->sys_param1 != 0;
++    bool source_userfault_flush = dcontext->source_mutation && sysnum == SYS_ioctl;
++    fragment_source_mutation_end(dcontext, NULL, 0, false, 0, 0, 0);
++    if (DYNAMO_OPTION(seedbox_icache_images) && success) {
++        if (source_madvise_flush)
++            flush_fragments_and_remove_region(dcontext, (app_pc)dcontext->sys_param0,
++                                              dcontext->sys_param1, false, false);
++        else if (sysnum == SYS_remap_file_pages || sysnum == SYS_shmdt ||
++                 source_userfault_flush)
++            flush_fragments_from_region(dcontext, NULL, POINTER_MAX, true,
++                                        THREAD_SYNCH_NO_LOCKS_NO_XFER, NULL, NULL);
++    }
++#endif
+
+     /* The instrument_post_syscall should be called after DR finishes all
+      * its operations, since DR needs to know the real syscall results,
+--- a/core/optionsx.h
++++ b/core/optionsx.h
+@@ -636,9 +636,9 @@
+ #ifdef AARCH64
+ /* XXX i#5771: This option may no longer be required when the issue is fixed. */
+ #ifdef AARCH64
+-/* Experimental correctness discriminator: scans all immutable source images. */
++/* Indexed immutable dependencies with conservative unresolved-mapping fallback. */
+ OPTION_DEFAULT(bool, seedbox_icache_images, false,
+-               "compare immutable decoded fragment images at IC publication")
++               "invalidate changed decoded dependencies at IC publication")
+ #endif
+ OPTION_DEFAULT_INTERNAL(bool, fake_ctr_dic, false,
+                         "mangle read of CTR_EL0 so app believes DIC bit is "

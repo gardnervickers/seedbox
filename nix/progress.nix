@@ -18,6 +18,9 @@ in pkgs.runCommand "seedbox-progress.tar" {
 } ''
   mkdir sdk bundle
   tar -xf ${sdk} -C sdk --strip-components=1
+  ${pkgs.lib.optionalString arm ''
+    cp -R ${armRuntime}/include/. sdk/include/
+  ''}
   cmake -G Ninja -S ${../guest/progress} -B build \
     -DDynamoRIO_DIR="$PWD/sdk/cmake" -DCMAKE_BUILD_TYPE=Release
   cmake --build build
