@@ -10,6 +10,8 @@ iced-x86 = { version = "1.21", default-features = false, features = ["decoder", 
 [features]
 # Builds only the explicit Linux signal-gated diagnostic, never the normal worker.
 linux-proof = []
+# Separate opt-in return prediction experiment; the baseline emitter stays default.
+linked-return-hint = ["linux-proof"]
 
 [[example]]
 name = "linux-proof"

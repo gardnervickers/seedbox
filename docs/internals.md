@@ -189,6 +189,13 @@ faults and driver work, not just translator cost. The
 finite-arena batches and preserves failed samples instead of treating them as
 speedups. No application/runtime selection is added.
 
+The opt-in `linked-return-hint` example feature tests one separate hot-path
+variant: a fully tagged RET-X30 prediction before the existing indirect lookup.
+It compares actual original LR, preserves NZCV and scratch maps, and enters the
+same revocable gate. A wrong prediction uses the full existing lookup; unknown
+targets still fail closed. It neither shares scratch across blocks nor changes
+charge points. The default emitter has no hint.
+
 ARM LL/SC cannot simply be copied: host-only exits may lose the physical
 exclusive monitor and make STXR failures host-timed. A future implementation
 must retain the [guest-epoch reservation contract](#software-exclusive-reservations),

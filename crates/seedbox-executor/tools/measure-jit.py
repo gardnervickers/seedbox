@@ -78,29 +78,32 @@ def main():
     p.add_argument("output", type=Path)
     p.add_argument("--batches", type=int, default=96)
     p.add_argument("--cap-seconds", type=int, default=480)
-    p.add_argument("--candidate-only", action="store_true", help="Stage B; retained stage A native/DR remain the reference.")
+    p.add_argument("--variant", type=Path, help="Stage B binary; rotate it against the frozen baseline candidate and unchanged native/DR binary.")
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     binary, reference = args.binary.resolve(), args.reference.resolve()
     if args.batches <= 0 or args.cap_seconds <= 0:
         p.error("positive finite batches/cap required")
-    plan = dict(rows=ROWS, orders=ORDERS, batches=args.batches, cap_seconds=args.cap_seconds,
-                candidate_only=args.candidate_only, binary=str(binary), reference=str(reference),
+    orders = ORDERS if args.variant is None else [
+        ["native", "dr", "baseline", "candidate"], ["candidate", "baseline", "dr", "native"],
+        ["dr", "candidate", "native", "baseline"], ["baseline", "native", "candidate", "dr"],
+        ["dr", "baseline", "native", "candidate"]]
+    plan = dict(rows=ROWS, orders=orders, batches=args.batches, cap_seconds=args.cap_seconds,
+                variant=str(args.variant.resolve()) if args.variant else None, binary=str(binary), reference=str(reference),
                 note="Separate fresh-process batches; no launch time in inner total; all raw outputs retained.")
     (args.output / "plan.json").write_text(json.dumps(plan, indent=2) + "\n")
     deadline = time.monotonic() + args.cap_seconds
     with (args.output / "samples.jsonl").open("x") as saved:
-        for repeat, order in enumerate(ORDERS):
+        for repeat, order in enumerate(orders):
             for row in ROWS:
                 for mode in order:
-                    if args.candidate_only and mode != "candidate":
-                        continue
                     sums = {}
                     for batch in range(args.batches):
                         if time.monotonic() >= deadline:
                             raise SystemExit("timing cap reached; partial evidence retained, no abandoned child")
                         command = (reference_command(reference) if mode == "dr" else []) + [
-                            str(binary), f"jit-{'linked' if mode == 'candidate' else 'native'}-{row}"]
+                            str(args.variant.resolve() if args.variant and mode == "candidate" else binary),
+                            f"jit-{'linked' if mode in ('candidate', 'baseline') else 'native'}-{row}"]
                         sample = dict(repeat=repeat, row=row, mode=mode, batch=batch, command=command,
                                       load_before=os.getloadavg(), started_unix=time.time())
                         start = time.monotonic_ns()
@@ -118,7 +121,7 @@ def main():
                         try:
                             if sample["exit"] != 0:
                                 raise ValueError(f"exit {sample['exit']}")
-                            sample["metrics"] = validate(text, row, mode)
+                            sample["metrics"] = validate(text, row, "candidate" if mode == "baseline" else mode)
                         except ValueError as error:
                             sample["failure"] = str(error)
                         saved.write(json.dumps(sample) + "\n")

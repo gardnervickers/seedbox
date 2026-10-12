@@ -181,6 +181,22 @@ pub fn emit(
     gateway: u64,
     targets: &[Target],
 ) -> Result<LinkedBlock, Error> {
+    emit_with_return_hint(source, pc, cache, state, gateway, targets, None)
+}
+
+/// Optional fully guarded RET-X30 fast arm. The hint is an original address,
+/// never execution authority: compare the actual LR and enter its stable gate.
+/// A miss retains the complete finite target lookup, including fail-closed
+/// unknown targets. Charge points, scratch ownership and due paths are unchanged.
+pub fn emit_with_return_hint(
+    source: &[u8],
+    pc: u64,
+    cache: u64,
+    state: u64,
+    gateway: u64,
+    targets: &[Target],
+    return_hint: Option<u64>,
+) -> Result<LinkedBlock, Error> {
     // Includes the maximum native body, veneers and literal pool. Bound the
     // entire emission, not just the fixed header, before computing cache PCs.
     let maximum = targets
@@ -248,6 +264,24 @@ pub fn emit(
         Terminal::Direct { target, link } => direct(&mut e, target, link)?,
         Terminal::Register { register, link } => {
             e.spill(state);
+            let terminal_offset = (block.source.end - pc - 4) as usize;
+            let is_ret_x30 =
+                source[terminal_offset..terminal_offset + 4] == 0xd65f03c0u32.to_le_bytes();
+            if let Some(hint) = return_hint.filter(|_| is_ret_x30) {
+                e.literal(17, hint);
+                e.ins(0xca1e0231); // EOR X17,X17,X30: compare actual original LR, NZCV intact
+                let miss = e.ins(0xb5000011); // CBNZ X17,full tagged lookup
+                e.restore();
+                e.source = hint;
+                e.phase = Phase::Ready;
+                e.branch(gate(hint)?)?;
+                e.source = block.source.end - 4;
+                e.phase = Phase::Running {
+                    instructions: charge,
+                };
+                e.saved = Saved::BothInState;
+                e.patch19(miss, e.pc())?;
+            }
             match register {
                 16 => {
                     e.ins(0xf9400211);
@@ -449,6 +483,100 @@ mod tests {
             };
             assert_eq!(map.reconstruct(&mut regs, 16, &state), 0x1234);
             assert_eq!((regs[16], regs[17]), (16, 17));
+        }
+    }
+    #[test]
+    fn guarded_return_hint_preserves_meter_and_falls_back_with_original_scratch() {
+        let targets = [
+            Target {
+                source: 0x1000,
+                gate: 0x4000,
+            },
+            Target {
+                source: 0x1004,
+                gate: 0x4004,
+            },
+        ];
+        let source = words(&[0x91000400, 0xd65f03c0]);
+        let baseline = emit(&source, 0x1000, 0x2000, 0x8000, 0x3000, &targets).unwrap();
+        let disabled =
+            emit_with_return_hint(&source, 0x1000, 0x2000, 0x8000, 0x3000, &targets, None).unwrap();
+        assert_eq!(baseline.bytes, disabled.bytes);
+        assert_eq!(baseline.maps, disabled.maps);
+        let b = emit_with_return_hint(
+            &source,
+            0x1000,
+            0x2000,
+            0x8000,
+            0x3000,
+            &targets,
+            Some(0x1004),
+        )
+        .unwrap();
+        assert_eq!(b.instructions, baseline.instructions);
+        assert_eq!(&b.maps[..14], &baseline.maps[..14]);
+        let ws: Vec<u32> = b
+            .bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w))
+            .collect();
+        let compare = ws.iter().position(|w| *w == 0xca1e0231).unwrap();
+        assert_eq!(b.maps[compare].saved, Saved::BothInState);
+        assert_eq!(b.maps[compare].phase, Phase::Running { instructions: 2 });
+        let miss = ws[compare + 1];
+        assert_eq!(miss & 0xff00001f, 0xb5000011);
+        let fallback = compare + 1 + ((miss >> 5) & 0x7ffff) as usize;
+        assert_eq!(ws[fallback], 0xaa1e03f1, "capture real X30 on miss");
+        assert_eq!(b.maps[fallback].saved, Saved::BothInState);
+        assert_eq!(b.maps[fallback].phase, Phase::Running { instructions: 2 });
+        assert_eq!(b.maps[compare + 4].source, 0x1004);
+        assert_eq!(b.maps[compare + 4].phase, Phase::Ready);
+        assert_eq!(
+            ws[compare + 4],
+            branch(b.maps[compare + 4].pc, 0x4004).unwrap()
+        );
+        assert!(b
+            .maps
+            .iter()
+            .rev()
+            .take(5)
+            .all(|m| m.phase == Phase::Debited { instructions: 2 }));
+        assert!(matches!(
+            emit_with_return_hint(
+                &source,
+                0x1000,
+                0x2000,
+                0x8000,
+                0x3000,
+                &targets,
+                Some(0xdead)
+            ),
+            Err(Error::Unsupported { pc: 0xdead })
+        ));
+    }
+    #[test]
+    fn return_hint_does_not_change_other_register_transfers() {
+        let targets = [Target {
+            source: 0x1000,
+            gate: 0x4000,
+        }];
+        for word in [0xd61f03c0, 0xd63f03c0, 0xd65f0200, 0xd65f0220] {
+            let source = words(&[word]);
+            let a = emit(&source, 0x1000, 0x2000, 0x8000, 0x3000, &targets).unwrap();
+            let b = emit_with_return_hint(
+                &source,
+                0x1000,
+                0x2000,
+                0x8000,
+                0x3000,
+                &targets,
+                Some(0x1000),
+            )
+            .unwrap();
+            assert_eq!(a.bytes, b.bytes);
+            assert_eq!(a.maps, b.maps);
         }
     }
     #[test]

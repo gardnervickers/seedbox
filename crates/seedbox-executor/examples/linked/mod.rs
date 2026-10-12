@@ -64,6 +64,7 @@ struct Config {
     jit: Option<jit::Jit>,
     gateway_fault: bool,
     corrupt_boundary_x0: bool,
+    return_hint: Option<u64>,
     target_register: Option<(usize, u64)>,
 }
 struct Code {
@@ -167,7 +168,7 @@ impl Engine {
         self.next += 4096;
         let source =
             unsafe { core::slice::from_raw_parts(pc as *const u8, 4096 - offset as usize) };
-        let block = linked::emit(
+        let block = linked::emit_with_return_hint(
             source,
             pc,
             memory.address as u64,
@@ -178,6 +179,7 @@ impl Engine {
             },
             self.arena.address as u64,
             &self.targets,
+            c.return_hint,
         )
         .unwrap_or_else(|e| {
             log(format_args!("emit: {e:?}\n"));
@@ -660,8 +662,8 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
             49996
         } else {
             match mode {
-                b"default" | b"gateway-fault" | b"boundary-x0-fault" | b"indirect16"
-                | b"indirect17" | b"return16" | b"return17" => 49996,
+                b"default" | b"gateway-fault" | b"boundary-x0-fault" | b"return-hint-miss"
+                | b"indirect16" | b"indirect17" | b"return16" | b"return17" => 49996,
                 b"zero" => 256,
                 b"negative" => 0,
                 b"overshoot" => -100001,
@@ -760,6 +762,21 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
             jit,
             gateway_fault: mode == b"gateway-fault",
             corrupt_boundary_x0: mode == b"boundary-x0-fault",
+            // A fixture-supplied prediction, not an application address bypass.
+            // Deliberately wrong known hint exercises the full tagged fallback.
+            return_hint: if cfg!(feature = "linked-return-hint") {
+                Some(
+                    base + if mode == b"return-hint-miss" {
+                        0
+                    } else if benchmark.is_some_and(|b| b.kind == bench::Kind::Short) {
+                        8
+                    } else {
+                        4
+                    },
+                )
+            } else {
+                None
+            },
             target_register,
         });
         *ENGINE.0.get() = Some(Engine {
