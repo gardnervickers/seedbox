@@ -91,7 +91,12 @@ core from source to apply the mark.
 Instrumentation must leave the application's registers and comparison flags
 intact. On ARM, the client uses arithmetic that leaves those flags alone and a
 branch that tests the sign bit directly (`TBZ`). DynamoRIO's drreg extension
-manages the temporary registers.
+manages the temporary registers, conservatively, and the charge puts the
+application's value back before the next application instruction. drreg would
+otherwise restore it lazily, at the next application read, and a register that
+straight-line code no longer reads can still be read on a fault path: HotSpot's
+implicit null checks deoptimize through handlers that save such registers, and a
+budget left there corrupted the heap.
 
 Guest signals arrive only at progress calls, so when the ARM translator
 synchronizes all threads, for example to flush code a JIT has rewritten, it
@@ -112,6 +117,14 @@ option in release builds. Enabled `hw_cache_consistency` instead uses code-page
 write protection and self-modifying-code sandboxing. In the observed Kafka
 startup, that mode grew a broker's memory to about 2 GB and it was killed;
 with application-driven invalidation, it used about 250 MB and kept starting.
+
+Each `IC IVAU` flush stops all threads, so a JVM creating a process races it.
+Translator patches keep a thread that is forking in place (redirecting it skipped
+the `fork`), count a thread waiting in `vfork` as stopped (it cannot take the
+suspend signal until its child execs, which may wait for the flush), and requeue
+signals that arrive while a thread is suspended, since it may resume into a
+blocking syscall and never reach the translator's pending-signal delivery.
+Minimal reproducers are in [`tools/jvm-fuzz/repros`](../tools/jvm-fuzz/repros).
 
 Code: [progress client](../guest/progress/progress.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
