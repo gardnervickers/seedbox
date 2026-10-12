@@ -2,7 +2,8 @@
 //!
 //! Decoding, source ownership and logical charges are independent of Linux. The
 //! opt-in `linux-proof` example uses Linux signal frames as a deliberately slow
-//! diagnostic dispatch gate. It is not the eventual linked-edge hot path.
+//! diagnostic dispatch gate. The separate ARM `linked-proof` example exercises
+//! task-bound linked edges and due-only signal gateways, not a production runtime.
 //! Unsupported instructions fail closed; they never escape to native source.
 #![no_std]
 extern crate alloc;

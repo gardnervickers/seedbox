@@ -34,6 +34,24 @@ impl Meter {
             payments: 0,
         })
     }
+    /// Import an already committed inline debit at the stopped due gateway.
+    /// No application instruction from this block has executed yet.
+    pub fn from_inline_debit(
+        quantum: u32,
+        left: i64,
+        instructions: u32,
+        payments: u64,
+    ) -> Result<Self, Error> {
+        if quantum == 0 || instructions == 0 || left >= 0 {
+            return Err(Error::ChargePhase);
+        }
+        Ok(Self {
+            quantum,
+            left,
+            phase: Phase::Debited { instructions },
+            payments,
+        })
+    }
     pub fn phase(&self) -> Phase {
         self.phase
     }
@@ -101,6 +119,25 @@ impl Meter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inline_import_retains_committed_debit_and_overshoot() {
+        for (left, instructions) in [(0, 1), (1, 1), (-1, 0)] {
+            assert!(matches!(
+                Meter::from_inline_debit(50_000, left, instructions, 0),
+                Err(Error::ChargePhase)
+            ));
+        }
+        let mut m = Meter::from_inline_debit(50_000, -100_257, 256, 0).unwrap();
+        assert_eq!(m.phase(), Phase::Debited { instructions: 256 });
+        assert!(m.paid_one().unwrap());
+        assert!(m.paid_one().unwrap());
+        assert!(!m.paid_one().unwrap());
+        m.refund_for_dispatch().unwrap();
+        assert!(!m.precharge(1).unwrap());
+        m.enter().unwrap();
+        assert_eq!(m.left(), 49_998);
+        assert_eq!(m.payments(), 3);
+    }
     #[test]
     fn sign_negative_and_refund_reentry() {
         let mut m = Meter::new(3).unwrap();

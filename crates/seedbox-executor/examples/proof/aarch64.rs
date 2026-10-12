@@ -60,7 +60,7 @@ impl Context {
             if magic == 0x46508001 && size == 528 {
                 return &mut r[at..at + size];
             }
-            if size < 16 || size % 16 != 0 || at + size > r.len() {
+            if size < 16 || !size.is_multiple_of(16) || at + size > r.len() {
                 break;
             }
             at += size;

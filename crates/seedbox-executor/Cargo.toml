@@ -15,3 +15,8 @@ linux-proof = []
 name = "linux-proof"
 required-features = ["linux-proof"]
 test = false
+
+[[example]]
+name = "linked-proof"
+required-features = ["linux-proof"]
+test = false

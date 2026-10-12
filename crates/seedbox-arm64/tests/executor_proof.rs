@@ -51,6 +51,11 @@ mod hvf {
                 .skip(lines)
             {
                 lines += 1;
+                eprint!("{line}");
+                assert!(
+                    !line.contains("EXECUTOR_FAIL") && !line.contains("EXECUTOR_PANIC"),
+                    "{line}"
+                );
                 match line.trim() {
                     "EXECUTOR_PV_ENTER" | "EXECUTOR_UNMARKED_ENTER" => {
                         assert!(pending.is_none());

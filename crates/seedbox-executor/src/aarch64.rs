@@ -4,6 +4,8 @@
 use crate::{Block, Error, PcMap};
 use alloc::vec::Vec;
 
+pub mod linked;
+
 pub const TRAP: u32 = 0xd420_bc00; // brk #0x5e0
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Terminal {

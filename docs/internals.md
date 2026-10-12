@@ -157,6 +157,26 @@ crate's `tools/build-proof.sh` inside the project Linux development shell; its
 horizon returns between marked-call console delimiters against an unmarked
 control. Native-container syscall completion alone is not PV evidence.
 
+The separate ARM [`linked-proof`](../crates/seedbox-executor/examples/linked/mod.rs)
+uses the [linked emitter](../crates/seedbox-executor/src/aarch64/linked.rs): inline
+signed precharge, direct edges and fully tagged finite indirect caches branch
+through revocable per-entry gates. Only a due payment or unresolved gate traps;
+unknown indirect targets fail closed. Code/maps remain pinned independently of
+gate permission. Source mutation revokes incoming direct and indirect access
+before publication, without waiting for the parked task.
+
+This cache belongs to one execution task. Its seven-instruction scratch spill
+transiently puts X16 in TPIDR_EL0; original TLS and X16/X17 are retained in private
+resident state, with a reconstruction map at each emitted instruction. TLS is
+restored before application execution. A suspended internal sequence must resume
+with its exact hardware TLS and PC; the diagnostic trap handler is TLS-independent.
+No application stack slot or register is reserved. This is not multi-task cache
+sharing, arbitrary asynchronous signal delivery, or a new kernel ABI. Deterministic
+boundary traps and a separate instrumentation-fault case test that distinction.
+The crate's `tools/build-linked.sh` builds this opt-in ELF. Its fixed-work modes
+separate install, first-pass and warm execution; ordinary Linux wall measurements
+are not PV-time or full-runtime qualification.
+
 ARM LL/SC cannot simply be copied: host-only exits may lose the physical
 exclusive monitor and make STXR failures host-timed. A future implementation
 must retain the [guest-epoch reservation contract](#software-exclusive-reservations),
