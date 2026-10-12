@@ -92,9 +92,12 @@ PROBES = {
     "ArraysSimd": {}, "VectorApi": {"extra": ["--add-modules", "jdk.incubator.vector"]},
     "Crypto": {}, "BigNumbers": {}, "Collections": {}, "Serialization": {}, "Compression": {},
     "FileIo": {}, "OffHeap": {}, "Sockets": {}, "Http": {},
-    "Processes": {"isolate": True, "variants": [["-Djdk.lang.Process.launchMechanism=POSIX_SPAWN"],
-                               ["-Djdk.lang.Process.launchMechanism=FORK"],
-                               ["-Djdk.lang.Process.launchMechanism=VFORK"]]},
+    # Each launch mechanism with background compilation, without a JIT, and with synchronous C1
+    # only (no code is written while a child is spawned).
+    "Processes": {"isolate": True, "variants": [[f"-Djdk.lang.Process.launchMechanism={m}"] + jit
+                                                for m in ("POSIX_SPAWN", "FORK", "VFORK")
+                                                for jit in ([], ["-Xint"], ["-Xbatch", "-XX:CICompilerCount=1",
+                                                                             "-XX:TieredStopAtLevel=1"])]},
     "Signals": {"isolate": True}, "Safepoints": {}, "Time": {}, "Preemption": {},
     "SignalBomb": {"preview": True, "isolate": True}, "InterruptedSyscalls": {"preview": True, "isolate": True},
     "AsyncClose": {"isolate": True}, "DeoptStorm": {}, "X28Storm": {}, "FpRegPressure": {}, "ThreadChurn": {},
@@ -102,17 +105,27 @@ PROBES = {
     "IcStorm": {}, "MappedSigbus": {}, "ArrayCopyStubs": {}, "SleepSort": {"det": False}, "Clocks": {}, "MmapChurn": {},
     "VthreadStorm": {"extra": ["-Djdk.virtualThreadScheduler.parallelism=4"]},
     # "exit_codes": the expected exit status for each argument variant.
+    "SigquitAttach": {"preview": True}, "SafepointsNative": {}, "Durability": {}, "ClassStorm": {},
+    "CodeReuse": {"extra": ["-XX:ReservedCodeCacheSize=6m", "-XX:-SegmentedCodeCache"]},
+    # Deliberate deaths: the exit status must match; the report is compared with the replay only.
+    "Crash": {"det": False, "isolate": True, "extra": ["-Xmx96m", "-XX:+CrashOnOutOfMemoryError"],
+              "arg_variants": ["segv-int", "segv-c2", "oom", "halthook"],
+              "exit_codes": {"segv-int": 134, "segv-c2": 134, "oom": 134, "halthook": 3}},
     "Redefine": {"extra": ["-javaagent:/fuzz/classes/agent.jar"]}, "CodeChurn": {"whitebox": True},
     "ExitMatrix": {"isolate": True, "arg_variants": ["daemons", "exit7", "halt5", "uncaught"],
                    "exit_codes": {"daemons": 0, "exit7": 7, "halt5": 5, "uncaught": 1}},
-    "Jfr": {"arg_variants": ["all 1", "exec 1", "exec 10", "alloc,monitor,park 1", "none 1"]},
+    "Jfr": {"arg_variants": ["all 1", "exec 1", "exec 10", "alloc,monitor,park 1", "none 1",
+                             "exec 1 soe", "exec 1 npe", "exec 1 alloc", "exec 5 lock", "exec 1 native",
+                             "exec,threaddump 1 vthread", "native 1 native", "threaddump 1 lock",
+                             "exceptions 1 npe", "threaddump,native 2 soe"]},
     "Race": {"det": False},
 }
 
 # Open translator bugs, as case-id patterns (see repros/README.md).
 # `gen --skip-known` leaves these out so a run reports only new problems.
 KNOWN_ISSUES = {
-    r"^Jfr\.[0-9]+(_(all|exec)_[0-9]+)?\.": "JFR execution sampling crashes C2-compiled code",
+    r"^Jfr\.[0-9]+(\.|_[a-z,]*(all|exec))": "JFR execution sampling crashes C2-compiled code",
+    r"^(SignalBomb|InterruptedSyscalls)\.": "thread-directed signals (tgkill) crash C2-compiled code, as JFR sampling does",
 }
 
 CASE_TIMEOUT = 240

@@ -6,14 +6,25 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.stream.Stream;
 
-/** Thread-directed signals for preview probes: tgkill through the foreign-function API. */
+/** Signals for preview probes: tgkill and kill through the foreign-function API. */
 final class Native {
-    static final int SIGHUP = 1, SIGWINCH = 28;
-    private static final MethodHandle TGKILL;
+    static final int SIGHUP = 1, SIGQUIT = 3, SIGWINCH = 28;
+    private static final MethodHandle TGKILL, KILL;
     static {
         Linker linker = Linker.nativeLinker();
         TGKILL = linker.downcallHandle(linker.defaultLookup().find("tgkill").orElseThrow(),
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+        KILL = linker.downcallHandle(linker.defaultLookup().find("kill").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+    }
+
+    /** Sends a process-directed `sig` to this process. */
+    static boolean killSelf(int sig) {
+        try {
+            return (int) KILL.invokeExact((int) ProcessHandle.current().pid(), sig) == 0;
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
     }
 
     /** Sends `sig` to Linux thread `tid` of this process; false if the thread is gone. */

@@ -40,6 +40,9 @@ public final class Processes {
         Process pipeline = ProcessBuilder.startPipeline(java.util.List.of(new ProcessBuilder("/bin/sh", "-c", "seq 1 5000"), new ProcessBuilder("/usr/bin/sort", "-r"), new ProcessBuilder("/usr/bin/head", "-3"))).get(2);
         Fz.out("pipeline", new String(pipeline.getInputStream().readAllBytes()).trim().replace('\n', ','));
         Fz.out("env", new String(new ProcessBuilder("/usr/bin/env").start().getInputStream().readAllBytes()).contains("PATH="));
+        // Exec chains of non-JVM processes, without the JVM's own spawn path in between.
+        Process deep = new ProcessBuilder("/bin/sh", "-c", "sh -c 'sh -c \"sh -c \\\"echo deep\\\"\"'").start();
+        Fz.out("deep", new String(deep.getInputStream().readAllBytes()).trim() + " " + deep.waitFor());
         Fz.done();
     }
 }

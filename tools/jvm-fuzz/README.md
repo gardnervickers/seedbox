@@ -21,11 +21,13 @@ This is a diagnostic tool, like `tools/mac-tcg`; it is not an acceptance suite.
   signals landing in compiled code (`SignalBomb`, `InterruptedSyscalls`,
   `AsyncClose`, `MappedSigbus`), code written while other threads run it
   (`IcStorm`, `DeoptStorm`, `Redefine` through a Java agent, `CodeChurn`
-  through HotSpot's WhiteBox API), the thread register x28 and vector
-  registers (`X28Storm`, `FpRegPressure`), copy and encoding stubs
-  (`ArrayCopyStubs`), memory maps (`MmapChurn`, `AddressSpace`), thread and
-  process lifetime (`ThreadChurn`, `VthreadStorm`, `ExitMatrix`) and timers
-  (`SleepSort`, `Clocks`). `probes/preview` use the JDK 21 foreign-function
+  through HotSpot's WhiteBox API, `CodeReuse` in a small code cache), the
+  thread register x28 and vector registers (`X28Storm`, `FpRegPressure`),
+  copy and encoding stubs (`ArrayCopyStubs`), memory maps and the disk
+  (`MmapChurn`, `AddressSpace`, `Durability`, `ClassStorm`), VM operations
+  (`SafepointsNative`, `SigquitAttach` through the attach socket), thread and
+  process lifetime (`ThreadChurn`, `VthreadStorm`, `ExitMatrix`, `Crash`) and
+  timers (`SleepSort`, `Clocks`). `probes/preview` use the JDK 21 foreign-function
   preview; `probes/whitebox` compile against the WhiteBox sources the image
   downloads for its JDK update.
 - `randprog.py`: seeded random programs (arithmetic edge cases, caught
