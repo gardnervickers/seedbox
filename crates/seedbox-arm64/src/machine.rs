@@ -21,6 +21,8 @@ use seedbox_engine_core::cpu_charge::{throttled_ns, SYSCALL_NS};
 const PROGRESS_NS_OFFSET: usize = 56;
 const PROGRESS_JITTER_NS_OFFSET: usize = 64;
 const PROGRESS_JITTER_SEED_OFFSET: usize = 72;
+/// Raw exits a fixture may take before it must have powered off.
+const FIXTURE_EXIT_BUDGET: u64 = 5_000_000;
 
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -195,13 +197,14 @@ impl<B: Backend> Machine<B> {
     }
     /// Advance a stopped machine to a finite world boundary. The horizon is
     /// published before entry, including boot/handshake reconciliation. A timer
-    /// beyond the boundary remains armed. The raw-exit budget spans all slices.
+    /// beyond the boundary remains armed. World runs have no exit budget: the
+    /// boundary ends each slice and a request's wall-time limit ends the run.
     pub fn run_until(&mut self, horizon: u64, before_run: impl FnMut()) -> Result<MachineStop> {
         if self.powered_off {
             return Ok(MachineStop::PoweredOff);
         }
         self.clock.set_horizon(Some(horizon))?;
-        self.advance(before_run, false)
+        self.advance(before_run, false, u64::MAX)
     }
 
     /// Slack permits an earlier stop; this cooperative backend uses the exact limit.
@@ -212,7 +215,7 @@ impl<B: Backend> Machine<B> {
         observe_console: bool,
     ) -> Result<MachineStop> {
         self.clock.set_horizon(Some(hard_limit))?;
-        self.advance(|| {}, observe_console)
+        self.advance(|| {}, observe_console, u64::MAX)
     }
     pub fn stopped_observation(&self) -> application::worker::StoppedObservation {
         application::worker::StoppedObservation {
@@ -566,7 +569,7 @@ impl<B: Backend> Machine<B> {
         }
         let start = Instant::now();
         self.clock.set_horizon(None)?;
-        if self.advance(before_run, false)? != MachineStop::PoweredOff {
+        if self.advance(before_run, false, FIXTURE_EXIT_BUDGET)? != MachineStop::PoweredOff {
             return Err("fixture stopped before power-off".into());
         }
         let console = String::from_utf8_lossy(&self.uart.console).into_owned();
@@ -610,6 +613,7 @@ impl<B: Backend> Machine<B> {
         &mut self,
         mut before_run: impl FnMut(),
         observe_console: bool,
+        exit_budget: u64,
     ) -> Result<MachineStop> {
         let console_start = self.uart.console.len();
         if self.powered_off {
@@ -629,7 +633,7 @@ impl<B: Backend> Machine<B> {
                 time_ns: self.clock.now(),
             });
         }
-        while self.raw_exits < 5_000_000 {
+        while self.raw_exits < exit_budget {
             before_run();
             let stop = match self.backend.run()? {
                 backend::RunStop::Guest(stop) => stop,
@@ -843,7 +847,7 @@ impl<B: Backend> Machine<B> {
                 });
             }
         }
-        Err("exit budget exhausted (5,000,000); no successful power-off".into())
+        Err(format!("exit budget exhausted ({exit_budget}); no successful power-off").into())
     }
 
     fn application_mmio(
@@ -1262,13 +1266,13 @@ mod spi_regression {
             .unwrap()
     }
     #[test]
-    fn host_interruptions_do_not_exhaust_last_semantic_exit() {
+    fn world_runs_continue_past_fixture_exit_budget() {
         let mut m = machine();
         m.ready = true;
         m.backend.set_reg(CoreReg::Pstate, 0).unwrap();
         // Simulate an epoch already advanced by the guest kernel.
         unsafe { m.page.set_word(EXCLUSIVE_EPOCH_OFFSET, 41).unwrap() };
-        m.raw_exits = 4_999_999;
+        m.raw_exits = FIXTURE_EXIT_BUDGET;
         m.backend.stops.extend([
             RunStop::Interrupted,
             RunStop::Interrupted,
@@ -1284,7 +1288,8 @@ mod spi_regression {
             MachineStop::Horizon { time_ns: 10 }
         );
         assert_eq!(entries, 3);
-        assert_eq!(m.raw_exits, 5_000_000);
+        // Host interruptions are not raw exits.
+        assert_eq!(m.raw_exits, FIXTURE_EXIT_BUDGET + 1);
         assert_eq!(m.trace.len(), 1);
         assert!(m.backend.injected.is_empty());
         assert_eq!(unsafe { m.page.word(EXCLUSIVE_EPOCH_OFFSET).unwrap() }, 42);
