@@ -1,12 +1,20 @@
 { pkgs }:
+let
+  arm = pkgs.stdenv.hostPlatform.isAarch64;
+in
 pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio";
-  version = "11.91.20735";
-  src = pkgs.fetchurl {
+  # ARM needs a newer core for JITs. x86 builds the source of its existing
+  # release; nix/progress.nix fetches the matching SDK for each.
+  version = if arm then "11.91.20735" else "11.3.0";
+  src = pkgs.fetchurl (if arm then {
     url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/cronbuild-11.91.20735.tar.gz";
     hash = "sha256-VNzTsfM80ByTlTeHGTDqE5cKa48oAWiNgdZ6oKCpOZo=";
-  };
-  patches = [
+  } else {
+    url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/release_11.3.0-1.tar.gz";
+    hash = "sha256-aj7BN0bravXAY72wVB37ZbTJvS+hZTxC61RAMiBDLsI=";
+  });
+  patches = if arm then [
     ../guest/progress/dynamorio-exclusives.patch
     # Rebuilding a block discards its region list and must recheck the start.
     ../guest/progress/dynamorio-rebuild-vmareas.patch
@@ -15,6 +23,9 @@ pkgs.stdenv.mkDerivation {
     ../guest/progress/dynamorio-cleancall-simd.patch
     # The translator marks its own syscalls so the guest charges them less.
     ../guest/progress/dynamorio-translator-syscalls.patch
+  ] else [
+    # The same translator syscall mark, in rbx.
+    ../guest/progress/dynamorio-x86-translator-syscalls.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build

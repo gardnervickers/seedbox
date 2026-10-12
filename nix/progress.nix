@@ -1,9 +1,9 @@
 { pkgs }:
 let
   arm = pkgs.stdenv.hostPlatform.isAarch64;
-  # ARM uses the matching SDK launcher/preload libraries with the patched core
+  # Both use the matching SDK launcher/preload libraries with the patched core
   # from nix/dynamorio.nix. Keep its version and hash aligned with that source.
-  # The x86 runtime remains on its existing release; this upgrade fixes ARM JITs.
+  # The x86 runtime remains on its existing release; the ARM upgrade fixes JITs.
   sdkTag = if arm then "cronbuild-11.91.20735" else "release_11.3.0-1";
   sdkVersion = if arm then "11.91.20735" else "11.3.0";
   sdk = pkgs.fetchurl {
@@ -11,7 +11,7 @@ let
     hash = if arm then "sha256-cMcDq/M5+XjvOcbPkMNtdRCiiYG7gGpGuj7AvqrXmto=" else "sha256-rgIEnfXE2uuC1Ah6qg04v1jN0ms4+2BC3M8ny8Ms7tk=";
   };
   loader = if arm then "ld-linux-aarch64.so.1" else "ld-linux-x86-64.so.2";
-  armRuntime = import ./dynamorio.nix { inherit pkgs; };
+  runtime = import ./dynamorio.nix { inherit pkgs; };
 in pkgs.runCommand "seedbox-progress.tar" {
   passthru = { inherit sdk; glibcSource = pkgs.glibc.src; };
   nativeBuildInputs = with pkgs; [ stdenv.cc cmake ninja patchelf python3 ];
@@ -25,12 +25,10 @@ in pkgs.runCommand "seedbox-progress.tar" {
   cp sdk/bin64/drrun bundle/bin64/
   cp sdk/lib64/release/*.so bundle/lib64/release/
   cp sdk/ext/lib64/release/libdrmgr.so sdk/ext/lib64/release/libdrreg.so bundle/ext/lib64/release/
-  ${pkgs.lib.optionalString arm ''
-    rm bundle/lib64/release/libdynamorio.so
-    cp ${armRuntime}/lib64/release/libdynamorio.so bundle/lib64/release/
-    rm bundle/ext/lib64/release/libdrmgr.so bundle/ext/lib64/release/libdrreg.so
-    cp ${armRuntime}/ext/lib64/release/*.so bundle/ext/lib64/release/
-  ''}
+  rm bundle/lib64/release/libdynamorio.so
+  cp ${runtime}/lib64/release/libdynamorio.so bundle/lib64/release/
+  rm bundle/ext/lib64/release/libdrmgr.so bundle/ext/lib64/release/libdrreg.so
+  cp ${runtime}/ext/lib64/release/*.so bundle/ext/lib64/release/
   cp build/libseedbox_progress.so bundle/
   # Only the launcher needs libc. Its private loader/search path must never
   # override the application's libc, including musl and static images.

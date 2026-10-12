@@ -20,6 +20,11 @@
 /* A progress call: getpid with this first argument (guest/progress/budget.h). */
 #define SEEDBOX_PROGRESS_NR	39
 #define SEEDBOX_PROGRESS_MARK	0x5eedb0c5UL
+/* rbx of a syscall the translator makes for itself
+ * (guest/progress/dynamorio-x86-translator-syscalls.patch). */
+#define SEEDBOX_TRANSLATOR_MARK	0x5eedd1a900000000UL
+/* Translator syscalls cost this fraction of an application syscall. */
+#define SEEDBOX_TRANSLATOR_DIVISOR	10
 
 #ifndef __ASSEMBLY__
 #include <linux/init.h>
@@ -74,6 +79,8 @@ void seedbox_timer_disarm(void);
 void seedbox_take_entropy(void);
 /* The syscalls a progress call counts as: its charge in whole syscall costs. */
 u64 seedbox_progress_syscalls(struct seedbox_time_page *p);
+/* The syscalls a translator syscall counts as: one in every SEEDBOX_TRANSLATOR_DIVISOR. */
+u64 seedbox_translator_syscalls(void);
 
 /*
  * Offer the VMM a deterministic stopping point. The executed conditional
@@ -89,6 +96,10 @@ static __always_inline void seedbox_syscall_hook(struct pt_regs *regs, int nr)
 
 		if (nr == SEEDBOX_PROGRESS_NR && regs->di == SEEDBOX_PROGRESS_MARK)
 			n += seedbox_progress_syscalls(p);
+		/* The translator's own syscalls (thread suspension, signal
+		 * returns, futex waits) are bookkeeping, not application work. */
+		else if (regs->bx == SEEDBOX_TRANSLATOR_MARK)
+			n += seedbox_translator_syscalls();
 		else
 			n += 1;
 		WRITE_ONCE(p->syscalls, n);

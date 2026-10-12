@@ -1,0 +1,34 @@
+--- a/core/drlibc/drlibc_x86.asm
++++ b/core/drlibc/drlibc_x86.asm
+@@ -93,6 +93,9 @@
+         mov      ARG6, [3*ARG_SZ + REG_XSP] /* arg8: above arg7, xbx, retaddr */
+ syscall_ready:
+         mov      r10, rcx
++        /* Seedbox: mark the translator's own syscall in rbx, which x86-64
++         * syscalls leave unused, so the guest kernel charges it as translator work. */
++        mov      rbx, HEX(5eedd1a900000000)
+         syscall
+ # else
+         push     REG_XBP
+--- a/core/arch/x86/x86.asm
++++ b/core/arch/x86/x86.asm
+@@ -1215,6 +1215,9 @@
+         mov      eax, HEX(f)
+ # endif
+         mov      r10, rcx
++        /* Seedbox: mark the translator's own syscall in rbx, which x86-64
++         * syscalls leave unused, so the guest kernel charges it as translator work. */
++        mov      rbx, HEX(5eedd1a900000000)
+         syscall
+ #else
+ # ifdef MACOS
+@@ -1316,6 +1319,9 @@
+         mov      ARG1, rax /* &futex, passed in rax */
+         mov      rax, 202 /* SYS_futex */
+         mov      r10, rcx
++        /* Seedbox: mark the translator's own syscall in rbx, which x86-64
++         * syscalls leave unused, so the guest kernel charges it as translator work. */
++        mov      rbx, HEX(5eedd1a900000000)
+         syscall
+         jmp      r12
+ #  else

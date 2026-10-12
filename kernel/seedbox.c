@@ -203,6 +203,23 @@ u64 seedbox_progress_syscalls(struct seedbox_time_page *p)
 	return charge / SEEDBOX_SYSCALL_NS;
 }
 
+/*
+ * A translator syscall costs a fraction of a syscall, as on ARM. The charge
+ * is counted in whole syscall costs, so every SEEDBOX_TRANSLATOR_DIVISOR-th
+ * one counts as a syscall; the count between them lives in guest RAM, like
+ * the progress carry, so a restored snapshot continues it. Called only from
+ * the syscall hook on the one guest CPU.
+ */
+u64 seedbox_translator_syscalls(void)
+{
+	static u64 pending;
+
+	if (++pending < SEEDBOX_TRANSLATOR_DIVISOR)
+		return 0;
+	pending = 0;
+	return 1;
+}
+
 bool seedbox_set_next_event(unsigned long ticks)
 {
 	struct seedbox_time_page *p = READ_ONCE(seedbox_page);

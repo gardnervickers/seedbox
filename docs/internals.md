@@ -78,13 +78,15 @@ reapplies active throttle faults.
 Some syscalls are not application work at full price. On ARM the PV clock
 disables the vDSO, so `clock_gettime`, `clock_getres` and `gettimeofday`
 are syscalls; they cost only the clock read they make, as x86 vDSO reads do
-through RDTSC emulation. The ARM translator also makes syscalls for itself:
+through RDTSC emulation. The translator also makes syscalls for itself:
 suspending threads to flush rewritten code, returning from its signal
-handler and waiting on futexes. Its syscall stubs put a fixed mark in x7,
-which arm64 syscalls leave unused, and the kernel charges a marked syscall a
-tenth of a syscall. A JVM makes millions of these while it starts, about ten
-times its own progress calls, and at full price they dominated simulated
-startup time.
+handler and waiting on futexes. Its syscall stubs put a fixed mark in a
+register the syscall leaves unused (x7 on ARM, rbx on x86), and the kernel
+charges a marked syscall a tenth of a syscall. x86 counts whole syscalls, so
+every tenth marked syscall counts as one. A JVM makes millions of these while
+it starts, about ten times its own progress calls, and at full price they
+dominated simulated startup time. Both architectures build the translator
+core from source to apply the mark.
 
 Instrumentation must leave the application's registers and comparison flags
 intact. On ARM, the client uses arithmetic that leaves those flags alone and a
@@ -113,7 +115,9 @@ with application-driven invalidation, it used about 250 MB and kept starting.
 
 Code: [progress client](../guest/progress/progress.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
-[vector context patch](../guest/progress/dynamorio-cleancall-simd.patch).
+[vector context patch](../guest/progress/dynamorio-cleancall-simd.patch),
+translator syscall marks ([ARM](../guest/progress/dynamorio-translator-syscalls.patch),
+[x86](../guest/progress/dynamorio-x86-translator-syscalls.patch)).
 
 On x86 a charge can span several scheduling boundaries. Its unpaid time is
 retained with the machine and drained while the vCPU is stopped, before guest
