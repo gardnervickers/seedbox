@@ -1,0 +1,27 @@
+diff --git a/core/unix/signal.c b/core/unix/signal.c
+index 3f9c6ed..379e7ae 100644
+--- a/core/unix/signal.c
++++ b/core/unix/signal.c
+@@ -5171,10 +5171,20 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
+          * back to d_r_dispatch and don't need to receive it now (which complicates
+          * post-syscall handling)
+          */
+-    } else if (thread_synch_check_state(dcontext, THREAD_SYNCH_NO_LOCKS) &&
++    } else if (IS_CLIENT_THREAD(dcontext) &&
++               thread_synch_check_state(dcontext, THREAD_SYNCH_NO_LOCKS) &&
+                /* Avoid grabbing locks for xl8 while in a suspended state (i#3026). */
+                ksynch_get_value(&ostd->suspended) == 0) {
+-        /* The signal interrupted DR or the client but it's at a safe spot so
++        /* An application thread at a safe spot in DR is inside a wait whose
++         * epilogue must run: check_wait_at_safe_spot(), a contended-lock wait
++         * with an mcontext, or a fork waiting for another thread's synch.
++         * Running the handler now would leave through fcache_return with the
++         * thread's synch permission still set, so later synchs would treat a
++         * thread running in the code cache as parked at a safe spot and
++         * redirect it from a stale mcontext. Such threads take the delayed path
++         * below and receive the signal when they next enter the code cache.
++         */
++        /* The signal interrupted the client but it's at a safe spot so
+          * deliver it now.
+          */
+         receive_now = true;

@@ -12,6 +12,7 @@ they always print `OK`.
 | `sigext ROUNDS` | process-directed signals from a child while code is patched | passes; the JVM form (`Signals` probe) lost them, see below |
 | `regcheck ROUNDS [SPINS [x28]]` | x0–x26 and q0–q31 across progress checkpoints and x28-based accesses | passes |
 | `srsample SAMPLES` | HotSpot-style suspend/resume sampling (JFR's protocol) against fixed registers | passes |
+| `sigregs WORKERS SIGNALS [SPINS [x28\|ibl]]` | x0–x26 and q0–q31 across `tgkill` signals whose handler posts a semaphore | passes with the client; without it, `ibl` (a `blr`/`ret` loop) hangs on the second signal to a thread |
 
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple
 `posix_spawn` into `fork`; it separated the two spawn bugs.
@@ -29,10 +30,20 @@ The fixes are in [`guest/progress`](../../../guest/progress):
   suspended are requeued to it. The JVM's primordial thread, blocked in
   `pthread_join`, received `kill -HUP <jvm>` that way and never ran the handler;
   `sigext` keeps its main thread busy and so does not hit this path.
+- `dynamorio-safe-spot-signals.patch`: a signal that interrupts an application
+  thread waiting at a synch-safe spot in DR (for another thread's flush, a
+  contended lock or a fork) is delayed instead of handled at once. Handling it
+  left the wait without its epilogue, so the thread stayed marked safe and later
+  synch-alls redirected it from a stale context while it ran in the code cache.
+  JFR execution sampling (HotSpot's SIGUSR2) and the `SignalBomb` and
+  `InterruptedSyscalls` probes crashed C2 code with corrupted registers and
+  untranslated cache PCs; the debug build failed the dispatch-entry check.
+  The plain C reproducers do not reach it: they make few flushes.
 - `progress.c`: the charge restores its scratch register before the application
   instruction. Excluding `java.util.TreeMap.rotate*` from C2 avoided the heap
   corruption; C2's code for it deoptimizes through an implicit null check whose
   handler saves a register that straight-line liveness considers dead.
 
-Still open: JFR execution sampling (`Jfr <seed> 1 exec 1`) crashes C2 code with or
-without the client; `srsample` does not reproduce it.
+Still open: without the client, `sigregs 1 2 2000 ibl` hangs (a second signal to
+a thread looping through indirect branches is not delivered). Seedbox always runs
+the client, whose checkpoints pass through dispatch, so it does not see this.

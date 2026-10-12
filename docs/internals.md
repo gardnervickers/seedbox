@@ -124,6 +124,10 @@ the `fork`), count a thread waiting in `vfork` as stopped (it cannot take the
 suspend signal until its child execs, which may wait for the flush), and requeue
 signals that arrive while a thread is suspended, since it may resume into a
 blocking syscall and never reach the translator's pending-signal delivery.
+A signal that interrupts a thread waiting for such a flush is delayed until the
+thread re-enters the code cache: running the handler at once abandoned the wait
+while the thread still looked parked, so later flushes redirected it from a
+stale context (JFR sampling and `tgkill` crashed compiled Java code this way).
 Minimal reproducers are in [`tools/jvm-fuzz/repros`](../tools/jvm-fuzz/repros).
 
 Code: [progress client](../guest/progress/progress.c),

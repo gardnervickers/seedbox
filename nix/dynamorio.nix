@@ -35,6 +35,10 @@ pkgs.stdenv.mkDerivation {
     # Signals that arrive while a thread is suspended must still reach it when
     # it resumes into a blocking syscall.
     ../guest/progress/dynamorio-suspend-pending.patch
+    # A signal that interrupts an application thread waiting at a synch-safe
+    # spot is delayed; running its handler at once skipped the wait's
+    # epilogue and left the thread marked safe while it ran in the cache.
+    ../guest/progress/dynamorio-safe-spot-signals.patch
   ] else [
     # The same translator syscall mark, in rbx.
     ../guest/progress/dynamorio-x86-translator-syscalls.patch
