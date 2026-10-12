@@ -1,0 +1,177 @@
+--- a/core/translate.c
++++ b/core/translate.c
+@@ -99,6 +99,10 @@
+     app_pc translation;
+     /* Are we inside a clean call? */
+     bool in_clean_call;
++#if defined(DEBUG) && defined(AARCH64)
++    cache_pc diagnostic_cache_pc; /* NULL for the linked-ilist walker. */
++    cache_pc diagnostic_body_end;
++#endif
+ } translate_walk_t;
+
+ static void
+@@ -281,6 +285,49 @@
+ }
+ #endif
+
++#if defined(AARCH64) && (defined(DEBUG) || defined(STANDALONE_UNIT_TEST))
++/* The ilist walker has successor links; the stored-info walker decodes a
++ * singleton. In the latter case inspect only the caller-owned fragment body,
++ * never app source, exit stubs, or the selfmod copy. The reconstruction caller
++ * already retains f and its cache bytes under its synchronization contract.
++ * Copy one complete A64 encoding before decoding so a truncated end is rejected.
++ */
++static bool
++translate_restore_lookahead(dcontext_t *dc, instr_t *inst, reg_id_t wanted,
++                            cache_pc current, cache_pc body_end)
++{
++    instr_t decoded;
++    bool found = false;
++    instr_init(dc, &decoded);
++    for (instr_t *curr = inst; curr != NULL;) {
++        bool tls, spill;
++        reg_id_t reg;
++        if (current != NULL) {
++            uint word;
++            if (body_end == NULL || current >= body_end || body_end - current < 4 ||
++                !ALIGNED(current, 4))
++                break;
++            memcpy(&word, current, sizeof(word));
++            instr_reset(dc, &decoded);
++            if (decode_from_copy(dc, (byte *)&word, current, &decoded) == NULL)
++                break;
++            curr = &decoded;
++        }
++        if (instr_is_DR_reg_spill_or_restore(dc, curr, &tls, &spill, &reg, NULL) &&
++            reg == wanted) {
++            found = !spill && tls;
++            break;
++        }
++        if (current != NULL)
++            current += 4;
++        else
++            curr = instr_get_next(curr);
++    }
++    instr_free(dc, &decoded);
++    return found;
++}
++#endif
++
+ static void
+ translate_walk_track_pre_instr(dcontext_t *tdcontext, instr_t *inst,
+                                translate_walk_t *walk)
+@@ -320,6 +367,11 @@
+              */
+             DOCHECK(1, {
+                 if (walk->reg_spill_offs[r] != UINT_MAX) {
++#    ifdef AARCH64
++                    ASSERT(translate_restore_lookahead(
++                        tdcontext, inst, r + REG_START_SPILL,
++                        walk->diagnostic_cache_pc, walk->diagnostic_body_end));
++#    else
+                     instr_t *curr;
+                     bool spill_or_restore = false;
+                     reg_id_t reg;
+@@ -333,6 +385,7 @@
+                     }
+                     ASSERT(spill_or_restore && r == reg - REG_START_SPILL && !spill &&
+                            spill_tls);
++#    endif
+                 }
+             });
+ #endif
+@@ -823,7 +876,8 @@
+ static recreate_success_t
+ recreate_app_state_from_info(dcontext_t *tdcontext, const translation_info_t *info,
+                              byte *start_cache, byte *end_cache, priv_mcontext_t *mc,
+-                             bool just_pc _IF_DEBUG(uint flags))
++                             bool just_pc _IF_DEBUG(uint flags)
++                                 _IF_DEBUG(cache_pc body_end))
+ {
+     byte *answer = NULL;
+     byte *cpc, *prev_cpc;
+@@ -898,6 +952,10 @@
+         instr_set_our_mangling(&instr, ours);
+         /* Sets the translation so that spilled registers can be restored. */
+         instr_set_translation(&instr, answer);
++#if defined(DEBUG) && defined(AARCH64)
++        walk.diagnostic_cache_pc = prev_cpc;
++        walk.diagnostic_body_end = body_end;
++#endif
+         translate_walk_track_pre_instr(tdcontext, &instr, &walk);
+         translate_walk_track_post_instr(tdcontext, &instr, &walk);
+         /* We directly set this field rather than inserting synthetic labels. */
+@@ -1617,7 +1675,8 @@
+                    INTERNAL_OPTION(safe_translate_flushed));
+             res = recreate_app_state_from_info(
+                 tdcontext, FRAGMENT_TRANSLATION_INFO(f), (byte *)f->start_pc,
+-                (byte *)f->start_pc + f->size, mcontext, just_pc _IF_DEBUG(f->flags));
++                (byte *)f->start_pc + f->size, mcontext, just_pc _IF_DEBUG(f->flags)
++                    _IF_DEBUG(fragment_body_end_pc(tdcontext, f)));
+             STATS_INC(recreate_via_stored_info);
+         } else {
+             res = recreate_app_state_from_ilist(
+@@ -2181,3 +2240,44 @@
+ #endif /* INTERNAL */
+
+ /* END TRANSLATION CODE ***********************************************************/
++
++#if defined(STANDALONE_UNIT_TEST) && defined(AARCH64)
++void
++unit_test_translate_restore_lookahead(dcontext_t *dc)
++{
++    reg_id_t old_stolen = dr_reg_stolen;
++    dr_reg_stolen = DR_REG_X28;
++    dr_isa_mode_t old_mode;
++    EXPECT(dr_set_isa_mode(dc, DR_ISA_ARM_A64, &old_mode), true);
++    byte buf[16];
++    instr_t *nop = INSTR_CREATE_nop(dc);
++    instr_t *restore = instr_create_restore_from_tls(dc, DR_REG_X0, TLS_REG0_SLOT);
++    instr_set_next(nop, restore);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X0, NULL, NULL), true);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X1, NULL, NULL), false);
++    EXPECT(instr_encode(dc, nop, buf), buf + 4);
++    EXPECT(instr_encode(dc, restore, buf + 4), buf + 8);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X0, buf, buf + 8), true);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X1, buf, buf + 8), false);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X0, buf, buf + 7), false);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X0, buf, buf + 4), false);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X0, buf, buf), false);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X0, buf, NULL), false);
++    instr_set_next(nop, NULL);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X0, NULL, NULL), false);
++    instr_destroy(dc, restore);
++    instr_t *spill = instr_create_save_to_tls(dc, DR_REG_X0, TLS_REG0_SLOT);
++    instr_set_next(nop, spill);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X0, NULL, NULL), false);
++    EXPECT(instr_encode(dc, spill, buf + 4), buf + 8);
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X0, buf, buf + 8), false);
++    memset(buf + 4, 0, 4); /* UDF: decoder rejects this encoding. */
++    EXPECT(translate_restore_lookahead(dc, nop, DR_REG_X0, buf, buf + 8), false);
++    instr_set_next(nop, NULL);
++    instr_destroy(dc, nop);
++    instr_destroy(dc, spill);
++    dr_set_isa_mode(dc, old_mode, NULL);
++    dr_reg_stolen = old_stolen;
++    print_file(STDERR, "translate restore lookahead tests passed\n");
++}
++#endif
+--- a/core/unit_tests.c
++++ b/core/unit_tests.c
+@@ -73,6 +73,7 @@
+ #ifdef AARCH64
+ void unit_test_fragment_source(dcontext_t *dc);
+ void unit_test_non_sve_signal_context(void);
++void unit_test_translate_restore_lookahead(dcontext_t *dc);
+ #endif
+
+ int
+@@ -99,6 +100,7 @@
+ #ifdef AARCH64
+     unit_test_fragment_source(dc);
+     unit_test_non_sve_signal_context();
++    unit_test_translate_restore_lookahead(dc);
+ #endif
+ #ifdef WINDOWS
+     unit_test_drwinapi();

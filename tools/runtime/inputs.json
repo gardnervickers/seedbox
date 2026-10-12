@@ -22,6 +22,7 @@
     "guest/progress/dynamorio-ic-ivau.patch",
     "guest/progress/dynamorio-sme-empty-context.patch",
     "guest/progress/dynamorio-icache-images.patch",
+    "guest/progress/dynamorio-translation-lookahead.patch",
     "guest/progress/progress.c",
     "guest/progress/budget.h",
     "guest/progress/CMakeLists.txt",

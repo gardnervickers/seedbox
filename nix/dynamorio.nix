@@ -20,6 +20,8 @@ pkgs.stdenv.mkDerivation {
     # Opt-in correctness discriminator only; the normal launch recipe does not
     # enable its all-image scan or change the existing retirement protocol.
     ../guest/progress/dynamorio-icache-images.patch
+    # Stored-info Debug validation walks the retained cache, not singleton IR.
+    ../guest/progress/dynamorio-translation-lookahead.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build
