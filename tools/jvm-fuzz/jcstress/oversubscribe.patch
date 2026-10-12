@@ -1,0 +1,38 @@
+Lets jcstress run multi-actor tests on fewer hardware CPUs than actors.
+With -Djcstress.virtualCpus=N it reports N CPUs and a flat N-core topology;
+use it with -af NONE so actors are time-sliced instead of pinned.
+
+diff --git a/jcstress-core/src/main/java/org/openjdk/jcstress/os/topology/Topology.java b/jcstress-core/src/main/java/org/openjdk/jcstress/os/topology/Topology.java
+index bc1bcaf..1a3eeff 100644
+--- a/jcstress-core/src/main/java/org/openjdk/jcstress/os/topology/Topology.java
++++ b/jcstress-core/src/main/java/org/openjdk/jcstress/os/topology/Topology.java
+@@ -33,6 +33,14 @@ import java.util.Collection;
+ public interface Topology {
+ 
+     static Topology get() {
++        Integer virtualCpus = Integer.getInteger("jcstress.virtualCpus");
++        if (virtualCpus != null) {
++            try {
++                return new PresetRegularTopology(1, virtualCpus, 1);
++            } catch (TopologyParseException tpe) {
++                throw new IllegalStateException(tpe);
++            }
++        }
+         if (VMSupport.isLinux()) {
+             // Try to parse sysfs
+             try {
+diff --git a/jcstress-core/src/main/java/org/openjdk/jcstress/vm/VMSupport.java b/jcstress-core/src/main/java/org/openjdk/jcstress/vm/VMSupport.java
+index 63192fa..25e48d7 100644
+--- a/jcstress-core/src/main/java/org/openjdk/jcstress/vm/VMSupport.java
++++ b/jcstress-core/src/main/java/org/openjdk/jcstress/vm/VMSupport.java
+@@ -457,6 +457,10 @@ public class VMSupport {
+      * @return online CPU count
+      */
+     public static int figureOutHotCPUs() {
++        Integer virtualCpus = Integer.getInteger("jcstress.virtualCpus");
++        if (virtualCpus != null) {
++            return virtualCpus;
++        }
+         if (HOT_CPUS != -1) {
+             return HOT_CPUS;
+         }
