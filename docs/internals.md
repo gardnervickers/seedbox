@@ -80,8 +80,29 @@ intact. On ARM, the client uses arithmetic that leaves those flags alone and a
 branch that tests the sign bit directly (`TBZ`). DynamoRIO's drreg extension
 manages the temporary registers.
 
+Guest signals arrive only at progress calls, so when the ARM translator
+synchronizes all threads, for example to flush code a JIT has rewritten, it
+always finds a busy thread inside the progress call. The translator cannot
+translate a thread's state there. If the thread returned into translated code,
+the request would retry forever while every other thread stayed suspended. The
+ARM progress call therefore leaves through the translator's dispatcher at the
+charged instruction, which waits for a pending synchronization. The charge
+there runs again, so the call gives it back first. The translator patch saves
+each vector register of the call in its own context slot, so that exit
+restores them exactly.
+
+The ARM translator detects rewritten code through the application's `IC IVAU`
+cache-maintenance instructions (`-no_hw_cache_consistency`). Translated reads of
+`CTR_EL0` clear DIC (`-fake_ctr_dic`), so applications must issue `IC IVAU` even
+when the underlying CPU would permit omitting it. DynamoRIO exposes this internal
+option in release builds. Enabled `hw_cache_consistency` instead uses code-page
+write protection and self-modifying-code sandboxing. In the observed Kafka
+startup, that mode grew a broker's memory to about 2 GB and it was killed;
+with application-driven invalidation, it used about 250 MB and kept starting.
+
 Code: [progress client](../guest/progress/progress.c),
-[x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c).
+[x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
+[vector context patch](../guest/progress/dynamorio-cleancall-simd.patch).
 
 On x86 a charge can span several scheduling boundaries. Its unpaid time is
 retained with the machine and drained while the vCPU is stopped, before guest

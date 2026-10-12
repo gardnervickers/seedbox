@@ -30,6 +30,8 @@ static int application_execv(const char *path, char *const argv[]) {
     size_t index = 3;
 #if defined(__aarch64__)
     assert(!strcmp(argv[index++], "-ldstex2cas"));
+    assert(!strcmp(argv[index++], "-no_hw_cache_consistency"));
+    assert(!strcmp(argv[index++], "-fake_ctr_dic"));
 #endif
     assert(!strcmp(argv[index++], "-c"));
     assert(!strcmp(argv[index++], "/seedbox/progress/libseedbox_progress.so"));

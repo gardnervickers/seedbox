@@ -10,6 +10,9 @@ pkgs.stdenv.mkDerivation {
     ../guest/progress/dynamorio-exclusives.patch
     # Rebuilding a block discards its region list and must recheck the start.
     ../guest/progress/dynamorio-rebuild-vmareas.patch
+    # Clean calls without SVE must save each vector register in its own
+    # context slot, where dr_get_mcontext() and redirection read it.
+    ../guest/progress/dynamorio-cleancall-simd.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build

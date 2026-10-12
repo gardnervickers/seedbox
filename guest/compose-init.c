@@ -537,7 +537,7 @@ static pid_t start(void) {
         size_t count = 0;
         while (arguments[count]) ++count;
         /* Translator arguments, the application's own, and execv's NULL. */
-        enum { PREFIX_MAX = 12 };
+        enum { PREFIX_MAX = 13 };
         char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
         if (!instrumented) die("instrumentation arguments");
         size_t prefix = 0;
@@ -548,6 +548,12 @@ static pid_t start(void) {
         /* The patched ARM translator implements guest-epoch reservations and
          * hides host-only exclusive-store retries from application execution. */
         instrumented[prefix++] = "-ldstex2cas";
+        /* Detect rewritten code through the application's IC IVAU, rather
+         * than write protection and sandboxing; the latter exhausted memory
+         * in the observed Kafka startup. Clear CTR_EL0.DIC so applications
+         * cannot legally omit the IC IVAU that invalidates cached code. */
+        instrumented[prefix++] = "-no_hw_cache_consistency";
+        instrumented[prefix++] = "-fake_ctr_dic";
 #endif
         instrumented[prefix++] = "-c";
         instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
