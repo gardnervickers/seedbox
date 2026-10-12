@@ -21,7 +21,7 @@ fn import(service: &config::Service, directory: &Path, store: &ContentStore) -> 
         docker: engine(),
         cancellation: CancellationToken::default(),
         progress: |line| eprintln!("{line}"),
-        export_cache: None,
+        export_cache: false,
     }
     .import(
         service,

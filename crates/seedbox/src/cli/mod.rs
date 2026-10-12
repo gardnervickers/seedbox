@@ -410,7 +410,6 @@ impl From<TemplateArg> for Template {
 
 /// Apple Silicon Mac runs the built-in HVF engine; every other host runs KVM.
 const MAC: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
-const VMM_REQUIRES_KVM: &str = "--vmm requires Linux KVM; use the built-in Mac engine";
 
 #[derive(Args)]
 struct ComposeArg {
@@ -490,9 +489,6 @@ struct KvmInputs {
     /// Guest kernel Image on Mac, or bzImage on Linux [default: embedded kernel, otherwise beside the executable].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
-    /// Override with a legacy standalone VMM [default: the engine built into seedbox].
-    #[arg(long, env = "SEEDBOX_VMM")]
-    vmm: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -515,24 +511,15 @@ struct RuntimeInputs {
 }
 
 impl RuntimeInputs {
-    fn validate_platform(&self) -> Result<()> {
-        if MAC && self.kvm.vmm.is_some() {
-            return Err(Error::Setup(VMM_REQUIRES_KVM.into()));
-        }
-        Ok(())
-    }
-
     /// Resolve every input and build the matching preparer and executor.
     fn backends(
         &self,
-        store: &ContentStore,
         simulation: &config::Simulation,
         cancellation: &CancellationToken,
     ) -> Result<(Preparer, Executor)> {
-        self.validate_platform()?;
         validate_machine(simulation)?;
         let machine = &simulation.machine;
-        let engine = defaults::engine(self.kvm.vmm.clone())?;
+        let engine = defaults::engine()?;
         for (flag, path) in [
             ("--kernel", &self.kvm.kernel),
             ("--runtime-assets", &self.runtime_assets),
@@ -564,9 +551,8 @@ impl RuntimeInputs {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         let executor = {
             Executor::Mac(seedbox_application::mac::MacExecutor::new(
-                &engine,
+                engine,
                 &kernel,
-                store,
                 machine.memory_mb,
                 witness,
                 simulation.disk.torn_writes,
@@ -574,14 +560,8 @@ impl RuntimeInputs {
         };
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         let executor = {
-            let executor = if self.kvm.vmm.is_some() {
-                VmmExecutor::new(&engine, store, machine.memory_mb, witness)?
-                    .with_detected_contract(store, &engine)?
-            } else {
-                VmmExecutor::new_internal(&engine, store, machine.memory_mb, witness)?
-            };
             Executor::Linux(
-                executor
+                VmmExecutor::new(engine, machine.memory_mb, witness)?
                     .with_torn_writes(simulation.disk.torn_writes)
                     .with_page_timer(machine.page_timer)
                     .with_deferred_tx(machine.deferred_tx),
@@ -590,7 +570,6 @@ impl RuntimeInputs {
         let inputs = OciPreparer {
             docker: backends::container_engine()?,
             kernel,
-            engine,
             init: resolve("--guest-init", &self.guest_init, "compose-init")?,
             progress: resolve("--runtime-assets", &None, "progress.tar")?,
             mke2fs: Some(resolve("--mke2fs", &self.mke2fs, "mke2fs")?),
@@ -870,14 +849,7 @@ fn validate(compose: &ComposeArg, json: bool) -> Result<u8> {
 fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
-    if let Some(path) = inputs.vmm {
-        defaults::existing("--vmm", path)?;
-        if let Some(kernel) = inputs.kernel {
-            defaults::existing("--kernel", kernel)?;
-        }
-        return Err(Error::Setup(VMM_REQUIRES_KVM.into()));
-    }
-    let engine = defaults::engine(None)?;
+    let engine = defaults::engine()?;
     let kernel = match inputs.kernel {
         Some(path) => defaults::existing("--kernel", path)?,
         None => backends::guest_kernel(None)?,
@@ -890,8 +862,7 @@ fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
         output::json(&report)?;
     } else {
         output::status("VALID", "compatible execution profile");
-        output::field("simulator", &report.simulator_version);
-        output::field("engine", report.engine.hex());
+        doctor_engine(&report.engine);
         output::field("kernel", report.kernel.hex());
     }
     Ok(0)
@@ -901,25 +872,22 @@ fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
 fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
-    let internal = inputs.vmm.is_none();
-    let engine = defaults::engine(inputs.vmm)?;
+    let engine = defaults::engine()?;
     let kernel = backends::guest_kernel(inputs.kernel)?;
-    let report = if internal {
-        VmmExecutor::doctor_internal(&engine, &kernel)?
-    } else {
-        VmmExecutor::doctor(&engine, &kernel)?
-    };
+    let report = VmmExecutor::doctor(engine, &kernel)?;
     if json {
         output::json(&report)?;
     } else {
         output::status("VALID", "compatible execution profile");
-        if let Some(version) = &report.simulator_version {
-            output::field("simulator", version);
-        }
-        output::field("engine", report.engine.hex());
+        doctor_engine(&report.engine);
         output::field("kernel", report.kernel.hex());
     }
     Ok(0)
+}
+
+fn doctor_engine(engine: &seedbox_application::execution::EngineDescriptor) {
+    output::field("simulator", &engine.simulator_version);
+    output::field("revision", engine.revision.as_deref().unwrap_or("unknown"));
 }
 
 fn prepare(
@@ -928,7 +896,6 @@ fn prepare(
     state: &StateArg,
     inputs: &RuntimeInputs,
 ) -> Result<u8> {
-    inputs.validate_platform()?;
     if output.exists() {
         return Err(Error::Setup(format!(
             "--output {}: already exists",
@@ -940,7 +907,7 @@ fn prepare(
     let (store, _) = state.open()?;
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
-    let (preparer, _) = inputs.backends(&store, &simulation, &cancellation)?;
+    let (preparer, _) = inputs.backends(&simulation, &cancellation)?;
     if cancellation.is_cancelled() {
         return Err(Error::PreparationCancelled);
     }

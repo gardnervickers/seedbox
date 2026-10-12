@@ -269,7 +269,6 @@ mod tests {
             fn profile(&self) -> ExecutionProfile {
                 ExecutionProfile {
                     backend: Backend::Other("fixture".into()),
-                    engine: ContentDigest::of(b"synthetic"),
                     witness_mode: WitnessMode::Exits,
                     semantic_parameters: SemanticParameters::new(512),
                 }

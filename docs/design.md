@@ -104,8 +104,9 @@ operations; shared policies stay in the core.
 
 A passing oracle and a matching replay answer different questions. The oracle
 checks application behavior. Replay checks whether retained inputs reproduce
-recorded results. An engine change also needs independent fresh runs: replay
-uses a retained engine and therefore cannot by itself validate a new engine.
+recorded results. Runs keep no engine executable; replay always uses the current
+engine, so replaying an older run checks the new engine against recorded results.
+Each run records the engine's source revision as provenance, never as an input.
 
 Server comparison checks resolved execution semantics and retained result evidence,
 not private run IDs. Image names and descriptive engine/host metadata do not replace

@@ -86,7 +86,7 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
         identity,
         attempt: "untrusted-original-attempt".into(),
         performance_parameters: BTreeMap::new(),
-        allow_engine_change: false,
+        engine: None,
         log_policy: Default::default(),
         omitted_logs: BTreeMap::from([(
             "worker-stderr".into(),
@@ -959,7 +959,7 @@ async fn independently_sequenced_machine_histories_survive_shared_budget_evictio
 }
 
 #[test]
-fn comparison_ignores_only_provenance_and_retains_launch_assets_architecture_and_semantics() {
+fn comparison_ignores_only_provenance_and_retains_assets_architecture_and_semantics() {
     let directory = tempfile::tempdir().unwrap();
     let (_, execution, store) = service(directory.path());
     let mut snapshot = fixture(&store, false);
@@ -970,25 +970,12 @@ fn comparison_ignores_only_provenance_and_retains_launch_assets_architecture_and
         tag: Some("source:tag".into()),
         digest: "image-provenance".into(),
     });
-    definition.runtime.execution["semantic_parameters"]["engine"] =
-        serde_json::to_value(EngineDescriptor {
-            kind: seedbox_artifacts::engine::ExecutableKind::InternalWorker,
-            owner_pipe: true,
-            live_observations: true,
-            simulator_version: "before".into(),
-            host_os: "before".into(),
-            host_arch: "before".into(),
-            guest_arch: "before".into(),
-            engine_backend: "before".into(),
-            engine_timebase: "before".into(),
-        })
-        .unwrap();
     definition.runtime.execution["semantic_parameters"]["hvf"] = serde_json::json!({"boot_policy":"fixed","entropy_policy":"fixed","device_policy":"fixed","host_release":"before","cpu_features":"before","launch_max_skew_ns":0});
     snapshot.simulation.spec = SimulationSpec::resolved(definition.as_ref().clone());
     let baseline = execution
         .import_bundle(encode(&snapshot, &store).as_slice(), &Options::default())
         .unwrap();
-    for change in 0..9 {
+    for change in 0..6 {
         let mut changed = snapshot.clone();
         let InputSource::Resolved { definition } = &mut changed.simulation.spec.inputs else {
             unreachable!()
@@ -999,47 +986,24 @@ fn comparison_ignores_only_provenance_and_retains_launch_assets_architecture_and
                     tag: Some("other:tag".into()),
                     digest: "other image provenance".into(),
                 });
-                for key in [
-                    "simulator_version",
-                    "host_os",
-                    "host_arch",
-                    "guest_arch",
-                    "engine_backend",
-                    "engine_timebase",
-                ] {
-                    definition.runtime.execution["semantic_parameters"]["engine"][key] =
-                        "after".into();
-                }
                 for key in ["host_release", "cpu_features"] {
                     definition.runtime.execution["semantic_parameters"]["hvf"][key] =
                         "after".into();
                 }
             }
-            1 => {
-                definition.runtime.execution["semantic_parameters"]["engine"]["owner_pipe"] =
-                    false.into()
-            }
+            1 => definition.runtime.execution["semantic_parameters"]["deferred_tx"] = true.into(),
             2 => {
-                definition.runtime.execution["semantic_parameters"]["engine"]["live_observations"] =
-                    false.into()
-            }
-            3 => {
-                definition.runtime.execution["semantic_parameters"]["engine"]["kind"] =
-                    "arm64-world-v1".into()
-            }
-            4 => definition.runtime.execution["semantic_parameters"]["deferred_tx"] = true.into(),
-            5 => {
                 definition.runtime.execution["semantic_parameters"]["hvf"]["entropy_policy"] =
                     "changed".into()
             }
-            6 => {
+            3 => {
                 definition.oracle.boot_archive = seedbox_spec::definition::Asset(format!(
                     "sha256:{}",
                     store.put(b"different guest bytes").unwrap().hex()
                 ))
             }
-            7 => definition.architecture = seedbox_spec::definition::Architecture::Aarch64,
-            8 => definition.runtime.execution["backend"] = "different-backend".into(),
+            4 => definition.architecture = seedbox_spec::definition::Architecture::Aarch64,
+            5 => definition.runtime.execution["backend"] = "different-backend".into(),
             _ => unreachable!(),
         }
         changed.simulation.spec = SimulationSpec::resolved(definition.as_ref().clone());

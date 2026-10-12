@@ -13,23 +13,15 @@ pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
 
 pub use seedbox_artifacts::evidence::{page_hash_log, MACHINE_OUTPUT_DIR};
 
-/// The retained executable and its recorded dispatch, without consulting the host.
-/// Run settings follow in its launch request (`worker_process`).
+/// The engine executable with the worker entry point for `kind`. Run settings
+/// follow in its launch request (`worker_process`).
 pub(crate) fn engine_command(
     engine: &Path,
-    profile: &ExecutionProfile,
-) -> Result<std::process::Command> {
+    kind: crate::engine::ExecutableKind,
+) -> std::process::Command {
     let mut command = std::process::Command::new(engine);
-    match crate::engine::recorded_launch(profile)? {
-        crate::engine::ExecutableKind::Standalone => {}
-        crate::engine::ExecutableKind::InternalWorker => {
-            command.args(["__engine", crate::engine::INTERNAL_WORKER_V1]);
-        }
-        crate::engine::ExecutableKind::ArmWorld => {
-            command.args(["__engine", crate::engine::ARM_WORLD_V1]);
-        }
-    }
-    Ok(command)
+    command.args(["__engine", kind.contract()]);
+    command
 }
 
 /// The run-shaping machine features a profile records, as the x86 worker takes them.

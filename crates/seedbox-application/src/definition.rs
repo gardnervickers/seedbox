@@ -95,7 +95,6 @@ pub fn resolve(
         },
         runtime: Runtime {
             kernel: asset(&inputs.kernel),
-            engine: asset(&inputs.profile.engine),
             execution: execution_settings(&inputs.profile)?,
         },
         machines,
@@ -120,10 +119,6 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
     let settings = settings
         .as_object_mut()
         .ok_or_else(|| Error::Integrity("runtime.execution must be an inline object".into()))?;
-    settings.insert(
-        "engine".into(),
-        serde_json::to_value(digest(&definition.runtime.engine)?)?,
-    );
     if let Some(parameters) = settings
         .get_mut("semantic_parameters")
         .and_then(|v| v.as_object_mut())
@@ -155,7 +150,6 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
         _ => {}
     }
 
-    profile.engine = digest(&definition.runtime.engine)?;
     if definition.oracle.memory_bytes == 0
         || !definition.oracle.memory_bytes.is_multiple_of(1024 * 1024)
     {
@@ -559,9 +553,6 @@ fn launch_configs(bytes: &[u8]) -> Result<&[u8]> {
 /// Inline settings omit values already defined by canonical binary or machine fields.
 pub fn execution_settings(profile: &ExecutionProfile) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(profile)?;
-    if let Some(object) = value.as_object_mut() {
-        object.remove("engine");
-    }
     if let Some(parameters) = value
         .get_mut("semantic_parameters")
         .and_then(|v| v.as_object_mut())
@@ -608,10 +599,8 @@ mod tests {
         crate::guest::build_initramfs(&root, &init, &recipe, &archive).unwrap();
         let boot = store.put_file(&archive).unwrap();
         let kernel = store.put(b"kernel").unwrap();
-        let engine = store.put(b"engine").unwrap();
         let profile = ExecutionProfile {
             backend: crate::execution::Backend::Hvf,
-            engine,
             witness_mode: crate::execution::WitnessMode::Exits,
             semantic_parameters: crate::execution::SemanticParameters::new(1024),
         };

@@ -183,25 +183,12 @@ fn load(directory: &Path) -> Result<Evidence> {
     let mut world = record.report.as_ref().and_then(|r| r.witness.clone());
     let mut machines = BTreeMap::new();
     // Counter-era x86 engines wrote 32-byte witness samples with a branch count.
-    let profile = &record.identity.inputs.profile;
-    let mut legacy_samples = profile.backend == crate::execution::Backend::Kvm
-        && profile
-            .semantic_parameters
-            .engine
-            .as_ref()
-            .is_some_and(|engine| engine.engine_timebase == "counter-pv-v1");
+    let mut legacy_samples = false;
     if let Some(file) = log(directory, &record, "vmm.json")? {
         let path = directory.join("output/vmm.json");
         let bytes = read_bounded(file, REPORT_LIMIT, "report").map_err(|e| bad(&path, e))?;
         let profile = &record.identity.inputs.profile;
-        let executable = crate::engine::recorded_launch(profile).map_err(|e| bad(&path, e))?;
-        let arm_world = executable == crate::engine::ExecutableKind::ArmWorld;
-        if (profile.backend == crate::execution::Backend::Hvf) != arm_world {
-            return Err(bad(
-                &path,
-                "HVF backend and ARM executable descriptor disagree",
-            ));
-        }
+        let arm_world = profile.backend == crate::execution::Backend::Hvf;
         let header: ReportHeader = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
         if header.report_version != if arm_world { 2 } else { 1 } {
             return Err(bad(&path, "unsupported VMM report version"));
@@ -834,15 +821,10 @@ mod tests {
     }
 
     #[test]
-    fn arm_descriptive_metadata_cannot_select_legacy_x86_samples() {
+    fn arm_reports_never_select_legacy_x86_samples() {
         let dir = tempfile::tempdir().unwrap();
         let mut record = fixture();
         record.identity.inputs.profile.backend = sb::execution::Backend::Hvf;
-        record.identity.inputs.profile.semantic_parameters.engine =
-            Some(sb::engine::arm_descriptor());
-        if let Some(engine) = &mut record.identity.inputs.profile.semantic_parameters.engine {
-            engine.engine_timebase = "counter-pv-v1".into();
-        }
         let mut report = raw_report();
         report["report_version"] = 2.into();
         report["timebase"] = "arm64-pv-world-v1".into();

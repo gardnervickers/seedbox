@@ -21,11 +21,14 @@ pub struct ContainerTransport {
     pub docker: Docker,
     pub cancellation: CancellationToken,
     pub progress: fn(&str),
-    /// Engine digest that keys reuse of an image's exported filesystem. An
-    /// image ID names fixed content, so the same engine merging the same
-    /// image yields the same bytes. `None` exports every time.
-    pub export_cache: Option<ContentDigest>,
+    /// Reuse an image's exported filesystem. An image ID names fixed content,
+    /// so the same export format yields the same bytes. `false` exports every time.
+    pub export_cache: bool,
 }
+
+/// Keys cached image exports. Change it whenever export or layer merging
+/// changes the bytes produced for the same image.
+const EXPORT_FORMAT: &str = "image-export-v2";
 fn setup(error: impl std::fmt::Display) -> Error {
     Error::Setup(format!("container image preparation: {error}"))
 }
@@ -279,9 +282,9 @@ impl ImageTransport for ContainerTransport {
             .build()
             .map_err(setup)?;
         let (docker, image) = runtime.block_on(self.resolve(service, directory, architecture))?;
-        let record = self.export_cache.as_ref().map(|engine| {
+        let record = self.export_cache.then(|| {
             ContentDigest::of(
-                serde_json::json!(["image-export", engine, architecture.platform(), image])
+                serde_json::json!([EXPORT_FORMAT, architecture.platform(), image])
                     .to_string()
                     .as_bytes(),
             )
@@ -580,7 +583,7 @@ mod tests {
                 .unwrap(),
                 cancellation: token,
                 progress: |_| {},
-                export_cache: None,
+                export_cache: false,
             };
             let store = ContentStore::new(directory.path().join("store"));
             let result = transport.import(
@@ -667,7 +670,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let simulation = crate::config::parse("name: fixture\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &directory.path().join("compose.yaml"), &BTreeMap::new()).unwrap();
         let store = ContentStore::new(directory.path().join("store"));
-        let import = |engine: &[u8], name: &str| {
+        let import = |cache: bool, name: &str| {
             let transport = ContainerTransport {
                 docker: Docker::connect_with_http(
                     &format!("http://{address}"),
@@ -677,7 +680,7 @@ mod tests {
                 .unwrap(),
                 cancellation: CancellationToken::default(),
                 progress: |_| {},
-                export_cache: Some(ContentDigest::of(engine)),
+                export_cache: cache,
             };
             let imported = transport
                 .import(
@@ -693,17 +696,17 @@ mod tests {
             };
             (imported.image, fs::read(path).unwrap())
         };
-        let exported = import(b"engine", "first");
+        let exported = import(true, "first");
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let reused = import(b"engine", "second");
+        let reused = import(true, "second");
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(reused, exported);
-        // Another engine exports again rather than trusting this one's merge.
-        assert_eq!(import(b"other engine", "third"), exported);
+        // Without the cache every import exports again.
+        assert_eq!(import(false, "third"), exported);
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 2);
         // A record whose objects are gone is a miss, not an error.
         fs::remove_dir_all(directory.path().join("store/sha256")).unwrap();
-        assert_eq!(import(b"engine", "fourth"), exported);
+        assert_eq!(import(true, "fourth"), exported);
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 }

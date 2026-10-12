@@ -52,7 +52,6 @@ pub struct Clock {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Runtime {
     pub kernel: Asset,
-    pub engine: Asset,
     /// Inline backend launch contract and resolved semantic policies.
     pub execution: serde_json::Value,
 }

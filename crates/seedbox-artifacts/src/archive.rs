@@ -117,7 +117,6 @@ fn collect(definition: &Definition, assets: &mut BTreeSet<ContentDigest>) -> Res
             .try_into()
     };
     assets.insert(digest(&definition.runtime.kernel)?);
-    assets.insert(digest(&definition.runtime.engine)?);
     for machine in definition
         .machines
         .values()
@@ -482,7 +481,6 @@ mod tests {
         let asset = Asset(format!("sha256:{}", binary.hex()));
         let profile = ExecutionProfile {
             backend: Backend::Other("archive-test".into()),
-            engine: binary,
             witness_mode: WitnessMode::Exits,
             semantic_parameters: SemanticParameters::new(16),
         };
@@ -494,7 +492,6 @@ mod tests {
             },
             runtime: Runtime {
                 kernel: asset.clone(),
-                engine: asset.clone(),
                 execution: serde_json::to_value(profile).unwrap(),
             },
             machines: BTreeMap::new(),

@@ -231,7 +231,6 @@ pub(super) fn checkpoint_metadata(
     let parent = checkpoint::parent_identity(
         world,
         request.seed,
-        request.prepared.profile.engine.hex(),
         recorded_deferred_tx(&request.prepared.profile)?,
         recorded_page_timer(&request.prepared.profile),
         |path| {

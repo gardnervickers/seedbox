@@ -210,13 +210,11 @@ pub fn branch_identity(parent: &str, at: u64, seed: u64) -> String {
 /// The CLI and the engine both hash the typed world document, without its
 /// `checkpoint`, so they agree whatever the document's bytes on disk.
 ///
-/// `engine` is the engine executable's digest. Binding a compiled binary
-/// means a rebuild changes the identity; whether to keep it is the
-/// checkpoint design's decision, not this function's.
+/// The engine build is not part of it: a checkpoint continues on whatever
+/// engine runs it, and an incompatible snapshot fails to restore.
 pub fn parent_identity(
     cfg: &WorldConfig,
     seed: u64,
-    engine: &str,
     deferred_tx: bool,
     page_timer: bool,
     mut digest: impl FnMut(&Path) -> Result<String, String>,
@@ -231,8 +229,7 @@ pub fn parent_identity(
         }
     }
     let mut h = Sha256::new();
-    h.update(b"seedbox-world-parent-v3\0");
-    h.update(engine.as_bytes());
+    h.update(b"seedbox-world-parent-v4\0");
     h.update(seed.to_le_bytes());
     h.update(serde_json::to_vec(&cfg).map_err(|e| e.to_string())?);
     if deferred_tx {
@@ -286,25 +283,21 @@ mod tests {
     fn identity_binds_parent_time_seed_and_content_not_paths() {
         let cfg = world("a", "b", "c");
         let content = |_: &Path| Ok("content".into());
-        let parent = parent_identity(&cfg, 7, "engine", false, false, content).unwrap();
+        let parent = parent_identity(&cfg, 7, false, false, content).unwrap();
         let moved = world("x", "y", "z");
         assert_eq!(
             parent,
-            parent_identity(&moved, 7, "engine", false, false, content).unwrap()
+            parent_identity(&moved, 7, false, false, content).unwrap()
         );
         assert_ne!(
             parent,
-            parent_identity(&cfg, 8, "engine", false, false, content).unwrap()
+            parent_identity(&cfg, 8, false, false, content).unwrap()
         );
         assert_ne!(
             parent,
-            parent_identity(&cfg, 7, "changed", false, false, content).unwrap()
+            parent_identity(&cfg, 7, false, false, |_| Ok("changed".into())).unwrap()
         );
-        assert_ne!(
-            parent,
-            parent_identity(&cfg, 7, "engine", false, false, |_| Ok("changed".into())).unwrap()
-        );
-        let deferred = parent_identity(&cfg, 7, "engine", true, false, content).unwrap();
+        let deferred = parent_identity(&cfg, 7, true, false, content).unwrap();
         assert_ne!(parent, deferred);
         assert_ne!(
             branch_identity(&parent, 10, 20),
@@ -312,7 +305,7 @@ mod tests {
         );
         assert_eq!(
             deferred,
-            parent_identity(&moved, 7, "engine", true, false, content).unwrap()
+            parent_identity(&moved, 7, true, false, content).unwrap()
         );
         let id = branch_identity(&parent, 10, 20);
         assert_eq!(id, branch_identity(&parent, 10, 20));
@@ -329,11 +322,10 @@ mod tests {
         let mut branches = std::collections::BTreeSet::new();
         for page_timer in [false, true] {
             for deferred_tx in [false, true] {
-                let parent =
-                    parent_identity(&cfg, 7, "engine", deferred_tx, page_timer, content).unwrap();
+                let parent = parent_identity(&cfg, 7, deferred_tx, page_timer, content).unwrap();
                 assert_eq!(
                     parent,
-                    parent_identity(&cfg, 7, "engine", deferred_tx, page_timer, content).unwrap()
+                    parent_identity(&cfg, 7, deferred_tx, page_timer, content).unwrap()
                 );
                 branches.insert(branch_identity(&parent, 10, 20));
                 parents.insert(parent);
