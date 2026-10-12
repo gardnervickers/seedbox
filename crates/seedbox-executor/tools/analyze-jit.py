@@ -51,10 +51,14 @@ def matrix(directory):
 
 
 def diagnostics(directory, row):
-    text = (directory / f"final-diagnostic-dr-{row}.out").read_text()
-    plans = (directory / f"final-diagnostic-dr-{row}.plans").read_text()
+    version_text = (directory / f"final-diagnostic-dr-{row}.out").read_text()
+    # Observe the SAME nonlogging fixture flags used for timing. Per-version
+    # print diagnostics execute extra DR-instrumented driver instructions and
+    # are not the timed-work accounting denominator.
+    text = (directory / f"accounting-dr-{row}.out").read_text()
+    plans = (directory / f"accounting-dr-{row}.plans").read_text()
     base = int(re.search(r"JIT_CORPUS base=(0x[0-9a-f]+)", text)[1], 16)
-    versions = [tuple(map(int, v)) for v in re.findall(r"JIT_VERSION round=(\d+) phase=(\d+) target=(\d+) version=(\d+) calls=(\d+) checksum=(\d+)", text)]
+    versions = [tuple(map(int, v)) for v in re.findall(r"JIT_VERSION round=(\d+) phase=(\d+) target=(\d+) version=(\d+) calls=(\d+) checksum=(\d+)", version_text)]
     calls = 32 if row.endswith("high") else 512 if row.endswith("medium") else 8192
     expected = []
     for r in range(64):
