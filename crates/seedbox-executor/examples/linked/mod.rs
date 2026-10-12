@@ -127,7 +127,26 @@ fn span(start: u64, end: u64) -> Span {
         bytes: start..end,
     }
 }
+const REGION: bool = cfg!(feature = "linked-region");
+fn normalize_carried(ctx: &mut arch::Context) {
+    unsafe {
+        ctx.machine.regs[16] = (*STATE.0.get()).x16;
+        ctx.machine.regs[17] = (*STATE.0.get()).x17;
+    }
+}
 impl Engine {
+    fn source_at_gate(&self, ctx: &mut arch::Context) -> Option<u64> {
+        self.targets.iter().find_map(|t| {
+            if t.gate == ctx.pc() {
+                Some(t.source)
+            } else if REGION && t.gate + 4 == ctx.pc() {
+                normalize_carried(ctx);
+                Some(t.source)
+            } else {
+                None
+            }
+        })
+    }
     fn gate(&self, source: u64) -> u64 {
         self.targets
             .iter()
@@ -168,19 +187,39 @@ impl Engine {
         self.next += 4096;
         let source =
             unsafe { core::slice::from_raw_parts(pc as *const u8, 4096 - offset as usize) };
-        let block = linked::emit_with_return_hint(
-            source,
-            pc,
-            memory.address as u64,
-            if c.gateway_fault {
-                c.guard.address as u64
-            } else {
-                STATE.0.get() as u64
-            },
-            self.arena.address as u64,
-            &self.targets,
-            c.return_hint,
-        )
+        let state = if c.gateway_fault {
+            c.guard.address as u64
+        } else {
+            STATE.0.get() as u64
+        };
+        let block = if REGION {
+            let carried: Vec<_> = self
+                .targets
+                .iter()
+                .map(|t| Target {
+                    source: t.source,
+                    gate: t.gate + 4,
+                })
+                .collect();
+            linked::region::emit(
+                source,
+                pc,
+                memory.address as u64,
+                state,
+                self.arena.address as u64,
+                &carried,
+            )
+        } else {
+            linked::emit_with_return_hint(
+                source,
+                pc,
+                memory.address as u64,
+                state,
+                self.arena.address as u64,
+                &self.targets,
+                c.return_hint,
+            )
+        }
         .unwrap_or_else(|e| {
             log(format_args!("emit: {e:?}\n"));
             fail("translation", pc)
@@ -204,7 +243,9 @@ impl Engine {
             && self.translations < 4
         {
             for m in &block.maps {
-                if m.instrumentation {
+                if m.instrumentation
+                    && !(REGION && offset != 0 && m.pc < block.carried_entry.unwrap())
+                {
                     let word = unsafe { (m.pc as *const u32).read() };
                     self.hooks.push((m.pc, word));
                     unsafe {
@@ -242,6 +283,12 @@ impl Engine {
             self.targets[slot].gate,
             linked::branch(self.targets[slot].gate, p.value.memory.address as u64).unwrap(),
         );
+        if let Some(entry) = p.value.block.carried_entry {
+            self.patch_gate(
+                self.targets[slot].gate + 4,
+                linked::branch(self.targets[slot].gate + 4, entry).unwrap(),
+            );
+        }
         self.generations[slot] = p.id;
         p
     }
@@ -258,6 +305,9 @@ impl Engine {
         for slot in 0..self.generations.len() {
             if removed.contains(&self.generations[slot]) {
                 self.patch_gate(self.targets[slot].gate, aarch64::TRAP);
+                if REGION {
+                    self.patch_gate(self.targets[slot].gate + 4, aarch64::TRAP);
+                }
                 self.generations[slot] = 0;
                 self.revoked += 1;
             }
@@ -311,7 +361,9 @@ extern "C" fn proof_writer() {
         }
         for entry in [base as u64 + 4, base as u64 + 8] {
             let gate = engine().gate(entry);
-            if (gate as *const u32).read() != aarch64::TRAP {
+            if (gate as *const u32).read() != aarch64::TRAP
+                || (REGION && ((gate + 4) as *const u32).read() != aarch64::TRAP)
+            {
                 fail("incoming gate not revoked", gate)
             }
         }
@@ -465,13 +517,15 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                 // terminal branch follows exactly one completed ADD; the first
                 // due stub follows floor(max(initial budget, 0)/256) bodies.
                 // None of these expectations reads reconstructed application X0.
+                let due_offset = pin.value.block.maps.len() as u64 - 5;
+                let terminal_offset = due_offset - 1;
                 let expected_x0 = if pin.entry == base + 4
                     && matches!(map.phase, Phase::Debited { .. })
-                    && map.pc >= pin.value.memory.address as u64 + 269 * 4
+                    && map.pc >= pin.value.memory.address as u64 + due_offset * 4
                 {
                     (c.loop_budget.max(0) / 256) as u64
                 } else if pin.entry == base + 4
-                    && map.pc == pin.value.memory.address as u64 + 268 * 4
+                    && map.pc == pin.value.memory.address as u64 + terminal_offset * 4
                 {
                     1
                 } else {
@@ -479,14 +533,14 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                 };
                 if c.corrupt_boundary_x0
                     && pin.entry == base + 4
-                    && map.pc == pin.value.memory.address as u64 + 268 * 4
+                    && map.pc == pin.value.memory.address as u64 + terminal_offset * 4
                 {
                     ctx.machine.regs[0] ^= 1;
                 }
                 verify_at(ctx, map.source, expected_x0);
                 let offset = (map.pc - pin.value.memory.address as u64) / 4;
                 if pin.entry == base + 4 {
-                    if offset == 0 {
+                    if offset == if REGION { 7 } else { 0 } {
                         (*STATE.0.get()).left = c.loop_budget;
                     }
                     let first_due = c.loop_budget - (c.loop_budget.max(0) / 256 + 1) * 256;
@@ -500,7 +554,7 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                         c.loop_budget
                     } else if offset == 10 {
                         c.loop_budget - 256
-                    } else if offset >= 269 {
+                    } else if offset >= due_offset {
                         first_due
                     } else {
                         first_running
@@ -633,10 +687,7 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
         // A stable revoked/unresolved direct or indirect gate can never authorize
         // old code. Cold lookup binds it to the current source generation.
         let pc = engine()
-            .targets
-            .iter()
-            .find(|t| t.gate == ctx.pc())
-            .map(|t| t.source)
+            .source_at_gate(ctx)
             .unwrap_or_else(|| fail("unknown gateway", ctx.pc()));
         let new = engine().lookup(pc);
         ctx.set_pc(new.value.memory.address as u64);
@@ -745,12 +796,15 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
             .enumerate()
             .map(|(i, offset)| Target {
                 source: base + offset,
-                gate: arena.address as u64 + 64 + i as u64 * 4,
+                gate: arena.address as u64 + 64 + i as u64 * if REGION { 8 } else { 4 },
             })
             .collect();
         (arena.address as *mut u32).write(aarch64::TRAP);
         for target in &targets {
             (target.gate as *mut u32).write(aarch64::TRAP);
+            if REGION {
+                ((target.gate + 4) as *mut u32).write(aarch64::TRAP);
+            }
         }
         arch::synchronize(arena.address, 4096);
         arena.protect(5);

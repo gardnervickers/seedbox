@@ -564,3 +564,20 @@ Code: [archives](../crates/seedbox-artifacts/src/archive.rs),
 [server bundles](../crates/seedbox-server/src/execution/bundles.rs),
 [comparison](../crates/seedbox-server/src/execution.rs),
 [client transfers](../crates/seedbox-client/src/transfers.rs).
+
+The opt-in `linked-region` proof carries scratch ownership between revocable
+entries. Each generation has a native entry that spills X16/X17 and a carried
+entry with X16 pointing to private State and both original values saved. Every
+original block still loads, subtracts, commits and tests its own charge. Source
+instructions that use either scratch register restore both before execution and
+respill after architectural completion; implicit faults therefore retain even
+scratch values dead on the successful path. PC-relative operands are relocated
+after these transitions. Indirect arms compare the complete original target
+without modifying NZCV or updating LR before a match. Both entry gates revoke
+before publication; keeping scratch across edges does not combine source spans
+or increase the generation's invalidation range. This adapts explicit entry
+conventions and lazy restore/respill mechanisms inspected in DynamoRIO's
+`core/arch/aarch64/emit_utils.c` and `ext/drreg/drreg.c`, not its trace charge plan.
+The native writer and TLS-independent diagnostic handler never enter translated
+code while an outer scratch transaction is active. General nested application
+signals and shared multi-execution-task caches remain unsupported.

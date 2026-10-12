@@ -115,28 +115,33 @@ pub fn translate(source: &[u8], pc: u64, cache: u64) -> Result<Block<Terminal>, 
                 trap: emitted,
             });
         }
-        let relocated = if w & 0x9f00_0000 == 0x1000_0000 {
-            // ADR
-            let imm = sext(((w >> 5) & 0x7ffff) << 2 | ((w >> 29) & 3), 21);
-            let r = relative(at, emitted, target(at, imm), 21, 0)?;
-            (w & 0x9f00_001f) | ((r & 3) << 29) | ((r >> 2) << 5)
-        } else if w & 0x9f00_0000 == 0x9000_0000 {
-            // ADRP
-            let imm = sext(((w >> 5) & 0x7ffff) << 2 | ((w >> 29) & 3), 21) * 4096;
-            let r = relative(at, emitted & !4095, target(at & !4095, imm), 21, 12)?;
-            (w & 0x9f00_001f) | ((r & 3) << 29) | ((r >> 2) << 5)
-        } else if w & 0xff00_0000 == 0x5800_0000 {
-            // LDR Xt, literal
-            let dest = target(at, sext((w >> 5) & 0x7ffff, 19) * 4);
-            (w & 0xff00_001f) | (relative(at, emitted, dest, 19, 2)? << 5)
-        } else if ordinary(w) {
-            w
-        } else {
-            return Err(Error::Unsupported { pc: at });
-        };
+        let relocated = relocate(w, at, emitted)?;
         bytes.extend(relocated.to_le_bytes());
     }
     Err(Error::Unsupported { pc })
+}
+// Shared by block and region emission so inserted restores do not skew PC-relative operands.
+fn relocate(w: u32, at: u64, emitted: u64) -> Result<u32, Error> {
+    let relocated = if w & 0x9f00_0000 == 0x1000_0000 {
+        // ADR
+        let imm = sext(((w >> 5) & 0x7ffff) << 2 | ((w >> 29) & 3), 21);
+        let r = relative(at, emitted, target(at, imm), 21, 0)?;
+        (w & 0x9f00_001f) | ((r & 3) << 29) | ((r >> 2) << 5)
+    } else if w & 0x9f00_0000 == 0x9000_0000 {
+        // ADRP
+        let imm = sext(((w >> 5) & 0x7ffff) << 2 | ((w >> 29) & 3), 21) * 4096;
+        let r = relative(at, emitted & !4095, target(at & !4095, imm), 21, 12)?;
+        (w & 0x9f00_001f) | ((r & 3) << 29) | ((r >> 2) << 5)
+    } else if w & 0xff00_0000 == 0x5800_0000 {
+        // LDR Xt, literal
+        let dest = target(at, sext((w >> 5) & 0x7ffff, 19) * 4);
+        (w & 0xff00_001f) | (relative(at, emitted, dest, 19, 2)? << 5)
+    } else if ordinary(w) {
+        w
+    } else {
+        return Err(Error::Unsupported { pc: at });
+    };
+    Ok(relocated)
 }
 fn ordinary(w: u32) -> bool {
     w == 0xd503_201f // NOP

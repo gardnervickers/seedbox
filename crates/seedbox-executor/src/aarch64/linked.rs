@@ -9,6 +9,8 @@ use super::{relative, translate, Terminal};
 use crate::{meter::Phase, Error};
 use alloc::vec::Vec;
 
+pub mod region;
+
 /// Private, resident memory belonging to exactly one execution task. The caller
 /// must keep this allocation and the original TLS value stable while code lives.
 #[repr(C)]
@@ -66,6 +68,9 @@ pub struct LinkedBlock {
     pub maps: Vec<Map>,
     pub source: core::ops::Range<u64>,
     pub instructions: u32,
+    /// Entry with X16 holding State and both original scratch values saved.
+    /// Baseline blocks have no such entry.
+    pub carried_entry: Option<u64>,
 }
 impl LinkedBlock {
     pub fn map(&self, pc: u64) -> Option<Map> {
@@ -371,6 +376,7 @@ pub fn emit_with_return_hint(
         maps,
         source: block.source,
         instructions: charge,
+        carried_entry: None,
     })
 }
 

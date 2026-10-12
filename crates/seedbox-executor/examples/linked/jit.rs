@@ -294,10 +294,7 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Jit)
             ctx.set_pc(engine().gate(pc));
         } else {
             let pc = engine()
-                .targets
-                .iter()
-                .find(|t| t.gate == ctx.pc())
-                .map(|t| t.source)
+                .source_at_gate(ctx)
                 .unwrap_or_else(|| fail("jit unmapped trap", ctx.pc()));
             // The finite target set is declared before emission. Every initial
             // entry/reused slot resolves through its revocable stable gate.
