@@ -9,14 +9,14 @@
 +    __u16 __reserved[2];
 +
  };
- 
+
  /*
 --- a/core/unix/signal_linux_aarch64.c
 +++ b/core/unix/signal_linux_aarch64.c
 @@ -277,6 +277,19 @@
  #endif
  }
- 
+
 +/* Linux arm64 restore_sve_fpsimd_context explicitly accepts this SME-only,
 + * non-streaming header with no payload (VL=0). FPSIMD owns all vector state;
 + * leave the header and following records intact rather than inventing SVE state.
@@ -36,7 +36,7 @@
 @@ -316,7 +329,9 @@
      struct _aarch64_ctx *terminator_record = next_head;
      ASSERT(terminator_record->magic == 0);
- 
+
 -    if (sve != NULL) {
 +    if (sve != NULL &&
 +        !sve_is_non_sve_fpsimd_header(
@@ -110,7 +110,7 @@
 @@ -70,6 +70,10 @@
  void
  unit_test_jit_fragment_tree(void);
- 
+
 +#ifdef AARCH64
 +void unit_test_non_sve_signal_context(void);
 +#endif

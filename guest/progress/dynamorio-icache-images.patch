@@ -1,0 +1,758 @@
+--- a/core/arch/interp.c
++++ b/core/arch/interp.c
+@@ -200,6 +200,9 @@
+
+     /* out */
+     instrlist_t *ilist;
++#ifdef AARCH64
++    fragment_source_t *source;
++#endif
+     uint flags;
+     void *vmlist;
+     app_pc end_pc;
+@@ -3239,6 +3242,11 @@
+     bool stop_bb_on_fallthrough = false;
+
+     ASSERT(bb->initialized);
++#ifdef AARCH64
++    /* Recursive rebuilds discard the complete provisional generation. */
++    fragment_source_destroy(bb->source);
++    bb->source = NULL;
++#endif
+     /* note that it's ok for bb->start_pc to be NULL as our check_new_page_start
+      * will catch it
+      */
+@@ -3386,6 +3394,15 @@
+             }
+
+             bb->instr_start = bb->cur_pc;
++#ifdef AARCH64
++            if (bb->for_cache && DYNAMO_OPTION(seedbox_icache_images) &&
++                !INTERNAL_OPTION(unsafe_build_ldstex)) {
++                bb->cur_pc = fragment_source_decode(dcontext, &bb->source,
++                                                    bb->cur_pc, bb->instr);
++                if (bb->record_translation)
++                    instr_set_translation(bb->instr, bb->instr_start);
++            } else
++#endif
+             if (bb->full_decode) {
+                 /* only going through this do loop once! */
+                 bb->cur_pc = IF_AARCH64_ELSE(decode_with_ldstex,
+@@ -4429,6 +4446,10 @@
+     ASSERT(dcontext->bb_build_info != NULL); /* caller should check */
+     if (dcontext->bb_build_info != NULL) {
+         build_bb_t *bb = (build_bb_t *)dcontext->bb_build_info;
++#ifdef AARCH64
++        fragment_source_destroy(bb->source);
++        bb->source = NULL;
++#endif
+         /* free instr memory */
+         if (bb->instr != NULL && bb->ilist != NULL &&
+             instrlist_last(bb->ilist) != bb->instr)
+@@ -5048,6 +5069,11 @@
+         initial_flags |
+             (INTERNAL_OPTION(store_translations) ? FRAG_HAS_TRANSLATION_INFO : 0),
+         NULL /*no overlap*/);
++#ifdef AARCH64
++    /* Context reconstruction must never decode patched application bytes. */
++    if (DYNAMO_OPTION(seedbox_icache_images))
++        bb->flags |= FRAG_HAS_TRANSLATION_INFO;
++#endif
+     if (!TESTANY(FRAG_TEMP_PRIVATE, initial_flags))
+         bb->has_bb_building_lock = true;
+     /* We avoid races where there is no hook when we start building a
+@@ -5107,7 +5133,21 @@
+
+     /* free the instrlist_t elements */
+     instrlist_clear_and_destroy(dcontext, bb->ilist);
+-}
++    IF_AARCH64(fragment_source_destroy(bb->source);)
++}
++
++#ifdef AARCH64
++fragment_source_t *
++bb_build_take_source(dcontext_t *dcontext, instrlist_t *ilist)
++{
++    build_bb_t *bb = (build_bb_t *)dcontext->bb_build_info;
++    if (bb == NULL || !bb->for_cache || bb->ilist != ilist)
++        return NULL;
++    fragment_source_t *source = bb->source;
++    bb->source = NULL;
++    return source;
++}
++#endif
+
+ /* Interprets the application's instructions until the end of a basic
+  * block is found, and then creates a fragment for the basic block.
+@@ -5154,6 +5194,7 @@
+             LOG(THREAD, LOG_INTERP, 2, "replacing built bb with native_exec bb\n");
+             instrlist_clear_and_destroy(dcontext, bb.ilist);
+             vm_area_destroy_list(dcontext, bb.vmlist);
++            IF_AARCH64(fragment_source_destroy(bb.source);)
+             dcontext->bb_build_info = NULL;
+             init_interp_build_bb(dcontext, &bb, start, initial_flags, for_trace,
+                                  unmangled_ilist);
+--- a/core/arch/mangle_shared.c
++++ b/core/arch/mangle_shared.c
+@@ -994,15 +994,17 @@
+      */
+     instr_t *skip_exit = INSTR_CREATE_label(dcontext);
+     PRE(ilist, instr, XINST_CREATE_jump_short(dcontext, opnd_create_instr(skip_exit)));
+-    /* assumption: raw bits of instr == app pc */
+-    ASSERT(instr_get_raw_bits(instr) != NULL);
++    /* Copied ARM decode images have an original-PC translation, not raw bits
++     * pointing into application memory. The signal barrier targets that PC. */
++    app_pc syscall_pc = IF_AARCH64_ELSE(get_app_instr_xl8(instr), instr_get_raw_bits(instr));
++    ASSERT(syscall_pc != NULL);
+     /* this should NOT be a meta-instr so we don't use PRE */
+     /* note that it's ok if this gets linked: we unlink all outgoing exits in
+      * addition to changing the skip_exit jmp upon receiving a signal
+      */
+     instrlist_preinsert(
+         ilist, instr,
+-        XINST_CREATE_jump(dcontext, opnd_create_pc(instr_get_raw_bits(instr))));
++        XINST_CREATE_jump(dcontext, opnd_create_pc(syscall_pc)));
+     PRE(ilist, instr, skip_exit);
+
+     if (does_syscall_ret_to_callsite() &&
+--- a/core/dispatch.c
++++ b/core/dispatch.c
+@@ -967,6 +967,9 @@
+             priv_mcontext_t *mcontext = get_mcontext(dcontext);
+             mcontext->pc = get_fcache_target(dcontext);
+
++            if (DYNAMO_OPTION(seedbox_icache_images)) {
++                fragment_source_icache(dcontext, begin, end);
++            } else {
+             /* Invalidate eagerly, retaining the all-thread continuation protocol.
+              * Removing the page from executable_areas also clears its historical
+              * VM_EXECUTED_FROM state: subsequent lines of a publication need no
+@@ -987,6 +990,7 @@
+                 true /*force synchall*/, THREAD_SYNCH_VALID_MCONTEXT _IF_DGCDIAG(NULL));
+             remove_executable_region(begin, size, true /*have lock*/);
+             flush_fragments_in_region_finish(dcontext, false);
++            }
+         }
+ #endif
+
+--- a/core/emit.c
++++ b/core/emit.c
+@@ -757,6 +757,10 @@
+     }
+     mangle_finalize(dcontext, ilist, f);
+
++#ifdef AARCH64
++    if (DYNAMO_OPTION(seedbox_icache_images) && !TESTANY(FRAG_COARSE_GRAIN, f->flags))
++        fragment_source_publish(f, bb_build_take_source(dcontext, ilist));
++#endif
+     /* add fragment to vm area lists */
+     vm_area_add_fragment(dcontext, f, vmlist);
+
+--- a/core/fragment.c
++++ b/core/fragment.c
+@@ -81,6 +81,278 @@
+ #    ifndef RETURN_AFTER_CALL
+ #        error RCT_IND_BRANCH requires RETURN_AFTER_CALL since it reuses data types
+ #    endif
++#endif
++
++#ifdef AARCH64
++/* This is a correctness/lifetime discriminator, not an indexed JIT fast path.
++ * Every IC compares ALL live source images, including executable aliases outside
++ * the named line. The platform's normal DSB/IC publication contract still applies.
++ * The builder decodes from these immutable bytes, never from a later reread.
++ * Mapping changes retain the existing VM/syscall flush protocol and revoke equality
++ * admission through an additional global incarnation. Equality is not permission.
++ */
++#define SOURCE_SPAN_CAPACITY 256
++typedef struct _source_span_t {
++    struct _source_span_t *next;
++    app_pc pc;
++    uint size;
++    byte bytes[SOURCE_SPAN_CAPACITY];
++} source_span_t;
++struct _fragment_source_t {
++    struct _fragment_source_t *next, *prev;
++    source_span_t *first, *last;
++    uint64 incarnation;
++    bool published, live, selected;
++};
++DECLARE_CXTSWPROT_VAR(static mutex_t fragment_source_lock, INIT_LOCK_FREE(fragment_source_lock));
++DECLARE_NEVERPROT_VAR(static fragment_source_t *fragment_sources, NULL);
++DECLARE_NEVERPROT_VAR(static uint64 source_incarnation, 1);
++/* Only the all-thread owner reads/writes this while it owns the collection. */
++DECLARE_NEVERPROT_VAR(static bool source_selective_flush, false);
++DECLARE_NEVERPROT_VAR(static uint64 source_ics, 0);
++DECLARE_NEVERPROT_VAR(static uint64 source_admissions, 0);
++DECLARE_NEVERPROT_VAR(static uint64 source_scanned_bytes, 0);
++DECLARE_NEVERPROT_VAR(static uint64 source_scan_us, 0);
++DECLARE_NEVERPROT_VAR(static uint64 source_emitted, 0);
++DECLARE_NEVERPROT_VAR(static uint64 source_reclaimed, 0);
++DECLARE_NEVERPROT_VAR(static uint64 source_selected, 0);
++
++fragment_source_t *
++fragment_source_create(void)
++{
++    fragment_source_t *source = global_heap_alloc(sizeof(*source) HEAPACCT(ACCT_FRAGMENT));
++    memset(source, 0, sizeof(*source));
++    d_r_mutex_lock(&fragment_source_lock);
++    source->incarnation = source_incarnation;
++    d_r_mutex_unlock(&fragment_source_lock);
++    return source;
++}
++
++byte *
++fragment_source_decode(dcontext_t *dcontext, fragment_source_t **owner, app_pc pc,
++                       instr_t *instr)
++{
++    if (*owner == NULL)
++        *owner = fragment_source_create();
++    fragment_source_t *source = *owner;
++    source_span_t *span = source->last;
++    if (span == NULL || span->pc + span->size != pc ||
++        span->size == SOURCE_SPAN_CAPACITY ||
++        PAGE_START(span->pc) != PAGE_START(pc)) {
++        span = global_heap_alloc(sizeof(*span) HEAPACCT(ACCT_FRAGMENT));
++        memset(span, 0, sizeof(*span));
++        span->pc = pc;
++        if (source->last == NULL)
++            source->first = span;
++        else
++            source->last->next = span;
++        source->last = span;
++    }
++    byte *copy = span->bytes + span->size;
++    /* ARM instructions are aligned words. A fault uses the existing bb abort
++     * path, which owns this span already. unsafe_build_ldstex uses the old decoder
++     * and receives unknown ownership rather than claiming a partial image. */
++    *(uint *)copy = *(const uint *)pc;
++    span->size += AARCH64_INSTR_SIZE;
++    byte *next = decode_from_copy(dcontext, copy, pc, instr);
++    return next == NULL ? NULL : pc + AARCH64_INSTR_SIZE;
++}
++
++void
++fragment_source_publish(fragment_t *f, fragment_source_t *source)
++{
++    if (source == NULL)
++        source = fragment_source_create(); /* unknown => must invalidate */
++    f->source = source;
++    d_r_mutex_lock(&fragment_source_lock);
++    source->published = source->live = true;
++    source->next = fragment_sources;
++    if (fragment_sources != NULL)
++        fragment_sources->prev = source;
++    fragment_sources = source;
++    source_emitted++;
++    d_r_mutex_unlock(&fragment_source_lock);
++}
++
++static void
++fragment_source_retire(fragment_t *f)
++{
++    if (f->source == NULL)
++        return;
++    d_r_mutex_lock(&fragment_source_lock);
++    f->source->live = false;
++    d_r_mutex_unlock(&fragment_source_lock);
++}
++
++void
++fragment_source_destroy(fragment_source_t *source)
++{
++    if (source == NULL)
++        return;
++    d_r_mutex_lock(&fragment_source_lock);
++    if (source->published) {
++        if (source->prev != NULL)
++            source->prev->next = source->next;
++        else
++            fragment_sources = source->next;
++        if (source->next != NULL)
++            source->next->prev = source->prev;
++        source_reclaimed++;
++    }
++    d_r_mutex_unlock(&fragment_source_lock);
++    source_span_t *span = source->first;
++    while (span != NULL) {
++        source_span_t *next = span->next;
++        global_heap_free(span, sizeof(*span) HEAPACCT(ACCT_FRAGMENT));
++        span = next;
++    }
++    global_heap_free(source, sizeof(*source) HEAPACCT(ACCT_FRAGMENT));
++}
++
++void
++fragment_source_mapping_changed(void)
++{
++    if (!DYNAMO_OPTION(seedbox_icache_images))
++        return;
++    d_r_mutex_lock(&fragment_source_lock);
++    ++source_incarnation;
++    /* Never let a wrapped incarnation bless an old image. */
++    if (source_incarnation == 0) {
++        for (fragment_source_t *s = fragment_sources; s != NULL; s = s->next)
++            s->incarnation = 0;
++        source_incarnation = 1;
++    }
++    d_r_mutex_unlock(&fragment_source_lock);
++}
++
++static bool
++fragment_source_unchanged(fragment_source_t *source)
++{
++    ASSERT_OWN_MUTEX(true, &fragment_source_lock);
++    if (source->first == NULL || source->incarnation != source_incarnation)
++        return false;
++    for (source_span_t *span = source->first; span != NULL; span = span->next) {
++        dr_mem_info_t info;
++        byte current[SOURCE_SPAN_CAPACITY];
++        if (!query_memory_ex(span->pc, &info) ||
++            !TESTALL(MEMPROT_READ | MEMPROT_EXEC, info.prot) ||
++            span->pc < info.base_pc || span->size > info.size ||
++            span->pc - info.base_pc > info.size - span->size)
++            return false;
++        source_scanned_bytes += span->size;
++        if (!d_r_safe_read(span->pc, span->size, current) ||
++            memcmp(current, span->bytes, span->size) != 0)
++            return false;
++    }
++    return true;
++}
++
++/* Called under the full synchronization before any fragment/IBL deletion. */
++static void
++fragment_source_select(void)
++{
++    uint64 start = query_time_micros();
++    d_r_mutex_lock(&fragment_source_lock);
++    for (fragment_source_t *s = fragment_sources; s != NULL; s = s->next) {
++        s->selected = s->live && !fragment_source_unchanged(s);
++        source_selected += s->selected;
++    }
++    source_scan_us += query_time_micros() - start;
++    d_r_mutex_unlock(&fragment_source_lock);
++}
++
++bool
++fragment_source_flushing(void)
++{
++    return source_selective_flush && is_self_allsynch_flushing();
++}
++
++bool
++fragment_source_selected(fragment_t *f)
++{
++    ASSERT(fragment_source_flushing());
++    return f->source == NULL || f->source->selected;
++}
++
++#ifdef STANDALONE_UNIT_TEST
++void
++unit_test_fragment_source(dcontext_t *dc)
++{
++    byte *code = heap_mmap(2 * PAGE_SIZE, MEMPROT_READ | MEMPROT_WRITE | MEMPROT_EXEC,
++                           VMM_SPECIAL_MMAP);
++    EXPECT(code != NULL, true);
++    uint *word = (uint *)code;
++    word[0] = 0x11000800; /* add w0,w0,#2 */
++    word[1] = 0xd65f03c0;
++    word[32] = 0x528003c0;
++    *(uint *)(code + PAGE_SIZE - 4) = 0x52800080;
++    *(uint *)(code + PAGE_SIZE) = 0x11000c00;
++    fragment_source_t *source = NULL;
++    instr_t instr;
++    instr_init(dc, &instr);
++    EXPECT(fragment_source_decode(dc, &source, code, &instr), code + 4);
++    EXPECT(instr_get_opcode(&instr), OP_add);
++    word[0] = 0x52800020;
++    EXPECT(*(uint *)source->first->bytes, 0x11000800);
++    EXPECT(instr_get_opcode(&instr), OP_add); /* decoded OLD image */
++    instr_reset(dc, &instr);
++    fragment_source_decode(dc, &source, code + 128, &instr);
++    EXPECT(source->first->next->pc, code + 128);
++    instr_reset(dc, &instr);
++    fragment_source_decode(dc, &source, code + PAGE_SIZE - 4, &instr);
++    instr_reset(dc, &instr);
++    fragment_source_decode(dc, &source, code + PAGE_SIZE, &instr);
++    EXPECT(source->last->pc, code + PAGE_SIZE);
++    instr_reset(dc, &instr);
++    d_r_mutex_lock(&fragment_source_lock);
++    EXPECT(fragment_source_unchanged(source), false);
++    word[0] = 0x11000800;
++    EXPECT(fragment_source_unchanged(source), true);
++    word[8] = 0x528009a0; /* unrelated same-line bytes */
++    EXPECT(fragment_source_unchanged(source), true);
++    source->incarnation--;
++    EXPECT(fragment_source_unchanged(source), false);
++    source->incarnation++;
++    d_r_mutex_unlock(&fragment_source_lock);
++    fragment_t f = { 0 };
++    fragment_source_publish(&f, source);
++    EXPECT(f.source, source);
++    fragment_source_retire(&f);
++    EXPECT(source->live, false);
++    uint64 reclaimed = source_reclaimed;
++    fragment_source_destroy(source);
++    EXPECT(source_reclaimed, reclaimed + 1);
++    /* Unknown and non-executable images never receive equality admission. */
++    source = fragment_source_create();
++    d_r_mutex_lock(&fragment_source_lock);
++    EXPECT(fragment_source_unchanged(source), false);
++    d_r_mutex_unlock(&fragment_source_lock);
++    fragment_source_destroy(source);
++    uint nonexec = 0xd65f03c0;
++    source = NULL;
++    fragment_source_decode(dc, &source, (byte *)&nonexec, &instr);
++    instr_reset(dc, &instr);
++    d_r_mutex_lock(&fragment_source_lock);
++    EXPECT(fragment_source_unchanged(source), false);
++    d_r_mutex_unlock(&fragment_source_lock);
++    fragment_source_destroy(source);
++    heap_munmap(code, 2 * PAGE_SIZE, VMM_SPECIAL_MMAP);
++    print_file(STDERR, "fragment source images: passed\n");
++}
++#endif
++
++static void
++fragment_source_report(void)
++{
++    if (!DYNAMO_OPTION(seedbox_icache_images))
++        return;
++    print_file(STDERR, "seedbox-ic-images: ic=" UINT64_FORMAT_STRING
++               " admissions=" UINT64_FORMAT_STRING " scanned_bytes=" UINT64_FORMAT_STRING
++               " scan_us=" UINT64_FORMAT_STRING " emitted=" UINT64_FORMAT_STRING
++               " selected=" UINT64_FORMAT_STRING " reclaimed=" UINT64_FORMAT_STRING "\n",
++               source_ics, source_admissions, source_scanned_bytes, source_scan_us,
++               source_emitted, source_selected, source_reclaimed);
++}
+ #endif
+
+ /* if shared traces, we currently have no private traces so make table tiny
+@@ -1610,6 +1882,7 @@
+ #endif
+
+     fragment_reset_free();
++    IF_AARCH64(fragment_source_report(); DELETE_LOCK(fragment_source_lock);)
+
+ #ifdef RETURN_AFTER_CALL
+     if (dynamo_options.ret_after_call && rac_non_module_table.live_table != NULL) {
+@@ -2281,6 +2554,7 @@
+ #endif
+
+     f->in_xlate.incoming_stubs = NULL;
++    IF_AARCH64(f->source = NULL;)
+ #ifdef CUSTOM_TRACES_RET_REMOVAL
+     f->num_calls = 0;
+     f->num_rets = 0;
+@@ -2553,6 +2827,7 @@
+      */
+
+     linkstub_free_exitstubs(dcontext, f);
++    IF_AARCH64(fragment_source_destroy(f->source);)
+
+     if ((f->flags & FRAG_IS_TRACE) != 0) {
+         trace_only_t *t = TRACE_FIELDS(f);
+@@ -3776,6 +4051,7 @@
+ void
+ fragment_remove(dcontext_t *dcontext, fragment_t *f)
+ {
++    IF_AARCH64(fragment_source_retire(f);)
+     per_thread_t *pt = GET_PT(dcontext);
+     fragment_table_t *table = GET_FTABLE(pt, f->flags);
+
+@@ -3816,6 +4092,7 @@
+ void
+ fragment_replace(dcontext_t *dcontext, fragment_t *f, fragment_t *new_f)
+ {
++    IF_AARCH64(fragment_source_retire(f);)
+     per_thread_t *pt = GET_PT(dcontext);
+     fragment_table_t *table = GET_FTABLE(pt, f->flags);
+     TABLE_RWLOCK(table, write, lock);
+@@ -5910,6 +6187,10 @@
+ DECLARE_NEVERPROT_VAR(static int flush_last_stage, 0);
+ #endif
+
++#ifdef AARCH64
++static void fragment_source_select(void);
++#endif
++
+ static void
+ flush_fragments_free_futures(app_pc base, size_t size)
+ {
+@@ -5943,7 +6224,8 @@
+  */
+ static void
+ flush_fragments_synchall_start(dcontext_t *ignored, app_pc base, size_t size,
+-                               bool exec_invalid, thread_synch_permission_t cur_state)
++                               bool exec_invalid, thread_synch_permission_t cur_state,
++                               bool source_images)
+ {
+     dcontext_t *my_dcontext = get_thread_private_dcontext();
+     app_pc exec_start = NULL, exec_end = NULL;
+@@ -5984,6 +6266,11 @@
+     ASSERT(flush_last_stage == 0);
+     DODEBUG({ flush_last_stage = 1; });
+
++#ifdef AARCH64
++    source_selective_flush = source_images;
++    if (source_images)
++        fragment_source_select();
++#endif
+     LOG(GLOBAL, LOG_FRAGMENT, 2, "flush_fragments_synchall_start: walking the threads\n");
+     /* We rely on coarse fragments not touching more than one vmarea region
+      * for our ibl invalidation.  It's
+@@ -6070,8 +6357,11 @@
+              * also, but fine fragments are not constrained and could be missed using
+              * only a tag-based range remove.
+              */
+-            DEBUG_DECLARE(removed =)
+-            fragment_remove_all_ibl_in_region(dcontext, exec_start, exec_end);
++            DEBUG_DECLARE(removed = 0;)
++            if (!IF_AARCH64_ELSE(fragment_source_flushing(), false)) {
++                DEBUG_DECLARE(removed =)
++                fragment_remove_all_ibl_in_region(dcontext, exec_start, exec_end);
++            }
+             LOG(THREAD, LOG_FRAGMENT, 2, "\tremoved %d ibl entries in " PFX "-" PFX "\n",
+                 removed, exec_start, exec_end);
+             /* Free any fine private fragments in the region */
+@@ -6086,7 +6376,8 @@
+         }
+     }
+     /* Removed shared coarse fragments from ibl tables, before freeing any */
+-    if (SHARED_IBT_TABLES_ENABLED() && SHARED_FRAGMENTS_ENABLED())
++    if (SHARED_IBT_TABLES_ENABLED() && SHARED_FRAGMENTS_ENABLED() &&
++        !IF_AARCH64_ELSE(fragment_source_flushing(), false))
+         fragment_remove_all_ibl_in_region(GLOBAL_DCONTEXT, exec_start, exec_end);
+     /* Free coarse units and shared fine fragments, as well as removing shared fine
+      * entries in any shared ibl tables
+@@ -6113,6 +6404,7 @@
+     ASSERT(dynamo_all_threads_synched);
+     ASSERT(allsynch_flusher == my_dcontext);
+     allsynch_flusher = NULL;
++    IF_AARCH64(source_selective_flush = false;)
+     end_synch_with_all_threads(temp_threads, flush_num_threads, true /*resume*/);
+     KSTOP(synchall_flush);
+ }
+@@ -6482,7 +6774,8 @@
+          */
+         ASSERT(!own_initexit_lock);
+         /* The synchall will flush fine as well as coarse so we'll be done */
+-        flush_fragments_synchall_start(dcontext, base, size, exec_invalid, cur_state);
++        flush_fragments_synchall_start(dcontext, base, size, exec_invalid, cur_state,
++                                      false /* ordinary region flush */);
+         return true;
+     }
+
+@@ -6870,6 +7163,48 @@
+
+     flush_fragments_in_region_finish(dcontext, false);
+ }
++
++
++#ifdef AARCH64
++void
++fragment_source_icache(dcontext_t *dcontext, app_pc begin, app_pc end)
++{
++    ASSERT(begin < end || end == NULL);
++    bool unchanged = true;
++    bool precise = DYNAMO_OPTION(disable_traces) && !DYNAMO_OPTION(coarse_units);
++    uint64 start = query_time_micros();
++    /* Serialize with complete shared BB decode+publication, not just index insert.
++     * Private builders without this lock always use the full synchronization. */
++    if (precise && USE_BB_BUILDING_LOCK()) {
++        SHARED_BB_LOCK();
++        d_r_mutex_lock(&fragment_source_lock);
++        source_ics++;
++        for (fragment_source_t *s = fragment_sources; s != NULL; s = s->next) {
++            if (s->live && !fragment_source_unchanged(s)) {
++                unchanged = false;
++                break;
++            }
++        }
++        source_scan_us += query_time_micros() - start;
++        d_r_mutex_unlock(&fragment_source_lock);
++        SHARED_BB_UNLOCK();
++        if (unchanged)
++            return;
++    } else {
++        d_r_mutex_lock(&fragment_source_lock);
++        source_ics++;
++        d_r_mutex_unlock(&fragment_source_lock);
++    }
++    /* Retain the existing full-context synchronization and all its syscall /
++     * NO_XFER rules. No entry-only gate or native escape replaces that protocol.
++     * Decisions are recomputed after synchronization, before any IBL deletion. */
++    flush_fragments_synchall_start(dcontext, NULL, POINTER_MAX, false,
++                                  THREAD_SYNCH_VALID_MCONTEXT, precise);
++    source_admissions++;
++    flush_fragments_unlink_shared(dcontext, NULL, POINTER_MAX, NULL _IF_DGCDIAG(NULL));
++    flush_fragments_end_synch(dcontext, false);
++}
++#endif
+
+ /* Invalidate all fragments in all caches.  Currently executed
+  * fragments may be alive until they reach an exit.
+--- a/core/fragment.h
++++ b/core/fragment.h
+@@ -239,6 +239,20 @@
+  * this is the core structure shared by everything
+  * trace heads and traces extend it below
+  */
++#ifdef AARCH64
++typedef struct _fragment_source_t fragment_source_t;
++fragment_source_t *fragment_source_create(void);
++void fragment_source_destroy(fragment_source_t *source);
++byte *fragment_source_decode(dcontext_t *dcontext, fragment_source_t **source,
++                             app_pc pc, instr_t *instr);
++fragment_source_t *bb_build_take_source(dcontext_t *dcontext, instrlist_t *ilist);
++void fragment_source_publish(fragment_t *f, fragment_source_t *source);
++void fragment_source_mapping_changed(void);
++bool fragment_source_selected(fragment_t *f);
++bool fragment_source_flushing(void);
++void fragment_source_icache(dcontext_t *dcontext, app_pc begin, app_pc end);
++#endif
++
+ struct _fragment_t {
+     /* WARNING: the tag offset is assumed to be 0 in arch/emit_utils.c
+      * Also, next and flags' offsets must match future_fragment_t's
+@@ -285,6 +299,10 @@
+         translation_info_t *translation_info;
+     } in_xlate;
+
++#ifdef AARCH64
++    /* Owned until final fragment free, including pending deletion. */
++    fragment_source_t *source;
++#endif
+     fragment_t *next_vmarea; /* for chaining fragments in vmarea list */
+     fragment_t *prev_vmarea; /* for chaining fragments in vmarea list */
+     union {
+--- a/core/heap.c
++++ b/core/heap.c
+@@ -140,7 +140,7 @@
+                   HEAP_ALIGNMENT), /* 96 dbg / 92 rel (180 x64 => 184) */
+     ALIGN_FORWARD(sizeof(trace_t) + 5 * sizeof(direct_linkstub_t) + sizeof(uint),
+                   HEAP_ALIGNMENT), /* 128 dbg / 124 rel (244 x64 => 248) */
+-    256, 512, UINT_MAX             /* variable-length */
++    IF_AARCH64_ELSE(272, 256), 512, UINT_MAX /* variable-length */
+ };
+ #define BLOCK_TYPES (sizeof(BLOCK_SIZES) / sizeof(uint))
+
+--- a/core/optionsx.h
++++ b/core/optionsx.h
+@@ -635,6 +635,11 @@
+ #endif
+ #ifdef AARCH64
+ /* XXX i#5771: This option may no longer be required when the issue is fixed. */
++#ifdef AARCH64
++/* Experimental correctness discriminator: scans all immutable source images. */
++OPTION_DEFAULT(bool, seedbox_icache_images, false,
++               "compare immutable decoded fragment images at IC publication")
++#endif
+ OPTION_DEFAULT_INTERNAL(bool, fake_ctr_dic, false,
+                         "mangle read of CTR_EL0 so app believes DIC bit is "
+                         "clear, which can help with apps that modify code")
+--- a/core/utils.h
++++ b/core/utils.h
+@@ -551,6 +551,7 @@
+     LOCK_RANK(allunits_lock),                    /* < global_alloc_lock */
+     LOCK_RANK(fcache_unit_areas),                /* > allunits_lock,
+                                                     < dynamo_areas, < global_alloc_lock */
++    IF_AARCH64_(LOCK_RANK(fragment_source_lock))
+     IF_NO_MEMQUERY_(LOCK_RANK(all_memory_areas)) /* < dynamo_areas */
+     IF_UNIX_(LOCK_RANK(set_thread_area_lock))    /* no constraints */
+     LOCK_RANK(landing_pad_areas_lock),           /* < global_alloc_lock, < dynamo_areas */
+--- a/core/vmareas.c
++++ b/core/vmareas.c
+@@ -2831,6 +2831,8 @@
+ static bool
+ remove_executable_vm_area(app_pc start, app_pc end, bool have_writelock)
+ {
++    IF_AARCH64(fragment_source_mapping_changed();)
++
+     bool ok;
+     LOG(GLOBAL, LOG_VMAREAS, 2, "removing executable vm area: " PFX "-" PFX "\n", start,
+         end);
+@@ -10182,6 +10184,11 @@
+             if (v->buf[i].custom.frags != NULL) {
+                 for (entry = v->buf[i].custom.frags; entry != NULL; entry = next) {
+                     next = FRAG_NEXT(entry);
++#ifdef AARCH64
++                    if (fragment_source_flushing() &&
++                        !fragment_source_selected(FRAG_FRAG(entry)))
++                        continue;
++#endif
+                     if (dcontext == del_dcontext) {
+                         LOG(THREAD, LOG_FRAGMENT | LOG_VMAREAS, 5,
+                             "\tremoving " PFX "%s F%d(" PFX ")\n", entry,
+@@ -10205,9 +10212,13 @@
+                                                         false /*shouldn't be in shared*/);
+                     }
+                 }
+-                if (dcontext == del_dcontext)
++                if (dcontext == del_dcontext &&
++                    !IF_AARCH64_ELSE(fragment_source_flushing(), false))
+                     v->buf[i].custom.frags = NULL;
+             }
++            /* Keep surviving members and their executed-area bookkeeping. */
++            if (IF_AARCH64_ELSE(fragment_source_flushing(), false))
++                continue;
+             if (dcontext == del_dcontext && remove_shared_vm_area) {
+                 /* could just remove flush region...but we flushed entire vm region
+                  * ASSUMPTION: remove_vm_area, given exact bounds, simply shifts later
+--- a/core/unix/os.c
++++ b/core/unix/os.c
+@@ -7404,6 +7404,19 @@
+  */
+ /* XXX: split out specific handlers into separate routines
+  */
++#ifdef AARCH64
++static void
++fragment_source_mapping_syscall(int number)
++{
++    /* A mapping/permission incarnation changes even if the bytes and final
++     * permissions are equal. Both sides bracket an in-flight kernel change;
++     * ordinary DR mapping invalidation and syscall continuation remain intact. */
++    if (number == SYS_mmap || number == SYS_munmap || number == SYS_mprotect ||
++        number == SYS_mremap)
++        fragment_source_mapping_changed();
++}
++#endif
++
+ bool
+ pre_system_call(dcontext_t *dcontext)
+ {
+@@ -7423,6 +7436,7 @@
+      * in syscall itself)
+      */
+     dcontext->sys_num = os_normalized_sysnum((int)MCXT_SYSNUM_REG(mc), NULL, dcontext);
++    IF_AARCH64(fragment_source_mapping_syscall(dcontext->sys_num);)
+
+     RSTATS_INC(pre_syscall);
+     DOSTATS({
+@@ -9101,6 +9115,7 @@
+     dr_where_am_i_t old_whereami;
+     DEBUG_DECLARE(bool ok;)
+
++    IF_AARCH64(fragment_source_mapping_syscall(sysnum);)
+     RSTATS_INC(post_syscall);
+
+     old_whereami = dcontext->whereami;
+--- a/core/unit_tests.c
++++ b/core/unit_tests.c
+@@ -71,6 +71,7 @@
+ unit_test_jit_fragment_tree(void);
+
+ #ifdef AARCH64
++void unit_test_fragment_source(dcontext_t *dc);
+ void unit_test_non_sve_signal_context(void);
+ #endif
+
+@@ -96,6 +97,7 @@
+     unit_test_vmareas();
+     unit_test_ibl_top_range();
+ #ifdef AARCH64
++    unit_test_fragment_source(dc);
+     unit_test_non_sve_signal_context();
+ #endif
+ #ifdef WINDOWS

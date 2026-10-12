@@ -17,6 +17,9 @@ pkgs.stdenv.mkDerivation {
     ../guest/progress/dynamorio-ic-ivau.patch
     # SME-only Linux can supply an inactive, header-only SVE record with VL=0.
     ../guest/progress/dynamorio-sme-empty-context.patch
+    # Opt-in correctness discriminator only; the normal launch recipe does not
+    # enable its all-image scan or change the existing retirement protocol.
+    ../guest/progress/dynamorio-icache-images.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build
