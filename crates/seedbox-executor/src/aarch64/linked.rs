@@ -9,6 +9,7 @@ use super::{relative, translate, Terminal};
 use crate::{meter::Phase, Error};
 use alloc::vec::Vec;
 
+pub mod gateway;
 pub mod region;
 
 /// Private, resident memory belonging to exactly one execution task. The caller
@@ -23,6 +24,10 @@ pub struct State {
     pub gateway_pc: u64,
     pub gateway_charge: u64,
     pub target: u64,
+    pub x0: u64,
+    pub x8: u64,
+    pub payments: u64,
+    pub gateway_gate: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

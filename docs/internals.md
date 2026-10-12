@@ -196,6 +196,39 @@ same revocable gate. A wrong prediction uses the full existing lookup; unknown
 targets still fail closed. It neither shares scratch across blocks nor changes
 charge points. The default emitter has no hint.
 
+The opt-in `linked-region` proof carries scratch ownership between revocable
+entries. Each generation has a native entry that spills X16/X17 and a carried
+entry with X16 pointing to private State and both original values saved. Every
+original block still loads, subtracts, commits and tests its own charge. Source
+instructions that use either scratch register restore both before execution and
+respill after architectural completion; implicit faults therefore retain even
+scratch values dead on the successful path. PC-relative operands are relocated
+after these transitions. Indirect arms compare the complete original target
+without modifying NZCV or updating LR before a match. Both entry gates revoke
+before publication; keeping scratch across edges does not combine source spans
+or increase the generation's invalidation range. This adapts explicit entry
+conventions and lazy restore/respill mechanisms inspected in DynamoRIO's
+`core/arch/aarch64/emit_utils.c` and `ext/drreg/drreg.c`, not its trace charge plan.
+The native writer and TLS-independent diagnostic handler never enter translated
+code while an outer scratch transaction is active. General nested application
+signals and shared multi-execution-task caches remain unsupported.
+
+The `linked-raw` proof uses that carried ABI with a stable getpid-only gateway
+([emitter](../crates/seedbox-executor/src/aarch64/linked/gateway.rs)). It additionally
+saves X0/X8 in private State, issues the marked raw syscall, commits the quantum
+and counter, refunds the captured old charge, restores X0/X8, and branches to
+the original entry's revocable carried gate. It never returns to a cache-body PC.
+SP, LR, TLS, NZCV and FP/SIMD are untouched; no C/Rust call or application stack
+frame is needed. Maps distinguish syscall return from budget/counter/refund
+commits. Unknown indirect targets and unexpected syscall failures remain fatal.
+The diagnostic observer pins old maps before the real syscall, parks the writer
+after payment, and resumes the exact raw continuation after invalidation. It
+uses extra observational traps; those add real kernel charges and are absent
+from wall timing. Neither that observer nor the native writer can reenter
+translated application code. Normal raw execution permits no uncontrolled
+writer or application signal; arbitrary nested/kernel continuations require
+additional ownership, not permission inferred from these entry gates.
+
 ARM LL/SC cannot simply be copied: host-only exits may lose the physical
 exclusive monitor and make STXR failures host-timed. A future implementation
 must retain the [guest-epoch reservation contract](#software-exclusive-reservations),
@@ -564,20 +597,3 @@ Code: [archives](../crates/seedbox-artifacts/src/archive.rs),
 [server bundles](../crates/seedbox-server/src/execution/bundles.rs),
 [comparison](../crates/seedbox-server/src/execution.rs),
 [client transfers](../crates/seedbox-client/src/transfers.rs).
-
-The opt-in `linked-region` proof carries scratch ownership between revocable
-entries. Each generation has a native entry that spills X16/X17 and a carried
-entry with X16 pointing to private State and both original values saved. Every
-original block still loads, subtracts, commits and tests its own charge. Source
-instructions that use either scratch register restore both before execution and
-respill after architectural completion; implicit faults therefore retain even
-scratch values dead on the successful path. PC-relative operands are relocated
-after these transitions. Indirect arms compare the complete original target
-without modifying NZCV or updating LR before a match. Both entry gates revoke
-before publication; keeping scratch across edges does not combine source spans
-or increase the generation's invalidation range. This adapts explicit entry
-conventions and lazy restore/respill mechanisms inspected in DynamoRIO's
-`core/arch/aarch64/emit_utils.c` and `ext/drreg/drreg.c`, not its trace charge plan.
-The native writer and TLS-independent diagnostic handler never enter translated
-code while an outer scratch transaction is active. General nested application
-signals and shared multi-execution-task caches remain unsupported.

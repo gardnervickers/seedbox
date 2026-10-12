@@ -276,7 +276,7 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Jit)
                 DEFAULT_BUDGET,
                 (*STATE.0.get()).left,
                 charge,
-                *PAYMENTS.0.get(),
+                (*STATE.0.get()).payments,
             )
             .unwrap();
             loop {
@@ -285,7 +285,7 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Jit)
                     break;
                 }
             }
-            *PAYMENTS.0.get() = m.payments();
+            (*STATE.0.get()).payments = m.payments();
             m.refund_for_dispatch().unwrap();
             (*STATE.0.get()).left = m.left();
             if !engine().index.is_live(&pin) {
@@ -356,7 +356,7 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Jit)
             r.start = bench::now();
             return;
         }
-        *PAYMENTS.0.get() = 0;
+        (*STATE.0.get()).payments = 0;
         (*STATE.0.get()).left = 50000;
         if !b.native {
             r.neighbor_id = engine().index.lookup(base + NEIGHBOR).unwrap().id;
@@ -410,7 +410,7 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Jit)
             }
             if !b.native
                 && (*STATE.0.get()).left
-                    != 50000 + *PAYMENTS.0.get() as i64 * 50000 - logical as i64
+                    != 50000 + (*STATE.0.get()).payments as i64 * 50000 - logical as i64
             {
                 fail("jit ledger", logical)
             }
@@ -421,7 +421,7 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Jit)
                 .filter_map(Weak::upgrade)
                 .map(|p| p.value.block.maps.len())
                 .sum();
-            log(format_args!("JIT_RESULT kind={:?} native={} diagnostic={} rounds={} calls={} publications={} store_width={} checksum={} checks={} logical={} payments={} remaining={} total_ns={} write_barrier_ns={} index_gate_ns={} first_ns={} warm_ns={} cold_ns={} translations={} resolutions={} translation_diagnostic_ns={} invalidated={} neighbor_reuse={} overlap_probes={} gate_probes={} gate_updates={} emitted={} live={} live_code_bytes={} pinned_bytes=0 reclaimed={} arena_used={} weak_slots={} live_maps={} map_bytes={}\n", b.kind,b.native,b.diagnostic,ROUNDS,r.calls,if b.kind==Kind::Zero{0}else{ROUNDS},if b.kind==Kind::Patch{4}else{WIDTH},r.checksum,r.checks,logical,*PAYMENTS.0.get(),(*STATE.0.get()).left,total,r.publish_ns,r.index_ns,r.first_ns,r.warm_ns,r.cold_ns,e.translations,r.resolutions,r.translation_ns,r.removed,r.neighbor_reuse,r.probes,r.gate_probes,e.translations+e.revoked,e.emitted,e.index.len(),e.index.len()*4096,r.reclaimed,e.next,e.codes.len(),maps,maps*core::mem::size_of::<linked::Map>()));
+            log(format_args!("JIT_RESULT kind={:?} native={} diagnostic={} rounds={} calls={} publications={} store_width={} checksum={} checks={} logical={} payments={} remaining={} total_ns={} write_barrier_ns={} index_gate_ns={} first_ns={} warm_ns={} cold_ns={} translations={} resolutions={} translation_diagnostic_ns={} invalidated={} neighbor_reuse={} overlap_probes={} gate_probes={} gate_updates={} emitted={} live={} live_code_bytes={} pinned_bytes=0 reclaimed={} arena_used={} weak_slots={} live_maps={} map_bytes={}\n", b.kind,b.native,b.diagnostic,ROUNDS,r.calls,if b.kind==Kind::Zero{0}else{ROUNDS},if b.kind==Kind::Patch{4}else{WIDTH},r.checksum,r.checks,logical,(*STATE.0.get()).payments,(*STATE.0.get()).left,total,r.publish_ns,r.index_ns,r.first_ns,r.warm_ns,r.cold_ns,e.translations,r.resolutions,r.translation_ns,r.removed,r.neighbor_reuse,r.probes,r.gate_probes,e.translations+e.revoked,e.emitted,e.index.len(),e.index.len()*4096,r.reclaimed,e.next,e.codes.len(),maps,maps*core::mem::size_of::<linked::Map>()));
             linux::exit(0)
         }
         publish(b);

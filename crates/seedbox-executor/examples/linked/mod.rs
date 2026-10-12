@@ -10,6 +10,7 @@ mod bench;
 mod jit;
 #[path = "../proof/linux.rs"]
 mod linux;
+mod raw;
 use alloc::{
     sync::{Arc, Weak},
     vec,
@@ -48,9 +49,12 @@ static STATE: Cell<State> = Cell(UnsafeCell::new(State {
     gateway_pc: 0,
     gateway_charge: 0,
     target: 0,
+    x0: 0,
+    x8: 0,
+    payments: 0,
+    gateway_gate: 0,
 }));
 static BARRIER: AtomicU32 = AtomicU32::new(0);
-static PAYMENTS: Cell<u64> = Cell(UnsafeCell::new(0));
 static RETIRED: Cell<Option<Weak<Generation<Code>>>> = Cell(UnsafeCell::new(None));
 struct Config {
     source: Memory,
@@ -66,6 +70,8 @@ struct Config {
     corrupt_boundary_x0: bool,
     return_hint: Option<u64>,
     target_register: Option<(usize, u64)>,
+    fault_word: u32,
+    count_scratch: bool,
 }
 struct Code {
     block: LinkedBlock,
@@ -83,6 +89,7 @@ struct Engine {
     translations: usize,
     emitted: usize,
     revoked: usize,
+    raw_gateway: Option<linked::gateway::Gateway>,
 }
 struct Output;
 impl Write for Output {
@@ -127,6 +134,7 @@ fn span(start: u64, end: u64) -> Span {
         bytes: start..end,
     }
 }
+const RAW: bool = cfg!(feature = "linked-raw");
 const REGION: bool = cfg!(feature = "linked-region");
 fn normalize_carried(ctx: &mut arch::Context) {
     unsafe {
@@ -154,7 +162,7 @@ impl Engine {
             .unwrap_or_else(|| fail("unknown target", source))
             .gate
     }
-    fn patch_gate(&self, at: u64, word: u32) {
+    fn patch_gate(&self, at: u64, word: u32, carried: Option<u32>) {
         let page = Memory {
             address: self.arena.address,
             len: 4096,
@@ -162,8 +170,11 @@ impl Engine {
         page.protect(3);
         unsafe {
             (at as *mut u32).write(word);
+            if let Some(word) = carried {
+                ((at + 4) as *mut u32).write(word);
+            }
         }
-        arch::synchronize(at as usize, 4);
+        arch::synchronize(at as usize, if carried.is_some() { 8 } else { 4 });
         page.protect(5);
         core::mem::forget(page);
     }
@@ -206,7 +217,7 @@ impl Engine {
                 pc,
                 memory.address as u64,
                 state,
-                self.arena.address as u64,
+                self.arena.address as u64 + if RAW { 256 } else { 0 },
                 &carried,
             )
         } else {
@@ -282,13 +293,11 @@ impl Engine {
         self.patch_gate(
             self.targets[slot].gate,
             linked::branch(self.targets[slot].gate, p.value.memory.address as u64).unwrap(),
+            p.value
+                .block
+                .carried_entry
+                .map(|entry| linked::branch(self.targets[slot].gate + 4, entry).unwrap()),
         );
-        if let Some(entry) = p.value.block.carried_entry {
-            self.patch_gate(
-                self.targets[slot].gate + 4,
-                linked::branch(self.targets[slot].gate + 4, entry).unwrap(),
-            );
-        }
         self.generations[slot] = p.id;
         p
     }
@@ -304,10 +313,11 @@ impl Engine {
         // shared incoming gates BEFORE the caller commits any source store.
         for slot in 0..self.generations.len() {
             if removed.contains(&self.generations[slot]) {
-                self.patch_gate(self.targets[slot].gate, aarch64::TRAP);
-                if REGION {
-                    self.patch_gate(self.targets[slot].gate + 4, aarch64::TRAP);
-                }
+                self.patch_gate(
+                    self.targets[slot].gate,
+                    aarch64::TRAP,
+                    REGION.then_some(aarch64::TRAP),
+                );
                 self.generations[slot] = 0;
                 self.revoked += 1;
             }
@@ -355,7 +365,7 @@ extern "C" fn proof_writer() {
         let appended = engine().lookup(base as u64 + 2048);
         proof_store(base + 8, arch::DEAD_SCRATCH_WORD);
         proof_store(base + 12, 0x17fffffe); // B source+4: replacement is THREE instructions.
-        proof_store(base + 4, arch::FAULT_WORD);
+        proof_store(base + 4, config().fault_word);
         if !engine().index.is_live(&appended) {
             fail("append lost", 0)
         }
@@ -374,12 +384,23 @@ extern "C" fn proof_writer() {
 }
 fn verify(ctx: &mut arch::Context, loops: u64) {
     let c = config();
+    let scratch = [ctx.machine.regs[16], ctx.machine.regs[17]];
+    if c.count_scratch {
+        for n in [16, 17] {
+            if ctx.machine.regs[n] != pattern(n) + loops {
+                fail("scratch architectural writes", n as u64);
+            }
+            ctx.machine.regs[n] = pattern(n);
+        }
+    }
     ctx.verify(
         c.source.address as u64,
         loops,
         (c.stack.address + c.stack.len) as u64,
         c.guard.address as u64,
     );
+    ctx.machine.regs[16] = scratch[0];
+    ctx.machine.regs[17] = scratch[1];
 }
 fn verify_at(ctx: &mut arch::Context, source: u64, expected_x0: u64) {
     let c = config();
@@ -394,6 +415,14 @@ fn verify_at(ctx: &mut arch::Context, source: u64, expected_x0: u64) {
                 } else {
                     base + 3072
                 }
+            }
+            16 | 17 if c.count_scratch => {
+                let before_write = if n == 16 {
+                    source == base + 8
+                } else {
+                    source == base + 8 || source == base + 12
+                };
+                pattern(n) + expected_x0 - u64::from(before_write)
             }
             20 => c.guard.address as u64,
             30 => {
@@ -449,6 +478,9 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
         let ctx = &mut *ctx;
         let c = config();
         let base = c.source.address as u64;
+        if RAW && raw::signal(sig, ctx) {
+            return;
+        }
         if let Some(b) = c.jit {
             jit::signal(sig, info, ctx, b);
             return;
@@ -468,7 +500,7 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                 2052 => arch::APPEND_WORDS[1],
                 8 => arch::DEAD_SCRATCH_WORD,
                 12 => 0x17fffffe,
-                4 => arch::FAULT_WORD,
+                4 => c.fault_word,
                 _ => fail("writer range", offset),
             };
             if value != expected || (info.add(16) as *const u64).read_unaligned() != address {
@@ -517,7 +549,7 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                 // terminal branch follows exactly one completed ADD; the first
                 // due stub follows floor(max(initial budget, 0)/256) bodies.
                 // None of these expectations reads reconstructed application X0.
-                let due_offset = pin.value.block.maps.len() as u64 - 5;
+                let due_offset = pin.value.block.maps.len() as u64 - if REGION { 7 } else { 5 };
                 let terminal_offset = due_offset - 1;
                 let expected_x0 = if pin.entry == base + 4
                     && matches!(map.phase, Phase::Debited { .. })
@@ -525,7 +557,8 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                 {
                     (c.loop_budget.max(0) / 256) as u64
                 } else if pin.entry == base + 4
-                    && map.pc == pin.value.memory.address as u64 + terminal_offset * 4
+                    && (map.pc == pin.value.memory.address as u64 + terminal_offset * 4
+                        || (map.source > base + 4 && map.source < base + 1024))
                 {
                     1
                 } else {
@@ -589,7 +622,7 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
             verify(ctx, loops);
             if arch::tls_get() != c.tls.address as u64
                 || (*STATE.0.get()).left != remaining
-                || *PAYMENTS.0.get() != 3
+                || (*STATE.0.get()).payments != 3
             {
                 fail("fault ledger or tls", (*STATE.0.get()).left as u64)
             }
@@ -605,6 +638,14 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                     .any(|(pc, _)| engine().at(*pc).is_some_and(|(p, _)| p.entry == base + 4))
             {
                 fail("unvisited loop hooks", 0)
+            }
+            if RAW
+                && engine()
+                    .hooks
+                    .iter()
+                    .any(|(pc, _)| *pc < engine().arena.address as u64 + 4096)
+            {
+                fail("unvisited raw gateway hooks", 0);
             }
             log(format_args!("EXECUTOR_FAULT pc={:#x} address={:#x} loops={} payments=3 left={} gpr-flags-fp-tls-stack=exact old-pin=reclaimed hooks={} translations={} emitted={} revoked={}\n",map.source,fault,loops,remaining,engine().hook_count,engine().translations,engine().emitted,engine().revoked));
             linux::write("SEEDBOX_INIT_PASS\n");
@@ -625,7 +666,7 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                 fail("unpopulated indirect target", (*STATE.0.get()).target)
             }
             let pin = engine().index.lookup(pc).unwrap();
-            let completed = ((c.loop_budget + *PAYMENTS.0.get() as i64 * 50000
+            let completed = ((c.loop_budget + (*STATE.0.get()).payments as i64 * 50000
                 - (*STATE.0.get()).left
                 - charge as i64)
                 / 256) as u64;
@@ -634,7 +675,7 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                 DEFAULT_BUDGET,
                 (*STATE.0.get()).left,
                 charge,
-                *PAYMENTS.0.get(),
+                (*STATE.0.get()).payments,
             )
             .unwrap();
             loop {
@@ -645,7 +686,7 @@ extern "C" fn signal(sig: i32, info: *const u8, ctx: *mut arch::Context) {
                     break;
                 }
             }
-            *PAYMENTS.0.get() = meter.payments();
+            (*STATE.0.get()).payments = meter.payments();
             if meter.payments() == 3 {
                 if c.loop_budget == 49996
                     && engine()
@@ -718,7 +759,9 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
         } else {
             match mode {
                 b"default" | b"gateway-fault" | b"boundary-x0-fault" | b"return-hint-miss"
-                | b"indirect16" | b"indirect17" | b"return16" | b"return17" => 49996,
+                | b"indirect16" | b"indirect17" | b"return16" | b"return17" | b"scratch"
+                | b"fault16" | b"fault17" | b"fault-base16" | b"fault-base17"
+                | b"return-unknown" | b"scratch-write" => 49996,
                 b"zero" => 256,
                 b"negative" => 0,
                 b"overshoot" => -100001,
@@ -746,23 +789,40 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
             || benchmark.map_or_else(arch::source, bench::Bench::source),
             jit::Jit::source,
         );
-        let target_register = match mode {
+        let mut target_register = match mode {
             b"indirect16" | b"indirect17" => {
                 let register = if mode == b"indirect16" { 16 } else { 17 };
                 bytes[..4].copy_from_slice(&(0xd63f0000u32 | (register << 5)).to_le_bytes());
                 Some((register as usize, source.address as u64 + 1536))
             }
-            b"return16" | b"return17" => {
-                let register = if mode == b"return16" { 16 } else { 17 };
+            b"return16" | b"return17" | b"return-unknown" => {
+                let register = if mode == b"return17" { 17 } else { 16 };
                 bytes[1544..1548].copy_from_slice(&(0xd65f0000u32 | (register << 5)).to_le_bytes());
-                Some((register as usize, source.address as u64 + 4))
+                Some((
+                    register as usize,
+                    source.address as u64 + if mode == b"return-unknown" { 3072 } else { 4 },
+                ))
             }
             _ => None,
         };
+        if mode == b"scratch-write" {
+            bytes[8..12].copy_from_slice(&0x91000610u32.to_le_bytes());
+            bytes[12..16].copy_from_slice(&0x91000631u32.to_le_bytes());
+        }
+        if mode == b"scratch" {
+            bytes[8..12].copy_from_slice(&0xaa1003f0u32.to_le_bytes());
+            bytes[12..16].copy_from_slice(&0xaa1103f1u32.to_le_bytes());
+        }
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), alias.address as *mut u8, 4096);
         arch::synchronize(alias.address, 4096);
         arch::synchronize(source.address, 4096);
         let guard = Memory::anonymous(4096, 0);
+        if mode == b"fault-base16" || mode == b"fault-base17" {
+            target_register = Some((
+                if mode == b"fault-base16" { 16 } else { 17 },
+                guard.address as u64,
+            ));
+        }
         let app_stack = Memory::anonymous(65536, 3);
         let tls = Memory::anonymous(4096, 3);
         arch::tls_set(tls.address as u64);
@@ -806,6 +866,21 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
                 ((target.gate + 4) as *mut u32).write(aarch64::TRAP);
             }
         }
+        let raw_gateway = if RAW {
+            let gateway = linked::gateway::emit(
+                arena.address as u64 + 256,
+                benchmark.is_none() && jit.is_none() && mode != b"return-unknown",
+            )
+            .unwrap();
+            core::ptr::copy_nonoverlapping(
+                gateway.bytes.as_ptr(),
+                (arena.address + 256) as *mut u8,
+                gateway.bytes.len(),
+            );
+            Some(gateway)
+        } else {
+            None
+        };
         arch::synchronize(arena.address, 4096);
         arena.protect(5);
         *CONFIG.0.get() = Some(Config {
@@ -836,6 +911,14 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
                 None
             },
             target_register,
+            count_scratch: mode == b"scratch-write",
+            fault_word: match mode {
+                b"fault16" => 0xf9400290,
+                b"fault17" => 0xf9400291,
+                b"fault-base16" => 0xf9400203,
+                b"fault-base17" => 0xf9400223,
+                _ => arch::FAULT_WORD,
+            },
         });
         *ENGINE.0.get() = Some(Engine {
             index: SourceIndex::default(),
@@ -849,7 +932,11 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
             translations: 0,
             emitted: 0,
             revoked: 0,
+            raw_gateway,
         });
+        if RAW && benchmark.is_none() && jit.is_none() && mode != b"return-unknown" {
+            raw::install_hooks();
+        }
         let start = bench::now();
         if jit.is_none() && !benchmark.is_some_and(|b| b.native) {
             for offset in benchmark.map_or_else(|| vec![0, 4, 8, 1536], bench::Bench::initial) {
@@ -866,7 +953,10 @@ extern "C" fn proof_main(stack: *const usize) -> ! {
         linux::write("EXECUTOR_UNMARKED_RETURN\n");
         // This expected fatal helper fault occurs before any payment. Do not
         // create a writer that would remain blocked after the diagnostic exits.
-        let child = if config().gateway_fault || config().corrupt_boundary_x0 {
+        let child = if config().gateway_fault
+            || config().corrupt_boundary_x0
+            || mode == b"return-unknown"
+        {
             0
         } else {
             checked(proof_clone(

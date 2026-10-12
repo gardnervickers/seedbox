@@ -14,6 +14,8 @@ linux-proof = []
 linked-return-hint = ["linux-proof"]
 # Scratch-carrying ABI; baseline remains available for controlled comparisons.
 linked-region = ["linux-proof"]
+# Same carried ABI with a stable raw getpid-only payment gateway.
+linked-raw = ["linked-region"]
 
 [[example]]
 name = "linux-proof"

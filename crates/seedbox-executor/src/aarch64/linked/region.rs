@@ -228,6 +228,10 @@ pub fn emit(
     e.phase = Phase::Debited {
         instructions: charge,
     };
+    // Stable original-entry gate, not a generation-body continuation. The raw
+    // gateway refunds this old charge then re-enters CURRENT lookup permission.
+    e.literal(17, gate(pc)?);
+    e.ins(0xf9002a11); // STR X17,[X16,#80]
     e.cold(pc, charge, gateway)?;
     let (bytes, maps) = e.finish()?;
     Ok(LinkedBlock {

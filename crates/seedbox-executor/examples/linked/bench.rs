@@ -6,6 +6,7 @@ use super::*;
 pub enum Kind {
     Compute,
     Short,
+    Call17,
     Jit,
 }
 #[derive(Clone, Copy)]
@@ -26,6 +27,7 @@ impl Bench {
         let kind = match name {
             b"compute" => Kind::Compute,
             b"short" => Kind::Short,
+            b"call17" => Kind::Call17,
             b"jit" => Kind::Jit,
             _ => fail("benchmark name", 0),
         };
@@ -37,7 +39,7 @@ impl Bench {
         } else {
             match self.kind {
                 Kind::Compute => 2_000_000,
-                Kind::Short => 10_000_000,
+                Kind::Short | Kind::Call17 => 10_000_000,
                 Kind::Jit => 250_000,
             }
         }
@@ -50,7 +52,9 @@ impl Bench {
         }
     }
     pub fn offsets(self) -> Vec<u64> {
-        if self.kind == Kind::Short {
+        if self.kind == Kind::Call17 {
+            vec![0, 4, 12, 64]
+        } else if self.kind == Kind::Short {
             vec![0, 8, 16, 64]
         } else {
             let mut v = vec![0, 512];
@@ -61,7 +65,9 @@ impl Bench {
         }
     }
     pub fn initial(self) -> Vec<u64> {
-        if self.kind == Kind::Short {
+        if self.kind == Kind::Call17 {
+            vec![0, 4, 12, 64]
+        } else if self.kind == Kind::Short {
             vec![0, 8, 16, 64]
         } else {
             vec![0, 512]
@@ -70,7 +76,18 @@ impl Bench {
     pub fn source(self) -> Vec<u8> {
         let mut bytes = vec![0; 4096];
         let mut put = |at: usize, w: u32| bytes[at..at + 4].copy_from_slice(&w.to_le_bytes());
-        if self.kind == Kind::Short {
+        if self.kind == Kind::Call17 {
+            put(0, 0xd63f0060); // BLR X3
+            put(4, 0xf1000421); // SUBS X1,X1,#1
+            put(8, 0x54ffffc1); // B.NE source
+            put(12, arch::FAULT_WORD);
+            put(16, 0x17ffffff);
+            for n in 0..12 {
+                put(64 + n * 4, 0x91000400);
+            }
+            put(112, 0x91000442); // independent call count
+            put(116, 0xd65f03c0);
+        } else if self.kind == Kind::Short {
             put(0, 0x91000400); // ADD X0,X0,#1
             put(4, 0x9400000f); // BL source+64
             put(8, 0xf1000421); // SUBS X1,X1,#1
@@ -129,6 +146,9 @@ fn initialize(ctx: &mut arch::Context, b: Bench, iterations: u64) {
     );
     ctx.machine.regs[1] = iterations;
     ctx.machine.regs[2] = 0;
+    if b.kind == Kind::Call17 {
+        ctx.machine.regs[3] = c.source.address as u64 + 64;
+    }
     let pc = c.source.address as u64;
     ctx.set_pc(if b.native {
         pc
@@ -139,7 +159,9 @@ fn initialize(ctx: &mut arch::Context, b: Bench, iterations: u64) {
 /// Called only at an actual application load fault, never a helper fault.
 fn verify_finished(ctx: &mut arch::Context, b: Bench, iterations: u64, round: u64) {
     let c = config();
-    let x0 = if b.kind == Kind::Short {
+    let x0 = if b.kind == Kind::Call17 {
+        iterations * 12
+    } else if b.kind == Kind::Short {
         iterations
     } else {
         iterations * (126 + if b.kind == Kind::Jit { round % 2 } else { 0 })
@@ -149,15 +171,20 @@ fn verify_finished(ctx: &mut arch::Context, b: Bench, iterations: u64, round: u6
             0 => x0,
             1 => 0,
             2 => {
-                if b.kind == Kind::Short {
+                if b.kind == Kind::Call17 {
+                    iterations
+                } else if b.kind == Kind::Short {
                     iterations * 3
                 } else {
                     0
                 }
             }
+            3 if b.kind == Kind::Call17 => c.source.address as u64 + 64,
             20 => c.guard.address as u64,
             30 => {
-                if b.kind == Kind::Short {
+                if b.kind == Kind::Call17 {
+                    c.source.address as u64 + 4
+                } else if b.kind == Kind::Short {
                     c.source.address as u64 + 8
                 } else {
                     pattern(30)
@@ -216,7 +243,7 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Benc
             DEFAULT_BUDGET,
             (*STATE.0.get()).left,
             charge,
-            *PAYMENTS.0.get(),
+            (*STATE.0.get()).payments,
         )
         .unwrap();
         loop {
@@ -225,7 +252,7 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Benc
                 break;
             }
         }
-        *PAYMENTS.0.get() = m.payments();
+        (*STATE.0.get()).payments = m.payments();
         m.refund_for_dispatch().unwrap();
         (*STATE.0.get()).left = m.left();
         if !engine().index.is_live(&pin) {
@@ -252,7 +279,15 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Benc
         map.reconstruct(&mut ctx.machine.regs, arch::tls_get(), &*STATE.0.get());
         map.source
     };
-    if original != base + if b.kind == Kind::Short { 16 } else { 512 }
+    if original
+        != base
+            + if b.kind == Kind::Call17 {
+                12
+            } else if b.kind == Kind::Short {
+                16
+            } else {
+                512
+            }
         || (info.add(16) as *const u64).read_unaligned() != c.guard.address as u64
     {
         fail("benchmark fault identity", original)
@@ -262,7 +297,7 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Benc
         r.first_pass = now() - r.start;
         verify_finished(ctx, b, 1000, 0);
         r.warmed = true;
-        *PAYMENTS.0.get() = 0;
+        (*STATE.0.get()).payments = 0;
         (*STATE.0.get()).left = 50000;
         initialize(ctx, b, b.iterations());
         r.start = now();
@@ -318,15 +353,24 @@ pub unsafe fn signal(sig: i32, info: *const u8, ctx: &mut arch::Context, b: Benc
         return;
     }
     let elapsed = now() - r.start;
-    let logical =
-        b.iterations() * b.rounds() * if b.kind == Kind::Short { 6 } else { 128 } + b.rounds() * 2;
+    let logical = b.iterations()
+        * b.rounds()
+        * if b.kind == Kind::Call17 {
+            17
+        } else if b.kind == Kind::Short {
+            6
+        } else {
+            128
+        }
+        + b.rounds() * 2;
     if !b.native
-        && (*STATE.0.get()).left != 50000 + *PAYMENTS.0.get() as i64 * 50000 - logical as i64
+        && (*STATE.0.get()).left
+            != 50000 + (*STATE.0.get()).payments as i64 * 50000 - logical as i64
     {
         fail("benchmark logical ledger", logical)
     }
     let mut usage = [0u64; 32];
     checked(syscall(165, 0, usage.as_mut_ptr() as usize, 0, 0, 0, 0));
-    log(format_args!("EXECUTOR_BENCH kind={:?} native={} gate={} iterations={} rounds={} checksum={} logical={} payments={} remaining={} warm_ns={} install_ns={} first_pass_ns={} translations={} emitted={} live={} live_code_bytes={} arena_reserved_bytes=1048576 pinned_peak={} reclaimed={} maxrss_kib={}\n",b.kind,b.native,b.gate,b.iterations(),b.rounds(),r.checksum,logical,*PAYMENTS.0.get(),(*STATE.0.get()).left,elapsed,r.cold,r.first_pass,engine().translations,engine().emitted,engine().index.len(),engine().index.len()*4096,r.pinned_peak,r.reclaimed,usage[4]));
+    log(format_args!("EXECUTOR_BENCH kind={:?} native={} gate={} iterations={} rounds={} checksum={} logical={} payments={} remaining={} warm_ns={} install_ns={} first_pass_ns={} translations={} emitted={} live={} live_code_bytes={} arena_reserved_bytes=1048576 pinned_peak={} reclaimed={} maxrss_kib={}\n",b.kind,b.native,b.gate,b.iterations(),b.rounds(),r.checksum,logical,(*STATE.0.get()).payments,(*STATE.0.get()).left,elapsed,r.cold,r.first_pass,engine().translations,engine().emitted,engine().index.len(),engine().index.len()*4096,r.pinned_peak,r.reclaimed,usage[4]));
     linux::exit(0)
 }
