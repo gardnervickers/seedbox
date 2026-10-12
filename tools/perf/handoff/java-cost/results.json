@@ -1,0 +1,502 @@
+{
+  "rows": [
+    {
+      "pair": 0,
+      "mode": "off",
+      "id": "rngd23yg",
+      "stage": {
+        "preparing": 2.381922791,
+        "booting": 1.44734075,
+        "executing": 31.214490667,
+        "finalizing": 0.015169625
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": 23.084275709,
+        "jfr_running_to_final_checksum": 1.468606833,
+        "final_checksum_to_jfr_stopped": 2.296185958,
+        "jfr_stopped_to_java_completed": 0.014106667,
+        "java_completed_to_oracle_pass": 0.162503833
+      },
+      "scheduler": {
+        "coordinator_s": 0.026457481,
+        "machine_s": 29.67740593,
+        "round_wall_s": 29.677777557,
+        "seconds": 29.705809166999998
+      },
+      "counts": {
+        "java": {
+          "exits": 29514,
+          "simulatedTimeNs": 13547340166
+        },
+        "oracle": {
+          "exits": 21251,
+          "simulatedTimeNs": 13606820074
+        }
+      },
+      "simulatedTimeNs": 13607700391
+    },
+    {
+      "pair": 0,
+      "mode": "on",
+      "id": "kqdsk35x",
+      "stage": {
+        "preparing": 1.810000542,
+        "booting": 1.273066333,
+        "executing": 100.701897875,
+        "finalizing": 0.010855584
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": 75.647041,
+        "jfr_running_to_final_checksum": 5.537861791,
+        "final_checksum_to_jfr_stopped": 8.95389725,
+        "jfr_stopped_to_java_completed": 0.446528459,
+        "java_completed_to_oracle_pass": 1.044792041
+      },
+      "scheduler": {
+        "coordinator_s": 0.039751929,
+        "machine_s": 98.7766159,
+        "round_wall_s": 98.776838277,
+        "seconds": 98.817513542
+      },
+      "counts": {
+        "java": {
+          "exits": 10826,
+          "simulatedTimeNs": 5180267367
+        },
+        "oracle": {
+          "exits": 9310,
+          "simulatedTimeNs": 5258241557
+        }
+      },
+      "simulatedTimeNs": 5258700391
+    },
+    {
+      "pair": 1,
+      "mode": "on",
+      "id": "aeh49utw",
+      "stage": {
+        "preparing": 1.871853542,
+        "booting": 1.436057375,
+        "executing": 88.0018505,
+        "finalizing": 0.009331083
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": 65.063651208,
+        "jfr_running_to_final_checksum": 5.05760675,
+        "final_checksum_to_jfr_stopped": 7.606054625,
+        "jfr_stopped_to_java_completed": 0.433575667,
+        "java_completed_to_oracle_pass": 0.985202917
+      },
+      "scheduler": {
+        "coordinator_s": 0.028326499,
+        "machine_s": 86.359809969,
+        "round_wall_s": 86.359995545,
+        "seconds": 86.38914175
+      },
+      "counts": {
+        "java": {
+          "exits": 10826,
+          "simulatedTimeNs": 5180267367
+        },
+        "oracle": {
+          "exits": 9310,
+          "simulatedTimeNs": 5258241557
+        }
+      },
+      "simulatedTimeNs": 5258700391
+    },
+    {
+      "pair": 1,
+      "mode": "off",
+      "id": "srh9295n",
+      "stage": {
+        "preparing": 1.859893792,
+        "booting": 1.522008375,
+        "executing": 32.805101625,
+        "finalizing": 0.010664292
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": 24.274693666,
+        "jfr_running_to_final_checksum": 1.530779292,
+        "final_checksum_to_jfr_stopped": 2.337166625,
+        "jfr_stopped_to_java_completed": 0.014892625,
+        "java_completed_to_oracle_pass": 0.167090542
+      },
+      "scheduler": {
+        "coordinator_s": 0.029147554,
+        "machine_s": 31.152571576,
+        "round_wall_s": 31.152963646,
+        "seconds": 31.183769
+      },
+      "counts": {
+        "java": {
+          "exits": 29514,
+          "simulatedTimeNs": 13547340166
+        },
+        "oracle": {
+          "exits": 21251,
+          "simulatedTimeNs": 13606820074
+        }
+      },
+      "simulatedTimeNs": 13607700391
+    },
+    {
+      "pair": 2,
+      "mode": "off",
+      "id": "ff92bd7n",
+      "stage": {
+        "preparing": 1.710844125,
+        "booting": 1.46239,
+        "executing": 33.215817708,
+        "finalizing": 0.009966708
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": 24.477613417,
+        "jfr_running_to_final_checksum": 1.563243208,
+        "final_checksum_to_jfr_stopped": 2.506399125,
+        "jfr_stopped_to_java_completed": 0.0158475,
+        "java_completed_to_oracle_pass": 0.181925417
+      },
+      "scheduler": {
+        "coordinator_s": 0.031204709,
+        "machine_s": 31.55327213,
+        "round_wall_s": 31.55367029,
+        "seconds": 31.586553333
+      },
+      "counts": {
+        "java": {
+          "exits": 29514,
+          "simulatedTimeNs": 13547340166
+        },
+        "oracle": {
+          "exits": 21251,
+          "simulatedTimeNs": 13606820074
+        }
+      },
+      "simulatedTimeNs": 13607700391
+    },
+    {
+      "pair": 2,
+      "mode": "on",
+      "id": "5meu56r4",
+      "stage": {
+        "preparing": 1.861733708,
+        "booting": 1.425154709,
+        "executing": 92.117621833,
+        "finalizing": 0.010959708
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": 68.819924833,
+        "jfr_running_to_final_checksum": 4.977299917,
+        "final_checksum_to_jfr_stopped": 7.567179041,
+        "jfr_stopped_to_java_completed": 0.431949667,
+        "java_completed_to_oracle_pass": 0.975711583
+      },
+      "scheduler": {
+        "coordinator_s": 0.032512387,
+        "machine_s": 90.41448957,
+        "round_wall_s": 90.41469167,
+        "seconds": 90.448109917
+      },
+      "counts": {
+        "java": {
+          "exits": 10826,
+          "simulatedTimeNs": 5180267367
+        },
+        "oracle": {
+          "exits": 9310,
+          "simulatedTimeNs": 5258241557
+        }
+      },
+      "simulatedTimeNs": 5258700391
+    },
+    {
+      "pair": 3,
+      "mode": "on",
+      "id": "vtqq3a5n",
+      "stage": {
+        "preparing": 1.802396542,
+        "booting": 1.4541305,
+        "executing": 88.113363917,
+        "finalizing": 0.010392083
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": 65.168080625,
+        "jfr_running_to_final_checksum": 5.196256875,
+        "final_checksum_to_jfr_stopped": 7.623866542,
+        "jfr_stopped_to_java_completed": 0.434556833,
+        "java_completed_to_oracle_pass": 0.979831208
+      },
+      "scheduler": {
+        "coordinator_s": 0.028702183,
+        "machine_s": 86.51832265,
+        "round_wall_s": 86.518522295,
+        "seconds": 86.548091458
+      },
+      "counts": {
+        "java": {
+          "exits": 10826,
+          "simulatedTimeNs": 5180267367
+        },
+        "oracle": {
+          "exits": 9310,
+          "simulatedTimeNs": 5258241557
+        }
+      },
+      "simulatedTimeNs": 5258700391
+    },
+    {
+      "pair": 3,
+      "mode": "off",
+      "id": "9gf4spz5",
+      "stage": {
+        "preparing": 1.89342725,
+        "booting": 1.520030375,
+        "executing": 33.438808,
+        "finalizing": 0.010721167
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": 24.544501875,
+        "jfr_running_to_final_checksum": 1.686123375,
+        "final_checksum_to_jfr_stopped": 2.575185292,
+        "jfr_stopped_to_java_completed": 0.01924,
+        "java_completed_to_oracle_pass": 0.200880792
+      },
+      "scheduler": {
+        "coordinator_s": 0.034572577,
+        "machine_s": 31.859804532,
+        "round_wall_s": 31.860208792,
+        "seconds": 31.896542166
+      },
+      "counts": {
+        "java": {
+          "exits": 29514,
+          "simulatedTimeNs": 13547340166
+        },
+        "oracle": {
+          "exits": 21251,
+          "simulatedTimeNs": 13606820074
+        }
+      },
+      "simulatedTimeNs": 13607700391
+    },
+    {
+      "pair": 4,
+      "mode": "off",
+      "id": "7qs6zq5v",
+      "stage": {
+        "preparing": 1.922163625,
+        "booting": 1.517699958,
+        "executing": 34.657896958,
+        "finalizing": 0.0105475
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": 25.528071625,
+        "jfr_running_to_final_checksum": 1.497537541,
+        "final_checksum_to_jfr_stopped": 2.503352375,
+        "jfr_stopped_to_java_completed": 0.015210792,
+        "java_completed_to_oracle_pass": 0.173295
+      },
+      "scheduler": {
+        "coordinator_s": 0.036450005,
+        "machine_s": 32.727341382,
+        "round_wall_s": 32.72775592,
+        "seconds": 32.766153167
+      },
+      "counts": {
+        "java": {
+          "exits": 29514,
+          "simulatedTimeNs": 13547340166
+        },
+        "oracle": {
+          "exits": 21251,
+          "simulatedTimeNs": 13606820074
+        }
+      },
+      "simulatedTimeNs": 13607700391
+    },
+    {
+      "pair": 4,
+      "mode": "on",
+      "id": "6jzz5te3",
+      "stage": {
+        "preparing": 1.782205,
+        "booting": 1.516072,
+        "executing": 98.54182425,
+        "finalizing": 0.010937291
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": 73.899019375,
+        "jfr_running_to_final_checksum": 5.33315625,
+        "final_checksum_to_jfr_stopped": 8.223924417,
+        "jfr_stopped_to_java_completed": 0.521371041,
+        "java_completed_to_oracle_pass": 1.044872167
+      },
+      "scheduler": {
+        "coordinator_s": 0.037232064,
+        "machine_s": 96.855951865,
+        "round_wall_s": 96.856163336,
+        "seconds": 96.894530667
+      },
+      "counts": {
+        "java": {
+          "exits": 10826,
+          "simulatedTimeNs": 5180267367
+        },
+        "oracle": {
+          "exits": 9310,
+          "simulatedTimeNs": 5258241557
+        }
+      },
+      "simulatedTimeNs": 5258700391
+    }
+  ],
+  "summary": {
+    "off": {
+      "stage": {
+        "preparing": {
+          "median": 1.89342725,
+          "min": 1.710844125,
+          "max": 2.381922791
+        },
+        "booting": {
+          "median": 1.517699958,
+          "min": 1.44734075,
+          "max": 1.522008375
+        },
+        "executing": {
+          "median": 33.215817708,
+          "min": 31.214490667,
+          "max": 34.657896958
+        },
+        "finalizing": {
+          "median": 0.010664292,
+          "min": 0.009966708,
+          "max": 0.015169625
+        }
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": {
+          "median": 24.477613417,
+          "min": 23.084275709,
+          "max": 25.528071625
+        },
+        "jfr_running_to_final_checksum": {
+          "median": 1.530779292,
+          "min": 1.468606833,
+          "max": 1.686123375
+        },
+        "final_checksum_to_jfr_stopped": {
+          "median": 2.503352375,
+          "min": 2.296185958,
+          "max": 2.575185292
+        },
+        "jfr_stopped_to_java_completed": {
+          "median": 0.015210792,
+          "min": 0.014106667,
+          "max": 0.01924
+        },
+        "java_completed_to_oracle_pass": {
+          "median": 0.173295,
+          "min": 0.162503833,
+          "max": 0.200880792
+        }
+      },
+      "scheduler": {
+        "coordinator_s": {
+          "median": 0.031204709,
+          "min": 0.026457481,
+          "max": 0.036450005
+        },
+        "machine_s": {
+          "median": 31.55327213,
+          "min": 29.67740593,
+          "max": 32.727341382
+        },
+        "round_wall_s": {
+          "median": 31.55367029,
+          "min": 29.677777557,
+          "max": 32.72775592
+        },
+        "seconds": {
+          "median": 31.586553333,
+          "min": 29.705809166999998,
+          "max": 32.766153167
+        }
+      }
+    },
+    "on": {
+      "stage": {
+        "preparing": {
+          "median": 1.810000542,
+          "min": 1.782205,
+          "max": 1.871853542
+        },
+        "booting": {
+          "median": 1.436057375,
+          "min": 1.273066333,
+          "max": 1.516072
+        },
+        "executing": {
+          "median": 92.117621833,
+          "min": 88.0018505,
+          "max": 100.701897875
+        },
+        "finalizing": {
+          "median": 0.010855584,
+          "min": 0.009331083,
+          "max": 0.010959708
+        }
+      },
+      "receiptPhases": {
+        "oracle_wait_to_jfr_running": {
+          "median": 68.819924833,
+          "min": 65.063651208,
+          "max": 75.647041
+        },
+        "jfr_running_to_final_checksum": {
+          "median": 5.196256875,
+          "min": 4.977299917,
+          "max": 5.537861791
+        },
+        "final_checksum_to_jfr_stopped": {
+          "median": 7.623866542,
+          "min": 7.567179041,
+          "max": 8.95389725
+        },
+        "jfr_stopped_to_java_completed": {
+          "median": 0.434556833,
+          "min": 0.431949667,
+          "max": 0.521371041
+        },
+        "java_completed_to_oracle_pass": {
+          "median": 0.985202917,
+          "min": 0.975711583,
+          "max": 1.044872167
+        }
+      },
+      "scheduler": {
+        "coordinator_s": {
+          "median": 0.032512387,
+          "min": 0.028326499,
+          "max": 0.039751929
+        },
+        "machine_s": {
+          "median": 90.41448957,
+          "min": 86.359809969,
+          "max": 98.7766159
+        },
+        "round_wall_s": {
+          "median": 90.41469167,
+          "min": 86.359995545,
+          "max": 98.776838277
+        },
+        "seconds": {
+          "median": 90.448109917,
+          "min": 86.38914175,
+          "max": 98.817513542
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(ic_counter C)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(DynamoRIO_USE_LIBC OFF)
+find_package(DynamoRIO REQUIRED)
+add_library(ic_counter SHARED ic-client.c)
+configure_DynamoRIO_client(ic_counter)

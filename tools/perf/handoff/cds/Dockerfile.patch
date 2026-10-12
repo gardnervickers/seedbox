@@ -1,0 +1,13 @@
+diff --git a/examples/kafka/broker/Dockerfile b/examples/kafka/broker/Dockerfile
+index 3a250d29..c131cef5 100644
+--- a/examples/kafka/broker/Dockerfile
++++ b/examples/kafka/broker/Dockerfile
+@@ -16,4 +16,8 @@ ENV CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk \
+     KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
+     KAFKA_HEAP_OPTS="-Xms512m -Xmx512m" \
+     KAFKA_JVM_PERFORMANCE_OPTS="-XX:+UseSerialGC -XX:ActiveProcessorCount=1"
++# Generate both script-selected AppCDS archives on this exact JVM. Training
++# uses a throwaway single-node cluster and leaves the runtime config unchanged.
++COPY build-cds.sh /tmp/build-cds.sh
++RUN timeout 180 bash /tmp/build-cds.sh && rm /tmp/build-cds.sh
+ ENTRYPOINT ["/etc/kafka/docker/run"]
