@@ -549,9 +549,9 @@ static pid_t start(void) {
          * hides host-only exclusive-store retries from application execution. */
         instrumented[prefix++] = "-ldstex2cas";
         /* Detect rewritten code through the application's IC IVAU, rather
-         * than hardware-consistency page tracking, which exhausts JVM memory.
-         * Clear CTR_EL0.DIC in translated reads so applications cannot legally
-         * omit the IC IVAU that invalidates the translator's cached code. */
+         * than write protection and sandboxing; the latter exhausted memory
+         * in the observed Kafka startup. Clear CTR_EL0.DIC so applications
+         * cannot legally omit the IC IVAU that invalidates cached code. */
         instrumented[prefix++] = "-no_hw_cache_consistency";
         instrumented[prefix++] = "-fake_ctr_dic";
 #endif

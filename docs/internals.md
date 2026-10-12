@@ -95,9 +95,10 @@ The ARM translator detects rewritten code through the application's `IC IVAU`
 cache-maintenance instructions (`-no_hw_cache_consistency`). Translated reads of
 `CTR_EL0` clear DIC (`-fake_ctr_dic`), so applications must issue `IC IVAU` even
 when the underlying CPU would permit omitting it. DynamoRIO exposes this internal
-option in release builds. The newer hardware-consistency mode instead tracks
-code pages; a Kafka broker's memory grew to 2 GB while it started its controller,
-about eight times as much, and the guest killed it.
+option in release builds. Enabled `hw_cache_consistency` instead uses code-page
+write protection and self-modifying-code sandboxing. In the observed Kafka
+startup, that mode grew a broker's memory to about 2 GB and it was killed;
+with application-driven invalidation, it used about 250 MB and kept starting.
 
 Code: [progress client](../guest/progress/progress.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
