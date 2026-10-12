@@ -37,6 +37,9 @@ impl ExecutionBackend for Executor {
     fn performance_parameters(&self) -> BTreeMap<String, String> {
         self.backend().performance_parameters()
     }
+    fn engine(&self) -> Option<seedbox_application::execution::EngineDescriptor> {
+        self.backend().engine()
+    }
     fn preflight(&self, out: Option<&Path>) -> Result<()> {
         self.backend().preflight(out)
     }

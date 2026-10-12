@@ -16,8 +16,8 @@ fn main() {
 
 /// `HEAD`, suffixed `-dirty` when tracked files differ from it. Builds without
 /// Git metadata, such as a source archive, record no revision. Cargo reruns
-/// this when `HEAD`, its branch or the index changes; edits that have not
-/// touched the index since the last build keep the earlier dirty state.
+/// this when `HEAD`, its branch, the index or any tracked top-level path
+/// changes, so an unstaged edit cannot leave a clean revision on a changed build.
 fn revision() -> Option<String> {
     let git = |args: &[&str]| {
         let output = Command::new("git")
@@ -43,6 +43,20 @@ fn revision() -> Option<String> {
                 println!("cargo::rerun-if-changed={path}");
             }
         }
+    }
+    // Cargo checks watched directories recursively. Untracked outputs such as
+    // `target/` stay outside the top-level paths Git tracks.
+    let root = git(&["rev-parse", "--show-toplevel"])?;
+    let tracked = git(&["ls-files", "-z", "--full-name", "--", ":/"])?;
+    let mut tops: Vec<_> = tracked
+        .split('\0')
+        .filter_map(|path| path.split('/').next())
+        .filter(|top| !top.is_empty())
+        .collect();
+    tops.sort_unstable();
+    tops.dedup();
+    for top in tops {
+        println!("cargo::rerun-if-changed={root}/{top}");
     }
     let dirty = git(&["status", "--porcelain", "--untracked-files=no"])?;
     Some(if dirty.is_empty() {

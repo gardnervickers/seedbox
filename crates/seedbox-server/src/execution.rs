@@ -1023,6 +1023,11 @@ mod tests {
             fn profile(&self) -> ExecutionProfile {
                 self.0.profile.clone()
             }
+            fn engine(&self) -> Option<seedbox_application::execution::EngineDescriptor> {
+                Some(seedbox_application::engine::kvm_descriptor(Some(
+                    "fixture-revision-dirty".into(),
+                )))
+            }
             fn execute(
                 &self,
                 request: ExecutionRequest<'_>,
@@ -1145,6 +1150,14 @@ mod tests {
         assert_eq!(
             finished.status.termination,
             Some(seedbox_api::ExecutionTermination::OracleExited)
+        );
+        // The executing engine's build is recorded as provenance.
+        assert_eq!(
+            finished.status.engine,
+            Some(seedbox_api::EngineBuild {
+                version: seedbox_application::engine::SIMULATOR_VERSION.into(),
+                revision: Some("fixture-revision-dirty".into()),
+            })
         );
     }
 
