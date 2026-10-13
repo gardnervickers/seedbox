@@ -83,10 +83,13 @@ fn long_server_state_path_fails_before_creating_state() {
 
 #[test]
 fn explicit_asset_directory_overrides_bundled_kernel_without_build_tools() {
-    let directory = tempfile::tempdir().unwrap();
+    // Hard-link instead of copying: a copy holds a writable descriptor that a
+    // concurrently forked test child can inherit, making exec fail with ETXTBSY.
+    // CARGO_TARGET_TMPDIR shares the binary's filesystem, so linking works.
+    let directory = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let root = directory.path().canonicalize().unwrap();
     let binary = root.join("seedbox");
-    fs::copy(env!("CARGO_BIN_EXE_seedbox"), &binary).unwrap();
+    fs::hard_link(env!("CARGO_BIN_EXE_seedbox"), &binary).unwrap();
     let output = Command::new(binary)
         .arg("doctor")
         .current_dir(&root)
