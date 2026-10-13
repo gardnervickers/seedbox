@@ -1,4 +1,5 @@
 //! Internal timer ownership: retiring policy work cannot delete external FIFO entries.
+use super::fixture::auto_key;
 use super::*;
 use crate::oracle::service::{Effect, FaultAction, Plan, Settlement, SettlementStatus};
 #[derive(Clone)]
@@ -65,18 +66,28 @@ fn cancellation_replaces_then_removes_only_obsolete_internal_markers() {
     driver
         .schedule(
             at(10),
-            Action::SetExecution {
-                machine: MachineId(0),
-                config: ExecutionConfig::default(),
+            auto_key(),
+            Action::Throttle {
+                target: Target::Machine(MachineId(0)),
+                config: ExecutionConfig::new(2000).unwrap(),
             },
         )
         .unwrap();
-    driver.schedule(at(20), Action::Wake(MachineId(0))).unwrap();
+    driver
+        .schedule(
+            at(20),
+            auto_key(),
+            Action::Pause(Target::Machine(MachineId(0))),
+        )
+        .unwrap();
     rpc(&mut driver, 3, r#""op":"cancel_trigger","trigger_id":1"#);
     assert_eq!(driver.trigger_marker, Some(at(20)));
     assert!(matches!(
         driver.events[&at(10)].front(),
-        Some(Scheduled::Driver(DriverEvent::SetExecution { .. }))
+        Some(Scheduled::Control(control::Event::Input {
+            action: Action::Throttle { .. },
+            ..
+        }))
     ));
     assert_eq!(driver.events[&at(10)].len(), 1);
     rpc(&mut driver, 4, r#""op":"cancel_trigger","trigger_id":2"#);
@@ -84,7 +95,10 @@ fn cancellation_replaces_then_removes_only_obsolete_internal_markers() {
     assert_eq!(driver.events[&at(20)].len(), 1);
     assert!(matches!(
         driver.events[&at(20)].front(),
-        Some(Scheduled::Driver(DriverEvent::Wake(_)))
+        Some(Scheduled::Control(control::Event::Input {
+            action: Action::Pause(_),
+            ..
+        }))
     ));
 }
 #[test]
@@ -99,7 +113,7 @@ fn firing_and_expiring_a_trigger_retire_old_marker_and_schedule_next_deadline() 
     driver
         .control
         .service
-        .committed_bytes("fixture-0", 11, b"x", 11)
+        .committed_bytes("machine:0", 11, b"x", 11)
         .unwrap();
     driver.clock.set(11);
     let plans = driver
@@ -121,7 +135,11 @@ fn settlement_retires_its_deadline_without_deleting_other_policy_or_external_wor
         ])
         .unwrap();
     driver
-        .schedule(at(100), Action::Wake(MachineId(0)))
+        .schedule(
+            at(100),
+            auto_key(),
+            Action::Pause(Target::Machine(MachineId(0))),
+        )
         .unwrap();
     driver
         .control_plans(vec![Plan::Settled(Settlement {
@@ -146,5 +164,11 @@ fn settlement_retires_its_deadline_without_deleting_other_policy_or_external_wor
         events[0],
         Scheduled::Control(control::Event::Plan(Plan::Deadline { fault: 8, .. }))
     ));
-    assert!(matches!(events[1], Scheduled::Driver(DriverEvent::Wake(_))));
+    assert!(matches!(
+        events[1],
+        Scheduled::Control(control::Event::Input {
+            action: Action::Pause(_),
+            ..
+        })
+    ));
 }

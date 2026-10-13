@@ -2,7 +2,7 @@
 use seedbox_machine::{
     driver::{
         Action, Cause, Driver, Error, Event, EventKind, FaultAction, FaultId, FaultOrigin,
-        MachineId, SettlementStatus, StepOutcome, Transition, TriggerResult,
+        MachineId, SettlementStatus, StepOutcome, Target, Transition, TriggerResult,
     },
     execution::ExecutionConfig,
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
@@ -12,6 +12,9 @@ use seedbox_machine::{
 use std::{collections::VecDeque, io, num::NonZeroU32, time::Duration};
 #[path = "support/driver_definition.rs"]
 mod driver_definition;
+#[path = "support/input_key.rs"]
+mod input_key;
+use input_key::{auto_key, key};
 
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
@@ -203,7 +206,7 @@ fn outputs_sort_within_a_commit_and_separate_commits_keep_publication_order() {
             EventKind::MachineAdded { machine, cause: Cause::Initial, .. } if machine == ids[index]));
     }
     driver
-        .with_barrier(|b| b.schedule(at(10), Action::Pause(ids[2])))
+        .with_barrier(|b| b.schedule(at(10), auto_key(), Action::Pause(Target::Machine(ids[2]))))
         .unwrap();
     assert!(
         driver.drain_events().is_empty(),
@@ -222,12 +225,15 @@ fn outputs_sort_within_a_commit_and_separate_commits_keep_publication_order() {
                 other => panic!("{other:?}"),
             },
             EventKind::Transition { change, .. } => (format!("{change:?}"), e.position),
+            EventKind::FaultAdmitted(_) => ("admitted".into(), e.position),
+            EventKind::FaultSettled { .. } => ("settled".into(), e.position),
             other => panic!("{other:?}"),
         })
         .collect();
     let names: Vec<_> = labelled.iter().map(|(n, _)| n.as_str()).collect();
-    // One commit: time, then identity, then emission order. The pause applies
-    // after that commit at its own barrier; the next commit follows.
+    // One commit: time, then identity, then emission order. The pause input is
+    // admitted after that commit at its own barrier, and its effect applies at
+    // the next one, at the same time; the next execution commit follows.
     assert_eq!(
         names,
         [
@@ -238,7 +244,9 @@ fn outputs_sort_within_a_commit_and_separate_commits_keep_publication_order() {
             "b3",
             "b5",
             "a7",
+            "admitted",
             "Paused",
+            "settled",
             "a13"
         ]
     );
@@ -248,51 +256,75 @@ fn outputs_sort_within_a_commit_and_separate_commits_keep_publication_order() {
         labelled[7].1.boundary_index,
         labelled[6].1.boundary_index + 1
     );
-    assert_eq!(labelled[7].1.at, at(10));
-    assert_eq!(labelled[8].1.at, at(20));
+    assert_eq!(labelled[8].1, labelled[9].1);
+    assert_eq!(
+        labelled[8].1.boundary_index,
+        labelled[7].1.boundary_index + 1
+    );
+    assert_eq!(labelled[8].1.at, at(10));
+    assert_eq!(labelled[10].1.at, at(20));
     assert!(driver.drain_events().is_empty(), "each event is taken once");
 }
 
 #[test]
-fn host_transitions_publish_effective_changes_in_fifo_order() {
+fn host_inputs_publish_effective_changes_with_their_fault_cause() {
     let (mut driver, ids) = world(10, 2, &["m"], |_| Scripted::default());
     let m = ids[1];
     let slow = ExecutionConfig::new(2000).unwrap();
-    driver
-        .with_barrier(|b| {
-            for action in [
-                Action::Pause(m),
-                Action::Pause(m),
-                Action::Resume(m),
-                Action::Resume(m),
-                Action::SetExecution {
-                    machine: m,
-                    config: slow,
-                },
-                Action::Shutdown(m),
-                Action::Crash(m),
-                Action::Shutdown(m),
-                Action::Pause(m),
-            ] {
-                b.schedule(at(5), action)?;
-            }
-            b.schedule_request(at(5), m, Request::Reboot)
-        })
-        .unwrap();
     driver.drain_events();
-    let events = run_to(&mut driver, 5);
-    let host = Cause::Host;
+    let mut events = Vec::new();
+    // One input per barrier, all at time 5: each is admitted against the state
+    // its predecessor left. Repeats are rejected rather than ignored.
+    for (index, action) in [
+        Action::Pause(Target::Machine(m)),
+        Action::Pause(Target::Machine(m)),
+        Action::Resume(Target::Machine(m)),
+        Action::Resume(Target::Machine(m)),
+        Action::Throttle {
+            target: Target::Machine(m),
+            config: slow,
+        },
+        Action::Shutdown(Target::Machine(m)),
+        Action::Crash(Target::Machine(m)),
+        Action::Shutdown(Target::Machine(m)),
+        Action::Pause(Target::Machine(m)),
+        Action::Reboot(Target::Machine(m)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        driver
+            .with_barrier(|b| b.schedule(at(5), key(&format!("input-{index}")), action))
+            .unwrap();
+        events.extend(run_to(&mut driver, 5));
+    }
+    let faults = fault_ids(&events);
+    let fault = |n: usize| Cause::Fault(faults[n]);
     assert_eq!(
         transitions(&events),
         [
-            (m, 0, Transition::Paused, host, at(5)),
-            (m, 0, Transition::Resumed, host, at(5)),
-            (m, 0, Transition::ExecutionSet(slow), host, at(5)),
-            (m, 0, Transition::ShutdownRequested, host, at(5)),
-            (m, 0, Transition::Crashed, host, at(5)),
-            (m, 0, Transition::Rebooted { new_boot: 1 }, host, at(5)),
+            (m, 0, Transition::Paused, fault(0), at(5)),
+            (m, 0, Transition::Resumed, fault(1), at(5)),
+            (m, 0, Transition::ExecutionSet(slow), fault(2), at(5)),
+            (m, 0, Transition::ShutdownRequested, fault(3), at(5)),
+            (m, 0, Transition::Crashed, fault(4), at(5)),
+            (m, 0, Transition::Rebooted { new_boot: 1 }, fault(5), at(5)),
         ]
     );
+    let rejected: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::InputRejected { key, .. } => Some(key.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rejected, ["input-1", "input-3", "input-7", "input-8"]);
+    for e in &events {
+        if let EventKind::FaultAdmitted(record) = &e.kind {
+            assert!(matches!(record.origin, FaultOrigin::Input { .. }));
+            assert_eq!(record.requested_at, at(5));
+        }
+    }
 }
 
 fn fault_script(name: &str) -> Scripted {
@@ -416,7 +448,7 @@ fn fault_admission_settlement_and_transitions_are_incremental_pairs() {
         );
         // Throttle installs the handle that its heal names.
         let handle = (index == 2 || index == 3).then(|| "p1".to_string());
-        assert_eq!(record.handle, handle);
+        assert_eq!(record.handle.as_ref().map(ToString::to_string), handle);
         let EventKind::FaultSettled {
             record: repeated,
             status: actual,
@@ -486,7 +518,13 @@ fn trigger_world(workers: usize) -> (Vec<Event>, Vec<MachineId>, StepOutcome) {
         trigger_script,
     );
     driver
-        .with_barrier(|b| b.schedule(at(1), Action::Pause(ids[4])))
+        .with_barrier(|b| {
+            b.schedule(
+                at(1),
+                key("peer-pause"),
+                Action::Pause(Target::Machine(ids[4])),
+            )
+        })
         .unwrap();
     let mut events = driver.drain_events();
     let mut outcome;
@@ -592,8 +630,9 @@ fn reply_admission_excludes_discarded_and_retired_replies() {
     let (caller, other) = (ids[1], ids[2]);
     driver
         .with_barrier(|b| {
-            b.schedule(at(4), Action::Crash(other))?;
-            b.schedule(at(5), Action::Reboot(caller))
+            b.schedule(at(4), auto_key(), Action::Crash(Target::Machine(other)))?;
+            b.schedule(at(4), auto_key(), Action::Crash(Target::Machine(caller)))?;
+            b.schedule(at(5), auto_key(), Action::Reboot(Target::Machine(caller)))
         })
         .unwrap();
     let events = run_to(&mut driver, 12);

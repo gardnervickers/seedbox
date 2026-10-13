@@ -1,5 +1,8 @@
 use seedbox_machine::{
-    driver::{Action, Driver, Error, EventKind, MachineId, StepOutcome},
+    driver::{
+        Action, Driver, Error, EventKind, FaultOrigin, MachineId, SettlementStatus, StepOutcome,
+        Target,
+    },
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     pv::{Request, Response},
     rng::RngStream,
@@ -7,6 +10,9 @@ use seedbox_machine::{
 use std::{num::NonZeroU32, sync::Arc, time::Duration};
 #[path = "support/driver_definition.rs"]
 mod driver_definition;
+#[path = "support/input_key.rs"]
+mod input_key;
+use input_key::{auto_key, key};
 use seedbox_machine::pv::{ApplicationCommand, CommandResult, Output};
 use std::sync::Mutex;
 
@@ -132,7 +138,13 @@ fn oracle_exit_publishes_whole_round_then_sticks_before_due_effects() {
     for workers in [1, 2] {
         let (mut driver, calls, ids) = build(workers, ExitReason::ProgramExit { code: 23 }, false);
         driver
-            .with_barrier(|b| b.schedule(Timestamp::from_nanos(10), Action::Crash(ids[1])))
+            .with_barrier(|b| {
+                b.schedule(
+                    Timestamp::from_nanos(10),
+                    auto_key(),
+                    Action::Crash(Target::Machine(ids[1])),
+                )
+            })
             .unwrap();
         let expected = StepOutcome::Finished {
             at: Timestamp::from_nanos(10),
@@ -153,7 +165,7 @@ fn oracle_exit_publishes_whole_round_then_sticks_before_due_effects() {
             assert_eq!(outputs[1].at,Timestamp::from_nanos(10));
             assert!(matches!(b.stopped(ids[0])?, StopReason::Exited { reached, .. } if reached == Timestamp::from_nanos(1)));
             assert_eq!(b.stopped(ids[1])?, StopReason::BoundaryReached);
-            assert!(matches!(b.schedule(Timestamp::from_nanos(10), Action::Wake(ids[1])),Err(Error::Completed)));
+            assert!(matches!(b.schedule(Timestamp::from_nanos(10), auto_key(), Action::Pause(Target::Machine(ids[1]))),Err(Error::Completed)));
             Ok(())
         }).unwrap();
         let count = calls.lock().unwrap().len();
@@ -169,63 +181,78 @@ fn oracle_exit_publishes_whole_round_then_sticks_before_due_effects() {
     }
 }
 #[test]
-fn crash_and_confirmed_application_stop_terminate_but_pause_does_not() {
-    for stop in [false, true] {
-        let (mut driver, calls, ids) = build(2, ExitReason::ProgramExit { code: 0 }, false);
-        driver
-            .with_barrier(|b| {
-                b.schedule(Timestamp::from_nanos(0), Action::Pause(ids[0]))?;
-                if stop {
-                    b.schedule_request(
-                        Timestamp::from_nanos(0),
-                        ids[0],
-                        Request::Application {
-                            id: NonZeroU32::new(7).unwrap(),
-                            command: ApplicationCommand::Stop,
-                        },
-                    )?;
-                } else {
-                    b.schedule(Timestamp::from_nanos(0), Action::Crash(ids[0]))?;
-                }
-                b.schedule(Timestamp::from_nanos(0), Action::Reboot(ids[0]))
-            })
-            .unwrap();
-        assert_eq!(
-            driver.step(Timestamp::from_nanos(0)).unwrap(),
-            StepOutcome::Finished {
-                at: Timestamp::from_nanos(0),
-                reason: if stop {
-                    ExitReason::Shutdown
-                } else {
-                    ExitReason::Crashed
-                }
-            }
-        );
-        assert_eq!(calls.lock().unwrap().len(), 1);
-        if stop {
-            assert_eq!(
-                driver
-                    .drain_events()
-                    .into_iter()
-                    .filter_map(|event| match event.kind {
-                        EventKind::Output(output) => Some(output),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .len(),
-                1
-            );
-            driver
-                .with_barrier(|b| {
-                    assert_eq!(b.stopped(ids[0])?, StopReason::BoundaryReached);
-                    Ok(())
-                })
-                .unwrap();
+fn crash_terminates_and_cuts_off_later_inputs_but_pause_does_not() {
+    let (mut driver, calls, ids) = build(2, ExitReason::ProgramExit { code: 0 }, false);
+    driver
+        .with_barrier(|b| {
+            b.schedule(
+                Timestamp::from_nanos(0),
+                auto_key(),
+                Action::Pause(Target::Machine(ids[0])),
+            )?;
+            b.schedule(
+                Timestamp::from_nanos(0),
+                auto_key(),
+                Action::Crash(Target::Machine(ids[0])),
+            )?;
+            b.schedule(
+                Timestamp::from_nanos(0),
+                key("after"),
+                Action::Pause(Target::Machine(ids[1])),
+            )?;
+            b.schedule(
+                Timestamp::from_nanos(5),
+                key("later"),
+                Action::Pause(Target::Machine(ids[1])),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        driver.step(Timestamp::from_nanos(0)).unwrap(),
+        StepOutcome::Finished {
+            at: Timestamp::from_nanos(0),
+            reason: ExitReason::Crashed
         }
-    }
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    // The same-time input was admitted before the crash effect applied, but its
+    // effect is cut off; the future input is never admitted and has no event.
+    let events = driver.drain_events();
+    assert!(!events.iter().any(|event| matches!(&event.kind,
+        EventKind::FaultAdmitted(record) | EventKind::FaultSettled { record, .. }
+            if record.origin == FaultOrigin::Input { key: key("later") })));
+    let admitted = |name: &str| {
+        events.iter().any(|event| matches!(&event.kind,
+            EventKind::FaultAdmitted(record) if record.origin == FaultOrigin::Input { key: key(name) }))
+    };
+    let settled = |name: &str| {
+        events.iter().any(|event| matches!(&event.kind,
+            EventKind::FaultSettled { record, .. } if record.origin == FaultOrigin::Input { key: key(name) }))
+    };
+    assert!(admitted("after") && !settled("after"));
+    assert_eq!(
+        driver.step(Timestamp::from_nanos(100)).unwrap(),
+        StepOutcome::Finished {
+            at: Timestamp::from_nanos(0),
+            reason: ExitReason::Crashed
+        }
+    );
+    driver
+        .with_barrier(|b| {
+            assert!(!b.paused(ids[1])?);
+            Ok(())
+        })
+        .unwrap();
+    assert!(driver.drain_events().is_empty());
     let (mut driver, calls, ids) = build(1, ExitReason::Shutdown, false);
     driver
-        .with_barrier(|b| b.schedule(Timestamp::from_nanos(0), Action::Pause(ids[0])))
+        .with_barrier(|b| {
+            b.schedule(
+                Timestamp::from_nanos(0),
+                auto_key(),
+                Action::Pause(Target::Machine(ids[0])),
+            )
+        })
         .unwrap();
     assert_eq!(
         driver.step(Timestamp::from_nanos(0)).unwrap(),
@@ -247,6 +274,7 @@ impl RngStream for FixtureRng {
 struct Acknowledgments {
     consume: Arc<std::sync::atomic::AtomicBool>,
     reply: Arc<Mutex<Option<(NonZeroU32, CommandResult)>>>,
+    ready: bool,
 }
 impl Machine for Acknowledgments {
     type Context = ();
@@ -257,6 +285,17 @@ impl Machine for Acknowledgments {
         context: &mut RunContext<'_, ()>,
         _: Timestamp,
     ) -> Result<StopReason, Self::Error> {
+        let now = Timestamp::from_nanos(context.clock.now());
+        if !self.ready {
+            self.ready = true;
+            context
+                .outbox
+                .emit(Output {
+                    at: now,
+                    payload: Response::Ready,
+                })
+                .unwrap();
+        }
         if self.consume.load(std::sync::atomic::Ordering::Relaxed) {
             while context.inbox.take().is_some() {}
         }
@@ -264,7 +303,7 @@ impl Machine for Acknowledgments {
             context
                 .outbox
                 .emit(Output {
-                    at: Timestamp::from_nanos(context.clock.now()),
+                    at: now,
                     payload: Response::CommandAcknowledged { id, result },
                 })
                 .unwrap();
@@ -276,13 +315,14 @@ impl Machine for Acknowledgments {
     }
 }
 #[test]
-fn only_consumed_stop_and_matching_successful_ack_finish() {
+fn only_a_consumed_stop_with_its_successful_acknowledgment_finishes() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let consume = Arc::new(AtomicBool::new(false));
     let reply = Arc::new(Mutex::new(None));
     let machine = Acknowledgments {
         consume: consume.clone(),
         reply: reply.clone(),
+        ready: false,
     };
     let mut driver = Driver::new(
         Timestamp::from_nanos(0),
@@ -296,70 +336,47 @@ fn only_consumed_stop_and_matching_successful_ack_finish() {
         move |_| Ok(machine.clone()),
     )
     .unwrap();
-    let id = driver
-        .with_barrier(|b| Ok(b.machines().next().unwrap().0))
-        .unwrap();
-    let stop = |command| Request::Application {
-        id: NonZeroU32::new(command).unwrap(),
-        command: ApplicationCommand::Stop,
-    };
-    driver
-        .with_barrier(|b| b.schedule_request(Timestamp::from_nanos(0), id, stop(7)))
-        .unwrap();
-    assert!(matches!(
-        driver.step(Timestamp::from_nanos(0)).unwrap(),
-        StepOutcome::BarrierReached { .. }
-    ));
-    consume.store(true, Ordering::Relaxed);
-    *reply.lock().unwrap() = Some((NonZeroU32::new(7).unwrap(), CommandResult::Rejected));
-    driver
-        .with_barrier(|b| b.schedule(Timestamp::from_nanos(0), Action::Wake(id)))
-        .unwrap();
-    assert!(matches!(
-        driver.step(Timestamp::from_nanos(0)).unwrap(),
-        StepOutcome::BarrierReached { .. }
-    ));
-    // A different, actually admitted command cannot complete Stop8.
     driver
         .with_barrier(|b| {
-            b.schedule_request(
+            b.schedule(
                 Timestamp::from_nanos(0),
-                id,
-                Request::Application {
-                    id: NonZeroU32::new(99).unwrap(),
-                    command: ApplicationCommand::Start,
+                key("stop"),
+                Action::Stop {
+                    target: Target::Name("oracle".into()),
+                    deadline: Duration::from_nanos(1000),
                 },
             )
         })
         .unwrap();
-    driver.step(Timestamp::from_nanos(0)).unwrap();
-    *reply.lock().unwrap() = Some((NonZeroU32::new(99).unwrap(), CommandResult::Completed));
-    driver
-        .with_barrier(|b| b.schedule_request(Timestamp::from_nanos(0), id, stop(8)))
-        .unwrap();
-    assert!(matches!(
-        driver.step(Timestamp::from_nanos(0)).unwrap(),
-        StepOutcome::BarrierReached { .. }
-    ));
-    // No acknowledgment exists yet for accepted Stop8.
-    driver
-        .with_barrier(|b| b.schedule(Timestamp::from_nanos(0), Action::Wake(id)))
-        .unwrap();
-    assert!(matches!(
-        driver.step(Timestamp::from_nanos(0)).unwrap(),
-        StepOutcome::BarrierReached { .. }
-    ));
-    *reply.lock().unwrap() = Some((NonZeroU32::new(8).unwrap(), CommandResult::Completed));
-    driver
-        .with_barrier(|b| b.schedule(Timestamp::from_nanos(0), Action::Wake(id)))
-        .unwrap();
+    // Dispatched at the Ready commit, but the guest leaves it unconsumed.
     assert_eq!(
-        driver.step(Timestamp::from_nanos(0)).unwrap(),
+        driver.step(Timestamp::from_nanos(10)).unwrap(),
+        StepOutcome::BarrierReached {
+            at: Timestamp::from_nanos(10)
+        }
+    );
+    consume.store(true, Ordering::Relaxed);
+    // Consumed, but not yet acknowledged.
+    assert_eq!(
+        driver.step(Timestamp::from_nanos(20)).unwrap(),
+        StepOutcome::BarrierReached {
+            at: Timestamp::from_nanos(20)
+        }
+    );
+    *reply.lock().unwrap() = Some((NonZeroU32::new(1).unwrap(), CommandResult::Completed));
+    assert_eq!(
+        driver.step(Timestamp::from_nanos(30)).unwrap(),
         StepOutcome::Finished {
-            at: Timestamp::from_nanos(0),
+            at: Timestamp::from_nanos(30),
             reason: ExitReason::Shutdown
         }
     );
+    assert!(driver
+        .drain_events()
+        .iter()
+        .any(|event| matches!(&event.kind,
+        EventKind::FaultSettled { record, status: SettlementStatus::Applied, .. }
+            if record.origin == FaultOrigin::Input { key: key("stop") })));
 }
 
 #[test]

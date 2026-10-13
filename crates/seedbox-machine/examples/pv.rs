@@ -91,11 +91,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const QUANTUM_NS: u64 = 1_000_000; // One millisecond of simulated execution.
     loop {
         let outcome = driver.step(Timestamp::from_nanos(now.as_nanos() + QUANTUM_NS))?;
-        now = match outcome {
-            StepOutcome::BarrierReached { at } | StepOutcome::Finished { at, .. } => at,
+        now = match &outcome {
+            StepOutcome::BarrierReached { at } | StepOutcome::Finished { at, .. } => *at,
             StepOutcome::Blocked { .. } => return Err("PV guests blocked without a timer".into()),
             StepOutcome::Waiting { .. }
-            | StepOutcome::BeforeAction { .. }
+            | StepOutcome::BeforeFault { .. }
             | StepOutcome::Stopped { .. } => {
                 return Err("unexpected playback control in example".into());
             }

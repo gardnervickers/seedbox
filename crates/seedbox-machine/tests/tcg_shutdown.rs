@@ -2,12 +2,15 @@
 
 use seedbox_machine as machine_crate;
 use seedbox_machine::{
-    driver::{Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome},
+    driver::{Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome, Target},
     machine::{tcg::TcgMachine, ExitReason, Machine, StopReason, Timestamp},
     rng::RngStream,
 };
+#[path = "support/input_key.rs"]
+mod input_key;
 #[path = "support/prepared_application.rs"]
 mod prepared;
+use input_key::auto_key;
 
 struct Harness {
     driver: Driver<TestMachine>,
@@ -168,8 +171,8 @@ fn early_queued_request_after_restore_runs_real_guest_cleanup() {
     let id = machine_id(&mut driver);
     driver
         .with_barrier(|b| {
-            b.schedule(at(0), Action::Shutdown(id))?;
-            b.schedule(at(0), Action::Shutdown(id))
+            b.schedule(at(0), auto_key(), Action::Shutdown(Target::Machine(id)))?;
+            b.schedule(at(0), auto_key(), Action::Shutdown(Target::Machine(id)))
         })
         .unwrap();
     step(&mut driver, at(0));
@@ -191,7 +194,11 @@ fn early_queued_request_after_restore_runs_real_guest_cleanup() {
     assert!(observed.matches("cleaned\n").count() <= 1);
     // An already-exited request is harmless and cannot reboot the guest.
     assert!(matches!(
-        driver.with_barrier(|b| b.schedule(reached, Action::Shutdown(id))),
+        driver.with_barrier(|b| b.schedule(
+            reached,
+            auto_key(),
+            Action::Shutdown(Target::Machine(id))
+        )),
         Err(seedbox_machine::driver::Error::Completed)
     ));
     assert!(matches!(
@@ -222,9 +229,9 @@ fn paused_shutdown_stays_pending_until_resume_and_restores_without_duplicate() {
     let resume = at(now.as_nanos() + 50_000_000);
     driver
         .with_barrier(|b| {
-            b.schedule(now, Action::Pause(id))?;
-            b.schedule(now, Action::Shutdown(id))?;
-            b.schedule(resume, Action::Resume(id))
+            b.schedule(now, auto_key(), Action::Pause(Target::Machine(id)))?;
+            b.schedule(now, auto_key(), Action::Shutdown(Target::Machine(id)))?;
+            b.schedule(resume, auto_key(), Action::Resume(Target::Machine(id)))
         })
         .unwrap();
     step(&mut driver, now);

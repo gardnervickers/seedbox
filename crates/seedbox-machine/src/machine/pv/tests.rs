@@ -1,5 +1,6 @@
 use super::*;
 use crate::clock::Clock;
+use crate::driver::{fixture::auto_key, Target};
 use std::sync::Arc;
 type PVMachine = crate::machine::test_environment::Environment<super::PVMachine>;
 use crate::driver::{Action, StepOutcome};
@@ -77,7 +78,7 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
                 );
             }
             let snapshot = barrier.snapshot(ids[0])?;
-            barrier.schedule(at(3), Action::Crash(ids[1]))?;
+            barrier.schedule(at(3), auto_key(), Action::Crash(Target::Machine(ids[1])))?;
             Ok(snapshot)
         })
         .unwrap();

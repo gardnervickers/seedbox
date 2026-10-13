@@ -1,3 +1,4 @@
+use super::fixture::auto_key;
 use super::*;
 
 #[test]
@@ -24,19 +25,27 @@ fn invalid_adoption_report_is_rejected_and_pause_schedule_validation_is_atomic()
     driver
         .with_barrier(|barrier| {
             assert!(matches!(
-                barrier.schedule(at(0), Action::Pause(MachineId(9))),
+                barrier.schedule(
+                    at(0),
+                    auto_key(),
+                    Action::Pause(Target::Machine(MachineId(9)))
+                ),
                 Err(Error::UnknownMachine(_))
             ));
             assert!(matches!(
-                barrier.schedule(at(0), Action::Resume(MachineId(9))),
+                barrier.schedule(
+                    at(0),
+                    auto_key(),
+                    Action::Resume(Target::Machine(MachineId(9)))
+                ),
                 Err(Error::UnknownMachine(_))
             ));
             assert!(matches!(
                 barrier.paused(MachineId(9)),
                 Err(Error::UnknownMachine(_))
             ));
-            barrier.schedule(at(0), Action::Pause(id))?;
-            barrier.schedule(at(5), Action::Resume(id))
+            barrier.schedule(at(0), auto_key(), Action::Pause(Target::Machine(id)))?;
+            barrier.schedule(at(5), auto_key(), Action::Resume(Target::Machine(id)))
         })
         .unwrap();
     assert!(

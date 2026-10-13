@@ -75,3 +75,25 @@ pub(crate) fn settlements(
         })
         .collect()
 }
+/// A key unique within this test process, so it is never live twice.
+pub(crate) fn auto_key() -> InputKey {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    InputKey::new(format!("auto-{}", NEXT.fetch_add(1, Ordering::Relaxed))).unwrap()
+}
+impl<M> Driver<M>
+where
+    M: Machine + Send + 'static,
+    M::Context: 'static,
+    M::Error: Send + 'static,
+{
+    /// Scheduling shortcut for private tests: one barrier, one input.
+    pub(crate) fn schedule(
+        &mut self,
+        at: Timestamp,
+        key: InputKey,
+        action: Action,
+    ) -> Result<(), Error<M::Error>> {
+        self.with_barrier(|barrier| barrier.schedule(at, key, action))
+    }
+}

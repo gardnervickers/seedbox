@@ -1,3 +1,4 @@
+use super::fixture::auto_key;
 use super::*;
 
 #[derive(Clone)]
@@ -70,7 +71,11 @@ fn uncertain_effect_retains_prior_settlement_and_never_claims_applied() {
     )
     .unwrap();
     driver
-        .schedule(Timestamp::from_nanos(0), Action::Pause(MachineId(0)))
+        .schedule(
+            Timestamp::from_nanos(0),
+            auto_key(),
+            Action::Pause(Target::Machine(MachineId(0))),
+        )
         .unwrap();
     assert!(matches!(
         driver.step(Timestamp::from_nanos(10)),
@@ -82,10 +87,13 @@ fn uncertain_effect_retains_prior_settlement_and_never_claims_applied() {
     // Drainable after failure, including the failure-path settlement.
     let events = driver.drain_events();
     let settlements = fixture::settlements(&events);
-    assert_eq!(settlements.len(), 2);
+    assert_eq!(settlements.len(), 3);
+    // The host pause is itself an admitted, applied fault.
+    assert!(matches!(settlements[0].0.origin, FaultOrigin::Input { .. }));
     assert_eq!(settlements[0].1, SettlementStatus::Applied);
-    assert_eq!(settlements[1].1, SettlementStatus::Failed);
-    assert_eq!(settlements[1].2, None);
+    assert_eq!(settlements[1].1, SettlementStatus::Applied);
+    assert_eq!(settlements[2].1, SettlementStatus::Failed);
+    assert_eq!(settlements[2].2, None);
     assert_eq!(driver.machines[3].execution.factor_permille(), 2000);
     assert_eq!(
         fixture::outputs(&events)

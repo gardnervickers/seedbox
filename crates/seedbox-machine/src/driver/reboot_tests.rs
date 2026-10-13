@@ -1,3 +1,4 @@
+use super::fixture::auto_key;
 use super::*;
 
 fn controlled(workers: usize, programs: &[&[Op]]) -> Driver<TestMachine> {
@@ -29,11 +30,15 @@ fn reboot_schedule_errors_leave_queue_unchanged() {
     driver
         .with_barrier(|barrier| {
             assert!(matches!(
-                barrier.schedule(at(2), Action::Reboot(id)),
+                barrier.schedule(at(2), auto_key(), Action::Reboot(Target::Machine(id))),
                 Err(Error::PastTime { .. })
             ));
             assert!(matches!(
-                barrier.schedule(at(3), Action::Reboot(MachineId(99))),
+                barrier.schedule(
+                    at(3),
+                    auto_key(),
+                    Action::Reboot(Target::Machine(MachineId(99)))
+                ),
                 Err(Error::UnknownMachine(_))
             ));
             Ok(())

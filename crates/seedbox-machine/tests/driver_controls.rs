@@ -1,13 +1,20 @@
 mod driver_fixture;
 use driver_fixture::*;
 
+fn held_record(outcome: &StepOutcome) -> Option<seedbox_machine::driver::FaultRecord> {
+    match outcome {
+        StepOutcome::BeforeFault { fault, .. } => Some(fault.clone()),
+        _ => None,
+    }
+}
+
 #[test]
 fn initial_pause_holds_current_time_actions_and_dynamic_resume() {
     let mut driver = controlled(2, &[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
-            barrier.schedule(at(0), Action::Crash(id))?;
+            barrier.schedule(at(0), auto_key(), Action::Crash(Target::Machine(id)))?;
             barrier.set_rate(PlaybackRate::Paused)
         })
         .unwrap();
@@ -32,7 +39,8 @@ fn initial_pause_holds_current_time_actions_and_dynamic_resume() {
             reason: ExitReason::Crashed
         }
     );
-    assert_eq!(status(&mut driver).position.boundary_index, 1);
+    // The crash input's admission and its effect each commit a boundary.
+    assert_eq!(status(&mut driver).position.boundary_index, 2);
 }
 
 #[test]
@@ -43,11 +51,23 @@ fn one_quantum_survives_short_barriers_and_zero_time_actions() {
         .with_barrier(|barrier| {
             assert!(matches!(barrier.step_quantum(), Err(Error::NotPaused)));
             assert!(matches!(
-                barrier.pause_before_next_crash(PlaybackRate::Paused),
+                barrier.pause_before_next_fault(PlaybackRate::Paused),
                 Err(Error::InvalidRate)
             ));
-            barrier.schedule(at(3), Action::Wake(id))?;
-            barrier.schedule(at(10), Action::Wake(id))?;
+            // Zero-time inputs whose effects leave execution unchanged.
+            barrier.schedule(
+                at(3),
+                key("nominal"),
+                Action::Throttle {
+                    target: Target::Machine(id),
+                    config: Default::default(),
+                },
+            )?;
+            barrier.schedule(
+                at(10),
+                auto_key(),
+                Action::Heal(seedbox_machine::driver::HealTarget::Input(key("nominal"))),
+            )?;
             barrier.set_rate(PlaybackRate::Paused)?;
             barrier.step_quantum()?;
             assert!(matches!(barrier.step_quantum(), Err(Error::StepPending)));
@@ -89,20 +109,20 @@ fn pre_crash_hold_retains_exact_current_time_cursor_and_allows_only_playback() {
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
-            barrier.schedule(at(0), Action::Wake(id))?;
-            barrier.schedule(at(0), Action::Crash(id))?;
-            barrier.schedule(at(0), Action::Crash(id))?;
-            barrier.schedule(at(0), Action::Wake(id))?;
-            barrier.pause_before_next_crash(PlaybackRate::Unlimited)
+            barrier.schedule(at(0), auto_key(), Action::Crash(Target::Machine(id)))?;
+            barrier.schedule(at(0), auto_key(), Action::Crash(Target::Machine(id)))?;
+            barrier.pause_before_next_fault(PlaybackRate::Unlimited)
         })
         .unwrap();
-    let held = StepOutcome::BeforeAction {
-        at: at(0),
-        action: Action::Crash(id),
-    };
-    assert_eq!(driver.step(at(100)).unwrap(), held);
+    let held = driver.step(at(100)).unwrap();
+    assert_eq!(
+        driver_fixture::held(&held),
+        Some((at(0), FaultAction::Crash, id))
+    );
     let position = status(&mut driver);
-    assert_eq!(position.position.boundary_index, 1); // The Wake committed; Crash did not.
+    // Both admissions committed; the first Crash effect did not.
+    assert_eq!(position.position.boundary_index, 2);
+    assert_eq!(position.before_fault, held_record(&held));
     assert_eq!(position.position.completed_quanta, 0);
     for _ in 0..3 {
         assert_eq!(driver.step(at(100)).unwrap(), held);
@@ -111,15 +131,15 @@ fn pre_crash_hold_retains_exact_current_time_cursor_and_allows_only_playback() {
     driver
         .with_barrier(|barrier| {
             assert!(!barrier.machine(id)?.crashed);
-            assert_eq!(barrier.machine(id)?.log.lock().unwrap().len(), 1);
-            assert!(matches!(barrier.snapshot(id), Err(Error::BeforeAction)));
+            assert!(barrier.machine(id)?.log.lock().unwrap().is_empty());
+            assert!(matches!(barrier.snapshot(id), Err(Error::BeforeFault)));
             assert!(matches!(
-                barrier.schedule(at(0), Action::Wake(id)),
-                Err(Error::BeforeAction)
+                barrier.schedule(at(0), auto_key(), Action::Pause(Target::Machine(id))),
+                Err(Error::BeforeFault)
             ));
             assert!(matches!(
                 barrier.add(|| panic!("held factory ran")),
-                Err(Error::BeforeAction)
+                Err(Error::BeforeFault)
             ));
             barrier.step_quantum()
         })
@@ -131,7 +151,7 @@ fn pre_crash_hold_retains_exact_current_time_cursor_and_allows_only_playback() {
             reason: ExitReason::Crashed
         }
     );
-    assert_eq!(status(&mut driver).position.boundary_index, 2); // Oracle crash ends admission before later occurrences.
+    assert_eq!(status(&mut driver).position.boundary_index, 3); // Oracle crash ends admission before later occurrences.
     assert!(!status(&mut driver).stepping);
     assert_eq!(
         driver.step(at(100)).unwrap(),
@@ -143,7 +163,7 @@ fn pre_crash_hold_retains_exact_current_time_cursor_and_allows_only_playback() {
     driver
         .with_barrier(|barrier| {
             assert!(matches!(barrier.step_quantum(), Err(Error::Completed)));
-            assert_eq!(barrier.machine(id)?.log.lock().unwrap().len(), 1);
+            assert!(barrier.machine(id)?.log.lock().unwrap().is_empty());
             Ok(())
         })
         .unwrap();
@@ -155,16 +175,13 @@ fn pre_crash_hold_precedes_same_time_timer_and_counts_quantum_once() {
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
-            barrier.schedule(at(10), Action::Crash(id))?;
-            barrier.pause_before_next_crash(PlaybackRate::Unlimited)
+            barrier.schedule(at(10), auto_key(), Action::Crash(Target::Machine(id)))?;
+            barrier.pause_before_next_fault(PlaybackRate::Unlimited)
         })
         .unwrap();
     assert_eq!(
-        driver.step(at(100)).unwrap(),
-        StepOutcome::BeforeAction {
-            at: at(10),
-            action: Action::Crash(id)
-        }
+        held(&driver.step(at(100)).unwrap()),
+        Some((at(10), FaultAction::Crash, id))
     );
     let held = status(&mut driver);
     assert_eq!(held.position.completed_quanta, 1);
@@ -190,13 +207,13 @@ fn explicit_rate_and_step_controls_cancel_a_pre_crash_arm() {
         let id = ids(&mut driver)[0];
         driver
             .with_barrier(|barrier| {
-                barrier.schedule(at(3), Action::Crash(id))?;
-                barrier.pause_before_next_crash(PlaybackRate::Unlimited)?;
+                barrier.schedule(at(3), auto_key(), Action::Crash(Target::Machine(id)))?;
+                barrier.pause_before_next_fault(PlaybackRate::Unlimited)?;
                 if step {
                     barrier.set_rate(PlaybackRate::Paused)?;
                     // Rearm while at the same position, then make an explicit pause
                     // and step request; neither request changes the simulation.
-                    barrier.pause_before_next_crash(PlaybackRate::Unlimited)?;
+                    barrier.pause_before_next_fault(PlaybackRate::Unlimited)?;
                     barrier.set_rate(PlaybackRate::Paused)?;
                     barrier.step_quantum()
                 } else {
@@ -241,7 +258,20 @@ fn blocked_single_quantum_reports_blocked_without_polling_and_keeps_admission() 
         .with_barrier(|barrier| {
             assert_eq!(barrier.machine(id)?.log.lock().unwrap().len(), 1);
             barrier.machine(id)?.input.store(true, Ordering::Relaxed);
-            barrier.schedule(at(0), Action::Wake(id))
+            barrier.schedule(at(0), auto_key(), Action::Pause(Target::Machine(id)))
+        })
+        .unwrap();
+    // Pause applies without a run and keeps the quantum admission pending.
+    assert_eq!(
+        driver.step(at(0)).unwrap(),
+        StepOutcome::Blocked { at: at(0) }
+    );
+    assert!(status(&mut driver).stepping);
+    // Resume's zero-budget run delivers the stimulus (a separate barrier:
+    // a same-time Resume would be admitted before the Pause effect applies).
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(at(0), auto_key(), Action::Resume(Target::Machine(id)))
         })
         .unwrap();
     assert_eq!(
@@ -257,7 +287,7 @@ fn permanent_stop_prevents_action_work_factory_and_resume() {
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
-            barrier.schedule(at(0), Action::Crash(id))?;
+            barrier.schedule(at(0), auto_key(), Action::Crash(Target::Machine(id)))?;
             barrier.set_rate(PlaybackRate::Paused)?;
             barrier.step_quantum()?;
             barrier.stop();
@@ -268,7 +298,7 @@ fn permanent_stop_prevents_action_work_factory_and_resume() {
             ));
             assert!(matches!(barrier.step_quantum(), Err(Error::Stopped)));
             assert!(matches!(
-                barrier.pause_before_next_crash(PlaybackRate::Unlimited),
+                barrier.pause_before_next_fault(PlaybackRate::Unlimited),
                 Err(Error::Stopped)
             ));
             assert!(matches!(
@@ -276,7 +306,7 @@ fn permanent_stop_prevents_action_work_factory_and_resume() {
                 Err(Error::Stopped)
             ));
             assert!(matches!(
-                barrier.schedule(at(0), Action::Wake(id)),
+                barrier.schedule(at(0), auto_key(), Action::Pause(Target::Machine(id))),
                 Err(Error::Stopped)
             ));
             assert!(matches!(barrier.snapshot(id), Err(Error::Stopped)));
@@ -316,13 +346,13 @@ fn controls_preserve_worker_independent_results_positions_and_action_order() {
         let id = ids(&mut driver)[1];
         driver
             .with_barrier(|barrier| {
-                barrier.schedule(at(10), Action::Wake(id))?;
-                barrier.schedule(at(10), Action::Crash(id))?;
-                barrier.pause_before_next_crash(PlaybackRate::Unlimited)
+                barrier.schedule(at(10), key("pause"), Action::Pause(Target::Machine(id)))?;
+                barrier.schedule(at(10), key("crash"), Action::Crash(Target::Machine(id)))?;
+                barrier.pause_before_next_fault(PlaybackRate::Unlimited)
             })
             .unwrap();
         let held = driver.step(at(100)).unwrap();
-        assert!(matches!(held, StepOutcome::BeforeAction { .. }));
+        assert!(matches!(held, StepOutcome::BeforeFault { .. }));
         let held_status = status(&mut driver);
         driver
             .with_barrier(|barrier| barrier.step_quantum())
@@ -336,7 +366,7 @@ fn controls_preserve_worker_independent_results_positions_and_action_order() {
         let mut outcomes = vec![held, resumed];
         loop {
             let outcome = driver.step(at(100)).unwrap();
-            outcomes.push(outcome);
+            outcomes.push(outcome.clone());
             if matches!(outcome, StepOutcome::Finished { .. }) {
                 break;
             }
@@ -365,40 +395,35 @@ fn rearming_held_crash_resumes_only_that_occurrence_and_skips_noop_crashes() {
     let ids = ids(&mut driver);
     driver
         .with_barrier(|barrier| {
-            barrier.schedule(at(0), Action::Crash(ids[0]))?;
-            barrier.schedule(at(0), Action::Crash(ids[0]))?; // Becomes a no-op after first occurrence.
-            barrier.schedule(at(0), Action::Wake(ids[1]))?;
-            barrier.schedule(at(0), Action::Crash(ids[1]))?;
-            barrier.pause_before_next_crash(PlaybackRate::Unlimited)
+            barrier.schedule(at(0), auto_key(), Action::Crash(Target::Machine(ids[0])))?;
+            // Admitted, but stale (rejected) at its turn after the first crash.
+            barrier.schedule(at(0), auto_key(), Action::Crash(Target::Machine(ids[0])))?;
+            barrier.schedule(at(0), auto_key(), Action::Crash(Target::Machine(ids[1])))?;
+            barrier.pause_before_next_fault(PlaybackRate::Unlimited)
         })
         .unwrap();
     assert_eq!(
-        driver.step(at(100)).unwrap(),
-        StepOutcome::BeforeAction {
-            at: at(0),
-            action: Action::Crash(ids[0])
-        }
+        held(&driver.step(at(100)).unwrap()),
+        Some((at(0), FaultAction::Crash, ids[0]))
     );
     let first = status(&mut driver).position;
     driver
-        .with_barrier(|barrier| barrier.pause_before_next_crash(PlaybackRate::Unlimited))
+        .with_barrier(|barrier| barrier.pause_before_next_fault(PlaybackRate::Unlimited))
         .unwrap();
     assert_eq!(
-        driver.step(at(100)).unwrap(),
-        StepOutcome::BeforeAction {
-            at: at(0),
-            action: Action::Crash(ids[1])
-        }
+        held(&driver.step(at(100)).unwrap()),
+        Some((at(0), FaultAction::Crash, ids[1]))
     );
     let second = status(&mut driver).position;
     assert_eq!(second.at, first.at);
     assert_eq!(second.completed_quanta, first.completed_quanta);
-    assert_eq!(second.boundary_index, first.boundary_index + 3);
+    // Only the applied crash commits; the stale one settles Rejected.
+    assert_eq!(second.boundary_index, first.boundary_index + 1);
     driver
         .with_barrier(|barrier| {
             assert!(barrier.machine(ids[0])?.crashed);
             assert!(!barrier.machine(ids[1])?.crashed);
-            assert_eq!(barrier.machine(ids[1])?.log.lock().unwrap().len(), 1);
+            assert!(barrier.machine(ids[1])?.log.lock().unwrap().is_empty());
             barrier.set_rate(PlaybackRate::Unlimited)
         })
         .unwrap();

@@ -23,10 +23,15 @@ use std::{
 
 mod control;
 mod event;
+mod input;
 mod playback;
 pub use event::{
     Cause, Event, EventKind, FaultAction, FaultId, FaultOrigin, FaultRecord, SettlementStatus,
     Transition, TriggerResult,
+};
+pub use input::{
+    Action, FaultHandle, HealTarget, InputKey, InputRejection, InvalidInputKey, RejectionReason,
+    Target,
 };
 use playback::Playback;
 pub use playback::{PlaybackRate, PlaybackStatus};
@@ -74,7 +79,6 @@ struct Entry<M> {
 
 #[derive(Clone, Copy)]
 enum DriverEvent {
-    Wake(MachineId),
     Pause(MachineId),
     Resume(MachineId),
     SetExecution {
@@ -110,49 +114,16 @@ impl<M> Entry<M> {
     }
 }
 
-/// A scheduling or lifecycle action applied at a barrier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    /// Admit execution after a stimulus has been made visible in the machine's
-    /// environment. This does not itself deliver a packet or other input data.
-    Wake(MachineId),
-    /// Withhold this machine's execution, including ordinary wakeups and timers.
-    /// Its state and pending input remain retained; it has not exited. Repeated
-    /// pauses are harmless and do not call the machine.
-    Pause(MachineId),
-    /// Resume a paused machine at this action's shared simulation time. A
-    /// zero-budget run adopts elapsed time and delivers overdue timers without
-    /// replaying paused CPU work. Resuming an active machine is a no-op.
-    Resume(MachineId),
-    /// Set the execution configuration at this action's barrier, in FIFO order.
-    /// Applies while active, paused or exited and survives crash and reboot.
-    /// Global playback pause still withholds timeline admission.
-    /// The setting does not execute or wake the machine, change its pause state,
-    /// adopt time or shift timers. Subsequent calls receive this configuration;
-    /// already charged partial work retains its original cost. The default
-    /// configuration restores nominal execution cost.
-    SetExecution {
-        /// Machine whose subsequent execution receives the configuration.
-        machine: MachineId,
-        /// Validated execution configuration owned by the driver.
-        config: ExecutionConfig,
-    },
-    /// Crash the machine without graceful shutdown, including while paused.
-    Crash(MachineId),
-    /// Request reset of a live, exited, or crashed machine at this
-    /// barrier, clearing its driver pause and old blocked/timer state. Reboot
-    /// executes no guest work and preserves this identity and all queued actions;
-    /// later actions target the new boot. Repeated actions perform separate
-    /// resets in distinct zero-budget admission runs. Failure poisons the driver
-    /// without promising rollback.
-    Reboot(MachineId),
-    /// Latch a graceful shutdown request for the current boot. Repeats and
-    /// already-exited machines retain their exit state. All machines receive a
-    /// zero-budget admission run, including while paused; this may deliver the
-    /// request and refresh scheduling without executing guest instructions.
-    /// Paused machines remain paused until resume.
-    /// Subsequent runs drive graceful exit. Crash and reboot discard the request.
-    Shutdown(MachineId),
+/// Driver bookkeeping for a live host input key. Only live keys are kept;
+/// the host owns the history of every key it used.
+#[derive(Clone, Debug)]
+enum LiveInput {
+    /// Queued and not yet due.
+    Pending,
+    /// Admitted and unsettled; a throttle names the handle it reserved.
+    Admitted { handle: Option<String> },
+    /// Settled Applied with this handle still active.
+    Handle(String),
 }
 
 type MachineFactory<M> =
@@ -167,16 +138,17 @@ type MachineFactory<M> =
 ///
 /// The positive quantum is fixed for the driver's lifetime. Quantum boundaries
 /// are anchored at the initial timestamp; intermediate barriers never shift them.
-/// The caller queues actions before stepping; actions at one timestamp execute
-/// in insertion order, before timer wakeups. Execution settings apply in every
-/// machine state and survive lifecycle changes without executing the machine.
-/// Exited machines ignore ordinary wake/pause/resume actions; queued lifecycle
-/// requests still receive zero-budget admission, and reboot admits a fresh boot.
+/// The caller schedules host inputs (`Barrier::schedule`) between steps; they
+/// share one FIFO timeline with guest control work and are admitted through
+/// the same control policy, in insertion order at one timestamp and before
+/// timer wakeups. Execution settings apply in every machine state and survive
+/// lifecycle changes without executing the machine. Lifecycle effects receive
+/// zero-budget admission runs, and reboot admits a fresh boot.
 /// Paused machines remain unfinished and receive no positive execution budget.
 /// Due requests still receive zero-budget admission runs, which adopt shared
 /// time and make due timers eligible without executing program instructions.
-/// Pausing never freezes the clock or shifts timer deadlines. Wake actions leave input retained while paused;
-/// crash actions still terminate paused machines.
+/// Pausing never freezes the clock or shifts timer deadlines. Retained input
+/// stays queued while paused; crashes still terminate paused machines.
 /// Guest simulation-control calls are interpreted after their full round commits.
 /// Their effects and replies join the same ordered timeline at that barrier;
 /// draining events (`Driver::drain_events`) only observes them. Accepted control work survives caller
@@ -204,6 +176,7 @@ pub struct Driver<M: Machine> {
     finished: Option<(Timestamp, ExitReason)>,
     oracle_stops: BTreeSet<(u64, NonZeroU32)>,
     control: control::Control,
+    inputs: BTreeMap<InputKey, LiveInput>,
     trigger_marker: Option<Timestamp>,
     // Retained for upcoming barrier-time spawning.
     #[allow(dead_code)]
@@ -329,6 +302,7 @@ where
             finished: None,
             oracle_stops: BTreeSet::new(),
             control,
+            inputs: BTreeMap::new(),
             trigger_marker: None,
             definitions: spawnable,
             factory: Box::new(factory),
@@ -366,8 +340,8 @@ where
     /// they take effect, in timeline FIFO order, before the outputs of the
     /// admission run they cause. Separate commits are never resorted, so
     /// `Event::at` is not monotonic across the stream. Enqueueing work,
-    /// including `Barrier::schedule` and `Barrier::schedule_request`,
-    /// publishes nothing. Sleep wakeups, internal timeline markers and playback
+    /// including `Barrier::schedule`, publishes nothing; a host input publishes
+    /// `FaultAdmitted` or `InputRejected` when it becomes due. Sleep wakeups, internal timeline markers and playback
     /// changes are not published.
     ///
     /// # Faults and triggers
@@ -404,8 +378,54 @@ where
 
     fn stage_notices(&mut self) {
         let notices = self.control.service.take_notices();
+        for notice in &notices {
+            self.track_input(notice);
+        }
         self.staged_events
             .extend(notices.into_iter().map(Staged::Notice));
+    }
+
+    /// Follow a host input key from admission to settlement and, for a
+    /// throttle, until its handle is healed.
+    fn track_input(&mut self, notice: &crate::oracle::service::Notice) {
+        use crate::oracle::service::{
+            Effect, FaultAction as Action, Notice, Requester, SettlementStatus as Status,
+        };
+        match notice {
+            Notice::Admitted(admitted) => {
+                if let Requester::Input(key) = &admitted.requester {
+                    // Only a throttle creates its handle; a heal merely names one.
+                    let created = matches!(admitted.action, Action::Effect(Effect::Execution(_)));
+                    self.inputs.insert(
+                        InputKey::validated(key.clone()),
+                        LiveInput::Admitted {
+                            handle: admitted.handle.clone().filter(|_| created),
+                        },
+                    );
+                }
+            }
+            Notice::Settled(settled) => {
+                if let Requester::Input(key) = &settled.requester {
+                    let key = InputKey::validated(key.clone());
+                    match (&settled.action, settled.status, &settled.handle) {
+                        (Action::Effect(Effect::Execution(_)), Status::Applied, Some(handle)) => {
+                            self.inputs.insert(key, LiveInput::Handle(handle.clone()));
+                        }
+                        _ => {
+                            self.inputs.remove(&key);
+                        }
+                    }
+                }
+                if let (Action::Heal, Status::Applied, Some(healed)) =
+                    (&settled.action, settled.status, &settled.handle)
+                {
+                    self.inputs.retain(
+                        |_, live| !matches!(live, LiveInput::Handle(handle) if handle == healed),
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Record a Driver fact after any service facts confirmed before it.
@@ -470,57 +490,6 @@ where
         Timestamp::from_nanos(self.clock.now())
     }
 
-    /// Queue a barrier action. Past times and unknown machine identities are
-    /// rejected without changing the queue. Actions at `now` run on the next step.
-    fn schedule(&mut self, at: Timestamp, action: Action) -> Result<(), Error<M::Error>> {
-        self.check_valid()?;
-        if at < self.now() {
-            return Err(Error::PastTime {
-                now: self.now(),
-                requested: at,
-            });
-        }
-        let (Action::Wake(id)
-        | Action::Pause(id)
-        | Action::Resume(id)
-        | Action::Crash(id)
-        | Action::Reboot(id)
-        | Action::Shutdown(id)
-        | Action::SetExecution { machine: id, .. }) = action;
-        self.entry(id)?;
-        let scheduled = match action {
-            Action::Wake(id) => Scheduled::Driver(DriverEvent::Wake(id)),
-            Action::Pause(id) => Scheduled::Driver(DriverEvent::Pause(id)),
-            Action::Resume(id) => Scheduled::Driver(DriverEvent::Resume(id)),
-            Action::SetExecution { machine, config } => {
-                Scheduled::Driver(DriverEvent::SetExecution { machine, config })
-            }
-            Action::Crash(id) => Scheduled::Input {
-                id,
-                input: Input {
-                    at,
-                    payload: Request::Crash,
-                },
-            },
-            Action::Reboot(id) => Scheduled::Input {
-                id,
-                input: Input {
-                    at,
-                    payload: Request::Reboot,
-                },
-            },
-            Action::Shutdown(id) => Scheduled::Input {
-                id,
-                input: Input {
-                    at,
-                    payload: Request::Shutdown,
-                },
-            },
-        };
-        self.events.entry(at).or_default().push_back(scheduled);
-        Ok(())
-    }
-
     /// Advance the simulation to its next barrier, no later than `upto`.
     ///
     /// This call is synchronous. On success, all machine execution is stopped
@@ -531,10 +500,11 @@ where
     /// never sleeps. Process controls or cancellation between calls, and wait
     /// for the suggested delay when playback returns `Waiting`.
     ///
-    /// A pre-action stop returns before the retained action takes effect, also
-    /// for actions queued at the initial/current timestamp. Selecting a running
-    /// rate or admitting a quantum resumes that action exactly once. Same-time
-    /// action order and subsequent timer wakeups are preserved.
+    /// A pre-fault stop (`Barrier::pause_before_next_fault`) returns before the
+    /// held fault's effect is applied, also for inputs scheduled at the
+    /// initial/current timestamp. Selecting a running rate or admitting a
+    /// quantum applies that effect exactly once. Same-time FIFO order and
+    /// subsequent timer wakeups are preserved.
     ///
     /// # Time and execution boundaries
     ///
@@ -562,7 +532,7 @@ where
     ///
     /// # Events and caller responsibilities
     ///
-    /// Except at an explicit `BeforeAction` stop, events due at a returned
+    /// Except at an explicit `BeforeFault` stop, events due at a returned
     /// barrier are applied in the simulation's defined order before returning. Their effects are visible to subsequent machine
     /// execution. The ordering must not depend on host timing or worker assignment.
     /// Future events remain pending. Events newly supplied by the caller at the
@@ -576,7 +546,7 @@ where
     ///
     /// - [`StepOutcome::Waiting`]: playback is paused or host pacing is waiting.
     ///   Keep servicing controls and cancellation; no simulation work occurred.
-    /// - [`StepOutcome::BeforeAction`]: the next effective crash is retained.
+    /// - [`StepOutcome::BeforeFault`]: the next effective fault effect is held.
     ///   Inspect its committed position, then resume playback or admit a quantum.
     /// - [`StepOutcome::Stopped`]: permanent stop prevents any further execution.
     /// - [`StepOutcome::BarrierReached`]: the simulation can make further
@@ -631,10 +601,10 @@ where
             }
             let position = self.position();
             if let Some(delay) = self.playback.delay(position, host_now) {
-                return Ok(match self.playback.held {
-                    Some(action) => StepOutcome::BeforeAction {
+                return Ok(match self.playback.held.clone() {
+                    Some(fault) => StepOutcome::BeforeFault {
                         at: self.now(),
-                        action,
+                        fault,
                     },
                     None => StepOutcome::Waiting {
                         at: self.now(),
@@ -838,10 +808,10 @@ where
         upto: Timestamp,
         host_now: Instant,
     ) -> Result<StepOutcome, Error<M::Error>> {
-        if let Some(action) = self.apply_due(host_now)? {
-            return Ok(StepOutcome::BeforeAction {
+        if let Some(fault) = self.apply_due(host_now)? {
+            return Ok(StepOutcome::BeforeFault {
                 at: self.now(),
-                action,
+                fault,
             });
         }
         if self.finished.is_some() || upto == self.now() || self.is_quiescent() {
@@ -898,7 +868,7 @@ where
         }
 
         // Finish early if all machines exited or became indefinitely blocked.
-        // A queued action still keeps time moving toward its own barrier.
+        // A queued input still keeps time moving toward its own barrier.
         let at = if self.is_quiescent() {
             self.machines
                 .iter()
@@ -913,8 +883,8 @@ where
         if at != initial || ran {
             self.commit_boundary()?;
         }
-        if let Some(action) = self.apply_due(host_now)? {
-            return Ok(StepOutcome::BeforeAction { at, action });
+        if let Some(fault) = self.apply_due(host_now)? {
+            return Ok(StepOutcome::BeforeFault { at, fault });
         }
         Ok(self.outcome())
     }
@@ -1063,7 +1033,7 @@ where
         Ok(())
     }
 
-    fn apply_due(&mut self, host_now: Instant) -> Result<Option<Action>, Error<M::Error>> {
+    fn apply_due(&mut self, host_now: Instant) -> Result<Option<FaultRecord>, Error<M::Error>> {
         let result = self.apply_due_inner(host_now);
         // Facts of a final uncommitted item belong to the current barrier.
         let flushed = self.flush_events();
@@ -1071,14 +1041,17 @@ where
         flushed.map(|()| result)
     }
 
-    fn apply_due_inner(&mut self, host_now: Instant) -> Result<Option<Action>, Error<M::Error>> {
+    fn apply_due_inner(
+        &mut self,
+        host_now: Instant,
+    ) -> Result<Option<FaultRecord>, Error<M::Error>> {
         if self.finished.is_some() {
             return Ok(None);
         }
         let now = self.now();
         let mut waking = Vec::new();
         // Keep the front event until its effect is admitted, including across
-        // a pre-crash stop. Driver controls and requests share one FIFO timeline.
+        // a pre-fault stop. Driver controls and requests share one FIFO timeline.
         while let Some(scheduled) = self
             .events
             .get(&now)
@@ -1088,43 +1061,29 @@ where
             // Facts of the previous item that committed no barrier belong to
             // the current one, before this item can commit another.
             self.flush_events()?;
-            let crash = match &scheduled {
-                Scheduled::Input {
-                    id,
-                    input:
-                        Input {
-                            payload: Request::Crash,
-                            ..
-                        },
-                } => Some(*id),
-                Scheduled::Control(control::Event::Plan(
-                    crate::oracle::service::Plan::Effect {
-                        target,
-                        boot,
-                        effect: crate::oracle::service::Effect::Crash,
-                        ..
-                    },
-                )) => {
-                    let id = self
-                        .control
-                        .target(target)
-                        .map_err(|e| Error::Control(e.message))?;
-                    (self.machines[id.0].boot == *boot).then_some(id)
+            // An effect plan is effective when its dispatch check passes. That
+            // check runs before the plan leaves the FIFO front, so a hold keeps
+            // this exact plan, and every later same-time item, pending.
+            let mut checked = None;
+            if let Scheduled::Control(control::Event::Plan(
+                crate::oracle::service::Plan::Effect { fault, .. },
+            )) = &scheduled
+            {
+                let fault = *fault;
+                let check = self
+                    .control
+                    .invoke(|service, view| service.dispatch_check(view, fault))
+                    .map_err(Error::Control)?;
+                if matches!(check, Some(Ok(()))) {
+                    let was_held = self.playback.held.take().is_some();
+                    if self.playback.before_next && !was_held {
+                        let record = self.control.pending_record(fault).map_err(Error::Control)?;
+                        self.playback
+                            .hold(record.clone(), self.position(), host_now);
+                        return Ok(Some(record));
+                    }
                 }
-                _ => None,
-            };
-            if let Some(id) = crash {
-                // The held cursor names this exact queued request. The public
-                // Action is only its playback/status descriptor, not a driver event.
-                let was_held = self.playback.held.take().is_some();
-                if self.playback.before_next
-                    && !was_held
-                    && !matches!(self.machines[id.0].stopped, StopReason::Exited { .. })
-                {
-                    let action = Action::Crash(id);
-                    self.playback.hold(action, self.position(), host_now);
-                    return Ok(Some(action));
-                }
+                checked = Some(check);
             }
             let events = self.events.get_mut(&now).expect("due events");
             events.pop_front();
@@ -1161,6 +1120,11 @@ where
                                 })
                                 .map_err(Error::Control)?;
                             self.control_plans(plans)?;
+                            self.commit_boundary()?;
+                            continue;
+                        }
+                        control::Event::Input { key, action } => {
+                            self.admit_input(key, action, now)?;
                             self.commit_boundary()?;
                             continue;
                         }
@@ -1220,10 +1184,7 @@ where
                             command,
                             ..
                         }) => {
-                            let check = self
-                                .control
-                                .invoke(|service, view| service.dispatch_check(view, fault))
-                                .map_err(Error::Control)?;
+                            let check = checked.take().expect("checked effect plan");
                             match check {
                                 None => continue,
                                 Some(Err(reason)) => {
@@ -1266,10 +1227,7 @@ where
                                 continue;
                             }
                             accepted_fault = Some(fault);
-                            let id = self
-                                .control
-                                .target(&target)
-                                .map_err(|e| Error::Control(e.message))?;
+                            let id = self.control.reply_target(&target).map_err(Error::Control)?;
                             debug_assert_eq!(self.machines[id.0].boot, boot);
                             if !matches!(effect, Effect::Process(_)) {
                                 service_effect = Some(fault);
@@ -1296,6 +1254,13 @@ where
                                     input: Input {
                                         at: now,
                                         payload: Request::Reboot,
+                                    },
+                                },
+                                Effect::Shutdown => Scheduled::Input {
+                                    id,
+                                    input: Input {
+                                        at: now,
+                                        payload: Request::Shutdown,
                                     },
                                 },
                                 Effect::Process(action) => {
@@ -1342,13 +1307,11 @@ where
                             command: action,
                         } = input.payload
                         {
+                            // Public scheduling creates application requests only
+                            // from admitted process faults. Only private queue
+                            // tests inject raw (external) application requests.
                             let origin = service_origin
                                 .unwrap_or(crate::oracle::observation::Origin::External);
-                            if service_origin.is_none() {
-                                self.control
-                                    .retire_external(id, command)
-                                    .map_err(Error::Control)?;
-                            }
                             if !matches!(self.machines[id.0].stopped, StopReason::Exited { .. }) {
                                 self.control
                                     .offered(id, command, action, origin)
@@ -1426,8 +1389,7 @@ where
                         self.run_batch(&[id], now)?;
                     }
                     Scheduled::Driver(event) => {
-                        let (DriverEvent::Wake(id)
-                        | DriverEvent::Pause(id)
+                        let (DriverEvent::Pause(id)
                         | DriverEvent::Resume(id)
                         | DriverEvent::SetExecution { machine: id, .. }) = event;
                         use crate::oracle::observation::Transition;
@@ -1463,13 +1425,12 @@ where
                         match event {
                             DriverEvent::SetExecution { config, .. } => entry.execution = config,
                             _ if matches!(entry.stopped, StopReason::Exited { .. }) => {}
-                            DriverEvent::Wake(_) if !entry.paused => self.run_batch(&[id], now)?,
                             DriverEvent::Pause(_) => entry.paused = true,
                             DriverEvent::Resume(_) if entry.paused => {
                                 entry.paused = false;
                                 self.run_batch(&[id], now)?;
                             }
-                            DriverEvent::Wake(_) | DriverEvent::Resume(_) => {}
+                            DriverEvent::Resume(_) => {}
                         }
                     }
                 }
@@ -1530,6 +1491,112 @@ where
             self.commit_boundary()?;
         }
         Ok(None)
+    }
+
+    /// Admit one due host input through the ordinary-control path. A
+    /// rejection publishes `InputRejected` and releases the key; admission
+    /// publishes `FaultAdmitted` through service notices and queues the
+    /// generated effects at the FIFO tail.
+    fn admit_input(
+        &mut self,
+        key: InputKey,
+        action: Action,
+        now: Timestamp,
+    ) -> Result<(), Error<M::Error>> {
+        use crate::oracle::{
+            service::{Command, Effect},
+            ErrorCode, OperationError, Target as Wire, PROCESS_EFFECT_TIMEOUT_NS,
+        };
+        use crate::pv::ApplicationCommand as App;
+        // Settlements confirmed earlier update the live-key handles first.
+        self.stage_notices();
+        let wire = |target: &Target| match target {
+            Target::Machine(id) => Wire::Key(control::Control::source(*id)),
+            Target::Name(name) => Wire::Machine(name.clone()),
+        };
+        let effect = |target: &Target, effect| Command::Effect {
+            target: wire(target),
+            effect,
+        };
+        let command = match &action {
+            Action::Pause(target) => Ok(effect(target, Effect::Pause)),
+            Action::Resume(target) => Ok(effect(target, Effect::Resume)),
+            Action::Crash(target) => Ok(effect(target, Effect::Crash)),
+            Action::Reboot(target) => Ok(effect(target, Effect::Reboot)),
+            Action::Shutdown(target) => Ok(effect(target, Effect::Shutdown)),
+            Action::Stop { target, .. } => Ok(effect(target, Effect::Process(App::Stop))),
+            Action::Restart { target, .. } => Ok(effect(target, Effect::Process(App::Start))),
+            Action::PauseProcess { target, .. } => Ok(effect(target, Effect::Process(App::Pause))),
+            Action::ResumeProcess { target, .. } => {
+                Ok(effect(target, Effect::Process(App::Resume)))
+            }
+            Action::Throttle { target, config } => Ok(Command::Throttle {
+                target: wire(target),
+                config: *config,
+            }),
+            Action::Heal(HealTarget::Handle(handle)) => Ok(Command::Heal {
+                handle: handle.0.clone(),
+            }),
+            Action::Heal(HealTarget::Input(input)) => match self.inputs.get(input) {
+                Some(LiveInput::Admitted {
+                    handle: Some(handle),
+                })
+                | Some(LiveInput::Handle(handle)) => Ok(Command::Heal {
+                    handle: handle.clone(),
+                }),
+                _ => Err(OperationError {
+                    code: ErrorCode::InvalidState,
+                    message: format!("input {input} owns no active handle"),
+                    handle: None,
+                }),
+            },
+            Action::Spawn { name } => Ok(Command::Spawn {
+                machine: name.clone(),
+            }),
+        };
+        let deadline = match action.deadline() {
+            Some(deadline) => u64::try_from(deadline.as_nanos())
+                .map_err(|_| Error::Control("validated input deadline overflow".into()))?,
+            None => PROCESS_EFFECT_TIMEOUT_NS,
+        };
+        let admitted = match command {
+            Ok(command) => self
+                .control
+                .invoke(|service, view| {
+                    service.admit_input(
+                        view,
+                        key.as_str().to_owned(),
+                        command,
+                        now.as_nanos(),
+                        deadline,
+                    )
+                })
+                .map_err(Error::Control)?,
+            Err(rejection) => Err(rejection),
+        };
+        match admitted {
+            Ok((_, plans)) => self.control_plans(plans),
+            Err(error) => {
+                self.inputs.remove(&key);
+                let reason = match error.code {
+                    ErrorCode::InvalidState => RejectionReason::InvalidState,
+                    ErrorCode::TargetUnavailable => RejectionReason::TargetUnavailable,
+                    ErrorCode::Unsupported => RejectionReason::Unsupported,
+                    _ => RejectionReason::InvalidRequest,
+                };
+                self.stage(
+                    now,
+                    EventKind::InputRejected {
+                        key,
+                        rejection: InputRejection {
+                            reason,
+                            detail: error.message,
+                        },
+                    },
+                );
+                Ok(())
+            }
+        }
     }
 
     fn spawn(&mut self, name: &str, fault: u32) -> Result<(), Error<M::Error>> {
@@ -1630,7 +1697,7 @@ where
     }
 
     /// Select host pacing from this boundary. This cancels a pending single
-    /// quantum and a one-shot pre-action arm. It never advances simulation time.
+    /// quantum and a one-shot pre-fault arm. It never advances simulation time.
     /// An explicit stop cannot be resumed by selecting a running rate.
     pub fn set_rate(&mut self, rate: PlaybackRate) -> Result<(), Error<M::Error>> {
         self.check_running()?;
@@ -1646,7 +1713,7 @@ where
     /// consume this admission. Completion becomes visible in `playback()` after
     /// the boundary commits. Early finish cancels the admission; blocking keeps
     /// it pending until input arrives or the caller cancels it with `set_rate`.
-    /// A second pending admission is rejected. This clears a pre-action arm.
+    /// A second pending admission is rejected. This clears a pre-fault arm.
     pub fn step_quantum(&mut self) -> Result<(), Error<M::Error>> {
         self.check_running()?;
         if matches!(self.driver.outcome(), StepOutcome::Finished { .. }) {
@@ -1656,15 +1723,23 @@ where
         self.driver.playback.step(position)
     }
 
-    /// Run at a positive rate until just before the next queued `Action::Crash`.
-    /// Ordinary wakeups, pause/resume/reboot/shutdown actions, and crashes of already
-    /// exited machines do not consume the arm. Rearming while held resumes the held
-    /// occurrence and stops before the next effective crash, including at the
-    /// same timestamp. The arm is consumed once, even at the current time. The
-    /// action and all following same-time actions remain pending until playback
-    /// resumes or a quantum is admitted. While held, only observation and
-    /// playback controls are allowed through this handle.
-    pub fn pause_before_next_crash(&mut self, rate: PlaybackRate) -> Result<(), Error<M::Error>> {
+    /// Run at a positive rate until just before the next effective fault
+    /// effect, from any origin: a guest control call, a trigger or a host
+    /// input. An effect is effective when its dispatch check passes at its
+    /// FIFO turn, immediately before the driver applies it; this includes
+    /// process command dispatch, throttle, heal and spawn. Effects rejected or
+    /// made stale (for example by a reboot) at their turn, admissions,
+    /// replies, wakes and settlements do not consume the arm.
+    ///
+    /// The held fault is already admitted, so its record has a fault ID. It
+    /// stays at the FIFO front, with all following same-time items pending.
+    /// Repeated `step` calls return the same [`StepOutcome::BeforeFault`]
+    /// without progress. While held, only observation and playback controls
+    /// are allowed through this handle. Selecting a running rate or admitting
+    /// a quantum applies the held effect exactly once; rearming while held
+    /// applies it and stops before the next effective fault, including at the
+    /// same timestamp. The arm is consumed once, even at the current time.
+    pub fn pause_before_next_fault(&mut self, rate: PlaybackRate) -> Result<(), Error<M::Error>> {
         self.check_running()?;
         if rate == PlaybackRate::Paused {
             return Err(Error::InvalidRate);
@@ -1698,7 +1773,7 @@ where
     fn check_mutation(&self) -> Result<(), Error<M::Error>> {
         self.check_running()?;
         if self.driver.playback.held.is_some() {
-            Err(Error::BeforeAction)
+            Err(Error::BeforeFault)
         } else {
             Ok(())
         }
@@ -1735,8 +1810,8 @@ where
     /// This is separate from its last `StopReason`: paused machines receive no
     /// positive execution budget, but due requests can update their state and
     /// adopt time through zero-budget runs. Exited machines are
-    /// never logically paused. Pause/resume changes use queued `Action`s and
-    /// take effect in insertion order when the next step admits their barrier.
+    /// never logically paused. Pause and resume are faults: they take effect
+    /// at their FIFO turn after admission (see [`Barrier::schedule`]).
     pub fn paused(&self, id: MachineId) -> Result<bool, Error<M::Error>> {
         Ok(self.driver.entry(id)?.paused)
     }
@@ -1789,8 +1864,11 @@ where
     /// including while paused. Reconstructing a whole simulation also requires
     /// its environment and driver-owned scheduling/lifecycle state, including
     /// each machine's execution configuration and pause flag observed through
-    /// `paused`, global RNG cursor, and the independently continuing RNG cursor
-    /// of every machine.
+    /// `paused`, global RNG cursor, the independently continuing RNG cursor
+    /// of every machine, and the control timeline: host inputs scheduled but
+    /// not yet admitted, live input keys (with the handles they own), and
+    /// admitted faults awaiting their effect or settlement. Restoration must
+    /// neither repeat consumed inputs nor lose pending ones.
     pub fn snapshot(&mut self, id: MachineId) -> Result<M::Snapshot, Error<M::Error>> {
         if self.driver.finished.is_none() {
             self.check_mutation()?;
@@ -1804,51 +1882,119 @@ where
             .map_err(|source| Error::Machine { id, source })
     }
 
-    /// Queue an action in simulation order. Actions at the current barrier are
-    /// applied by the next `step`, before any further execution.
-    pub fn schedule(&mut self, at: Timestamp, action: Action) -> Result<(), Error<M::Error>> {
-        self.check_mutation()?;
-        self.driver.schedule(at, action)
-    }
-    /// Queue a request in the same admission order as scheduled actions.
-    /// Admission occurs in a subsequent `step`; enqueueing executes no work
-    /// and does not imply success or a guest acknowledgment. Its boot is
-    /// determined when it becomes due. Application IDs must not be reused
-    /// within that admitted boot. Ordinary requests for an exited boot are
-    /// discarded; Reboot starts a new boot. Zero-budget runs service due
-    /// requests even while machine execution is paused.
-    pub fn schedule_request(
+    /// Enqueue a host input: `action` is admitted through the control policy
+    /// at `at`, identified by `key`.
+    ///
+    /// # Enqueue
+    ///
+    /// This only queues the input. It executes nothing, publishes nothing and
+    /// reserves no fault ID, handle or application command ID, so not-yet-due
+    /// inputs never shift the IDs guest faults receive. It is allowed only at
+    /// a barrier that permits mutation, and checks the request's shape:
+    ///
+    /// - `at` is not before the current time ([`Error::PastTime`]);
+    /// - a [`Target::Machine`] exists ([`Error::UnknownMachine`]); a
+    ///   [`Target::Name`] names exactly one machine ([`Error::UnknownName`]);
+    ///   a spawn names a declared machine that is not yet admitted
+    ///   ([`Error::UnknownName`]);
+    /// - a process command's `deadline` is positive and `at + deadline` is
+    ///   representable ([`Error::InvalidDeadline`]);
+    /// - `key` is not live ([`Error::LiveInputKey`]). A key is live while its
+    ///   input is pending, while its admitted fault is unsettled, and while the
+    ///   handle its admission created is active. The driver keeps only live
+    ///   keys; the host owns their history and any wider uniqueness rule.
+    ///
+    /// An error leaves the queue unchanged. To act "now", schedule at the
+    /// current instant: the input is admitted by the next `step`, before any
+    /// machine runs.
+    ///
+    /// # Admission
+    ///
+    /// When the input reaches the front of the timeline at `at`, in FIFO order
+    /// with guest calls, trigger work and earlier inputs, the control policy
+    /// admits it exactly as it admits an ordinary guest control call,
+    /// including the availability preflight that rejects pause, resume,
+    /// shutdown and process commands for a physically exited, uncrashed target.
+    /// (Output triggers keep their own admission mode.) Targets resolve and the
+    /// target's current boot is bound at admission. No guest call, reply or
+    /// message is fabricated.
+    ///
+    /// - Admitted: allocates a fault ID (and a handle for a throttle) from the
+    ///   shared owners and publishes [`EventKind::FaultAdmitted`] with
+    ///   [`FaultOrigin::Input`] carrying `key`.
+    /// - Rejected: publishes [`EventKind::InputRejected`] with `key`; no fault
+    ///   ID is allocated. (A rejected throttle still consumes the handle
+    ///   number it drew, as for guest calls.)
+    ///
+    /// # Execution and completion
+    ///
+    /// Generated effects join the FIFO tail at the admission time and are
+    /// revalidated at their turn, like guest-call effects. Consequently a later
+    /// same-time input is admitted before an earlier input's effect applies:
+    /// Crash then Reboot of one machine at the same time admits the Crash and
+    /// rejects the Reboot (the target is not yet down). Schedule dependent
+    /// inputs at a later time, or after observing the settlement. Driver
+    /// changes publish [`EventKind::Transition`] with [`Cause::Fault`]. Only
+    /// [`SettlementStatus::Applied`] in [`EventKind::FaultSettled`] proves the
+    /// change. Process commands wait for the guest's readiness, are dispatched
+    /// with a driver-allocated command ID and settle on acknowledgment; their
+    /// `deadline`, measured from admission, bounds dispatch and acknowledgment,
+    /// and expiry fails the driver with a Failed settlement, as for guest
+    /// controls. Accepted work survives caller loss.
+    ///
+    /// After oracle completion, a permanent stop or a driver failure, pending
+    /// inputs are never admitted and no per-key event is published.
+    pub fn schedule(
         &mut self,
         at: Timestamp,
-        id: MachineId,
-        request: Request,
+        key: InputKey,
+        action: Action,
     ) -> Result<(), Error<M::Error>> {
         self.check_mutation()?;
-        self.driver.check_valid()?;
-        if at < self.driver.now() {
+        let driver = &mut *self.driver;
+        driver.check_valid()?;
+        if at < driver.now() {
             return Err(Error::PastTime {
-                now: self.driver.now(),
+                now: driver.now(),
                 requested: at,
             });
         }
-        self.driver.entry(id)?;
-        if let Request::Application { id: command, .. } = request {
-            self.driver
-                .control
-                .reserve_external(id, command)
-                .map_err(Error::Control)?;
+        match action.target() {
+            Some(Target::Machine(id)) => {
+                driver.entry(*id)?;
+            }
+            Some(Target::Name(name)) => {
+                driver
+                    .control
+                    .target(name)
+                    .map_err(|_| Error::UnknownName(name.clone()))?;
+            }
+            None => {}
         }
-        self.driver
+        if let Action::Spawn { name } = &action {
+            if !driver.control.spawnable(name) {
+                return Err(Error::UnknownName(name.clone()));
+            }
+        }
+        if let Some(deadline) = action.deadline() {
+            let valid = u64::try_from(deadline.as_nanos())
+                .ok()
+                .filter(|&nanos| nanos > 0)
+                .and_then(|nanos| at.as_nanos().checked_add(nanos))
+                .is_some();
+            if !valid {
+                return Err(Error::InvalidDeadline(deadline));
+            }
+        }
+        if driver.inputs.contains_key(&key) {
+            return Err(Error::LiveInputKey(key));
+        }
+        driver.inputs.insert(key.clone(), LiveInput::Pending);
+        driver
             .events
             .entry(at)
             .or_default()
-            .push_back(Scheduled::Input {
-                id,
-                input: Input {
-                    at,
-                    payload: request,
-                },
-            });
+            .push_back(Scheduled::Control(control::Event::Input { key, action }));
         Ok(())
     }
 }
@@ -1874,14 +2020,21 @@ pub enum Error<E> {
     NotPaused,
     /// A previously admitted quantum has not completed.
     StepPending,
-    /// A pre-action arm requires a positive playback rate.
+    /// A pre-fault arm requires a positive playback rate.
     InvalidRate,
     /// Oracle termination was committed; further scheduling is prohibited.
     Completed,
     /// A permanent stop prohibits execution and scheduling changes.
     Stopped,
-    /// Only observation and playback controls are allowed before a held action.
-    BeforeAction,
+    /// Only observation and playback controls are allowed before a held fault.
+    BeforeFault,
+    /// No machine (or declared spawnable machine) has exactly this name.
+    UnknownName(String),
+    /// A process command deadline must be positive and representable after
+    /// its scheduled time.
+    InvalidDeadline(Duration),
+    /// This input key is live: pending, unsettled or owning an active handle.
+    LiveInputKey(InputKey),
     /// The next full quantum boundary cannot be represented.
     TimeOverflow,
     /// A worker's context factory failed.
@@ -1940,12 +2093,17 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
             Self::PositionOverflow => f.write_str("simulation position counter overflow"),
             Self::NotPaused => f.write_str("playback must be paused before admitting a quantum"),
             Self::StepPending => f.write_str("a quantum admission is already pending"),
-            Self::InvalidRate => f.write_str("pre-action playback rate must be positive"),
+            Self::InvalidRate => f.write_str("pre-fault playback rate must be positive"),
             Self::Completed => f.write_str("simulation has completed"),
             Self::Stopped => f.write_str("driver has been permanently stopped"),
-            Self::BeforeAction => {
-                f.write_str("only playback controls are allowed before the held action")
+            Self::BeforeFault => {
+                f.write_str("only playback controls are allowed before the held fault")
             }
+            Self::UnknownName(name) => write!(f, "no unique machine named {name:?}"),
+            Self::InvalidDeadline(deadline) => {
+                write!(f, "process command deadline {deadline:?} is invalid")
+            }
+            Self::LiveInputKey(key) => write!(f, "input key {key} is still live"),
             Self::TimeOverflow => f.write_str("quantum boundary exceeds the simulation time range"),
             Self::Context { worker, source } => write!(f, "worker {worker} context: {source}"),
             Self::Worker { worker, source } => write!(f, "worker {worker}: {source}"),
@@ -1988,15 +2146,15 @@ impl<E: std::error::Error + 'static> std::error::Error for Error<E> {
 }
 
 /// Why a driver returned control at a simulation-wide barrier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
     /// Playback withholds execution because it is paused or a limited rate is
     /// waiting for host time. `Barrier::playback` distinguishes those states.
     /// The suggested delay is bounded for servicing controls; `step` never sleeps.
     Waiting { at: Timestamp, delay: Duration },
-    /// The arm was consumed and this queued action has not taken effect.
-    /// Repeated calls while paused return the same position and action.
-    BeforeAction { at: Timestamp, action: Action },
+    /// The arm was consumed and this admitted fault's effect has not been
+    /// applied. Repeated calls while paused return the same position and fault.
+    BeforeFault { at: Timestamp, fault: FaultRecord },
     /// A permanent stop was requested at a barrier. No machine has been crashed.
     Stopped { at: Timestamp },
     /// Further work is runnable or has a known future scheduling time.

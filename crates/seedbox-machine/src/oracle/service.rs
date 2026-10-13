@@ -96,6 +96,8 @@ pub(crate) enum Effect {
     Resume,
     Crash,
     Reboot,
+    /// Latch graceful shutdown of the current boot (host inputs only).
+    Shutdown,
     Execution(ExecutionConfig),
     Process(ApplicationCommand),
 }
@@ -114,7 +116,8 @@ pub(crate) enum FaultAction {
     Effect(Effect),
     Heal,
 }
-/// Who requested an admitted fault: a guest control call or a matched trigger.
+/// Who requested an admitted fault: a guest control call, a matched trigger
+/// or a host input identified by its validated key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Requester {
     Call {
@@ -122,6 +125,62 @@ pub(crate) enum Requester {
         id: SimulationControlId,
     },
     Trigger(u32),
+    Input(String),
+}
+/// A fault request after operation parsing, independent of its requester.
+/// Guest operations convert through `from_operation`; host inputs construct
+/// one directly, so host-only effects (Shutdown) never appear on the wire.
+#[derive(Clone, Debug)]
+pub(crate) enum Command {
+    Effect {
+        target: Target,
+        effect: Effect,
+    },
+    Throttle {
+        target: Target,
+        config: ExecutionConfig,
+    },
+    Heal {
+        handle: String,
+    },
+    /// Reserve and later build a declared machine by name.
+    Spawn {
+        machine: String,
+    },
+}
+impl Command {
+    fn from_operation(op: Operation) -> Result<Self, OperationError> {
+        let effect = |target, effect| Ok(Self::Effect { target, effect });
+        match op {
+            Operation::Stop { target } => effect(target, Effect::Process(ApplicationCommand::Stop)),
+            Operation::Restart { target } => {
+                effect(target, Effect::Process(ApplicationCommand::Start))
+            }
+            Operation::PauseProcess { target } => {
+                effect(target, Effect::Process(ApplicationCommand::Pause))
+            }
+            Operation::ResumeProcess { target } => {
+                effect(target, Effect::Process(ApplicationCommand::Resume))
+            }
+            Operation::Pause { target } => effect(target, Effect::Pause),
+            Operation::Resume { target } => effect(target, Effect::Resume),
+            Operation::Crash { target } => effect(target, Effect::Crash),
+            Operation::Reboot { target } => effect(target, Effect::Reboot),
+            Operation::Throttle {
+                target,
+                factor_permille,
+            } => Ok(Self::Throttle {
+                target,
+                config: u32::try_from(factor_permille)
+                    .ok()
+                    .and_then(|factor| ExecutionConfig::new(factor).ok())
+                    .ok_or_else(|| OperationError::invalid("invalid execution factor"))?,
+            }),
+            Operation::Heal { handle } => Ok(Self::Heal { handle }),
+            Operation::Spawn { machine } => Ok(Self::Spawn { machine }),
+            _ => Err(OperationError::unsupported()),
+        }
+    }
 }
 /// Policy admission of a fault. Admission is not completion; a later
 /// Settlement reports the outcome.
@@ -217,7 +276,7 @@ impl Failure {
 #[derive(Clone, Copy)]
 enum AdmissionMode {
     Control,
-    Trigger { trigger: u32 },
+    Trigger,
 }
 
 enum PreparationError {
@@ -305,6 +364,20 @@ impl Service {
     /// Transfer confirmed facts once, in confirmation order.
     pub(crate) fn take_notices(&mut self) -> Vec<Notice> {
         std::mem::take(&mut self.notices)
+    }
+    /// Describe a pending fault as it was admitted, for a pre-effect hold.
+    pub(crate) fn pending_admitted(&self, fault: u32) -> Option<Admitted> {
+        let p = self.pending.get(&fault)?;
+        Some(Admitted {
+            fault,
+            requester: p.requester.clone(),
+            target: p.target.clone(),
+            boot: p.boot,
+            action: Self::action(p),
+            handle: Self::handle(p),
+            requested_at: Self::requested_at(p),
+            admitted_at: p.admitted,
+        })
     }
     fn valid(&self) -> Result<(), Failure> {
         if self.poisoned {
@@ -451,13 +524,27 @@ impl Service {
                 | Operation::Throttle { .. }
                 | Operation::Heal { .. }
                 | Operation::Spawn { .. }),
-            ) => match self.prepare(adapter, AdmissionMode::Control, Some(call.clone()), op, now) {
-                Ok((_, plans)) => return Ok(plans),
-                Err(PreparationError::Fatal(e)) => {
-                    self.poison();
-                    return Err(e);
-                }
-                Err(PreparationError::Rejected(e)) => Err(e),
+            ) => match Command::from_operation(op) {
+                Err(e) => Err(e),
+                Ok(command) => match self.prepare(
+                    adapter,
+                    AdmissionMode::Control,
+                    Requester::Call {
+                        source: call.source.clone(),
+                        id: call.id,
+                    },
+                    Some(call.clone()),
+                    command,
+                    now,
+                    PROCESS_EFFECT_TIMEOUT_NS,
+                ) {
+                    Ok((_, plans)) => return Ok(plans),
+                    Err(PreparationError::Fatal(e)) => {
+                        self.poison();
+                        return Err(e);
+                    }
+                    Err(PreparationError::Rejected(e)) => Err(e),
+                },
             },
             Ok(_) => Err(OperationError::unsupported()),
         };
@@ -468,17 +555,53 @@ impl Service {
         .then_some(now);
         Ok(vec![Self::reply(call, now, effect, result)?])
     }
+    /// Admit a host input through the ordinary-control path at its due time.
+    /// The outer result is fatal failure; the inner result is admission or
+    /// policy rejection. A rejection allocates no fault ID and produces no
+    /// reply; no guest call is fabricated. `deadline_ns` bounds process
+    /// dispatch and acknowledgment after admission.
+    pub(crate) fn admit_input(
+        &mut self,
+        adapter: &mut impl Adapter,
+        key: String,
+        command: Command,
+        now: u64,
+        deadline_ns: u64,
+    ) -> Result<Result<(u32, Vec<Plan>), OperationError>, Failure> {
+        self.valid()?;
+        match self.prepare(
+            adapter,
+            AdmissionMode::Control,
+            Requester::Input(key),
+            None,
+            command,
+            now,
+            deadline_ns,
+        ) {
+            Ok(admitted) => Ok(Ok(admitted)),
+            Err(PreparationError::Rejected(e)) => Ok(Err(e)),
+            Err(PreparationError::Fatal(e)) => {
+                self.poison();
+                Err(e)
+            }
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         &mut self,
         adapter: &mut impl Adapter,
         mode: AdmissionMode,
+        requester: Requester,
         call: Option<Call>,
-        op: Operation,
+        command: Command,
         now: u64,
+        deadline_ns: u64,
     ) -> Result<(u32, Vec<Plan>), PreparationError> {
-        let mut handle = None;
-        let (facts, effect) = match op {
-            Operation::Spawn { machine } => {
+        let deadline = now
+            .checked_add(deadline_ns)
+            .ok_or_else(|| OperationError::invalid("effect deadline overflow"))?;
+        let (facts, effect, handle, healing) = match command {
+            Command::Spawn { machine } => {
                 adapter.reserve_spawn(&machine)?;
                 (
                     Facts {
@@ -491,14 +614,16 @@ impl Service {
                         execution: ExecutionConfig::default(),
                     },
                     Effect::Spawn,
+                    None,
+                    false,
                 )
             }
-            Operation::Heal { handle: text } => {
+            Command::Heal { handle: text } => {
                 let plan = self
                     .handles
                     .heal(&text)
                     .map_err(|e| error(ErrorCode::InvalidState, format!("heal: {e:?}")))?;
-                let facts = match adapter.resolve(&Target::Machine(plan.target.clone())) {
+                let facts = match adapter.resolve(&Target::Key(plan.target.clone())) {
                     Ok(f) => f,
                     Err(e) => {
                         self.handles
@@ -507,72 +632,35 @@ impl Service {
                         return Err(e.into());
                     }
                 };
-                let effect = Effect::Execution(plan.config);
-                handle = Some(plan);
-                (facts, effect)
+                (facts, Effect::Execution(plan.config), Some(plan), true)
             }
-            op => {
-                let (target, effect) = match op {
-                    Operation::Stop { target } => {
-                        (target, Effect::Process(ApplicationCommand::Stop))
-                    }
-                    Operation::Restart { target } => {
-                        (target, Effect::Process(ApplicationCommand::Start))
-                    }
-                    Operation::PauseProcess { target } => {
-                        (target, Effect::Process(ApplicationCommand::Pause))
-                    }
-                    Operation::ResumeProcess { target } => {
-                        (target, Effect::Process(ApplicationCommand::Resume))
-                    }
-                    Operation::Pause { target } => (target, Effect::Pause),
-                    Operation::Resume { target } => (target, Effect::Resume),
-                    Operation::Crash { target } => (target, Effect::Crash),
-                    Operation::Reboot { target } => (target, Effect::Reboot),
-                    Operation::Throttle {
-                        target,
-                        factor_permille,
-                    } => {
-                        let facts = adapter.resolve(&target)?;
-                        let config = ExecutionConfig::new(factor_permille as u32)
-                            .map_err(|_| OperationError::invalid("invalid execution factor"))?;
-                        let plan =
-                            self.handles
-                                .throttle(facts.name.clone(), config)
-                                .map_err(|e| {
-                                    error(ErrorCode::InvalidState, format!("throttle: {e:?}"))
-                                })?;
-                        handle = Some(plan);
-                        return self.install(
-                            adapter,
-                            mode,
-                            call,
-                            facts,
-                            Effect::Execution(config),
-                            handle,
-                            false,
-                            now,
-                        );
-                    }
-                    _ => unreachable!(),
-                };
-                (adapter.resolve(&target)?, effect)
+            Command::Throttle { target, config } => {
+                let facts = adapter.resolve(&target)?;
+                let plan = self
+                    .handles
+                    .throttle(facts.name.clone(), config)
+                    .map_err(|e| error(ErrorCode::InvalidState, format!("throttle: {e:?}")))?;
+                (facts, Effect::Execution(config), Some(plan), false)
             }
+            Command::Effect { target, effect } => (adapter.resolve(&target)?, effect, None, false),
         };
-        let heal = matches!(effect, Effect::Execution(_)) && handle.is_some();
-        self.install(adapter, mode, call, facts, effect, handle, heal, now)
+        self.install(
+            adapter, mode, requester, call, facts, effect, handle, healing, now, deadline,
+        )
     }
     #[allow(clippy::too_many_arguments)]
     fn install(
         &mut self,
         adapter: &mut impl Adapter,
         mode: AdmissionMode,
+        requester: Requester,
         call: Option<Call>,
         facts: Facts,
         effect: Effect,
         handle: Option<ExecutionPlan>,
         healing: bool,
         now: u64,
+        deadline: u64,
     ) -> Result<(u32, Vec<Plan>), PreparationError> {
         // The control API's physical-availability preflight precedes Faults'
         // policy validation (world_windowed::admit_control/reject_unavailable).
@@ -580,7 +668,10 @@ impl Service {
         if matches!(mode, AdmissionMode::Control)
             && facts.physically_ended
             && facts.vm != Vm::Down
-            && matches!(effect, Effect::Pause | Effect::Resume | Effect::Process(_))
+            && matches!(
+                effect,
+                Effect::Pause | Effect::Resume | Effect::Shutdown | Effect::Process(_)
+            )
         {
             return Err(error(ErrorCode::TargetUnavailable, "target VM has exited").into());
         }
@@ -599,25 +690,16 @@ impl Service {
             Effect::Resume => facts.vm == Vm::Paused,
             Effect::Crash => facts.vm != Vm::Down,
             Effect::Reboot => facts.vm == Vm::Down,
+            Effect::Shutdown => facts.vm != Vm::Down,
             Effect::Execution(_) | Effect::Spawn => true,
         };
         if !allowed {
             return Err(error(ErrorCode::InvalidState, "target state rejects operation").into());
         }
-        let requester = match (&call, mode) {
-            (Some(call), _) => Requester::Call {
-                source: call.source.clone(),
-                id: call.id,
-            },
-            (None, AdmissionMode::Trigger { trigger }) => Requester::Trigger(trigger),
-            (None, AdmissionMode::Control) => {
-                return Err(Failure::from("control admission lacks its call").into());
-            }
-        };
+        if matches!(mode, AdmissionMode::Trigger) != matches!(requester, Requester::Trigger(_)) {
+            return Err(Failure::from("admission mode does not match its requester").into());
+        }
         let fault = self.token()?;
-        let deadline = now
-            .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
-            .ok_or_else(|| OperationError::invalid("effect deadline overflow"))?;
         let pending = Pending {
             call,
             requester,
@@ -741,7 +823,7 @@ impl Service {
         if pending.effect == Effect::Spawn {
             return Ok(Some(Ok(())));
         }
-        let facts = match adapter.resolve(&Target::Machine(pending.target.clone())) {
+        let facts = match adapter.resolve(&Target::Key(pending.target.clone())) {
             Ok(facts) => facts,
             Err(error) => return Ok(Some(Err(error))),
         };
@@ -755,7 +837,7 @@ impl Service {
             && facts.vm != Vm::Down
             && matches!(
                 pending.effect,
-                Effect::Pause | Effect::Resume | Effect::Process(_)
+                Effect::Pause | Effect::Resume | Effect::Shutdown | Effect::Process(_)
             )
         {
             return Ok(Some(Err(error(
@@ -768,6 +850,7 @@ impl Service {
             Effect::Resume => facts.vm == Vm::Paused,
             Effect::Crash => facts.vm != Vm::Down,
             Effect::Reboot => facts.vm == Vm::Down,
+            Effect::Shutdown => facts.vm != Vm::Down,
             Effect::Execution(_) | Effect::Spawn => true,
             // Commands already reserved for the application are decided by its
             // actual acknowledgment. Earlier commands can change process state.
@@ -1152,14 +1235,15 @@ impl Service {
             };
             let result = self.prepare(
                 adapter,
-                AdmissionMode::Trigger {
-                    trigger: effect.trigger_id,
-                },
+                AdmissionMode::Trigger,
+                Requester::Trigger(effect.trigger_id),
                 None,
-                Operation::Stop {
-                    target: Target::Machine(effect.target),
+                Command::Effect {
+                    target: Target::Key(effect.target),
+                    effect: Effect::Process(ApplicationCommand::Stop),
                 },
                 at,
+                PROCESS_EFFECT_TIMEOUT_NS,
             );
             match result {
                 Ok((id, p)) => {

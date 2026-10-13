@@ -1,5 +1,6 @@
 use super::*;
 use crate::clock::Clock;
+use crate::driver::{fixture::auto_key, Target};
 use crate::rng::{RngStreamExt, SeededRng};
 use std::sync::Arc;
 type TcgMachine = crate::machine::test_environment::Environment<super::TcgMachine>;
@@ -268,9 +269,21 @@ fn check_driver_reboot(workers: usize) {
     let before = driver
         .with_barrier(|barrier| {
             let saved = barrier.snapshot(id)?;
-            barrier.schedule(at(5), Action::Pause(id))?;
-            barrier.schedule(at(5), Action::Reboot(id))?;
+            barrier.schedule(at(5), auto_key(), Action::Pause(Target::Machine(id)))?;
+            barrier.schedule(at(5), auto_key(), Action::Crash(Target::Machine(id)))?;
             Ok(saved)
+        })
+        .unwrap();
+    assert_eq!(
+        driver.step(at(5)).unwrap(),
+        StepOutcome::BarrierReached { at: at(5) }
+    );
+    // Reboot requires an applied crash. A Reboot input queued with the Crash
+    // would be admitted before the Crash effect applies, so it is scheduled at
+    // the following barrier, still at the same simulation time.
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(at(5), auto_key(), Action::Reboot(Target::Machine(id)))
         })
         .unwrap();
     assert_eq!(
@@ -305,21 +318,30 @@ fn check_driver_reboot(workers: usize) {
     driver
         .with_barrier(|barrier| {
             for (time, action) in [
-                (5, Action::Crash(id)),
-                (8, Action::Reboot(id)),
-                (8, Action::Pause(id)),
-                (8, Action::Wake(id)),
-                (9, Action::Resume(id)),
-                (12, Action::Crash(id)),
-                (12, Action::Crash(oracle)),
+                (5, Action::Crash(Target::Machine(id))),
+                (8, Action::Reboot(Target::Machine(id))),
+                (9, Action::Resume(Target::Machine(id))),
+                (12, Action::Crash(Target::Machine(id))),
+                (12, Action::Crash(Target::Machine(oracle))),
             ] {
-                barrier.schedule(at(time), action)?;
+                barrier.schedule(at(time), auto_key(), action)?;
             }
             Ok(())
         })
         .unwrap();
     assert_eq!(
         driver.step(at(100)).unwrap(),
+        StepOutcome::BarrierReached { at: at(8) }
+    );
+    // A same-time pause would be admitted before the reboot effect applies
+    // (and rejected for a crashed machine), so pause the new boot afterwards.
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(at(8), auto_key(), Action::Pause(Target::Machine(id)))
+        })
+        .unwrap();
+    assert_eq!(
+        driver.step(at(8)).unwrap(),
         StepOutcome::BarrierReached { at: at(8) }
     );
     driver

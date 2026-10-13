@@ -1,13 +1,19 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 //! Test machines implemented solely through seedbox-machine's public contracts.
 
 #[path = "../support/driver_definition.rs"]
 mod driver_definition;
 pub use driver_definition::definition;
+#[path = "../support/input_key.rs"]
+mod input_key;
+pub use input_key::{auto_key, key};
 
 pub use seedbox_machine::{
     clock::Clock,
-    driver::{Action, Driver, Error, MachineId, PlaybackRate, PlaybackStatus, StepOutcome},
+    driver::{
+        Action, Driver, Error, EventKind, FaultAction, FaultOrigin, InputKey, MachineId,
+        PlaybackRate, PlaybackStatus, SettlementStatus, StepOutcome, Target,
+    },
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     rng::RngStream,
 };
@@ -343,9 +349,16 @@ pub fn controlled_targets(workers: usize, programs: &[&[Op]]) -> Driver<TestMach
     driver
         .with_barrier(|barrier| {
             let oracle = barrier.machines().next().unwrap().0;
-            barrier.schedule(at(0), Action::Pause(oracle))
+            barrier.schedule(
+                at(0),
+                key("oracle-pause"),
+                Action::Pause(Target::Machine(oracle)),
+            )
         })
         .unwrap();
+    // Apply the oracle pause before tests arm pre-fault holds; it executes
+    // no machine and publishes its fault events.
+    driver.step(at(0)).unwrap();
     driver
 }
 pub fn ids(driver: &mut Driver<TestMachine>) -> Vec<MachineId> {
@@ -358,6 +371,13 @@ pub fn ids(driver: &mut Driver<TestMachine>) -> Vec<MachineId> {
                 .collect())
         })
         .unwrap()
+}
+/// The time, action and target of a pre-fault hold.
+pub fn held(outcome: &StepOutcome) -> Option<(Timestamp, FaultAction, MachineId)> {
+    match outcome {
+        StepOutcome::BeforeFault { at, fault } => Some((*at, fault.action, fault.target)),
+        _ => None,
+    }
 }
 pub fn status(driver: &mut Driver<TestMachine>) -> PlaybackStatus {
     driver

@@ -1,17 +1,43 @@
 mod driver_fixture;
 use driver_fixture::*;
 
+/// Crash, then reboot at the next barrier at the same simulation time. A
+/// Reboot input queued with the Crash would be admitted before the crash
+/// effect applies and be rejected (see the same-time test below).
+fn crash_then_reboot(driver: &mut Driver<TestMachine>, id: MachineId, time: u64) {
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(at(time), auto_key(), Action::Crash(Target::Machine(id)))
+        })
+        .unwrap();
+    driver.step(at(time)).unwrap();
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(at(time), auto_key(), Action::Reboot(Target::Machine(id)))
+        })
+        .unwrap();
+}
+
 #[test]
-fn exited_target_can_reboot_while_separate_oracle_remains_alive() {
+fn exited_target_can_crash_and_reboot_while_separate_oracle_remains_alive() {
     let mut driver = controlled_targets(1, &[&[Op::Work(2), Op::Exit]]);
     let id = ids(&mut driver)[0];
     assert_eq!(
         driver.step(at(100)).unwrap(),
         StepOutcome::Blocked { at: at(2) }
     );
+    // A machine that exited by itself is not down: Reboot needs a crash first.
     driver
-        .with_barrier(|barrier| barrier.schedule(at(2), Action::Reboot(id)))
+        .with_barrier(|barrier| {
+            barrier.schedule(at(2), key("early"), Action::Reboot(Target::Machine(id)))
+        })
         .unwrap();
+    driver.step(at(2)).unwrap();
+    assert!(driver.drain_events().iter().any(|event| matches!(
+        &event.kind,
+        EventKind::InputRejected { key: found, .. } if *found == key("early")
+    )));
+    crash_then_reboot(&mut driver, id, 2);
     assert_eq!(
         driver.step(at(2)).unwrap(),
         StepOutcome::BarrierReached { at: at(2) }
@@ -35,6 +61,7 @@ fn exited_target_can_reboot_while_separate_oracle_remains_alive() {
             assert_eq!(guest.pending_boots, 0);
             assert_eq!(guest.pending_at, None);
             assert_eq!(guest.boot_times, [0, 2]);
+            // The fixture treats a crash of an exited boot as already ended.
             assert_eq!(guest.lifecycle, ["reboot"]);
             assert_eq!(guest.log.lock().unwrap().len(), 2);
             let snapshot = barrier.snapshot(id)?;
@@ -50,24 +77,24 @@ fn exited_target_can_reboot_while_separate_oracle_remains_alive() {
 }
 
 #[test]
-fn future_reboot_and_all_later_actions_survive_exit_with_the_same_identity() {
+fn future_lifecycle_inputs_survive_exit_with_the_same_identity() {
     let mut driver = controlled_targets(1, &[&[Op::Work(2), Op::Exit]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
             for (time, action) in [
-                (5, Action::Reboot(id)),
-                (5, Action::Pause(id)),
-                (7, Action::Wake(id)),
-                (9, Action::Resume(id)),
-                (10, Action::Crash(id)),
+                (4, Action::Crash(Target::Machine(id))),
+                (5, Action::Reboot(Target::Machine(id))),
+                (6, Action::Pause(Target::Machine(id))),
+                (9, Action::Resume(Target::Machine(id))),
+                (10, Action::Crash(Target::Machine(id))),
             ] {
-                barrier.schedule(at(time), action)?;
+                barrier.schedule(at(time), auto_key(), action)?;
             }
             Ok(())
         })
         .unwrap();
-    for end in [5, 7, 9] {
+    for end in [4, 5, 6, 9] {
         assert_eq!(
             driver.step(at(100)).unwrap(),
             StepOutcome::BarrierReached { at: at(end) }
@@ -82,19 +109,9 @@ fn future_reboot_and_all_later_actions_survive_exit_with_the_same_identity() {
                         .0,
                     id
                 );
-                assert_eq!(barrier.paused(id)?, end < 9);
+                assert_eq!(barrier.paused(id)?, end == 6);
                 let guest = barrier.machine(id)?;
-                assert_eq!(guest.executed, 2);
-                if end < 9 {
-                    assert!(!guest.exited);
-                    assert_eq!(guest.pending_boots, 0);
-                    assert_eq!(guest.pending_at, None);
-                } else {
-                    assert!(!guest.exited);
-                    assert_eq!(guest.reached, 9);
-                    assert_eq!(guest.pending_boots, 0);
-                    assert_eq!(guest.boot_times, [0, 5]);
-                }
+                assert_eq!(guest.boot_times.len(), if end < 5 { 1 } else { 2 });
                 Ok(())
             })
             .unwrap();
@@ -107,11 +124,11 @@ fn future_reboot_and_all_later_actions_survive_exit_with_the_same_identity() {
         .with_barrier(|barrier| {
             let guest = barrier.machine(id)?;
             assert_eq!(guest.lifecycle, ["reboot", "crash"]);
-            assert_eq!(guest.executed, 3);
+            assert_eq!(guest.executed, 4);
             assert_eq!(guest.boot_times, [0, 5]);
             assert_eq!(
                 *guest.log.lock().unwrap(),
-                [(0, 0, 5), (0, 5, 5), (0, 9, 9), (0, 9, 10)]
+                [(0, 0, 4), (0, 5, 5), (0, 5, 6), (0, 9, 9), (0, 9, 10)]
             );
             Ok(())
         })
@@ -119,61 +136,74 @@ fn future_reboot_and_all_later_actions_survive_exit_with_the_same_identity() {
 }
 
 #[test]
-fn same_time_crash_reboot_and_pause_order_controls_the_fresh_boot() {
-    for pause_last in [false, true] {
-        let mut driver = controlled_targets(2, &[&[Op::Work(100)]]);
-        let id = ids(&mut driver)[0];
-        driver
-            .with_barrier(|barrier| {
-                let actions = if pause_last {
-                    vec![Action::Crash(id), Action::Reboot(id), Action::Pause(id)]
-                } else {
-                    vec![
-                        Action::Pause(id),
-                        Action::Reboot(id),
-                        Action::Crash(id),
-                        Action::Reboot(id),
-                    ]
-                };
-                for action in actions {
-                    barrier.schedule(at(0), action)?;
-                }
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(
-            driver.step(at(0)).unwrap(),
-            if pause_last {
-                StepOutcome::Blocked { at: at(0) }
-            } else {
-                StepOutcome::BarrierReached { at: at(0) }
+fn same_time_crash_then_reboot_inputs_apply_the_crash_and_reject_the_reboot() {
+    let mut driver = controlled_targets(2, &[&[Op::Work(100)]]);
+    let id = ids(&mut driver)[0];
+    driver.drain_events();
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(at(0), key("crash"), Action::Crash(Target::Machine(id)))?;
+            barrier.schedule(at(0), key("reboot"), Action::Reboot(Target::Machine(id)))
+        })
+        .unwrap();
+    assert_eq!(
+        driver.step(at(0)).unwrap(),
+        StepOutcome::Blocked { at: at(0) }
+    );
+    // Generated effects join the FIFO tail, so the Reboot input is admitted
+    // while the target is still up, before the Crash effect applies.
+    let events = driver.drain_events();
+    let facts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::FaultAdmitted(record) => Some(format!("admitted {:?}", record.action)),
+            EventKind::InputRejected { key, rejection } => {
+                Some(format!("rejected {key} {:?}", rejection.reason))
             }
-        );
-        driver
-            .with_barrier(|barrier| {
-                assert_eq!(barrier.paused(id)?, pause_last);
-                assert_eq!(barrier.stopped(id)?, StopReason::BoundaryReached);
-                assert!(!barrier.machine(id)?.crashed);
-                assert_eq!(barrier.machine(id)?.executed, 0);
-                assert_eq!(barrier.machine(id)?.pending_boots, 0);
-                assert_eq!(
-                    barrier.machine(id)?.log.lock().unwrap().len(),
-                    if pause_last { 1 } else { 2 }
-                );
-                let expected = if pause_last {
-                    vec!["crash", "reboot"]
-                } else {
-                    vec!["reboot", "crash", "reboot"]
-                };
-                assert_eq!(barrier.machine(id)?.lifecycle, expected);
-                Ok(())
-            })
-            .unwrap();
-    }
+            EventKind::FaultSettled { record, status, .. } => {
+                Some(format!("settled {:?} {status:?}", record.action))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        facts,
+        [
+            "admitted Crash",
+            "rejected reboot InvalidState",
+            "settled Crash Applied"
+        ]
+    );
+    driver
+        .with_barrier(|barrier| {
+            assert!(barrier.machine(id)?.crashed);
+            assert_eq!(barrier.machine(id)?.lifecycle, ["crash"]);
+            // The key was released by its rejection.
+            barrier.schedule(at(0), key("reboot"), Action::Reboot(Target::Machine(id)))?;
+            barrier.schedule(at(1), key("pause"), Action::Pause(Target::Machine(id)))
+        })
+        .unwrap();
+    assert_eq!(
+        driver.step(at(0)).unwrap(),
+        StepOutcome::BarrierReached { at: at(0) }
+    );
+    assert_eq!(
+        driver.step(at(100)).unwrap(),
+        StepOutcome::Blocked { at: at(1) }
+    );
+    driver
+        .with_barrier(|barrier| {
+            assert!(barrier.paused(id)?);
+            assert!(!barrier.machine(id)?.crashed);
+            assert_eq!(barrier.machine(id)?.executed, 1);
+            assert_eq!(barrier.machine(id)?.lifecycle, ["crash", "reboot"]);
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
-fn reboot_discards_due_and_overdue_old_timers_and_clears_pause() {
+fn crash_and_reboot_discard_due_and_overdue_old_timers_and_pause() {
     for reboot_at in [5, 10] {
         let mut driver = controlled_targets(2, &[&[Op::Sleep(5), Op::Work(100)]]);
         let id = ids(&mut driver)[0];
@@ -184,13 +214,28 @@ fn reboot_discards_due_and_overdue_old_timers_and_clears_pause() {
         driver
             .with_barrier(|barrier| {
                 if reboot_at == 10 {
-                    barrier.schedule(at(1), Action::Pause(id))?;
+                    barrier.schedule(at(1), auto_key(), Action::Pause(Target::Machine(id)))?;
                 }
-                barrier.schedule(at(reboot_at), Action::Reboot(id))
+                barrier.schedule(
+                    at(reboot_at),
+                    auto_key(),
+                    Action::Crash(Target::Machine(id)),
+                )
+            })
+            .unwrap();
+        driver.step(at(100)).unwrap();
+        driver
+            .with_barrier(|barrier| {
+                assert!(!barrier.paused(id)?);
+                barrier.schedule(
+                    at(reboot_at),
+                    auto_key(),
+                    Action::Reboot(Target::Machine(id)),
+                )
             })
             .unwrap();
         assert_eq!(
-            driver.step(at(100)).unwrap(),
+            driver.step(at(reboot_at)).unwrap(),
             StepOutcome::BarrierReached { at: at(reboot_at) }
         );
         driver
@@ -233,50 +278,53 @@ fn reboot_discards_due_and_overdue_old_timers_and_clears_pause() {
 }
 
 #[test]
-fn reboot_retains_quantum_anchor_and_does_not_consume_pre_crash_arm() {
+fn reboot_retains_quantum_anchor_and_later_crash_is_held() {
     let mut driver = controlled_targets(2, &[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
-            barrier.schedule(at(3), Action::Reboot(id))?;
-            barrier.schedule(at(10), Action::Reboot(id))?;
-            barrier.schedule(at(12), Action::Crash(id))?;
-            barrier.pause_before_next_crash(PlaybackRate::Unlimited)
+            barrier.schedule(at(2), auto_key(), Action::Crash(Target::Machine(id)))?;
+            barrier.schedule(at(3), auto_key(), Action::Reboot(Target::Machine(id)))?;
+            barrier.schedule(at(9), auto_key(), Action::Crash(Target::Machine(id)))?;
+            barrier.schedule(at(10), auto_key(), Action::Reboot(Target::Machine(id)))?;
+            barrier.schedule(at(12), auto_key(), Action::Crash(Target::Machine(id)))
         })
         .unwrap();
-    for end in [3, 10] {
+    for end in [2, 3, 9, 10] {
         assert_eq!(
             driver.step(at(100)).unwrap(),
             StepOutcome::BarrierReached { at: at(end) }
         );
         driver
             .with_barrier(|barrier| {
-                assert!(barrier.playback().before_next_crash);
                 assert_eq!(
                     barrier.playback().position.completed_quanta,
                     u64::from(end == 10)
                 );
-                assert_eq!(barrier.machine(id)?.reached, end);
                 assert_eq!(barrier.machine(id)?.pending_boots, 0);
                 assert_eq!(barrier.machine(id)?.pending_at, None);
-                assert_eq!(barrier.machine(id)?.boot_times.last(), Some(&end));
+                if end == 3 || end == 10 {
+                    assert_eq!(barrier.machine(id)?.reached, end);
+                    assert_eq!(barrier.machine(id)?.boot_times.last(), Some(&end));
+                }
                 Ok(())
             })
             .unwrap();
     }
+    driver
+        .with_barrier(|barrier| barrier.pause_before_next_fault(PlaybackRate::Unlimited))
+        .unwrap();
     assert_eq!(
-        driver.step(at(100)).unwrap(),
-        StepOutcome::BeforeAction {
-            at: at(12),
-            action: Action::Crash(id)
-        }
+        held(&driver.step(at(100)).unwrap()),
+        Some((at(12), FaultAction::Crash, id))
     );
     driver
         .with_barrier(|barrier| {
             assert!(!barrier.machine(id)?.crashed);
-            assert_eq!(barrier.machine(id)?.lifecycle, ["reboot", "reboot"]);
-            assert_eq!(barrier.machine(id)?.pending_boots, 0);
-            assert_eq!(barrier.machine(id)?.pending_at, None);
+            assert_eq!(
+                barrier.machine(id)?.lifecycle,
+                ["crash", "reboot", "crash", "reboot"]
+            );
             assert_eq!(barrier.machine(id)?.boot_times.last(), Some(&10));
             Ok(())
         })
@@ -288,14 +336,27 @@ fn reboot_errors_poison_driver_before_remaining_actions_or_work() {
     let mut driver = configured(2, {
         let mut guest = machine(0, &[Op::Work(100)]);
         guest.fail_reboot = true;
-        vec![guest, machine(1, &[Op::Work(100)])]
+        vec![
+            machine(usize::MAX, &[Op::Park]),
+            guest,
+            machine(1, &[Op::Work(100)]),
+        ]
     });
     let ids = ids(&mut driver);
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(at(5), auto_key(), Action::Crash(Target::Machine(ids[0])))
+        })
+        .unwrap();
+    assert_eq!(
+        driver.step(at(100)).unwrap(),
+        StepOutcome::BarrierReached { at: at(5) }
+    );
     let log = driver
         .with_barrier(|barrier| {
-            barrier.schedule(at(5), Action::Reboot(ids[0]))?;
-            barrier.schedule(at(5), Action::Wake(ids[1]))?;
-            barrier.schedule(at(6), Action::Crash(ids[1]))?;
+            barrier.schedule(at(5), auto_key(), Action::Reboot(Target::Machine(ids[0])))?;
+            barrier.schedule(at(5), auto_key(), Action::Pause(Target::Machine(ids[1])))?;
+            barrier.schedule(at(6), auto_key(), Action::Crash(Target::Machine(ids[1])))?;
             Ok(barrier.machine(ids[1])?.log.clone())
         })
         .unwrap();
@@ -316,17 +377,22 @@ fn repeated_boot_lifecycle_results_are_worker_independent() {
         let ids = ids(&mut driver);
         driver
             .with_barrier(|barrier| {
-                for (time, action) in [
-                    (3, Action::Pause(ids[0])),
-                    (7, Action::Reboot(ids[0])),
-                    (10, Action::Crash(ids[1])),
-                    (10, Action::Reboot(ids[1])),
-                    (10, Action::Wake(ids[1])),
-                    (14, Action::Reboot(ids[0])),
-                    (21, Action::Crash(ids[0])),
-                    (21, Action::Crash(ids[1])),
-                ] {
-                    barrier.schedule(at(time), action)?;
+                for (index, (time, action)) in [
+                    (3, Action::Pause(Target::Machine(ids[0]))),
+                    (6, Action::Crash(Target::Machine(ids[0]))),
+                    (7, Action::Reboot(Target::Machine(ids[0]))),
+                    (10, Action::Crash(Target::Machine(ids[1]))),
+                    (10, Action::Reboot(Target::Machine(ids[1]))),
+                    (11, Action::Reboot(Target::Machine(ids[1]))),
+                    (13, Action::Crash(Target::Machine(ids[0]))),
+                    (14, Action::Reboot(Target::Machine(ids[0]))),
+                    (21, Action::Crash(Target::Machine(ids[0]))),
+                    (21, Action::Crash(Target::Machine(ids[1]))),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    barrier.schedule(at(time), key(&format!("input-{index}")), action)?;
                 }
                 Ok(())
             })
@@ -334,11 +400,11 @@ fn repeated_boot_lifecycle_results_are_worker_independent() {
         let mut outcomes = Vec::new();
         loop {
             let outcome = driver.step(at(100)).unwrap();
-            outcomes.push(outcome);
+            outcomes.push(outcome.clone());
             if matches!(outcome, StepOutcome::Blocked { .. }) {
                 break;
             }
-            assert!(outcomes.len() < 10);
+            assert!(outcomes.len() < 20);
         }
         let observations = driver
             .with_barrier(|barrier| {
@@ -357,7 +423,12 @@ fn repeated_boot_lifecycle_results_are_worker_independent() {
                     .collect::<Vec<_>>())
             })
             .unwrap();
-        let observed = (outcomes, observations);
+        assert_eq!(
+            observations[0].3,
+            ["crash", "reboot", "crash", "reboot", "crash"]
+        );
+        assert_eq!(observations[1].3, ["crash", "reboot", "crash"]);
+        let observed = (outcomes, observations, driver.drain_events());
         if let Some(reference) = &reference {
             assert_eq!(&observed, reference);
         } else {

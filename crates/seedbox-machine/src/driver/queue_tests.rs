@@ -1,3 +1,4 @@
+use super::fixture::auto_key;
 use super::*;
 use crate::pv::{ApplicationCommand, CommandResult, Request, Response};
 use std::num::NonZeroU32;
@@ -147,25 +148,28 @@ fn driver(machines: Vec<QueueMachine>) -> Driver<QueueMachine> {
 fn enqueue(driver: &mut Driver<QueueMachine>, at: Timestamp, id: u32) {
     enqueue_to(driver, at, MachineId(0), id);
 }
-fn enqueue_to(driver: &mut Driver<QueueMachine>, at: Timestamp, target: MachineId, id: u32) {
-    driver
-        .control
-        .reserve_external(target, NonZeroU32::new(id).unwrap())
-        .unwrap();
+/// Raw queue entries exercise private timeline mechanics below the control
+/// policy; public scheduling only creates them from admitted faults.
+fn raw(driver: &mut Driver<QueueMachine>, at: Timestamp, target: MachineId, payload: Request) {
     driver
         .events
         .entry(at)
         .or_default()
         .push_back(Scheduled::Input {
             id: target,
-            input: Input {
-                at,
-                payload: Request::Application {
-                    id: NonZeroU32::new(id).unwrap(),
-                    command: ApplicationCommand::Start,
-                },
-            },
+            input: Input { at, payload },
         });
+}
+fn enqueue_to(driver: &mut Driver<QueueMachine>, at: Timestamp, target: MachineId, id: u32) {
+    raw(
+        driver,
+        at,
+        target,
+        Request::Application {
+            id: NonZeroU32::new(id).unwrap(),
+            command: ApplicationCommand::Start,
+        },
+    );
 }
 #[test]
 fn unconsumed_due_input_survives_jobs_without_perpetual_runnable_work() {
@@ -181,13 +185,6 @@ fn unconsumed_due_input_survives_jobs_without_perpetual_runnable_work() {
         StepOutcome::Blocked { .. }
     ));
     assert_eq!(driver.machines[0].machine.as_ref().unwrap().calls, calls);
-    driver.schedule(at(2), Action::Wake(MachineId(0))).unwrap();
-    driver.step(at(10)).unwrap();
-    assert_eq!(driver.machines[0].inbox.len(), 1);
-    assert_eq!(
-        driver.machines[0].machine.as_ref().unwrap().calls,
-        calls + 1
-    );
 }
 #[test]
 fn ordered_reboot_discards_only_admitted_work_and_preserves_future_input() {
@@ -195,9 +192,7 @@ fn ordered_reboot_discards_only_admitted_work_and_preserves_future_input() {
     machine.consume = false;
     let mut driver = driver(vec![machine]);
     enqueue(&mut driver, at(0), 1);
-    driver
-        .schedule(at(0), Action::Reboot(MachineId(0)))
-        .unwrap();
+    raw(&mut driver, at(0), MachineId(0), Request::Reboot);
     enqueue(&mut driver, at(0), 2);
     enqueue(&mut driver, at(5), 3);
     driver.step(at(0)).unwrap();
@@ -286,9 +281,7 @@ fn normal_exit_discards_ended_boot_inbox_but_keeps_future_timeline() {
     enqueue_to(&mut driver, at(0), MachineId(1), 1);
     enqueue_to(&mut driver, at(0), MachineId(1), 2);
     enqueue_to(&mut driver, at(4), MachineId(1), 3);
-    driver
-        .schedule(at(5), Action::Reboot(MachineId(1)))
-        .unwrap();
+    raw(&mut driver, at(5), MachineId(1), Request::Reboot);
     enqueue_to(&mut driver, at(5), MachineId(1), 4);
     driver.step(at(0)).unwrap();
     assert!(driver.machines[1].inbox.is_empty());
@@ -326,9 +319,7 @@ impl QueueMachine {
 fn boot_generation_overflow_fails_before_reset_or_response_publication() {
     let mut driver = driver(vec![QueueMachine::new()]);
     driver.machines[0].boot = u64::MAX;
-    driver
-        .schedule(at(0), Action::Reboot(MachineId(0)))
-        .unwrap();
+    raw(&mut driver, at(0), MachineId(0), Request::Reboot);
     assert!(matches!(
         driver.step(at(0)),
         Err(Error::BootOverflow { id: MachineId(0) })
@@ -339,34 +330,37 @@ fn boot_generation_overflow_fails_before_reset_or_response_publication() {
 }
 
 #[test]
-fn public_actions_normalize_to_driver_controls_or_machine_requests_at_enqueue() {
+fn public_inputs_enqueue_in_fifo_order_without_admission_or_reservation() {
     let mut driver = driver(vec![QueueMachine::new()]);
     let id = MachineId(0);
-    for action in [
-        Action::Wake(id),
-        Action::Pause(id),
-        Action::Resume(id),
-        Action::Crash(id),
-        Action::Reboot(id),
-        Action::Shutdown(id),
-    ] {
-        driver.schedule(at(0), action).unwrap();
+    let actions = [
+        Action::Pause(Target::Machine(id)),
+        Action::Resume(Target::Machine(id)),
+        Action::Crash(Target::Machine(id)),
+        Action::Reboot(Target::Machine(id)),
+        Action::Shutdown(Target::Machine(id)),
+        Action::Stop {
+            target: Target::Machine(id),
+            deadline: Duration::from_nanos(5),
+        },
+    ];
+    for action in actions.clone() {
+        driver.schedule(at(0), auto_key(), action).unwrap();
     }
-    let queued = &driver.events[&at(0)];
-    assert!(matches!(queued[0], Scheduled::Driver(DriverEvent::Wake(found)) if found == id));
-    assert!(matches!(queued[1], Scheduled::Driver(DriverEvent::Pause(found)) if found == id));
-    assert!(matches!(queued[2], Scheduled::Driver(DriverEvent::Resume(found)) if found == id));
-    for (event, request) in
-        queued
-            .iter()
-            .skip(3)
-            .zip([Request::Crash, Request::Reboot, Request::Shutdown])
-    {
-        assert!(
-            matches!(event, Scheduled::Input { id: found, input } if *found == id && input.at == at(0) && input.payload == request)
-        );
-    }
-    // Enqueue performs no machine admission or lifecycle transition.
+    let queued: Vec<_> = driver.events[&at(0)]
+        .iter()
+        .map(|event| match event {
+            Scheduled::Control(control::Event::Input { action, .. }) => action.clone(),
+            _ => panic!("host input must enqueue as a control input"),
+        })
+        .collect();
+    assert_eq!(queued, actions);
+    // Enqueue performs no machine admission, lifecycle transition or ID
+    // reservation, and publishes nothing.
     assert!(driver.machines[0].inbox.is_empty());
     assert_eq!(driver.machines[0].machine.as_ref().unwrap().calls, 0);
+    let (_, events) = (driver.control.service.take_notices(), driver.drain_events());
+    assert!(events
+        .iter()
+        .all(|event| matches!(event.kind, EventKind::MachineAdded { .. })));
 }

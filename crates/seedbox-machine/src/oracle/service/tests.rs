@@ -40,7 +40,9 @@ impl Owner {
 impl Adapter for Owner {
     fn resolve(&self, target: &Target) -> Result<Facts, OperationError> {
         match target {
-            Target::Machine(n) | Target::Service(n) if n == "app" || n == "service" => {
+            Target::Machine(n) | Target::Service(n) | Target::Key(n)
+                if n == "app" || n == "service" =>
+            {
                 Ok(self.facts.clone())
             }
             _ => Err(OperationError::invalid("unknown target")),
@@ -1079,7 +1081,7 @@ fn fatal_later_trigger_preserves_earlier_owned_settlement_in_arm_order() {
     struct Targets;
     impl Adapter for Targets {
         fn resolve(&self, t: &Target) -> Result<Facts, OperationError> {
-            let (Target::Machine(name) | Target::Service(name)) = t;
+            let (Target::Machine(name) | Target::Service(name) | Target::Key(name)) = t;
             if !["source", "gone", "live"].contains(&name.as_str()) {
                 return Err(OperationError::invalid("unknown target"));
             }
@@ -1270,27 +1272,28 @@ fn application_end_settles_old_commands_once_but_preserves_new_start() {
 fn ordinary_control_preflight_does_not_depend_on_a_reply_destination() {
     let (mut service, mut owner) = (Service::default(), Owner::default());
     owner.facts.physically_ended = true;
-    let operation = || Operation::Stop {
+    let command = || Command::Effect {
         target: Target::Machine("app".into()),
+        effect: Effect::Process(ApplicationCommand::Stop),
     };
-    // Reply correlation cannot choose policy. Ordinary control rejects before
-    // fault allocation even without an RPC destination; bare trigger admission
-    // allocates that same fault and reports Unavailable instead.
-    let rejected = service.prepare(&mut owner, AdmissionMode::Control, None, operation(), 10);
-    match rejected {
-        Err(PreparationError::Rejected(error)) => {
-            assert_eq!(error.code, ErrorCode::TargetUnavailable);
-        }
-        _ => panic!("ordinary control must perform physical-exit preflight"),
-    }
+    // Reply correlation cannot choose policy. A host input has no RPC
+    // destination, yet ordinary control rejects it before fault allocation;
+    // bare trigger admission allocates that same fault and reports Unavailable.
+    let rejected = service
+        .admit_input(&mut owner, "key".into(), command(), 10, 7)
+        .unwrap();
+    assert_eq!(rejected.unwrap_err().code, ErrorCode::TargetUnavailable);
     assert_eq!(service.last, 0);
     assert!(service.pending.is_empty());
+    assert!(service.take_notices().is_empty());
     let (fault, plans) = match service.prepare(
         &mut owner,
-        AdmissionMode::Trigger { trigger: 1 },
+        AdmissionMode::Trigger,
+        Requester::Trigger(1),
         None,
-        operation(),
+        command(),
         10,
+        PROCESS_EFFECT_TIMEOUT_NS,
     ) {
         Ok(result) => result,
         Err(_) => panic!("bare trigger must admit an unavailable fault"),
@@ -1301,4 +1304,35 @@ fn ordinary_control_preflight_does_not_depend_on_a_reply_destination() {
     assert!(!plans.iter().any(|plan| matches!(plan, Plan::Reply { .. })));
     assert!(service.pending.is_empty());
     assert_eq!(owner.next, 40, "unavailable fault offers no app command");
+}
+
+#[test]
+fn host_input_admission_uses_its_own_deadline_and_never_replies() {
+    let (mut service, mut owner) = (Service::default(), Owner::default());
+    let command = Command::Effect {
+        target: Target::Machine("app".into()),
+        effect: Effect::Process(ApplicationCommand::Pause),
+    };
+    let (fault, plans) = service
+        .admit_input(&mut owner, "freeze".into(), command, 10, 7)
+        .unwrap()
+        .unwrap();
+    assert!(plans
+        .iter()
+        .any(|plan| matches!(plan, Plan::Deadline { fault: f, at: 17 } if *f == fault)));
+    assert!(!plans.iter().any(|plan| matches!(plan, Plan::Reply { .. })));
+    let notices = service.take_notices();
+    assert!(
+        matches!(&notices[..], [Notice::Admitted(Admitted { requester: Requester::Input(key), requested_at: 10, .. })] if key == "freeze")
+    );
+    // Overflowing deadlines reject without allocating a fault.
+    let command = Command::Effect {
+        target: Target::Machine("app".into()),
+        effect: Effect::Pause,
+    };
+    let rejected = service
+        .admit_input(&mut owner, "late".into(), command, 10, u64::MAX)
+        .unwrap();
+    assert_eq!(rejected.unwrap_err().code, ErrorCode::InvalidRequest);
+    assert_eq!(service.last, fault);
 }

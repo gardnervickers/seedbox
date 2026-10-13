@@ -1,5 +1,9 @@
-//! Concrete private control ownership. Machine identities route replies;
-//! optional display names resolve targets, never the reverse.
+//! Concrete private control ownership. Every machine has a canonical private
+//! key (`machine:N`), which the service uses as its identity for targets,
+//! handles, triggers and replies. Optional display names (which are also
+//! service names) resolve guest and host name targets, never the reverse, so
+//! unnamed machines and duplicate display names stay safely targetable by
+//! identity.
 use super::{MachineId, Timestamp};
 use crate::{
     definition::MachineDefinition,
@@ -20,7 +24,6 @@ use std::{
 #[derive(Default)]
 struct Commands {
     next: u32,
-    future: BTreeMap<NonZeroU32, usize>,
     used: BTreeMap<NonZeroU32, (ApplicationCommand, Origin, bool)>,
 }
 impl Commands {
@@ -31,9 +34,8 @@ impl Commands {
                 .checked_add(1)
                 .ok_or("application command IDs exhausted")?;
             let id = NonZeroU32::new(self.next).unwrap();
-            if !self.future.contains_key(&id) && !self.used.contains_key(&id) {
-                self.used
-                    .insert(id, (action, Origin::Service { fault }, false));
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.used.entry(id) {
+                entry.insert((action, Origin::Service { fault }, false));
                 return Ok(id);
             }
         }
@@ -63,10 +65,11 @@ impl Control {
     pub(super) fn new(definitions: &[MachineDefinition], start: Timestamp) -> Self {
         let entries = definitions
             .iter()
-            .map(|definition| Observed {
+            .enumerate()
+            .map(|(index, definition)| Observed {
                 name: Some(definition.name.clone()),
                 state: State::new(
-                    definition.name.clone(),
+                    Self::source(MachineId(index)),
                     0,
                     start.as_nanos(),
                     ExecutionConfig::default(),
@@ -93,7 +96,12 @@ impl Control {
         }
         self.entries.push(Observed {
             name: Some(name.into()),
-            state: State::new(name.into(), 0, at.as_nanos(), ExecutionConfig::default()),
+            state: State::new(
+                Self::source(id),
+                0,
+                at.as_nanos(),
+                ExecutionConfig::default(),
+            ),
             commands: Commands::default(),
         });
         self.spawning.remove(name);
@@ -104,7 +112,27 @@ impl Control {
             .get(name)
             .copied()
             .map(Ok)
-            .unwrap_or_else(|| self.named(name))
+            .unwrap_or_else(|| self.target(name).map_err(|e| e.message))
+    }
+    /// Whether a declared name can still be admitted as a spawn.
+    pub(super) fn spawnable(&self, name: &str) -> bool {
+        self.spawnable.contains(name)
+    }
+    /// Describe a pending fault as it was admitted, for a pre-effect hold.
+    pub(super) fn pending_record(&self, fault: u32) -> Result<super::FaultRecord, String> {
+        let a = self
+            .service
+            .pending_admitted(fault)
+            .ok_or("held fault is not pending")?;
+        self.record(
+            a.fault,
+            &a.requester,
+            &a.target,
+            a.boot,
+            &a.action,
+            &a.handle,
+            a.requested_at,
+        )
     }
     pub(super) fn spawn_pending(&self) -> bool {
         !self.spawning.is_empty()
@@ -117,63 +145,43 @@ impl Control {
             commands: Commands::default(),
         });
     }
+    /// Canonical private key of a machine, also its control-call source.
     pub(super) fn source(id: MachineId) -> String {
         format!("machine:{}", id.0)
     }
-    pub(super) fn reply_target(&self, source: &str) -> Result<MachineId, String> {
-        let index = source
+    fn key_index(entries: &[Observed], key: &str) -> Result<usize, String> {
+        let index = key
             .strip_prefix("machine:")
             .and_then(|index| index.parse::<usize>().ok())
-            .ok_or("invalid private control source")?;
-        if index >= self.entries.len() {
-            return Err("unknown private control source".into());
+            .filter(|index| Self::source(MachineId(*index)) == key)
+            .ok_or("invalid private machine key")?;
+        if index >= entries.len() {
+            return Err("unknown private machine key".into());
         }
-        Ok(MachineId(index))
+        Ok(index)
     }
-    pub(super) fn target(&self, name: &str) -> Result<MachineId, OperationError> {
-        let mut matches = self
-            .entries
+    fn name_index(entries: &[Observed], name: &str) -> Result<usize, String> {
+        let mut matches = entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| entry.name.as_deref() == Some(name));
         let Some((index, _)) = matches.next() else {
-            return Err(OperationError::invalid("unknown machine target"));
+            return Err("unknown machine target".into());
         };
         if matches.next().is_some() {
-            return Err(OperationError::invalid("ambiguous machine target"));
+            return Err("ambiguous machine target".into());
         }
-        Ok(MachineId(index))
+        Ok(index)
     }
-    pub(super) fn reserve_external(
-        &mut self,
-        id: MachineId,
-        command: NonZeroU32,
-    ) -> Result<(), String> {
-        let count = self.entries[id.0]
-            .commands
-            .future
-            .entry(command)
-            .or_default();
-        *count = count
-            .checked_add(1)
-            .ok_or("future command reservation count overflow")?;
-        Ok(())
+    /// Resolve a canonical key, such as a call source or a plan target.
+    pub(super) fn reply_target(&self, key: &str) -> Result<MachineId, String> {
+        Self::key_index(&self.entries, key).map(MachineId)
     }
-    pub(super) fn retire_external(
-        &mut self,
-        id: MachineId,
-        command: NonZeroU32,
-    ) -> Result<(), String> {
-        let commands = &mut self.entries[id.0].commands;
-        let count = commands
-            .future
-            .get_mut(&command)
-            .ok_or("missing future command reservation")?;
-        *count -= 1;
-        if *count == 0 {
-            commands.future.remove(&command);
-        }
-        Ok(())
+    /// Resolve a display (service) name that identifies exactly one machine.
+    pub(super) fn target(&self, name: &str) -> Result<MachineId, OperationError> {
+        Self::name_index(&self.entries, name)
+            .map(MachineId)
+            .map_err(OperationError::invalid)
     }
     pub(super) fn offered(
         &mut self,
@@ -242,19 +250,8 @@ pub(super) struct View<'a> {
     spawning: &'a mut BTreeMap<String, MachineId>,
 }
 impl View<'_> {
-    fn index(&self, name: &str) -> Result<usize, String> {
-        let mut matches = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.name.as_deref() == Some(name));
-        let Some((index, _)) = matches.next() else {
-            return Err("unknown machine target".into());
-        };
-        if matches.next().is_some() {
-            return Err("ambiguous machine target".into());
-        }
-        Ok(index)
+    fn index(&self, key: &str) -> Result<usize, String> {
+        Control::key_index(self.entries, key)
     }
 }
 impl Adapter for View<'_> {
@@ -266,11 +263,16 @@ impl Adapter for View<'_> {
         self.spawning.insert(name.into(), id);
         Ok(())
     }
+    /// A service name is its machine's name, so both wire forms resolve the
+    /// same display name; internal re-resolution uses canonical keys.
     fn resolve(&self, target: &Target) -> Result<Facts, OperationError> {
-        let Target::Machine(name) = target else {
-            return Err(OperationError::unsupported());
-        };
-        let index = self.index(name).map_err(OperationError::invalid)?;
+        let index = match target {
+            Target::Machine(name) | Target::Service(name) => {
+                Control::name_index(self.entries, name)
+            }
+            Target::Key(key) => self.index(key),
+        }
+        .map_err(OperationError::invalid)?;
         self.entries[index]
             .state
             .facts()
@@ -345,13 +347,11 @@ mod tests {
         assert!(control.target("machine:2").is_err());
     }
     #[test]
-    fn boot_allocator_excludes_future_external_ids_and_never_wraps() {
+    fn boot_allocator_restarts_per_boot_and_never_wraps() {
         let mut commands = Commands::default();
-        let one = NonZeroU32::new(1).unwrap();
-        commands.future.insert(one, 2);
         assert_eq!(
             commands.reserve(7, ApplicationCommand::Stop).unwrap().get(),
-            2
+            1
         );
         commands.reset();
         assert_eq!(
@@ -359,7 +359,7 @@ mod tests {
                 .reserve(8, ApplicationCommand::Start)
                 .unwrap()
                 .get(),
-            2
+            1
         );
         commands.next = u32::MAX;
         let before = commands.used.clone();
@@ -379,6 +379,11 @@ pub(super) enum Event {
         payload: Vec<u8>,
     },
     Plan(crate::oracle::service::Plan),
+    /// A host input, admitted through the control policy when it is due.
+    Input {
+        key: super::InputKey,
+        action: super::Action,
+    },
     TriggerBoundary,
     TriggerFinalize,
 }
@@ -411,12 +416,9 @@ impl Control {
     ) -> Result<Vec<crate::oracle::service::Plan>, String> {
         self.invoke(f)
     }
-    pub(super) fn name(&self, id: MachineId) -> Option<String> {
-        let name = self.entries[id.0].name.as_ref()?;
-        self.target(name)
-            .ok()
-            .filter(|target| *target == id)
-            .map(|_| name.clone())
+    /// The service's identity for this machine: its canonical key.
+    pub(super) fn name(&self, id: MachineId) -> String {
+        Self::source(id)
     }
     pub(super) fn uncertain_failure(&mut self) {
         for entry in &mut self.entries {
@@ -433,12 +435,11 @@ impl Control {
         let boot = self.current_boot(id)?;
         let mut plans = vec![];
         if matches!(transition, Transition::Crash | Transition::Reboot { .. }) {
-            if let Some(name) = self.name(id) {
-                plans = self.invoke_plans(|service, _| {
-                    service.ended(&name, boot, at.as_nanos(), at.as_nanos())
-                })?;
-                self.service.source_reset(&name).map_err(|e| e.message)?;
-            }
+            let name = self.name(id);
+            plans = self.invoke_plans(|service, _| {
+                service.ended(&name, boot, at.as_nanos(), at.as_nanos())
+            })?;
+            self.service.source_reset(&name).map_err(|e| e.message)?;
         }
         self.entries[id.0]
             .state
@@ -462,37 +463,35 @@ impl Control {
         use crate::pv::Response;
         let mut plans = vec![];
         let name = self.name(output.machine);
-        if let Some(name) = &name {
-            match &output.payload {
-                Response::CommandAcknowledged { id, result } => {
-                    plans.extend(self.invoke_plans(|service, view| {
-                        service.acknowledged(
-                            view,
-                            name,
-                            output.boot,
-                            *id,
-                            *result,
-                            output.at.as_nanos(),
-                            commit.as_nanos(),
-                        )
-                    })?)
-                }
-                Response::ApplicationOutcome { .. } => {
-                    plans.extend(self.invoke_plans(|service, _| {
-                        service.application_ended(
-                            name,
-                            output.boot,
-                            output.at.as_nanos(),
-                            commit.as_nanos(),
-                        )
-                    })?)
-                }
-                Response::ApplicationOutput { bytes, .. } | Response::BootConsole { bytes } => self
-                    .service
-                    .committed_bytes(name, output.at.as_nanos(), bytes, commit.as_nanos())
-                    .map_err(|e| e.message)?,
-                _ => {}
+        match &output.payload {
+            Response::CommandAcknowledged { id, result } => {
+                plans.extend(self.invoke_plans(|service, view| {
+                    service.acknowledged(
+                        view,
+                        &name,
+                        output.boot,
+                        *id,
+                        *result,
+                        output.at.as_nanos(),
+                        commit.as_nanos(),
+                    )
+                })?)
             }
+            Response::ApplicationOutcome { .. } => {
+                plans.extend(self.invoke_plans(|service, _| {
+                    service.application_ended(
+                        &name,
+                        output.boot,
+                        output.at.as_nanos(),
+                        commit.as_nanos(),
+                    )
+                })?)
+            }
+            Response::ApplicationOutput { bytes, .. } | Response::BootConsole { bytes } => self
+                .service
+                .committed_bytes(&name, output.at.as_nanos(), bytes, commit.as_nanos())
+                .map_err(|e| e.message)?,
+            _ => {}
         }
         self.entries[output.machine.0]
             .state
@@ -504,17 +503,15 @@ impl Control {
             )
             .map_err(|e| format!("control observation response: {e:?}"))?;
         if matches!(output.payload, Response::Ready) {
-            if let Some(name) = name {
-                plans.extend(self.invoke_plans(|service, view| {
-                    service.ready(
-                        view,
-                        &name,
-                        output.boot,
-                        output.at.as_nanos(),
-                        commit.as_nanos(),
-                    )
-                })?);
-            }
+            plans.extend(self.invoke_plans(|service, view| {
+                service.ready(
+                    view,
+                    &name,
+                    output.boot,
+                    output.at.as_nanos(),
+                    commit.as_nanos(),
+                )
+            })?);
         }
         Ok(plans)
     }
@@ -535,12 +532,10 @@ impl Control {
         if change != crate::oracle::observation::Change::Changed {
             return Ok(vec![]);
         }
-        if let Some(name) = self.name(id) {
-            return self.invoke_plans(|service, _| {
-                service.ended(&name, boot, reached.as_nanos(), commit.as_nanos())
-            });
-        }
-        Ok(vec![])
+        let name = self.name(id);
+        self.invoke_plans(|service, _| {
+            service.ended(&name, boot, reached.as_nanos(), commit.as_nanos())
+        })
     }
 }
 
@@ -566,11 +561,11 @@ impl Control {
             .remove(&(source, id.session.get(), id.request.get()))
             .ok_or_else(|| "reply for an unadmitted call".into())
     }
-    fn named(&self, name: &str) -> Result<MachineId, String> {
-        self.target(name).map_err(|e| e.message)
+    fn named(&self, key: &str) -> Result<MachineId, String> {
+        self.reply_target(key)
     }
     #[allow(clippy::too_many_arguments)]
-    fn record(
+    pub(super) fn record(
         &self,
         fault: u32,
         requester: &crate::oracle::service::Requester,
@@ -590,6 +585,9 @@ impl Control {
                     call: *id,
                 },
                 Requester::Trigger(trigger) => FaultOrigin::Trigger { trigger: *trigger },
+                Requester::Input(key) => FaultOrigin::Input {
+                    key: super::InputKey::validated(key.clone()),
+                },
             },
             target: if *action == FaultAction::Effect(Effect::Spawn) {
                 self.spawn_target(target)?
@@ -604,10 +602,11 @@ impl Control {
                 FaultAction::Effect(Effect::Resume) => Public::Resume,
                 FaultAction::Effect(Effect::Crash) => Public::Crash,
                 FaultAction::Effect(Effect::Reboot) => Public::Reboot,
+                FaultAction::Effect(Effect::Shutdown) => Public::Shutdown,
                 FaultAction::Effect(Effect::Execution(config)) => Public::SetExecution(*config),
                 FaultAction::Effect(Effect::Process(command)) => Public::Application(*command),
             },
-            handle: handle.clone(),
+            handle: handle.clone().map(super::FaultHandle),
             requested_at: Timestamp::from_nanos(requested_at),
         })
     }

@@ -1,3 +1,4 @@
+use super::fixture::auto_key;
 use super::*;
 use std::{
     collections::VecDeque,
@@ -201,42 +202,7 @@ fn schedule(
     time: u64,
     action: Action,
 ) -> Result<(), Error<std::io::Error>> {
-    driver.with_barrier(|barrier| barrier.schedule(at(time), action))
-}
-
-#[test]
-fn an_ineffective_wakeup_does_not_rewind_shared_time() {
-    let mut driver = super::fixture::driver(
-        at(3),
-        std::time::Duration::from_nanos(1000),
-        2,
-        crate::rng::SeededRng::new(0),
-        || Ok(()),
-        || Ok(vec![machine(0, &[Op::Park])]),
-    )
-    .unwrap();
-    let id = ids(&mut driver)[0];
-    schedule(&mut driver, 10, Action::Wake(id)).unwrap();
-    assert_eq!(
-        driver.step(at(20)).unwrap(),
-        StepOutcome::Blocked { at: at(10) }
-    );
-    driver
-        .with_barrier(|barrier| {
-            assert_eq!(barrier.machine(id)?.reached, 10);
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(
-        driver.step(at(20)).unwrap(),
-        StepOutcome::Blocked { at: at(10) }
-    );
-    driver
-        .with_barrier(|barrier| {
-            assert_eq!(barrier.machine(id)?.log.lock().unwrap().len(), 2);
-            Ok(())
-        })
-        .unwrap();
+    driver.with_barrier(|barrier| barrier.schedule(at(time), auto_key(), action))
 }
 
 #[test]
@@ -333,21 +299,9 @@ fn blocked_oracle_does_not_poll() {
     driver
         .with_barrier(|barrier| {
             assert_eq!(barrier.machine(id)?.log.lock().unwrap().len(), 1);
-            barrier.machine(id)?.input.store(true, Ordering::Relaxed);
-            barrier.schedule(at(7), Action::Wake(id))
+            Ok(())
         })
         .unwrap();
-    assert_eq!(
-        driver.step(at(7)).unwrap(),
-        StepOutcome::BarrierReached { at: at(7) }
-    );
-    assert_eq!(
-        driver.step(at(100)).unwrap(),
-        StepOutcome::Finished {
-            at: at(9),
-            reason: ExitReason::Shutdown
-        }
-    );
 }
 
 #[test]
@@ -431,8 +385,7 @@ fn actions_bound_execution_and_crash_precedes_a_same_time_timer() {
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
-            barrier.schedule(at(5), Action::Crash(id))?;
-            barrier.schedule(at(5), Action::Wake(id))
+            barrier.schedule(at(5), auto_key(), Action::Crash(Target::Machine(id)))
         })
         .unwrap();
     assert_eq!(
@@ -468,7 +421,7 @@ fn actions_bound_execution_and_crash_precedes_a_same_time_timer() {
 fn future_action_keeps_an_indefinitely_blocked_simulation_alive() {
     let mut driver = build(0, &[&[Op::Park]]);
     let id = ids(&mut driver)[0];
-    schedule(&mut driver, 50, Action::Crash(id)).unwrap();
+    schedule(&mut driver, 50, Action::Crash(Target::Machine(id))).unwrap();
     assert_eq!(
         driver.step(at(10)).unwrap(),
         StepOutcome::BarrierReached { at: at(10) }
@@ -515,7 +468,7 @@ fn crash_failure_and_backwards_step_prevent_retry() {
     )
     .unwrap();
     let id = ids(&mut driver)[0];
-    schedule(&mut driver, 3, Action::Crash(id)).unwrap();
+    schedule(&mut driver, 3, Action::Crash(Target::Machine(id))).unwrap();
     assert!(matches!(driver.step(at(3)), Err(Error::Machine { .. })));
     assert!(matches!(driver.step(at(4)), Err(Error::Failed)));
     let mut driver = build(3, &[&[Op::Park]]);
@@ -528,11 +481,15 @@ fn invalid_schedule_does_not_mutate_the_queue_or_poison_the_driver() {
     let mut driver = build(3, &[&[Op::Exit]]);
     let id = ids(&mut driver)[0];
     assert!(matches!(
-        schedule(&mut driver, 2, Action::Crash(id)),
+        schedule(&mut driver, 2, Action::Crash(Target::Machine(id))),
         Err(Error::PastTime { .. })
     ));
     assert!(matches!(
-        schedule(&mut driver, 3, Action::Wake(MachineId(99))),
+        schedule(
+            &mut driver,
+            3,
+            Action::Pause(Target::Machine(MachineId(99)))
+        ),
         Err(Error::UnknownMachine(_))
     ));
     assert_eq!(
@@ -562,7 +519,7 @@ fn quantum_boundaries_survive_short_steps_actions_and_additions() {
     driver
         .with_barrier(|barrier| {
             let id = barrier.add(|| Ok(machine(1, &[Op::Park])))?;
-            barrier.schedule(at(15), Action::Crash(id))
+            barrier.schedule(at(15), auto_key(), Action::Crash(Target::Machine(id)))
         })
         .unwrap();
     for end in [15, 17, 27, 37] {
@@ -668,12 +625,12 @@ fn worker_count_preserves_barriers_machine_progress_and_action_order() {
             },
         )
         .unwrap();
-        schedule(&mut driver, 7, Action::Wake(MachineId(2))).unwrap();
-        schedule(&mut driver, 7, Action::Crash(MachineId(2))).unwrap();
+        schedule(&mut driver, 7, Action::Pause(Target::Machine(MachineId(2)))).unwrap();
+        schedule(&mut driver, 7, Action::Crash(Target::Machine(MachineId(2)))).unwrap();
         let mut outcomes = Vec::new();
         loop {
             let outcome = driver.step(at(100)).unwrap();
-            outcomes.push(outcome);
+            outcomes.push(outcome.clone());
             if matches!(outcome, StepOutcome::Finished { .. }) {
                 break;
             }
@@ -692,8 +649,9 @@ fn worker_count_preserves_barriers_machine_progress_and_action_order() {
                     .collect::<Vec<_>>())
             })
             .unwrap();
-        // The wake preceding the crash must run, even though both are due at 7.
-        assert_eq!(machines[2].1, [(2, 0, 7), (2, 7, 7)]);
+        // Both inputs' effects apply before the same-time timer: the paused
+        // machine crashes without ever running its failing work.
+        assert_eq!(machines[2].1, [(2, 0, 7)]);
         let observed = (outcomes, machines);
         if let Some(reference) = &reference {
             assert_eq!(&observed, reference);
@@ -951,8 +909,8 @@ fn machine_rng_cursors_follow_identity_across_work_stealing_and_failed_addition(
                         reached: 0,
                     })
                 })?;
-                barrier.schedule(at(20), Action::Pause(id))?;
-                barrier.schedule(at(40), Action::Resume(id))?;
+                barrier.schedule(at(20), auto_key(), Action::Pause(Target::Machine(id)))?;
+                barrier.schedule(at(40), auto_key(), Action::Resume(Target::Machine(id)))?;
                 // Capturing machine state never borrows or advances its RNG.
                 let first = barrier.machines().next().unwrap().0;
                 barrier.snapshot(first)?;
@@ -992,7 +950,9 @@ fn machine_rng_cursors_follow_identity_across_work_stealing_and_failed_addition(
 #[test]
 fn stale_adoption_reports_are_rejected_and_poison_before_another_dispatch() {
     use std::sync::atomic::AtomicUsize;
-    for resume in [false, true] {
+    // Only resume admits a zero-budget run of an unchanged program now that
+    // host wakeups (Action::Wake) are removed.
+    for resume in [true] {
         for exited in [false, true] {
             let calls = Arc::new(AtomicUsize::new(0));
             let observed = calls.clone();
@@ -1032,16 +992,9 @@ fn stale_adoption_reports_are_rejected_and_poison_before_another_dispatch() {
             driver
                 .with_barrier(|barrier| {
                     if resume {
-                        barrier.schedule(at(0), Action::Pause(id))?;
+                        barrier.schedule(at(0), auto_key(), Action::Pause(Target::Machine(id)))?;
                     }
-                    barrier.schedule(
-                        at(5),
-                        if resume {
-                            Action::Resume(id)
-                        } else {
-                            Action::Wake(id)
-                        },
-                    )
+                    barrier.schedule(at(5), auto_key(), Action::Resume(Target::Machine(id)))
                 })
                 .unwrap();
             assert!(

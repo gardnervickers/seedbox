@@ -1,5 +1,5 @@
 use seedbox_machine::{
-    driver::{Action, Driver, EventKind, MachineId},
+    driver::{Action, Driver, EventKind, MachineId, Target},
     machine::{Machine, RunContext, StopReason, Timestamp},
     pv::{Output, Request, Response, SimulationControlId},
     rng::RngStream,
@@ -11,6 +11,9 @@ use std::{
 };
 #[path = "support/driver_definition.rs"]
 mod driver_definition;
+#[path = "support/input_key.rs"]
+mod input_key;
+use input_key::auto_key;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
@@ -168,7 +171,7 @@ fn definitionless_add_and_zero_sleep_finish_due_processing_without_guest_progres
     let extra = driver
         .with_barrier(|b| {
             for id in &ids {
-                b.schedule(at(0), Action::Pause(*id))?;
+                b.schedule(at(0), auto_key(), Action::Pause(Target::Machine(*id)))?;
             }
             b.add(|| {
                 Ok(Caller {
@@ -193,7 +196,7 @@ fn definitionless_add_and_zero_sleep_finish_due_processing_without_guest_progres
                 b.stopped(extra)?,
                 StopReason::Blocked { deadline: None, .. }
             ));
-            b.schedule(at(10), Action::Resume(ids[1]))
+            b.schedule(at(10), auto_key(), Action::Resume(Target::Machine(ids[1])))
         })
         .unwrap();
     driver.step(at(20)).unwrap();
@@ -242,9 +245,9 @@ fn queued_pair(
     let ids = driver
         .with_barrier(|b| {
             let ids: Vec<_> = b.machines().map(|(id, _)| id).collect();
-            b.schedule(at(0), Action::Pause(ids[0]))?;
+            b.schedule(at(0), auto_key(), Action::Pause(Target::Machine(ids[0])))?;
             if crash_peer {
-                b.schedule(at(0), Action::Crash(ids[3]))?;
+                b.schedule(at(0), auto_key(), Action::Crash(Target::Machine(ids[3])))?;
             }
             Ok(ids)
         })

@@ -1,6 +1,6 @@
 //! Host pacing at committed barriers, independent of simulation scheduling.
 
-use super::{Action, Error, Position};
+use super::{Error, FaultRecord, Position};
 use std::{
     num::NonZeroU32,
     time::{Duration, Instant},
@@ -20,7 +20,7 @@ pub enum PlaybackRate {
 }
 
 /// Control state observed at a stopped simulation boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackStatus {
     pub position: Position,
     pub rate: PlaybackRate,
@@ -28,10 +28,10 @@ pub struct PlaybackStatus {
     pub stepping: bool,
     /// Permanent stop was requested. No further machine execution is permitted.
     pub stopped: bool,
-    /// A one-shot stop remains armed for the next effective queued crash.
-    pub before_next_crash: bool,
-    /// The next action is retained, with its effect still unapplied.
-    pub before_action: Option<Action>,
+    /// A one-shot stop remains armed for the next effective fault effect.
+    pub before_next_fault: bool,
+    /// The held fault, admitted but with its effect still unapplied.
+    pub before_fault: Option<FaultRecord>,
 }
 
 #[derive(Default)]
@@ -40,7 +40,7 @@ pub(super) struct Playback {
     anchor: Option<(u64, Instant)>,
     step_after: Option<u64>,
     pub(super) before_next: bool,
-    pub(super) held: Option<Action>,
+    pub(super) held: Option<FaultRecord>,
     pub(super) stopped: bool,
 }
 
@@ -51,8 +51,8 @@ impl Playback {
             rate: self.rate,
             stepping: self.step_after.is_some(),
             stopped: self.stopped,
-            before_next_crash: self.before_next,
-            before_action: self.held,
+            before_next_fault: self.before_next,
+            before_fault: self.held.clone(),
         }
     }
 
@@ -88,9 +88,9 @@ impl Playback {
         self.step_after = None;
     }
 
-    pub(super) fn hold(&mut self, action: Action, position: Position, now: Instant) {
+    pub(super) fn hold(&mut self, fault: FaultRecord, position: Position, now: Instant) {
         self.set_rate(PlaybackRate::Paused, position, now);
-        self.held = Some(action);
+        self.held = Some(fault);
     }
 
     /// No sleep is performed here. Callers remain responsible for processing

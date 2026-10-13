@@ -1,6 +1,6 @@
 //! Public automatic-service ordering with timed outputs and actual inbox ACKs.
 use seedbox_machine::{
-    driver::{Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome},
+    driver::{Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome, Target},
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     pv::{
         ApplicationCommand, CommandResult, Output, Request, Response, SimulationControlId, Stream,
@@ -10,6 +10,9 @@ use seedbox_machine::{
 use std::{collections::VecDeque, num::NonZeroU32, time::Duration};
 #[path = "support/driver_definition.rs"]
 mod driver_definition;
+#[path = "support/input_key.rs"]
+mod input_key;
+use input_key::auto_key;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
@@ -201,7 +204,7 @@ impl World {
         let ids: Vec<_> = driver
             .with_barrier(|b| {
                 let ids: Vec<_> = b.machines().map(|(id, _)| id).collect();
-                b.schedule(at(0), Action::Pause(ids[0]))?;
+                b.schedule(at(0), auto_key(), Action::Pause(Target::Machine(ids[0])))?;
                 Ok(ids)
             })
             .unwrap();
@@ -431,7 +434,13 @@ fn positive_sleep_wakes_at_admission_plus_duration_even_if_caller_exits() {
         if crash {
             world
                 .driver
-                .with_barrier(|b| b.schedule(at(11), Action::Crash(world.caller)))
+                .with_barrier(|b| {
+                    b.schedule(
+                        at(11),
+                        auto_key(),
+                        Action::Crash(Target::Machine(world.caller)),
+                    )
+                })
                 .unwrap();
         }
         world.advance(16);
@@ -489,7 +498,13 @@ fn accepted_peer_effect_finishes_after_its_caller_exits() {
     assert!(peer.acknowledgments.is_empty());
     world
         .driver
-        .with_barrier(|b| b.schedule(at(11), Action::Crash(world.caller)))
+        .with_barrier(|b| {
+            b.schedule(
+                at(11),
+                auto_key(),
+                Action::Crash(Target::Machine(world.caller)),
+            )
+        })
         .unwrap();
     world.advance(11);
     world.advance(13);

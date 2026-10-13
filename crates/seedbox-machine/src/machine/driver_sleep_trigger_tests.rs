@@ -1,6 +1,7 @@
 //! Native Driver/service evidence with private backend snapshot reconstruction.
 //! Restoring machines in place keeps Driver-owned time, queues, control state and
 //! RNG cursors intact; this is not a whole-simulation snapshot API.
+use crate::driver::{fixture::auto_key, Target};
 use crate::{
     driver::{Action, Driver, MachineId, MachineResponse, StepOutcome},
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
@@ -168,7 +169,7 @@ where
     let (oracle, peer) = driver
         .with_barrier(|b| {
             let ids: Vec<_> = b.machines().map(|(id, _)| id).collect();
-            b.schedule(at(0), Action::Pause(ids[0]))?;
+            b.schedule(at(0), auto_key(), Action::Pause(Target::Machine(ids[0])))?;
             Ok((ids[0], ids[1]))
         })
         .unwrap();
@@ -187,7 +188,7 @@ where
             .with_barrier(|b| Ok(b.playback().position.at))
             .unwrap();
         let result = driver.step(at(now.as_nanos() + QUANTUM)).unwrap();
-        outcomes.push(result);
+        outcomes.push(result.clone());
         events.extend(
             driver
                 .drain_events()
@@ -199,7 +200,13 @@ where
         );
         if !resumed && output(&events, peer, Stream::Stdout) == b"PEER_RUNNING\n" {
             driver
-                .with_barrier(|b| b.schedule(b.playback().position.at, Action::Resume(oracle)))
+                .with_barrier(|b| {
+                    b.schedule(
+                        b.playback().position.at,
+                        auto_key(),
+                        Action::Resume(Target::Machine(oracle)),
+                    )
+                })
                 .unwrap();
             resumed = true;
         }

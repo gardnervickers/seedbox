@@ -1,10 +1,22 @@
+//! Host-scheduled process commands: admitted through the control policy,
+//! dispatched with Driver-allocated command IDs and settled by acknowledgment.
 use seedbox_machine::{
-    driver::{Action, Driver, Error, EventKind, MachineId, MachineResponse},
+    driver::{
+        Action, Driver, Error, Event, EventKind, FaultAction, FaultOrigin, MachineId,
+        MachineResponse, PlaybackRate, RejectionReason, SettlementStatus, StepOutcome, Target,
+    },
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     pv::{ApplicationCommand, CommandResult, Request, Response},
     rng::RngStream,
 };
-use std::{io, num::NonZeroU32, time::Duration};
+use std::{io, time::Duration};
+#[path = "support/driver_definition.rs"]
+mod driver_definition;
+#[path = "support/input_key.rs"]
+mod input_key;
+use input_key::{auto_key, key};
+
+/// Announces readiness once per boot and acknowledges every command.
 #[derive(Clone, Default)]
 struct Fixture {
     boot: u64,
@@ -12,6 +24,9 @@ struct Fixture {
     work: u64,
     exit: Option<ExitReason>,
     fail: bool,
+    silent: bool,
+    ready: bool,
+    commands: Vec<(u64, u32, ApplicationCommand)>,
 }
 impl Machine for Fixture {
     type Context = ();
@@ -23,14 +38,19 @@ impl Machine for Fixture {
         upto: Timestamp,
     ) -> Result<StopReason, io::Error> {
         let now = Timestamp::from_nanos(context.clock.now());
+        let emit = |context: &mut RunContext<'_, ()>, payload| {
+            context
+                .outbox
+                .emit(seedbox_machine::pv::Output { at: now, payload })
+                .unwrap()
+        };
         while let Some(input) = context.inbox.take() {
             match input.payload {
                 Request::Reboot => {
                     self.boot += 1;
                     self.resets += 1;
                     self.exit = None;
-                    let mut byte = [0];
-                    context.rng.fill_bytes(&mut byte);
+                    self.ready = false;
                 }
                 Request::Crash => {
                     if self.exit.is_none() {
@@ -38,17 +58,15 @@ impl Machine for Fixture {
                     }
                 }
                 Request::Shutdown => {}
-                Request::Application { id, .. } if self.exit.is_none() => {
-                    context
-                        .outbox
-                        .emit(seedbox_machine::pv::Output {
-                            at: now,
-                            payload: Response::CommandAcknowledged {
-                                id,
-                                result: CommandResult::Completed,
-                            },
-                        })
-                        .unwrap();
+                Request::Application { id, command } if self.exit.is_none() => {
+                    self.commands.push((self.boot, id.get(), command));
+                    emit(
+                        context,
+                        Response::CommandAcknowledged {
+                            id,
+                            result: CommandResult::Completed,
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -62,6 +80,10 @@ impl Machine for Fixture {
                 reason,
             });
         }
+        if !self.ready && !self.silent {
+            self.ready = true;
+            emit(context, Response::Ready);
+        }
         self.work += upto.as_nanos() - now.as_nanos();
         Ok(StopReason::BoundaryReached)
     }
@@ -69,18 +91,27 @@ impl Machine for Fixture {
         Ok(self.clone())
     }
 }
-fn outputs(driver: &mut Driver<Fixture>) -> Vec<MachineResponse> {
-    driver
-        .drain_events()
-        .into_iter()
-        .filter_map(|event| match event.kind {
-            EventKind::Output(output) => Some(output),
+fn outputs(events: &[Event]) -> Vec<MachineResponse> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Output(output) => Some(output.clone()),
             _ => None,
         })
         .collect()
 }
-#[path = "support/driver_definition.rs"]
-mod driver_definition;
+fn settled(events: &[Event]) -> Vec<(String, FaultAction, SettlementStatus)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::FaultSettled { record, status, .. } => match &record.origin {
+                FaultOrigin::Input { key } => Some((key.to_string(), record.action, *status)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
 struct Rng;
 impl RngStream for Rng {
     fn fill_bytes(&mut self, bytes: &mut [u8]) {
@@ -90,7 +121,14 @@ impl RngStream for Rng {
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
-fn make() -> (Driver<Fixture>, MachineId) {
+const DEADLINE: Duration = Duration::from_nanos(1000);
+fn stop(target: MachineId) -> Action {
+    Action::Stop {
+        target: Target::Machine(target),
+        deadline: DEADLINE,
+    }
+}
+fn make_with(target: Fixture) -> (Driver<Fixture>, MachineId) {
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(10),
@@ -100,7 +138,13 @@ fn make() -> (Driver<Fixture>, MachineId) {
         driver_definition::definition("oracle"),
         vec![driver_definition::definition("target")],
         Vec::new(),
-        |_| Ok(Fixture::default()),
+        move |definition| {
+            Ok(if definition.name == "target" {
+                target.clone()
+            } else {
+                Fixture::default()
+            })
+        },
     )
     .unwrap();
     let id = driver
@@ -109,147 +153,241 @@ fn make() -> (Driver<Fixture>, MachineId) {
     driver
         .with_barrier(|barrier| {
             let oracle = barrier.machines().next().unwrap().0;
-            barrier.schedule(at(0), Action::Pause(oracle))
+            barrier.schedule(
+                at(0),
+                key("oracle-pause"),
+                Action::Pause(Target::Machine(oracle)),
+            )
         })
         .unwrap();
     (driver, id)
 }
-fn app(id: u32) -> Request {
-    Request::Application {
-        id: NonZeroU32::new(id).unwrap(),
-        command: ApplicationCommand::Start,
-    }
+fn make() -> (Driver<Fixture>, MachineId) {
+    make_with(Fixture::default())
 }
-#[test]
-fn responses_keep_emitting_boot_across_reused_ids_and_drain_once() {
+/// Run until the target has reported readiness at `at(10)`.
+fn ready() -> (Driver<Fixture>, MachineId) {
     let (mut driver, id) = make();
-    driver
-        .with_barrier(|barrier| {
-            barrier.schedule_request(at(0), id, app(1))?;
-            barrier.schedule_request(at(0), id, Request::Reboot)?;
-            barrier.schedule_request(at(0), id, app(1))
-        })
-        .unwrap();
-    driver.step(at(0)).unwrap();
-    let outputs = outputs(&mut driver);
     assert_eq!(
-        outputs
-            .iter()
-            .map(|output| (output.machine, output.boot, output.at))
-            .collect::<Vec<_>>(),
-        [(id, 0, at(0)), (id, 1, at(0))]
+        driver.step(at(10)).unwrap(),
+        StepOutcome::BarrierReached { at: at(10) }
     );
-    assert!(outputs.iter().all(|output|matches!(output.payload,Response::CommandAcknowledged { id,result:CommandResult::Completed } if id.get()==1)));
-    assert!(driver.drain_events().is_empty());
-}
-#[test]
-fn paused_and_exited_requests_share_action_order_and_reboots_are_distinct() {
-    let (mut driver, id) = make();
-    driver
-        .with_barrier(|barrier| {
-            barrier.schedule(at(0), Action::Pause(id))?;
-            barrier.schedule_request(at(0), id, app(1))?;
-            barrier.schedule_request(at(0), id, Request::Crash)?;
-            barrier.schedule_request(at(0), id, app(2))?;
-            barrier.schedule(at(0), Action::Reboot(id))?;
-            barrier.schedule_request(at(0), id, Request::Reboot)?;
-            barrier.schedule_request(at(0), id, app(3))
-        })
-        .unwrap();
-    driver.step(at(0)).unwrap();
-    driver
-        .with_barrier(|barrier| {
-            assert!(!barrier.paused(id)?);
-            assert_eq!(barrier.machine(id)?.resets, 2);
-            assert_eq!(barrier.machine(id)?.work, 0);
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(
-        outputs(&mut driver)
-            .iter()
-            .map(|output| output.boot)
-            .collect::<Vec<_>>(),
-        [0, 2]
-    );
-}
-#[test]
-fn action_and_request_lifecycle_have_equivalent_effects() {
-    for request_mode in [false, true] {
-        let (mut driver, id) = make();
-        driver
-            .with_barrier(|barrier| {
-                for (request, action) in [
-                    (Request::Crash, Action::Crash(id)),
-                    (Request::Reboot, Action::Reboot(id)),
-                    (Request::Shutdown, Action::Shutdown(id)),
-                ] {
-                    if request_mode {
-                        barrier.schedule_request(at(0), id, request)?;
-                    } else {
-                        barrier.schedule(at(0), action)?;
-                    }
-                }
-                Ok(())
-            })
-            .unwrap();
-        driver.step(at(0)).unwrap();
-        driver
-            .with_barrier(|barrier| {
-                assert_eq!(barrier.machine(id)?.resets, 1);
-                assert_eq!(barrier.machine(id)?.exit, None);
-                assert_eq!(barrier.machine(id)?.work, 0);
-                Ok(())
-            })
-            .unwrap();
-    }
-}
-#[test]
-fn request_schedule_uses_barrier_time_and_mutation_validation() {
-    let (mut driver, id) = make();
-    driver.step(at(3)).unwrap();
-    driver
-        .with_barrier(|barrier| {
-            assert!(matches!(
-                barrier.schedule_request(at(2), id, app(1)),
-                Err(Error::PastTime { .. })
-            ));
-            barrier.stop();
-            assert!(matches!(
-                barrier.schedule_request(at(3), id, app(1)),
-                Err(Error::Stopped)
-            ));
-            Ok(())
-        })
-        .unwrap();
+    driver.drain_events();
+    (driver, id)
 }
 
 #[test]
-fn request_validation_rejects_foreign_identity_and_held_barrier() {
-    let (mut driver, id) = make();
-    let (mut other, _) = make();
-    let foreign = other
-        .with_barrier(|barrier| barrier.add(|| Ok(Fixture::default())))
-        .unwrap();
-    driver.with_barrier(|barrier| { assert!(matches!(barrier.schedule_request(at(0),foreign,app(1)),Err(Error::UnknownMachine(found)) if found==foreign)); barrier.schedule_request(at(0),id,Request::Crash)?; barrier.pause_before_next_crash(seedbox_machine::driver::PlaybackRate::Unlimited) }).unwrap();
-    assert!(matches!(
-        driver.step(at(0)).unwrap(),
-        seedbox_machine::driver::StepOutcome::BeforeAction { .. }
-    ));
+fn process_commands_receive_boot_scoped_ids_and_settle_on_acknowledgment() {
+    let (mut driver, id) = ready();
     driver
         .with_barrier(|barrier| {
-            assert!(matches!(
-                barrier.schedule_request(at(0), id, Request::Reboot),
-                Err(Error::BeforeAction)
-            ));
+            barrier.schedule(at(10), key("stop"), stop(id))?;
+            barrier.schedule(
+                at(11),
+                key("restart"),
+                Action::Restart {
+                    target: Target::Name("target".into()),
+                    deadline: DEADLINE,
+                },
+            )?;
+            barrier.schedule(at(12), key("crash"), Action::Crash(Target::Machine(id)))?;
+            barrier.schedule(at(13), key("reboot"), Action::Reboot(Target::Machine(id)))
+        })
+        .unwrap();
+    while driver
+        .with_barrier(|b| Ok(b.playback().position.at))
+        .unwrap()
+        < at(30)
+    {
+        driver.step(at(30)).unwrap();
+    }
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(
+                at(30),
+                key("freeze"),
+                Action::PauseProcess {
+                    target: Target::Machine(id),
+                    deadline: DEADLINE,
+                },
+            )?;
+            barrier.schedule(
+                at(31),
+                key("thaw"),
+                Action::ResumeProcess {
+                    target: Target::Machine(id),
+                    deadline: DEADLINE,
+                },
+            )
+        })
+        .unwrap();
+    driver.step(at(40)).unwrap();
+    driver.step(at(40)).unwrap();
+    let events = driver.drain_events();
+    assert_eq!(
+        settled(&events),
+        [
+            (
+                "stop".into(),
+                FaultAction::Application(ApplicationCommand::Stop),
+                SettlementStatus::Applied
+            ),
+            (
+                "restart".into(),
+                FaultAction::Application(ApplicationCommand::Start),
+                SettlementStatus::Applied
+            ),
+            (
+                "crash".into(),
+                FaultAction::Crash,
+                SettlementStatus::Applied
+            ),
+            (
+                "reboot".into(),
+                FaultAction::Reboot,
+                SettlementStatus::Applied
+            ),
+            (
+                "freeze".into(),
+                FaultAction::Application(ApplicationCommand::Pause),
+                SettlementStatus::Applied
+            ),
+            (
+                "thaw".into(),
+                FaultAction::Application(ApplicationCommand::Resume),
+                SettlementStatus::Applied
+            ),
+        ]
+    );
+    // Command IDs come from the Driver's per-boot allocator.
+    driver
+        .with_barrier(|barrier| {
+            assert_eq!(
+                barrier.machine(id)?.commands,
+                [
+                    (0, 1, ApplicationCommand::Stop),
+                    (0, 2, ApplicationCommand::Start),
+                    (1, 1, ApplicationCommand::Pause),
+                    (1, 2, ApplicationCommand::Resume),
+                ]
+            );
+            assert_eq!(barrier.machine(id)?.resets, 1);
             Ok(())
         })
         .unwrap();
-    assert!(outputs(&mut driver).is_empty());
+    // Acknowledgments keep their emitting boot.
+    let acks: Vec<_> = outputs(&events)
+        .into_iter()
+        .filter(|output| matches!(output.payload, Response::CommandAcknowledged { .. }))
+        .map(|output| output.boot)
+        .collect();
+    assert_eq!(acks, [0, 0, 1, 1]);
 }
 
 #[test]
-fn failed_run_poisons_before_any_response_can_be_observed() {
+fn process_commands_wait_for_readiness_and_unavailable_targets_reject_before_admission() {
+    let (mut driver, id) = make();
+    // Admitted at 0, dispatched once Ready commits at 10.
+    driver
+        .with_barrier(|barrier| barrier.schedule(at(0), key("early"), stop(id)))
+        .unwrap();
+    driver.step(at(10)).unwrap();
+    driver.step(at(10)).unwrap();
+    let events = driver.drain_events();
+    assert_eq!(
+        settled(&events),
+        [
+            (
+                "oracle-pause".into(),
+                FaultAction::Pause,
+                SettlementStatus::Applied
+            ),
+            (
+                "early".into(),
+                FaultAction::Application(ApplicationCommand::Stop),
+                SettlementStatus::Applied
+            ),
+        ]
+    );
+    let settled_at = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::FaultSettled {
+                record, outcome_at, ..
+            } if matches!(&record.origin, FaultOrigin::Input { key: k } if *k == key("early")) => {
+                *outcome_at
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(settled_at, at(10));
+    // A physically exited, uncrashed target fails ordinary-control preflight:
+    // rejected with its key and no fault ID (a trigger would admit and settle
+    // Unavailable instead; see the service policy tests).
+    let (mut driver, id) = make_with(Fixture {
+        exit: Some(ExitReason::Shutdown),
+        ..Fixture::default()
+    });
+    driver.step(at(10)).unwrap();
+    driver.drain_events();
+    driver
+        .with_barrier(|barrier| barrier.schedule(at(10), key("late"), stop(id)))
+        .unwrap();
+    driver.step(at(10)).unwrap();
+    let events = driver.drain_events();
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event.kind, EventKind::FaultAdmitted(_))));
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::InputRejected { key: found, rejection }
+            if *found == key("late") && rejection.reason == RejectionReason::TargetUnavailable
+    )));
+}
+
+#[test]
+fn an_unacknowledged_process_command_fails_the_driver_at_its_own_deadline() {
+    let (mut driver, id) = make_with(Fixture {
+        silent: true,
+        ..Fixture::default()
+    });
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(
+                at(0),
+                key("stop"),
+                Action::Stop {
+                    target: Target::Machine(id),
+                    deadline: Duration::from_nanos(25),
+                },
+            )
+        })
+        .unwrap();
+    let mut result = Ok(StepOutcome::Blocked { at: at(0) });
+    for _ in 0..10 {
+        result = driver.step(at(100));
+        if result.is_err() {
+            break;
+        }
+    }
+    assert!(matches!(result, Err(Error::Control(_))));
+    let events = driver.drain_events();
+    let failed = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::FaultSettled { record, status, .. }
+                if *status == SettlementStatus::Failed =>
+            {
+                Some((record.origin.clone(), event.at))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(failed, (FaultOrigin::Input { key: key("stop") }, at(25)));
+}
+
+#[test]
+fn failed_admission_run_poisons_before_any_response_can_be_observed() {
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(10),
@@ -271,7 +409,9 @@ fn failed_run_poisons_before_any_response_can_be_observed() {
         .with_barrier(|barrier| Ok(barrier.machines().next().unwrap().0))
         .unwrap();
     driver
-        .with_barrier(|barrier| barrier.schedule_request(at(0), id, app(1)))
+        .with_barrier(|barrier| {
+            barrier.schedule(at(0), auto_key(), Action::Shutdown(Target::Machine(id)))
+        })
         .unwrap();
     assert!(matches!(driver.step(at(0)), Err(Error::Machine { .. })));
     assert!(matches!(
@@ -279,84 +419,110 @@ fn failed_run_poisons_before_any_response_can_be_observed() {
         Err(Error::Failed)
     ));
     // The failed batch publishes none of its staged outputs.
-    assert!(outputs(&mut driver).is_empty());
+    assert!(outputs(&driver.drain_events()).is_empty());
     assert!(matches!(driver.step(at(0)), Err(Error::Failed)));
 }
 
 #[test]
-fn same_time_separate_commits_preserve_publication_sequence() {
-    let (mut driver, first) = make();
-    let second = driver
-        .with_barrier(|barrier| barrier.add(|| Ok(Fixture::default())))
+fn same_time_process_effects_follow_fifo_input_order() {
+    let (mut driver, first) = ready();
+    driver
+        .with_barrier(|barrier| {
+            let oracle = barrier.machines().next().unwrap().0;
+            barrier.schedule(at(10), auto_key(), Action::Resume(Target::Machine(oracle)))
+        })
+        .unwrap();
+    driver.step(at(20)).unwrap();
+    driver.drain_events();
+    let oracle = driver
+        .with_barrier(|barrier| Ok(barrier.machines().next().unwrap().0))
         .unwrap();
     driver
         .with_barrier(|barrier| {
-            barrier.schedule_request(at(0), second, app(1))?;
-            barrier.schedule_request(at(0), first, app(1))
+            barrier.schedule(at(20), auto_key(), stop(first))?;
+            barrier.schedule(at(20), auto_key(), stop(oracle))
         })
         .unwrap();
-    driver.step(at(0)).unwrap();
-    let responses = outputs(&mut driver);
+    assert!(matches!(
+        driver.step(at(20)).unwrap(),
+        StepOutcome::Finished {
+            reason: ExitReason::Shutdown,
+            ..
+        }
+    ));
+    let responses = outputs(&driver.drain_events());
     assert_eq!(
         responses
             .iter()
             .map(|response| response.machine)
             .collect::<Vec<_>>(),
-        [second, first]
+        [first, oracle]
     );
 }
 
 #[test]
-fn normalized_requests_preserve_same_time_controls_and_held_crash_cursor() {
-    use seedbox_machine::driver::{PlaybackRate, StepOutcome};
-    let (mut driver, id) = make();
+fn process_dispatch_is_held_before_the_next_fault_and_applies_once() {
+    let (mut driver, id) = ready();
     driver
         .with_barrier(|barrier| {
-            barrier.schedule(at(0), Action::Pause(id))?;
-            barrier.schedule_request(at(0), id, app(1))?;
-            barrier.schedule(at(0), Action::Crash(id))?;
-            barrier.schedule_request(at(0), id, Request::Reboot)?;
-            barrier.schedule_request(at(0), id, app(2))?;
-            barrier.pause_before_next_crash(PlaybackRate::Unlimited)
+            barrier.schedule(
+                at(10),
+                key("freeze"),
+                Action::PauseProcess {
+                    target: Target::Machine(id),
+                    deadline: DEADLINE,
+                },
+            )?;
+            barrier.schedule(at(10), key("crash"), Action::Crash(Target::Machine(id)))?;
+            barrier.pause_before_next_fault(PlaybackRate::Unlimited)
+        })
+        .unwrap();
+    let held = driver.step(at(10)).unwrap();
+    assert!(matches!(&held, StepOutcome::BeforeFault { at: t, fault }
+        if *t == at(10)
+            && fault.action == FaultAction::Application(ApplicationCommand::Pause)
+            && fault.origin == FaultOrigin::Input { key: key("freeze") }));
+    assert_eq!(driver.step(at(10)).unwrap(), held);
+    driver
+        .with_barrier(|barrier| {
+            assert!(barrier.machine(id)?.commands.is_empty());
+            barrier.pause_before_next_fault(PlaybackRate::Unlimited)
+        })
+        .unwrap();
+    let held = driver.step(at(10)).unwrap();
+    assert!(matches!(&held, StepOutcome::BeforeFault { fault, .. }
+        if fault.action == FaultAction::Crash));
+    driver
+        .with_barrier(|barrier| {
+            assert_eq!(
+                barrier.machine(id)?.commands,
+                [(0, 1, ApplicationCommand::Pause)]
+            );
+            assert!(barrier.machine(id)?.exit.is_none());
+            barrier.set_rate(PlaybackRate::Unlimited)
+        })
+        .unwrap();
+    driver.step(at(10)).unwrap();
+    driver
+        .with_barrier(|barrier| {
+            assert_eq!(barrier.machine(id)?.exit, Some(ExitReason::Crashed));
+            assert_eq!(barrier.machine(id)?.commands.len(), 1);
+            Ok(())
         })
         .unwrap();
     assert_eq!(
-        driver.step(at(0)).unwrap(),
-        StepOutcome::BeforeAction {
-            at: at(0),
-            action: Action::Crash(id)
-        }
-    );
-    driver
-        .with_barrier(|barrier| {
-            assert!(barrier.paused(id)?);
-            assert_eq!(barrier.machine(id)?.resets, 0);
-            assert_eq!(barrier.machine(id)?.work, 0);
-            Ok(())
-        })
-        .unwrap();
-    let responses = outputs(&mut driver);
-    assert_eq!(responses.len(), 1);
-    assert_eq!(responses[0].boot, 0);
-    assert!(
-        matches!(responses[0].payload, Response::CommandAcknowledged { id, .. } if id.get() == 1)
-    );
-    driver
-        .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Unlimited))
-        .unwrap();
-    driver.step(at(0)).unwrap();
-    driver
-        .with_barrier(|barrier| {
-            assert!(!barrier.paused(id)?);
-            assert_eq!(barrier.machine(id)?.resets, 1);
-            assert_eq!(barrier.machine(id)?.work, 0);
-            Ok(())
-        })
-        .unwrap();
-    let responses = outputs(&mut driver);
-    assert_eq!(responses.len(), 1);
-    assert_eq!(responses[0].boot, 1);
-    assert!(
-        matches!(responses[0].payload, Response::CommandAcknowledged { id, .. } if id.get() == 2)
+        settled(&driver.drain_events()),
+        [
+            (
+                "freeze".into(),
+                FaultAction::Application(ApplicationCommand::Pause),
+                SettlementStatus::Applied
+            ),
+            (
+                "crash".into(),
+                FaultAction::Crash,
+                SettlementStatus::Applied
+            ),
+        ]
     );
 }

@@ -1,3 +1,4 @@
+use super::fixture::auto_key;
 use super::*;
 
 fn controlled(workers: usize, programs: &[&[Op]]) -> Driver<TestMachine> {
@@ -86,7 +87,9 @@ fn rate_wait_holds_new_current_time_actions_until_host_pacing_permits() {
         StepOutcome::BarrierReached { at: at(10) }
     );
     driver
-        .with_barrier(|barrier| barrier.schedule(at(10), Action::Crash(id)))
+        .with_barrier(|barrier| {
+            barrier.schedule(at(10), auto_key(), Action::Crash(Target::Machine(id)))
+        })
         .unwrap();
     let before = status(&mut driver);
     assert!(matches!(

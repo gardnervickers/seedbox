@@ -2,19 +2,24 @@
 //! Native public Driver acceptance with ordinary targets and a required oracle.
 //! Guest inputs are shared with isolated Machine checks through explicit fixture paths.
 use seedbox_machine as machine_crate;
+#[path = "support/input_key.rs"]
+mod input_key;
 #[path = "support/prepared_application.rs"]
 mod prepared;
+use input_key::{auto_key, key};
 use seedbox_machine::{
-    driver::{Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome},
+    driver::{
+        Action, Driver, Event, EventKind, FaultOrigin, HealTarget, MachineId, MachineResponse,
+        RejectionReason, SettlementStatus, StepOutcome, Target,
+    },
     execution::ExecutionConfig,
     machine::{ExitReason, Machine, StopReason, Timestamp},
-    pv::{ApplicationCommand, CommandResult, Request, Response, SimulationControlId, Stream},
+    pv::{CommandResult, Response, SimulationControlId, Stream},
     rng::RngStream,
 };
 use std::{
     fmt::Debug,
     fs,
-    num::NonZeroU32,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -32,12 +37,6 @@ impl RngStream for FixtureRng {
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
-fn app(id: u32, command: ApplicationCommand) -> Request {
-    Request::Application {
-        id: NonZeroU32::new(id).unwrap(),
-        command,
-    }
-}
 fn input(name: &str) -> PathBuf {
     std::env::var_os(name)
         .unwrap_or_else(|| panic!("{name} is required"))
@@ -48,6 +47,8 @@ struct Session<M: Machine<Context = ()>> {
     driver: Driver<M>,
     ids: Vec<MachineId>,
     events: Vec<MachineResponse>,
+    /// Every drained event, including control facts.
+    all: Vec<Event>,
     started: Instant,
 }
 impl<M> Session<M>
@@ -61,9 +62,9 @@ where
             .unwrap()
     }
     fn drain(&mut self) {
-        let responses = self
-            .driver
-            .drain_events()
+        let drained = self.driver.drain_events();
+        self.all.extend(drained.iter().cloned());
+        let responses = drained
             .into_iter()
             .filter_map(|event| match event.kind {
                 EventKind::Output(output) => Some(output),
@@ -88,8 +89,46 @@ where
         }
         panic!(
             "native Driver failed to produce expected responses: {:?}",
-            self.events
+            self.all
+                .iter()
+                .filter(|event| !matches!(&event.kind, EventKind::Output(output)
+                    if matches!(output.payload, Response::BootConsole { .. })))
+                .collect::<Vec<_>>()
         );
+    }
+    /// Final status of the fault admitted for host input `name`.
+    fn settled(&self, name: &str) -> Option<SettlementStatus> {
+        self.all.iter().find_map(|event| match &event.kind {
+            EventKind::FaultSettled { record, status, .. }
+                if record.origin == FaultOrigin::Input { key: key(name) } =>
+            {
+                Some(*status)
+            }
+            _ => None,
+        })
+    }
+    fn rejected(&self, name: &str) -> Option<RejectionReason> {
+        self.all.iter().find_map(|event| match &event.kind {
+            EventKind::InputRejected {
+                key: found,
+                rejection,
+            } if *found == key(name) => Some(rejection.reason),
+            _ => None,
+        })
+    }
+    /// Schedule inputs at the current time and admit them at the next barrier.
+    fn apply(&mut self, inputs: impl IntoIterator<Item = (String, Action)>) {
+        let now = self.now();
+        self.driver
+            .with_barrier(|b| {
+                for (name, action) in inputs {
+                    b.schedule(now, key(&name), action)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        self.driver.step(now).unwrap();
+        self.drain();
     }
     fn ack(&self, machine: MachineId, boot: u64, command_id: u32) -> bool {
         self.events.iter().any(|event| event.machine == machine && event.boot == boot &&
@@ -107,13 +146,14 @@ where
             event.machine == machine
                 && event.boot == boot
                 && matches!(&event.payload, Response::SimulationControl { id, payload }
-                if u64::from(id.session.get()) == boot + 1 && id.request.get() == 1 &&
-                    payload == br#"{"version":1,"id":1,"op":"now"}"#)
+                if id.request.get() == 1 && payload == br#"{"version":1,"id":1,"op":"now"}"#)
         })
     }
+    /// The last committed control call of this boot.
     fn control_id(&self, machine: MachineId, boot: u64) -> SimulationControlId {
         self.events
             .iter()
+            .rev()
             .find_map(|event| match event.payload {
                 Response::SimulationControl { id, .. }
                     if event.machine == machine && event.boot == boot =>
@@ -151,11 +191,15 @@ where
             .unwrap()
     }
 }
+/// Host inputs drive real guests through the same control policy as guest
+/// calls: machine pause/resume, throttle/heal, every process command, graceful
+/// shutdown, crash and reboot. Process commands settle on the guest's own
+/// acknowledgment, never on queue acceptance.
 fn scenario<M>(
     workers: usize,
     definition: machine_crate::definition::MachineDefinition,
     mut construct: impl FnMut(&machine_crate::definition::MachineDefinition) -> M + Send + 'static,
-) -> Vec<MachineResponse>
+) -> Vec<Event>
 where
     M: Machine<Context = ()> + Send + 'static,
     M::Error: Debug + Send + 'static,
@@ -187,17 +231,22 @@ where
     let oracle = driver
         .with_barrier(|b| {
             let oracle = b.machines().next().unwrap().0;
-            b.schedule(at(0), Action::Pause(oracle))?;
+            b.schedule(
+                at(0),
+                key("oracle-pause"),
+                Action::Pause(Target::Machine(oracle)),
+            )?;
             Ok(oracle)
         })
         .unwrap();
-    let ids = driver
+    let ids: Vec<MachineId> = driver
         .with_barrier(|b| Ok(b.machines().skip(1).map(|(id, _)| id).collect()))
         .unwrap();
     let mut session = Session {
         driver,
-        ids,
+        ids: ids.clone(),
         events: Vec::new(),
+        all: Vec::new(),
         started: Instant::now(),
     };
     session.pump_until(|s| {
@@ -238,24 +287,21 @@ where
         timer_blocked,
         "both Linux guests must expose pending timer deadlines"
     );
+    let each = |name: &str, action: &dyn Fn(Target) -> Action| {
+        ids.iter()
+            .enumerate()
+            .map(|(index, &id)| (format!("{name}-{index}"), action(Target::Machine(id))))
+            .collect::<Vec<_>>()
+    };
+    let deadline = Duration::from_secs(5);
+    let all_settled = |s: &Session<M>, name: &str| {
+        (0..2).all(|index| s.settled(&format!("{name}-{index}")) == Some(SettlementStatus::Applied))
+    };
 
-    // Both identities may reuse the same command ID. Machine pause accepts
-    // ordered input at a barrier but does not execute the guest to acknowledge it.
-    let now = session.now();
-    session
-        .driver
-        .with_barrier(|b| {
-            for &id in &session.ids {
-                b.schedule(now, Action::Pause(id))?;
-            }
-            Ok(())
-        })
-        .unwrap();
-    session.driver.step(now).unwrap();
-    session.drain();
-    assert!(session.ids.iter().all(|&id| !session.ack(id, 0, 7)));
-    // Configuration admission on paused machines executes no guest work and
-    // preserves their blocked state/deadline. Later work uses the new price.
+    // Machine pause executes no guest work. Throttle on paused machines
+    // preserves their blocked state and deadline; later work uses the price.
+    session.apply(each("pause", &Action::Pause));
+    assert!(all_settled(&session, "pause"));
     let stopped = session
         .driver
         .with_barrier(|b| {
@@ -273,26 +319,29 @@ where
             ..
         }
     )));
-    session
-        .driver
-        .with_barrier(|b| {
-            b.schedule(
-                now,
-                Action::SetExecution {
-                    machine: session.ids[0],
-                    config: ExecutionConfig::new(1001).unwrap(),
-                },
-            )?;
-            b.schedule(
-                now,
-                Action::SetExecution {
-                    machine: session.ids[1],
-                    config: ExecutionConfig::new(2000).unwrap(),
-                },
-            )
-        })
-        .unwrap();
-    session.driver.step(now).unwrap();
+    session.apply(
+        ids.iter()
+            .zip([1001, 2000])
+            .enumerate()
+            .map(|(index, (&id, factor))| {
+                (
+                    format!("throttle-{index}"),
+                    Action::Throttle {
+                        target: Target::Machine(id),
+                        config: ExecutionConfig::new(factor).unwrap(),
+                    },
+                )
+            }),
+    );
+    assert!(all_settled(&session, "throttle"));
+    // Ordinary control policy refuses process commands for a paused machine.
+    session.apply(each("frozen-early", &|target| Action::PauseProcess {
+        target,
+        deadline,
+    }));
+    assert!((0..2).all(|index| {
+        session.rejected(&format!("frozen-early-{index}")) == Some(RejectionReason::InvalidState)
+    }));
     session
         .driver
         .with_barrier(|b| {
@@ -303,45 +352,48 @@ where
             Ok(())
         })
         .unwrap();
-    // Ordinary input may make the device runnable even with no CPU work.
-    // Offer it only after independently proving SetExecution preserves timers.
-    session
-        .driver
-        .with_barrier(|b| {
-            for &id in &session.ids {
-                b.schedule_request(now, id, app(7, ApplicationCommand::Pause))?;
-            }
-            Ok(())
-        })
-        .unwrap();
-    session.driver.step(now).unwrap();
-    session.drain();
-    assert!(session.ids.iter().all(|&id| !session.ack(id, 0, 7)));
-    session
-        .driver
-        .with_barrier(|b| {
-            for &id in &session.ids {
-                assert!(b.paused(id)?);
-                b.schedule(now, Action::Resume(id))?;
-            }
-            Ok(())
-        })
-        .unwrap();
-    session.pump_until(|s| s.ids.iter().all(|&id| s.ack(id, 0, 7)));
-
-    // Leave old-boot acknowledgments in Driver's response queue while each
-    // Reboot is admitted. Draining afterward must retain the emitting boot tag.
-    let now = session.now();
-    session
-        .driver
-        .with_barrier(|b| {
-            for &id in &session.ids {
-                b.schedule_request(now, id, app(8, ApplicationCommand::Stop))?;
-                b.schedule_request(now, id, Request::Shutdown)?;
-            }
-            Ok(())
-        })
-        .unwrap();
+    assert!(session.ids.iter().all(|&id| !session.ack(id, 0, 1)));
+    session.apply(each("resume", &Action::Resume));
+    // Each process command is dispatched with the boot's next command ID and
+    // settles on the guest's acknowledgment.
+    session.apply(each("freeze", &|target| Action::PauseProcess {
+        target,
+        deadline,
+    }));
+    session.pump_until(|s| all_settled(s, "freeze"));
+    assert!(session.ids.iter().all(|&id| session.ack(id, 0, 1)));
+    session.apply(
+        (0..2)
+            .map(|index| {
+                (
+                    format!("heal-{index}"),
+                    Action::Heal(HealTarget::Input(key(&format!("throttle-{index}")))),
+                )
+            })
+            .chain(each("thaw", &|target| Action::ResumeProcess {
+                target,
+                deadline,
+            })),
+    );
+    assert!(all_settled(&session, "heal"));
+    session.pump_until(|s| all_settled(s, "thaw"));
+    session.apply(each("stop", &|target| Action::Stop { target, deadline }));
+    session.pump_until(|s| all_settled(s, "stop"));
+    session.apply(each("restart", &|target| Action::Restart {
+        target,
+        deadline,
+    }));
+    session.pump_until(|s| {
+        all_settled(s, "restart")
+            && s.ids
+                .iter()
+                .all(|&id| s.output(id, 0, Stream::Stdout) == b"app\0out\napp\0out\n")
+    });
+    assert!(session
+        .ids
+        .iter()
+        .all(|&id| (1..=4).all(|command| session.ack(id, 0, command))));
+    session.apply(each("shutdown", &Action::Shutdown));
     for _ in 0..20000 {
         if session.all_exited() {
             break;
@@ -349,45 +401,21 @@ where
         assert!(session.started.elapsed() < Duration::from_secs(180));
         let upto = at(session.now().as_nanos() + QUANTUM);
         session.driver.step(upto).unwrap();
+        session.drain();
     }
     assert!(session.all_exited());
-    let reset = session.now();
-    let late = at(reset.as_nanos() + 1);
+    assert!(all_settled(&session, "shutdown"));
+    // An exited (uncrashed) machine cannot reboot until it is crashed. A Reboot
+    // queued with the Crash would be admitted first, so it follows separately.
     let retired = session
         .ids
         .iter()
         .map(|&id| (id, session.control_id(id, 0)))
         .collect::<Vec<_>>();
-    session
-        .driver
-        .with_barrier(|b| {
-            for &(id, old) in &retired {
-                // Schedule before admitting Reboot, but deliver to the fresh
-                // machine before it has created its first control connection.
-                b.schedule_request(
-                    late,
-                    id,
-                    Request::SimulationReply {
-                        id: old,
-                        payload: br#"{"version":1,"id":1,"stale":true}"#.to_vec(),
-                    },
-                )?;
-                b.schedule_request(reset, id, Request::Reboot)?;
-            }
-            Ok(())
-        })
-        .unwrap();
-    session.driver.step(reset).unwrap();
-    session.drain();
-    assert!(
-        session.ids.iter().all(|&id| session.ack(id, 0, 8)),
-        "old boot responses lost their association: {:?}",
-        session
-            .events
-            .iter()
-            .filter(|event| !matches!(event.payload, Response::BootConsole { .. }))
-            .collect::<Vec<_>>()
-    );
+    session.apply(each("crash", &Action::Crash));
+    assert!(all_settled(&session, "crash"));
+    session.apply(each("reboot", &Action::Reboot));
+    assert!(all_settled(&session, "reboot"));
     session.pump_until(|s| {
         s.ids.iter().all(|&id| {
             s.ready(id, 1)
@@ -401,64 +429,34 @@ where
         .iter()
         .map(|&id| (id, session.control_id(id, 1)))
         .collect::<Vec<_>>();
-    for (&(machine, old), &(_, new)) in retired.iter().zip(&fresh) {
+    for (&(_, old), &(_, new)) in retired.iter().zip(&fresh) {
         assert_eq!(new.session.get(), old.session.get() + 1);
         assert_eq!(new.request.get(), 1);
-        assert!(session.events.iter().any(|event| event.machine == machine
-            && event.boot == 1
-            && event.at > late
-            && matches!(event.payload, Response::SimulationControl { id, .. } if id == new)));
     }
-    let now = session.now();
-    session
-        .driver
-        .with_barrier(|b| {
-            for &(id, old) in &retired {
-                // Adversarial retired replies travel through the ordinary inbox.
-                // Driver already answered the fresh call; this old destination
-                // must be ignored without disturbing subsequent guest commands.
-                b.schedule_request(
-                    now,
-                    id,
-                    Request::SimulationReply {
-                        id: old,
-                        payload: br#"{"version":1,"id":1,"stale":true}"#.to_vec(),
-                    },
-                )?;
-                b.schedule_request(now, id, app(7, ApplicationCommand::Pause))?;
-            }
-            Ok(())
+    // The fresh boot's allocator restarts; the new boot is bound at admission.
+    session.apply(each("freeze-again", &|target| Action::PauseProcess {
+        target,
+        deadline,
+    }));
+    session.pump_until(|s| all_settled(s, "freeze-again"));
+    assert!(session.ids.iter().all(|&id| session.ack(id, 1, 1)));
+    session.apply(each("pause-again", &Action::Pause));
+    session.apply(each("thaw-paused", &|target| Action::ResumeProcess {
+        target,
+        deadline,
+    }));
+    assert!((0..2).all(|index| {
+        session.rejected(&format!("thaw-paused-{index}")) == Some(RejectionReason::InvalidState)
+    }));
+    session.apply(each("resume-again", &Action::Resume));
+    session.apply(
+        each("thaw-again", &|target| Action::ResumeProcess {
+            target,
+            deadline,
         })
-        .unwrap();
-    session.pump_until(|s| s.ids.iter().all(|&id| s.ack(id, 1, 7)));
-
-    // Resume the application before graceful shutdown in the same FIFO while
-    // machine execution is paused. No acknowledgment can appear until resume.
-    let now = session.now();
-    session
-        .driver
-        .with_barrier(|b| {
-            for &id in &session.ids {
-                b.schedule(now, Action::Pause(id))?;
-                b.schedule_request(now, id, app(8, ApplicationCommand::Resume))?;
-                b.schedule_request(now, id, Request::Shutdown)?;
-            }
-            Ok(())
-        })
-        .unwrap();
-    session.driver.step(now).unwrap();
-    session.drain();
-    assert!(session.ids.iter().all(|&id| !session.ack(id, 1, 8)));
-    session
-        .driver
-        .with_barrier(|b| {
-            for &id in &session.ids {
-                assert!(b.paused(id)?);
-                b.schedule(now, Action::Resume(id))?;
-            }
-            Ok(())
-        })
-        .unwrap();
+        .into_iter()
+        .chain(each("shutdown-again", &Action::Shutdown)),
+    );
     for _ in 0..20000 {
         if session.all_exited() {
             break;
@@ -472,10 +470,16 @@ where
         session.drain();
     }
     assert!(session.all_exited());
+    assert!(all_settled(&session, "thaw-again"));
     for &id in &session.ids {
         assert!(
-            session.ack(id, 1, 8),
+            session.ack(id, 1, 2),
             "shutdown overtook application resume"
+        );
+        assert_eq!(
+            session.output(id, 0, Stream::Stdout),
+            b"app\0out\napp\0out\ncleaned\n",
+            "commanded Stop terminates without the graceful cleanup"
         );
         assert_eq!(
             session.output(id, 1, Stream::Stdout),
@@ -487,12 +491,10 @@ where
         .events
         .iter()
         .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. })));
-    assert!(session.driver.drain_events().is_empty());
-    // Each ordinary machine emits one control call from each boot. Driver
-    // interprets and replies automatically; emitted calls stay drainable.
+    // Each application session emits its one control call; Restart starts a
+    // second session in boot zero. Driver replies automatically.
     for &machine in &session.ids {
-        for boot in [0, 1] {
-            assert!(session.initial_control(machine, boot));
+        for (boot, sessions) in [(0, 2), (1, 1)] {
             assert_eq!(
                 session
                     .events
@@ -501,8 +503,7 @@ where
                         && event.boot == boot
                         && matches!(event.payload, Response::SimulationControl { .. }))
                     .count(),
-                1,
-                "control publication must occur exactly once per machine and boot"
+                sessions,
             );
         }
     }
@@ -511,7 +512,13 @@ where
     let now = session.now();
     session
         .driver
-        .with_barrier(|b| b.schedule(now, Action::Crash(oracle)))
+        .with_barrier(|b| {
+            b.schedule(
+                now,
+                key("oracle-crash"),
+                Action::Crash(Target::Machine(oracle)),
+            )
+        })
         .unwrap();
     let finished = StepOutcome::Finished {
         at: now,
@@ -522,17 +529,21 @@ where
         session.driver.step(at(now.as_nanos() + QUANTUM)).unwrap(),
         finished
     );
+    session.drain();
     assert!(session.all_exited());
-    // Boot serial output is diagnostic; compare the full typed application and
-    // control trace, including canonical timestamps, IDs, boot tags and order.
+    // Boot serial output is diagnostic; compare the full event stream,
+    // including canonical timestamps, fault IDs, keys, boot tags and order.
     session
-        .events
+        .all
         .into_iter()
-        .filter(|event| !matches!(event.payload, Response::BootConsole { .. }))
+        .filter(|event| {
+            !matches!(&event.kind, EventKind::Output(output)
+                if matches!(output.payload, Response::BootConsole { .. }))
+        })
         .collect()
 }
 
-fn tcg(workers: usize) -> Vec<MachineResponse> {
+fn tcg(workers: usize) -> Vec<Event> {
     let definition = prepared::definition(
         fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
         256 << 20,
@@ -554,7 +565,7 @@ fn tcg_driver_queues_boot_tags_and_worker_count_match() {
     assert_eq!(serial, tcg(4));
 }
 #[cfg(seedbox_pv)]
-fn pv(workers: usize) -> Vec<MachineResponse> {
+fn pv(workers: usize) -> Vec<Event> {
     let definition = prepared::definition(
         fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
         128 << 20,
@@ -572,7 +583,7 @@ fn pv(workers: usize) -> Vec<MachineResponse> {
 #[test]
 #[ignore = "requires native PV hypervisor and SEEDBOX_PV_SERVICE_INITRD static guest fixtures"]
 fn pv_driver_queues_boot_tags_and_worker_count_match() {
-    assert_eq!(pv(1), pv(2));
+    assert_eq!(pv(1), pv(4));
 }
 
 /// A real guest consumes every automatic RPC reply. The peer's Stop/Restart
@@ -639,7 +650,7 @@ where
     let (oracle, peer) = driver
         .with_barrier(|b| {
             let ids: Vec<_> = b.machines().map(|(id, _)| id).collect();
-            b.schedule(at(0), Action::Pause(ids[0]))?;
+            b.schedule(at(0), auto_key(), Action::Pause(Target::Machine(ids[0])))?;
             Ok((ids[0], ids[1]))
         })
         .unwrap();
@@ -647,6 +658,7 @@ where
         driver,
         ids: vec![peer],
         events: Vec::new(),
+        all: Vec::new(),
         started: Instant::now(),
     };
     session
@@ -654,7 +666,7 @@ where
     let now = session.now();
     session
         .driver
-        .with_barrier(|b| b.schedule(now, Action::Resume(oracle)))
+        .with_barrier(|b| b.schedule(now, auto_key(), Action::Resume(Target::Machine(oracle))))
         .unwrap();
     let mut outcomes = Vec::new();
     let mut saw_paused = false;
@@ -668,7 +680,7 @@ where
         );
         let upto = at(session.now().as_nanos() + QUANTUM);
         let outcome = session.driver.step(upto).unwrap();
-        outcomes.push(outcome);
+        outcomes.push(outcome.clone());
         session.drain();
         let bytes = session.output(oracle, 0, Stream::Stdout);
         let output = std::str::from_utf8(&bytes).unwrap();
@@ -924,7 +936,7 @@ where
         );
         let outcome = driver.step(at(now.as_nanos() + QUANTUM)).unwrap();
         events.extend(driver.drain_events());
-        outcomes.push(outcome);
+        outcomes.push(outcome.clone());
         match outcome {
             StepOutcome::BarrierReached { at } => now = at,
             StepOutcome::Finished {
@@ -1075,6 +1087,7 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
         driver,
         ids: vec![],
         events: vec![],
+        all: vec![],
         started: Instant::now(),
     };
     loop {

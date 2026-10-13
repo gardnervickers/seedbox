@@ -1,5 +1,6 @@
 use super::*;
 use crate::clock::Clock;
+use crate::driver::{fixture::auto_key, Target};
 use crate::rng::SeededRng;
 use std::sync::Arc;
 type TcgMachine = crate::machine::test_environment::Environment<super::TcgMachine>;
@@ -232,8 +233,8 @@ fn driver_resumes_a_runnable_guest_without_replaying_paused_instructions() {
     let id = driver
         .with_barrier(|barrier| {
             let id = barrier.machines().next().unwrap().0;
-            barrier.schedule(at(3), Action::Pause(id))?;
-            barrier.schedule(at(20), Action::Resume(id))?;
+            barrier.schedule(at(3), auto_key(), Action::Pause(Target::Machine(id)))?;
+            barrier.schedule(at(20), auto_key(), Action::Resume(Target::Machine(id)))?;
             Ok(id)
         })
         .unwrap();
@@ -320,8 +321,8 @@ fn driver_resume_delivers_overdue_timer_before_post_resume_instructions() {
     let id = driver
         .with_barrier(|barrier| {
             let id = barrier.machines().next().unwrap().0;
-            barrier.schedule(at(7), Action::Pause(id))?;
-            barrier.schedule(at(2000), Action::Resume(id))?;
+            barrier.schedule(at(7), auto_key(), Action::Pause(Target::Machine(id)))?;
+            barrier.schedule(at(2000), auto_key(), Action::Resume(Target::Machine(id)))?;
             Ok(id)
         })
         .unwrap();

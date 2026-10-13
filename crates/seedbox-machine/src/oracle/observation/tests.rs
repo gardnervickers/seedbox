@@ -383,7 +383,7 @@ fn service_correlation_is_consumed_after_settlement_then_terminal() {
     }
     impl Adapter for Owner {
         fn resolve(&self, target: &Target) -> Result<Facts, OperationError> {
-            let (Target::Machine(name) | Target::Service(name)) = target;
+            let (Target::Machine(name) | Target::Service(name) | Target::Key(name)) = target;
             if name != "peer" {
                 return Err(OperationError::invalid("unknown target"));
             }

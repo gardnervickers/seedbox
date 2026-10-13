@@ -3,7 +3,7 @@
 //! See [`Driver::drain_events`](super::Driver::drain_events) for the ordering,
 //! failure and retention contract shared by every event.
 
-use super::{MachineId, MachineResponse, Position};
+use super::{FaultHandle, InputKey, InputRejection, MachineId, MachineResponse, Position};
 use crate::{
     execution::ExecutionConfig, machine::Timestamp, pv::ApplicationCommand, pv::SimulationControlId,
 };
@@ -56,8 +56,16 @@ pub enum EventKind {
         cause: Cause,
     },
     /// Control policy admitted a fault. Admission is not success; a matching
-    /// [`EventKind::FaultSettled`] reports its outcome.
+    /// [`EventKind::FaultSettled`] reports its outcome. A host input's
+    /// admission carries [`FaultOrigin::Input`] with its key.
     FaultAdmitted(FaultRecord),
+    /// Control policy refused a host input when it became due. `at` is its
+    /// due time. No fault ID or handle was allocated, nothing was applied and
+    /// the key is no longer live.
+    InputRejected {
+        key: InputKey,
+        rejection: InputRejection,
+    },
     /// The final outcome of an admitted fault. `at` is when the settlement was
     /// committed; `outcome_at` is when the outcome occurred, if known. Only
     /// [`SettlementStatus::Applied`] proves the change happened.
@@ -124,9 +132,10 @@ pub enum Transition {
 pub enum Cause {
     /// Driver construction.
     Initial,
-    /// A host barrier operation or scheduled host action/request.
+    /// A host barrier operation, such as [`Barrier::add`](super::Barrier::add).
     Host,
-    /// Dispatch of an admitted fault.
+    /// Dispatch of an admitted fault from any origin, including host inputs
+    /// scheduled with [`Barrier::schedule`](super::Barrier::schedule).
     Fault(FaultId),
 }
 
@@ -144,15 +153,16 @@ pub struct FaultRecord {
     /// at boot zero, including a subsequent construction failure.
     pub boot: u64,
     pub action: FaultAction,
-    /// Handle that can later heal this fault, if it installed one.
-    pub handle: Option<String>,
+    /// Handle that can later heal this fault, if it installs one; for a heal,
+    /// the handle it restores.
+    pub handle: Option<FaultHandle>,
     /// When the requester asked for the fault; for a guest call, the call's
     /// observation time, which can precede admission.
     pub requested_at: Timestamp,
 }
 
 /// Who requested a fault.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FaultOrigin {
     /// A guest simulation-control call from `machine`.
@@ -162,6 +172,9 @@ pub enum FaultOrigin {
     },
     /// A matched output trigger.
     Trigger { trigger: u32 },
+    /// A host input scheduled with [`Barrier::schedule`](super::Barrier::schedule).
+    /// Its `requested_at` is its admission time.
+    Input { key: InputKey },
 }
 
 /// Requested fault effect.
@@ -174,6 +187,8 @@ pub enum FaultAction {
     Resume,
     Crash,
     Reboot,
+    /// Latch graceful shutdown of the target boot (host inputs only).
+    Shutdown,
     /// Install an execution configuration (throttle).
     SetExecution(ExecutionConfig),
     /// Operate on the prepared application.

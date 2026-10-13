@@ -1,5 +1,6 @@
 use super::*;
 use crate::clock::Clock;
+use crate::driver::{fixture::auto_key, Target};
 use crate::rng::SeededRng;
 use std::sync::Arc;
 type TcgMachine = crate::machine::test_environment::Environment<super::TcgMachine>;
@@ -71,7 +72,7 @@ fn step(driver: &mut Driver<TcgMachine>, id: MachineId, now: &mut Timestamp, qua
         StepOutcome::BarrierReached { at } | StepOutcome::Finished { at, .. } => at,
         StepOutcome::Blocked { .. } => panic!("guest blocked without a timer"),
         StepOutcome::Waiting { .. }
-        | StepOutcome::BeforeAction { .. }
+        | StepOutcome::BeforeFault { .. }
         | StepOutcome::Stopped { .. } => panic!("unexpected playback control in test"),
     };
 }
@@ -580,7 +581,7 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
                 StepOutcome::BarrierReached { at } | StepOutcome::Finished { at, .. } => at,
                 StepOutcome::Blocked { .. } => panic!("Linux guests blocked without timers"),
                 StepOutcome::Waiting { .. }
-                | StepOutcome::BeforeAction { .. }
+                | StepOutcome::BeforeFault { .. }
                 | StepOutcome::Stopped { .. } => panic!("unexpected playback control in test"),
             };
             assert!(now >= before && now <= upto);
@@ -709,15 +710,13 @@ fn driver_playback_controls_preserve_real_machine_execution_and_pre_crash_state(
         }
         driver
             .with_barrier(|barrier| {
-                barrier.schedule(at(15), Action::Crash(id))?;
-                barrier.pause_before_next_crash(PlaybackRate::Unlimited)
+                barrier.schedule(at(15), auto_key(), Action::Crash(Target::Machine(id)))?;
+                barrier.pause_before_next_fault(PlaybackRate::Unlimited)
             })
             .unwrap();
-        let held = StepOutcome::BeforeAction {
-            at: at(15),
-            action: Action::Crash(id),
-        };
-        assert_eq!(driver.step(at(100)).unwrap(), held);
+        let held = driver.step(at(100)).unwrap();
+        assert!(matches!(&held, StepOutcome::BeforeFault { at: t, fault }
+            if *t == at(15) && fault.target == id && fault.action == crate::driver::FaultAction::Crash));
         for _ in 0..2 {
             assert_eq!(driver.step(at(100)).unwrap(), held);
         }

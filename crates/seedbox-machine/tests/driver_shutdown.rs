@@ -1,22 +1,26 @@
 mod driver_fixture;
 use driver_fixture::*;
 
+/// Schedule one input and admit it at the next barrier at the same time.
+fn apply(driver: &mut Driver<TestMachine>, time: u64, action: Action) -> StepOutcome {
+    driver
+        .with_barrier(|barrier| barrier.schedule(at(time), auto_key(), action))
+        .unwrap();
+    driver.step(at(time)).unwrap()
+}
+
 #[test]
-fn shutdown_after_reboot_targets_the_pending_boot() {
-    let mut driver = controlled(1, &[&[Op::Work(100)]]);
+fn shutdown_after_reboot_targets_the_new_boot() {
+    let mut driver = controlled_targets(1, &[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     assert_eq!(
         driver.step(at(1)).unwrap(),
         StepOutcome::BarrierReached { at: at(1) }
     );
-    driver
-        .with_barrier(|barrier| {
-            barrier.schedule(at(1), Action::Reboot(id))?;
-            barrier.schedule(at(1), Action::Shutdown(id))
-        })
-        .unwrap();
+    apply(&mut driver, 1, Action::Crash(Target::Machine(id)));
+    apply(&mut driver, 1, Action::Reboot(Target::Machine(id)));
     assert_eq!(
-        driver.step(at(1)).unwrap(),
+        apply(&mut driver, 1, Action::Shutdown(Target::Machine(id))),
         StepOutcome::BarrierReached { at: at(1) }
     );
     driver
@@ -43,7 +47,9 @@ fn shutdown_refreshes_blocked_scheduling_without_cpu_and_later_runs_exit() {
         StepOutcome::BarrierReached { at: at(1) }
     );
     driver
-        .with_barrier(|barrier| barrier.schedule(at(1), Action::Shutdown(id)))
+        .with_barrier(|barrier| {
+            barrier.schedule(at(1), auto_key(), Action::Shutdown(Target::Machine(id)))
+        })
         .unwrap();
     assert_eq!(
         driver.step(at(1)).unwrap(),
@@ -99,12 +105,12 @@ fn paused_shutdown_is_delivered_once_without_executing_cleanup_until_resume() {
     driver
         .with_barrier(|barrier| {
             for (time, action) in [
-                (0, Action::Pause(id)),
-                (5, Action::Shutdown(id)),
-                (5, Action::Shutdown(id)),
-                (10, Action::Resume(id)),
+                (0, Action::Pause(Target::Machine(id))),
+                (5, Action::Shutdown(Target::Machine(id))),
+                (5, Action::Shutdown(Target::Machine(id))),
+                (10, Action::Resume(Target::Machine(id))),
             ] {
-                barrier.schedule(at(time), action)?;
+                barrier.schedule(at(time), auto_key(), action)?;
             }
             Ok(())
         })
@@ -159,16 +165,16 @@ fn repeated_in_progress_and_exited_shutdown_requests_do_not_latch_or_deliver_aga
     driver
         .with_barrier(|barrier| {
             for (time, action) in [
-                (0, Action::Shutdown(id)),
-                (0, Action::Shutdown(id)),
-                (1, Action::Shutdown(id)),
-                (5, Action::Shutdown(id)),
+                (0, Action::Shutdown(Target::Machine(id))),
+                (0, Action::Shutdown(Target::Machine(id))),
+                (1, Action::Shutdown(Target::Machine(id))),
             ] {
-                barrier.schedule(at(time), action)?;
+                barrier.schedule(at(time), auto_key(), action)?;
             }
-            Ok(())
+            barrier.schedule(at(5), key("exited"), Action::Shutdown(Target::Machine(id)))
         })
         .unwrap();
+    driver.drain_events();
     assert_eq!(
         driver.step(at(100)).unwrap(),
         StepOutcome::BarrierReached { at: at(1) }
@@ -177,12 +183,20 @@ fn repeated_in_progress_and_exited_shutdown_requests_do_not_latch_or_deliver_aga
         driver.step(at(100)).unwrap(),
         StepOutcome::Blocked { at: at(5) }
     );
+    // A request to the physically exited boot is unavailable: no admission
+    // run, so the machine keeps its exit position.
+    assert!(driver.drain_events().iter().any(|event| matches!(
+        &event.kind,
+        EventKind::InputRejected { key: found, rejection }
+            if *found == key("exited")
+                && rejection.reason == seedbox_machine::driver::RejectionReason::TargetUnavailable
+    )));
     driver
         .with_barrier(|barrier| {
             assert_eq!(
                 barrier.stopped(id)?,
                 StopReason::Exited {
-                    reached: at(5),
+                    reached: at(2),
                     reason: ExitReason::Shutdown
                 }
             );
@@ -197,7 +211,9 @@ fn repeated_in_progress_and_exited_shutdown_requests_do_not_latch_or_deliver_aga
         let id = ids(&mut driver)[0];
         if crash {
             driver
-                .with_barrier(|barrier| barrier.schedule(at(0), Action::Crash(id)))
+                .with_barrier(|barrier| {
+                    barrier.schedule(at(0), auto_key(), Action::Crash(Target::Machine(id)))
+                })
                 .unwrap();
         }
         assert_eq!(
@@ -205,7 +221,9 @@ fn repeated_in_progress_and_exited_shutdown_requests_do_not_latch_or_deliver_aga
             StepOutcome::Blocked { at: at(0) }
         );
         driver
-            .with_barrier(|barrier| barrier.schedule(at(0), Action::Shutdown(id)))
+            .with_barrier(|barrier| {
+                barrier.schedule(at(0), auto_key(), Action::Shutdown(Target::Machine(id)))
+            })
             .unwrap();
         assert_eq!(
             driver.step(at(0)).unwrap(),
@@ -229,9 +247,9 @@ fn crash_and_reboot_discard_pending_or_delivered_shutdown_without_affecting_snap
         driver
             .with_barrier(|barrier| {
                 if paused {
-                    barrier.schedule(at(0), Action::Pause(id))?;
+                    barrier.schedule(at(0), auto_key(), Action::Pause(Target::Machine(id)))?;
                 }
-                barrier.schedule(at(0), Action::Shutdown(id))
+                barrier.schedule(at(0), auto_key(), Action::Shutdown(Target::Machine(id)))
             })
             .unwrap();
         let outcome = driver.step(at(0)).unwrap();
@@ -247,13 +265,13 @@ fn crash_and_reboot_discard_pending_or_delivered_shutdown_without_affecting_snap
             .with_barrier(|barrier| {
                 assert!(barrier.machine(id)?.shutdown_delivered);
                 let saved = barrier.snapshot(id)?;
-                barrier.schedule(at(0), Action::Crash(id))?;
-                barrier.schedule(at(0), Action::Reboot(id))?;
+                barrier.schedule(at(0), auto_key(), Action::Crash(Target::Machine(id)))?;
                 Ok(saved)
             })
             .unwrap();
+        driver.step(at(0)).unwrap();
         assert_eq!(
-            driver.step(at(0)).unwrap(),
+            apply(&mut driver, 0, Action::Reboot(Target::Machine(id))),
             StepOutcome::BarrierReached { at: at(0) }
         );
         driver
@@ -272,7 +290,7 @@ fn crash_and_reboot_discard_pending_or_delivered_shutdown_without_affecting_snap
         driver
             .with_barrier(|barrier| {
                 assert_eq!(barrier.machine(id)?.executed, 5);
-                barrier.schedule(at(5), Action::Shutdown(id))
+                barrier.schedule(at(5), auto_key(), Action::Shutdown(Target::Machine(id)))
             })
             .unwrap();
         assert_eq!(
@@ -302,8 +320,8 @@ fn shutdown_request_or_delivery_error_poisons_before_later_actions() {
         let ids = ids(&mut driver);
         let peer = driver
             .with_barrier(|barrier| {
-                barrier.schedule(at(5), Action::Shutdown(ids[0]))?;
-                barrier.schedule(at(5), Action::Wake(ids[1]))?;
+                barrier.schedule(at(5), auto_key(), Action::Shutdown(Target::Machine(ids[0])))?;
+                barrier.schedule(at(5), auto_key(), Action::Pause(Target::Machine(ids[1])))?;
                 Ok(barrier.machine(ids[1])?.log.clone())
             })
             .unwrap();
@@ -318,7 +336,7 @@ fn shutdown_request_or_delivery_error_poisons_before_later_actions() {
 }
 
 #[test]
-fn shutdown_does_not_consume_pre_crash_arm_and_worker_count_does_not_change_results() {
+fn every_effective_fault_holds_in_order_and_worker_count_does_not_change_results() {
     let mut reference = None;
     for workers in [1, 2, 4] {
         let mut driver = controlled(
@@ -328,38 +346,52 @@ fn shutdown_does_not_consume_pre_crash_arm_and_worker_count_does_not_change_resu
         let ids = ids(&mut driver);
         driver
             .with_barrier(|barrier| {
-                for (time, action) in [
-                    (3, Action::Pause(ids[0])),
-                    (5, Action::Shutdown(ids[0])),
-                    (7, Action::Resume(ids[0])),
-                    (7, Action::Shutdown(ids[0])),
-                    (8, Action::Crash(ids[1])),
+                for (time, name, action) in [
+                    (3, "pause", Action::Pause(Target::Machine(ids[0]))),
+                    (5, "shutdown", Action::Shutdown(Target::Machine(ids[0]))),
+                    (7, "resume", Action::Resume(Target::Machine(ids[0]))),
+                    (
+                        7,
+                        "shutdown-again",
+                        Action::Shutdown(Target::Machine(ids[0])),
+                    ),
+                    (8, "crash", Action::Crash(Target::Machine(ids[1]))),
                 ] {
-                    barrier.schedule(at(time), action)?;
+                    barrier.schedule(at(time), key(name), action)?;
                 }
-                barrier.pause_before_next_crash(PlaybackRate::Unlimited)
+                barrier.pause_before_next_fault(PlaybackRate::Unlimited)
             })
             .unwrap();
         let mut outcomes = Vec::new();
+        let mut holds = Vec::new();
         loop {
             let outcome = driver.step(at(100)).unwrap();
-            outcomes.push(outcome);
-            if matches!(outcome, StepOutcome::BeforeAction { .. }) {
+            outcomes.push(outcome.clone());
+            if let Some(fault) = held(&outcome) {
+                holds.push(fault);
+                // Rearming applies the held effect exactly once and stops
+                // before the next effective fault.
+                driver
+                    .with_barrier(|barrier| {
+                        barrier.pause_before_next_fault(PlaybackRate::Unlimited)
+                    })
+                    .unwrap();
+            }
+            if matches!(outcome, StepOutcome::Finished { .. }) {
                 break;
             }
-            assert!(outcomes.len() < 10);
+            assert!(outcomes.len() < 20);
         }
         assert_eq!(
-            *outcomes.last().unwrap(),
-            StepOutcome::BeforeAction {
-                at: at(8),
-                action: Action::Crash(ids[1])
-            }
+            holds,
+            [
+                (at(3), FaultAction::Pause, ids[0]),
+                (at(5), FaultAction::Shutdown, ids[0]),
+                (at(7), FaultAction::Resume, ids[0]),
+                (at(7), FaultAction::Shutdown, ids[0]),
+                (at(8), FaultAction::Crash, ids[1]),
+            ]
         );
-        driver
-            .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        outcomes.push(driver.step(at(100)).unwrap());
         assert_eq!(
             *outcomes.last().unwrap(),
             StepOutcome::Finished {
@@ -383,7 +415,7 @@ fn shutdown_does_not_consume_pre_crash_arm_and_worker_count_does_not_change_resu
                     .collect::<Vec<_>>())
             })
             .unwrap();
-        let result = (outcomes, observed);
+        let result = (outcomes, observed, driver.drain_events());
         if let Some(reference) = &reference {
             assert_eq!(&result, reference);
         } else {
