@@ -36,6 +36,7 @@ Open bugs found by the P0 probes (`C.*` signal and `cfzsync` tests, JVM and Go p
 | `jitspin W S MS` | flushes while threads call into the flushed code | 2 flushes in 3 s instead of thousands |
 | `pid1_raise_dfl` | PID 1 raising a signal with the default action | spins at 100% CPU |
 | `RedefineWrongMethod.java` | class redefinition with a thread parked in the class | JVM crash in `vframeStream` from `handle_wrong_method` |
+| `timer_sigwait timer\|kill thread\|self\|handler` | a process-directed signal for a thread in `sigwaitinfo`, or the one thread that unblocks it, while the main thread blocks in `pselect6` | never delivered (`timer self` and `kill handler` pass; `kill self`, with the signal already pending, waits forever); also with `drrun` and no client. A thread-directed `SIGEV_THREAD_ID` timer works |
 | `go_exec_flaky.sh` | runs `Go.exec` repeatedly | about 3% of runs lose a signal, crash a child or hang |
 
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple
