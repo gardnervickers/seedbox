@@ -20,10 +20,12 @@ pub(crate) struct Entry {
     pub kind: Kind,
 }
 
-/// Bound both slice and round buffering independently of reader speed.
+/// Bound both slice and round buffering independently of reader speed. What a
+/// buffer keeps depends only on the machine's committed output.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Buffer {
     entries: Vec<Entry>,
+    bytes: usize,
     lost: Option<Entry>,
 }
 
@@ -47,14 +49,26 @@ pub(crate) mod empty_checkpoint {
 }
 
 impl Buffer {
-    const CAPACITY: usize = 64;
+    /// Records one machine may publish per round.
+    const CAPACITY: usize = 8192;
+    /// Application-log bytes one machine may publish per round: 2048 full
+    /// chunks, bounding round memory independently of chunk sizes.
+    const BYTES: usize = 2048 * application_log::MAX_BYTES;
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty() && self.lost.is_none()
     }
 
     pub fn push(&mut self, entry: Entry) {
-        if self.entries.len() < Self::CAPACITY && self.lost.is_none() {
+        let bytes = match &entry.kind {
+            Kind::Log(chunk) => chunk.bytes.len(),
+            _ => 0,
+        };
+        if self.entries.len() < Self::CAPACITY
+            && self.bytes + bytes <= Self::BYTES
+            && self.lost.is_none()
+        {
+            self.bytes += bytes;
             self.entries.push(entry);
             return;
         }
@@ -75,11 +89,13 @@ impl Buffer {
     }
 
     pub fn drain(&mut self) -> impl Iterator<Item = Entry> + '_ {
+        self.bytes = 0;
         self.entries.drain(..).chain(self.lost.take())
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.bytes = 0;
         self.lost = None;
     }
 }
@@ -290,12 +306,13 @@ mod tests {
 
     #[test]
     fn slice_and_round_overflow_preserve_exact_omission_count() {
+        let per_slice = Buffer::CAPACITY as u64 + 36;
         let mut round = Buffer::default();
         for slice in 0..3 {
             let mut pending = Buffer::default();
-            for offset in 0..100 {
+            for offset in 0..per_slice {
                 pending.push(Entry {
-                    time_ns: slice * 100 + offset,
+                    time_ns: slice * per_slice + offset,
                     incarnation: 2,
                     kind: Kind::MalformedLog,
                 });
@@ -308,9 +325,49 @@ mod tests {
         let entries: Vec<_> = round.drain().collect();
         assert_eq!(entries.len(), Buffer::CAPACITY + 1);
         let gap = entries.last().unwrap();
-        assert_eq!(gap.kind, Kind::LogGap { records: 236 });
-        assert_eq!((gap.time_ns, gap.incarnation), (299, 2));
+        assert_eq!(
+            gap.kind,
+            Kind::LogGap {
+                records: 3 * per_slice - Buffer::CAPACITY as u64
+            }
+        );
+        assert_eq!((gap.time_ns, gap.incarnation), (3 * per_slice - 1, 2));
         assert!(round.is_empty());
+    }
+
+    #[test]
+    fn round_output_bytes_are_bounded_and_later_records_stay_behind_the_gap() {
+        let chunk = |bytes| Entry {
+            time_ns: 7,
+            incarnation: 1,
+            kind: Kind::Log(Chunk {
+                stream: Stream::Stdout,
+                bytes: vec![b'x'; bytes],
+            }),
+        };
+        let mut round = Buffer::default();
+        // Small chunks are bounded by record count, not bytes.
+        for _ in 0..Buffer::CAPACITY / 2 {
+            round.push(chunk(1));
+        }
+        assert_eq!(round.drain().count(), Buffer::CAPACITY / 2);
+        let full = Buffer::BYTES / application_log::MAX_BYTES;
+        for _ in 0..full {
+            round.push(chunk(application_log::MAX_BYTES));
+        }
+        round.push(chunk(1));
+        round.push(Entry {
+            time_ns: 8,
+            incarnation: 1,
+            kind: Kind::MalformedLog,
+        });
+        let entries: Vec<_> = round.drain().collect();
+        assert_eq!(entries.len(), full + 1);
+        let gap = entries.last().unwrap();
+        assert_eq!((gap.time_ns, &gap.kind), (8, &Kind::LogGap { records: 2 }));
+        // Draining restores the whole byte budget for the next round.
+        round.push(chunk(application_log::MAX_BYTES));
+        assert_eq!(round.drain().count(), 1);
     }
 
     #[test]
