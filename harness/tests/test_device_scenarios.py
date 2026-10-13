@@ -15,6 +15,8 @@ def driver(name):
 
 
 durability = driver('durability')
+waits = driver('blocked_waits')
+tcp = driver('tcp_checkpoint')
 groups = driver('process_groups')
 BLOCK = 4096
 
@@ -126,6 +128,78 @@ class DurabilityOracleTests(unittest.TestCase):
         plan = durability.crash_plan(random.Random(1))
         self.assertEqual({k for kind, k, _ in plan if kind == 'boundary'}, set(range(len(durability.PHASES) + 1)))
         self.assertEqual({k for kind, k, _ in plan if kind == 'inside'}, set(range(len(durability.PHASES))))
+
+
+class WaitOracleTests(unittest.TestCase):
+    def ledger(self):
+        deadline = 1000
+        done = {kind: {'woke_ns': deadline + 10} for kind in waits.KINDS}
+        for kind, token in waits.tokens().items():
+            done[kind]['token'] = token
+        for kind in ('pipe', 'timerfd', 'accept'):
+            done[kind]['extra'] = False
+        done['epoll'].update(events=1, extra=0)
+        done['timerfd']['expirations'] = 1
+        done['futex-timeout']['notified'] = False
+        return {'done': done, 'deadline_ns': deadline}
+
+    def test_exactly_once_completions_pass(self):
+        self.assertEqual(waits.verify(self.ledger(), waits.tokens()), [])
+
+    def test_each_violation_is_reported(self):
+        cases = [
+            lambda d: d['done'].pop('futex'),
+            lambda d: d['done']['pipe'].update(token=999),
+            lambda d: d['done']['accept'].update(extra=True),
+            lambda d: d['done']['epoll'].update(extra=1),
+            lambda d: d['done']['timerfd'].update(expirations=2),
+            lambda d: d['done']['futex-timeout'].update(notified=True),
+            lambda d: d['done']['nanosleep'].update(woke_ns=999),
+        ]
+        for mutate in cases:
+            ledger = self.ledger()
+            mutate(ledger)
+            self.assertTrue(waits.verify(ledger, waits.tokens()))
+
+
+class TcpOracleTests(unittest.TestCase):
+    def steps(self):
+        import hashlib
+        sent = tcp.WARMUP + tcp.FLOOD
+        digest = hashlib.sha256(b''.join(tcp.payload(0, s, tcp.DATA_BYTES) for s in range(sent))).hexdigest()
+        reply = hashlib.sha256(b''.join(tcp.payload(1, s, tcp.REPLY_BYTES)
+                                        for s in range(tcp.REPLY_FRAMES))).hexdigest()
+        return {'held': {'data_frames': tcp.WARMUP, 'held_at': 5},
+                'flood': {'sent_before_block': 200},
+                'continue': {'sent': sent, 'reply_frames': tcp.REPLY_FRAMES, 'reply_digest': reply,
+                             'echoes': tcp.TICKS},
+                'close': {'summary': {'frames': sent, 'digest': digest}, 'expected_digest': digest,
+                          'eof_after_summary': True},
+                'reconnect': {'verified': 10},
+                'server_end': {'ticks_echoed': tcp.TICKS, 'data_digest': digest}}
+
+    def test_complete_streams_pass(self):
+        tcp.verify(self.steps())
+
+    def test_each_violation_is_reported(self):
+        cases = [
+            lambda s: s['flood'].update(sent_before_block=tcp.WARMUP + tcp.FLOOD),
+            lambda s: s['continue'].update(reply_digest='0'),
+            lambda s: s['server_end'].update(ticks_echoed=tcp.TICKS + 1),
+            lambda s: s['close']['summary'].update(frames=1),
+            lambda s: s['close'].update(eof_after_summary=False),
+            lambda s: s['server_end'].update(data_digest='0'),
+        ]
+        for mutate in cases:
+            steps = self.steps()
+            mutate(steps)
+            with self.assertRaises(RuntimeError):
+                tcp.verify(steps)
+
+    def test_payloads_depend_on_direction_and_sequence(self):
+        self.assertNotEqual(tcp.payload(0, 1, 64), tcp.payload(0, 2, 64))
+        self.assertNotEqual(tcp.payload(0, 1, 64), tcp.payload(1, 1, 64))
+        self.assertEqual(len(tcp.payload(1, 255, tcp.REPLY_BYTES)), tcp.REPLY_BYTES)
 
 
 class ProcessGroupOracleTests(unittest.TestCase):
