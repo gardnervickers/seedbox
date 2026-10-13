@@ -23,6 +23,8 @@
 #include <linux/io.h>
 #include <linux/i8253.h>
 #include <linux/kernel.h>
+#include <linux/preempt.h>
+#include <linux/sched.h>
 #include <linux/printk.h>
 #include <asm/cpufeature.h>
 #include <asm/fixmap.h>
@@ -33,6 +35,17 @@
 
 struct seedbox_time_page *seedbox_page;
 static unsigned long long seedbox_early_last;
+struct task_struct *seedbox_user_charge;
+
+/*
+ * Account the current tick as user time (kernel/time/timer.c): it arrived
+ * directly at a progress call's yield, not in a softirq or a nested interrupt.
+ * One guest CPU, and no preemption between the mark and the yield.
+ */
+bool seedbox_user_tick(void)
+{
+	return READ_ONCE(seedbox_user_charge) == current && irq_count() == HARDIRQ_OFFSET;
+}
 
 noinstr unsigned long long seedbox_rdtsc(void)
 {

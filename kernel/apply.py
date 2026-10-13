@@ -169,6 +169,18 @@ edit(
 )
 
 
+# Guest time moves only at exits, so every tick interrupts the kernel and tick
+# accounting would charge translated compute as system time. Count a tick that
+# arrives at a progress call's yield as user time. Only the accounting changes:
+# RCU and the scheduler still see the interrupted kernel mode.
+edit("kernel/time/timer.c", "#include <asm/io.h>\n", "#include <asm/io.h>\n#include <asm/seedbox.h>\n")
+edit(
+    "kernel/time/timer.c",
+    "\taccount_process_tick(p, user_tick);\n",
+    "\taccount_process_tick(p, user_tick || seedbox_user_tick());\n",
+)
+
+
 # Only the network device uses the shared-page ISR fast path. Other virtio
 # devices have independent interrupt status registers.
 edit(

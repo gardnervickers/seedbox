@@ -10,4 +10,6 @@ void seedbox_idle(void);
 void notrace seedbox_cpu_relax(void);
 struct pt_regs;
 void seedbox_syscall_progress(struct pt_regs *regs, int scno);
+/* The current tick interrupted a progress charge: user time. */
+bool seedbox_user_tick(void);
 #endif
