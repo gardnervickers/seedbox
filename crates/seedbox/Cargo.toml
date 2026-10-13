@@ -38,11 +38,17 @@ tar.workspace = true
 
 [features]
 application-tests = []
+# Long-running application tier (harness/acceptance/long); see harness/check.py.
+long-application-tests = []
 retained-run-tests = []
 
 [[test]]
 name = "applications"
 required-features = ["application-tests"]
+
+[[test]]
+name = "long_applications"
+required-features = ["long-application-tests"]
 
 [[test]]
 name = "determinism"
