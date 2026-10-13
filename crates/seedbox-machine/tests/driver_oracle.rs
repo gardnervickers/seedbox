@@ -1,5 +1,5 @@
 use seedbox_machine::{
-    driver::{Action, Driver, Error, MachineId, StepOutcome},
+    driver::{Action, Driver, Error, EventKind, MachineId, StepOutcome},
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     pv::{Request, Response},
     rng::RngStream,
@@ -140,8 +140,15 @@ fn oracle_exit_publishes_whole_round_then_sticks_before_due_effects() {
             reason: ExitReason::ProgramExit { code: 23 },
         };
         assert_eq!(driver.step(Timestamp::from_nanos(10)).unwrap(), expected);
+        let outputs = driver
+            .drain_events()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::Output(output) => Some(output),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         driver.with_barrier(|b| {
-            let outputs = b.drain_responses();
             assert_eq!(outputs.len(),2);
             assert_eq!(outputs[0].at,Timestamp::from_nanos(1));
             assert_eq!(outputs[1].at,Timestamp::from_nanos(10));
@@ -156,10 +163,10 @@ fn oracle_exit_publishes_whole_round_then_sticks_before_due_effects() {
         driver
             .with_barrier(|b| {
                 let _final_snapshot = b.snapshot(ids[0])?;
-                assert!(b.drain_responses().is_empty());
                 Ok(())
             })
             .unwrap();
+        assert!(driver.drain_events().is_empty());
     }
 }
 #[test]
@@ -197,9 +204,20 @@ fn crash_and_confirmed_application_stop_terminate_but_pause_does_not() {
         );
         assert_eq!(calls.lock().unwrap().len(), 1);
         if stop {
+            assert_eq!(
+                driver
+                    .drain_events()
+                    .into_iter()
+                    .filter_map(|event| match event.kind {
+                        EventKind::Output(output) => Some(output),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .len(),
+                1
+            );
             driver
                 .with_barrier(|b| {
-                    assert_eq!(b.drain_responses().len(), 1);
                     assert_eq!(b.stopped(ids[0])?, StopReason::BoundaryReached);
                     Ok(())
                 })
@@ -354,13 +372,19 @@ fn oracle_application_outcome_finishes_without_claiming_machine_exit() {
             reason: ExitReason::ProgramExit { code: 23 }
         }
     );
+    assert!(driver
+        .drain_events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Output(output) => Some(output),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .iter()
+        .any(|output| matches!(output.payload, Response::ApplicationOutcome { code: 23 })));
     driver
         .with_barrier(|b| {
             assert!(matches!(b.stopped(ids[0])?, StopReason::Blocked { .. }));
-            assert!(b
-                .drain_responses()
-                .iter()
-                .any(|output| matches!(output.payload, Response::ApplicationOutcome { code: 23 })));
             Ok(())
         })
         .unwrap();

@@ -1,5 +1,5 @@
 use seedbox_machine::{
-    driver::{Action, Driver, MachineId},
+    driver::{Action, Driver, EventKind, MachineId},
     machine::{Machine, RunContext, StopReason, Timestamp},
     pv::{Output, Request, Response, SimulationControlId},
     rng::RngStream,
@@ -143,9 +143,16 @@ fn duplicate_display_names_route_identical_rpc_ids_to_exact_sources() {
             assert_eq!(value["result"]["now_ns"], 10);
         }
         drop(got);
+        let outputs = driver
+            .drain_events()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::Output(output) => Some(output),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         driver
             .with_barrier(|b| {
-                let outputs = b.drain_responses();
                 assert_eq!(
                     outputs
                         .iter()

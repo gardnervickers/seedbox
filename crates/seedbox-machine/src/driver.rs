@@ -22,7 +22,12 @@ use std::{
 };
 
 mod control;
+mod event;
 mod playback;
+pub use event::{
+    Cause, Event, EventKind, FaultAction, FaultId, FaultOrigin, FaultRecord, SettlementStatus,
+    Transition, TriggerResult,
+};
 use playback::Playback;
 pub use playback::{PlaybackRate, PlaybackStatus};
 
@@ -76,6 +81,13 @@ enum DriverEvent {
         machine: MachineId,
         config: ExecutionConfig,
     },
+}
+
+/// A fact awaiting its publication position. Service notices stay raw until
+/// publication so that their order relative to Driver facts is preserved.
+enum Staged {
+    Driver(Timestamp, EventKind),
+    Notice(crate::oracle::service::Notice),
 }
 
 #[derive(Clone)]
@@ -164,7 +176,7 @@ pub enum Action {
 /// crash actions still terminate paused machines.
 /// Guest simulation-control calls are interpreted after their full round commits.
 /// Their effects and replies join the same ordered timeline at that barrier;
-/// draining responses only observes them. Accepted control work survives caller
+/// draining events (`Driver::drain_events`) only observes them. Accepted control work survives caller
 /// loss. Calls generated together are queued before their generated effects;
 /// dependent operations must await acknowledgment rather than assume that a
 /// concurrent Pause/Resume sequence succeeds. Oracle completion publishes the full response batch before stopping
@@ -177,7 +189,9 @@ pub struct Driver<M: Machine> {
     quantum_end: Timestamp,
     machines: Vec<Entry<M>>,
     events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
-    committed_outputs: Vec<MachineResponse>,
+    staged_events: Vec<Staged>,
+    published: Vec<Event>,
+    next_sequence: u64,
     boundary_index: u64,
     completed_quanta: u64,
     quantum_committed: bool,
@@ -270,7 +284,7 @@ where
                 boot: 0,
             })
             .collect();
-        Ok(Self {
+        let mut driver = Self {
             clock,
             workers,
             quantum_ns,
@@ -278,7 +292,9 @@ where
             machines,
             rng,
             events: BTreeMap::new(),
-            committed_outputs: Vec::new(),
+            staged_events: Vec::new(),
+            published: Vec::new(),
+            next_sequence: 0,
             boundary_index: 0,
             completed_quanta: 0,
             quantum_committed: false,
@@ -291,7 +307,116 @@ where
             trigger_marker: None,
             definitions,
             factory: Box::new(factory),
-        })
+        };
+        for index in 0..driver.machines.len() {
+            driver.stage(
+                start,
+                EventKind::MachineAdded {
+                    machine: MachineId(index),
+                    cause: Cause::Initial,
+                },
+            );
+        }
+        driver.flush_events()?;
+        Ok(driver)
+    }
+
+    /// Take all undrained events in publication order.
+    ///
+    /// This works in every state, including after a failed `step`, a
+    /// permanent stop and oracle completion, and never runs simulation work.
+    /// Each event is returned exactly once. The driver keeps no history of
+    /// drained events: the host owns retained history. Undrained events are
+    /// retained without bound, so hosts should drain after every `step` and
+    /// barrier callback.
+    ///
+    /// # Order
+    ///
+    /// Publication order is the order in which the driver commits facts, and
+    /// `Event::sequence` numbers it densely from zero. Construction publishes
+    /// a `MachineAdded` event for each initial machine, oracle first. Machine
+    /// outputs of one barrier are published together, sorted by occurrence
+    /// time, machine identity and per-machine emission order; control facts
+    /// derived from that batch follow it. Driver-applied changes publish when
+    /// they take effect, in timeline FIFO order, before the outputs of the
+    /// admission run they cause. Separate commits are never resorted, so
+    /// `Event::at` is not monotonic across the stream. Enqueueing work,
+    /// including `Barrier::schedule` and `Barrier::schedule_request`,
+    /// publishes nothing. Sleep wakeups, internal timeline markers and playback
+    /// changes are not published.
+    ///
+    /// # Faults and triggers
+    ///
+    /// Admission and settlement are separate events: `FaultAdmitted` records
+    /// policy admission and a later `FaultSettled` reports the outcome. Only
+    /// `SettlementStatus::Applied` proves a change. Control facts are
+    /// incremental; a settlement repeats the fault's `FaultRecord` so hosts need
+    /// no second store to interpret it. A fault's Driver-applied change, when
+    /// it takes effect, publishes a `Transition` with `Cause::Fault` before its
+    /// Applied settlement. A fired trigger publishes `TriggerResolved` before the
+    /// admission of the fault it caused.
+    ///
+    /// # Failure
+    ///
+    /// Confirmed prefixes survive failure. After `step` returns `Err`, every
+    /// fact confirmed before the failure remains drainable, including outputs
+    /// of earlier commits and Failed or other settlements produced on the
+    /// failure path. A failed execution batch publishes none of its staged
+    /// outputs. A barrier mutation that succeeded remains published even if
+    /// its callback later returns `Err`; for example `Barrier::add` publishes
+    /// `MachineAdded` immediately. Failure, permanent stop and oracle
+    /// completion are reported by `step`, not as events.
+    ///
+    /// # Determinism
+    ///
+    /// The stream, including sequences and positions, is a pure function of
+    /// the machine definitions, the seed and host inputs (barrier operations
+    /// and the `upto` bounds passed to `step`). Worker count and playback rate
+    /// never change it.
+    pub fn drain_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.published)
+    }
+
+    fn stage_notices(&mut self) {
+        let notices = self.control.service.take_notices();
+        self.staged_events
+            .extend(notices.into_iter().map(Staged::Notice));
+    }
+
+    /// Record a Driver fact after any service facts confirmed before it.
+    fn stage(&mut self, at: Timestamp, kind: EventKind) {
+        self.stage_notices();
+        self.staged_events.push(Staged::Driver(at, kind));
+    }
+
+    /// Publish staged facts at the current committed position. A conversion
+    /// failure skips only that fact and is reported after publishing the rest.
+    fn flush_events(&mut self) -> Result<(), Error<M::Error>> {
+        self.stage_notices();
+        let position = self.position();
+        let mut result = Ok(());
+        for staged in std::mem::take(&mut self.staged_events) {
+            let (at, kind) = match staged {
+                Staged::Driver(at, kind) => (at, kind),
+                Staged::Notice(notice) => match self.control.event(notice) {
+                    Ok(event) => event,
+                    Err(message) => {
+                        if result.is_ok() {
+                            result = Err(Error::Control(message));
+                        }
+                        continue;
+                    }
+                },
+            };
+            self.published.push(Event {
+                sequence: self.next_sequence,
+                position,
+                at,
+                kind,
+            });
+            self.next_sequence += 1;
+        }
+        result
     }
 
     /// Access the simulation at its initial or most recent successful barrier.
@@ -501,12 +626,15 @@ where
             }
             Ok(outcome)
         })();
+        let result = result.and_then(|outcome| self.flush_events().map(|()| outcome));
         if result.is_err() {
             // All submitted synchronous calls have finished before poisoning.
             for entry in &mut self.machines {
                 entry.staged.clear();
             }
             self.failed = true;
+            // Facts confirmed before the failure remain drainable.
+            let _ = self.flush_events();
         }
         result
     }
@@ -561,7 +689,9 @@ where
                 _ => {}
             }
         }
-        self.committed_outputs.extend(outputs.iter().cloned());
+        for output in &outputs {
+            self.stage(output.at, EventKind::Output(output.clone()));
+        }
         let mut plans = vec![];
         let mut calls = vec![];
         for output in &outputs {
@@ -573,6 +703,7 @@ where
             if let Response::SimulationControl { id, payload } = &output.payload {
                 calls.push(control::Event::Call {
                     source: output.machine,
+                    boot: output.boot,
                     id: *id,
                     observed: output.at.as_nanos(),
                     payload: payload.clone(),
@@ -613,7 +744,7 @@ where
             self.control_plans(plans)?;
             self.sync_trigger_marker();
         }
-        Ok(())
+        self.flush_events()
     }
 
     fn sync_trigger_marker(&mut self) {
@@ -910,6 +1041,14 @@ where
     }
 
     fn apply_due(&mut self, host_now: Instant) -> Result<Option<Action>, Error<M::Error>> {
+        let result = self.apply_due_inner(host_now);
+        // Facts of a final uncommitted item belong to the current barrier.
+        let flushed = self.flush_events();
+        let result = result?;
+        flushed.map(|()| result)
+    }
+
+    fn apply_due_inner(&mut self, host_now: Instant) -> Result<Option<Action>, Error<M::Error>> {
         if self.finished.is_some() {
             return Ok(None);
         }
@@ -923,6 +1062,9 @@ where
             .and_then(|events| events.front())
             .cloned()
         {
+            // Facts of the previous item that committed no barrier belong to
+            // the current one, before this item can commit another.
+            self.flush_events()?;
             let crash = match &scheduled {
                 Scheduled::Input {
                     id,
@@ -969,16 +1111,19 @@ where
             let mut service_effect = None;
             let mut service_origin = None;
             let mut accepted_fault = None;
+            let mut reply_boot = None;
             let scheduled = match scheduled {
                 Scheduled::Control(event) => {
                     use crate::oracle::service::{Effect, Plan};
                     match event {
                         control::Event::Call {
                             source,
+                            boot,
                             id,
                             observed,
                             payload,
                         } => {
+                            self.control.record_call(source, id, boot);
                             let plans = self
                                 .control
                                 .invoke_plans(|service, view| {
@@ -1018,10 +1163,10 @@ where
                             continue;
                         }
                         control::Event::Plan(Plan::Deadline { fault, .. }) => {
+                            // A Failed settlement publishes through service notices.
                             if let Err(failure) =
                                 self.control.service.deadline(fault, now.as_nanos())
                             {
-                                self.control.settlements.extend(failure.settlements);
                                 return Err(Error::Control(failure.message));
                             }
                             continue;
@@ -1034,6 +1179,8 @@ where
                         }) => {
                             let target =
                                 self.control.reply_target(&source).map_err(Error::Control)?;
+                            reply_boot =
+                                Some(self.control.take_call(target, id).map_err(Error::Control)?);
                             Scheduled::Input {
                                 id: target,
                                 input: Input {
@@ -1137,6 +1284,9 @@ where
                 scheduled => scheduled,
             };
             let mut confirmed_transition = None;
+            let cause = accepted_fault.map_or(Cause::Host, |fault| Cause::Fault(FaultId(fault)));
+            // Published only after the item takes effect without error.
+            let mut effective = None;
             let mechanical = (|| -> Result<(), Error<M::Error>> {
                 match scheduled {
                     Scheduled::Control(_) => unreachable!(),
@@ -1189,6 +1339,37 @@ where
                             | Request::SimulationReply { .. }
                             | Request::Shutdown => {}
                         }
+                        let exited = matches!(entry.stopped, StopReason::Exited { .. });
+                        let change = |change| EventKind::Transition {
+                            machine: id,
+                            boot: entry.boot,
+                            change,
+                            cause,
+                        };
+                        effective = match &input.payload {
+                            Request::Crash => Some(change(event::Transition::Crashed)),
+                            Request::Reboot => Some(change(event::Transition::Rebooted {
+                                new_boot: entry
+                                    .boot
+                                    .checked_add(1)
+                                    .ok_or(Error::BootOverflow { id })?,
+                            })),
+                            Request::Shutdown if !exited => {
+                                Some(change(event::Transition::ShutdownRequested))
+                            }
+                            // A call from an earlier boot belongs to a retired
+                            // session, which the machine silently discards.
+                            Request::SimulationReply { id: call, .. }
+                                if reply_boot.is_none_or(|boot| boot == entry.boot) =>
+                            {
+                                Some(EventKind::ReplyAdmitted {
+                                    machine: id,
+                                    boot: entry.boot,
+                                    id: *call,
+                                })
+                            }
+                            _ => None,
+                        };
                         if matches!(input.payload, Request::Reboot) {
                             entry.boot = entry
                                 .boot
@@ -1219,6 +1400,19 @@ where
                             _ => None,
                         };
                         confirmed_transition = transition.map(|transition| (id, transition));
+                        effective = transition.map(|transition| EventKind::Transition {
+                            machine: id,
+                            boot: entry.boot,
+                            change: match transition {
+                                Transition::Pause => event::Transition::Paused,
+                                Transition::Resume => event::Transition::Resumed,
+                                Transition::Execution(config) => {
+                                    event::Transition::ExecutionSet(config)
+                                }
+                                Transition::Crash | Transition::Reboot { .. } => unreachable!(),
+                            },
+                            cause,
+                        });
                         let entry = &mut self.machines[id.0];
                         match event {
                             DriverEvent::SetExecution { config, .. } => entry.execution = config,
@@ -1237,16 +1431,19 @@ where
             })();
             if let Err(error) = mechanical {
                 if let Some(fault) = accepted_fault {
-                    let failure = self.control.service.execution_failed(
+                    // The Failed settlement publishes through service notices.
+                    let _ = self.control.service.execution_failed(
                         fault,
                         None,
                         now.as_nanos(),
                         "machine effect failed; execution state is uncertain".into(),
                     );
-                    self.control.settlements.extend(failure.settlements);
                 }
                 self.control.uncertain_failure();
                 return Err(error);
+            }
+            if let Some(kind) = effective {
+                self.stage(now, kind);
             }
             if let Some((id, transition)) = confirmed_transition {
                 let plans = self
@@ -1461,6 +1658,8 @@ where
     /// Construct and admit a machine at this barrier's time. Construction
     /// failure leaves the existing set unchanged. The returned identity follows
     /// all earlier additions; removal and identity reuse are not supported.
+    /// Success publishes `EventKind::MachineAdded` with `Cause::Host`
+    /// immediately, so it survives a later error from the same callback.
     pub fn add(
         &mut self,
         machine: impl FnOnce() -> Result<M, M::Error>,
@@ -1483,6 +1682,14 @@ where
             boot: 0,
         });
         self.driver.control.add_unnamed(self.driver.now());
+        self.driver.stage(
+            self.driver.now(),
+            EventKind::MachineAdded {
+                machine: id,
+                cause: Cause::Host,
+            },
+        );
+        self.driver.flush_events()?;
         Ok(id)
     }
 
@@ -1551,18 +1758,6 @@ where
                 },
             });
         Ok(())
-    }
-
-    /// Transfer committed responses once, preserving commit/publication order.
-    /// Within each commit, responses sort by timestamp, machine identity, and
-    /// per-machine emission order. Separate commits are not globally resorted.
-    /// Boot association is fixed at emission, including across reboots.
-    /// Simulation-control messages belong to driver-owned handling. Calls in the
-    /// final oracle batch remain observable but are not admitted after terminal
-    /// cutoff. Draining never transfers dispatch or reply responsibility, and
-    /// observers must not redispatch these messages.
-    pub fn drain_responses(&mut self) -> Vec<MachineResponse> {
-        std::mem::take(&mut self.driver.committed_outputs)
     }
 }
 
@@ -1713,7 +1908,7 @@ pub enum StepOutcome {
     /// An application outcome reports ProgramExit while its guest may remain alive. A confirmed
     /// application Stop reports Shutdown without claiming that its machine exited.
     /// Other machines and queued work remain stopped. This result is permanent;
-    /// committed responses remain available through the barrier.
+    /// committed events remain available through `Driver::drain_events`.
     Finished { at: Timestamp, reason: ExitReason },
 }
 

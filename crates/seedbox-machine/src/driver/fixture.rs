@@ -47,3 +47,30 @@ where
         move |_| Ok(machines.next().expect("one fixture per definition")),
     )
 }
+/// Committed outputs among drained events, in publication order.
+pub(crate) fn outputs(events: &[Event]) -> Vec<MachineResponse> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Output(output) => Some(output.clone()),
+            _ => None,
+        })
+        .collect()
+}
+/// Settlements among drained events: record, status, outcome time and commit time.
+pub(crate) fn settlements(
+    events: &[Event],
+) -> Vec<(FaultRecord, SettlementStatus, Option<Timestamp>, Timestamp)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::FaultSettled {
+                record,
+                status,
+                outcome_at,
+                ..
+            } => Some((record.clone(), *status, *outcome_at, event.at)),
+            _ => None,
+        })
+        .collect()
+}

@@ -48,7 +48,8 @@ struct Observed {
 pub(super) struct Control {
     pub(super) service: Service,
     entries: Vec<Observed>,
-    pub(super) settlements: Vec<crate::oracle::service::Settlement>,
+    /// Boot of each admitted call awaiting its reply; live bookkeeping only.
+    calls: BTreeMap<(MachineId, u32, u32), u64>,
 }
 impl Control {
     pub(super) fn new(definitions: &[MachineDefinition], start: Timestamp) -> Self {
@@ -67,7 +68,7 @@ impl Control {
             .collect();
         Self {
             service: Service::default(),
-            settlements: vec![],
+            calls: BTreeMap::new(),
             entries,
         }
     }
@@ -325,6 +326,7 @@ mod tests {
 pub(super) enum Event {
     Call {
         source: MachineId,
+        boot: u64,
         id: crate::pv::SimulationControlId,
         observed: u64,
         payload: Vec<u8>,
@@ -344,15 +346,12 @@ impl Control {
                 entries: &mut self.entries,
             },
         );
-        result.map_err(|failure| {
-            self.settlements.extend(failure.settlements);
-            failure.message
-        })
+        // Settlements in a Failure were already recorded as service notices,
+        // which the Driver publishes even when this call fails.
+        result.map_err(|failure| failure.message)
     }
-    /// A successful service call transfers immutable settlements now, before
-    /// later response/state processing can fail or terminal cutoff can discard
-    /// its scheduling plans. Leave the records in the returned plans solely so
-    /// the queue owner can retire their already-scheduled deadlines.
+    /// Settlement plans remain solely so the queue owner can retire their
+    /// already-scheduled deadlines; their facts publish through notices.
     pub(super) fn invoke_plans(
         &mut self,
         f: impl FnOnce(
@@ -361,13 +360,7 @@ impl Control {
         )
             -> Result<Vec<crate::oracle::service::Plan>, crate::oracle::service::Failure>,
     ) -> Result<Vec<crate::oracle::service::Plan>, String> {
-        let plans = self.invoke(f)?;
-        self.settlements
-            .extend(plans.iter().filter_map(|plan| match plan {
-                crate::oracle::service::Plan::Settled(settled) => Some(settled.clone()),
-                _ => None,
-            }));
-        Ok(plans)
+        self.invoke(f)
     }
     pub(super) fn name(&self, id: MachineId) -> Option<String> {
         let name = self.entries[id.0].name.as_ref()?;
@@ -499,5 +492,152 @@ impl Control {
             });
         }
         Ok(vec![])
+    }
+}
+
+/// Conversion of private service notices into public events. Names were
+/// resolved uniquely by the service, so they map back to one identity.
+impl Control {
+    pub(super) fn record_call(
+        &mut self,
+        source: MachineId,
+        id: crate::pv::SimulationControlId,
+        boot: u64,
+    ) {
+        self.calls
+            .insert((source, id.session.get(), id.request.get()), boot);
+    }
+    /// Retire the call's bookkeeping and return the boot that made it.
+    pub(super) fn take_call(
+        &mut self,
+        source: MachineId,
+        id: crate::pv::SimulationControlId,
+    ) -> Result<u64, String> {
+        self.calls
+            .remove(&(source, id.session.get(), id.request.get()))
+            .ok_or_else(|| "reply for an unadmitted call".into())
+    }
+    fn named(&self, name: &str) -> Result<MachineId, String> {
+        self.target(name).map_err(|e| e.message)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn record(
+        &self,
+        fault: u32,
+        requester: &crate::oracle::service::Requester,
+        target: &str,
+        boot: u64,
+        action: &crate::oracle::service::FaultAction,
+        handle: &Option<String>,
+        requested_at: u64,
+    ) -> Result<super::FaultRecord, String> {
+        use super::{FaultAction as Public, FaultOrigin};
+        use crate::oracle::service::{Effect, FaultAction, Requester};
+        Ok(super::FaultRecord {
+            fault: super::FaultId(fault),
+            origin: match requester {
+                Requester::Call { source, id } => FaultOrigin::Control {
+                    machine: self.reply_target(source)?,
+                    call: *id,
+                },
+                Requester::Trigger(trigger) => FaultOrigin::Trigger { trigger: *trigger },
+            },
+            target: self.named(target)?,
+            boot,
+            action: match action {
+                FaultAction::Heal => Public::Heal,
+                FaultAction::Effect(Effect::Pause) => Public::Pause,
+                FaultAction::Effect(Effect::Resume) => Public::Resume,
+                FaultAction::Effect(Effect::Crash) => Public::Crash,
+                FaultAction::Effect(Effect::Reboot) => Public::Reboot,
+                FaultAction::Effect(Effect::Execution(config)) => Public::SetExecution(*config),
+                FaultAction::Effect(Effect::Process(command)) => Public::Application(*command),
+            },
+            handle: handle.clone(),
+            requested_at: Timestamp::from_nanos(requested_at),
+        })
+    }
+    pub(super) fn event(
+        &self,
+        notice: crate::oracle::service::Notice,
+    ) -> Result<(Timestamp, super::EventKind), String> {
+        use super::{EventKind, SettlementStatus as Public, TriggerResult};
+        use crate::oracle::{
+            service::{Notice, SettlementStatus},
+            triggers::Status,
+        };
+        Ok(match notice {
+            Notice::Admitted(a) => (
+                Timestamp::from_nanos(a.admitted_at),
+                EventKind::FaultAdmitted(self.record(
+                    a.fault,
+                    &a.requester,
+                    &a.target,
+                    a.boot,
+                    &a.action,
+                    &a.handle,
+                    a.requested_at,
+                )?),
+            ),
+            Notice::Settled(s) => (
+                Timestamp::from_nanos(s.committed_at),
+                EventKind::FaultSettled {
+                    record: self.record(
+                        s.fault,
+                        &s.requester,
+                        &s.target,
+                        s.boot,
+                        &s.action,
+                        &s.handle,
+                        s.requested_at,
+                    )?,
+                    status: match s.status {
+                        SettlementStatus::Applied => Public::Applied,
+                        SettlementStatus::Unavailable => Public::Unavailable,
+                        SettlementStatus::Rejected => Public::Rejected,
+                        SettlementStatus::Failed => Public::Failed,
+                    },
+                    outcome_at: s.outcome_at.map(Timestamp::from_nanos),
+                    detail: s.detail,
+                },
+            ),
+            Notice::TriggerArmed {
+                trigger,
+                source,
+                target,
+                at,
+                deadline,
+            } => (
+                Timestamp::from_nanos(at),
+                EventKind::TriggerArmed {
+                    trigger,
+                    source: self.named(&source)?,
+                    target: self.named(&target)?,
+                    deadline: Timestamp::from_nanos(deadline),
+                },
+            ),
+            Notice::TriggerResolved {
+                trigger,
+                at,
+                status,
+                fault,
+            } => (
+                Timestamp::from_nanos(at),
+                EventKind::TriggerResolved {
+                    trigger,
+                    result: match status {
+                        Status::Fired => TriggerResult::Fired,
+                        Status::Rejected => TriggerResult::Rejected,
+                        Status::Cancelled => TriggerResult::Cancelled,
+                        Status::Expired => TriggerResult::Expired,
+                        Status::CutOff => TriggerResult::CutOff,
+                        Status::Armed | Status::Matched => {
+                            return Err("unresolved trigger notice".into())
+                        }
+                    },
+                    fault: fault.map(super::FaultId),
+                },
+            ),
+        })
     }
 }

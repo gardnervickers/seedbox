@@ -1,6 +1,6 @@
 //! Public automatic-service ordering with timed outputs and actual inbox ACKs.
 use seedbox_machine::{
-    driver::{Action, Driver, MachineId, MachineResponse, StepOutcome},
+    driver::{Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome},
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     pv::{
         ApplicationCommand, CommandResult, Output, Request, Response, SimulationControlId, Stream,
@@ -216,8 +216,13 @@ impl World {
         let outcome = self.driver.step(at(upto)).unwrap();
         self.trace.extend(
             self.driver
-                .with_barrier(|b| Ok(b.drain_responses()))
-                .unwrap(),
+                .drain_events()
+                .into_iter()
+                .filter_map(|event| match event.kind {
+                    EventKind::Output(output) => Some(output),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
         );
         outcome
     }

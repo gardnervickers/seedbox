@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         definition::{
             FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources,
         },
-        driver::{Driver, StepOutcome},
+        driver::{Driver, EventKind, StepOutcome},
         machine::{tcg::Factory, ExitReason, Timestamp},
     };
     use std::path::PathBuf;
@@ -97,7 +97,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("unexpected playback control in example".into());
             }
         };
-        let outputs = driver.with_barrier(|barrier| Ok(barrier.drain_responses()))?;
+        let outputs = driver
+            .drain_events()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::Output(output) => Some(output),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         for output in outputs {
             if let seedbox_machine::pv::Response::ApplicationOutcome { code } = output.payload {
                 if let Some(index) = ids.iter().position(|&id| id == output.machine) {

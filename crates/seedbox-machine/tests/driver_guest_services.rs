@@ -5,7 +5,7 @@ use seedbox_machine as machine_crate;
 #[path = "support/prepared_application.rs"]
 mod prepared;
 use seedbox_machine::{
-    driver::{Action, Driver, MachineId, MachineResponse, StepOutcome},
+    driver::{Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome},
     execution::ExecutionConfig,
     machine::{ExitReason, Machine, StopReason, Timestamp},
     pv::{ApplicationCommand, CommandResult, Request, Response, SimulationControlId, Stream},
@@ -63,8 +63,13 @@ where
     fn drain(&mut self) {
         let responses = self
             .driver
-            .with_barrier(|b| Ok(b.drain_responses()))
-            .unwrap();
+            .drain_events()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::Output(output) => Some(output),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         self.events.extend(responses);
     }
     fn pump_until(&mut self, predicate: impl Fn(&Self) -> bool) {
@@ -481,11 +486,7 @@ where
         .events
         .iter()
         .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. })));
-    assert!(session
-        .driver
-        .with_barrier(|b| Ok(b.drain_responses()))
-        .unwrap()
-        .is_empty());
+    assert!(session.driver.drain_events().is_empty());
     // Each ordinary machine emits one control call from each boot. Driver
     // interprets and replies automatically; emitted calls stay drainable.
     for &machine in &session.ids {

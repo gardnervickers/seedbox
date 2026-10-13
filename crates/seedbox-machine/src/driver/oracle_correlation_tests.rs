@@ -72,7 +72,7 @@ fn retired_boot_ack_does_not_complete_current_boot_pending_stop() {
         driver.finished,
         Some((Timestamp::from_nanos(0), ExitReason::Shutdown))
     );
-    assert_eq!(driver.committed_outputs.len(), 2);
+    assert_eq!(fixture::outputs(&driver.drain_events()).len(), 2);
 }
 
 #[test]
@@ -143,6 +143,6 @@ fn first_terminal_response_wins_and_physical_shutdown_is_only_a_fallback() {
                 }
             ))
         );
-        assert_eq!(driver.committed_outputs.len(), 2);
+        assert_eq!(fixture::outputs(&driver.drain_events()).len(), 2);
     }
 }

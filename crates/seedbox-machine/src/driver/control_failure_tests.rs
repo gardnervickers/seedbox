@@ -1,5 +1,5 @@
 use super::*;
-use crate::oracle::service::SettlementStatus;
+
 #[derive(Clone)]
 struct Probe {
     role: usize,
@@ -79,15 +79,16 @@ fn uncertain_effect_retains_prior_settlement_and_never_claims_applied() {
             ..
         })
     ));
-    let settlements = &driver.control.settlements;
+    // Drainable after failure, including the failure-path settlement.
+    let events = driver.drain_events();
+    let settlements = fixture::settlements(&events);
     assert_eq!(settlements.len(), 2);
-    assert_eq!(settlements[0].status, SettlementStatus::Applied);
-    assert_eq!(settlements[1].status, SettlementStatus::Failed);
-    assert_eq!(settlements[1].outcome_at, None);
+    assert_eq!(settlements[0].1, SettlementStatus::Applied);
+    assert_eq!(settlements[1].1, SettlementStatus::Failed);
+    assert_eq!(settlements[1].2, None);
     assert_eq!(driver.machines[3].execution.factor_permille(), 2000);
     assert_eq!(
-        driver
-            .committed_outputs
+        fixture::outputs(&events)
             .iter()
             .filter(|output| matches!(output.payload, Response::SimulationControl { .. }))
             .count(),
@@ -222,7 +223,11 @@ fn ack_batch(final_batch: bool, bad_ack: bool) -> Driver<AckBatchProbe> {
             at: Timestamp::from_nanos(10)
         }
     );
-    assert!(driver.control.settlements.is_empty());
+    let events = driver.drain_events();
+    assert!(fixture::settlements(&events).is_empty());
+    // The Stop fault was admitted at the first barrier.
+    assert!(events.iter().any(|event| event.at == Timestamp::from_nanos(10)
+        && matches!(&event.kind, EventKind::FaultAdmitted(record) if record.fault == FaultId(1))));
     assert!(driver.machines[2]
         .machine
         .as_ref()
@@ -231,21 +236,20 @@ fn ack_batch(final_batch: bool, bad_ack: bool) -> Driver<AckBatchProbe> {
         .is_some());
     driver
 }
-fn assert_ack_settlement(driver: &Driver<AckBatchProbe>) {
-    use crate::oracle::service::{Effect, FaultAction};
-    assert_eq!(driver.control.settlements.len(), 1);
-    let settled = &driver.control.settlements[0];
-    assert_eq!(settled.fault, 1);
-    assert_eq!(settled.target, "fixture-2");
-    assert_eq!(settled.boot, 0);
+fn assert_ack_settlement(driver: &Driver<AckBatchProbe>, events: &[Event]) {
+    let settlements = fixture::settlements(events);
+    assert_eq!(settlements.len(), 1);
+    let (record, status, outcome_at, committed_at) = &settlements[0];
+    assert_eq!(record.fault, FaultId(1));
+    assert_eq!(record.target, MachineId(2));
+    assert_eq!(record.boot, 0);
     assert_eq!(
-        settled.action,
-        FaultAction::Effect(Effect::Process(crate::pv::ApplicationCommand::Stop))
+        record.action,
+        FaultAction::Application(crate::pv::ApplicationCommand::Stop)
     );
-    assert_eq!(settled.status, SettlementStatus::Applied);
-    assert_eq!(settled.admitted_at, 10);
-    assert_eq!(settled.outcome_at, Some(11));
-    assert_eq!(settled.committed_at, 20);
+    assert_eq!(*status, SettlementStatus::Applied);
+    assert_eq!(*outcome_at, Some(Timestamp::from_nanos(11)));
+    assert_eq!(*committed_at, Timestamp::from_nanos(20));
     // An immutable receipt is not permission to enqueue the reply or another
     // effect before the entire committed batch finishes control processing.
     assert!(!driver.events.values().flatten().any(|event| matches!(
@@ -263,10 +267,10 @@ fn earlier_ack_settlement_survives_later_bad_ack_in_same_committed_batch() {
         driver.step(Timestamp::from_nanos(20)),
         Err(Error::Control(_))
     ));
-    assert_ack_settlement(&driver);
+    let events = driver.drain_events();
+    assert_ack_settlement(&driver, &events);
     assert_eq!(
-        driver
-            .committed_outputs
+        fixture::outputs(&events)
             .iter()
             .filter(|output| matches!(output.payload, Response::CommandAcknowledged { .. }))
             .count(),
@@ -277,7 +281,7 @@ fn earlier_ack_settlement_survives_later_bad_ack_in_same_committed_batch() {
         driver.step(Timestamp::from_nanos(20)),
         Err(Error::Failed)
     ));
-    assert_eq!(driver.control.settlements.len(), 1);
+    assert!(driver.drain_events().is_empty());
 }
 #[test]
 fn final_oracle_batch_retains_confirmed_peer_settlement_without_new_dispatch() {
@@ -287,17 +291,33 @@ fn final_oracle_batch_retains_confirmed_peer_settlement_without_new_dispatch() {
         reason: ExitReason::ProgramExit { code: 0 },
     };
     assert_eq!(driver.step(Timestamp::from_nanos(20)).unwrap(), finished);
-    assert_ack_settlement(&driver);
-    assert!(driver.committed_outputs.iter().any(|output| matches!(output.payload, Response::SimulationControl { id, .. } if id.request.get() == 2)));
+    let events = driver.drain_events();
+    assert_ack_settlement(&driver, &events);
+    assert!(fixture::outputs(&events).iter().any(|output| matches!(output.payload, Response::SimulationControl { id, .. } if id.request.get() == 2)));
     assert_eq!(driver.step(Timestamp::from_nanos(30)).unwrap(), finished);
-    assert_eq!(driver.control.settlements.len(), 1);
+    assert!(driver.drain_events().is_empty());
 }
 
 #[test]
 fn a_settlement_cannot_reenter_execution_and_duplicate_retention() {
     let mut driver = ack_batch(false, false);
     driver.step(Timestamp::from_nanos(20)).unwrap();
-    let settled = driver.control.settlements[0].clone();
+    assert_eq!(fixture::settlements(&driver.drain_events()).len(), 1);
+    let settled = crate::oracle::service::Settlement {
+        fault: 1,
+        requester: crate::oracle::service::Requester::Trigger(1),
+        target: "fixture-2".into(),
+        boot: 0,
+        action: crate::oracle::service::FaultAction::Heal,
+        requested_at: 10,
+        admitted_at: 10,
+        outcome_at: Some(11),
+        committed_at: 20,
+        status: crate::oracle::service::SettlementStatus::Applied,
+        handle: None,
+        command: None,
+        detail: String::new(),
+    };
     driver
         .events
         .entry(Timestamp::from_nanos(20))
@@ -308,5 +328,5 @@ fn a_settlement_cannot_reenter_execution_and_duplicate_retention() {
     assert!(
         matches!(driver.step(Timestamp::from_nanos(20)), Err(Error::Control(message)) if message == "settlement entered execution queue")
     );
-    assert_eq!(driver.control.settlements.len(), 1);
+    assert!(fixture::settlements(&driver.drain_events()).is_empty());
 }

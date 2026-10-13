@@ -222,8 +222,7 @@ fn common_barrier_sorts_worker_outputs_by_identity_then_emission_order() {
     let mut driver = driver(vec![first, second]);
     driver.step(at(10)).unwrap();
     assert_eq!(
-        driver
-            .committed_outputs
+        fixture::outputs(&driver.drain_events())
             .iter()
             .map(|output| (output.machine.0, output.at, output.payload.clone()))
             .collect::<Vec<_>>(),
@@ -246,7 +245,7 @@ fn output_after_returned_stop_poison_discards_entire_batch() {
     assert!(
         matches!(driver.step(at(10)), Err(Error::InvalidOutput { id: MachineId(0), at: emitted, reached }) if emitted == at(10) && reached == at(0))
     );
-    assert!(driver.committed_outputs.is_empty());
+    assert!(fixture::outputs(&driver.drain_events()).is_empty());
     assert!(driver.machines.iter().all(|entry| entry.staged.is_empty()));
     assert!(matches!(driver.step(at(10)), Err(Error::Failed)));
 }
@@ -274,7 +273,7 @@ fn later_batch_failure_discards_earlier_uncommitted_outputs() {
         },
     });
     assert!(matches!(driver.step(at(10)), Err(Error::Machine { .. })));
-    assert!(driver.committed_outputs.is_empty());
+    assert!(fixture::outputs(&driver.drain_events()).is_empty());
     assert!(driver.machines[0].staged.is_empty());
 }
 
@@ -335,7 +334,7 @@ fn boot_generation_overflow_fails_before_reset_or_response_publication() {
         Err(Error::BootOverflow { id: MachineId(0) })
     ));
     assert_eq!(driver.machines[0].machine.as_ref().unwrap().boot, 0);
-    assert!(driver.committed_outputs.is_empty());
+    assert!(fixture::outputs(&driver.drain_events()).is_empty());
     assert!(matches!(driver.step(at(0)), Err(Error::Failed)));
 }
 

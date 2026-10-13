@@ -1,5 +1,5 @@
 use seedbox_machine::{
-    driver::{Action, Driver, Error, MachineId},
+    driver::{Action, Driver, Error, EventKind, MachineId, MachineResponse},
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     pv::{ApplicationCommand, CommandResult, Request, Response},
     rng::RngStream,
@@ -69,6 +69,16 @@ impl Machine for Fixture {
         Ok(self.clone())
     }
 }
+fn outputs(driver: &mut Driver<Fixture>) -> Vec<MachineResponse> {
+    driver
+        .drain_events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Output(output) => Some(output),
+            _ => None,
+        })
+        .collect()
+}
 #[path = "support/driver_definition.rs"]
 mod driver_definition;
 struct Rng;
@@ -120,9 +130,7 @@ fn responses_keep_emitting_boot_across_reused_ids_and_drain_once() {
         })
         .unwrap();
     driver.step(at(0)).unwrap();
-    let outputs = driver
-        .with_barrier(|barrier| Ok(barrier.drain_responses()))
-        .unwrap();
+    let outputs = outputs(&mut driver);
     assert_eq!(
         outputs
             .iter()
@@ -131,10 +139,7 @@ fn responses_keep_emitting_boot_across_reused_ids_and_drain_once() {
         [(id, 0, at(0)), (id, 1, at(0))]
     );
     assert!(outputs.iter().all(|output|matches!(output.payload,Response::CommandAcknowledged { id,result:CommandResult::Completed } if id.get()==1)));
-    assert!(driver
-        .with_barrier(|barrier| Ok(barrier.drain_responses()))
-        .unwrap()
-        .is_empty());
+    assert!(driver.drain_events().is_empty());
 }
 #[test]
 fn paused_and_exited_requests_share_action_order_and_reboots_are_distinct() {
@@ -156,14 +161,16 @@ fn paused_and_exited_requests_share_action_order_and_reboots_are_distinct() {
             assert!(!barrier.paused(id)?);
             assert_eq!(barrier.machine(id)?.resets, 2);
             assert_eq!(barrier.machine(id)?.work, 0);
-            let outputs = barrier.drain_responses();
-            assert_eq!(
-                outputs.iter().map(|output| output.boot).collect::<Vec<_>>(),
-                [0, 2]
-            );
             Ok(())
         })
         .unwrap();
+    assert_eq!(
+        outputs(&mut driver)
+            .iter()
+            .map(|output| output.boot)
+            .collect::<Vec<_>>(),
+        [0, 2]
+    );
 }
 #[test]
 fn action_and_request_lifecycle_have_equivalent_effects() {
@@ -234,10 +241,10 @@ fn request_validation_rejects_foreign_identity_and_held_barrier() {
                 barrier.schedule_request(at(0), id, Request::Reboot),
                 Err(Error::BeforeAction)
             ));
-            assert!(barrier.drain_responses().is_empty());
             Ok(())
         })
         .unwrap();
+    assert!(outputs(&mut driver).is_empty());
 }
 
 #[test]
@@ -266,9 +273,11 @@ fn failed_run_poisons_before_any_response_can_be_observed() {
         .unwrap();
     assert!(matches!(driver.step(at(0)), Err(Error::Machine { .. })));
     assert!(matches!(
-        driver.with_barrier(|barrier| Ok(barrier.drain_responses())),
+        driver.with_barrier(|_| Ok(())),
         Err(Error::Failed)
     ));
+    // The failed batch publishes none of its staged outputs.
+    assert!(outputs(&mut driver).is_empty());
     assert!(matches!(driver.step(at(0)), Err(Error::Failed)));
 }
 
@@ -285,9 +294,7 @@ fn same_time_separate_commits_preserve_publication_sequence() {
         })
         .unwrap();
     driver.step(at(0)).unwrap();
-    let responses = driver
-        .with_barrier(|barrier| Ok(barrier.drain_responses()))
-        .unwrap();
+    let responses = outputs(&mut driver);
     assert_eq!(
         responses
             .iter()
@@ -318,25 +325,36 @@ fn normalized_requests_preserve_same_time_controls_and_held_crash_cursor() {
             action: Action::Crash(id)
         }
     );
-    driver.with_barrier(|barrier| {
-        assert!(barrier.paused(id)?);
-        assert_eq!(barrier.machine(id)?.resets, 0);
-        assert_eq!(barrier.machine(id)?.work, 0);
-        let responses = barrier.drain_responses();
-        assert_eq!(responses.len(), 1);
-        assert_eq!(responses[0].boot, 0);
-        assert!(matches!(responses[0].payload, Response::CommandAcknowledged { id, .. } if id.get() == 1));
-        barrier.set_rate(PlaybackRate::Unlimited)
-    }).unwrap();
+    driver
+        .with_barrier(|barrier| {
+            assert!(barrier.paused(id)?);
+            assert_eq!(barrier.machine(id)?.resets, 0);
+            assert_eq!(barrier.machine(id)?.work, 0);
+            Ok(())
+        })
+        .unwrap();
+    let responses = outputs(&mut driver);
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].boot, 0);
+    assert!(
+        matches!(responses[0].payload, Response::CommandAcknowledged { id, .. } if id.get() == 1)
+    );
+    driver
+        .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
     driver.step(at(0)).unwrap();
-    driver.with_barrier(|barrier| {
-        assert!(!barrier.paused(id)?);
-        assert_eq!(barrier.machine(id)?.resets, 1);
-        assert_eq!(barrier.machine(id)?.work, 0);
-        let responses = barrier.drain_responses();
-        assert_eq!(responses.len(), 1);
-        assert_eq!(responses[0].boot, 1);
-        assert!(matches!(responses[0].payload, Response::CommandAcknowledged { id, .. } if id.get() == 2));
-        Ok(())
-    }).unwrap();
+    driver
+        .with_barrier(|barrier| {
+            assert!(!barrier.paused(id)?);
+            assert_eq!(barrier.machine(id)?.resets, 1);
+            assert_eq!(barrier.machine(id)?.work, 0);
+            Ok(())
+        })
+        .unwrap();
+    let responses = outputs(&mut driver);
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].boot, 1);
+    assert!(
+        matches!(responses[0].payload, Response::CommandAcknowledged { id, .. } if id.get() == 2)
+    );
 }

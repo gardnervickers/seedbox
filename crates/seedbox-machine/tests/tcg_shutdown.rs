@@ -2,7 +2,7 @@
 
 use seedbox_machine as machine_crate;
 use seedbox_machine::{
-    driver::{Action, Driver, MachineId, MachineResponse, StepOutcome},
+    driver::{Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome},
     machine::{tcg::TcgMachine, ExitReason, Machine, StopReason, Timestamp},
     rng::RngStream,
 };
@@ -88,7 +88,14 @@ fn machine_id(driver: &mut Harness) -> MachineId {
         .unwrap()
 }
 fn output(driver: &mut Harness, id: MachineId) -> String {
-    let batch = driver.with_barrier(|b| Ok(b.drain_responses())).unwrap();
+    let batch = driver
+        .drain_events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Output(output) => Some(output),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     driver.events.extend(batch);
     let bytes: Vec<_> = driver
         .events
