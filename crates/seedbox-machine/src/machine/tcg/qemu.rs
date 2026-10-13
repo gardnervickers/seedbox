@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 // QEMU's RISC-V virt board maps main RAM here.
+#[cfg(test)]
 const RAM_BASE: u64 = 0x8000_0000;
 // Host transport/startup limits; these do not advance simulation time.
 const TIMEOUT: Duration = Duration::from_secs(30);

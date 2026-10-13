@@ -166,6 +166,8 @@ pub(crate) enum ErrorCode {
     Unsupported,
     InvalidState,
     TargetUnavailable,
+    // Reserved wire classification for failed backend effects.
+    #[cfg_attr(not(test), allow(dead_code))]
     EffectFailed,
     ResultTooLarge,
 }

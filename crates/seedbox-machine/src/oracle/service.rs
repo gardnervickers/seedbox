@@ -35,6 +35,8 @@ pub(crate) struct Facts {
     pub process: Process,
     pub physically_ended: bool,
     pub ready: bool,
+    // Retained for upcoming live execution-setting control.
+    #[allow(dead_code)]
     pub execution: ExecutionConfig,
 }
 /// Authoritative stopped-state view, not an output-derived mirror. Inspection
@@ -770,6 +772,8 @@ impl Service {
         }
         self.finish(fault, observed, at, Ok(()))
     }
+    // Keep the existing acknowledgment seam stable during service integration.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn acknowledged(
         &mut self,
         adapter: &impl Adapter,

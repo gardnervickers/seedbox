@@ -164,7 +164,7 @@ impl Codec {
                 }
             }
             let mut bytes = Vec::with_capacity(hex.len() / 2);
-            for pair in hex.chunks_exact(2) {
+            for pair in hex.as_chunks::<2>().0 {
                 bytes.push(digit(pair[0])? * 16 + digit(pair[1])?);
             }
             Response::ApplicationOutput { stream, bytes }

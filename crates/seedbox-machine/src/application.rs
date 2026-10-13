@@ -320,11 +320,11 @@ impl Newc {
         write!(self.output,"070701{inode:08x}{:08x}{:08x}{:08x}{nlink:08x}{:08x}{size:08x}{:08x}{:08x}{major:08x}{minor:08x}{namesize:08x}{:08x}",node.mode,node.uid,node.gid,node.mtime,0,0,0).map_err(|e|invalid(e.to_string()))?;
         self.output.extend(name);
         self.output.push(0);
-        while self.output.len() % 4 != 0 {
+        while !self.output.len().is_multiple_of(4) {
             self.output.push(0);
         }
         self.output.extend(data);
-        while self.output.len() % 4 != 0 {
+        while !self.output.len().is_multiple_of(4) {
             self.output.push(0);
         }
         Ok(())
@@ -450,7 +450,7 @@ fn package(
     }
     archive.owned(b"TRAILER!!!", 0, &[])?;
     let mut out = bootstrap.base_initramfs.clone();
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
     out.extend(archive.output);

@@ -132,7 +132,7 @@ impl TcgMachine {
     ) -> Result<Self, Error> {
         const MIB: u64 = 1024 * 1024;
         let memory = definition.resources.memory_bytes;
-        if memory == 0 || memory % MIB != 0 || memory / MIB > u64::from(u32::MAX) {
+        if memory == 0 || !memory.is_multiple_of(MIB) || memory / MIB > u64::from(u32::MAX) {
             return Err(Error(
                 "TCG guest memory must be a nonzero whole number of MiB representable in u32"
                     .into(),
@@ -176,13 +176,17 @@ impl TcgMachine {
         if manifest.memory_mib == 0 {
             return Err(Error("guest memory must be nonzero".into()));
         }
-        if let Boot::Linux { initramfs, .. } = &manifest.boot {
-            let memory = u64::from(manifest.memory_mib) * 1024 * 1024;
-            if initramfs.len() as u64 > memory {
-                return Err(Error(format!(
-                    "TCG initramfs ({} bytes) must fit in guest RAM ({memory} bytes)",
-                    initramfs.len()
-                )));
+        match &manifest.boot {
+            #[cfg(test)]
+            Boot::Program(_) => {}
+            Boot::Linux { initramfs, .. } => {
+                let memory = u64::from(manifest.memory_mib) * 1024 * 1024;
+                if initramfs.len() as u64 > memory {
+                    return Err(Error(format!(
+                        "TCG initramfs ({} bytes) must fit in guest RAM ({memory} bytes)",
+                        initramfs.len()
+                    )));
+                }
             }
         }
         #[cfg(test)]

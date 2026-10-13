@@ -155,6 +155,9 @@ pub enum Action {
     Shutdown(MachineId),
 }
 
+type MachineFactory<M> =
+    Box<dyn FnMut(&MachineDefinition) -> Result<M, <M as Machine>::Error> + Send>;
+
 /// Owns simulation scheduling and shared time.
 ///
 /// Execution uses a fixed pool of worker threads. Each worker owns its context;
@@ -202,8 +205,12 @@ pub struct Driver<M: Machine> {
     oracle_stops: BTreeSet<(u64, NonZeroU32)>,
     control: control::Control,
     trigger_marker: Option<Timestamp>,
+    // Retained for upcoming barrier-time spawning.
+    #[allow(dead_code)]
     definitions: Vec<MachineDefinition>,
-    factory: Box<dyn FnMut(&MachineDefinition) -> Result<M, M::Error> + Send>,
+    // Retained for upcoming barrier-time spawning.
+    #[allow(dead_code)]
+    factory: MachineFactory<M>,
 }
 
 impl<M> Driver<M>
@@ -233,6 +240,8 @@ where
     /// depend on worker identity or host timing. Machines can move between the
     /// caller and workers; their errors must also be transferable between threads.
     /// Initialization failure joins all started workers before returning.
+    // The public constructor interface is frozen.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         start: Timestamp,
         quantum: Duration,
@@ -661,9 +670,8 @@ where
         }
         let mut outputs = Vec::new();
         for (index, entry) in self.machines.iter_mut().enumerate() {
-            outputs.extend(entry.staged.drain(..).map(|output| {
+            outputs.extend(entry.staged.drain(..).inspect(|output| {
                 debug_assert_eq!(output.machine, MachineId(index));
-                output
             }));
         }
         // Stable sorting preserves each machine's emission order at one time.
@@ -679,12 +687,11 @@ where
                         code: i32::from(code),
                     });
                 }
-                Response::CommandAcknowledged { id, result } => {
+                Response::CommandAcknowledged { id, result }
                     if self.oracle_stops.remove(&(output.boot, id))
-                        && result == crate::pv::CommandResult::Completed
-                    {
-                        terminal.get_or_insert(ExitReason::Shutdown);
-                    }
+                        && result == crate::pv::CommandResult::Completed =>
+                {
+                    terminal.get_or_insert(ExitReason::Shutdown);
                 }
                 _ => {}
             }

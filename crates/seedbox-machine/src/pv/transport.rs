@@ -15,6 +15,8 @@ pub(crate) enum GuestWrite {
     Lifecycle(LifecycleWrite),
 }
 impl GuestWrite {
+    // Machine-side observation; the worker retains the underlying write time directly.
+    #[allow(dead_code)]
     pub(crate) fn time(&self) -> u64 {
         match self {
             Self::Console(write) | Self::Lifecycle(write) => write.time,
@@ -23,16 +25,16 @@ impl GuestWrite {
 }
 
 /// Pending output belongs to snapshots until transferred at a stopped boundary.
+// Shared with the worker binary; the library consumes writes instead of buffering them.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct LifecycleOutput(Vec<LifecycleWrite>);
+#[cfg_attr(not(test), allow(dead_code))]
 impl LifecycleOutput {
     pub(crate) fn push(&mut self, time: u64, bytes: Vec<u8>) {
         if !bytes.is_empty() {
             self.0.push(LifecycleWrite { time, bytes });
         }
-    }
-    pub(crate) fn extend(&mut self, writes: Vec<LifecycleWrite>) {
-        self.0.extend(writes);
     }
     pub(crate) fn drain(&mut self) -> Vec<LifecycleWrite> {
         std::mem::take(&mut self.0)

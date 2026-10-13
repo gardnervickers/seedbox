@@ -57,7 +57,11 @@ pub(crate) enum Transition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Admission {
     Applied(Transition),
+    // Explicit no-transition admissions are exercised by policy tests;
+    // backend admission integration will supply them.
+    #[cfg_attr(not(test), allow(dead_code))]
     NoEffect,
+    #[cfg_attr(not(test), allow(dead_code))]
     Rejected,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

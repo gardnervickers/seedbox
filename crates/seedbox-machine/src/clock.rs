@@ -4,6 +4,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+// Private clock-adjustment policy awaits guest-clock integration.
+#[cfg_attr(not(test), allow(dead_code))]
 mod projection;
 
 pub trait Clock {
