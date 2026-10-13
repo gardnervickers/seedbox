@@ -417,6 +417,36 @@ async fn capture_at_marked_phase(
     Err("no checkpoint could be requested after the marked fault".into())
 }
 
+/// The simulation a `replay` reran, from its `MATCH:` status line.
+fn replayed(output: &str) -> Result<String, String> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("MATCH: "))
+        .map(str::to_owned)
+        .ok_or_else(|| format!("missing MATCH simulation ID: {output}"))
+}
+
+/// Delete a passing derived workload's simulations, newest first, so their
+/// session files (machine snapshots, checkpoints) do not accumulate on the
+/// shared server across workloads. Failing workloads keep theirs.
+fn delete_simulations(
+    cli: &Path,
+    directory: &Path,
+    state: &Path,
+    ids: &[&str],
+) -> Result<(), String> {
+    for id in ids.iter().rev() {
+        invoke(
+            cli,
+            directory,
+            state,
+            &format!("delete-{id}"),
+            &["delete", "simulation", id],
+        )?;
+    }
+    Ok(())
+}
+
 /// Capture each `checkpoint-*` workload at its marked phase, finish the source
 /// run, then branch twice. The branches must pass, match each other, replay, and
 /// print the same continuation evidence as the source after the capture point.
@@ -542,14 +572,19 @@ fn checkpoint_branches(
         &branches[0],
         &branches[1],
     )?;
-    invoke(
+    let replay = replayed(&invoke(
         cli,
         directory,
         state,
         "replay-branch",
         &["replay", &branches[0], "--wall-time", "30m"],
-    )?;
-    Ok(())
+    )?)?;
+    delete_simulations(
+        cli,
+        directory,
+        state,
+        &[id.as_str(), &branches[0], &branches[1], &replay],
+    )
 }
 
 /// Run a disk workload (durability.yaml, two-crash.yaml) under the torn-write
@@ -599,14 +634,19 @@ fn torn_writes(cli: &Path, directory: &Path, state: &Path, workload: &Path) -> R
     if !result.contains(" policy=torn ") {
         return Err(format!("torn run reported {result}"));
     }
-    invoke(
+    let replay = replayed(&invoke(
         cli,
         directory,
         state,
         "replay-torn",
         &["replay", torn, "--wall-time", "30m"],
-    )?;
-    Ok(())
+    )?)?;
+    delete_simulations(
+        cli,
+        directory,
+        state,
+        &[simulation_id(&drop)?, torn, &replay],
+    )
 }
 
 /// Hold the run before the stop that follows the oracle's `CRASH_NEXT` line,
@@ -770,14 +810,14 @@ fn crashed_pending_stop(
             app.incarnation
         ));
     }
-    invoke(
+    let replay = replayed(&invoke(
         cli,
         directory,
         state,
         "replay",
         &["replay", id.as_str(), "--wall-time", "30m"],
-    )?;
-    Ok(())
+    )?)?;
+    delete_simulations(cli, directory, state, &[id.as_str(), &replay])
 }
 
 /// Simulations derived from a workload run rather than submitted from its file:
