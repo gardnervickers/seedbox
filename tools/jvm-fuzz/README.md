@@ -52,7 +52,10 @@ This is a diagnostic tool, like `tools/mac-tcg`; it is not an acceptance suite.
   unwinding through signal frames, TLS destructors, static PIE re-exec, vDSO clocks,
   counters, `WFE`/`WFI` and CPU affinity. Probes whose values depend on the host
   (entropy digests, counters, `TPIDRRO_EL0`, exclusive-store failures) are compared
-  with the replay only. `C.capabilities` lists the host's CPU features, syscalls and files;
+  with the replay only. `probes/c/cfzprocfs.c` (`C.procfs`, replay-only) hashes
+  `/proc` files and kernel-visible syscalls one per line after threads, files,
+  sockets, a timer and a fork, so a replay or twin-run difference names the
+  subsystem. `C.capabilities` lists the host's CPU features, syscalls and files;
   its differences from native are reported as `GUEST_DIFF`, not failures. Run
   native passes with `--unconfined`, or the engine's seccomp filter hides some
   syscalls.
@@ -114,11 +117,19 @@ simulation of its own.
 | `OK` | Simulation output equals the (stable) native output. |
 | `OK_NONDET` | Output is not expected to match native; only replay is checked. |
 | `MISMATCH` | Deterministic case whose simulated output differs from native. |
-| `SIM_CRASH`, `SIM_FAIL`, `SIM_TIMEOUT` | The JVM crashed (hs_err included), failed, or hit the per-case limit only in simulation. |
+| `SIM_CRASH`, `SIM_FAIL`, `SIM_TIMEOUT` | The JVM crashed (hs_err included), failed, or hit the per-case limit only in simulation. A wrong exit status, or exit 0 without the `OK` (or `UNSUPPORTED`) line, is `SIM_FAIL`. |
 | `SIM_CUT`, `SIM_NOT_REACHED` | The simulation ended during or before the case. |
-| `REPLAY_DIVERGE` | The replay printed different output from the original simulation. |
+| `REPLAY_DIVERGE` | The replay printed different output from the original simulation, or lacks the case. |
+| `REPLAY_MISMATCH`, `REPLAY_NOT_COMPARABLE`, `REPLAY_ERROR` | `seedbox replay` of the batch did not report `MATCH` (witness or full state), whatever the output; every case of the batch gets it. |
 | `NATIVE_FAIL`, `NATIVE_UNSTABLE` | The probe itself is broken or nondeterministic; fix the probe. |
 | `GUEST_DIFF` | An informational probe (`C.capabilities`) found the guest differs from the host. |
+
+Probes with `exit_codes` are judged by exit status alone; every other case must
+exit 0 and print its `OK` line. A jcstress group passes only when its run
+selected tests, printed the results summary and exit status, passed every
+planned test (as many as natively) and replayed with `MATCH`; otherwise it is
+`FAIL`, `CRASH`, `TRUNCATED` or `NO_TESTS`. `test_jvmfuzz.py` checks these
+verdicts on fixture result directories (portable suite).
 
 The report also lists programs whose native output changes with the flag
 profile: a probe bug or a HotSpot bug, independent of Seedbox.

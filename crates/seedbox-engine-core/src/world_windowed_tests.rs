@@ -1028,6 +1028,110 @@ fn worker_count_and_completion_order_never_change_a_world_with_faults_and_contro
     }
 }
 
+/// Capturing at any legal interactive boundary must not perturb the world, and
+/// restoring that capture must reproduce the remaining effect ledger: owed I/O,
+/// queued serial input and frames, a console trigger matched only in part,
+/// future pause/crash/resume/reboot faults and an undelivered control reply.
+#[test]
+fn checkpoint_at_every_boundary_is_transparent_and_restores_the_remaining_ledger() {
+    let run = Run {
+        duration: 160,
+        end_on: Some("a"),
+        fork: None,
+        checkpoint: None,
+        require_barrier: false,
+    };
+    let build = |variant| {
+        let mut w = scenario(variant);
+        // "AB" spans two console bytes four time units apart: a partial match
+        // is pending at every boundary between them.
+        w.control
+            .triggers
+            .arm("a".into(), b"AB".to_vec(), 0, 200, partition("pair"))
+            .unwrap();
+        let mut b = Step::new(6, Stop::Control);
+        b.console = Some(b'B');
+        let steps = &mut w.machines[0].steps;
+        let at = steps.iter().position(|s| s.at > 6).unwrap();
+        steps.insert(at, b);
+        w
+    };
+    let without_traces = |mut receipt: Value| {
+        receipt.as_object_mut().unwrap().remove("traces");
+        receipt
+    };
+    for variant in 0..4u64 {
+        let mut w = build(variant);
+        let (outcome, _) = simulate(&mut w, &run, Duration::ZERO, &mut |_, _| Ok(())).unwrap();
+        let reference = receipt(&w, outcome.as_str());
+        assert_eq!(
+            w.control.triggers.records[1].status, "fired",
+            "variant {variant}"
+        );
+        let boundaries = w.boundaries;
+        let mut captured = Vec::new();
+        for target in 0..boundaries {
+            let mut w = build(variant);
+            let mut selected = None;
+            let (outcome, _) =
+                simulate(&mut w, &run, Duration::ZERO, &mut |boundary, admission| {
+                    if selected.is_none()
+                        && boundary.position.boundary_index >= target
+                        && admission.request_checkpoint().is_ok()
+                    {
+                        selected = Some(boundary.position);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            if outcome != RunOutcome::Checkpoint {
+                continue;
+            }
+            let at = selected.unwrap();
+            if captured.last() == Some(&at.boundary_index) {
+                continue;
+            }
+            // The mock cannot save unpaid I/O cost (x86 snapshots carry it).
+            let snapshot = match WorldSnapshot::take_checkpoint(&mut w) {
+                Err(error) if error == "owed I/O" => continue,
+                result => result.unwrap(),
+            };
+            captured.push(at.boundary_index);
+            let snapshot: WorldSnapshot<Mock> =
+                serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            let prefix = trace(&w).len();
+            let (outcome, evidence) =
+                simulate(&mut w, &run, Duration::ZERO, &mut |_, _| Ok(())).unwrap();
+            assert_eq!(
+                receipt(&w, outcome.as_str()),
+                reference,
+                "variant {variant}: capture at {at:?} changed the run"
+            );
+            let continuation = trace(&w)[prefix..].to_vec();
+            let ledger = without_traces(receipt(&w, outcome.as_str()));
+            snapshot.restore_checkpoint(&mut w).unwrap();
+            w.factory.lock().unwrap().clear();
+            let (restored, restored_evidence) =
+                simulate(&mut w, &run, Duration::ZERO, &mut |_, _| Ok(())).unwrap();
+            assert_eq!(
+                trace(&w),
+                continuation,
+                "variant {variant}: restore at {at:?}"
+            );
+            assert_eq!(
+                without_traces(receipt(&w, restored.as_str())),
+                ledger,
+                "variant {variant}: restore at {at:?}"
+            );
+            assert_eq!(
+                restored_evidence["effects_digest"], evidence["effects_digest"],
+                "variant {variant}: restore at {at:?}"
+            );
+        }
+        assert!(captured.len() >= 5, "{captured:?} of {boundaries}");
+    }
+}
+
 #[test]
 fn a_fault_that_fails_ends_the_run_with_its_evidence() {
     let mut w = world(&["a", "b"]);

@@ -30,6 +30,7 @@ timed shell-syntax check_shells
 # Discover new Python tests without maintaining per-module lists.
 timed harness-python bash -c 'cd harness/tests && python3 -m unittest discover -s . -q'
 timed client-python bash -c 'cd python && python3 -m unittest discover -s tests -q'
+timed jvm-fuzz-python bash -c 'cd tools/jvm-fuzz && python3 -m unittest discover -s . -q'
 # Compile hardware-feature tests without opening KVM or HVF. Default execution
 # keeps hardware tests ignored, while their bodies remain type-checked.
 if [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]]; then

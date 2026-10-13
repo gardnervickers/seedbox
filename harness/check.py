@@ -320,7 +320,7 @@ class Checks:
                 if target == "applications":
                     command.append("--nocapture")
                 # oci uses the engine the way the root CLI does in applications.
-                needs_root = package == "seedbox" and target in ("applications", "host_pause", "oci")
+                needs_root = package == "seedbox" and target in ("applications", "determinism", "host_pause", "oci")
                 if needs_root or (package in ("seedbox-arm64", "seedbox-vmm") and "kvm-tests" in features):
                     command = privileged(prefix, command, environment)
                 self.run(package + "/" + target, command, environment=environment,
