@@ -385,7 +385,7 @@
  system_ss.add(when: 'CONFIG_DIVA_GSP', if_true: files('diva-gsp.c'))
 --- /dev/null
 +++ b/hw/char/seedbox-lifecycle.c
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,261 @@
 +/* Deterministic stopped ingress for Seedbox's machine lifecycle port. */
 +#include "qemu/osdep.h"
 +#include "exec/icount.h"
@@ -397,6 +397,7 @@
 +#include "system/runstate.h"
 +#include "qemu/module.h"
 +#include "system/cpus.h"
++#include "hw/core/cpu.h"
 +
 +#define TYPE_SEEDBOX_LIFECYCLE "seedbox-lifecycle-port"
 +OBJECT_DECLARE_SIMPLE_TYPE(SeedboxLifecycle, SEEDBOX_LIFECYCLE)
@@ -415,6 +416,20 @@
 + * callback or timer may introduce input between accepted execution barriers. */
 +static SeedboxLifecycle *lifecycle;
 +static const uint8_t request[] = "shutdown\n";
++
++/* QEMU classifies every CPU as idle while the VM is stopped. Ask instead
++ * whether a halted CPU now has deliverable work, such as the interrupt that
++ * drain_input raises synchronously, so the stopped guest is not reported blocked. */
++static bool cpus_runnable(void)
++{
++    CPUState *cpu;
++    CPU_FOREACH(cpu) {
++        if (!cpu_work_list_empty(cpu) || !cpu->halted || cpu_has_work(cpu)) {
++            return true;
++        }
++    }
++    return false;
++}
 +
 +static void drain_input(VirtIOSerialPort *port)
 +{
@@ -473,7 +488,7 @@
 +    }
 +    g_byte_array_unref(input);
 +    result = g_new0(SeedboxShutdownResult, 1);
-+    result->runnable = !all_cpu_threads_idle();
++    result->runnable = cpus_runnable();
 +    return result;
 +}
 +
@@ -484,7 +499,7 @@
 +        append_input(request, sizeof(request) - 1);
 +    }
 +    drain_input(VIRTIO_SERIAL_PORT(lifecycle));
-+    return !all_cpu_threads_idle();
++    return cpus_runnable();
 +}
 +
 +static void guest_connected(VirtIOSerialPort *port, int connected)
