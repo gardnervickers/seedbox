@@ -94,18 +94,23 @@ Code: [TCG machine](../crates/seedbox-machine/src/machine/tcg.rs),
 ## Reference PV machine
 
 `cargo run -p seedbox-machine --example pv` uses the same Driver and common
-machine definitions for native ARM64 guests. Set `SEEDBOX_PV_WORKER` to this
-crate's standalone worker and `SEEDBOX_PV_ASSETS` to its prepared guest asset
-directory. The factory owns the PV kernel, helper and mandatory DynamoRIO
-runtime; it prepares the application launch without exposing those details to
-Driver. The host worker executable is not bundled into the guest filesystem.
+machine definitions for native guests of the host architecture. Set
+`SEEDBOX_PV_WORKER` to this crate's standalone worker and `SEEDBOX_PV_ASSETS`
+to its prepared guest asset directory (`nix build .#machinePvAssets`). The
+factory owns the PV kernel, helper and mandatory DynamoRIO runtime; it prepares
+the application launch without exposing those details to Driver. The host
+worker executable is not bundled into the guest filesystem.
 
 Build `seedbox-pv-worker` from this crate inside the project development shell.
 On Apple Silicon, sign a disposable worker copy with
 [the Hypervisor entitlement](../crates/seedbox-machine/hvf.entitlements.plist).
-The worker uses ARM64 KVM on Linux or HVF on macOS, with one worker process per
-machine. Architectural snapshot/restore currently requires macOS/HVF; Linux
-KVM snapshot/restore is unsupported.
+The worker uses ARM64 KVM on Linux, HVF on macOS, or x86-64 KVM on Linux, with
+one worker process per machine. Architectural snapshot/restore requires
+macOS/HVF or x86-64 KVM; Linux ARM64 KVM snapshot/restore is unsupported.
+Both architectures share the PV time page, event registers and lifecycle
+console; the x86 platform is described in its
+[worker module](../crates/seedbox-machine/src/machine/pv/worker/x86_64.rs).
+`nix build .#machinePvTestFixtures` builds the native test inputs.
 
 Code: [PV example](../crates/seedbox-machine/examples/pv.rs),
 [shared example RNG](../crates/seedbox-machine/examples/support/mod.rs).
@@ -131,7 +136,8 @@ counter frequency rather than measure the host.
 
 A guest must never observe time beyond the boundary the VMM has permitted.
 
-Code: [x86 clock](../kernel/seedbox.c), [ARM clock](../kernel-arm64/seedbox.c).
+Code: [x86 clock](../kernel/seedbox.c), [ARM clock](../kernel-arm64/seedbox.c),
+[seedbox-machine x86 clock](../crates/seedbox-machine/guest/kernel/x86_64/seedbox.c).
 
 ## Progress from translated blocks
 

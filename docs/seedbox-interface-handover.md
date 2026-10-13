@@ -252,8 +252,10 @@ Networking and storage integration/faults, whole-simulation checkpoint/branch,
 and implementing a PMU backend are deferred. Host readback, clock faults,
 inspection and dynamic creation are not deferred.
 
-Native evidence is from Apple Silicon/HVF and TCG. Linux ARM KVM architectural
-snapshot support remains absent/unvalidated; do not claim cross-platform parity.
+Native evidence is from Apple Silicon/HVF, x86-64 Linux/KVM and TCG. The x86
+PV backend passes the existing native PV suites on an AMD KVM host, including
+snapshots; Intel VMX hosts are unverified. Linux ARM KVM architectural snapshot
+support remains absent/unvalidated; do not claim cross-platform parity.
 PV work accounting covers instrumentation charge points, not arbitrary polling
 or uninstrumented execution. The execute-only handoff covers configured startup
 and same-boot restart, not arbitrary application-initiated exec. RTC epochs, raw
