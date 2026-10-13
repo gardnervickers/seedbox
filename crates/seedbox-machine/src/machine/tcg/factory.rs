@@ -88,7 +88,7 @@ mod tests {
                     initramfs: again, ..
                 },
             ) => {
-                assert_eq!(*image, kernel);
+                assert_eq!(image.as_ref(), kernel);
                 assert_eq!(command_line, " custom=x\n");
                 assert_eq!(initramfs, again);
             }

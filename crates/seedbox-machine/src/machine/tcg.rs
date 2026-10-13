@@ -30,6 +30,7 @@ pub use factory::Factory;
 use serde_json::Value;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 mod qemu;
 use qemu::Process;
@@ -39,12 +40,12 @@ use qemu::Process;
 pub(crate) enum Boot {
     /// Flat machine code loaded at the start of RAM, with no firmware.
     #[cfg(test)]
-    Program(Vec<u8>),
+    Program(Arc<[u8]>),
     /// A Linux kernel, initramfs, and OpenSBI firmware for QEMU's RV64 virt board.
     Linux {
-        kernel: Vec<u8>,
-        initramfs: Vec<u8>,
-        firmware: Vec<u8>,
+        kernel: Arc<[u8]>,
+        initramfs: Arc<[u8]>,
+        firmware: Arc<[u8]>,
         command_line: String,
     },
 }
@@ -157,9 +158,9 @@ impl TcgMachine {
             Manifest {
                 memory_mib: (memory / MIB) as u32,
                 boot: Boot::Linux {
-                    kernel: bootstrap.kernel.image.clone(),
-                    initramfs,
-                    firmware,
+                    kernel: Arc::from(bootstrap.kernel.image.as_slice()),
+                    initramfs: initramfs.into(),
+                    firmware: firmware.into(),
                     command_line: bootstrap.kernel.command_line.clone(),
                 },
             },
@@ -174,6 +175,15 @@ impl TcgMachine {
     fn from_manifest(qemu: &Path, manifest: Manifest) -> Result<Self, Error> {
         if manifest.memory_mib == 0 {
             return Err(Error("guest memory must be nonzero".into()));
+        }
+        if let Boot::Linux { initramfs, .. } = &manifest.boot {
+            let memory = u64::from(manifest.memory_mib) * 1024 * 1024;
+            if initramfs.len() as u64 > memory {
+                return Err(Error(format!(
+                    "TCG initramfs ({} bytes) must fit in guest RAM ({memory} bytes)",
+                    initramfs.len()
+                )));
+            }
         }
         #[cfg(test)]
         if let Boot::Program(program) = &manifest.boot {

@@ -63,9 +63,9 @@ fn tcg_native_prepared_image_launch_and_runtime_wrapper() {
                 Manifest {
                     memory_mib: 128,
                     boot: Boot::Linux {
-                        kernel: bootstrap.kernel.image.clone(),
-                        initramfs: boot_derived(&derived, &bootstrap).unwrap(),
-                        firmware: firmware.clone(),
+                        kernel: bootstrap.kernel.image.clone().into(),
+                        initramfs: boot_derived(&derived, &bootstrap).unwrap().into(),
+                        firmware: firmware.clone().into(),
                         command_line: bootstrap.kernel.command_line.clone(),
                     },
                 },

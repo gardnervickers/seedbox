@@ -393,9 +393,9 @@ fn linux_boots_sleeps_and_shuts_down_with_the_machine_driver() {
                 Manifest {
                     memory_mib: 256,
                     boot: Boot::Linux {
-                        kernel: fs::read(assets.join("kernel")).unwrap(),
-                        initramfs: fs::read(assets.join("initramfs")).unwrap(),
-                        firmware: fs::read(input("SEEDBOX_TCG_FIRMWARE")).unwrap(),
+                        kernel: fs::read(assets.join("kernel")).unwrap().into(),
+                        initramfs: fs::read(assets.join("initramfs")).unwrap().into(),
+                        firmware: fs::read(input("SEEDBOX_TCG_FIRMWARE")).unwrap().into(),
                         command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
                     },
                 },
@@ -512,9 +512,9 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
     }
     let assets = input("SEEDBOX_TCG_LINUX");
     let boot = Boot::Linux {
-        kernel: fs::read(assets.join("kernel")).unwrap(),
-        initramfs: fs::read(assets.join("initramfs")).unwrap(),
-        firmware: fs::read(input("SEEDBOX_TCG_FIRMWARE")).unwrap(),
+        kernel: fs::read(assets.join("kernel")).unwrap().into(),
+        initramfs: fs::read(assets.join("initramfs")).unwrap().into(),
+        firmware: fs::read(input("SEEDBOX_TCG_FIRMWARE")).unwrap().into(),
         command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
     };
     let started = Instant::now();
@@ -866,9 +866,11 @@ fn linux_lifecycle_tx_retains_fragments_and_snapshot_drain_position() {
     let manifest = Manifest {
         memory_mib: 256,
         boot: Boot::Linux {
-            kernel: fs::read(assets.join("kernel")).unwrap(),
-            initramfs: lifecycle_tx_initramfs(&fs::read(assets.join("initramfs")).unwrap()),
-            firmware: fs::read(std::env::var_os("SEEDBOX_TCG_FIRMWARE").unwrap()).unwrap(),
+            kernel: fs::read(assets.join("kernel")).unwrap().into(),
+            initramfs: lifecycle_tx_initramfs(&fs::read(assets.join("initramfs")).unwrap()).into(),
+            firmware: fs::read(std::env::var_os("SEEDBOX_TCG_FIRMWARE").unwrap())
+                .unwrap()
+                .into(),
             command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr seedbox_sleep=100"
                 .into(),
         },
@@ -951,12 +953,12 @@ fn lifecycle_rx_backpressure_and_pending_suffix_survive_qemu_migration() {
     let manifest = Manifest {
         memory_mib: 256,
         boot: Boot::Linux {
-            kernel: fs::read(assets.join("kernel")).unwrap(),
+            kernel: fs::read(assets.join("kernel")).unwrap().into(),
             initramfs: lifecycle_initramfs(
                 &fs::read(assets.join("initramfs")).unwrap(),
                 "while [ ! -e /sys/class/virtio-ports/vport0p1/name ]; do /bin/busybox sleep 0.001; done\nexec 9<>/dev/vport0p1\necho RX_OPEN\n/bin/busybox sleep 0.1\n/bin/busybox dd bs=700013 count=1 iflag=fullblock <&9 >&9 2>/dev/null\necho RX_DONE\n/bin/busybox sleep 100",
-            ),
-            firmware: fs::read(std::env::var_os("SEEDBOX_TCG_FIRMWARE").unwrap()).unwrap(),
+            ).into(),
+            firmware: fs::read(std::env::var_os("SEEDBOX_TCG_FIRMWARE").unwrap()).unwrap().into(),
             command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr seedbox_sleep=100"
                 .into(),
         },
@@ -1105,12 +1107,15 @@ printf 'SBX_EXIT1 status=%s\n' "$status" >&9
         let manifest = Manifest {
             memory_mib: 256,
             boot: Boot::Linux {
-                kernel: fs::read(assets.join("kernel")).unwrap(),
+                kernel: fs::read(assets.join("kernel")).unwrap().into(),
                 initramfs: transform_initramfs(
                     &fs::read(assets.join("initramfs")).unwrap(),
                     |_| script.clone(),
-                ),
-                firmware: fs::read(std::env::var_os("SEEDBOX_TCG_FIRMWARE").unwrap()).unwrap(),
+                )
+                .into(),
+                firmware: fs::read(std::env::var_os("SEEDBOX_TCG_FIRMWARE").unwrap())
+                    .unwrap()
+                    .into(),
                 command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
             },
         };
@@ -1296,9 +1301,100 @@ fn common_constructor_preserves_inputs_and_reuses_prepared_application() {
                 initramfs: again, ..
             },
         ) => {
-            assert_eq!(kernel, &[1]);
+            assert_eq!(kernel.as_ref(), &[1]);
             assert_eq!(command_line, "custom=verbatim");
             assert_eq!(initramfs, again);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn common_constructor_rejects_initramfs_larger_than_guest_memory() {
+    let (mut bootstrap, mut definition) = common_inputs();
+    definition.resources.memory_bytes = 1 << 20;
+    // The packed archive includes the helper as well as the prepared filesystem.
+    bootstrap.init = vec![2; 1 << 20];
+    let packed = crate::application::boot_archive(&definition.application, &bootstrap).unwrap();
+    assert!(packed.len() > definition.resources.memory_bytes as usize);
+    let error = super::TcgMachine::new(Path::new("/missing/qemu"), vec![3], &bootstrap, definition)
+        .err()
+        .expect("oversized initramfs must fail before starting QEMU");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "TCG initramfs ({} bytes) must fit in guest RAM (1048576 bytes)",
+            packed.len()
+        )
+    );
+}
+
+#[test]
+fn tcg_initramfs_memory_bound_is_inclusive() {
+    for length in [(1 << 20) - 1, 1 << 20, (1 << 20) + 1] {
+        let result = super::TcgMachine::new_raw(
+            Path::new("/missing/qemu"),
+            Manifest {
+                memory_mib: 1,
+                boot: Boot::Linux {
+                    kernel: Arc::from([1]),
+                    initramfs: vec![0; length].into(),
+                    firmware: Arc::from([3]),
+                    command_line: String::new(),
+                },
+            },
+        );
+        assert_eq!(result.is_ok(), length <= 1 << 20);
+    }
+}
+
+#[test]
+fn tcg_snapshots_and_restores_share_owned_boot_blobs() {
+    fn assert_shared(left: &Manifest, right: &Manifest) {
+        let (
+            Boot::Linux {
+                kernel: lk,
+                initramfs: li,
+                firmware: lf,
+                ..
+            },
+            Boot::Linux {
+                kernel: rk,
+                initramfs: ri,
+                firmware: rf,
+                ..
+            },
+        ) = (&left.boot, &right.boot)
+        else {
+            panic!("expected Linux boot inputs");
+        };
+        assert!(Arc::ptr_eq(lk, rk));
+        assert!(Arc::ptr_eq(li, ri));
+        assert!(Arc::ptr_eq(lf, rf));
+    }
+    let (bootstrap, definition) = common_inputs();
+    let qemu = Path::new("/missing/qemu");
+    let mut machine = super::TcgMachine::new(qemu, vec![3], &bootstrap, definition).unwrap();
+    let snapshot = machine.snapshot().unwrap();
+    let copy = snapshot.clone();
+    assert_shared(&machine.manifest, &snapshot.manifest);
+    assert_shared(&snapshot.manifest, &copy.manifest);
+    drop(machine);
+    drop(bootstrap);
+    drop(snapshot);
+    // The retained snapshot owns the bytes, not a source file or live machine.
+    let restored = super::TcgMachine::from_snapshot(qemu, &copy).unwrap();
+    assert_shared(&copy.manifest, &restored.manifest);
+    match &restored.manifest.boot {
+        Boot::Linux {
+            kernel,
+            initramfs,
+            firmware,
+            ..
+        } => {
+            assert_eq!(kernel.as_ref(), &[1]);
+            assert!(!initramfs.is_empty());
+            assert_eq!(firmware.as_ref(), &[3]);
         }
         _ => unreachable!(),
     }
