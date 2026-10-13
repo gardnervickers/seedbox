@@ -52,7 +52,10 @@ This is a diagnostic tool, like `tools/mac-tcg`; it is not an acceptance suite.
   unwinding through signal frames, TLS destructors, static PIE re-exec, vDSO clocks,
   counters, `WFE`/`WFI` and CPU affinity. Probes whose values depend on the host
   (entropy digests, counters, `TPIDRRO_EL0`, exclusive-store failures) are compared
-  with the replay only. `C.capabilities` lists the host's CPU features, syscalls and files;
+  with the replay only. `probes/c/cfzprocfs.c` (`C.procfs`, replay-only) hashes
+  `/proc` files and kernel-visible syscalls one per line after threads, files,
+  sockets, a timer and a fork, so a replay or twin-run difference names the
+  subsystem. `C.capabilities` lists the host's CPU features, syscalls and files;
   its differences from native are reported as `GUEST_DIFF`, not failures. Run
   native passes with `--unconfined`, or the engine's seccomp filter hides some
   syscalls.

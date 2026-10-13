@@ -171,6 +171,9 @@ PROBES = {
     **{f"C.{name}": {"native": name, "det": False} for name in (
         "getrandomhash", "staticpieaddr", "counters", "vdsogetrandom", "rndr", "tpidrro", "prtsc",
         "exclusive")},
+    # Hashes of /proc files and kernel-visible syscalls after a fixed workload (cfzprocfs.c): any
+    # host leak into guest kernel state shows as a replay or twin-run difference naming the file.
+    "C.procfs": {"native": "procfs", "exe": "/fuzz/bin/cfzprocfs", "det": False},
     # What the host offers; differences from native describe the guest ("info").
     "C.capabilities": {"native": "capabilities", "info": True},
     # The guest kernel has no process_vm_readv (CROSS_MEMORY_ATTACH); the difference is reported.

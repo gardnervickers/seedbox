@@ -26,7 +26,8 @@ RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq 
 COPY src/c /src/c
 RUN mkdir /native && gcc -O2 -pthread -o /native/cfz /src/c/cfz.c -ldl && \
     gcc -O2 -shared -fPIC -o /native/libfzdl.so /src/c/fzdl.c && \
-    gcc -O2 -static-pie -o /native/cfzpie /src/c/cfzpie.c
+    gcc -O2 -static-pie -o /native/cfzpie /src/c/cfzpie.c && \
+    gcc -O2 -pthread -o /native/cfzprocfs /src/c/cfzprocfs.c
 
 # Probes for other runtimes (probes/go, js, cs, erl, lua). Each runtime comes from an image pinned
 # by digest or a source archive pinned by checksum, and runs on the runtime image's glibc 2.35.
