@@ -1,0 +1,29 @@
+name: disk-rebuild
+machines:
+  store:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/disk_rebuild.py"
+    - store
+    files:
+    - source: "../driver/disk_rebuild.py"
+      target: "/scenario/disk_rebuild.py"
+    volumes:
+      data:
+        target: "/data"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/disk_rebuild.py"
+  - oracle
+  files:
+  - source: "../driver/disk_rebuild.py"
+    target: "/scenario/disk_rebuild.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms
