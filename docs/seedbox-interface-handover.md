@@ -189,20 +189,28 @@ this new family, not the whole legacy suite.
 
 ## TODO — remaining work
 
-Resume with item 1. Do not interpret this checkpoint or the approved event stream
-as completion of the full compatibility objective.
+Item 1 is implemented and awaits the user's re-evaluation. Do not interpret
+this checkpoint or the event stream as completion of the full compatibility
+objective.
 
-1. **Host event stream — approved to add, not yet implemented.** Replace the
-   response-only drain with a single Driver event stream, usable after failure.
-   Include committed machine/Driver changes, outputs, fault/trigger results and
-   host-generated control results. The host owns retained history; Driver keeps
-   only live bookkeeping and undrained publications.
-   **TODO BEFORE MERGE: re-evaluate this event interface**, as explicitly requested
-   by the user. Preserve confirmed prefixes when later processing fails and
-   successful barrier mutations when their callback later returns an error.
-   Control facts should be incremental so a late delivery does not require a
-   second retained history store. No event types or drain implementation had
-   landed when implementation was paused.
+1. **Host event stream — implemented in the approved shape; re-evaluation
+   pending.** `Driver::drain_events` replaced `Barrier::drain_responses` and
+   works after failure, stop and finish. Types and the ordering, failure,
+   retention and determinism contract live in rustdoc
+   ([event.rs](../crates/seedbox-machine/src/driver/event.rs) and
+   `Driver::drain_events`). Outputs, MachineAdded, Driver transitions with
+   Host/Fault causes, fault admission and settlement, trigger arm/resolution
+   and reply admission are published incrementally; the Driver's retained
+   settlement history was removed. Confirmed prefixes, including failure-path
+   settlements, and successful `Barrier::add` mutations survive later errors.
+   Portable coverage is in `tests/driver_events.rs` plus the migrated tests.
+   **TODO BEFORE MERGE: re-evaluate this event interface**, as explicitly
+   requested by the user. Open points for that review: machine self-exit has
+   no event (only its outputs and `Barrier::stopped`); `TriggerResult::Rejected`
+   carries no reason; `FaultRecord` omits admission time (the `FaultAdmitted`
+   event's `at`) and the application command ID; `FaultId` has no accessor;
+   a reply to a session retired within the same boot still publishes
+   `ReplyAdmitted` because only the machine sees that discard (item 2).
 2. **Reply delivery evidence — requires approval.** Consider a backend-neutral
    `Response::SimulationReplyDelivered { id }`, timestamped when the entire reply
    reaches the program-readable transport with completion published. Inbox
