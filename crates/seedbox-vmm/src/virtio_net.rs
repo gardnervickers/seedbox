@@ -807,6 +807,146 @@ mod tests {
         }
     }
 
+    /// NEXT-100 case 84 on the KVM adapter: a Status reset after a partial
+    /// receive, with the interrupt still asserted. The journal keeps every
+    /// pre-reset write and gains nothing for the stale frame; the stale frame
+    /// neither completes nor interrupts on the fresh rings; afterwards the
+    /// device and its post-reset journal equal those of a device that only
+    /// saw the fresh negotiation.
+    #[test]
+    fn reset_after_partial_rx_journals_no_stale_frame_or_interrupt() {
+        // (queue size, desc, avail, used, buffers).
+        type Rings = (u32, u64, u64, u64, u64);
+        const OLD: Rings = (2, DESC, AVAIL, USED, 0x400);
+        const NEW: Rings = (4, 0x800, 0x900, 0xa00, 0xc00);
+        fn negotiate(
+            net: &mut VirtioNet,
+            m: &mut [u8],
+            (num, desc, avail, used, _): Rings,
+            event_idx: bool,
+        ) {
+            let features = if event_idx {
+                VIRTIO_RING_F_EVENT_IDX
+            } else {
+                0
+            };
+            for (off, value) in [
+                (0x070, 1),
+                (0x070, 3),
+                (0x020, features),
+                (0x024, 1),
+                (0x020, 1),
+                (0x070, 0xb),
+            ] {
+                net.write(m, off, value).unwrap();
+            }
+            for (queue, (n, d, a, u)) in
+                [(0, (num, desc, avail, used)), (1, (2, 0xe00, 0xe40, 0xe80))]
+            {
+                for (off, value) in [
+                    (0x030, queue),
+                    (0x038, n),
+                    (0x080, d as u32),
+                    (0x090, a as u32),
+                    (0x0a0, u as u32),
+                    (0x044, 1),
+                ] {
+                    net.write(m, off, value).unwrap();
+                }
+            }
+            net.write(m, 0x070, 0xf).unwrap();
+        }
+        fn post(m: &mut [u8], (num, desc, avail, _, buffers): Rings, slot: u16) {
+            let d = desc + 16 * slot as u64;
+            m[d as usize..d as usize + 8]
+                .copy_from_slice(&(buffers + 128 * slot as u64).to_le_bytes());
+            wr32(m, d + 8, 128);
+            wr16(m, d + 12, 2);
+            let idx = rd16(m, avail + 2);
+            wr16(m, avail + 4 + 2 * (idx as u64 % num as u64), slot);
+            wr16(m, avail + 2, idx + 1);
+        }
+        fn state(net: &VirtioNet) -> serde_json::Value {
+            let mut value = serde_json::to_value(net).unwrap();
+            value.as_object_mut().unwrap().remove("dirty");
+            value
+        }
+        for event_idx in [false, true] {
+            for deferred in [false, true] {
+                let mut m = vec![0; 4096];
+                let mut net = VirtioNet::new([2, 0, 0, 0, 0, 1]);
+                net.set_deferred_tx(deferred);
+                negotiate(&mut net, &mut m, OLD, event_idx);
+                assert_eq!(net.event_idx(), event_idx);
+                post(&mut m, OLD, 0);
+                assert!(net.receive(&mut m, b"first").unwrap().irq);
+                assert_eq!(&m[0x400 + HDR..0x400 + HDR + 5], b"first");
+                assert_eq!(
+                    net.receive(&mut m, b"second").unwrap(),
+                    ReceiveOutcome {
+                        accepted: true,
+                        irq: false
+                    }
+                );
+                assert_eq!(net.read(0x060), 1, "interrupt left asserted");
+                let journal = net.dirty.clone();
+                assert!(journal.contains(&(0x400, HDR + 5)));
+
+                let out = net.write(&mut m, 0x070, 0).unwrap();
+                assert!(!out.irq && out.frames.is_empty());
+                assert_eq!(net.read(0x060), 0, "reset clears the interrupt status");
+                assert!(!net.event_idx());
+                assert_eq!(
+                    net.deferred_tx(),
+                    deferred,
+                    "a performance setting survives reset"
+                );
+                assert_eq!(net.dirty, journal, "reset writes no guest RAM");
+                let at_reset = m.clone();
+
+                negotiate(&mut net, &mut m, NEW, event_idx);
+                post(&mut m, NEW, 0);
+                post(&mut m, NEW, 1);
+                let kick = net.write(&mut m, 0x050, 0).unwrap();
+                assert!(!kick.irq, "stale frame raised an interrupt");
+                assert_eq!(net.read(0x060), 0);
+                assert_eq!(rd16(&m, NEW.3 + 2), 0, "stale frame completed");
+                let third = net.receive(&mut m, b"third").unwrap();
+                assert!(third.accepted && third.irq);
+                assert_eq!(&m[0xc00 + HDR..0xc00 + HDR + 5], b"third");
+                assert_eq!(rd32(&m, NEW.3 + 8), (HDR + 5) as u32);
+                assert!(!m.windows(6).any(|w| w == b"second"));
+                assert_eq!(&m[..0x800], &at_reset[..0x800], "old rings untouched");
+                // Every post-reset journal entry is a fresh-ring write.
+                let fresh_rings = |&(a, n): &(usize, usize)| {
+                    a >= 0x800 && a + n <= 0xd00 || a >= 0xe00 && a + n <= 0xf00
+                };
+                assert!(
+                    net.dirty[journal.len()..].iter().all(fresh_rings),
+                    "{:x?}",
+                    &net.dirty[journal.len()..]
+                );
+                assert!(net.dirty[journal.len()..].contains(&(0xc00, HDR + 5)));
+
+                let mut fresh_m = at_reset;
+                let mut fresh = VirtioNet::new([2, 0, 0, 0, 0, 1]);
+                fresh.set_deferred_tx(deferred);
+                negotiate(&mut fresh, &mut fresh_m, NEW, event_idx);
+                post(&mut fresh_m, NEW, 0);
+                post(&mut fresh_m, NEW, 1);
+                fresh.write(&mut fresh_m, 0x050, 0).unwrap();
+                fresh.receive(&mut fresh_m, b"third").unwrap();
+                assert_eq!(fresh_m, m);
+                assert_eq!(fresh.dirty, net.dirty[journal.len()..]);
+                assert_eq!(
+                    state(&fresh),
+                    state(&net),
+                    "event_idx={event_idx} deferred={deferred}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn deferred_poll_bound_is_semantic_and_off_keeps_the_original_limit() {
         assert_eq!(poll_limit(100, 1_000_000, false), 1_000_000);
