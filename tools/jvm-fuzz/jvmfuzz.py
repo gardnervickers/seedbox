@@ -459,6 +459,70 @@ def cmd_sim(a):
         futs = [ex.submit(sim_batch, a, meta, b, list(meta["batches"]).index(b)) for b in names]
         for f in concurrent.futures.as_completed(futs):
             print(f.result(), file=sys.stderr, flush=True)
+    if a.twin_session:
+        twin_session(a, names)
+
+
+def twin_session(a, names):
+    """Export each batch's run, restart the server (a new session: the catalogue is
+    per session), import the export, run the batch again from its project with the
+    same seed and compare the import with the fresh run. Resolution and preparation
+    nondeterminism (epoch, seed derivation, cache state) shows up here, not in replay."""
+    root = Path(a.corpus).resolve() / ("sim-" + a.variant if a.variant else "sim")
+    todo = []
+    for b in names:
+        d = root / b
+        info = json.loads((d / "result.json").read_text()) if (d / "result.json").exists() else {}
+        if info.get("id") and "twin_status" not in info:
+            bundle = d / "run.seedbox.tar"
+            bundle.unlink(missing_ok=True)
+            p = seedbox(a, "export", info["id"], "--output", str(bundle))
+            if p.returncode:
+                info.update({"twin_status": "ERROR", "twin_error": p.stderr.strip()[-2000:]})
+                (d / "result.json").write_text(json.dumps(info, indent=1))
+            else:
+                todo.append((b, d, info))
+    if not todo:
+        return
+    p = seedbox(a, "shutdown")
+    if p.returncode:
+        sys.exit(f"twin session: seedbox shutdown: {p.stderr.strip()}")
+    log = open(root / "twin-server.log", "ab")
+    # Comparisons include full state; the restarted server keeps running afterwards.
+    server = subprocess.Popen([a.seedbox, "serve", "--full-state", "--startup-handshake"], env=engine_env(),
+                              stdout=subprocess.PIPE, stderr=log, start_new_session=True)
+    ready = server.stdout.readline()
+    server.stdout.close()
+    if b'"ready"' not in ready:
+        sys.exit(f"twin session: server did not start; see {root / 'twin-server.log'}")
+    print(f"twin session: restarted server {server.pid}", file=sys.stderr, flush=True)
+
+    def twin(item):
+        b, d, info = item
+        p = seedbox(a, "import", str(d / "run.seedbox.tar"))
+        m = re.search(r"^[A-Z_]+: ([a-z0-9]+)\s*$", p.stdout, re.M)
+        if p.returncode or not m:
+            info.update({"twin_status": "ERROR", "twin_error": (p.stdout + p.stderr).strip()[-2000:]})
+        else:
+            info["import_id"] = m.group(1)
+            p = seedbox(a, "run", str(d), "--seed", str(info["seed"]), "--wall-time", a.wall_time)
+            (d / "twin.stdout").write_text(p.stdout)
+            (d / "twin.stderr").write_text(p.stderr)
+            m = STATUS.search(p.stdout)
+            info["twin_id"] = m.group(2) if m else None
+            if not info["twin_id"]:
+                info["twin_status"] = "ERROR"
+            else:
+                p = seedbox(a, "compare", info["import_id"], info["twin_id"])
+                (d / "twin-compare.stdout").write_text(p.stdout + p.stderr)
+                m = STATUS.search(p.stdout)
+                info["twin_status"] = m.group(1) if m else "ERROR"
+        (d / "result.json").write_text(json.dumps(info, indent=1))
+        return f"twin {b} {info['twin_status']} {info.get('import_id')} {info.get('twin_id')}"
+
+    with concurrent.futures.ThreadPoolExecutor(a.jobs) as ex:
+        for line in ex.map(twin, todo):
+            print(line, file=sys.stderr, flush=True)
 
 
 # report --------------------------------------------------------------------
@@ -605,6 +669,11 @@ def cmd_report(a):
             if status not in (None, "MATCH") and not verdict.startswith(("NATIVE_", "NO_NATIVE")):
                 notes = [f"seedbox replay: {status}"] + notes
                 verdict = f"REPLAY_{status}"
+            # `sim --twin-session`: a fresh run in a new server session against the import.
+            twin = meta_d.get(batch_of[cid], {}).get("twin_status")
+            if twin not in (None, "MATCH") and not verdict.startswith(("NATIVE_", "NO_NATIVE", "REPLAY_")):
+                notes = [f"seedbox compare (twin session): {twin}"] + notes
+                verdict = f"TWIN_{twin}"
             rows.append({"id": cid, "batch": batch_of[cid], "profile": c["profile"], "main": c["main"],
                          "sim": label, "verdict": verdict, "replayed": p is not None})
             if not verdict.startswith("OK") and verdict != "NO_SIM":
@@ -818,6 +887,9 @@ def main():
     s.add_argument("--variant", help="Store results as sim-VARIANT, compared with native like the main run.")
     s.add_argument("--seed-offset", type=int, default=0, help="Shift simulation seeds (for variants).")
     s.add_argument("--jitter", type=int, default=0, help="Oracle CPU jitter percent (for variants).")
+    s.add_argument("--twin-session", action="store_true",
+                   help="Afterwards export each run, restart the server with serve --full-state, import, "
+                        "rerun from the project with the same seed and compare.")
     r = sub.add_parser("report", help="Compare native, simulation and replay output.")
     r.add_argument("corpus")
     j = sub.add_parser("jcstress", help="Run jcstress groups natively and/or as simulations, comparing verdicts.")
