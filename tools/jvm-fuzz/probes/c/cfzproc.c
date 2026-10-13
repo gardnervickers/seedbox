@@ -518,8 +518,8 @@ static int t_clone3(void) {
         {"stack_size_only", {.flags = CLONE_CLEAR_SIGHAND, .exit_signal = SIGCHLD, .stack_size = 4096}, 0, 0},
         {"unknown_flag", {.flags = CLONE_CLEAR_SIGHAND | 1ULL << 40, .exit_signal = SIGCHLD}, 0, 0},
         {"set_tid_size", {.flags = CLONE_CLEAR_SIGHAND, .exit_signal = SIGCHLD, .set_tid = (uintptr_t)&settid, .set_tid_size = 33}, 0, 0},
-        {"set_tid_exists", {.flags = CLONE_CLEAR_SIGHAND, .exit_signal = SIGCHLD, .set_tid = (uintptr_t)&settid, .set_tid_size = 1}, 0, 0},
-        {"into_cgroup_badfd", {.flags = CLONE_INTO_CGROUP | CLONE_CLEAR_SIGHAND, .exit_signal = SIGCHLD, .cgroup = 987}, 0, 0},
+        /* Not here: an existing set_tid (EPERM without CAP_CHECKPOINT_RESTORE, EEXIST with it)
+         * and CLONE_INTO_CGROUP (ignored by a kernel without cgroups) depend on the environment. */
         {"efault", {0}, 0, 1},
     };
     enum { NINV = sizeof inv / sizeof inv[0] };
