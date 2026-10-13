@@ -901,10 +901,13 @@ mod tests {
 
     #[test]
     fn native_acceptance_projects_round_trip_through_submission_json() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../harness/acceptance/workloads");
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../harness/acceptance");
         let mut tested = 0;
-        for entry in std::fs::read_dir(root).unwrap() {
+        let entries = ["workloads", "long"]
+            .into_iter()
+            .flat_map(|tier| std::fs::read_dir(root.join(tier)).unwrap());
+        for entry in entries {
             let path = entry.unwrap().path();
             if path.extension().and_then(|v| v.to_str()) != Some("yaml") {
                 continue;

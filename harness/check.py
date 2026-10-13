@@ -30,9 +30,11 @@ SUITES = {
     "mac-hvf": "Apple Silicon with macOS 15+, Hypervisor.framework and codesign: native CPU/state and cancellation primitives.",
     "mac-guests": "mac-hvf plus the ARM fixture kernel and initrd: real guest controls.",
     "mac-apps": "mac-hvf plus a Docker-compatible engine and Nix guest builds: every acceptance workload on ARM PV.",
+    "linux-apps-long": "linux-apps requirements: the long-running workloads (harness/acceptance/long, tens of minutes each), run and rerun.",
+    "mac-apps-long": "mac-apps requirements: the long-running workloads (harness/acceptance/long, tens of minutes each), run and rerun.",
 }
 # Groups hold the suites a set-up host can run with no hand-built fixtures;
-# the guest and pause suites are always named explicitly.
+# the guest, pause and long-running suites are always named explicitly.
 GROUPS = {
     "linux": ["linux-kvm", "linux-oci", "linux-apps"],
     "mac": ["mac-hvf", "mac-apps"],
@@ -42,6 +44,7 @@ IMPLIES = {
     "linux-guests": ["linux-kvm"],
     "mac-guests": ["mac-hvf"],
     "mac-apps": ["mac-hvf"],
+    "mac-apps-long": ["mac-hvf"],
 }
 
 
@@ -190,7 +193,7 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
             need(x86, "requires Linux x86-64")
         if suite != "linux-oci":  # Image import and builds need no hypervisor.
             need(not probe.get("kvm"), "/dev/kvm: " + (probe.get("kvm") or ""))
-        if suite in ("linux-apps", "linux-pause"):
+        if suite in ("linux-apps", "linux-apps-long", "linux-pause"):
             need(can_root, "requires root or passwordless sudo")
         if suite == "linux-kvm":
             need(machine in ("x86_64", "aarch64"), "requires Linux x86-64 or ARM64")
@@ -201,7 +204,7 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
             engine()
             need(can_root or not engine_needs_root(environment),
                  "the engine socket is not writable by this user; join its group, or allow passwordless sudo")
-        elif suite in ("linux-apps", "linux-pause"):
+        elif suite in ("linux-apps", "linux-apps-long", "linux-pause"):
             engine()
             missing.extend(build_requirements(environment, system))
         return [reason for reason in missing if reason]
@@ -217,7 +220,7 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
         need(shutil.which("codesign"), "codesign not found")
     elif suite == "mac-guests":
         inputs("SEEDBOX_ARM64_KERNEL", "SEEDBOX_ARM64_INITRD")
-    elif suite == "mac-apps":
+    elif suite in ("mac-apps", "mac-apps-long"):
         engine()
         missing.extend(build_requirements(environment, system))
     return missing
@@ -231,7 +234,9 @@ def features_for(package, machine, suites):
         return pick((("linux-oci", "oci-tests"),))
     if package == "seedbox":
         return pick((("linux-apps", "application-tests"),
-                     ("mac-apps", "application-tests"), ("linux-pause", "retained-run-tests")))
+                     ("mac-apps", "application-tests"), ("linux-pause", "retained-run-tests"),
+                     ("linux-apps-long", "long-application-tests"),
+                     ("mac-apps-long", "long-application-tests")))
     if package == "seedbox-vmm":
         return pick((("linux-kvm", "kvm-tests"),
                      ("linux-guests", "guest-tests"))) if machine == "x86_64" else []
@@ -317,14 +322,14 @@ class Checks:
                         continue
                     binary = str(copied)
                 command = [binary, "--test-threads=1"]
-                if target == "applications":
+                if target in ("applications", "long_applications"):
                     command.append("--nocapture")
                 # oci uses the engine the way the root CLI does in applications.
-                needs_root = package == "seedbox" and target in ("applications", "determinism", "host_pause", "oci")
+                needs_root = package == "seedbox" and target in ("applications", "long_applications", "determinism", "host_pause", "oci")
                 if needs_root or (package in ("seedbox-arm64", "seedbox-vmm") and "kvm-tests" in features):
                     command = privileged(prefix, command, environment)
                 self.run(package + "/" + target, command, environment=environment,
-                         timeout=None if target == "applications" else 1800)
+                         timeout=None if target in ("applications", "long_applications") else 1800)
 
 
 def describe():
@@ -390,7 +395,7 @@ def main(argv=None):
         if (path := available_file(environment, key, ROOT / default)) is not None:
             environment[key] = str(path)
     environment["SEEDBOX_ARM64_REPORT_DIR"] = str(reports / "arm64")
-    if {"linux-apps", "linux-pause", "mac-apps"} & set(suites):
+    if {"linux-apps", "linux-apps-long", "linux-pause", "mac-apps", "mac-apps-long"} & set(suites):
         output = checks.run("application-assets", ["cargo", "xtask", "build-assets"], capture=True)
         if output is None:
             return 1

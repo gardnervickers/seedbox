@@ -177,7 +177,10 @@ bash harness/check.sh mac             # Apple Silicon
 
 Suites are named, never auto-detected: `portable`, `linux-kvm`,
 `linux-guests`, `linux-oci`, `linux-apps`, `linux-pause`, `mac-hvf`,
-`mac-guests`, `mac-apps`, plus the `linux` and `mac` groups. `portable` compiles
+`mac-guests`, `mac-apps`, `linux-apps-long`, `mac-apps-long`, plus the `linux`
+and `mac` groups. The `-long` suites run `harness/acceptance/long`, workloads that
+take tens of minutes each (real JVM brokers); they are never in a group, and the
+`applications` corpus never reads that directory. `portable` compiles
 every feature-gated test with `--no-run` and executes only portable tests; it
 opens no KVM/HVF device and needs no root or registry access. It always runs
 first and must pass before hardware execution. A named suite whose host

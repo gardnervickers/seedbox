@@ -1,0 +1,34 @@
+# NEXT-100 case 12 (long-running tier): one KRaft broker with Kafka's default
+# JVM flags (G1, tiered C1+C2) at 1 GHz; startup, then a crash-durability arm.
+name: kafka-startup-crash
+machines:
+  kafka:
+    build:
+      context: "../guest/kafka"
+      dockerfile: broker.Dockerfile
+    environment:
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+    memoryMiB: 2048
+    cpu:
+      speed: 1GHz
+    volumes:
+      data:
+        target: "/data"
+oracle:
+  build:
+    context: "../guest/kafka"
+    dockerfile: client.Dockerfile
+  entrypoint:
+  - python3
+  - "/scenario/kafka_broker.py"
+  - startup-crash
+  memoryMiB: 1024
+  files:
+  - source: "../driver/kafka_broker.py"
+    target: "/scenario/kafka_broker.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

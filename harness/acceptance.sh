@@ -44,7 +44,7 @@ timed arm64-compare python3 crates/seedbox-arm64/test_compare.py -q
 timed workspace-feature-build cargo test --workspace --locked --all-features --no-run
 timed workspace-tests cargo test --workspace --locked
 validate_workloads() {
-  for scenario in harness/acceptance/workloads/*.yaml; do
+  for scenario in harness/acceptance/workloads/*.yaml harness/acceptance/long/*.yaml; do
     cargo run --quiet --locked -p seedbox -- validate "$scenario"
   done
 }
