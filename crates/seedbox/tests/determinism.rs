@@ -5,6 +5,9 @@
 //! different host arrangement, or an edited copy of it, and checks the server's
 //! comparison of witness, full state and fault history, or the unchanged prefix
 //! of logs, events and faults. Any host leak into the simulated world fails it.
+//! The last oracles cross a server session: runs exported from the first
+//! session are imported into a second server with a fresh state directory,
+//! where fresh resolutions must match them and imported checkpoints must branch.
 #![cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
@@ -72,7 +75,7 @@ fn whole_run_determinism_oracles() {
         .tempdir_in("/tmp")
         .unwrap();
     let state = directory.path().join("state");
-    let server = Server::start(Path::new(&cli), &state);
+    let mut server = Some(Server::start(Path::new(&cli), &state));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -103,6 +106,42 @@ fn whole_run_determinism_oracles() {
                 oracles.edited_timeline_prefix(&baseline).await,
             ),
             ("PreviewPurity", oracles.preview_purity(&baseline).await),
+            (
+                "AcceptedFaultSurvivesDisconnect",
+                oracles.accepted_fault_survives_disconnect(&baseline).await,
+            ),
+        ] {
+            match result {
+                Ok(()) => eprintln!("determinism: {name}: PASS"),
+                Err(error) => {
+                    eprintln!("determinism: {name}: FAIL: {error}");
+                    failures.push(format!("{name}: {error}"));
+                }
+            }
+        }
+        // Cross-session oracles: export from this session, then shut it down.
+        // Exports refuse symlinked parents such as macOS /tmp.
+        let root = directory.path().canonicalize().unwrap();
+        let carried = match oracles.carry(&root).await {
+            Ok(carried) => carried,
+            Err(error) => {
+                failures.push(format!("cross-session export: {error}"));
+                return failures;
+            }
+        };
+        drop(server.take());
+        let second = directory.path().join("state2");
+        server = Some(Server::start(Path::new(&cli), &second));
+        let fresh = Oracles::new(PathBuf::from(&cli), &second).await;
+        for (name, result) in [
+            (
+                "TwinFreshRunsCrossSession",
+                fresh.twin_fresh_runs(&carried).await,
+            ),
+            (
+                "ImportedCheckpointExecutes",
+                fresh.imported_checkpoint(&carried).await,
+            ),
         ] {
             match result {
                 Ok(()) => eprintln!("determinism: {name}: PASS"),
@@ -826,6 +865,399 @@ impl Oracles {
         }
         Ok(())
     }
+}
+
+impl Oracles {
+    /// Run a CLI command against this session's server; stdout on success.
+    fn cli(&self, args: &[&str]) -> Result<Vec<u8>, String> {
+        let output = Command::new(&self.cli)
+            .args(args)
+            .env("SEEDBOX_STATE", &self.state)
+            .output()
+            .map_err(|error| format!("{}: {error}", self.cli.display()))?;
+        if !output.status.success() {
+            return Err(format!(
+                "seedbox {}: {}{}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(output.stdout)
+    }
+
+    /// Resolve and run a project afresh with an explicit seed.
+    async fn run_project(&self, project: &Path) -> Result<SimulationId, String> {
+        let stdout = self.cli(&[
+            "run",
+            project.to_str().ok_or("project path is not UTF-8")?,
+            "--seed",
+            &SEED.to_string(),
+            "--detach",
+            "--json",
+        ])?;
+        let submitted: Simulation = serde_json::from_slice(&stdout).map_err(err)?;
+        self.complete(&submitted.metadata.id).await?;
+        Ok(submitted.metadata.id)
+    }
+
+    fn export(&self, id: &SimulationId, bundle: &Path) -> Outcome {
+        self.cli(&[
+            "export",
+            id.as_str(),
+            "--output",
+            bundle.to_str().ok_or("bundle path is not UTF-8")?,
+            "--json",
+        ])
+        .map(drop)
+    }
+
+    fn import(&self, bundle: &Path) -> Result<SimulationId, String> {
+        let stdout = self.cli(&[
+            "import",
+            bundle.to_str().ok_or("bundle path is not UTF-8")?,
+            "--json",
+        ])?;
+        let imported: Simulation = serde_json::from_slice(&stdout).map_err(err)?;
+        Ok(imported.metadata.id)
+    }
+
+    /// Send one control over a raw connection and return it unread.
+    fn post_control(
+        &self,
+        id: &SimulationId,
+        request: &ControlRequest,
+    ) -> Result<std::os::unix::net::UnixStream, String> {
+        use std::io::Write;
+        let body = serde_json::to_vec(request).map_err(err)?;
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(self.state.join("server.sock")).map_err(err)?;
+        write!(
+            stream,
+            "POST /v1/simulations/{id}/controls HTTP/1.1\r\nHost: seedbox.local\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .map_err(err)?;
+        stream.write_all(&body).map_err(err)?;
+        stream.flush().map_err(err)?;
+        Ok(stream)
+    }
+
+    /// Poll a receipt until the worker acknowledged it without error.
+    async fn acknowledged(
+        &self,
+        id: &SimulationId,
+        request_id: &str,
+    ) -> Result<ControlReceipt, String> {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let receipt = self
+                .client
+                .control_receipt(id, request_id)
+                .await
+                .map_err(err)?;
+            match &receipt.state {
+                ControlState::Acknowledged { error: None, .. } => return Ok(receipt),
+                ControlState::Accepted if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                _ => return Err(format!("{id}: {request_id}: {receipt:?}")),
+            }
+        }
+    }
+
+    // ---- 11. AcceptedFaultSurvivesDisconnect --------------------------------------
+
+    /// Keyed faults whose HTTP clients disconnect before reading the receipt,
+    /// once right after writing (perhaps before acceptance) and once after
+    /// acceptance: retrying each key must leave exactly one admission, the
+    /// partition must drop packets, and the run must replay.
+    async fn accepted_fault_survives_disconnect(&self, baseline: &SimulationId) -> Outcome {
+        let id = self.submit(&self.document, true).await?;
+        self.live(&id).await?;
+        self.rate(&id, PlaybackRate::Unlimited).await?;
+        if !self.reach(&id, 2 * SECOND).await? {
+            return Err(format!("{id} ended before 2 s"));
+        }
+        let partition = ControlRequest {
+            request_id: Client::request_id().map_err(err)?,
+            command: ControlCommand::InjectFault {
+                action: serde_json::from_value(json!({"action": "partition",
+                    "handle": "dropped-client", "left": ["worker"], "right": ["server"]}))
+                .map_err(err)?,
+            },
+        };
+        // Close right after writing: the server may never have accepted it, so
+        // the client retries the same key, which admits it exactly once.
+        drop(self.post_control(&id, &partition)?);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let first = self
+            .client
+            .request_control(&id, &partition)
+            .await
+            .map_err(err)?;
+        let receipt = self.acknowledged(&id, &partition.request_id).await?;
+        // Retrying an acknowledged key returns that receipt and admits nothing new.
+        let retried = self
+            .client
+            .request_control(&id, &partition)
+            .await
+            .map_err(err)?;
+        if retried != receipt || first.request != receipt.request {
+            return Err(format!(
+                "{id}: retry changed the receipt: {retried:?} vs {receipt:?}"
+            ));
+        }
+        let at = self.client.playback(&id).await.map_err(err)?.state.position;
+        if !self.reach(&id, at.simulated_time_ns + SECOND).await? {
+            return Err(format!("{id} ended while partitioned"));
+        }
+        // The heal's client disconnects after acceptance, before the response.
+        let heal = ControlRequest {
+            request_id: Client::request_id().map_err(err)?,
+            command: ControlCommand::InjectFault {
+                action: serde_json::from_value(
+                    json!({"action": "heal", "handle": "dropped-client"}),
+                )
+                .map_err(err)?,
+            },
+        };
+        let connection = self.post_control(&id, &heal)?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while self
+            .client
+            .control_receipt(&id, &heal.request_id)
+            .await
+            .is_err()
+        {
+            if Instant::now() > deadline {
+                return Err(format!("{id}: heal never accepted on an open connection"));
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        drop(connection);
+        self.acknowledged(&id, &heal.request_id).await?;
+        let retried = self.client.request_control(&id, &heal).await.map_err(err)?;
+        if !matches!(
+            retried.state,
+            ControlState::Acknowledged { error: None, .. }
+        ) {
+            return Err(format!("{id}: heal retry: {retried:?}"));
+        }
+        self.complete(&id).await?;
+        let world = self.client.world(&id).await.map_err(err)?;
+        let admitted: Vec<_> = world
+            .faults
+            .iter()
+            .filter(|f| {
+                f.action == "partition"
+                    && f.plan
+                        .as_ref()
+                        .is_some_and(|p| p["handle"] == "dropped-client")
+            })
+            .collect();
+        if admitted.len() != 1 {
+            return Err(format!(
+                "{id}: {} admissions of one keyed partition: {:?}",
+                admitted.len(),
+                world.faults
+            ));
+        }
+        let interventions = self
+            .client
+            .timeline(&id)
+            .await
+            .map_err(err)?
+            .entries
+            .iter()
+            .filter(|e| serde_json::to_string(e).is_ok_and(|t| t.contains("dropped-client")))
+            .count();
+        // The partition and its heal.
+        if interventions != 2 {
+            return Err(format!(
+                "{id}: {interventions} timeline entries for the keyed fault"
+            ));
+        }
+        let dropped = |world: &seedbox_api::WorldState| -> u64 {
+            world
+                .links
+                .iter()
+                .filter(|l| {
+                    (l.from == "worker" && l.to == "server")
+                        || (l.from == "server" && l.to == "worker")
+                })
+                .map(|l| l.counters.partition_dropped)
+                .sum()
+        };
+        let base = self.client.world(baseline).await.map_err(err)?;
+        if dropped(&world) <= dropped(&base) {
+            return Err(format!(
+                "{id}: the keyed partition dropped no packets ({} vs baseline {})",
+                dropped(&world),
+                dropped(&base)
+            ));
+        }
+        // Exit status 0 is MATCH.
+        self.cli(&["replay", id.as_str()]).map(drop)
+    }
+
+    // ---- 8 and 10: carried across the session boundary ---------------------------
+
+    /// In the first session: fresh runs of the fixture and of an example with
+    /// images pulled by tag, and a run with a checkpoint whose source is
+    /// deleted after export. Everything is exported for the second session.
+    async fn carry(&self, root: &Path) -> Result<Carried, String> {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../harness/fixtures/determinism");
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/redis");
+        let mut carried = Carried {
+            fixture,
+            example: example.clone(),
+            pinned: root.join("redis-pinned"),
+            bundles: root.join("bundles"),
+            suffix: Vec::new(),
+            checkpoint: String::new(),
+        };
+        std::fs::create_dir_all(&carried.bundles).map_err(err)?;
+        let twin = self.run_project(&carried.fixture).await?;
+        self.export(&twin, &carried.bundles.join("fixture.tar"))?;
+        let tagged = self.run_project(&example).await?;
+        self.export(&tagged, &carried.bundles.join("example.tar"))?;
+        // The same example with its pulled image named by a registry digest.
+        let engine = bollard::Docker::connect_with_defaults().map_err(err)?;
+        let digest = engine
+            .inspect_image("docker.io/library/redis:7.2")
+            .await
+            .map_err(err)?
+            .repo_digests
+            .unwrap_or_default()
+            .into_iter()
+            .find(|reference| reference.starts_with("docker.io/library/redis@sha256:"))
+            .ok_or("redis:7.2 has no registry digest")?;
+        copy_tree(&example, &carried.pinned).map_err(err)?;
+        let project = carried.pinned.join("seedbox.yaml");
+        let text = std::fs::read_to_string(&project).map_err(err)?;
+        let pinned = text.replace("docker.io/library/redis:7.2", &digest);
+        if pinned == text {
+            return Err("examples/redis no longer names redis:7.2".into());
+        }
+        std::fs::write(&project, pinned).map_err(err)?;
+
+        // A checkpoint with open TCP streams, volume data and guest entropy in use.
+        let source = self.submit(&self.document, true).await?;
+        self.live(&source).await?;
+        self.rate(&source, PlaybackRate::Unlimited).await?;
+        if !self.reach(&source, 9 * SECOND).await? {
+            return Err(format!("{source} ended before 9 s"));
+        }
+        self.rate(&source, PlaybackRate::Paused).await?;
+        let receipt = self.control(&source, ControlCommand::Checkpoint).await?;
+        carried.checkpoint = receipt.request.request_id;
+        self.rate(&source, PlaybackRate::Unlimited).await?;
+        self.complete(&source).await?;
+        let at = self
+            .client
+            .checkpoint(&source, &carried.checkpoint)
+            .await
+            .map_err(err)
+            .and_then(|receipt| match receipt.state {
+                ControlState::Acknowledged {
+                    checkpoint: Some(status),
+                    ..
+                } if status.state
+                    == seedbox_engine_protocol::host_control::CheckpointState::Captured =>
+                {
+                    Ok(status.position.simulated_time_ns)
+                }
+                state => Err(format!("{source}: checkpoint not captured: {state:?}")),
+            })?;
+        carried.suffix = self
+            .logs(&source)
+            .await?
+            .into_iter()
+            .filter(|r| r.time >= at)
+            .collect();
+        self.export(&source, &carried.bundles.join("checkpoint.tar"))?;
+        self.client.delete(&source).await.map_err(err)?;
+        Ok(carried)
+    }
+
+    // ---- 8. TwinFreshRunsCrossSession -------------------------------------------
+
+    /// In a new session with an empty cache, the fixture and the example
+    /// (pinned by digest) resolve, prepare and run again; each must match its
+    /// imported first-session run.
+    async fn twin_fresh_runs(&self, carried: &Carried) -> Outcome {
+        for (bundle, project) in [
+            ("fixture.tar", &carried.fixture),
+            ("example.tar", &carried.pinned),
+        ] {
+            let imported = self.import(&carried.bundles.join(bundle))?;
+            let fresh = self.run_project(project).await?;
+            self.same_results(&imported, &fresh)
+                .await
+                .map_err(|e| format!("{bundle} vs a fresh run of {}: {e}", project.display()))?;
+        }
+        Ok(())
+    }
+
+    // ---- 10. ImportedCheckpointExecutes -----------------------------------------
+
+    /// A checkpoint exported from a deleted source, imported into a session
+    /// that never saw it, must branch twice to equal results and continue
+    /// with the source's output.
+    async fn imported_checkpoint(&self, carried: &Carried) -> Outcome {
+        let imported = self.import(&carried.bundles.join("checkpoint.tar"))?;
+        let definition = self
+            .client
+            .checkpoint_definition(&imported, &carried.checkpoint)
+            .await
+            .map_err(err)?;
+        let document = serde_json::to_value(&definition).map_err(err)?;
+        let first = self.submit(&document, false).await?;
+        let second = self.submit(&document, false).await?;
+        self.complete(&first).await?;
+        self.complete(&second).await?;
+        self.same_results(&first, &second).await?;
+        for branch in [&first, &second] {
+            let output = self.logs(branch).await?;
+            if by_machine(&output) != by_machine(&carried.suffix) {
+                return Err(format!(
+                    "{branch} output differs from the deleted source after its checkpoint:\n{}",
+                    first_difference(&by_machine(&carried.suffix), &by_machine(&output))
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What the second session needs from the first.
+struct Carried {
+    fixture: PathBuf,
+    #[allow(dead_code)]
+    example: PathBuf,
+    /// A copy of the example whose pulled image is named by digest.
+    pinned: PathBuf,
+    bundles: PathBuf,
+    /// The checkpointed source's output from its capture time on.
+    suffix: Vec<Record>,
+    checkpoint: String,
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -34,7 +34,7 @@ class Corpus:
         self.root = Path(root)
         self.cases, self.batches = [], {}
 
-    def add(self, c, native, sim=None, replay=None, replay_status="MATCH"):
+    def add(self, c, native, sim=None, replay=None, replay_status="MATCH", twin_status=None):
         """`native`, `sim`, `replay`: (lines, exit[, hserr]) for this case, or None."""
         b = f"b{len(self.batches):03d}"
         self.cases.append(c)
@@ -51,6 +51,8 @@ class Corpus:
             if replay_status is not None:
                 info.update({"replay_status": replay_status, "replay_id": f"r{b}"})
                 (d / "replay.out").write_text((framed(c["id"], *replay) if replay else "") + f"@@DONE {b}\n")
+            if twin_status is not None:
+                info.update({"twin_status": twin_status, "import_id": f"i{b}", "twin_id": f"t{b}"})
             (d / "result.json").write_text(json.dumps(info))
 
     def report(self):
@@ -91,6 +93,21 @@ class ReportVerdicts(unittest.TestCase):
                 code, verdicts = corpus.report()
                 self.assertEqual(code, 1)
                 self.assertEqual(verdicts, {"Arith.1.default": f"REPLAY_{status}", "Arith.2.default": "OK"})
+
+    def test_twin_session_mismatch_fails_every_case_of_the_batch(self):
+        for status in ("MISMATCH", "NOT_COMPARABLE", "ERROR"):
+            with self.subTest(status=status):
+                corpus = Corpus(Path(self.tmp.name) / f"twin-{status}")
+                corpus.add(case("Arith.1.default", "Arith", "1 1"), OK, OK, OK, twin_status=status)
+                corpus.add(case("Arith.2.default", "Arith", "2 1"), OK, OK, OK, twin_status="MATCH")
+                code, verdicts = corpus.report()
+                self.assertEqual(code, 1)
+                self.assertEqual(verdicts, {"Arith.1.default": f"TWIN_{status}", "Arith.2.default": "OK"})
+        # A replay failure keeps its own attribution.
+        corpus = Corpus(Path(self.tmp.name) / "twin-and-replay")
+        corpus.add(case("Arith.1.default", "Arith", "1 1"), OK, OK, OK, replay_status="MISMATCH",
+                   twin_status="MISMATCH")
+        self.assertEqual(corpus.report(), (1, {"Arith.1.default": "REPLAY_MISMATCH"}))
 
     def test_replay_output_divergence_or_a_case_missing_from_the_replay(self):
         diverged = (["value 2", "OK Arith 1f"], 0)

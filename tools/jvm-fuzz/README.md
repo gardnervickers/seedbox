@@ -115,7 +115,10 @@ dropping hidden classes, so each probe also runs during code modification.
 ergonomics match the 1-vCPU guest; `--unconfined` drops the engine's seccomp
 filter, which the guest does not have. `sim --variant NAME --seed-offset K
 --jitter P` reruns the corpus into `sim-NAME` with other simulation seeds and
-CPU jitter; the report gives each variant its own verdicts.
+CPU jitter; the report gives each variant its own verdicts. `sim
+--twin-session` then exports every run, restarts the server (`seedbox serve
+--full-state`, left running), imports each export into the new session, runs
+the batch again from its project with the same seed and compares the two.
 
 A probe whose expected exit status is not 0 lists it per argument variant
 (`exit_codes` in `PROBES`); a probe that can hang its JVM is `isolate`d in a
@@ -132,6 +135,7 @@ simulation of its own.
 | `SIM_CUT`, `SIM_NOT_REACHED` | The simulation ended during or before the case. |
 | `REPLAY_DIVERGE` | The replay printed different output from the original simulation, or lacks the case. |
 | `REPLAY_MISMATCH`, `REPLAY_NOT_COMPARABLE`, `REPLAY_ERROR` | `seedbox replay` of the batch did not report `MATCH` (witness or full state), whatever the output; every case of the batch gets it. |
+| `TWIN_MISMATCH`, `TWIN_NOT_COMPARABLE`, `TWIN_ERROR` | With `sim --twin-session`: the run imported into a new server session and a fresh run of the same project and seed did not `compare` as `MATCH`. |
 | `NATIVE_FAIL`, `NATIVE_UNSTABLE` | The probe itself is broken or nondeterministic; fix the probe. |
 | `GUEST_DIFF` | An informational probe (`C.capabilities`) found the guest differs from the host. |
 

@@ -8,6 +8,9 @@ machines:
     files:
     - source: driver.py
       target: /driver.py
+    volumes:
+      data:
+        target: /data
   worker:
     build:
       context: .

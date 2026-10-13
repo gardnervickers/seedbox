@@ -261,6 +261,10 @@ impl WorldMachine for Mock {
         if self.owed.is_some() {
             return Err("owed I/O".into());
         }
+        let failpoint = format!("fail/snapshot/{}", self.name);
+        if self.trace.lock().unwrap().contains(&failpoint) {
+            return Err(format!("{} snapshot failed", self.name));
+        }
         Ok(Saved {
             common: self.common.clone(),
             steps: self.steps.clone(),

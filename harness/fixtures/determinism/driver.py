@@ -1,6 +1,6 @@
 """Whole-run determinism fixture (crates/seedbox/tests/determinism.rs).
 
-`server` serves digests of seeded file reads; `worker` rewrites code while
+`server` serves digests of seeded reads of a file on its volume; `worker` rewrites code while
 threads execute it (`/rewrite`), then makes a numbered TCP exchange with the
 server; the oracle prints markers at fixed simulated times, each followed by a
 child blocked on a pipe, partitions and heals the worker from the server, and
@@ -34,10 +34,13 @@ def connect(host, port):
 
 def server():
     data = os.urandom(1 << 20)  # Guest entropy: equal for one seed.
-    with open("/tmp/data.bin", "wb") as f:
+    # Written to a volume, so checkpoints and exports carry changed disk data.
+    with open("/data/data.bin", "wb") as f:
         f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
     print("server data", hashlib.sha256(data).hexdigest()[:16], flush=True)
-    fd = os.open("/tmp/data.bin", os.O_RDONLY)
+    fd = os.open("/data/data.bin", os.O_RDONLY)
 
     def serve(channel):
         with channel, channel.makefile("rwb") as stream:

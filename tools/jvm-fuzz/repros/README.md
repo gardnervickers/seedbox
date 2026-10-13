@@ -47,6 +47,8 @@ Open bugs found by the P0 probes (`C.*` signal and `cfzsync` tests, JVM and Go p
 | `close_range_all range\|cloexec` | `close_range(N, ~0U)` as `closefrom` and Python's `close_fds` use it | hangs |
 | `rlimit_nofile` | `RLIMIT_NOFILE` enforcement and inheritance across exec | not enforced; the exec'd image sees the translator's limit |
 | `clear_sighand_child exit` | a `CLONE_CLEAR_SIGHAND` fork child of a multithreaded parent | debug builds assert |
+||||||| 4f6d647c
+| `timer_sigwait timer\|kill thread\|self\|handler` | a process-directed signal for a thread in `sigwaitinfo`, or the one thread that unblocks it, while the main thread blocks in `pselect6` | never delivered (`timer self` and `kill handler` pass; `kill self`, with the signal already pending, waits forever); also with `drrun` and no client. A thread-directed `SIGEV_THREAD_ID` timer works |
 | `go_exec_flaky.sh` | runs `Go.exec` repeatedly | about 3% of runs lose a signal, crash a child or hang |
 
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple

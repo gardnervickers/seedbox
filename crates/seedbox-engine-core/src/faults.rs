@@ -1459,6 +1459,55 @@ mod link_tests {
                 .contains("handle=old"));
         }
     }
+    /// NEXT-100 case 9, engine arm: the network witness and the fault history
+    /// each change for their own component and only for it, so neither
+    /// comparison field can silently ignore a queued frame or a fault row.
+    #[test]
+    fn network_witness_and_fault_history_change_only_for_their_own_component() {
+        fn fields(f: &Faults) -> (Vec<u8>, Vec<u8>) {
+            let mut h = Sha256::new();
+            f.network_witness(&mut h);
+            (h.finalize().to_vec(), serde_json::to_vec(&f.log).unwrap())
+        }
+        let mut base = fixture(vec![shape(1, "s", 30)]);
+        base.apply_due(10);
+        assert_eq!(base.log.len(), 1);
+        let original = fields(&base);
+        assert_eq!(fields(&base.clone()), original);
+        // One link-queue entry: a frame scheduled on the shaped direction.
+        let mut queued = base.clone();
+        assert!(matches!(
+            queued.links.decide(0, 1, 15, 1500, false),
+            crate::links::Outcome::Deliver(_)
+        ));
+        let (network, history) = fields(&queued);
+        assert_ne!(
+            network, original.0,
+            "network witness ignored a queued frame"
+        );
+        assert_eq!(history, original.1, "a queued frame changed fault history");
+        // One fault-history entry, with the links untouched.
+        let mut recorded = base.clone();
+        let mut row = recorded.log[0].clone();
+        row.applied_at_ns = row.applied_at_ns.map(|at| at + 1);
+        recorded.log[0] = row;
+        let (network, history) = fields(&recorded);
+        assert_eq!(
+            network, original.0,
+            "a history row changed the network witness"
+        );
+        assert_ne!(history, original.1, "fault history ignored an edited row");
+        // An active handle is network state: healing it changes the witness and adds a row.
+        let mut healed = fixture(vec![shape(1, "s", 30), heal(2, "s")]);
+        healed.apply_due(10);
+        let scheduled = fields(&healed);
+        // The scheduled heal is already a history row, but not network state.
+        assert_eq!(scheduled.0, original.0);
+        healed.apply_due(20);
+        let (network, history) = fields(&healed);
+        assert_ne!(network, scheduled.0);
+        assert_ne!(history, scheduled.1);
+    }
     #[test]
     fn cut_dominates_live_shape_then_heal_resumes_identical_stream_position() {
         let mut f = fixture(vec![
