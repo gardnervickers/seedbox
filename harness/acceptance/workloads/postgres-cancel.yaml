@@ -1,0 +1,18 @@
+name: postgres-cancel
+machines:
+  pg:
+    image: docker.io/library/postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    memoryMiB: 1024
+    command: [postgres, -c, shared_buffers=32MB, -c, max_connections=20]
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+oracle:
+  image: docker.io/library/python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
+  entrypoint:
+  - python3
+  - "/scenario/postgres_cancel.py"
+  files:
+  - source: "../driver/postgres_cancel.py"
+    target: "/scenario/postgres_cancel.py"
+network:
+  latency: 1ms
