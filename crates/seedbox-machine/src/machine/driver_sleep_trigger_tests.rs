@@ -149,7 +149,15 @@ where
             .unwrap();
         let result = driver.step(at(now.as_nanos() + QUANTUM)).unwrap();
         outcomes.push(result);
-        events.extend(driver.with_barrier(|b| Ok(b.drain_responses())).unwrap());
+        events.extend(
+            driver
+                .drain_events()
+                .into_iter()
+                .filter_map(|event| match event.kind {
+                    crate::driver::EventKind::Output(output) => Some(output),
+                    _ => None,
+                }),
+        );
         if !resumed && output(&events, peer, Stream::Stdout) == b"PEER_RUNNING\n" {
             driver
                 .with_barrier(|b| b.schedule(b.playback().position.at, Action::Resume(oracle)))
