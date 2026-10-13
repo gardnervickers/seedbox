@@ -8,6 +8,8 @@
 #include <linux/irq.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
+#include <linux/preempt.h>
+#include <linux/sched.h>
 #include <linux/sched_clock.h>
 #include <linux/sizes.h>
 #include <asm/ptrace.h>
@@ -175,10 +177,23 @@ static void seedbox_charge(u64 ns)
 	}
 }
 
+/* The task whose progress call is charging its translated compute, if any.
+ * The clock advances only in the kernel, so every tick lands at EL1; a tick
+ * that interrupts this charge samples user work. One guest CPU, and no
+ * preemption inside the charge. */
+static struct task_struct *user_charge;
+
+/* Account the current tick as user time (kernel/time/timer.c): it interrupted
+ * a progress charge directly, not a softirq or a nested interrupt. */
+bool seedbox_user_tick(void)
+{
+	return READ_ONCE(user_charge) == current && irq_count() == HARDIRQ_OFFSET;
+}
+
 /* Charge syscall work through the bounded clock rendezvous. Load the charge
  * once: throttle/heal changes at a rendezvous affect the next syscall, while
  * the remaining charge survives in guest registers or stack. A progress call
- * charges the compute it stands for instead of one syscall.
+ * charges the compute it stands for instead of one syscall, as user time.
  */
 void seedbox_syscall_progress(struct pt_regs *regs, int scno)
 {
@@ -192,11 +207,16 @@ void seedbox_syscall_progress(struct pt_regs *regs, int scno)
 		return;
 	ns = page ? READ_ONCE(page->syscall_ns) : SYSCALL_NS;
 
-	if (page && scno == SEEDBOX_PROGRESS_NR && regs->regs[0] == SEEDBOX_PROGRESS_MARK)
+	if (page && scno == SEEDBOX_PROGRESS_NR && regs->regs[0] == SEEDBOX_PROGRESS_MARK) {
 		ns = progress_charge(ns);
+		WRITE_ONCE(user_charge, current);
+		seedbox_charge(ns);
+		WRITE_ONCE(user_charge, NULL);
+		return;
+	}
 	/* The translator's own syscalls (thread suspension, signal returns,
 	 * futex waits) are bookkeeping, not application work. */
-	else if (regs->regs[7] == SEEDBOX_TRANSLATOR_MARK)
+	if (regs->regs[7] == SEEDBOX_TRANSLATOR_MARK)
 		ns /= SEEDBOX_TRANSLATOR_DIVISOR;
 	seedbox_charge(ns);
 }

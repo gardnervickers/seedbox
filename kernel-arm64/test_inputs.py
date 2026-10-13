@@ -280,7 +280,10 @@ int main(void) {
             ], check=True, capture_output=True)
             subprocess.run([str(exe)], check=True, capture_output=True, timeout=10)
 
-    def test_syscall_charge_scales_and_survives_mid_charge_throttle_and_heal(self):
+    def run_charge_fixture(self, main):
+        # The actual charge helpers against a PV page and rendezvous model.
+        # Each rendezvous takes a tick in hard IRQ context on top of
+        # `nesting`, and counts how tick accounting classifies it.
         source = (HERE / "seedbox.c").read_text()
         page = source[source.index("struct seedbox_page {"):
                       source.index("static struct seedbox_page *page;")]
@@ -288,6 +291,7 @@ int main(void) {
                          source.index("static u64 cs_read")]
         fixture = r"""
 #include <assert.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -296,6 +300,15 @@ typedef uint64_t u64;
 #define unlikely(x) (x)
 #define panic(...) abort()
 struct pt_regs { unsigned long regs[31]; };
+struct task_struct { int pid; };
+static struct task_struct tasks[2], *current = &tasks[0];
+#define HARDIRQ_OFFSET (1UL << 16)
+#define SOFTIRQ_OFFSET (1UL << 8)
+static unsigned long preempt, nesting;
+#define irq_count() preempt
+static unsigned user_ticks, system_ticks;
+bool seedbox_user_tick(void);
+static struct task_struct *user_charge; /* tentative; defined in the helpers */
 """ + page + r"""
 _Static_assert(offsetof(struct seedbox_page, syscall_ns) == 48, "PV syscall cost ABI");
 _Static_assert(offsetof(struct seedbox_page, progress_ns) == 56, "progress charge ABI");
@@ -314,11 +327,14 @@ static void *event = registers;
 #define local_irq_restore(saved) do { irq_flags = (saved); } while (0)
 #define irqs_disabled_flags(saved) ((saved) & 128)
 #define isb() ((void)0)
-#define READ_ONCE(x) (assert(&(x) == &page->syscall_ns || &(x) == &page->progress_ns \
-                             || &(x) == &page->progress_jitter_ns \
-                             || &(x) == &page->progress_jitter_seed || (irq_flags & 128)), (x))
+#define AT(x, y) ((void *)&(x) == (void *)&(y))
+#define READ_ONCE(x) (assert(AT(x, page->syscall_ns) || AT(x, page->progress_ns) \
+                             || AT(x, page->progress_jitter_ns) \
+                             || AT(x, page->progress_jitter_seed) \
+                             || AT(x, user_charge) || (irq_flags & 128)), (x))
 #define likely(x) (x)
-#define WRITE_ONCE(x, v) do { assert(irq_flags & 128); (x) = (v); } while (0)
+#define WRITE_ONCE(x, v) do { assert(AT(x, user_charge) || (irq_flags & 128)); \
+                              (x) = (v); } while (0)
 static void writeq(unsigned long value, void *address) {
     assert(value == 1 && address == registers + 24);
     assert(irq_flags == 0);
@@ -327,8 +343,22 @@ static void writeq(unsigned long value, void *address) {
     page->now = page->last;
     page->bound += window;
     if (next_cost) page->syscall_ns = next_cost;
+    preempt = nesting + HARDIRQ_OFFSET;
+    if (seedbox_user_tick()) ++user_ticks; else ++system_ticks;
+    preempt = 0;
 }
-""" + helpers + r"""
+""" + helpers + main
+        with tempfile.TemporaryDirectory() as directory:
+            c = Path(directory) / "syscall.c"
+            exe = Path(directory) / "syscall"
+            c.write_text(fixture)
+            subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+                "-Wall", "-Wextra", "-Werror", "-O2", str(c), "-o", str(exe)
+            ], check=True, capture_output=True)
+            subprocess.run([str(exe)], check=True, capture_output=True, timeout=10)
+
+    def test_syscall_charge_scales_and_survives_mid_charge_throttle_and_heal(self):
+        self.run_charge_fixture(r"""
 static void reset(u64 cost, u64 bound, u64 span, u64 replacement) {
     storage = (struct seedbox_page){.syscall_ns = cost, .bound = bound};
     window = span;
@@ -449,15 +479,65 @@ int main(void) {
     seedbox_syscall_progress(&regs, 1);
     assert(early_last == 2000 && irq_flags == 0);
 }
-"""
-        with tempfile.TemporaryDirectory() as directory:
-            c = Path(directory) / "syscall.c"
-            exe = Path(directory) / "syscall"
-            c.write_text(fixture)
-            subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
-                "-Wall", "-Wextra", "-Werror", "-O2", str(c), "-o", str(exe)
-            ], check=True, capture_output=True)
-            subprocess.run([str(exe)], check=True, capture_output=True, timeout=10)
+""")
+
+    def test_ticks_during_progress_charges_count_as_user_time(self):
+        self.run_charge_fixture(r"""
+static void reset(u64 bound, u64 span) {
+    storage = (struct seedbox_page){.syscall_ns = 1000, .bound = bound,
+                                    .progress_ns = 25000};
+    window = span;
+    next_cost = 0;
+    writes = user_ticks = system_ticks = 0;
+    nesting = 0;
+    current = &tasks[0];
+}
+int main(void) {
+    /* A tick during a progress charge samples user work, at every bound
+     * the charge crosses; the charge total is unchanged. */
+    reset(10000, 10000);
+    regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(page->last == 25000 && writes == 2);
+    assert(user_ticks == 2 && system_ticks == 0);
+    /* After the call returns, a tick is the kernel's again. */
+    preempt = HARDIRQ_OFFSET;
+    assert(!seedbox_user_tick());
+    preempt = 0;
+
+    /* Syscall and translator work stays system time. */
+    reset(500, 500);
+    regs.regs[0] = 0;
+    seedbox_syscall_progress(&regs, 1);
+    regs.regs[7] = SEEDBOX_TRANSLATOR_MARK;
+    for (int i = 0; i != 10; ++i)
+        seedbox_syscall_progress(&regs, 98);
+    regs.regs[7] = 0;
+    regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR + 1);
+    assert(page->last == 3000 && writes == 5);
+    assert(user_ticks == 0 && system_ticks == 5);
+
+    /* A tick nested in a softirq on top of the charge, or seen by another
+     * task, is not the charge's. */
+    reset(10000, 10000);
+    nesting = SOFTIRQ_OFFSET;
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(user_ticks == 0 && system_ticks == 2);
+    nesting = 0;
+    reset(UINT64_MAX, 0);
+    current = &tasks[1];
+    assert(!seedbox_user_tick());
+
+    /* Before the PV page, a marked call charges a syscall, as system time. */
+    page = NULL;
+    current = &tasks[0];
+    seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+    assert(early_last == 1000);
+    preempt = HARDIRQ_OFFSET;
+    assert(!seedbox_user_tick());
+}
+""")
 
     def test_exec_cannot_reenable_hardware_counter(self):
         source = """static void update_cntkctl_el1(struct task_struct *next)
