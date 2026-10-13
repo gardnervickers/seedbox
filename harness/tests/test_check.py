@@ -52,6 +52,17 @@ class SelectionTests(unittest.TestCase):
             inputs["SEEDBOX_TCG_ASSETS"] = directory
             self.assertEqual(self.linux("machine-tcg", {"kvm": "denied"}, inputs=inputs), [])
 
+    def test_missing_tcg_list_exits_two_without_probing_kvm_or_building(self):
+        with patch.object(check.platform, "system", return_value="Linux"), \
+                patch.object(check.platform, "machine", return_value="x86_64"), \
+                patch.object(check, "root_prefix", return_value=None), \
+                patch.dict(os.environ, {}, clear=True), \
+                patch.object(check.subprocess, "run") as run, \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(check.main(["machine-tcg", "--list"]), 2)
+            run.assert_not_called()
+
     def test_default_is_portable_only(self):
         self.assertEqual(check.expand(["portable"], "x86_64"), ["portable"])
 

@@ -193,14 +193,14 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
         keys = ["ASSETS", "SERVICE_INITRD", "CONTROL_INITRD",
                 "DRIVER_CONTROL_APPLICATION", "PREPARED_FIXTURE"]
         keys += ["QEMU", "FIRMWARE", "KERNEL", "INIT"] if backend == "TCG" else [
-            "WORKER", "KERNEL", "INIT", "PROGRESS_RUNTIME", "PROGRESS_FIXTURE"]
+            "WORKER", "KERNEL", "INIT", "PROGRESS_RUNTIME", "PROGRESS_FIXTURE", "CLANG", "LD"]
         for suffix in keys:
             key = f"SEEDBOX_{backend}_{suffix}"
             value = environment.get(key)
             path = Path(value) if value else None
             valid = path and (path.is_dir() if suffix == "ASSETS" else path.is_file())
             need(valid, f"set {key} to an existing {'directory' if suffix == 'ASSETS' else 'file'}")
-            if valid and suffix in ("QEMU", "WORKER"):
+            if valid and suffix in ("QEMU", "WORKER", "CLANG", "LD"):
                 need(os.access(path, os.X_OK), f"{key} is not executable")
         return missing
     if suite.startswith("linux-"):
