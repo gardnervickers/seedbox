@@ -471,6 +471,29 @@ static int t_pselect(void) {
     return 1;
 }
 
+/* sigsuspend must return at once for a signal that its mask unblocks and that is
+ * already pending, as HotSpot's suspend/resume handler relies on. */
+static volatile sig_atomic_t suspend_hits;
+static void ss_handler(int s) { (void)s; suspend_hits++; }
+static int t_sigsuspend(void) {
+    signal(SIGUSR2, ss_handler);
+    sigset_t block, empty;
+    sigemptyset(&block);
+    sigaddset(&block, SIGUSR2);
+    sigemptyset(&empty);
+    sigprocmask(SIG_BLOCK, &block, 0);
+    long eintr = 0;
+    for (long i = 0; i < 500 * scale; i++) {
+        raise(SIGUSR2); /* pending while blocked */
+        int r = sigsuspend(&empty);
+        eintr += r < 0 && errno == EINTR;
+    }
+    sigprocmask(SIG_UNBLOCK, &block, 0);
+    OUT("eintr", "%ld", eintr);
+    OUT("handled", "%d", (int)suspend_hits);
+    return 1;
+}
+
 static volatile sig_atomic_t cpu_ticks;
 static void cpu_tick(int s) { (void)s; cpu_ticks++; }
 static int t_cputimer(void) {
@@ -825,6 +848,7 @@ static const struct { const char *name; int (*fn)(void); } TESTS[] = {
     {"membarrier", t_membarrier}, {"dlopen", t_dlopen}, {"segvbarrier", t_segvbarrier},
     {"siglongjmp", t_siglongjmp}, {"ucontext", t_ucontext}, {"pthreadcancel", t_pthreadcancel},
     {"seccomp", t_seccomp}, {"autodisarm", t_autodisarm}, {"signalfd", t_signalfd}, {"pselect", t_pselect},
+    {"sigsuspend", t_sigsuspend},
     {"cputimer", t_cputimer}, {"futexwaitv", t_futexwaitv}, {"epolloneshot", t_epolloneshot},
     {"pidfd", t_pidfd}, {"clone3", t_clone3}, {"memfdexec", t_memfdexec}, {"vmops", t_vmops},
     {"timerfd", t_timerfd}, {"rseq", t_rseq}, {"iouring", t_iouring}, {"ptrace", t_ptrace},

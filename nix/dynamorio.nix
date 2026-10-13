@@ -57,6 +57,9 @@ pkgs.stdenv.mkDerivation {
     # A new thread found its clone record by reading unused stack, where a
     # record an earlier thread left could match; it then hung on a garbage lock.
     ../guest/progress/dynamorio-clone-record.patch
+    # Backport of upstream PR #7958: sigsuspend hung when a signal it unblocks
+    # was already pending in the translator.
+    ../guest/progress/dynamorio-sigsuspend-pending.patch
   ] else [
     # The same translator syscall mark, in rbx.
     ../guest/progress/dynamorio-x86-translator-syscalls.patch

@@ -118,10 +118,11 @@ PROBES = {
                    "exit_codes": {"daemons": 0, "exit7": 7, "halt5": 5, "uncaught": 1}},
     # Native AArch64 probes (probes/c/cfz.c), one test each, run without a JVM.
     **{f"C.{name}": {"native": name} for name in (
-        "casp", "lse2", "ldapr", "dczva", "carry", "fpcr", "tbi", "rwrx", "mremapcode", "membarrier",
-        "dlopen", "segvbarrier", "siglongjmp", "ucontext", "pthreadcancel", "seccomp", "autodisarm",
-        "signalfd", "pselect", "cputimer", "futexwaitv", "epolloneshot", "pidfd", "clone3", "memfdexec",
-        "vmops", "timerfd", "rseq", "iouring", "ptrace", "wipeonfork", "scmrights", "ifunc")},
+        "casp", "lse2", "ldapr", "dczva", "carry", "fpcr", "tbi", "rwrx", "mremapcode",
+        "membarrier", "dlopen", "segvbarrier", "siglongjmp", "ucontext", "pthreadcancel",
+        "seccomp", "autodisarm", "signalfd", "pselect", "sigsuspend", "cputimer", "futexwaitv",
+        "epolloneshot", "pidfd", "clone3", "memfdexec", "vmops", "timerfd", "rseq", "iouring",
+        "ptrace", "wipeonfork", "scmrights", "ifunc")},
     # What the host offers; differences from native describe the guest ("info").
     "C.capabilities": {"native": "capabilities", "info": True},
     "Jfr": {"arg_variants": ["all 1", "exec 1", "exec 10", "alloc,monitor,park 1", "none 1",
