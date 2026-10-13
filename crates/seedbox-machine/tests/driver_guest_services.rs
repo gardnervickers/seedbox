@@ -1105,7 +1105,7 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
 
 #[test]
 #[ignore = "requires native TCG owned kernel/helper and driver-control application"]
-fn tcg_native_boot_realtime_observes_fixed_2000_epoch() {
+fn tcg_native_boot_realtime_is_epoch_plus_machine_counter() {
     let serial = boot_epoch(1);
     assert_eq!(serial, boot_epoch(2));
     assert_eq!(serial, boot_epoch(4));
@@ -1132,14 +1132,12 @@ fn tcg_native_boot_realtime_observes_fixed_2000_epoch() {
     assert_eq!(clocks.len(), 4);
     assert!(clocks[0] <= clocks[3]);
     assert!(clocks[0] <= clocks[2] && clocks[2] <= clocks[3]);
-    // Observation of today's QEMU goldfish RTC, not a definition-level epoch
-    // contract. TCG hard-codes 2000-01-01; no host wall clock is consulted.
-    // Linux hctosys initializes REALTIME from the RTC's whole seconds during
-    // boot, after MONOTONIC has already advanced. Consequently the offset is
-    // not precisely epoch: REALTIME - epoch lags MONOTONIC by boot work.
-    let epoch = 946_684_800_000_000_000;
-    assert!(clocks[1] > epoch);
-    assert!(clocks[1] - epoch < clocks[0]);
+    // Every boot sets REALTIME to the epoch (zero: factories have no epoch
+    // input yet) plus the machine counter before Ready. MONOTONIC starts when
+    // the kernel's clocksource does, after the counter, so REALTIME leads it
+    // by the constant pre-clocksource boot interval. The board RTC derives
+    // from the same epoch; no host wall clock is consulted.
+    assert!(clocks[1] > clocks[0] && clocks[1] - clocks[0] < 1_000_000_000);
     for clock in clocks {
         assert_eq!(clock % 100, 0, "current 10 MHz time CSR resolution");
     }

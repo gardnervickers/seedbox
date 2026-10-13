@@ -4,6 +4,7 @@
 #   bin/cpu-loop                     SEEDBOX_PV_PROGRESS_FIXTURE
 #   bin/prepared-fixture             SEEDBOX_PV_PREPARED_FIXTURE
 #   bin/driver-simulation-control    SEEDBOX_PV_DRIVER_CONTROL_APPLICATION
+#   bin/clock-faults                 SEEDBOX_PV_CLOCK_APPLICATION
 #   service-initrd                   SEEDBOX_PV_SERVICE_INITRD
 #   control-initrd                   SEEDBOX_PV_CONTROL_INITRD
 { pkgs, guest }:
@@ -18,6 +19,7 @@ let
       ./src/pv/guest_prepared_fixture.c
       ./tests/fixtures/simulation-control.c
       ./tests/fixtures/driver-simulation-control.c
+      ./tests/fixtures/clock-faults.c
     ];
   };
   programs = pkgs.stdenvNoCC.mkDerivation {
@@ -35,10 +37,11 @@ let
       build src/pv/guest_prepared_fixture.c prepared-fixture
       build tests/fixtures/simulation-control.c simulation-control
       build tests/fixtures/driver-simulation-control.c driver-simulation-control
+      build tests/fixtures/clock-faults.c clock-faults
     '';
     installPhase = ''
       mkdir -p "$out/bin"
-      cp cpu-loop prepared-fixture simulation-control driver-simulation-control "$out/bin/"
+      cp cpu-loop prepared-fixture simulation-control driver-simulation-control clock-faults "$out/bin/"
     '';
   };
   service = guest.mkInitramfs { application = "${guest}/bin/application"; };

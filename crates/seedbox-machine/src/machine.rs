@@ -25,6 +25,8 @@ pub struct RunContext<'a, C> {
 mod test_environment;
 
 #[cfg(all(test, unix))]
+mod clock_fault_tests;
+#[cfg(all(test, unix))]
 mod control_snapshot_tests;
 #[cfg(all(test, unix))]
 mod driver_input_snapshot_tests;

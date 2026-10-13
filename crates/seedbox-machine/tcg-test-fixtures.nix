@@ -1,5 +1,5 @@
 # Static RISC-V Linux inputs owned by seedbox-machine's native TCG tests.
-# bin/prepared-fixture and bin/driver-simulation-control, service-initrd and
+# bin/prepared-fixture, bin/driver-simulation-control and bin/clock-faults, service-initrd and
 # control-initrd correspond to the explicit SEEDBOX_TCG_* test inputs.
 { pkgs, guest }:
 let
@@ -9,6 +9,7 @@ let
       ./src/pv/guest_prepared_fixture.c
       ./tests/fixtures/simulation-control.c
       ./tests/fixtures/driver-simulation-control.c
+      ./tests/fixtures/clock-faults.c
     ];
   };
   programs = pkgs.stdenvNoCC.mkDerivation {
@@ -25,10 +26,11 @@ let
       build src/pv/guest_prepared_fixture.c prepared-fixture
       build tests/fixtures/simulation-control.c simulation-control
       build tests/fixtures/driver-simulation-control.c driver-simulation-control
+      build tests/fixtures/clock-faults.c clock-faults
     '';
     installPhase = ''
       mkdir -p "$out/bin"
-      cp prepared-fixture simulation-control driver-simulation-control "$out/bin/"
+      cp prepared-fixture simulation-control driver-simulation-control clock-faults "$out/bin/"
     '';
   };
   service = guest.mkInitramfs { application = "${guest}/bin/application"; };
