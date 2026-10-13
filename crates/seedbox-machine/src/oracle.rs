@@ -72,6 +72,9 @@ pub(crate) enum TriggerFault {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Operation {
     Now {},
+    Spawn {
+        machine: String,
+    },
     Inspect {},
     Sleep {
         duration_ns: u64,

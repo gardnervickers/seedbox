@@ -44,6 +44,7 @@ where
         context,
         definition(0),
         others,
+        Vec::new(),
         move |_| Ok(machines.next().expect("one fixture per definition")),
     )
 }

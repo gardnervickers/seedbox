@@ -222,7 +222,14 @@ where
     /// Construct machines and driver-owned simulation dependencies.
     ///
     /// The factory constructs the required oracle first, followed by the other
-    /// definitions in list order. The driver retains the factory and definitions.
+    /// definitions in list order. `spawnable` contains definitions not started at
+    /// boot; any machine may request each name once through simulation control.
+    /// Names must be unique across all three lists, checked before either factory.
+    /// Spawns join at their FIFO effect turn and run from the next round. IDs and
+    /// RNG streams follow spawn admission order. Construction failure publishes a
+    /// Failed settlement and poisons the driver; confirmed events remain drainable.
+    /// The driver retains the factory and spawnable definitions.
+    /// TODO BEFORE MERGE: re-evaluate the MachineDefinition / spawnable representation.
     /// The factory must return newly configured machines without executing them. This order
     /// breaks scheduling ties and assigns
     /// independent machine RNG streams by drawing one little-endian u64 seed
@@ -250,6 +257,7 @@ where
         context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
         oracle: MachineDefinition,
         machines: Vec<MachineDefinition>,
+        spawnable: Vec<MachineDefinition>,
         mut factory: impl FnMut(&MachineDefinition) -> Result<M, M::Error> + Send + 'static,
     ) -> Result<Self, Error<M::Error>> {
         let quantum_ns = u64::try_from(quantum.as_nanos())
@@ -264,6 +272,12 @@ where
         );
         if workers == 0 {
             return Err(Error::InvalidWorkerCount);
+        }
+        let mut names = BTreeSet::new();
+        for definition in std::iter::once(&oracle).chain(&machines).chain(&spawnable) {
+            if !names.insert(&definition.name) {
+                return Err(Error::DuplicateName(definition.name.clone()));
+            }
         }
         let workers = Workers::new(workers, context)?;
         let clock = Arc::new(SimulationClock::new(start.as_nanos()));
@@ -293,6 +307,8 @@ where
                 boot: 0,
             })
             .collect();
+        let mut control = control::Control::new(&definitions, start);
+        control.declare_spawnable(&spawnable);
         let mut driver = Self {
             clock,
             workers,
@@ -312,9 +328,9 @@ where
             oracle: MachineId(0),
             finished: None,
             oracle_stops: BTreeSet::new(),
-            control: control::Control::new(&definitions, start),
+            control,
             trigger_marker: None,
-            definitions,
+            definitions: spawnable,
             factory: Box::new(factory),
         };
         for index in 0..driver.machines.len() {
@@ -1204,11 +1220,6 @@ where
                             command,
                             ..
                         }) => {
-                            accepted_fault = Some(fault);
-                            let id = self
-                                .control
-                                .target(&target)
-                                .map_err(|e| Error::Control(e.message))?;
                             let check = self
                                 .control
                                 .invoke(|service, view| service.dispatch_check(view, fault))
@@ -1232,11 +1243,39 @@ where
                                 }
                                 Some(Ok(())) => {}
                             }
+                            if effect == Effect::Spawn {
+                                let created = self.spawn(&target, fault);
+                                if let Err(error) = created {
+                                    self.control.service.execution_failed(
+                                        fault,
+                                        None,
+                                        now.as_nanos(),
+                                        "spawn construction failed".into(),
+                                    );
+                                    self.control.uncertain_failure();
+                                    return Err(error);
+                                }
+                                let plans = self
+                                    .control
+                                    .invoke_plans(|service, _| {
+                                        service.applied(fault, now.as_nanos(), now.as_nanos())
+                                    })
+                                    .map_err(Error::Control)?;
+                                self.control_plans(plans)?;
+                                self.commit_boundary()?;
+                                continue;
+                            }
+                            accepted_fault = Some(fault);
+                            let id = self
+                                .control
+                                .target(&target)
+                                .map_err(|e| Error::Control(e.message))?;
                             debug_assert_eq!(self.machines[id.0].boot, boot);
                             if !matches!(effect, Effect::Process(_)) {
                                 service_effect = Some(fault);
                             }
                             match effect {
+                                Effect::Spawn => unreachable!("spawn handled separately"),
                                 Effect::Pause => Scheduled::Driver(DriverEvent::Pause(id)),
                                 Effect::Resume => Scheduled::Driver(DriverEvent::Resume(id)),
                                 Effect::Execution(config) => {
@@ -1491,6 +1530,46 @@ where
             self.commit_boundary()?;
         }
         Ok(None)
+    }
+
+    fn spawn(&mut self, name: &str, fault: u32) -> Result<(), Error<M::Error>> {
+        let index = self
+            .definitions
+            .iter()
+            .position(|d| d.name == name)
+            .ok_or_else(|| Error::Control("spawn lacks declared definition".into()))?;
+        let id = self.control.spawn_target(name).map_err(Error::Control)?;
+        if id.0 != self.machines.len() {
+            return Err(Error::Control(
+                "spawn identity out of insertion order".into(),
+            ));
+        }
+        let machine = (self.factory)(&self.definitions[index]).map_err(Error::Construction)?;
+        let mut bytes = [0; 8];
+        self.rng.fill_bytes(&mut bytes);
+        self.machines.push(Entry {
+            machine: Some(machine),
+            rng: Some(SeededRng::new(u64::from_le_bytes(bytes))),
+            execution: ExecutionConfig::default(),
+            reached: self.now(),
+            stopped: StopReason::BoundaryReached,
+            paused: false,
+            inbox: VecDeque::new(),
+            staged: Vec::new(),
+            boot: 0,
+        });
+        self.control
+            .spawned(name, self.now())
+            .map_err(Error::Control)?;
+        self.definitions.remove(index);
+        self.stage(
+            self.now(),
+            EventKind::MachineAdded {
+                machine: id,
+                cause: Cause::Fault(FaultId(fault)),
+            },
+        );
+        Ok(())
     }
 
     fn next(&self) -> Option<(MachineId, Timestamp)> {
@@ -1773,6 +1852,8 @@ where
 pub enum Error<E> {
     /// A machine factory failed before its machines were admitted.
     Construction(E),
+    /// Definition names must be unique across oracle, initial and spawnable machines.
+    DuplicateName(String),
     /// Simulation-control policy or correlation failed.
     Control(String),
     /// Quantum must be positive and representable in u64 nanoseconds.
@@ -1839,6 +1920,7 @@ pub enum Error<E> {
 impl<E: fmt::Display> fmt::Display for Error<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DuplicateName(name) => write!(f, "duplicate machine definition name: {name}"),
             Self::Control(message) => write!(f, "simulation control: {message}"),
             Self::InvalidQuantum => {
                 f.write_str("quantum must be positive and fit in u64 nanoseconds")
@@ -1921,6 +2003,8 @@ pub enum StepOutcome {
 
 #[cfg(test)]
 mod queue_tests;
+#[cfg(test)]
+mod spawn_tests;
 #[cfg(test)]
 mod tests;
 

@@ -99,6 +99,7 @@ fn make() -> (Driver<Fixture>, MachineId) {
         || Ok(()),
         driver_definition::definition("oracle"),
         vec![driver_definition::definition("target")],
+        Vec::new(),
         |_| Ok(Fixture::default()),
     )
     .unwrap();
@@ -256,6 +257,7 @@ fn failed_run_poisons_before_any_response_can_be_observed() {
         Rng,
         || Ok(()),
         driver_definition::definition("oracle"),
+        Vec::new(),
         Vec::new(),
         |_| {
             Ok(Fixture {

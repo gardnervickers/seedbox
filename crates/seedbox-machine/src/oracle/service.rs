@@ -60,6 +60,10 @@ pub(crate) enum CommandOwner {
     },
 }
 pub(crate) trait Adapter {
+    /// Reserve a declared machine once, without building it or drawing entropy.
+    fn reserve_spawn(&mut self, _: &str) -> Result<(), OperationError> {
+        Err(OperationError::unsupported())
+    }
     fn resolve(&self, target: &Target) -> Result<Facts, OperationError>;
     /// Reserve from the shared boot allocator, excluding even future scheduled
     /// external IDs. Reservation is not machine acceptance: command_owner must
@@ -87,6 +91,7 @@ pub(crate) trait Adapter {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Effect {
+    Spawn,
     Pause,
     Resume,
     Crash,
@@ -444,7 +449,8 @@ impl Service {
                 | Operation::Crash { .. }
                 | Operation::Reboot { .. }
                 | Operation::Throttle { .. }
-                | Operation::Heal { .. }),
+                | Operation::Heal { .. }
+                | Operation::Spawn { .. }),
             ) => match self.prepare(adapter, AdmissionMode::Control, Some(call.clone()), op, now) {
                 Ok((_, plans)) => return Ok(plans),
                 Err(PreparationError::Fatal(e)) => {
@@ -472,6 +478,21 @@ impl Service {
     ) -> Result<(u32, Vec<Plan>), PreparationError> {
         let mut handle = None;
         let (facts, effect) = match op {
+            Operation::Spawn { machine } => {
+                adapter.reserve_spawn(&machine)?;
+                (
+                    Facts {
+                        name: machine,
+                        boot: 0,
+                        vm: Vm::Up,
+                        process: Process::Running,
+                        physically_ended: false,
+                        ready: false,
+                        execution: ExecutionConfig::default(),
+                    },
+                    Effect::Spawn,
+                )
+            }
             Operation::Heal { handle: text } => {
                 let plan = self
                     .handles
@@ -578,7 +599,7 @@ impl Service {
             Effect::Resume => facts.vm == Vm::Paused,
             Effect::Crash => facts.vm != Vm::Down,
             Effect::Reboot => facts.vm == Vm::Down,
-            Effect::Execution(_) => true,
+            Effect::Execution(_) | Effect::Spawn => true,
         };
         if !allowed {
             return Err(error(ErrorCode::InvalidState, "target state rejects operation").into());
@@ -600,14 +621,15 @@ impl Service {
         let pending = Pending {
             call,
             requester,
-            target: facts.name,
+            target: facts.name.clone(),
             boot: facts.boot,
-            effect,
+            effect: effect.clone(),
             command: None,
             dispatched: None,
             deadline,
             admitted: now,
             result: match &handle {
+                _ if effect == Effect::Spawn => json!({"machine":facts.name}),
                 Some(h) if !healing => json!({"handle":h.handle.to_string()}),
                 _ => json!({}),
             },
@@ -716,6 +738,9 @@ impl Service {
         let Some(pending) = self.pending.get(&fault) else {
             return Ok(None);
         };
+        if pending.effect == Effect::Spawn {
+            return Ok(Some(Ok(())));
+        }
         let facts = match adapter.resolve(&Target::Machine(pending.target.clone())) {
             Ok(facts) => facts,
             Err(error) => return Ok(Some(Err(error))),
@@ -743,7 +768,7 @@ impl Service {
             Effect::Resume => facts.vm == Vm::Paused,
             Effect::Crash => facts.vm != Vm::Down,
             Effect::Reboot => facts.vm == Vm::Down,
-            Effect::Execution(_) => true,
+            Effect::Execution(_) | Effect::Spawn => true,
             // Commands already reserved for the application are decided by its
             // actual acknowledgment. Earlier commands can change process state.
             Effect::Process(_) => facts.vm != Vm::Down && !facts.physically_ended,

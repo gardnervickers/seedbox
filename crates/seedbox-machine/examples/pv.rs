@@ -77,6 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         || Ok(()),
         oracle,
         machines,
+        Vec::new(),
         move |definition| backend.create(definition),
     )?;
     let ids: Vec<_> = driver

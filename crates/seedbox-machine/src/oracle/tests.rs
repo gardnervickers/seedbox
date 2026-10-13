@@ -74,6 +74,25 @@ fn full_scoped_wire_vocabulary_preserves_targets_and_binary_marker() {
 }
 
 #[test]
+fn spawn_wire_contains_only_a_declared_name_not_guest_supplied_definitions() {
+    assert_eq!(
+        operation(json!({"op":"spawn","machine":"replica-1"})),
+        Operation::Spawn {
+            machine: "replica-1".into()
+        }
+    );
+    for value in [
+        json!({"op":"spawn"}),
+        json!({"op":"spawn","machine":{"name":"replica-1"}}),
+        json!({"op":"spawn","machine":"replica-1","resources":{}}),
+        json!({"op":"spawn","machine":"replica-1","application":{}}),
+        json!({"op":"spawn","target":{"machine":"replica-1"}}),
+    ] {
+        assert_eq!(invalid(value).code, ErrorCode::InvalidRequest);
+    }
+}
+
+#[test]
 fn identity_failures_are_fatal_but_argument_errors_retain_correlation() {
     for wire in [
         br#"{"version":1,"id":0,"op":"now"}"#.as_slice(),

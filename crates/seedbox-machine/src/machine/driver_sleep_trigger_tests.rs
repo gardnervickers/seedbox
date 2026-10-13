@@ -123,6 +123,7 @@ where
         || Ok(()),
         oracle,
         vec![peer],
+        Vec::new(),
         move |definition| Ok(construct(definition)),
     )
     .unwrap();

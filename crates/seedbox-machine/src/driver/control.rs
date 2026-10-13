@@ -12,7 +12,10 @@ use crate::{
     pv::ApplicationCommand,
 };
 use serde_json::Value;
-use std::{collections::BTreeMap, num::NonZeroU32};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
+};
 
 #[derive(Default)]
 struct Commands {
@@ -48,6 +51,11 @@ struct Observed {
 pub(super) struct Control {
     pub(super) service: Service,
     entries: Vec<Observed>,
+    // Removing a declared name at admission rejects same-barrier duplicates.
+    spawnable: BTreeSet<String>,
+    // Reserved identities are not targetable until their FIFO construction turn.
+    // Failure retains this association for its Failed fault record.
+    spawning: BTreeMap<String, MachineId>,
     /// Boot of each admitted call awaiting its reply; live bookkeeping only.
     calls: BTreeMap<(MachineId, u32, u32), u64>,
 }
@@ -70,7 +78,33 @@ impl Control {
             service: Service::default(),
             calls: BTreeMap::new(),
             entries,
+            spawnable: BTreeSet::new(),
+            spawning: BTreeMap::new(),
         }
+    }
+    pub(super) fn declare_spawnable(&mut self, definitions: &[MachineDefinition]) {
+        self.spawnable
+            .extend(definitions.iter().map(|d| d.name.clone()));
+    }
+    pub(super) fn spawned(&mut self, name: &str, at: Timestamp) -> Result<MachineId, String> {
+        let id = *self.spawning.get(name).ok_or("unreserved spawn")?;
+        if id.0 != self.entries.len() {
+            return Err("spawn identity out of insertion order".into());
+        }
+        self.entries.push(Observed {
+            name: Some(name.into()),
+            state: State::new(name.into(), 0, at.as_nanos(), ExecutionConfig::default()),
+            commands: Commands::default(),
+        });
+        self.spawning.remove(name);
+        Ok(id)
+    }
+    pub(super) fn spawn_target(&self, name: &str) -> Result<MachineId, String> {
+        self.spawning
+            .get(name)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| self.named(name))
     }
     pub(super) fn add_unnamed(&mut self, at: Timestamp) {
         let key = Self::source(MachineId(self.entries.len()));
@@ -201,6 +235,8 @@ impl Control {
 }
 pub(super) struct View<'a> {
     entries: &'a mut [Observed],
+    spawnable: &'a mut BTreeSet<String>,
+    spawning: &'a mut BTreeMap<String, MachineId>,
 }
 impl View<'_> {
     fn index(&self, name: &str) -> Result<usize, String> {
@@ -219,6 +255,14 @@ impl View<'_> {
     }
 }
 impl Adapter for View<'_> {
+    fn reserve_spawn(&mut self, name: &str) -> Result<(), OperationError> {
+        if !self.spawnable.remove(name) {
+            return Err(OperationError::invalid("unknown or already admitted spawn"));
+        }
+        let id = MachineId(self.entries.len() + self.spawning.len());
+        self.spawning.insert(name.into(), id);
+        Ok(())
+    }
     fn resolve(&self, target: &Target) -> Result<Facts, OperationError> {
         let Target::Machine(name) = target else {
             return Err(OperationError::unsupported());
@@ -344,6 +388,8 @@ impl Control {
             &mut self.service,
             &mut View {
                 entries: &mut self.entries,
+                spawnable: &mut self.spawnable,
+                spawning: &mut self.spawning,
             },
         );
         // Settlements in a Failure were already recorded as service notices,
@@ -542,9 +588,14 @@ impl Control {
                 },
                 Requester::Trigger(trigger) => FaultOrigin::Trigger { trigger: *trigger },
             },
-            target: self.named(target)?,
+            target: if *action == FaultAction::Effect(Effect::Spawn) {
+                self.spawn_target(target)?
+            } else {
+                self.named(target)?
+            },
             boot,
             action: match action {
+                FaultAction::Effect(Effect::Spawn) => Public::Spawn,
                 FaultAction::Heal => Public::Heal,
                 FaultAction::Effect(Effect::Pause) => Public::Pause,
                 FaultAction::Effect(Effect::Resume) => Public::Resume,

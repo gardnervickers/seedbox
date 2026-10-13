@@ -111,6 +111,7 @@ fn build(
         || Ok(()),
         driver_definition::definition("fixture-0"),
         vec![driver_definition::definition("fixture-1")],
+        Vec::new(),
         move |definition| {
             Ok(Probe {
                 oracle: definition.name == "fixture-0",
@@ -290,6 +291,7 @@ fn only_consumed_stop_and_matching_successful_ack_finish() {
         FixtureRng,
         || Ok(()),
         driver_definition::definition("oracle"),
+        Vec::new(),
         Vec::new(),
         move |_| Ok(machine.clone()),
     )

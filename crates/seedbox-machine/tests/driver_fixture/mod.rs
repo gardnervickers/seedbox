@@ -315,6 +315,7 @@ pub fn configured(workers: usize, machines: Vec<TestMachine>) -> Driver<TestMach
         || Ok(()),
         definitions[0].clone(),
         definitions[1..].to_vec(),
+        Vec::new(),
         move |definition| Ok(machines[definition.name.parse::<usize>().unwrap()].clone()),
     )
     .unwrap()

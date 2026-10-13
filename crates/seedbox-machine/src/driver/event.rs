@@ -40,7 +40,9 @@ pub enum EventKind {
     Output(MachineResponse),
     /// A machine joined the simulation. Construction publishes one event per
     /// initial machine, oracle first, with [`Cause::Initial`];
-    /// [`Barrier::add`](super::Barrier::add) publishes [`Cause::Host`].
+    /// [`Barrier::add`](super::Barrier::add) publishes [`Cause::Host`]. Guest
+    /// spawn publishes [`Cause::Fault`] before Applied settlement and reply
+    /// admission, and before the new machine executes in the next round.
     #[non_exhaustive]
     MachineAdded { machine: MachineId, cause: Cause },
     /// A Driver-applied machine change took effect at `at` for `boot`, the
@@ -138,7 +140,8 @@ pub struct FaultRecord {
     pub fault: FaultId,
     pub origin: FaultOrigin,
     pub target: MachineId,
-    /// Target boot bound at admission.
+    /// Target boot bound at admission. Spawn binds its reserved new identity
+    /// at boot zero, including a subsequent construction failure.
     pub boot: u64,
     pub action: FaultAction,
     /// Handle that can later heal this fault, if it installed one.
@@ -165,6 +168,8 @@ pub enum FaultOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FaultAction {
+    /// Create a declared machine, targeting its admission-order identity at boot zero.
+    Spawn,
     Pause,
     Resume,
     Crash,

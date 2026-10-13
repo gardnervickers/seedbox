@@ -65,6 +65,7 @@ fn driver(restore_initial: bool) -> Harness {
         || Ok(()),
         definition,
         Vec::new(),
+        Vec::new(),
         move |definition| {
             let mut machine = backend.create(definition)?;
             if restore_initial {
@@ -267,6 +268,7 @@ fn paused_shutdown_stays_pending_until_resume_and_restores_without_duplicate() {
             TestRng,
             || Ok(()),
             definition,
+            Vec::new(),
             Vec::new(),
             move |_| TcgMachine::from_snapshot(&input("SEEDBOX_TCG_QEMU"), &snapshot),
         )

@@ -178,6 +178,7 @@ impl World {
             ["caller", "source", "peer"]
                 .map(driver_definition::definition)
                 .into(),
+            Vec::new(),
             move |definition| {
                 Ok(Fixture {
                     events: match definition.name.as_str() {

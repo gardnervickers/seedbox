@@ -102,8 +102,9 @@ fn setup(workers: usize, operation: &'static str) -> (Driver<Caller>, Replies, V
         workers,
         Rng,
         || Ok(()),
-        driver_definition::definition("same"),
-        vec![driver_definition::definition("same")],
+        driver_definition::definition("oracle"),
+        vec![driver_definition::definition("peer")],
+        Vec::new(),
         move |_| {
             let label = next;
             next += 1;
@@ -124,7 +125,7 @@ fn setup(workers: usize, operation: &'static str) -> (Driver<Caller>, Replies, V
     (driver, replies, ids)
 }
 #[test]
-fn duplicate_display_names_route_identical_rpc_ids_to_exact_sources() {
+fn distinct_machines_route_identical_rpc_ids_to_exact_sources() {
     for workers in [1, 2] {
         let (mut driver, replies, _) = setup(workers, r#"{"version":1,"id":1,"op":"now"}"#);
         driver.step(at(10)).unwrap();
@@ -223,6 +224,7 @@ fn queued_pair(
             driver_definition::definition("caller-b"),
             driver_definition::definition("peer"),
         ],
+        Vec::new(),
         move |_| {
             let label = next;
             next += 1;

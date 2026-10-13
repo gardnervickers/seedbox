@@ -288,6 +288,7 @@ fn failed_construction_preserves_existing_machines_and_id_order() {
         || Ok(()),
         super::fixture::definition(0),
         Vec::new(),
+        Vec::new(),
         |_| Err(std::io::Error::other("construction failed")),
     );
     assert!(matches!(failed, Err(Error::Construction(_))));
@@ -617,6 +618,7 @@ fn invalid_configuration_never_calls_factories_and_overflow_never_runs_work() {
             crate::rng::SeededRng::new(0),
             || panic!("invalid configuration created a context"),
             super::fixture::definition(0),
+            Vec::new(),
             Vec::new(),
             |_| panic!("invalid configuration created machines")
         )

@@ -178,6 +178,7 @@ where
             second.name = "beta".into();
             vec![first, second]
         },
+        Vec::new(),
         move |definition| Ok(construct(definition)),
     )
     .unwrap();
@@ -631,6 +632,7 @@ where
         || Ok(()),
         oracle_definition,
         vec![base],
+        Vec::new(),
         move |definition| Ok(construct(definition)),
     )
     .unwrap();
@@ -898,6 +900,7 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
         || Ok(()),
         oracle,
         vec![],
+        Vec::new(),
         move |definition| backend.create(definition),
     )
     .unwrap();

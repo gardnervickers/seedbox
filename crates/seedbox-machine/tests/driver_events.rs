@@ -135,6 +135,7 @@ fn world(
             .iter()
             .map(|&n| driver_definition::definition(n))
             .collect(),
+        Vec::new(),
         move |definition| Ok(script(&definition.name)),
     )
     .unwrap();
