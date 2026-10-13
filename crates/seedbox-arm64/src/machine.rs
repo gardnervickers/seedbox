@@ -1,3 +1,10 @@
+#[cfg(all(
+    test,
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "hvf-tests"
+))]
+mod hvf_tests;
 mod snapshot;
 pub use snapshot::Snapshot;
 
