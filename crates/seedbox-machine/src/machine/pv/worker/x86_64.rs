@@ -9,9 +9,11 @@
 //! ARM deferred-rendezvous page word therefore stays zero on x86.
 //!
 //! CPUID hides the APIC, RDRAND/RDSEED, RDPID, MONITOR/WAITPKG, performance
-//! counters and hypervisor leaves, and the VM has no vPMU. Hidden instructions
-//! are not trapped: an application that executes RDRAND/RDSEED regardless of
-//! CPUID still reads host entropy. Kernel TSC reads are PV time and CR4.TSD
+//! counters and hypervisor leaves, and the VM has no vPMU. AMD cannot trap
+//! hidden RDRAND/RDSEED, so the mandatory instrumentation replaces them in
+//! applications with guest getrandom draws; uninstrumented guest code that
+//! executes them regardless of CPUID still reads host entropy (the kernel only
+//! reaches them behind CPUID checks). Kernel TSC reads are PV time and CR4.TSD
 //! traps application RDTSC/RDTSCP. A guest reset or panic reboot ends in an
 //! architectural shutdown exit, which the worker reports as an error.
 #[path = "kvm_x86.rs"]

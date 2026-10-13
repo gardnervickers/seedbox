@@ -156,7 +156,18 @@ intact. On ARM, the client uses arithmetic that leaves those flags alone and a
 branch that tests a register directly (`CBNZ`, compare and branch if nonzero).
 DynamoRIO's drreg extension manages the temporary registers.
 
-Code: [progress client](../guest/progress/progress.c).
+On x86-64 the same client replaces `RDRAND` and `RDSEED`. CPUID hides both, but
+AMD hardware cannot trap them, so an application that executes them anyway
+would read host entropy. Each replacement draws 8 bytes from the guest
+kernel's `getrandom`, which is seeded from the machine's RNG stream, writes the
+destination with the instruction's width and reports success (CF set; OF, SF,
+ZF, AF and PF clear). The draw is an ordinary charged syscall. Uninstrumented
+guest code is not covered: the patched kernel reaches these instructions only
+behind CPUID checks and boots with `random.trust_cpu=off`, and the supervisor
+and translator do not use them.
+
+Code: [progress client](../guest/progress/progress.c),
+[seedbox-machine progress client](../crates/seedbox-machine/guest/progress/progress.c).
 
 ## Progress inside kernel polling
 

@@ -13,6 +13,15 @@
  * interrupts delivered at deterministic rendezvous points, waiting gains the
  * application nothing, so this client rewrites those hints to NOP before the
  * translator sees them.
+ *
+ * On x86-64 the machine hides RDRAND and RDSEED from CPUID, but an AMD host
+ * cannot trap them: code that executes them regardless would read host
+ * entropy. This client replaces every RDRAND and RDSEED, of each operand size,
+ * with a draw from the guest kernel's getrandom, which is seeded from the
+ * machine's RNG stream. The result always succeeds: CF is set, OF, SF, ZF, AF
+ * and PF are cleared, and the destination is written with the architectural
+ * width (a 32-bit write zero-extends, a 16-bit write keeps the upper bits).
+ * Each draw is one guest syscall and is charged like any other.
  */
 #include "dr_api.h"
 #include "drmgr.h"
@@ -23,6 +32,9 @@
 static reg_t block_budget;
 static reg_id_t budget_segment;
 static uint budget_offset;
+#ifdef X86_64
+static ptr_int_t entropy_note;
+#endif
 
 static reg_t *budget(void)
 {
@@ -83,24 +95,74 @@ static void charge_before(void *context, instrlist_t *block, instr_t *where)
 #endif
 }
 
-/* Replace application wait hints with NOP, keeping the original translation so
- * faults and signals in the block still map to the application PC. */
-static dr_emit_flags_t neutralize_waits(void *context, void *tag, instrlist_t *block,
-                                        bool trace, bool translating)
+#ifdef X86_64
+/* Deterministic replacement for RDRAND/RDSEED: guest getrandom, never host
+ * entropy. Runs as a clean call, so every application register and flag is
+ * saved; only the destination and the arithmetic flags change. */
+static void entropy(reg_id_t destination, uint bytes)
 {
-#ifdef AARCH64
+    uint64 value = 0;
+    for (size_t done = 0; done < sizeof(value);) {
+        long result;
+        __asm__ volatile("syscall" : "=a"(result)
+                         : "a"(318L), "D"((byte *)&value + done),
+                           "S"(sizeof(value) - done), "d"(0L)
+                         : "rcx", "r11", "memory", "cc");
+        DR_ASSERT(result > 0 || result == -4 /* EINTR */);
+        if (result > 0)
+            done += (size_t)result;
+    }
+    void *context = dr_get_current_drcontext();
+    dr_mcontext_t machine = { sizeof(machine), DR_MC_INTEGER | DR_MC_CONTROL };
+    DR_ASSERT(dr_get_mcontext(context, &machine));
+    reg_id_t full = reg_to_pointer_sized(destination);
+    reg_t written = (reg_t)value;
+    if (bytes == 4)
+        written = (uint)value;
+    else if (bytes == 2)
+        written = (reg_get_value(full, &machine) & ~(reg_t)0xffff) | (ushort)value;
+    else
+        DR_ASSERT(bytes == 8);
+    reg_set_value(full, &machine, written);
+    machine.xflags &= ~(reg_t)(EFLAGS_OF | EFLAGS_SF | EFLAGS_ZF | EFLAGS_AF | EFLAGS_PF);
+    machine.xflags |= EFLAGS_CF;
+    DR_ASSERT(dr_set_mcontext(context, &machine));
+}
+#endif
+
+/* Rewrite nondeterministic application instructions before instrumentation.
+ * Each replacement NOP keeps the original translation, so faults and signals
+ * in the block still map to the application PC. */
+static dr_emit_flags_t rewrite(void *context, void *tag, instrlist_t *block,
+                               bool trace, bool translating)
+{
     for (instr_t *instruction = instrlist_first_app(block); instruction != NULL;
          instruction = instr_get_next_app(instruction)) {
         int opcode = instr_get_opcode(instruction);
+#ifdef AARCH64
+        /* Wait hints become NOP. */
         if (opcode != OP_wfe && opcode != OP_wfi && opcode != OP_wfet && opcode != OP_wfit)
             continue;
+#else
+        /* Hardware entropy becomes a labelled NOP; the insertion pass puts the
+         * guest-entropy clean call at the label. */
+        if (opcode != OP_rdrand && opcode != OP_rdseed)
+            continue;
+        opnd_t destination = instr_get_dst(instruction, 0);
+        DR_ASSERT(opnd_is_reg(destination));
+        instr_t *label = INSTR_CREATE_label(context);
+        instr_set_note(label, (void *)entropy_note);
+        dr_instr_label_data_t *data = instr_get_label_data_area(label);
+        data->data[0] = (ptr_uint_t)opnd_get_reg(destination);
+        data->data[1] = (ptr_uint_t)opnd_size_in_bytes(opnd_get_size(destination));
+        instrlist_preinsert(block, instruction, label);
+#endif
         instr_t *nop = INSTR_CREATE_nop(context);
         instr_set_translation(nop, instr_get_app_pc(instruction));
         instrlist_replace(block, instruction, nop);
         instr_destroy(context, instruction);
         instruction = nop;
     }
-#endif
     return DR_EMIT_DEFAULT;
 }
 
@@ -110,6 +172,18 @@ static dr_emit_flags_t instrument(void *context, void *tag, instrlist_t *block,
 {
     if (drmgr_is_first_instr(context, instruction))
         charge_before(context, block, instruction);
+#ifdef X86_64
+    if (instr_is_label(instruction) && instr_get_note(instruction) == (void *)entropy_note) {
+        /* The clean call reads and writes application state: put every value
+         * drreg still holds back first, so no later lazy restore overwrites
+         * the replacement destination or flags. */
+        DR_ASSERT(drreg_restore_all(context, block, instruction) == DRREG_SUCCESS);
+        dr_instr_label_data_t *data = instr_get_label_data_area(instruction);
+        dr_insert_clean_call(context, block, instruction, (void *)entropy, false, 2,
+                             OPND_CREATE_INT32((int)data->data[0]),
+                             OPND_CREATE_INT32((int)data->data[1]));
+    }
+#endif
     return DR_EMIT_DEFAULT;
 }
 
@@ -136,7 +210,11 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);
     DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 1, 0));
     drmgr_register_thread_init_event(thread_init);
-    drmgr_register_bb_app2app_event(neutralize_waits, NULL);
+#ifdef X86_64
+    entropy_note = drmgr_reserve_note_range(1);
+    DR_ASSERT(entropy_note != DRMGR_NOTE_NONE);
+#endif
+    drmgr_register_bb_app2app_event(rewrite, NULL);
     drmgr_register_bb_instrumentation_event(NULL, instrument, NULL);
     dr_register_exit_event(finished);
 }
