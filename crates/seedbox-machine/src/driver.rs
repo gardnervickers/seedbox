@@ -213,6 +213,16 @@ type MachineFactory<M> =
 /// that cannot represent a required simulation time fails with
 /// `Error::ClockOverflow`.
 ///
+/// Only the times the driver passes across `Machine::run` are translated.
+/// Simulation-control payloads are opaque bytes: every time inside them stays
+/// simulation time, both in replies (`now_ns`, `requested_at_ns`,
+/// `admitted_at_ns`, `effect_at_ns`, `replied_at_ns`) and in requests
+/// (`sleep` `duration_ns`, trigger `match_timeout_ns`, and the effect deadline
+/// a guest command must meet). The call's observation time is its converted
+/// output time. Sleep, trigger matching and deadlines therefore keep their
+/// simulation-time meaning, while a drifting guest's own clocks run at its
+/// rate: a 1 s control `sleep` at +10% spans 1.1 s of that guest's clocks.
+///
 /// Execution uses a fixed pool of worker threads. Each worker owns its context;
 /// contexts must not contain machine-specific simulation state. Worker count and
 /// completion order must not affect simulation results. Machines share the
@@ -2039,13 +2049,20 @@ where
     /// driver-owned scheduling/lifecycle state, including each machine's
     /// execution configuration and pause flag observed through `paused`, its
     /// time-base mapping (a pure function of its addition time and its
-    /// `Transition::ClockRate` events), global RNG cursor, the independently
-    /// continuing RNG cursor of every machine, and the control timeline: host
-    /// inputs scheduled but not yet admitted, live input keys (with the handles
-    /// they own), and admitted faults awaiting their effect or settlement. The
+    /// `Transition::ClockRate` events), its last accepted position and pending
+    /// timer in machine time, global RNG cursor, the independently continuing
+    /// RNG cursor of every machine, and the control timeline: host inputs
+    /// scheduled but not yet admitted, live input keys (with the handles they
+    /// own), and admitted faults awaiting their effect or settlement. The
     /// Driver offers no snapshot or restore of that state: the host
-    /// reconstructs it from its own schedule history and the published event
-    /// stream, and must neither repeat consumed inputs nor lose pending ones.
+    /// reconstructs the control timeline from its own schedule history and the
+    /// published event stream, and must neither repeat consumed inputs nor lose
+    /// pending ones. The machine-time position and timer are retained
+    /// privately; `stopped` reports only their simulation-time conversions,
+    /// from which a fast mapping cannot recover the machine-time timer
+    /// uniquely. No API reconstructs a driver from these parts; restoring a
+    /// machine snapshot is only defined in place, inside the driver that keeps
+    /// them.
     pub fn snapshot(&mut self, id: MachineId) -> Result<M::Snapshot, Error<M::Error>> {
         if self.driver.finished.is_none() {
             self.check_mutation()?;

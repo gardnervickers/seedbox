@@ -94,8 +94,10 @@ pub enum Request {
     /// re-evaluates absolute realtime timers and cancels timers armed with
     /// cancel-on-set, as for any Linux clock step. Completion is the matching
     /// [`Response::CommandAcknowledged`]: Completed after the guest kernel has
-    /// applied the step, Rejected if it refused (for example, a step before the
-    /// realtime epoch). The ID shares the per-boot correlation space of
+    /// applied the step, Rejected if it refused. Linux refuses a step that would
+    /// put CLOCK_REALTIME below CLOCK_MONOTONIC, so a negative step can be at
+    /// most the boot's realtime lead over monotonic (its epoch plus the counter
+    /// that elapsed before the kernel clocksource started). The ID shares the per-boot correlation space of
     /// `Application` and must not be reused within a machine incarnation.
     /// The step is guest kernel state: it ends with crash, reboot or exit, and
     /// every boot starts realtime from the machine's epoch again.

@@ -288,7 +288,11 @@ fn lines(events: &[Event], clock: MachineId) -> Vec<Line> {
     lines
 }
 
-const LATENCY: i128 = 20_000_000;
+/// Guest sampling and transport overhead, in machine nanoseconds: the counter
+/// is read before formatting, the pipe write, PID 1 relay and transport. It is
+/// not conversion error (see the exact timer checks). Measured 15-58 us on TCG
+/// and 39-51 us on x86 PV; 1 ms leaves headroom without hiding a rate error.
+const LATENCY: i128 = 1_000_000;
 fn check(backend: &str, (events, clock, runs): &Outcome) {
     let rates: Vec<_> = events
         .iter()
@@ -351,7 +355,7 @@ fn check(backend: &str, (events, clock, runs): &Outcome) {
     let slept = find(0, "SLEPT");
     let (first, second) = (slept[0], slept[1]);
     assert!(
-        first.at > 100_000_000,
+        first.at > reference.0[0].0,
         "{backend}: drift precedes the sleeps"
     );
     let delta = |f: fn(&Line) -> i128| f(second) - f(first);
@@ -387,30 +391,63 @@ fn check(backend: &str, (events, clock, runs): &Outcome) {
     assert!(last.at > healed + 500_000_000);
     let ahead = last.cnt - i128::from(last.at);
     assert!(ahead <= accrued && ahead > accrued - LATENCY, "{last:?}");
-    // Exact conversion: a timer woke the machine at the earliest simulation
-    // time whose mapped time reaches it, observed as floor(G) of that time.
+    // Exact conversion. The Driver runs a blocked machine without inputs only
+    // when its converted deadline is due: rate changes, snapshots and other
+    // machines' work never run it, and this scenario has no pause/resume or
+    // wake actions. Runs with inputs (requests, replies, lifecycle) are the only
+    // legitimate earlier runs. So every input-free run after a Blocked stop is
+    // that timer's wake: it must never be early, and it must happen at the
+    // earliest simulation time whose mapped time reaches the deadline.
     let mut exact = 0;
+    let mut straddled = 0;
+    let mut reconverted = 0;
     for pair in runs.windows(2) {
         let (
             StopReason::Blocked {
+                reached,
                 deadline: Some(due),
-                ..
             },
             next,
         ) = (pair[0].result, &pair[1])
         else {
             continue;
         };
-        let due = due.as_nanos();
-        if next.inputs || next.now < due {
+        if next.inputs {
             continue;
         }
+        let due = due.as_nanos();
+        assert!(
+            next.now >= due,
+            "{backend}: early wake {} < {due}",
+            next.now
+        );
         let wake = reference.inverse(due);
         assert_eq!(next.now, reference.floor(wake), "{backend}: due {due}");
-        assert!(reference.floor(wake - 1) < due);
         exact += 1;
+        // A pending timer straddling a rate change was re-converted: its wake
+        // differs from the one its deadline had under the earlier rates.
+        for (index, &(change, _)) in reference.0.iter().enumerate() {
+            let boundary = reference.floor(change);
+            if reached.as_nanos() < boundary && boundary < next.now {
+                straddled += 1;
+                // The deadline converted under the earlier rates alone gives
+                // another simulation wake. Rates here are never slow, so the
+                // mapping is injective and the observed clock identifies the
+                // wake: a stale (unconverted) wake would be observed differently.
+                let earlier = Reference(reference.0[..index].to_vec());
+                let stale = earlier.inverse(due);
+                if stale != wake {
+                    assert_ne!(reference.floor(stale), next.now, "{backend}: stale wake");
+                    reconverted += 1;
+                }
+            }
+        }
     }
     assert!(exact > 10, "{backend}: {exact} timer wakeups checked");
+    assert!(
+        straddled >= 1 && reconverted >= 1,
+        "{backend}: {straddled} straddling timers, {reconverted} re-converted"
+    );
 }
 
 fn tcg(workers: usize, migrate: bool) -> Outcome {

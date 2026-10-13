@@ -272,14 +272,27 @@ objective.
    `src/driver/clock_fault_tests.rs`, clock tests in
    `src/oracle/service/tests.rs` and `src/oracle/handles.rs`. Native evidence:
    `src/machine/clock_fault_tests.rs` with `tests/fixtures/clock-faults.c` on
-   TCG and x86 PV (workers 1/4, in-place restore mid-drift, exact timer wakeups).
+   TCG and x86 PV (workers 1/4, exact never-early timer wakeups including one
+   re-converted across a rate change, 1 ms guest sampling tolerance). Its
+   restore is in place: the machine is replaced from its own snapshot inside
+   the same Driver, which keeps the mapping, machine-time position and pending
+   timer; this does not prove reconstruction in another Driver, and no public
+   API returns those Driver-owned fields. Guest RPC payload times stay
+   simulation time (Driver rustdoc). Linux refuses a step that would put
+   realtime below CLOCK_MONOTONIC; with epoch 0, realtime leads monotonic only
+   by the pre-clocksource boot interval, so negative steps beyond it are
+   refused (settled Rejected). **Merge blockers:** the epoch decision, then
+   native negative-step and refused-step coverage with a real epoch.
    **Open:** `Driver::new(.., epoch_seconds, ..)` is approved but no explicit
    path carries the epoch to machines without a further public change; the
    guest path exists (`GuestBootstrap::epoch_seconds` → `/seedbox/clock.bin`)
    and factories currently use 0. **TODO after F lands:** add
    `Action::Drift`/`Action::StepRealtime` mapped onto `Effect::Drift` /
-   `Effect::StepRealtime`; the raw `Barrier::schedule_clock_rate` hook is
-   test-only. Not yet run on Apple Silicon/HVF or arm64 KVM.
+   `Effect::StepRealtime`, enforcing the same 365-day step bound as the guest
+   schema (which excludes `i64::MIN`; `Handles::step` rejects anything else);
+   the raw `Barrier::schedule_clock_rate` hook is test-only. Pending policy
+   decisions: step refusal non-fatal, skew on Down rejected, drift in any
+   state, draw source (shared simulation RNG), pN use on rejection. Not yet run on Apple Silicon/HVF or arm64 KVM.
 6. **Oracle-driven machine creation — implemented in the approved shape.**
    `Driver::new` accepts a separate `spawnable: Vec<MachineDefinition>` after
    `machines`; definitions remain unchanged and templating belongs to the caller.

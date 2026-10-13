@@ -8,6 +8,10 @@
 //! membership and effect completion belong to the private service core, which
 //! the Driver invokes after full-round commit using its single event timeline.
 //!
+//! Every time in this schema is simulation time (`now_ns`, the `*_at_ns`
+//! reply metadata, `sleep` durations and trigger match timeouts), never the
+//! calling machine's drifted time base; see the Driver's time-base docs.
+//!
 //! Network operations are recognized for compatibility but explicitly deferred.
 //! The legacy guest schema defines no disk RPC operation; disk policy is likewise
 //! unsupported, and this parser does not invent disk operation names. Inspect

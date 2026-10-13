@@ -128,12 +128,16 @@ A machine reaches barrier `T` exactly when its position reaches
 `floor(G(T))`, which keeps one set of common barriers and tiles each machine's
 own time without gaps. Pending timers are re-converted when the rate changes.
 Drift therefore needs no backend support, and the whole machine (counters,
-timers and CPU progress) runs at the drifted rate.
+timers and CPU progress) runs at the drifted rate. Simulation-control payloads
+are not translated: their times and durations stay simulation time. The
+mapping, last machine-time position and pending machine-time timer are
+Driver-owned and excluded from machine snapshots.
 
 A realtime step is guest kernel state instead: the shared PID 1 performs
 `Request::StepRealtime` with `adjtimex(ADJ_SETOFFSET)` and acknowledges it,
 which moves only `CLOCK_REALTIME`, re-evaluates absolute realtime timers and
-cancels cancel-on-set timerfds. Steps end with their boot; drift survives
+cancels cancel-on-set timerfds. Linux refuses a step that would put realtime
+below `CLOCK_MONOTONIC`. Steps end with their boot; drift survives
 crash and reboot. Every boot sets realtime to the epoch in
 `/seedbox/clock.bin` plus the machine counter before `Ready`; the TCG board RTC
 derives from the same epoch.

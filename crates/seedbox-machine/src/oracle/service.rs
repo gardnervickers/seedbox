@@ -1109,8 +1109,9 @@ impl Service {
             ));
         }
         if result == CommandResult::Rejected && action == CommandKind::StepRealtime {
-            // The kernel may refuse a valid request (realtime before the
-            // epoch); nothing changed, so settle Rejected without poisoning.
+            // The kernel may refuse an admissible request (realtime below
+            // CLOCK_MONOTONIC); nothing changed, so settle Rejected without
+            // poisoning. Policy choice pending approval (process refusal is fatal).
             if self.pending[&fault]
                 .dispatched
                 .is_some_and(|sent| observed < sent)

@@ -31,6 +31,8 @@ pub(crate) enum Error {
     InactiveHandle,
     Unsettled,
     UnexpectedEffect,
+    /// A realtime step outside the 365-day bound, including i64::MIN.
+    StepOutOfRange,
 }
 #[derive(Clone, Default)]
 struct Allocator {
@@ -134,6 +136,11 @@ impl Handles {
         target: String,
         nanoseconds: i64,
     ) -> Result<ExecutionPlan, Error> {
+        // Every entrance (guest call or host action) must keep the 365-day
+        // bound, which also excludes i64::MIN, so a heal's inverse exists.
+        if nanoseconds.unsigned_abs() > super::MAX_CLOCK_OFFSET_NS {
+            return Err(Error::StepOutOfRange);
+        }
         self.install(target, Change::Step(nanoseconds))
     }
     /// Whether `target` already has a drift record in any phase.
@@ -175,14 +182,15 @@ impl Handles {
             revision: 0,
         })
     }
-    fn inverse(change: Change) -> Change {
-        match change {
+    /// None only for a step outside its installation bound (a corrupt record).
+    fn inverse(change: Change) -> Option<Change> {
+        Some(match change {
             // Nominal cost is the legacy inverse, not a captured previous rate.
             Change::Execution(_) => Change::Execution(ExecutionConfig::default()),
             // Nominal rate keeps the offset accrued so far.
             Change::Drift(_) => Change::Drift(ClockRate::NOMINAL),
-            Change::Step(nanoseconds) => Change::Step(nanoseconds.wrapping_neg()),
-        }
+            Change::Step(nanoseconds) => Change::Step(nanoseconds.checked_neg()?),
+        })
     }
     /// Healing is a distinct operation on an existing active handle; it does
     /// not allocate a new pN. No clock, idle time or partially charged work is
@@ -201,16 +209,17 @@ impl Handles {
             .checked_add(1)
             .ok_or(Error::AttemptsExhausted)?;
         let lost = record.phase == Phase::Lost;
+        let change = if lost {
+            Change::Step(0)
+        } else {
+            Self::inverse(record.change).ok_or(Error::StepOutOfRange)?
+        };
         record.revision = revision;
         record.phase = Phase::Healing;
         Ok(ExecutionPlan {
             handle,
             target: record.target.clone(),
-            change: if lost {
-                Change::Step(0)
-            } else {
-                Self::inverse(record.change)
-            },
+            change,
             lost,
             transition: Transition::Heal,
             revision,
@@ -226,11 +235,11 @@ impl Handles {
             record.target == plan.target
                 && record.revision == plan.revision
                 && record.phase == expected_phase
-                && plan.change
+                && Some(plan.change)
                     == match (plan.transition, plan.lost) {
-                        (Transition::Apply, _) => record.change,
+                        (Transition::Apply, _) => Some(record.change),
                         (Transition::Heal, false) => Self::inverse(record.change),
-                        (Transition::Heal, true) => Change::Step(0),
+                        (Transition::Heal, true) => Some(Change::Step(0)),
                     }
         });
         if !matches {
@@ -486,5 +495,33 @@ mod tests {
         handles.applied(&heal).unwrap();
         assert_eq!(handles.active_handles().unwrap(), ["p2"]);
         assert_eq!(handles.heal("p1"), Err(Error::InactiveHandle));
+    }
+    #[test]
+    fn steps_keep_the_bound_that_makes_their_inverse_representable() {
+        let mut handles = Handles::default();
+        let bound = super::super::MAX_CLOCK_OFFSET_NS as i64;
+        for outside in [i64::MIN, -bound - 1, bound + 1, i64::MAX] {
+            assert_eq!(
+                handles.step("a".into(), outside),
+                Err(Error::StepOutOfRange)
+            );
+        }
+        assert!(handles.active_handles().unwrap().is_empty());
+        for edge in [-bound, bound] {
+            let plan = handles.step("a".into(), edge).unwrap();
+            handles.applied(&plan).unwrap();
+            let heal = handles.heal(&plan.handle.to_string()).unwrap();
+            assert_eq!(heal.change, Change::Step(-edge));
+            handles.applied(&heal).unwrap();
+        }
+        // A corrupt out-of-bound record cannot produce a wrapped inverse.
+        let plan = handles.step("a".into(), 1).unwrap();
+        handles.applied(&plan).unwrap();
+        handles.records.get_mut(&plan.handle).unwrap().change = Change::Step(i64::MIN);
+        assert_eq!(
+            handles.heal(&plan.handle.to_string()),
+            Err(Error::StepOutOfRange)
+        );
+        assert_eq!(handles.records[&plan.handle].phase, Phase::Active);
     }
 }

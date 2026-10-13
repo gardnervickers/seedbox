@@ -80,7 +80,8 @@ static int acknowledge(struct sbx_service *s, uint32_t id, const char *action, i
     return s->write(s->sink, frame, (size_t)size);
 }
 /* step ID NS: ID is a nonzero management ID, NS a nonzero signed offset. A
- * refused step (for example before the epoch) is acknowledged as a failure. */
+ * refused step is acknowledged as a failure; Linux refuses one that would put
+ * CLOCK_REALTIME below CLOCK_MONOTONIC (EINVAL). */
 static int step(struct sbx_service *s, char *text) {
     uint64_t id, magnitude;
     if (decimal(&text, UINT32_MAX, &id) || *text++ != ' ') { errno = EINVAL; return -1; }
