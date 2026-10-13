@@ -9,9 +9,9 @@ mod implementation;
 #[cfg(target_os = "linux")]
 #[path = "kvm.rs"]
 mod implementation;
-pub(super) use implementation::Native;
+pub(in super::super) use implementation::Native;
 #[derive(Clone, Debug)]
-pub(super) enum Exit {
+pub(in super::super) enum Exit {
     Mmio {
         address: u64,
         width: u8,
@@ -30,7 +30,7 @@ pub(super) enum Exit {
     Interrupted,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Architecture {
+pub(in super::super) struct Architecture {
     pub(super) core: Vec<u64>,
     pub(super) system: BTreeMap<u16, u64>,
     pub(super) simd: Vec<[u8; 16]>,
@@ -38,7 +38,7 @@ pub(super) struct Architecture {
     pub(super) gic: Vec<u8>,
 }
 // Core numbers are x0..x30, SP_EL1=31, PC=32, PSTATE=33.
-pub(super) trait Backend: Sized {
+pub(in super::super) trait Backend: Sized {
     fn create(ram: Rc<Memory>, page: Rc<Memory>) -> Result<Self>;
     fn core(&self, register: u32) -> Result<u64>;
     fn set_core(&mut self, register: u32, value: u64) -> Result<()>;
