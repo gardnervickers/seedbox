@@ -17,10 +17,12 @@ they always print `OK`.
 | `mjit THREADS ITERS` | each thread rewrites `movz; ret` slots in its own page, flushes and calls | passes; with per-page flush tracking, a flush abandoned when another thread's flush redirected its thread left stale code |
 | `map_noreplace` | `MAP_FIXED_NOREPLACE` over an existing mapping | `EPERM` instead of `EEXIST` |
 | `sigframe_unwind` | `_Unwind_Backtrace` from a SIGSEGV handler | stopped after the handler: its return address was DR's own sigreturn stub |
+| `safespot_storm [SECONDS]` | writers rewrite and flush `movz; ret` slots that executor threads call under a SIGUSR1 every 20 µs, while a mapper maps, runs and unmaps RWX pages | most 10 s runs crashed with a branch to `0xffffffffffffffff`: an indirect branch lookup racing a removal from the shared table read the deleted entry's tag (-1). As PID 1 the crash hung instead, because the kernel dropped the translator's kill of itself |
 
-Open bugs found by the P0 probes (`C.*` signal and `cfzsync` tests, JVM and Go probes):
+Bugs found by the NEXT-100 probes (`C.*`, `cfzsync`, `cfzproc`, JVM and other runtimes), all
+fixed on the fork's master:
 
-| Program | What it checks | Under the translator |
+| Program | What it checks | Before the fix |
 | --- | --- | --- |
 | `sigsys_call_addr` | SIGSYS `si_call_addr` from seccomp | a code-cache address |
 | `tempmask_pending MODE` | `rt_sigpending`; ppoll, pselect6, epoll_pwait(2) and sigsuspend temporary masks | pending set empty; `epoll_pwait2` ignores its mask; signal delivered with EINTR although an fd is ready or the arguments are invalid |
@@ -47,7 +49,6 @@ Open bugs found by the P0 probes (`C.*` signal and `cfzsync` tests, JVM and Go p
 | `close_range_all range\|cloexec` | `close_range(N, ~0U)` as `closefrom` and Python's `close_fds` use it | hangs |
 | `rlimit_nofile` | `RLIMIT_NOFILE` enforcement and inheritance across exec | not enforced; the exec'd image sees the translator's limit |
 | `clear_sighand_child exit` | a `CLONE_CLEAR_SIGHAND` fork child of a multithreaded parent | debug builds assert |
-||||||| 4f6d647c
 | `timer_sigwait timer\|kill thread\|self\|handler` | a process-directed signal for a thread in `sigwaitinfo`, or the one thread that unblocks it, while the main thread blocks in `pselect6` | never delivered (`timer self` and `kill handler` pass; `kill self`, with the signal already pending, waits forever); also with `drrun` and no client. A thread-directed `SIGEV_THREAD_ID` timer works |
 | `go_exec_flaky.sh` | runs `Go.exec` repeatedly | about 3% of runs lose a signal, crash a child or hang |
 
