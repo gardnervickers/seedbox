@@ -35,7 +35,8 @@ impl BackendProvider for NeverExecute {
 }
 fn service(root: &Path) -> (Arc<Manager>, Arc<ExecutionService>, ContentStore) {
     let manager = Arc::new(Manager::new(Catalogue::in_memory()));
-    let store = ContentStore::with_ephemeral_evidence(root.join("cache"), root.join("evidence"));
+    let store = ContentStore::with_ephemeral_evidence(root.join("cache"), root.join("evidence"))
+        .with_owned_ledger(root.join("owned"));
     let execution = Arc::new(
         ExecutionService::new(
             manager.clone(),
@@ -1331,4 +1332,51 @@ fn prepared_reference_to_imported_checkpoint_starts_fresh_before_override_valida
     assert!(prepared.metadata.parent.is_none());
     execution.delete(&imported.metadata.id).unwrap();
     assert!(manager.describe(&prepared.metadata.id).is_ok());
+}
+
+#[test]
+fn deleting_imports_reclaims_only_binaries_they_brought_and_branches_still_need() {
+    let source = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(source.path());
+    let bytes = encode(&fixture(&store, true), &store);
+    let destination = tempfile::tempdir().unwrap();
+    let (manager, execution, store) = service(destination.path());
+    // The kernel and boot archive are already cache inputs here.
+    store.put(b"catalogue-only-binary").unwrap();
+    let objects = || -> std::collections::BTreeSet<_> {
+        std::fs::read_dir(destination.path().join("cache/sha256"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    };
+    let baseline = objects();
+    let ram = seedbox_artifacts::store::ContentDigest::of(b"retained checkpoint RAM");
+    let imported = execution
+        .import_bundle(bytes.as_slice(), &Options::default())
+        .unwrap()
+        .metadata
+        .id;
+    assert_eq!(store.owned_objects(), [ram.clone()].into());
+    let resource = execution
+        .checkpoint_definition(&imported, "capture")
+        .unwrap();
+    let mut request = support::resolved_request("imported-branch");
+    request.spec = resource.spec;
+    let branch = manager.submit(request).unwrap().0.metadata.id;
+    manager.begin(&branch).unwrap();
+    manager
+        .update(&branch, |s| s.status.phase = Phase::Completed)
+        .unwrap();
+    execution.delete(&imported).unwrap();
+    store.verify(&ram).unwrap();
+    execution.delete(&branch).unwrap();
+    assert_eq!(objects(), baseline);
+    // A second import of the same bundle owns its binaries again.
+    let again = execution
+        .import_bundle(bytes.as_slice(), &Options::default())
+        .unwrap()
+        .metadata
+        .id;
+    execution.delete_checkpoint(&again, "capture").unwrap();
+    assert_eq!(objects(), baseline);
 }

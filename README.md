@@ -95,7 +95,10 @@ completed resource; use its ID to describe, compare, rerun, replay or branch fro
 retained checkpoint. Export rejects active simulations. Imports are non-idempotent:
 a cancelled or disconnected upload may still complete, so do not retry blindly.
 Frames and missing/evicted observations are not recovered; omissions remain explicit.
-`SEEDBOX_STATE` selects the server storage directory. The cache is not automatically pruned.
+`SEEDBOX_STATE` selects the server storage directory. Deleting simulations removes
+the checkpoint state, imported binaries and edited boot archives that no remaining
+simulation needs; saved YAML that names them then fails. Reusable inputs such as
+kernels and prepared images are not automatically pruned.
 
 [Design](docs/design.md) explains the architecture and principles.
 [Technical details](docs/internals.md) covers determinism, fault ordering,

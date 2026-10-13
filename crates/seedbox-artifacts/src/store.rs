@@ -4,7 +4,7 @@ use crate::{limits::read_bounded, Context, Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     io::{self, Read, Seek, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -60,6 +60,19 @@ pub struct ContentStore {
     /// Shared copies made by `materialize_linked`, with the identity each had
     /// when this process wrote it. Holding the lock serializes their creation.
     shared: Arc<Mutex<HashMap<PathBuf, Stamp>>>,
+    /// Cache objects this process created for its resources, if it reclaims them.
+    owned: Option<Arc<Owned>>,
+}
+
+/// Cache objects created through the `*_owned` calls, which their owner may
+/// reclaim once nothing references them. Each has an empty marker file named
+/// by its digest in `ledger`, written before the object is named, so a later
+/// process can reclaim the objects of one that crashed (`reclaim_ledger`).
+/// Its lock also orders every publication into the cache against reclamation.
+#[derive(Debug)]
+struct Owned {
+    ledger: PathBuf,
+    objects: Mutex<BTreeSet<ContentDigest>>,
 }
 
 /// What any write, truncate, rename over or chmod of an object changes.
@@ -120,7 +133,90 @@ impl ContentStore {
             evidence_root: None,
             verified: Arc::default(),
             shared: Arc::default(),
+            owned: None,
         }
+    }
+
+    /// Let `*_owned` calls create reclaimable objects, listed in `ledger`.
+    /// Without a ledger they are ordinary cache objects.
+    pub fn with_owned_ledger(self, ledger: impl Into<PathBuf>) -> Self {
+        Self {
+            owned: Some(Arc::new(Owned {
+                ledger: ledger.into(),
+                objects: Mutex::default(),
+            })),
+            ..self
+        }
+    }
+
+    /// Owned objects that have not been reclaimed or reused as cache inputs.
+    pub fn owned_objects(&self) -> BTreeSet<ContentDigest> {
+        self.owned_lock()
+            .map(|objects| objects.clone())
+            .unwrap_or_default()
+    }
+
+    /// Remove every owned object not in `keep`, and its marker. Callers must
+    /// exclude concurrent work that has created an owned object it has not yet
+    /// recorded a reference to. Returns the removed digests.
+    pub fn reclaim_owned(&self, keep: &BTreeSet<ContentDigest>) -> Result<Vec<ContentDigest>> {
+        let Some(owned) = &self.owned else {
+            return Ok(Vec::new());
+        };
+        let mut objects = owned.objects.lock().unwrap_or_else(|e| e.into_inner());
+        let unreferenced: Vec<_> = objects.difference(keep).cloned().collect();
+        for digest in &unreferenced {
+            remove_if_present(&self.path(digest))?;
+            self.forget(digest);
+            remove_if_present(&owned.ledger.join(digest.hex()))?;
+            objects.remove(digest);
+        }
+        Ok(unreferenced)
+    }
+
+    /// Remove the cache objects a ledger lists, then the ledger. Only for the
+    /// ledger of a process that no longer runs, before any new store uses `cache`.
+    pub fn reclaim_ledger(cache: &Path, ledger: &Path) -> Result<usize> {
+        let entries = match fs::read_dir(ledger) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            result => result?,
+        };
+        let mut removed = 0;
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            if let Some(digest) = name
+                .to_str()
+                .and_then(|name| ContentDigest::try_from(name.to_owned()).ok())
+            {
+                if remove_if_present(&cache.join("sha256").join(digest.hex()))? {
+                    removed += 1;
+                }
+            }
+            remove_if_present(&entry.path())?;
+        }
+        fs::remove_dir(ledger)?;
+        Ok(removed)
+    }
+
+    fn owned_lock(&self) -> Option<std::sync::MutexGuard<'_, BTreeSet<ContentDigest>>> {
+        self.owned
+            .as_ref()
+            .map(|owned| owned.objects.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// An ordinary put reuses this object as a cache input: it is no longer owned.
+    fn adopt(
+        &self,
+        objects: &mut Option<std::sync::MutexGuard<'_, BTreeSet<ContentDigest>>>,
+        digest: &ContentDigest,
+    ) -> Result<()> {
+        if let (Some(owned), Some(objects)) = (&self.owned, objects.as_mut()) {
+            if objects.remove(digest) {
+                remove_if_present(&owned.ledger.join(digest.hex()))?;
+            }
+        }
+        Ok(())
     }
 
     /// Keep immutable inputs in a reusable cache while run identities and logs
@@ -159,7 +255,15 @@ impl ContentStore {
 
     /// Retain arbitrarily large artifacts with a bounded 64 KiB transfer buffer.
     pub fn put_reader(&self, reader: impl Read) -> Result<ContentDigest> {
-        self.put_reader_with(reader, true)
+        self.put_reader_with(reader, true, false)
+    }
+
+    /// `put_reader` for an object that belongs to a resource rather than to the
+    /// reusable cache. A new object becomes owned and `reclaim_owned` may remove
+    /// it, so callers exclude reclamation until a reference names it; an object
+    /// already present is unchanged.
+    pub fn put_reader_owned(&self, reader: impl Read) -> Result<ContentDigest> {
+        self.put_reader_with(reader, true, true)
     }
 
     /// Retain a run's own evidence (identity, logs) without syncing it. A host
@@ -170,19 +274,24 @@ impl ContentStore {
     /// `with_ephemeral_evidence`, these objects live only in the session store.
     /// Stream session-owned evidence without promoting it into the binary cache.
     pub fn put_reader_unsynced(&self, reader: impl Read) -> Result<ContentDigest> {
-        self.put_reader_with(reader, false)
+        self.put_reader_with(reader, false, false)
     }
 
     pub fn put_unsynced(&self, bytes: &[u8]) -> Result<ContentDigest> {
-        self.put_reader_with(bytes, false)
+        self.put_reader_with(bytes, false, false)
     }
 
     /// `put_unsynced` for a file.
     pub fn put_file_unsynced(&self, path: &Path) -> Result<ContentDigest> {
-        self.put_reader_with(fs::File::open(path)?, false)
+        self.put_reader_with(fs::File::open(path)?, false, false)
     }
 
-    fn put_reader_with(&self, mut reader: impl Read, durable: bool) -> Result<ContentDigest> {
+    fn put_reader_with(
+        &self,
+        mut reader: impl Read,
+        durable: bool,
+        owned: bool,
+    ) -> Result<ContentDigest> {
         let root = if durable {
             &self.root
         } else {
@@ -196,16 +305,51 @@ impl ContentStore {
         if durable {
             temp.as_file().sync_all()?;
         }
-        match temp.persist_noclobber(&path) {
-            Ok(_) => {}
-            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                // A host crash can leave an unsynced object named but short.
-                // These bytes hash to the digest, so put them in its place.
-                if !durable && self.verify(&digest).is_err() {
-                    e.file.persist(&path).map_err(|e| e.error)?;
+        {
+            // Naming a cache object and reclaiming one are ordered by this lock.
+            let mut objects = if *root == self.root {
+                self.owned_lock()
+            } else {
+                None
+            };
+            let marked = match (&self.owned, objects.as_ref()) {
+                (Some(ledger), Some(_)) if owned && !path.exists() => {
+                    // The marker is durable before the object has its name.
+                    fs::create_dir_all(&ledger.ledger)?;
+                    fs::File::create(ledger.ledger.join(digest.hex()))?;
+                    fs::File::open(&ledger.ledger)?.sync_all()?;
+                    true
+                }
+                _ => {
+                    if !owned {
+                        self.adopt(&mut objects, &digest)?;
+                    }
+                    false
+                }
+            };
+            let published = match temp.persist_noclobber(&path) {
+                Ok(_) => true,
+                Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // A host crash can leave an unsynced object named but short.
+                    // These bytes hash to the digest, so put them in its place.
+                    if !durable && self.verify(&digest).is_err() {
+                        e.file.persist(&path).map_err(|e| e.error)?;
+                    }
+                    false
+                }
+                Err(e) => return Err(e.error.into()),
+            };
+            if marked {
+                match (published, &self.owned, objects.as_mut()) {
+                    (true, _, Some(objects)) => {
+                        objects.insert(digest.clone());
+                    }
+                    (_, Some(ledger), _) => {
+                        remove_if_present(&ledger.ledger.join(digest.hex()))?;
+                    }
+                    _ => {}
                 }
             }
-            Err(e) => return Err(e.error.into()),
         }
         // Verify an existing entry too; never repair corruption implicitly.
         self.verify(&digest)?;
@@ -216,9 +360,25 @@ impl ContentStore {
     /// the file is hashed first, so retaining the same engine, kernel or image
     /// again never rewrites and syncs a second copy of it.
     pub fn put_file(&self, path: &Path) -> Result<ContentDigest> {
+        self.put_file_with(path, false)
+    }
+
+    /// `put_file` for an object that belongs to a resource (`put_reader_owned`).
+    pub fn put_file_owned(&self, path: &Path) -> Result<ContentDigest> {
+        self.put_file_with(path, true)
+    }
+
+    fn put_file_with(&self, path: &Path, owned: bool) -> Result<ContentDigest> {
         let mut file = fs::File::open(path)?;
         let digest = file_digest_with(&mut file, |file| transfer(file, &mut io::sink()))?;
-        if let Ok(existing) = fs::File::open(self.path(&digest)) {
+        let existing = {
+            let mut objects = self.owned_lock();
+            if !owned {
+                self.adopt(&mut objects, &digest)?;
+            }
+            fs::File::open(self.path(&digest))
+        };
+        if let Ok(existing) = existing {
             // Verify the existing entry; never repair corruption implicitly.
             if self.trusted(&digest, &existing)?.is_none() {
                 self.verify(&digest)?;
@@ -226,7 +386,7 @@ impl ContentStore {
             return Ok(digest);
         }
         file.seek(io::SeekFrom::Start(0))?;
-        self.put_reader(file)
+        self.put_reader_with(file, true, owned)
     }
 
     /// The object a named record points at, if the record exists and is
@@ -405,6 +565,15 @@ impl ContentStore {
                 self.materialize(digest, directory)
             }
         }
+    }
+}
+
+/// Whether `path` existed; a missing file is already removed.
+fn remove_if_present(path: &Path) -> io::Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 

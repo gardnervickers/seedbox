@@ -68,6 +68,10 @@ Import is not idempotent or resumable; a full upload may be accepted after the c
 disconnects. Export is completed-only, and files are published without overwriting
 an existing destination. Catalogue persistence and cache pruning are separate concerns.
 
+Deleting a simulation reclaims the cache objects it owned that no remaining
+resource references: captured checkpoint state, imported binaries and edited boot
+archives. Reusable inputs (kernels, prepared images and guests) are never owned.
+
 ## Deterministic execution
 
 A shared coordinator orders machine execution, network delivery, controls, and
