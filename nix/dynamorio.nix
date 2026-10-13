@@ -1,79 +1,23 @@
-{ pkgs }:
+{ pkgs, dynamorioSource ? null }:
 let
   arm = pkgs.stdenv.hostPlatform.isAarch64;
 in
 pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio";
-  # ARM needs a newer core for JITs: upstream main at a842f0e, the base of the
-  # fork where these patches are developed (`seedbox` and `main` branches).
-  # x86 builds the source of its existing release; nix/progress.nix fetches
-  # the matching SDK for each.
-  version = if arm then "11.91-unstable-2026-10-12" else "11.3.0";
-  src = pkgs.fetchurl (if arm then {
-    url = "https://github.com/DynamoRIO/dynamorio/archive/a842f0eb3463f2c1846d082ecac0b4b2d5f894c9.tar.gz";
-    hash = "sha256-l3iaagqwiOJy0lKK8r2vGSNSrnGblW5/AYd1z3bGMho=";
-  } else {
+  # ARM builds the DynamoRIO fork (the flake's `dynamorio-arm` input): upstream
+  # plus Seedbox's translator fixes and AArch64 IR fixes, as commits on its
+  # master. x86 builds the source of its existing release with one patch;
+  # nix/progress.nix fetches the matching SDK for each.
+  version = if arm then "11.91-seedbox" else "11.3.0";
+  src = if arm then
+    (if dynamorioSource == null
+     then throw "the ARM runtime needs the dynamorio-arm flake input"
+     else dynamorioSource)
+  else pkgs.fetchurl {
     url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/release_11.3.0-1.tar.gz";
     hash = "sha256-aj7BN0bravXAY72wVB37ZbTJvS+hZTxC61RAMiBDLsI=";
-  });
-  patches = if arm then [
-    # AArch64 decoder, encoder and IR fixes found by fuzzing the IR and
-    # checking it against the A64 specification.
-    ../guest/progress/dynamorio-aarch64-ir-fixes.patch
-    ../guest/progress/dynamorio-exclusives.patch
-    # Rebuilding a block discards its region list and must recheck the start.
-    ../guest/progress/dynamorio-rebuild-vmareas.patch
-    # Clean calls without SVE must save each vector register in its own
-    # context slot, where dr_get_mcontext() and redirection read it.
-    ../guest/progress/dynamorio-cleancall-simd.patch
-    # The translator marks its own syscalls so the guest charges them less.
-    ../guest/progress/dynamorio-translator-syscalls.patch
-    # A vfork child's handler copy must not make later signals to
-    # initializing threads fatal ("multiple native handlers").
-    ../guest/progress/dynamorio-vfork-handlers.patch
-    # A thread forking during another thread's stop-all-threads flush must be
-    # resumed in place; redirecting it skipped the fork syscall.
-    ../guest/progress/dynamorio-fork-synch.patch
-    # A vfork parent cannot take the suspend signal until its child execs, so
-    # stop-all-threads synchronization counts it as stopped instead of waiting.
-    ../guest/progress/dynamorio-vfork-synch.patch
-    # Signals that arrive while a thread is suspended must still reach it when
-    # it resumes into a blocking syscall.
-    ../guest/progress/dynamorio-suspend-pending.patch
-    # A signal that interrupts an application thread waiting at a synch-safe
-    # spot is delayed; running its handler at once skipped the wait's
-    # epilogue and left the thread marked safe while it ran in the cache.
-    ../guest/progress/dynamorio-safe-spot-signals.patch
-    # Signal emulation gaps found by the native corpus probes: SS_AUTODISARM,
-    # signalfd's queued value, signals sent to a fork child before it
-    # initialized, and clone3's CLONE_CLEAR_SIGHAND.
-    ../guest/progress/dynamorio-sigaltstack-autodisarm.patch
-    ../guest/progress/dynamorio-signalfd-value.patch
-    ../guest/progress/dynamorio-fork-pending-signals.patch
-    ../guest/progress/dynamorio-clone-clear-sighand.patch
-    # A signal on the indirect-branch lookup's hit path must still find the
-    # fragment to unlink, or a thread looping through indirect branches never
-    # receives it.
-    ../guest/progress/dynamorio-ibl-hit-signals.patch
-    # Each IC IVAU flush stops every thread, and JITs invalidate a range one
-    # line at a time, so a thread's consecutive lines are flushed together at
-    # its next DSB, which architecturally completes them.
-    ../guest/progress/dynamorio-icache-batch.patch
-    # A new thread found its clone record by reading unused stack, where a
-    # record an earlier thread left could match; it then hung on a garbage lock.
-    ../guest/progress/dynamorio-clone-record.patch
-    # Backport of upstream PR #7958: sigsuspend hung when a signal it unblocks
-    # was already pending in the translator.
-    ../guest/progress/dynamorio-sigsuspend-pending.patch
-    # A thread starting a stop-all-threads lets waiting ones go first: a JIT
-    # thread flushing after every code write starved a forking thread.
-    ../guest/progress/dynamorio-synch-fairness.patch
-    # A MAP_FIXED_NOREPLACE mmap that overlaps keeps its address (EEXIST, not
-    # EPERM), and signal handlers return through the vDSO trampoline that
-    # unwinders recognize, as on the kernel.
-    ../guest/progress/dynamorio-mmap-noreplace.patch
-    ../guest/progress/dynamorio-vdso-sigreturn.patch
-  ] else [
+  };
+  patches = if arm then [ ] else [
     # The same translator syscall mark, in rbx.
     ../guest/progress/dynamorio-x86-translator-syscalls.patch
   ];

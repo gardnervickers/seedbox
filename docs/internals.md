@@ -143,9 +143,9 @@ Minimal reproducers are in [`tools/jvm-fuzz/repros`](../tools/jvm-fuzz/repros).
 
 Code: [progress client](../guest/progress/progress.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
-[vector context patch](../guest/progress/dynamorio-cleancall-simd.patch),
-translator syscall marks ([ARM](../guest/progress/dynamorio-translator-syscalls.patch),
-[x86](../guest/progress/dynamorio-x86-translator-syscalls.patch)).
+the vector context and translator syscall mark commits in the ARM DynamoRIO
+fork (the `dynamorio-arm` flake input, [`nix/dynamorio.nix`](../nix/dynamorio.nix)),
+and the [x86 syscall mark patch](../guest/progress/dynamorio-x86-translator-syscalls.patch).
 
 On x86 a charge can span several scheduling boundaries. Its unpaid time is
 retained with the machine and drained while the vCPU is stopped, before guest
@@ -223,7 +223,7 @@ Faults must reconstruct the original application registers and instruction
 pointer. Internal retries cannot count as application progress. Application wait
 hints are rewritten so host wakeups cannot change charged loop counts.
 
-Code: [translator patch](../guest/progress/dynamorio-exclusives.patch), [ARM kernel patches](../kernel-arm64/apply.py), [assembly fixtures](../guest/progress/fixtures/).
+Code: the exclusives commit in the ARM DynamoRIO fork, [ARM kernel patches](../kernel-arm64/apply.py), [assembly fixtures](../guest/progress/fixtures/).
 
 ## Interrupt delivery at an idle rendezvous
 

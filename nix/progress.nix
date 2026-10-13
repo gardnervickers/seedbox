@@ -1,10 +1,11 @@
-{ pkgs }:
+{ pkgs, dynamorioSource ? null }:
 let
   arm = pkgs.stdenv.hostPlatform.isAarch64;
   # Both use the matching SDK launcher/preload libraries with the patched core
   # from nix/dynamorio.nix. x86 uses the SDK of that source's release. ARM's
-  # core is upstream main three days after this cronbuild, with the same 11.91
-  # client interface; move the SDK forward with the core when it changes.
+  # core is the DynamoRIO fork, based on upstream a few days after this
+  # cronbuild, with the same 11.91 client interface; move the SDK forward with
+  # the core when that interface changes.
   # The x86 runtime remains on its existing release; the ARM upgrade fixes JITs.
   sdkTag = if arm then "cronbuild-11.91.20735" else "release_11.3.0-1";
   sdkVersion = if arm then "11.91.20735" else "11.3.0";
@@ -13,7 +14,7 @@ let
     hash = if arm then "sha256-cMcDq/M5+XjvOcbPkMNtdRCiiYG7gGpGuj7AvqrXmto=" else "sha256-rgIEnfXE2uuC1Ah6qg04v1jN0ms4+2BC3M8ny8Ms7tk=";
   };
   loader = if arm then "ld-linux-aarch64.so.1" else "ld-linux-x86-64.so.2";
-  runtime = import ./dynamorio.nix { inherit pkgs; };
+  runtime = import ./dynamorio.nix { inherit pkgs dynamorioSource; };
 in pkgs.runCommand "seedbox-progress.tar" {
   passthru = { inherit sdk; glibcSource = pkgs.glibc.src; };
   nativeBuildInputs = with pkgs; [ stdenv.cc cmake ninja patchelf python3 ];

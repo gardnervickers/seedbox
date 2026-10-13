@@ -22,6 +22,10 @@ cargo build --release
 ./target/release/seedbox tui <sim-id>
 ```
 
+On Apple Silicon the guest helpers include a DynamoRIO fork fetched from a
+private GitHub repository with your SSH key (the `dynamorio-arm` flake input),
+so `cargo xtask build-assets` needs read access to it.
+
 The build embeds the guest kernel and helpers. Running Seedbox does not invoke
 Nix or a compiler. Docker or Podman prepares application images.
 

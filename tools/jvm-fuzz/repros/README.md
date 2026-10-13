@@ -41,20 +41,22 @@ Open bugs found by the P0 probes (`C.*` signal and `cfzsync` tests, JVM and Go p
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple
 `posix_spawn` into `fork`; it separated the two spawn bugs.
 
-The fixes are in [`guest/progress`](../../../guest/progress):
+The fixes are commits on the master branch of the ARM DynamoRIO fork, the
+`dynamorio-arm` flake input ([`nix/dynamorio.nix`](../../../nix/dynamorio.nix));
+they are named here by their former patch names:
 
-- `dynamorio-vfork-synch.patch`: synch-all counts a thread waiting in a vfork-style
+- `vfork-synch`: synch-all counts a thread waiting in a vfork-style
   clone as stopped; after the clone returns the thread waits for the synch.
-- `dynamorio-fork-synch.patch`: a thread in `fork` pre-syscall handling waits as
+- `fork-synch`: a thread in `fork` pre-syscall handling waits as
   "no transfer", so another thread's flush resumes it in place instead of
   redirecting it past the syscall.
-- `dynamorio-vfork-handlers.patch`: a vfork child's copied handlers no longer make
+- `vfork-handlers`: a vfork child's copied handlers no longer make
   later signals to initializing threads fatal ("multiple native handlers").
-- `dynamorio-suspend-pending.patch`: signals that arrive while a thread is
+- `suspend-pending`: signals that arrive while a thread is
   suspended are requeued to it. The JVM's primordial thread, blocked in
   `pthread_join`, received `kill -HUP <jvm>` that way and never ran the handler;
   `sigext` keeps its main thread busy and so does not hit this path.
-- `dynamorio-safe-spot-signals.patch`: a signal that interrupts an application
+- `safe-spot-signals`: a signal that interrupts an application
   thread waiting at a synch-safe spot in DR (for another thread's flush, a
   contended lock or a fork) is delayed instead of handled at once. Handling it
   left the wait without its epilogue, so the thread stayed marked safe and later
@@ -68,24 +70,24 @@ The fixes are in [`guest/progress`](../../../guest/progress):
   corruption; C2's code for it deoptimizes through an implicit null check whose
   handler saves a register that straight-line liveness considers dead.
 
-- `dynamorio-ibl-hit-signals.patch`: a signal on the indirect-branch lookup's hit
+- `ibl-hit-signals`: a signal on the indirect-branch lookup's hit
   path, after the app's x2 is restored, now finds the target fragment through the
   hashtable entry, so a thread looping through indirect branches still exits to
   receive it (`sigregs ... ibl`).
 - Emulation gaps found by the `C.*` probes (`probes/c/cfz.c`):
-  `dynamorio-sigaltstack-autodisarm.patch` (handlers ran with the alternate stack
-  still armed), `dynamorio-signalfd-value.patch` (`ssi_int`/`ssi_ptr` were zero),
-  `dynamorio-fork-pending-signals.patch` (a signal sent to a fork child before
+  `sigaltstack-autodisarm` (handlers ran with the alternate stack
+  still armed), `signalfd-value` (`ssi_int`/`ssi_ptr` were zero),
+  `fork-pending-signals` (a signal sent to a fork child before
   its translator initialized was dropped, so `kill` right after `fork` or through
-  a pidfd did nothing) and `dynamorio-clone-clear-sighand.patch` (`clone3`'s
+  a pidfd did nothing) and `clone-clear-sighand` (`clone3`'s
   `CLONE_CLEAR_SIGHAND` left the parent's handlers in the child).
-- `dynamorio-icache-batch.patch`, `dynamorio-synch-fairness.patch`: JIT flushes
+- `icache-batch`, `synch-fairness`: JIT flushes
   join a thread's consecutive `IC IVAU` lines and run at its next `DSB`, waiting
   for other flushes without being redirected; a thread starting a stop-all lets
   waiting ones go first (`spawnjit 60 1 fork 1 0`).
-- `dynamorio-clone-record.patch`: a new AArch64 thread found its clone record by
+- `clone-record`: a new AArch64 thread found its clone record by
   reading unused stack and could read a stale record (the `Signals` probe hung).
-- `dynamorio-sigsuspend-pending.patch`: upstream PR #7958; `sigsuspend` hung for a
+- `sigsuspend-pending`: upstream PR #7958; `sigsuspend` hung for a
   signal it unblocked that was already pending (`C.sigsuspend`).
-- `dynamorio-mmap-noreplace.patch` (`map_noreplace`) and
-  `dynamorio-vdso-sigreturn.patch` (`sigframe_unwind`).
+- `mmap-noreplace` (`map_noreplace`) and
+  `vdso-sigreturn` (`sigframe_unwind`).

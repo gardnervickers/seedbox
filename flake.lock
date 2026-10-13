@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "dynamorio-arm": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791893956,
+        "narHash": "sha256-AhLPoRlrJsBDE+pNqVsrSo9rEGBf/cLud+KhqJOPW/A=",
+        "ref": "master",
+        "rev": "5c49d8c38b0beed54e5d6fd2e2f4e5d0699071a6",
+        "revCount": 7276,
+        "type": "git",
+        "url": "ssh://git@github.com/lbradstreet/dynamorio.git"
+      },
+      "original": {
+        "ref": "master",
+        "type": "git",
+        "url": "ssh://git@github.com/lbradstreet/dynamorio.git"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1791191277,
@@ -18,6 +35,7 @@
     },
     "root": {
       "inputs": {
+        "dynamorio-arm": "dynamorio-arm",
         "nixpkgs": "nixpkgs"
       }
     }

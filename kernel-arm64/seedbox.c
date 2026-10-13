@@ -34,7 +34,7 @@ struct seedbox_page {
 #define SEEDBOX_CLOCK_GETRES_NR 114
 #define SEEDBOX_GETTIMEOFDAY_NR 169
 /* x7 of a syscall the translator makes for itself
- * (guest/progress/dynamorio-translator-syscalls.patch). */
+ * (the translator-syscalls commit in the DynamoRIO fork, nix/dynamorio.nix). */
 #define SEEDBOX_TRANSLATOR_MARK 0x5eedd1a900000000UL
 /* Translator syscalls cost this fraction of an application syscall. */
 #define SEEDBOX_TRANSLATOR_DIVISOR 10
