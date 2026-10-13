@@ -42,7 +42,6 @@ Open bugs found by the P0 probes (`C.*` signal and `cfzsync` tests, JVM and Go p
 | `stxr_flush_dup flush` | `ldxr`/`stxr` increments while another thread flushes code | increments applied twice |
 | `timer_signal_loss thread N` | process-directed timer signals with a `SIGEV_THREAD` helper exiting | signals dropped by the exiting thread |
 | `go_exec_flaky.sh` | runs `Go.exec` repeatedly | about 3% of runs lose a signal, crash a child or hang |
-| `altstack_onstack [ROUNDS]` | `sigaltstack(NULL, &old)` in a handler running on the alternate stack | `ss_flags` lacks `SS_ONSTACK` |
 
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple
 `posix_spawn` into `fork`; it separated the two spawn bugs.

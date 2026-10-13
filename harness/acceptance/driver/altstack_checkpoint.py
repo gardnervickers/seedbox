@@ -16,9 +16,9 @@ import time
 
 TOKEN = 4242
 # The translator does not report SS_ONSTACK to sigaltstack() inside a handler
-# on the alternate stack (tools/jvm-fuzz/repros/altstack_onstack.c); Linux does.
+# on the alternate stack (tools/jvm-fuzz/repros/sigaltstack_onstack.c); Linux does.
 # The handler's own stack address still proves where it ran.
-KNOWN = {"onstack": "translator omits SS_ONSTACK; see tools/jvm-fuzz/repros/altstack_onstack.c"}
+KNOWN = {"onstack": "translator omits SS_ONSTACK; see tools/jvm-fuzz/repros/sigaltstack_onstack.c"}
 
 
 def known(result):
