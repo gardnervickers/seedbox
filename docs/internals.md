@@ -115,6 +115,34 @@ console; the x86 platform is described in its
 Code: [PV example](../crates/seedbox-machine/examples/pv.rs),
 [shared example RNG](../crates/seedbox-machine/examples/support/mod.rs).
 
+## Machine time bases and clock faults
+
+In `seedbox-machine` every machine runs in its own time base `G`, which the
+Driver maps to simulation time at the machine boundary; machines never see the
+mapping. `G` is exact in units of 1e-9 ns, the identity until a rate change,
+and reanchored at each change keeping `G(T)`, so accrued drift is never
+rounded away. Into a machine go `floor(G(now))`, `floor(G(upto))` and input
+times; out of it, output times, positions and timer deadlines map to the
+earliest simulation nanosecond whose `G` reaches them, so nothing is early.
+A machine reaches barrier `T` exactly when its position reaches
+`floor(G(T))`, which keeps one set of common barriers and tiles each machine's
+own time without gaps. Pending timers are re-converted when the rate changes.
+Drift therefore needs no backend support, and the whole machine (counters,
+timers and CPU progress) runs at the drifted rate.
+
+A realtime step is guest kernel state instead: the shared PID 1 performs
+`Request::StepRealtime` with `adjtimex(ADJ_SETOFFSET)` and acknowledges it,
+which moves only `CLOCK_REALTIME`, re-evaluates absolute realtime timers and
+cancels cancel-on-set timerfds. Steps end with their boot; drift survives
+crash and reboot. Every boot sets realtime to the epoch in
+`/seedbox/clock.bin` plus the machine counter before `Ready`; the TCG board RTC
+derives from the same epoch.
+
+Code: [driver translation](../crates/seedbox-machine/src/driver.rs),
+[mapping](../crates/seedbox-machine/src/clock/projection.rs),
+[guest step](../crates/seedbox-machine/src/pv/guest_service.c),
+[boot realtime](../crates/seedbox-machine/src/pv/guest_service_init.c).
+
 ## Bounded virtual clock reads
 
 Reading the host counter would make a guest polling loop's iteration count

@@ -256,13 +256,30 @@ objective.
    name to the machine of that name, for host `Target::Name` and guest
    `{"service": ...}` targets alike. Inspect, and how it represents deferred
    networking, remain open; public contracts remain to be agreed.
-5. **Injected clock faults.** Agree the Driver-owned dependency boundary, then
-   implement step, drift and heal on both backends with correct reads and timers.
-   Canonical execution/barrier time must remain coherent. Private projection
-   arithmetic is not native support. Realtime versus monotonic/raw behavior,
-   inverse timer deadlines, zero-budget application, epoch, reboot and restore
-   policy need resolution. Current guest inputs lack the stopped timekeeper
-   mechanism; the ordinary TCG kernel constraint must be addressed explicitly.
+5. **Injected clock faults — implemented in the approved shape (DECISIONS K),
+   except the epoch delivery path, which awaits a decision.** The Driver maps
+   each machine's time base at the machine boundary (rules in `Driver` rustdoc
+   and docs/internals.md); `Transition::ClockRate` publishes rate changes and
+   `FaultAction::{Drift, StepRealtime}` carry resolved values. Guest
+   `clock_drift` sets the rate (no stacking, persists across reboot, heal to
+   nominal keeps accrued offset); `clock_skew` sends `Request::StepRealtime`,
+   performed by the shared supervisor (needs Up, unpaused, Ready; deadline;
+   guest refusal settles Rejected), lost with its boot, and healing a lost step
+   applies with no guest effect. Seeded `max_*` draws are uniform in
+   `[-max, max]` from the simulation RNG at admission. Every boot sets realtime
+   to epoch + counter before Ready; TCG's RTC base derives from the epoch.
+   Portable evidence: `src/clock/projection.rs`, `src/driver/clock_tests.rs`,
+   `src/driver/clock_fault_tests.rs`, clock tests in
+   `src/oracle/service/tests.rs` and `src/oracle/handles.rs`. Native evidence:
+   `src/machine/clock_fault_tests.rs` with `tests/fixtures/clock-faults.c` on
+   TCG and x86 PV (workers 1/4, in-place restore mid-drift, exact timer wakeups).
+   **Open:** `Driver::new(.., epoch_seconds, ..)` is approved but no explicit
+   path carries the epoch to machines without a further public change; the
+   guest path exists (`GuestBootstrap::epoch_seconds` → `/seedbox/clock.bin`)
+   and factories currently use 0. **TODO after F lands:** add
+   `Action::Drift`/`Action::StepRealtime` mapped onto `Effect::Drift` /
+   `Effect::StepRealtime`; the raw `Barrier::schedule_clock_rate` hook is
+   test-only. Not yet run on Apple Silicon/HVF or arm64 KVM.
 6. **Oracle-driven machine creation — implemented in the approved shape.**
    `Driver::new` accepts a separate `spawnable: Vec<MachineDefinition>` after
    `machines`; definitions remain unchanged and templating belongs to the caller.
@@ -297,8 +314,8 @@ objective.
 ## Explicit deferrals and limits
 
 Networking and storage integration/faults, whole-simulation checkpoint/branch,
-and implementing a PMU backend are deferred. Host readback, clock faults,
-inspection are not deferred; dynamic creation is implemented as described above.
+and implementing a PMU backend are deferred. Host readback and inspection are
+not deferred; clock faults are implemented as described above; dynamic creation is implemented as described above.
 
 Native evidence is from Apple Silicon/HVF, x86-64 Linux/KVM and TCG. The x86
 PV backend passes the existing native PV suites on an AMD KVM host, including
@@ -306,7 +323,7 @@ snapshots; Intel VMX hosts are unverified. Linux ARM KVM architectural snapshot
 support remains absent/unvalidated; do not claim cross-platform parity.
 PV work accounting covers instrumentation charge points, not arbitrary polling
 or uninstrumented execution. The execute-only handoff covers configured startup
-and same-boot restart, not arbitrary application-initiated exec. RTC epochs, raw
+and same-boot restart, not arbitrary application-initiated exec. Epoch delivery, raw
 hardware entropy and broader CPU portability remain limitations. Dependency
 snapshot consistency remains the caller's responsibility until a simulation-wide
 capture boundary is designed.
