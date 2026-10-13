@@ -189,7 +189,8 @@ this new family, not the whole legacy suite.
 
 ## TODO — remaining work
 
-Item 1 is implemented and awaits the user's re-evaluation. Do not interpret
+Item 1 is implemented and awaits the user's re-evaluation; items 3 and 6 and
+the fault parts of item 4 are implemented in their approved shapes. Do not interpret
 this checkpoint or the event stream as completion of the full compatibility
 objective.
 
@@ -219,16 +220,39 @@ objective.
    reply can complete later under its original identity; do not confuse retirement
    with discard. Silent disconnect/discard timing remains unobservable and needs
    an explicit decision if required. Do not claim delivery parity yet.
-3. **Host fault admission — requires approval.** Add a typed barrier-only entrance
-   to the same control policy/ID/handle owner. Proposed direction: scheduled time,
-   caller-owned key and typed action; echo the key on admission or rejection.
-   Enqueueing must not reserve runtime fault IDs. Raw Driver actions do not supply
-   equivalent policy. Preserve ordinary-control versus trigger validation and
-   bind the target boot at due admission. No fabricated guest RPC.
-4. **Complete control compatibility.** Generalize pause-before-next-fault beyond
-   effective crashes. Complete Inspect and service-name targeting from
-   authoritative state; decide how inspection represents deferred networking
-   without inventing empty data. Public contracts remain to be agreed.
+3. **Host fault admission — implemented in the approved shape (DECISIONS F).**
+   One `Barrier::schedule(at, InputKey, Action)` replaced `schedule`,
+   `schedule_request`, `Action::Wake` and `Action::SetExecution`; there are no
+   raw host actions any more. Enqueue only checks shape (key syntax, `at >= now`,
+   target or spawnable name, process deadline, live key) and reserves no fault,
+   handle or command ID. At its FIFO turn the input is admitted through the
+   service's ordinary-control path (`Service::admit_input`, sharing
+   `prepare`/`install`; triggers keep trigger mode), binding the target boot then.
+   Admission publishes `FaultAdmitted` with `FaultOrigin::Input { key }`; refusal
+   publishes `InputRejected { key, rejection }` with no fault ID. Generated
+   effects join the FIFO tail, so same-time Crash-then-Reboot admits the Crash
+   and rejects the Reboot (documented and tested). Process commands use
+   Driver-allocated command IDs and a per-input deadline; host Shutdown and
+   Spawn are host-only service commands. `Heal(Input(key))` resolves the key's
+   handle; the Driver keeps only live keys. Contract in rustdoc
+   ([input.rs](../crates/seedbox-machine/src/driver/input.rs),
+   `Barrier::schedule`, `Barrier::snapshot`). Internally the service now
+   identifies machines by canonical private keys (`machine:N`), so unnamed
+   added machines and duplicate display names are targetable by identity.
+   Portable evidence: `tests/driver_inputs.rs`, `tests/driver_requests.rs`
+   (process commands) plus the migrated suites. Native evidence on TCG and x86
+   PV: `tests/driver_guest_services.rs` (every host action on real guests,
+   settled by acknowledgment; workers 1/2/4 TCG, 1/4 PV) and
+   `src/machine/driver_input_snapshot_tests.rs` (in-place machine snapshots with
+   a pending input and an unacknowledged command; workers 1 and 4).
+4. **Complete control compatibility — fault parts implemented; Inspect open.**
+   `Barrier::pause_before_next_fault` replaced `pause_before_next_crash`: it holds
+   before any effective fault effect from guest, trigger or host origin
+   (including process dispatch, throttle, heal and spawn), reported as
+   `StepOutcome::BeforeFault { at, fault }`. Service-name targeting resolves a
+   name to the machine of that name, for host `Target::Name` and guest
+   `{"service": ...}` targets alike. Inspect, and how it represents deferred
+   networking, remain open; public contracts remain to be agreed.
 5. **Injected clock faults.** Agree the Driver-owned dependency boundary, then
    implement step, drift and heal on both backends with correct reads and timers.
    Canonical execution/barrier time must remain coherent. Private projection
