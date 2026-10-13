@@ -165,6 +165,12 @@ PROBES = {
                             "skip_profiles": ["zgc", "zgc-single"]},
     "JniCriticalGc": {"variants": [[], ["-Xcheck:jni"], ["-XX:+UseG1GC"], ["-XX:+UseZGC", "-XX:+ZGenerational"]]},
     "LibjsigChaining": {},
+    # JVMs stopped and continued under load, attach handshakes while stopped, sendfile/splice
+    # sockets, selector close races and JNI native rebinding.
+    "JvmUnderFaults": {"preview": True, "isolate": True, "timeout": 1200},
+    "JvmSigstopHandshakes": {"preview": True, "isolate": True, "timeout": 600},
+    "SendfileSockets": {}, "SelectorLifecycle": {},
+    "JniNativeRebinding": {"variants": [[], ["-Xcheck:jni"]]},
     "ExitMatrix": {"isolate": True, "arg_variants": ["daemons", "exit7", "halt5", "uncaught"],
                    "exit_codes": {"daemons": 0, "exit7": 7, "halt5": 5, "uncaught": 1}},
     # Native AArch64 probes (probes/c/cfz.c), one test each, run without a JVM.
@@ -176,12 +182,13 @@ PROBES = {
         "ptrace", "wipeonfork", "scmrights", "ifunc", "robust", "robustpi", "mapnoreplace",
         "pidns", "getrandom", "vmsplice", "unwind", "tlsdtor", "staticpie", "vdsoclock",
         "waits", "affinity", "sigframe", "ctxrewrite", "restart", "rtfifo", "sigpressure", "tmpmask",
-        "sigshare", "sigstop")},
+        "sigshare", "sigstop", "nestsig", "execsig", "autodisarmctx", "sigio", "timerstorm", "chargelin",
+        "unaligned", "exclmaint", "simdfpctl", "rseqcommit", "futexops", "epolledge", "seccompnotify")},
     # Host-dependent values (entropy digests, load addresses, counters, exclusive-store failure
     # counts) are compared with the replay only.
     **{f"C.{name}": {"native": name, "det": False} for name in (
         "getrandomhash", "staticpieaddr", "counters", "vdsogetrandom", "rndr", "tpidrro", "prtsc",
-        "exclusive")},
+        "exclusive", "execsigrace", "timerstormcounts", "chargelinvalues", "exclmaintcounts")},
     # Hashes of /proc files and kernel-visible syscalls after a fixed workload (cfzprocfs.c): any
     # host leak into guest kernel state shows as a replay or twin-run difference naming the file.
     "C.procfs": {"native": "procfs", "exe": "/fuzz/bin/cfzprocfs", "det": False},
@@ -205,6 +212,14 @@ PROBES = {
     **{f"Erl.{name}": {"native": name, "exe": "/fuzz/bin/erlfz", "explicit": True}
        for name in ("reductions", "heap")},
     **{f"Lua.{name}": {"native": name, "exe": "/fuzz/bin/luafz"} for name in ("trace", "ffi")},
+    # Go cgo threads and fault recovery, .NET reverse P/Invoke from native threads, BEAM hot code
+    # loading, Node workers with shared memory, and CPython signal handling.
+    "Go.faultRecovery": {"native": "faultRecovery", "exe": "/fuzz/bin/gofz"},
+    "Go.cgoThreads": {"native": "cgoThreads", "exe": "/fuzz/bin/gofzcgo"},
+    "Cs.reversePInvoke": {"native": "reversePInvoke", "exe": "/fuzz/bin/csfz"},
+    "Erl.hotCode": {"native": "hotCode", "exe": "/fuzz/bin/erlfz", "explicit": True},
+    "Js.workersToken": {"native": "workersToken", "exe": "/fuzz/bin/jsfz"},
+    "Py.signals": {"native": "signals", "exe": "/fuzz/bin/pyfz"},
     "Jfr": {"arg_variants": ["all 1", "exec 1", "exec 10", "alloc,monitor,park 1", "none 1",
                              "exec 1 soe", "exec 1 npe", "exec 1 alloc", "exec 5 lock", "exec 1 native",
                              "exec,threaddump 1 vthread", "native 1 native", "threaddump 1 lock",
@@ -219,6 +234,10 @@ KNOWN_ISSUES = {
 
 CASE_TIMEOUT = 240
 SIM_MEMORY_MIB = 2048
+# A guest's root filesystem is in RAM (about 750 MiB at 2 GiB, mostly the image), while a
+# container's /tmp is on disk. Simulations mount a disk volume there, as probes such as
+# Durability write hundreds of MiB and are meant to exercise the block device.
+SIM_VOLUMES = {"tmp": {"target": "/tmp"}}
 
 
 def sh(cmd, **kw):
@@ -252,7 +271,7 @@ def cmd_gen(a):
         for f in sorted(list((HERE / "probes" / sub).glob("*.java")) + list((HERE / "probes" / sub).glob("*.c"))):
             shutil.copy(f, src / sub / f.name)
     # Probes for other runtimes, built by their own image stages.
-    for sub in ("go", "js", "cs", "erl", "lua"):
+    for sub in ("go", "js", "cs", "erl", "lua", "py"):
         shutil.copytree(HERE / "probes" / sub, src / sub)
     instances = []  # (main, args, extra flags, det, expected exit)
     # "explicit" probes run only when --only names them.
@@ -361,7 +380,7 @@ def cmd_native(a):
             if dest.exists() and not a.force:
                 continue
             jobs.append((run, b, dest))
-    cpus = list(range(a.jobs))
+    cpus = [int(c) for c in a.cpus.split(",")] if a.cpus else list(range(a.jobs))
 
     def one(job, cpu):
         run, b, dest = job
@@ -416,7 +435,7 @@ def sim_batch(a, meta, b, index):
     project = {
         "name": f"jvmfuzz-{meta['tag']}-{b}",
         "machines": {},
-        "oracle": {"image": meta["image"], "memoryMiB": SIM_MEMORY_MIB, "command": [b]},
+        "oracle": {"image": meta["image"], "memoryMiB": SIM_MEMORY_MIB, "command": [b], "volumes": SIM_VOLUMES},
     }
     if a.jitter:
         project["oracle"]["cpu"] = {"jitter": f"{a.jitter}%"}
@@ -727,7 +746,8 @@ def cmd_jcstress(a):
         argv = list(args)
         argv[1] = regex
         project = {"name": f"jvmfuzz-jcstress-{name}", "machines": {},
-                   "oracle": {"image": a.image, "memoryMiB": SIM_MEMORY_MIB, "command": argv}}
+                   "oracle": {"image": a.image, "memoryMiB": SIM_MEMORY_MIB, "command": argv,
+                              "volumes": SIM_VOLUMES}}
         (d / "seedbox.yaml").write_text(json.dumps(project, indent=1) + "\n")
         info = json.loads((d / "result.json").read_text()) if (d / "result.json").exists() and not a.force else {}
         if "id" not in info:
@@ -804,6 +824,7 @@ def main():
     n.add_argument("corpus")
     n.add_argument("--runs", type=int, default=2, help="Native runs per batch (stability check).")
     n.add_argument("--jobs", type=int, default=4, help="Concurrent containers.")
+    n.add_argument("--cpus", help="Comma-separated host CPUs, one container each (default: 0 to JOBS-1).")
     n.add_argument("--force", action="store_true", help="Rerun batches with existing output.")
     n.add_argument("--unconfined", action="store_true",
                    help="Run without the engine's seccomp filter, as the guest has none.")

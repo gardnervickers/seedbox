@@ -43,12 +43,14 @@
 #include <ucontext.h>
 #include <unistd.h>
 #include <unwind.h>
+#include <linux/audit.h>
 #include <linux/bpf.h>
 #include <linux/perf_event.h>
 #include <sys/personality.h>
 #include <sys/random.h>
 #include <limits.h>
 #include <sys/file.h>
+#include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/sem.h>
 #include <sys/un.h>
@@ -3678,6 +3680,1873 @@ static int t_sigstop(void) {
     return 1;
 }
 
+/* ---- signals: nesting, exec, alternate-stack switches, SIGIO and timers ---- */
+
+/* 1 when thread tid of process pid sleeps in syscall nr (with first argument a0
+ * unless a0 is 0), as /proc reports it; 0 if not seen within ms milliseconds, -1
+ * without the file. Callers use it only to place an event after a wait has begun
+ * and sleep instead when it fails; no output depends on it. */
+static int cfz_blocked_in(pid_t pid, pid_t tid, long nr, uintptr_t a0, long ms) {
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%d/task/%d/syscall", (int)pid, (int)tid);
+    uint64_t end = mono_ns(CLOCK_MONOTONIC) + (uint64_t)ms * 1000000ULL;
+    for (;;) {
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return -1;
+        char b[256];
+        ssize_t n = read(fd, b, sizeof b - 1);
+        close(fd);
+        if (n > 0) {
+            b[n] = 0;
+            long got = -1;
+            unsigned long arg = 0;
+            if (sscanf(b, "%ld %lx", &got, &arg) >= 1 && got == nr && (!a0 || arg == a0)) return 1;
+        }
+        if (mono_ns(CLOCK_MONOTONIC) > end) return 0;
+        cfz_sleep_us(100);
+    }
+}
+static void cfz_settle(pid_t pid, pid_t tid, long nr, uintptr_t a0) {
+    if (cfz_blocked_in(pid, tid, nr, a0, 2000) != 1) cfz_sleep_us(20000);
+}
+
+/* det: same-signal nesting with SA_NODEFER to depth 50; on odd rounds the deepest
+ * level raises another signal whose SA_ONSTACK handler nests ten levels on the
+ * alternate stack and raises a legacy (non-SA_SIGINFO) handler there; sigaltstack
+ * there must report SS_ONSTACK and refuse a change; SA_RESETHAND proven in a child
+ * by the default action. Every level raises the next through
+ * cfz_canary_kill, which checks x9-x15, x19-x28, v16-v23 and NZCV across the
+ * delivery, and each frame must resume right after its svc. */
+CFZ_HIDDEN long cfz_canary_kill(const uint64_t *can, long tgid, long tid, long sig);
+CFZ_HIDDEN extern const char cfz_ck_after[];
+#define CK_XREGS "9, 10, 11, 12, 13, 14, 15, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28"
+asm(".text\n.p2align 2\n"
+    CFZ_FN("cfz_canary_kill")
+    "stp x29, x30, [sp, #-176]!\nmov x29, sp\n"
+    "stp x19, x20, [sp, #16]\nstp x21, x22, [sp, #32]\nstp x23, x24, [sp, #48]\nstp x25, x26, [sp, #64]\n"
+    "stp x27, x28, [sp, #80]\nstp d8, d9, [sp, #96]\nstp d10, d11, [sp, #112]\nstp d12, d13, [sp, #128]\n"
+    "stp d14, d15, [sp, #144]\nstr x0, [sp, #160]\n"
+    ".irp r, " CK_XREGS "\nldr x\\r, [x0, #\\r * 8]\n.endr\n"
+    ".irp v, 16, 17, 18, 19, 20, 21, 22, 23\nldr q\\v, [x0, #(256 + (\\v - 16) * 16)]\n.endr\n"
+    "ldr x5, [x0, #504]\nmov x0, x1\nmov x1, x2\nmov x2, x3\nmov x8, #131\nmsr nzcv, x5\nsvc #0\n"
+    CFZ_AT("cfz_ck_after")
+    "mrs x6, nzcv\nldr x0, [sp, #160]\nmov x1, #0\n"
+    ".irp r, " CK_XREGS "\nldr x2, [x0, #\\r * 8]\ncmp x\\r, x2\ncinc x1, x1, ne\n.endr\n"
+    ".irp v, 16, 17, 18, 19, 20, 21, 22, 23\nldr x2, [x0, #(256 + (\\v - 16) * 16)]\nfmov x3, d\\v\ncmp x2, x3\n"
+    "cinc x1, x1, ne\nldr x2, [x0, #(264 + (\\v - 16) * 16)]\nmov x3, v\\v\\().d[1]\ncmp x2, x3\ncinc x1, x1, ne\n.endr\n"
+    "ldr x2, [x0, #504]\ncmp x2, x6\ncinc x1, x1, ne\nmov x0, x1\n"
+    "ldp x19, x20, [sp, #16]\nldp x21, x22, [sp, #32]\nldp x23, x24, [sp, #48]\nldp x25, x26, [sp, #64]\n"
+    "ldp x27, x28, [sp, #80]\nldp d8, d9, [sp, #96]\nldp d10, d11, [sp, #112]\nldp d12, d13, [sp, #128]\n"
+    "ldp d14, d15, [sp, #144]\nldp x29, x30, [sp], #176\nret\n");
+#define NS_DEPTH 50
+#define NS_ALT 10
+static pid_t ns_tid;
+static uint64_t ns_mask0;
+static stack_t ns_alt;
+static volatile int ns_depth, ns_adepth, ns_phase;
+static long ns_canbad, ns_pcbad, ns_spbad, ns_maskbad, ns_infobad, ns_altbad, ns_altflagbad, ns_altrefused, ns_legacy, ns_legacybad,
+    ns_levels, ns_alevels;
+static uintptr_t ns_sp[NS_DEPTH + 2], ns_asp[NS_ALT + 2];
+static void ns_raise(int level, int sig) {
+    uint64_t can[64];
+    for (int i = 0; i < 64; i++) can[i] = ((uint64_t)(level + 1) * 0x9E3779B97F4A7C15ULL) ^ ((uint64_t)i << 48) ^ (uint64_t)sig;
+    can[63] = (uint64_t)((level * 5 + sig) & 15) << 28;
+    long bad = cfz_canary_kill(can, getpid(), ns_tid, sig);
+    ns_canbad += bad;
+}
+static int ns_onalt(uintptr_t sp) { return sp >= (uintptr_t)ns_alt.ss_sp && sp < (uintptr_t)ns_alt.ss_sp + ns_alt.ss_size; }
+static void ns_frame(int s, const siginfo_t *si, const ucontext_t *uc) {
+    if (uc->uc_mcontext.pc != (uintptr_t)cfz_ck_after) ns_pcbad++;
+    if (si->si_signo != s || si->si_code != SI_TKILL || si->si_pid != getpid()) ns_infobad++;
+}
+static void ns_usr1(int s, siginfo_t *si, void *ucv) {
+    ucontext_t *uc = ucv;
+    volatile char here = 0;
+    int d = ++ns_depth;
+    ns_levels++;
+    ns_sp[d] = (uintptr_t)&here;
+    if ((d > 1 && ns_sp[d] >= ns_sp[d - 1]) || ns_onalt(ns_sp[d])) ns_spbad++;
+    ns_frame(s, si, uc);
+    uint64_t saved, hm = ns_mask0 | SIGBIT(SIGRTMIN + 11);
+    memcpy(&saved, &uc->uc_sigmask, 8);
+    if (kmask_get() != hm || saved != (d == 1 ? ns_mask0 : hm)) ns_maskbad++;
+    if (d < NS_DEPTH) ns_raise(d, SIGUSR1);
+    else if (ns_phase) ns_raise(d, SIGRTMIN + 2);
+    ns_depth--;
+}
+static void ns_alth(int s, siginfo_t *si, void *ucv) {
+    ucontext_t *uc = ucv;
+    volatile char here = 0;
+    int d = ++ns_adepth;
+    ns_alevels++;
+    ns_asp[d] = (uintptr_t)&here;
+    stack_t cur;
+    sigaltstack(NULL, &cur);
+    if (!ns_onalt(ns_asp[d])) ns_altbad++;
+    if (cur.ss_flags != SS_ONSTACK) ns_altflagbad++;
+    if (d == 1) { /* the kernel refuses to change the stack it is running on */
+        int saved = errno;
+        stack_t again = ns_alt;
+        ns_altrefused += sigaltstack(&again, NULL) == -1 && errno == EPERM;
+        errno = saved;
+    }
+    if (d > 1 && ns_asp[d] >= ns_asp[d - 1]) ns_altbad++;
+    /* The saved uc_stack is the registration (its flags, not SS_ONSTACK), at every level. */
+    if (uc->uc_stack.ss_sp != ns_alt.ss_sp || uc->uc_stack.ss_size != ns_alt.ss_size || uc->uc_stack.ss_flags != 0) ns_altbad++;
+    ns_frame(s, si, uc);
+    if (kmask_get() != (ns_mask0 | SIGBIT(SIGRTMIN + 11))) ns_maskbad++;
+    if (d < NS_ALT) ns_raise(100 + d, SIGRTMIN + 2);
+    else ns_raise(200, SIGUSR2);
+    ns_adepth--;
+}
+static void ns_leg(int s) {
+    volatile char here = 0;
+    uintptr_t sp = (uintptr_t)&here;
+    ns_legacy++;
+    if (s != SIGUSR2 || !ns_onalt(sp) || sp >= ns_asp[NS_ALT] ||
+        kmask_get() != (ns_mask0 | SIGBIT(SIGRTMIN + 11) | SIGBIT(SIGUSR2)))
+        ns_legacybad++;
+}
+static volatile int nsr_ran, nsr_dfl, nsr_blocked;
+static void nsr_h(int s, siginfo_t *si, void *uc) {
+    (void)si; (void)uc;
+    struct sigaction o;
+    sigaction(s, NULL, &o);
+    nsr_ran++;
+    nsr_dfl = o.sa_handler == SIG_DFL;
+    nsr_blocked = (kmask_get() & SIGBIT(s)) != 0;
+}
+static int t_nestsig(void) {
+    static char altmem[262144] __attribute__((aligned(16)));
+    ns_alt.ss_sp = altmem;
+    ns_alt.ss_size = sizeof altmem;
+    ns_alt.ss_flags = 0;
+    if (sigaltstack(&ns_alt, NULL)) return 0;
+    ns_tid = gettid();
+    struct sigaction a;
+    memset(&a, 0, sizeof a);
+    a.sa_sigaction = ns_usr1;
+    a.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&a.sa_mask);
+    sigaddset(&a.sa_mask, SIGRTMIN + 11);
+    sigaction(SIGUSR1, &a, NULL);
+    a.sa_sigaction = ns_alth;
+    a.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+    sigemptyset(&a.sa_mask);
+    sigaction(SIGRTMIN + 2, &a, NULL);
+    memset(&a, 0, sizeof a);
+    a.sa_handler = ns_leg;
+    sigemptyset(&a.sa_mask);
+    sigaction(SIGUSR2, &a, NULL);
+    ns_mask0 = kmask_get();
+    long rounds = 500 * scale, endbad = 0;
+    for (long r = 0; r < rounds; r++) {
+        ns_phase = (int)(r & 1);
+        ns_raise(0, SIGUSR1);
+        endbad += kmask_get() != ns_mask0 || ns_depth || ns_adepth;
+    }
+    signal(SIGUSR1, SIG_DFL);
+    signal(SIGUSR2, SIG_DFL);
+    signal(SIGRTMIN + 2, SIG_DFL);
+    stack_t off = {.ss_flags = SS_DISABLE};
+    sigaltstack(&off, NULL);
+    long alts = rounds / 2;
+    OUT("levels", "%ld/%ld", ns_levels, rounds * NS_DEPTH);
+    OUT("altLevels", "%ld/%ld", ns_alevels, alts * NS_ALT);
+    OUT("legacy", "%ld/%ld bad %ld", ns_legacy, alts, ns_legacybad);
+    OUT("canaryBad", "%ld", ns_canbad);
+    OUT("frame", "pcBad %ld infoBad %ld spBad %ld maskBad %ld altBad %ld endBad %ld", ns_pcbad, ns_infobad, ns_spbad,
+        ns_maskbad, ns_altbad, endbad);
+    OUT("altQuery", "onstackFlagBad %ld changeRefused %ld/%ld", ns_altflagbad, ns_altrefused, alts);
+    int p[2];
+    if (pipe(p)) return 0;
+    pid_t c = fork();
+    if (!c) {
+        memset(&a, 0, sizeof a);
+        a.sa_sigaction = nsr_h;
+        a.sa_flags = SA_SIGINFO | SA_RESETHAND;
+        sigemptyset(&a.sa_mask);
+        sigaction(SIGUSR1, &a, NULL);
+        syscall(SYS_tgkill, getpid(), gettid(), SIGUSR1);
+        struct sigaction o;
+        sigaction(SIGUSR1, NULL, &o);
+        char b = (char)('0' + (nsr_ran == 1) + 2 * nsr_dfl + 4 * nsr_blocked + 8 * (o.sa_handler == SIG_DFL));
+        if (write(p[1], &b, 1) != 1) _exit(4);
+        syscall(SYS_tgkill, getpid(), gettid(), SIGUSR1);
+        _exit(7);
+    }
+    close(p[1]);
+    char b = '?';
+    if (read(p[0], &b, 1) != 1) b = '?';
+    close(p[0]);
+    int st = 0;
+    waitpid(c, &st, 0);
+    int v = b == '?' ? -1 : b - '0';
+    OUT("resethand", "ran %d dflInHandler %d blockedInHandler %d dflAfter %d exit %d", v & 1, (v >> 1) & 1, (v >> 2) & 1,
+        (v >> 3) & 1, WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st));
+    return 1;
+}
+
+/* det (execsig): signal state across execve. Before exec: SIGUSR1 and three realtime
+ * signals blocked, SIGUSR2, SIGHUP and SIGWINCH handled, SIGPIPE and SIGINT ignored,
+ * an alternate stack, a sibling thread; then a process-directed SIGUSR1, two values
+ * queued to the exec'ing thread and one to the sibling, which blocks it. A failed
+ * execve must change nothing. After the real one the helper reports its state,
+ * drains what is pending, takes anything left through handlers and acknowledges;
+ * only then does the parent queue one more value.
+ * replay (execsigrace): the parent queues 64 values and sends SIGWINCH while the
+ * child is inside execve; the helper reports what arrived. */
+#define ES_A (SIGRTMIN + 4)
+#define ES_B (SIGRTMIN + 5)
+#define ES_C (SIGRTMIN + 6)
+static char es_self[4096];
+static volatile int es_sib_go, es_late;
+static pid_t es_sib_tid;
+static void es_nop(int s) { (void)s; }
+static void es_late_h(int s) { (void)s; es_late++; }
+static void es_state(const char *tag) {
+    uint64_t m = kmask_get(), p = kpending();
+    const int sigs[6] = {SIGUSR2, SIGHUP, SIGWINCH, SIGPIPE, SIGINT, SIGTERM};
+    char d[7];
+    for (int i = 0; i < 6; i++) {
+        struct sigaction a;
+        sigaction(sigs[i], NULL, &a);
+        d[i] = a.sa_handler == SIG_DFL ? 'D' : a.sa_handler == SIG_IGN ? 'I' : 'H';
+    }
+    d[6] = 0;
+    stack_t st;
+    sigaltstack(NULL, &st);
+    OUT(tag, "mask %#llx pending %#llx disp %s alt %s", (unsigned long long)m, (unsigned long long)p, d,
+        (st.ss_flags & SS_DISABLE) ? "disabled" : (st.ss_flags & SS_ONSTACK) ? "onstack" : "armed");
+}
+static const char *es_code(int c) {
+    return c == SI_QUEUE ? "queue" : c == SI_USER ? "user" : c == SI_TKILL ? "tkill" : "other";
+}
+static int es_helper(int argc, char **argv) {
+    int fd = argc > 2 ? atoi(argv[2]) : -1, race = argc > 3 && atoi(argv[3]), gate = argc > 4 ? atoi(argv[4]) : -1;
+    es_state("helper");
+    char b;
+    if (race && gate >= 0 && read(gate, &b, 1) != 1) return 3;
+    sigset_t w;
+    sigemptyset(&w);
+    sigaddset(&w, SIGUSR1);
+    sigaddset(&w, ES_A);
+    sigaddset(&w, ES_C);
+    char line[2048] = "";
+    int len = 0, n = 0, queued = 0, inorder = 1, last = -1, usr1 = 0;
+    struct timespec zero = {0, 0};
+    siginfo_t si;
+    int got;
+    while (n < 256 && (got = sigtimedwait(&w, &si, &zero)) > 0) {
+        n++;
+        if (got == SIGUSR1) usr1++;
+        if (race) {
+            if (got == ES_A) { queued++; inorder &= si.si_value.sival_int > last; last = si.si_value.sival_int; }
+        } else if (len < (int)sizeof line - 64) {
+            len += snprintf(line + len, sizeof line - (size_t)len, " %s/%d/%s",
+                            got == SIGUSR1 ? "USR1" : got == ES_A ? "A" : got == ES_C ? "C" : "?",
+                            got == SIGUSR1 ? 0 : si.si_value.sival_int, es_code(si.si_code));
+        }
+    }
+    struct sigaction a;
+    memset(&a, 0, sizeof a);
+    a.sa_handler = es_late_h;
+    sigemptyset(&a.sa_mask);
+    sigaction(SIGUSR1, &a, NULL);
+    sigaction(ES_A, &a, NULL);
+    sigaction(ES_C, &a, NULL);
+    sigprocmask(SIG_UNBLOCK, &w, NULL);
+    if (race) OUT("raced", "queued %d/64 inOrder %d usr1 %d", queued, inorder, usr1);
+    else OUT("drained", "%d%s", n, line);
+    OUT("lateDeliveries", "%d", (int)es_late);
+    if (write(fd, "A", 1) != 1) return 4;
+    sigset_t bw;
+    sigemptyset(&bw);
+    sigaddset(&bw, ES_B);
+    struct timespec t = {10, 0};
+    memset(&si, 0, sizeof si);
+    got = sigtimedwait(&bw, &si, &t);
+    OUT("afterAck", "%s value %d fromParent %d %s", got == ES_B ? "B" : "none", si.si_value.sival_int,
+        si.si_pid == getppid(), es_code(si.si_code));
+    return 0;
+}
+static void *es_sibling(void *p) {
+    (void)p;
+    es_sib_tid = gettid();
+    __atomic_store_n(&es_sib_go, 1, __ATOMIC_RELEASE);
+    cfz_wake(&es_sib_go);
+    for (;;) pause();
+    return NULL;
+}
+static void es_child(int race, int ackfd, int gofd, int gatefd) {
+    sigset_t b;
+    sigemptyset(&b);
+    sigaddset(&b, SIGUSR1);
+    sigaddset(&b, ES_A);
+    sigaddset(&b, ES_B);
+    sigaddset(&b, ES_C);
+    pthread_sigmask(SIG_BLOCK, &b, NULL);
+    struct sigaction a;
+    memset(&a, 0, sizeof a);
+    a.sa_handler = es_nop;
+    sigemptyset(&a.sa_mask);
+    sigaction(SIGUSR2, &a, NULL);
+    sigaction(SIGWINCH, &a, NULL);
+    a.sa_flags = SA_ONSTACK;
+    sigaction(SIGHUP, &a, NULL);
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, SIG_IGN);
+    static char alt[65536] __attribute__((aligned(16)));
+    stack_t st = {.ss_sp = alt, .ss_flags = 0, .ss_size = sizeof alt};
+    sigaltstack(&st, NULL);
+    pthread_t t;
+    pthread_create(&t, NULL, es_sibling, NULL);
+    cfz_wait_for(&es_sib_go, 1, 5000);
+    if (!race) {
+        kill(getpid(), SIGUSR1);
+        cfz_queue(gettid(), ES_A, 11);
+        cfz_queue(gettid(), ES_A, 12);
+        cfz_queue(es_sib_tid, ES_C, 22);
+    }
+    es_state("before");
+    char *bad[] = {"cfz", NULL};
+    int r = execve("/nonexistent/cfz-helper", bad, environ);
+    OUT("failedExec", "%d %s", r, errno == ENOENT ? "ENOENT" : "other");
+    es_state("afterFailedExec");
+    char fds[16], gates[16];
+    snprintf(fds, sizeof fds, "%d", ackfd);
+    snprintf(gates, sizeof gates, "%d", gatefd);
+    char *args[] = {"cfz", "execsighelper", fds, race ? "1" : "0", gates, NULL};
+    if (race && write(gofd, "E", 1) != 1) _exit(5);
+    execve(es_self, args, environ);
+    _exit(127);
+}
+static int execsig(int race) {
+    ssize_t n = readlink("/proc/self/exe", es_self, sizeof es_self - 1);
+    if (n < 0) return 0;
+    es_self[n] = 0;
+    int ack[2], go[2], gate[2];
+    if (pipe(ack) || pipe(go) || pipe(gate)) return 0;
+    pid_t c = fork();
+    if (!c) {
+        close(ack[0]);
+        close(go[0]);
+        close(gate[1]);
+        es_child(race, ack[1], go[1], gate[0]);
+    }
+    close(ack[1]);
+    close(go[1]);
+    close(gate[0]);
+    char b;
+    if (race && read(go[0], &b, 1) == 1) {
+        for (int i = 0; i < 64; i++) {
+            union sigval v = {.sival_int = 100 + i};
+            sigqueue(c, ES_A, v);
+            if (i % 8 == 0) kill(c, SIGWINCH);
+        }
+        if (write(gate[1], "D", 1) != 1) return 0;
+    }
+    int acked = read(ack[0], &b, 1) == 1;
+    if (acked) {
+        cfz_settle(c, c, SYS_rt_sigtimedwait, 0);
+        union sigval v = {.sival_int = 77};
+        sigqueue(c, ES_B, v);
+    }
+    int st = 0;
+    waitpid(c, &st, 0);
+    close(ack[0]);
+    close(go[0]);
+    close(gate[1]);
+    OUT("acked", "%d", acked);
+    OUT("exit", "%d", WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st));
+    return 1;
+}
+static int t_execsig(void) { return execsig(0); }
+static int t_execsigrace(void) { return execsig(1); }
+
+/* det: an SS_AUTODISARM SIGUSR1 handler swaps to the main context and keeps its
+ * frame on alternate stack A. SIGUSR2 (SA_ONSTACK) then arrives on the thread
+ * stack, or on alternate stack B when odd rounds register B meanwhile; the first
+ * handler resumes, checks its canaries and saved context, and returns, which must
+ * restore registration A. */
+#define AC_AUTODISARM (1U << 31)
+static ucontext_t ac_main, ac_h1, ac_tmp;
+static char ac_mem_a[65536] __attribute__((aligned(16))), ac_mem_b[65536] __attribute__((aligned(16)));
+static long ac_round;
+static int ac_useb;
+static long ac_h1n, ac_h1alt, ac_h1disarmed, ac_ucok, ac_resumed, ac_canbad, ac_ucok2, ac_u2n, ac_u2where[3], ac_u2flags,
+    ac_finalok;
+static int ac_in(uintptr_t p, const char *m) { return p >= (uintptr_t)m && p < (uintptr_t)m + 65536; }
+static int ac_ucgood(const ucontext_t *uc) {
+    return uc->uc_stack.ss_sp == ac_mem_a && uc->uc_stack.ss_size == sizeof ac_mem_a &&
+           (unsigned)uc->uc_stack.ss_flags == AC_AUTODISARM && uc->uc_mcontext.pc == (uintptr_t)cfz_svc_after;
+}
+static void ac_usr1(int s, siginfo_t *si, void *ucv) {
+    (void)s; (void)si;
+    ucontext_t *uc = ucv;
+    volatile uint64_t can[16];
+    for (int i = 0; i < 16; i++) can[i] = 0xA5A5000000000000ULL ^ ((uint64_t)ac_round << 8) ^ (uint64_t)i;
+    stack_t cur;
+    sigaltstack(NULL, &cur);
+    ac_h1n++;
+    ac_h1alt += ac_in((uintptr_t)can, ac_mem_a);
+    ac_h1disarmed += (cur.ss_flags & SS_DISABLE) != 0;
+    ac_ucok += ac_ucgood(uc);
+    swapcontext(&ac_h1, &ac_main);
+    ac_resumed++;
+    long bad = 0;
+    for (int i = 0; i < 16; i++) bad += can[i] != (0xA5A5000000000000ULL ^ ((uint64_t)ac_round << 8) ^ (uint64_t)i);
+    ac_canbad += bad;
+    ac_ucok2 += ac_ucgood(uc);
+}
+static void ac_usr2(int s) {
+    (void)s;
+    volatile char here = 0;
+    uintptr_t p = (uintptr_t)&here;
+    stack_t cur;
+    sigaltstack(NULL, &cur);
+    ac_u2n++;
+    ac_u2where[ac_in(p, ac_mem_a) ? 1 : ac_in(p, ac_mem_b) ? 2 : 0]++;
+    ac_u2flags += cur.ss_flags == (ac_useb ? SS_ONSTACK : SS_DISABLE);
+}
+static void __attribute__((noinline)) ac_one(void) {
+    volatile int step = 0;
+    getcontext(&ac_main);
+    if (step == 0) {
+        step = 1;
+        cfz_rawsys(getpid(), gettid(), SIGUSR1, 0, 0, 0, SYS_tgkill);
+        /* The first handler returned; its sigreturn resumed here. */
+        step = 3;
+        return;
+    }
+    if (step == 1) {
+        step = 2;
+        if (ac_useb) {
+            stack_t b = {.ss_sp = ac_mem_b, .ss_flags = 0, .ss_size = sizeof ac_mem_b};
+            sigaltstack(&b, NULL);
+        }
+        cfz_rawsys(getpid(), gettid(), SIGUSR2, 0, 0, 0, SYS_tgkill);
+        swapcontext(&ac_tmp, &ac_h1);
+    }
+    abort();
+}
+static int t_autodisarmctx(void) {
+    stack_t a = {.ss_sp = ac_mem_a, .ss_flags = (int)AC_AUTODISARM, .ss_size = sizeof ac_mem_a};
+    if (sigaltstack(&a, NULL)) { puts("UNSUPPORTED autodisarm"); return 0; }
+    struct sigaction s;
+    memset(&s, 0, sizeof s);
+    s.sa_sigaction = ac_usr1;
+    s.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&s.sa_mask);
+    sigaction(SIGUSR1, &s, NULL);
+    memset(&s, 0, sizeof s);
+    s.sa_handler = ac_usr2;
+    s.sa_flags = SA_ONSTACK;
+    sigemptyset(&s.sa_mask);
+    sigaction(SIGUSR2, &s, NULL);
+    long rounds = 2000 * scale;
+    for (ac_round = 0; ac_round < rounds; ac_round++) {
+        ac_useb = (int)(ac_round & 1);
+        ac_one();
+        stack_t cur;
+        sigaltstack(NULL, &cur);
+        ac_finalok += cur.ss_sp == ac_mem_a && cur.ss_size == sizeof ac_mem_a && (unsigned)cur.ss_flags == AC_AUTODISARM;
+    }
+    signal(SIGUSR1, SIG_DFL);
+    signal(SIGUSR2, SIG_DFL);
+    stack_t off = {.ss_flags = SS_DISABLE};
+    sigaltstack(&off, NULL);
+    OUT("first", "%ld/%ld onA %ld disarmed %ld savedOk %ld resumed %ld savedOkAfter %ld canaryBad %ld", ac_h1n, rounds,
+        ac_h1alt, ac_h1disarmed, ac_ucok, ac_resumed, ac_ucok2, ac_canbad);
+    OUT("second", "%ld/%ld threadStack %ld onA %ld onB %ld flagsOk %ld", ac_u2n, rounds, ac_u2where[0], ac_u2where[1],
+        ac_u2where[2], ac_u2flags);
+    OUT("restoredA", "%ld/%ld", ac_finalok, rounds);
+    return 1;
+}
+
+/* det: F_SETOWN_EX(F_OWNER_TID) with F_SETSIG to a realtime signal and O_ASYNC on a
+ * pipe and a socket. Each phase makes one readiness transition while the workers
+ * wait in sigtimedwait; ownership moves between threads and to the process, and
+ * descriptor numbers are reused. Reports who received it, si_fd, si_band, si_code. */
+#define SIO_SIG (SIGRTMIN + 7)
+#define SIO_STOP (SIGRTMIN + 8)
+struct sio_w { pthread_t th; pid_t tid; volatile int gen, done; int got, err, fd, code; long band; };
+static struct sio_w sio_w[3];
+static volatile int sio_quit;
+static void *sio_worker(void *p) {
+    struct sio_w *w = p;
+    w->tid = gettid();
+    int seen = 0;
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIO_SIG);
+    sigaddset(&s, SIO_STOP);
+    __atomic_store_n(&w->done, 1, __ATOMIC_RELEASE);
+    cfz_wake(&w->done);
+    for (;;) {
+        int g;
+        while ((g = __atomic_load_n(&w->gen, __ATOMIC_ACQUIRE)) == seen) cfz_wait(&w->gen, seen, 100);
+        seen = g;
+        if (sio_quit) break;
+        siginfo_t si;
+        memset(&si, 0, sizeof si);
+        struct timespec t = {10, 0};
+        int r = sigtimedwait(&s, &si, &t);
+        w->got = r;
+        w->err = r < 0 ? errno : 0;
+        w->fd = si.si_fd;
+        w->band = si.si_band;
+        w->code = si.si_code;
+        __atomic_add_fetch(&w->done, 1, __ATOMIC_RELEASE);
+        cfz_wake(&w->done);
+    }
+    return NULL;
+}
+static int sio_own(int fd, int type, pid_t who, int async) {
+    struct f_owner_ex o = {type, who}, g = {0, 0};
+    int ok = !fcntl(fd, F_SETOWN_EX, &o) && !fcntl(fd, F_SETSIG, SIO_SIG);
+    int fl = fcntl(fd, F_GETFL);
+    ok &= !fcntl(fd, F_SETFL, (async ? fl | O_ASYNC : fl & ~O_ASYNC) | O_NONBLOCK);
+    ok &= !fcntl(fd, F_GETOWN_EX, &g) && g.type == type && g.pid == who;
+    return ok;
+}
+/* Releases the workers in mask into sigtimedwait, writes one byte to wfd once they
+ * are blocked and describes who received SIO_SIG. */
+static void sio_phase(char *b, size_t n, int mask, int wfd, int rfd, int want) {
+    int before[3];
+    for (int k = 0; k < 3; k++) {
+        if (!(mask >> k & 1)) continue;
+        before[k] = __atomic_load_n(&sio_w[k].done, __ATOMIC_ACQUIRE);
+        sio_w[k].got = 0;
+        __atomic_add_fetch(&sio_w[k].gen, 1, __ATOMIC_RELEASE);
+        cfz_wake(&sio_w[k].gen);
+    }
+    for (int k = 0; k < 3; k++)
+        if (mask >> k & 1) cfz_settle(getpid(), sio_w[k].tid, SYS_rt_sigtimedwait, 0);
+    if (write(wfd, "x", 1) != 1) { snprintf(b, n, "writeFailed"); return; }
+    uint64_t end = mono_ns(CLOCK_MONOTONIC) + (want < 0 ? 20000000ULL : 5000000000ULL);
+    for (;;) {
+        int any = 0;
+        for (int k = 0; k < 3; k++)
+            if ((mask >> k & 1) && __atomic_load_n(&sio_w[k].done, __ATOMIC_ACQUIRE) != before[k]) any = 1;
+        if (any || mono_ns(CLOCK_MONOTONIC) > end) break;
+        cfz_sleep_us(200);
+    }
+    for (int k = 0; k < 3; k++)
+        if ((mask >> k & 1) && __atomic_load_n(&sio_w[k].done, __ATOMIC_ACQUIRE) == before[k])
+            syscall(SYS_tgkill, getpid(), sio_w[k].tid, SIO_STOP);
+    for (int k = 0; k < 3; k++)
+        if (mask >> k & 1) cfz_wait_for(&sio_w[k].done, before[k] + 1, 10000);
+    char c;
+    while (read(rfd, &c, 1) == 1) {}
+    int len = 0, who = 0;
+    for (int k = 0; k < 3; k++) {
+        if (!(mask >> k & 1) || sio_w[k].got != SIO_SIG) continue;
+        who |= 1 << k;
+        len += snprintf(b + len, n - (size_t)len, " w%d fdOk %d band %#lx code %d", k, sio_w[k].fd == rfd,
+                        (unsigned long)sio_w[k].band, sio_w[k].code);
+    }
+    if (!who) snprintf(b, n, " none");
+}
+static int t_sigio(void) {
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIO_SIG);
+    sigaddset(&s, SIO_STOP);
+    pthread_sigmask(SIG_BLOCK, &s, NULL);
+    sio_quit = 0;
+    for (int k = 0; k < 3; k++) {
+        memset(&sio_w[k], 0, sizeof sio_w[k]);
+        pthread_create(&sio_w[k].th, NULL, sio_worker, &sio_w[k]);
+        cfz_wait_for(&sio_w[k].done, 1, 5000);
+    }
+    long rounds = 25 * scale;
+    const char *names[6] = {"pipeW0", "sockW1", "pipeMovedW2", "pipeProcess", "pipeReusedW1", "sockReusedNoAsync"};
+    char first[6][256], cur[256];
+    long same[6] = {0}, setupok = 0, setups = 0, reused = 0;
+    int pp[2], sv[2];
+    if (pipe(pp) || socketpair(AF_UNIX, SOCK_STREAM, 0, sv)) return 0;
+    fcntl(sv[0], F_SETFL, O_NONBLOCK);
+    for (long r = 0; r < rounds; r++) {
+        for (int ph = 0; ph < 6; ph++) {
+            int ok = 1;
+            switch (ph) {
+            case 0: ok = sio_own(pp[0], F_OWNER_TID, sio_w[0].tid, 1); sio_phase(cur, sizeof cur, 7, pp[1], pp[0], 0); break;
+            case 1: ok = sio_own(sv[0], F_OWNER_TID, sio_w[1].tid, 1); sio_phase(cur, sizeof cur, 7, sv[1], sv[0], 1); break;
+            case 2: ok = sio_own(pp[0], F_OWNER_TID, sio_w[2].tid, 1); sio_phase(cur, sizeof cur, 7, pp[1], pp[0], 2); break;
+            case 3: ok = sio_own(pp[0], F_OWNER_PID, getpid(), 1); sio_phase(cur, sizeof cur, 4, pp[1], pp[0], 2); break;
+            case 4: {
+                int op0 = pp[0], op1 = pp[1], os0 = sv[0], os1 = sv[1];
+                close(pp[0]); close(pp[1]); close(sv[0]); close(sv[1]);
+                if (pipe(pp) || socketpair(AF_UNIX, SOCK_STREAM, 0, sv)) return 0;
+                reused += pp[0] == op0 && pp[1] == op1 && sv[0] == os0 && sv[1] == os1;
+                fcntl(sv[0], F_SETFL, O_NONBLOCK);
+                ok = sio_own(pp[0], F_OWNER_TID, sio_w[1].tid, 1);
+                sio_phase(cur, sizeof cur, 7, pp[1], pp[0], 1);
+                break;
+            }
+            default: ok = sio_own(sv[0], F_OWNER_TID, sio_w[0].tid, 0); sio_phase(cur, sizeof cur, 1, sv[1], sv[0], -1); break;
+            }
+            setups++;
+            setupok += ok;
+            if (!r) snprintf(first[ph], sizeof first[ph], "%s", cur);
+            same[ph] += !strcmp(first[ph], cur);
+        }
+    }
+    sio_quit = 1;
+    for (int k = 0; k < 3; k++) {
+        __atomic_add_fetch(&sio_w[k].gen, 1, __ATOMIC_RELEASE);
+        cfz_wake(&sio_w[k].gen);
+        pthread_join(sio_w[k].th, NULL);
+    }
+    close(pp[0]); close(pp[1]); close(sv[0]); close(sv[1]);
+    pthread_sigmask(SIG_UNBLOCK, &s, NULL);
+    for (int ph = 0; ph < 6; ph++) OUT(names[ph], "%ld/%ld%s", same[ph], rounds, first[ph]);
+    OUT("owners", "%ld/%ld", setupok, setups);
+    OUT("numbersReused", "%ld/%ld", reused, rounds);
+    return 1;
+}
+
+/* det (timerstorm): 200 one-shot POSIX timers per round: 100 SIGEV_SIGNAL with values
+ * (never handled by the two threads that block it), 50 SIGEV_THREAD,
+ * 25 SIGEV_THREAD_ID aimed at a computing thread and 25 at one blocked in read();
+ * the computing thread is replaced on alternate rounds, after which its old TID is
+ * refused. Then a periodic timer expires while blocked: one delivery with overruns.
+ * replay (timerstormcounts): adds the overrun and delivery counts. */
+#define TS_SIG (SIGRTMIN + 9)
+#define TS_TID (SIGRTMIN + 10)
+#define TS_PER (SIGRTMIN + 12)
+#define TS_N 200
+static volatile int ts_seen[TS_N], ts_total, ts_cstop, ts_cready, ts_per_n, ts_per_over;
+static volatile long ts_wrong, ts_codebad, ts_eintr;
+static volatile pid_t ts_main, ts_compute, ts_blocked;
+static timer_t ts_pert;
+static int ts_pipe[2];
+static void ts_note(int v, int sigev) {
+    pid_t t = gettid();
+    if (v >= 0 && v < TS_N) {
+        __atomic_add_fetch(&ts_seen[v], 1, __ATOMIC_RELAXED);
+        int bad = sigev ? (t == ts_main || t == ts_compute || t == ts_blocked)
+                  : v < 100 ? (t == ts_compute || t == ts_blocked) : t != (v < 175 ? ts_compute : ts_blocked);
+        if (bad) __atomic_add_fetch(&ts_wrong, 1, __ATOMIC_RELAXED);
+    }
+    __atomic_add_fetch(&ts_total, 1, __ATOMIC_RELEASE);
+    cfz_wake(&ts_total);
+}
+static void ts_sig_h(int s, siginfo_t *si, void *uc) {
+    (void)s; (void)uc;
+    if (si->si_code != SI_TIMER) __atomic_add_fetch(&ts_codebad, 1, __ATOMIC_RELAXED);
+    ts_note(si->si_value.sival_int, 0);
+}
+static void ts_thread_fn(union sigval v) { ts_note(v.sival_int, 1); }
+static void ts_per_h(int s, siginfo_t *si, void *uc) {
+    (void)s; (void)si; (void)uc;
+    if (!ts_per_n++) {
+        ts_per_over = timer_getoverrun(ts_pert);
+        timer_delete(ts_pert);
+    }
+}
+static void *ts_compute_fn(void *p) {
+    (void)p;
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, TS_SIG);
+    sigaddset(&s, TS_PER);
+    pthread_sigmask(SIG_BLOCK, &s, NULL);
+    ts_compute = gettid();
+    __atomic_store_n(&ts_cready, 1, __ATOMIC_RELEASE);
+    volatile uint64_t h = 1;
+    while (!__atomic_load_n(&ts_cstop, __ATOMIC_ACQUIRE)) h = h * 6364136223846793005ULL + 1;
+    return NULL;
+}
+static void *ts_blocked_fn(void *p) {
+    (void)p;
+    ts_blocked = gettid();
+    char b;
+    for (;;) {
+        ssize_t n = read(ts_pipe[0], &b, 1);
+        if (n == 1 && b == 'q') break;
+        if (n < 0 && errno == EINTR) ts_eintr++;
+        else if (n <= 0) break;
+    }
+    return NULL;
+}
+static int timerstorm(int counts) {
+    ts_main = gettid();
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, TS_SIG);
+    sigaddset(&s, TS_PER);
+    pthread_sigmask(SIG_BLOCK, &s, NULL);
+    struct sigaction a;
+    memset(&a, 0, sizeof a);
+    a.sa_sigaction = ts_sig_h;
+    a.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&a.sa_mask);
+    sigaction(TS_SIG, &a, NULL);
+    sigaction(TS_TID, &a, NULL);
+    a.sa_sigaction = ts_per_h;
+    sigaction(TS_PER, &a, NULL);
+    if (pipe(ts_pipe)) return 0;
+    pthread_t comp, blk;
+    ts_cstop = 0;
+    ts_cready = 0;
+    pthread_create(&comp, NULL, ts_compute_fn, NULL);
+    pthread_create(&blk, NULL, ts_blocked_fn, NULL);
+    cfz_wait_for(&ts_cready, 1, 5000);
+    while (!ts_blocked) cfz_sleep_us(100);
+    sigset_t only;
+    sigemptyset(&only);
+    sigaddset(&only, TS_SIG);
+    pthread_sigmask(SIG_UNBLOCK, &only, NULL);
+    cfz_settle(getpid(), ts_blocked, SYS_read, 0);
+    long rounds = 10 * scale, created = 0, armed = 0, once = 0, missing = 0, dups = 0, complete = 0, deadEinval = 0, replaced = 0;
+    for (long r = 0; r < rounds; r++) {
+        for (int i = 0; i < TS_N; i++) ts_seen[i] = 0;
+        ts_total = 0;
+        timer_t tm[TS_N];
+        int ok[TS_N];
+        for (int i = 0; i < TS_N; i++) {
+            struct sigevent ev;
+            memset(&ev, 0, sizeof ev);
+            ev.sigev_value.sival_int = i;
+            if (i < 100) { ev.sigev_notify = SIGEV_SIGNAL; ev.sigev_signo = TS_SIG; }
+            else if (i < 150) { ev.sigev_notify = SIGEV_THREAD; ev.sigev_notify_function = ts_thread_fn; }
+            else {
+                ev.sigev_notify = SIGEV_THREAD_ID;
+                ev.sigev_signo = TS_TID;
+                ev._sigev_un._tid = i < 175 ? ts_compute : ts_blocked;
+            }
+            ok[i] = timer_create(CLOCK_MONOTONIC, &ev, &tm[i]) == 0;
+            created += ok[i];
+        }
+        for (int i = 0; i < TS_N; i++) {
+            struct itimerspec its = {{0, 0}, {0, 1000000L + (i % 20) * 100000L}};
+            if (ok[i]) armed += timer_settime(tm[i], 0, &its, NULL) == 0;
+        }
+        complete += cfz_wait_for(&ts_total, TS_N, 10000);
+        cfz_sleep_us(2000);
+        for (int i = 0; i < TS_N; i++) {
+            once += ts_seen[i] == 1;
+            missing += ts_seen[i] == 0;
+            dups += ts_seen[i] > 1;
+            if (ok[i]) timer_delete(tm[i]);
+        }
+        if (r & 1) {
+            pid_t old = ts_compute;
+            __atomic_store_n(&ts_cstop, 1, __ATOMIC_RELEASE);
+            pthread_join(comp, NULL);
+            ts_cstop = 0;
+            ts_cready = 0;
+            pthread_create(&comp, NULL, ts_compute_fn, NULL);
+            cfz_wait_for(&ts_cready, 1, 5000);
+            replaced += ts_compute != old;
+            /* pthread_join returns before the kernel has released the thread. */
+            char task[64];
+            snprintf(task, sizeof task, "/proc/self/task/%d", (int)old);
+            for (int w = 0; w < 10000 && !access(task, F_OK); w++) cfz_sleep_us(100);
+            struct sigevent ev;
+            memset(&ev, 0, sizeof ev);
+            ev.sigev_notify = SIGEV_THREAD_ID;
+            ev.sigev_signo = TS_TID;
+            ev._sigev_un._tid = old;
+            timer_t t;
+            int e = timer_create(CLOCK_MONOTONIC, &ev, &t);
+            deadEinval += e == -1 && errno == EINVAL;
+            if (!e) timer_delete(t);
+        }
+    }
+    __atomic_store_n(&ts_cstop, 1, __ATOMIC_RELEASE);
+    pthread_join(comp, NULL);
+    if (write(ts_pipe[1], "q", 1) != 1) return 0;
+    pthread_join(blk, NULL);
+    /* A periodic timer expiring while its signal is blocked: one pending signal, overruns. */
+    sigset_t per;
+    sigemptyset(&per);
+    sigaddset(&per, TS_PER);
+    struct sigevent ev;
+    memset(&ev, 0, sizeof ev);
+    ev.sigev_notify = SIGEV_SIGNAL;
+    ev.sigev_signo = TS_PER;
+    ev.sigev_value.sival_int = 999;
+    ts_per_n = 0;
+    ts_per_over = -1;
+    int pok = timer_create(CLOCK_MONOTONIC, &ev, &ts_pert) == 0;
+    struct itimerspec its = {{0, 5000000L}, {0, 5000000L}};
+    if (pok) timer_settime(ts_pert, 0, &its, NULL);
+    cfz_sleep_us(50000);
+    pthread_sigmask(SIG_UNBLOCK, &per, NULL);
+    cfz_sleep_us(1000);
+    if (!ts_per_n && pok) timer_delete(ts_pert);
+    signal(TS_SIG, SIG_DFL);
+    signal(TS_TID, SIG_DFL);
+    signal(TS_PER, SIG_DFL);
+    close(ts_pipe[0]);
+    close(ts_pipe[1]);
+    long total = rounds * TS_N;
+    OUT("created", "%ld/%ld armed %ld/%ld", created, total, armed, total);
+    OUT("delivered", "complete %ld/%ld once %ld/%ld missing %ld duplicates %ld", complete, rounds, once, total, missing, dups);
+    OUT("targets", "wrongThread %ld codeBad %ld readEintr %ld", (long)ts_wrong, (long)ts_codebad, (long)ts_eintr);
+    OUT("replaced", "%ld/%ld deadTidEinval %ld/%ld", replaced, rounds / 2, deadEinval, rounds / 2);
+    OUT("periodic", "created %d delivered %d overrunPositive %d", pok, ts_per_n > 0, ts_per_over > 0);
+    if (counts) OUT("periodicCounts", "deliveries %d overrun %d", (int)ts_per_n, (int)ts_per_over);
+    return 1;
+}
+static int t_timerstorm(void) { return timerstorm(0); }
+static int t_timerstormcounts(void) { return timerstorm(1); }
+
+/* ---- progress charges, atomics, exclusives and restored FP state ---- */
+
+/* Counted loops for chargelin; each returns a checksum and executes an exact number
+ * of instructions: straight 64 per iteration, tight 4, blr/ret 5, poll 5; ivau runs
+ * blocks of 250,000 tight iterations, each followed by IC IVAU of its own loop, DSB
+ * and ISB; signal runs blocks of 25,000 tight iterations, each followed by a tgkill. */
+CFZ_HIDDEN uint64_t cfz_cl_straight(long iters);
+CFZ_HIDDEN uint64_t cfz_cl_tight(long iters);
+CFZ_HIDDEN uint64_t cfz_cl_blr(long iters);
+CFZ_HIDDEN uint64_t cfz_cl_poll(long iters, volatile int *flag);
+CFZ_HIDDEN uint64_t cfz_cl_ivau(long blocks);
+CFZ_HIDDEN uint64_t cfz_cl_signal(long blocks, long tgid, long tid);
+asm(".text\n.p2align 6\n"
+    CFZ_FN("cfz_cl_straight") "mov x1, #1\nmov x2, #3\n1:\n.rept 31\nadd x1, x1, x2\neor x2, x2, x1, ror #7\n.endr\n"
+    "subs x0, x0, #1\nb.ne 1b\nmov x0, x1\nret\n"
+    ".p2align 6\n" CFZ_FN("cfz_cl_tight") "mov x1, #1\nmov x2, #3\n1: add x1, x1, x2\neor x2, x2, x1, ror #7\n"
+    "subs x0, x0, #1\nb.ne 1b\nmov x0, x1\nret\n"
+    ".p2align 6\n" CFZ_FN("cfz_cl_callee") "add x1, x1, #3\nret\n"
+    ".p2align 6\n" CFZ_FN("cfz_cl_blr") "stp x29, x30, [sp, #-16]!\nmov x1, #1\nadr x9, cfz_cl_callee\n"
+    "1: blr x9\nsubs x0, x0, #1\nb.ne 1b\nmov x0, x1\nldp x29, x30, [sp], #16\nret\n"
+    ".p2align 6\n" CFZ_FN("cfz_cl_poll") "mov x2, #1\n1: ldr w3, [x1]\ncbnz w3, 2f\nadd x2, x2, #5\nsubs x0, x0, #1\n"
+    "b.ne 1b\n2: mov x0, x2\nret\n"
+    ".p2align 6\n" CFZ_FN("cfz_cl_ivau") "mov x1, #1\nmov x2, #3\nadr x5, 1f\n3: mov x4, #0xd090\nmovk x4, #0x3, lsl #16\n"
+    "1: add x1, x1, x2\neor x2, x2, x1, ror #7\nsubs x4, x4, #1\nb.ne 1b\nic ivau, x5\ndsb ish\nisb\n"
+    "subs x0, x0, #1\nb.ne 3b\nmov x0, x1\nret\n"
+    ".p2align 6\n" CFZ_FN("cfz_cl_signal") "mov x9, x0\nmov x10, x1\nmov x11, x2\nmov x12, #1\nmov x13, #3\n"
+    "3: mov x4, #25000\n1: add x12, x12, x13\neor x13, x13, x12, ror #7\nsubs x4, x4, #1\nb.ne 1b\n"
+    "mov x0, x10\nmov x1, x11\nmov x2, #10\nmov x8, #131\nsvc #0\nsubs x9, x9, #1\nb.ne 3b\nmov x0, x12\nret\n");
+static volatile int cl_flag, cl_sigs;
+static void cl_usr1(int s) { (void)s; cl_sigs++; }
+#define CL_SHAPES 6
+#define CL_REPS 5
+static uint64_t cl_run(int shape, long m) {
+    switch (shape) {
+    case 0: return cfz_cl_straight(156250 * m);
+    case 1: return cfz_cl_tight(2500000 * m);
+    case 2: return cfz_cl_blr(2000000 * m);
+    case 3: return cfz_cl_poll(2000000 * m, &cl_flag);
+    case 4: return cfz_cl_ivau(10 * m);
+    default: return cfz_cl_signal(100 * m, getpid(), gettid());
+    }
+}
+/* chargelin (det): each shape at 10M and 20M application instructions, warmed, timed
+ * CL_REPS times with the same clock_gettime wrapper. Prints checksums, the delivered
+ * signal count and loose bounds that also hold natively: the 20M minimum is 1.3 to
+ * 3 times the 10M minimum.
+ * chargelinvalues (replay): adds every elapsed time and, as "sb*" predicates, the
+ * relations Seedbox's progress charges must satisfy with cpu.jitter zero (one
+ * progress call per 50,000 instructions, so 10M instructions are 200 calls):
+ *   sbLinear  |t20 - 2 t10| <= 3 calls; sbSpread  every repetition within 2 calls of
+ *   its minimum; sbAsStraight (tight, blrRet and poll only) |t10 - straight t10| <= 3
+ *   calls. ivau and signal add translator or kernel work and are compared only with
+ *   themselves and with the replay. Natively the sb predicates usually fail. */
+static int chargelin(int values) {
+    const char *names[CL_SHAPES] = {"straight", "tight", "blrRet", "poll", "ivau", "signal"};
+    signal(SIGUSR1, cl_usr1);
+    cl_flag = 0;
+    cl_sigs = 0;
+    uint64_t t[CL_SHAPES][2][CL_REPS], sum[CL_SHAPES][2];
+    int stable[CL_SHAPES];
+    for (int s = 0; s < CL_SHAPES; s++) {
+        sum[s][0] = cl_run(s, 1);
+        sum[s][1] = cl_run(s, 2);
+        stable[s] = 1;
+    }
+    long reps = CL_REPS;
+    for (long r = 0; r < reps; r++)
+        for (int s = 0; s < CL_SHAPES; s++)
+            for (int z = 0; z < 2; z++) {
+                uint64_t t0 = mono_ns(CLOCK_MONOTONIC);
+                uint64_t h = cl_run(s, z + 1);
+                uint64_t t1 = mono_ns(CLOCK_MONOTONIC);
+                t[s][z][r] = t1 - t0;
+                stable[s] &= h == sum[s][z];
+            }
+    signal(SIGUSR1, SIG_DFL);
+    uint64_t mn[CL_SHAPES][2], mx[CL_SHAPES][2];
+    for (int s = 0; s < CL_SHAPES; s++)
+        for (int z = 0; z < 2; z++) {
+            mn[s][z] = mx[s][z] = t[s][z][0];
+            for (long r = 1; r < reps; r++) {
+                if (t[s][z][r] < mn[s][z]) mn[s][z] = t[s][z][r];
+                if (t[s][z][r] > mx[s][z]) mx[s][z] = t[s][z][r];
+            }
+        }
+    for (int s = 0; s < CL_SHAPES; s++) {
+        uint64_t a = mn[s][0], b = mn[s][1];
+        OUT(names[s], "sum %lx %lx stable %d scales %d", (unsigned long)sum[s][0], (unsigned long)sum[s][1], stable[s],
+            13 * a <= 10 * b && b <= 3 * a);
+    }
+    OUT("signals", "%d/%ld", (int)cl_sigs, (1 + reps) * 300);
+    if (!values) return 1;
+    for (int s = 0; s < CL_SHAPES; s++) {
+        char line[512];
+        int len = 0;
+        for (int z = 0; z < 2; z++) {
+            len += snprintf(line + len, sizeof line - (size_t)len, "%s", z ? " ns20" : "ns10");
+            for (long r = 0; r < reps; r++) len += snprintf(line + len, sizeof line - (size_t)len, " %lu", (unsigned long)t[s][z][r]);
+        }
+        uint64_t a = mn[s][0], b = mn[s][1], call = a / 200;
+        uint64_t lin = b > 2 * a ? b - 2 * a : 2 * a - b;
+        int spread = mx[s][0] - mn[s][0] <= 2 * call && mx[s][1] - mn[s][1] <= 2 * call;
+        len += snprintf(line + len, sizeof line - (size_t)len, " sbLinear %d sbSpread %d", lin <= 3 * call, spread);
+        if (s >= 1 && s <= 3) {
+            uint64_t base = mn[0][0], d = a > base ? a - base : base - a;
+            snprintf(line + len, sizeof line - (size_t)len, " sbAsStraight %d", d <= 3 * (base / 200));
+        }
+        OUT(names[s], "%s", line);
+    }
+    return 1;
+}
+static int t_chargelin(void) { return chargelin(0); }
+static int t_chargelinvalues(void) { return chargelin(1); }
+
+/* det: casal, ldaddal, swpal, ldxr/stxr and ldaxp/stlxp at every offset of a 16-byte
+ * granule, across a cache line, across a page, into a PROT_NONE page and inside it.
+ * One character per offset: '.' success with the right memory and result, 'x' wrong;
+ * a fault is B (SIGBUS BUS_ADRALN), S (SEGV_ACCERR), M (SEGV_MAPERR), O (other), in
+ * lower case when si_addr is not the access address, W when memory changed. sites:
+ * 1 the load (or only) instruction faulted, 2 the store-exclusive, 3 elsewhere. */
+CFZ_HIDDEN uint64_t cfz_ua_casal(void *p, uint64_t expect, uint64_t val);
+CFZ_HIDDEN uint64_t cfz_ua_ldadd(void *p, uint64_t add);
+CFZ_HIDDEN uint64_t cfz_ua_swp(void *p, uint64_t val);
+CFZ_HIDDEN uint64_t cfz_ua_xpair(void *p, uint64_t add);
+CFZ_HIDDEN uint64_t cfz_ua_ppair(void *p, uint64_t add);
+CFZ_HIDDEN extern const char cfz_ua_start[], cfz_ua_end[], cfz_ua_casal_at[], cfz_ua_ldadd_at[], cfz_ua_swp_at[],
+    cfz_ua_xpair_ld[], cfz_ua_xpair_st[], cfz_ua_ppair_ld[], cfz_ua_ppair_st[];
+asm(".text\n.p2align 2\n.arch_extension lse\n" CFZ_AT("cfz_ua_start")
+    CFZ_FN("cfz_ua_casal") "mov x3, x1\n" CFZ_AT("cfz_ua_casal_at") "casal x3, x2, [x0]\nmov x0, x3\nret\n"
+    CFZ_FN("cfz_ua_ldadd") CFZ_AT("cfz_ua_ldadd_at") "ldaddal x1, x2, [x0]\nmov x0, x2\nret\n"
+    CFZ_FN("cfz_ua_swp") CFZ_AT("cfz_ua_swp_at") "swpal x1, x2, [x0]\nmov x0, x2\nret\n"
+    CFZ_FN("cfz_ua_xpair") "mov x4, #1000\n1:\n" CFZ_AT("cfz_ua_xpair_ld") "ldxr x2, [x0]\nadd x3, x2, x1\n"
+    CFZ_AT("cfz_ua_xpair_st") "stxr w5, x3, [x0]\ncbz w5, 2f\nsubs x4, x4, #1\nb.ne 1b\nmov x0, #-1\nret\n2: mov x0, x2\nret\n"
+    CFZ_FN("cfz_ua_ppair") "mov x4, #1000\n1:\n" CFZ_AT("cfz_ua_ppair_ld") "ldaxp x2, x3, [x0]\nadd x6, x2, x1\nadd x7, x3, x1\n"
+    CFZ_AT("cfz_ua_ppair_st") "stlxp w5, x6, x7, [x0]\ncbz w5, 2f\nsubs x4, x4, #1\nb.ne 1b\nmov x0, #-1\nret\n"
+    "2: mov x0, x2\nret\n" CFZ_AT("cfz_ua_end"));
+static volatile struct { int sig, code, site; uintptr_t addr; } ua_r;
+static void ua_handler(int s, siginfo_t *si, void *ucv) {
+    ucontext_t *uc = ucv;
+    uintptr_t pc = uc->uc_mcontext.pc;
+    if (pc < (uintptr_t)cfz_ua_start || pc >= (uintptr_t)cfz_ua_end) { signal(s, SIG_DFL); return; }
+    ua_r.sig = s;
+    ua_r.code = si->si_code;
+    ua_r.addr = (uintptr_t)si->si_addr;
+    ua_r.site = (pc == (uintptr_t)cfz_ua_casal_at || pc == (uintptr_t)cfz_ua_ldadd_at || pc == (uintptr_t)cfz_ua_swp_at ||
+                 pc == (uintptr_t)cfz_ua_xpair_ld || pc == (uintptr_t)cfz_ua_ppair_ld) ? 1
+                : (pc == (uintptr_t)cfz_ua_xpair_st || pc == (uintptr_t)cfz_ua_ppair_st) ? 2 : 3;
+    uc->uc_mcontext.pc = uc->uc_mcontext.regs[30];
+    uc->uc_mcontext.regs[0] = 0xfa17fa17fa17fa17ULL;
+}
+/* One access at p of which the first rw bytes are readable and writable. */
+static char ua_case(int op, unsigned char *p, size_t rw, char *site) {
+    size_t n = op == 4 ? 16 : 8, k = rw < n ? rw : n;
+    const uint64_t K = 0x0102030405060708ULL;
+    unsigned char before[16], after[16], want[16];
+    memcpy(before, p, k);
+    uint64_t o0 = 0, o1 = 0;
+    if (k == n) { memcpy(&o0, before, 8); if (n == 16) memcpy(&o1, before + 8, 8); }
+    ua_r.sig = 0;
+    uint64_t ret;
+    switch (op) {
+    case 0: ret = cfz_ua_casal(p, o0, o0 ^ 0x1111111111111111ULL); o0 ^= 0x1111111111111111ULL; break;
+    case 1: ret = cfz_ua_ldadd(p, K); o0 += K; break;
+    case 2: ret = cfz_ua_swp(p, K); o0 = K; break;
+    case 3: ret = cfz_ua_xpair(p, K); o0 += K; break;
+    default: ret = cfz_ua_ppair(p, K); o0 += K; o1 += K; break;
+    }
+    memcpy(after, p, k);
+    if (!ua_r.sig) {
+        *site = '-';
+        if (k != n) return 'x';
+        uint64_t old;
+        memcpy(&old, before, 8);
+        memcpy(want, &o0, 8);
+        memcpy(want + 8, &o1, 8);
+        return !memcmp(after, want, n) && ret == old ? '.' : 'x';
+    }
+    *site = (char)('0' + ua_r.site);
+    if (memcmp(after, before, k)) return 'W';
+    char c = ua_r.sig == SIGBUS && ua_r.code == BUS_ADRALN ? 'B'
+             : ua_r.sig == SIGSEGV && ua_r.code == SEGV_ACCERR ? 'S'
+             : ua_r.sig == SIGSEGV && ua_r.code == SEGV_MAPERR ? 'M' : 'O';
+    return ua_r.addr == (uintptr_t)p ? c : (char)(c - 'A' + 'a');
+}
+static int t_unaligned(void) {
+    if (!(getauxval(AT_HWCAP) & (1 << 8))) { puts("UNSUPPORTED lse"); return 0; }
+    unsigned char *m = mmap(0, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) return 0;
+    mprotect(m + 2 * 4096, 4096, PROT_NONE);
+    struct sigaction a, ob, os;
+    memset(&a, 0, sizeof a);
+    a.sa_sigaction = ua_handler;
+    a.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&a.sa_mask);
+    sigaction(SIGBUS, &a, &ob);
+    sigaction(SIGSEGV, &a, &os);
+    const char *ops[5] = {"casal", "ldadd", "swp", "ldxrStxr", "ldaxpStlxp"};
+    const char *regions[5] = {"granule", "line", "page", "intoProtNone", "inProtNone"};
+    static const int inside[4] = {0, 1, 4, 8};
+    char first[5][5][2][17];
+    long rounds = 200 * scale, stable = 0;
+    for (long r = 0; r < rounds; r++) {
+        int same = 1;
+        for (int i = 0; i < 2 * 4096; i++) m[i] = (unsigned char)(i * 7 + 3 + r);
+        for (int op = 0; op < 5; op++)
+            for (int g = 0; g < 5; g++) {
+                char kinds[17], sites[17];
+                int cnt = g == 4 ? 4 : 16;
+                for (int i = 0; i < cnt; i++) {
+                    unsigned char *p;
+                    size_t rw;
+                    switch (g) {
+                    case 0: p = m + 0x100 + i; rw = 16; break;
+                    case 1: p = m + 0x230 + i; rw = 16; break;
+                    case 2: p = m + 4096 - 16 + i; rw = 16; break;
+                    case 3: p = m + 2 * 4096 - 16 + i; rw = (size_t)(16 - i); break;
+                    default: p = m + 2 * 4096 + inside[i]; rw = 0; break;
+                    }
+                    kinds[i] = ua_case(op, p, rw, &sites[i]);
+                }
+                kinds[cnt] = sites[cnt] = 0;
+                if (!r) { memcpy(first[op][g][0], kinds, 17); memcpy(first[op][g][1], sites, 17); }
+                else same &= !strcmp(first[op][g][0], kinds) && !strcmp(first[op][g][1], sites);
+            }
+        stable += r > 0 && same;
+    }
+    sigaction(SIGBUS, &ob, NULL);
+    sigaction(SIGSEGV, &os, NULL);
+    munmap(m, 4 * 4096);
+    OUT("uscat", "%d", !!(getauxval(AT_HWCAP) & (1 << 25)));
+    for (int op = 0; op < 5; op++)
+        for (int g = 0; g < 5; g++) {
+            char key[64];
+            snprintf(key, sizeof key, "%s.%s", ops[op], regions[g]);
+            OUT(key, "kinds %s sites %s", first[op][g][0], first[op][g][1]);
+        }
+    OUT("stable", "%ld/%ld", stable, rounds - 1 > 0 ? rounds - 1 : 0);
+    return 1;
+}
+
+/* exclmaint (det): two threads increment a shared word and private words with
+ * ldxr/stxr retry loops while a maintenance thread flushes JIT code, toggles page
+ * protection, runs expedited membarriers, forks (copy-on-write of the words' page)
+ * and sends signals; afterwards single-thread probes put a getpid, a signal whose
+ * handler leaves the word alone, or one that changes and restores it (ABA) between
+ * ldxr and stxr. Prints final data and whether each probe's outcome agrees with it.
+ * exclmaintcounts (replay): adds STXR failure counts and probe success counts, which
+ * depend on host interruptions natively and on reservation policy under Seedbox. */
+CFZ_HIDDEN uint64_t cfz_ex_inc(volatile uint64_t *w, long n, uint64_t *fails);
+CFZ_HIDDEN uint64_t cfz_ex_probe(volatile uint64_t *w, long a0, long a1, long a2, long nr);
+asm(".text\n.p2align 2\n"
+    CFZ_FN("cfz_ex_inc") "mov x9, #0\n1: ldxr x3, [x0]\nadd x3, x3, #1\nstxr w4, x3, [x0]\ncbz w4, 2f\nadd x9, x9, #1\nb 1b\n"
+    "2: subs x1, x1, #1\nb.ne 1b\nldr x10, [x2]\nadd x10, x10, x9\nstr x10, [x2]\nmov x0, x3\nret\n"
+    CFZ_FN("cfz_ex_probe") "mov x9, x0\nmov x8, x4\nldxr x10, [x9]\nadd x10, x10, #1\nmov x0, x1\nmov x1, x2\nmov x2, x3\n"
+    "svc #0\nstxr w11, x10, [x9]\nmov x0, x11\nret\n");
+struct ex_line { volatile uint64_t v; char pad[56]; };
+static struct ex_line ex_shared __attribute__((aligned(64))), ex_priv[2] __attribute__((aligned(64)));
+static volatile uint64_t ex_probe_word __attribute__((aligned(64)));
+static uint64_t ex_fails[2];
+static volatile int ex_done, ex_sigs, ex_aba;
+static pid_t ex_tid[2];
+static void ex_usr1(int s) { (void)s; ex_sigs++; }
+static void ex_usr2(int s) {
+    (void)s;
+    if (ex_aba) {
+        uint64_t v = ex_probe_word;
+        ex_probe_word = v + 1000;
+        ex_probe_word = v;
+    }
+}
+static void *ex_worker(void *p) {
+    long k = (long)p, chunks = 20000 * scale;
+    ex_tid[k] = gettid();
+    for (long c = 0; c < chunks; c++) {
+        cfz_ex_inc(&ex_shared.v, 500, &ex_fails[k]);
+        cfz_ex_inc(&ex_priv[k].v, 500, &ex_fails[k]);
+    }
+    __atomic_add_fetch(&ex_done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+static int exclmaint(int counts) {
+    signal(SIGUSR1, ex_usr1);
+    signal(SIGUSR2, ex_usr2);
+    ex_shared.v = ex_priv[0].v = ex_priv[1].v = 0;
+    ex_fails[0] = ex_fails[1] = 0;
+    ex_done = 0;
+    int mb = syscall(SYS_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0) == 0;
+    char *scratch = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    struct jitw j;
+    jit_init(&j);
+    pthread_t t[2];
+    ex_tid[0] = ex_tid[1] = 0;
+    for (long k = 0; k < 2; k++) pthread_create(&t[k], NULL, ex_worker, (void *)k);
+    long kinds[5] = {0}, forkok = 0;
+    /* At least 400 rounds of maintenance, overlapping the workers as far as they run. */
+    for (long i = 0; i < 400 || __atomic_load_n(&ex_done, __ATOMIC_ACQUIRE) < 2; i++) {
+        switch (i % 5) {
+        case 0: jit_step(&j, i); kinds[0]++; break;
+        case 1: mprotect(scratch, 4096, PROT_READ); mprotect(scratch, 4096, PROT_READ | PROT_WRITE); kinds[1]++; break;
+        case 2: if (mb) syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0); kinds[2]++; break;
+        case 3:
+            if (i % 40 == 3) {
+                pid_t c = fork();
+                if (!c) _exit(0);
+                int st = 0;
+                if (c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st)) forkok++;
+                kinds[3]++;
+            }
+            break;
+        default: {
+            pid_t tid = ex_tid[i / 5 % 2];
+            if (tid) syscall(SYS_tgkill, getpid(), tid, SIGUSR1);
+            kinds[4]++;
+        }
+        }
+        sched_yield();
+    }
+    for (int k = 0; k < 2; k++) pthread_join(t[k], NULL);
+    uint64_t want = 20000ULL * (uint64_t)scale * 500;
+    long probes = 200, succ[3] = {0}, consistent = 0;
+    for (int v = 0; v < 3; v++) {
+        ex_aba = v == 2;
+        for (long i = 0; i < probes; i++) {
+            uint64_t before = ex_probe_word;
+            uint64_t st = v == 0 ? cfz_ex_probe(&ex_probe_word, 0, 0, 0, SYS_getpid)
+                                 : cfz_ex_probe(&ex_probe_word, getpid(), gettid(), SIGUSR2, SYS_tgkill);
+            succ[v] += st == 0;
+            consistent += ex_probe_word == before + (st == 0);
+        }
+    }
+    signal(SIGUSR1, SIG_DFL);
+    signal(SIGUSR2, SIG_DFL);
+    munmap(scratch, 4096);
+    OUT("shared", "%lu/%lu", (unsigned long)ex_shared.v, (unsigned long)(2 * want));
+    OUT("private", "%lu/%lu %lu/%lu", (unsigned long)ex_priv[0].v, (unsigned long)want, (unsigned long)ex_priv[1].v,
+        (unsigned long)want);
+    OUT("maintenance", "flush %d mprotect %d membarrier %d fork %d signal %d forksOk %d", kinds[0] > 0, kinds[1] > 0,
+        kinds[2] > 0 && mb, kinds[3] > 0, kinds[4] > 0, forkok == kinds[3]);
+    OUT("probes", "consistent %ld/%ld", consistent, 3 * probes);
+    if (counts) {
+        OUT("stxrFailures", "%lu %lu", (unsigned long)ex_fails[0], (unsigned long)ex_fails[1]);
+        OUT("probeSuccesses", "getpid %ld/%ld signal %ld/%ld aba %ld/%ld", succ[0], probes, succ[1], probes, succ[2], probes);
+        OUT("maintenanceCounts", "%ld %ld %ld %ld %ld signals %d", kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], (int)ex_sigs);
+    }
+    return 1;
+}
+static int t_exclmaint(void) { return exclmaint(0); }
+static int t_exclmaintcounts(void) { return exclmaint(1); }
+
+/* det: two threads keep distinct values in v0-v27, v29 and v30 and their own FPCR
+ * (rounding mode, FZ or DN) and FPSR sticky bits while repeating a rounding-dependent
+ * division, with a getpid every 1024 iterations; another thread signals them (the
+ * handler checks the saved FP record, then changes FPCR, FPSR and vector registers)
+ * and a third rewrites and flushes JIT code. Each thread reports its quotient and
+ * whether registers, FPCR and FPSR survived. */
+struct sfc { __uint128_t in[32]; uint64_t fpcr, fpsr, iters, pad; __uint128_t out[32]; uint64_t ofpcr, ofpsr, bad, quot; };
+_Static_assert(offsetof(struct sfc, out) == 544 && offsetof(struct sfc, ofpcr) == 1056, "sfc layout");
+CFZ_HIDDEN void cfz_sfc_soak(struct sfc *s);
+CFZ_HIDDEN extern const char cfz_sfc_loop[], cfz_sfc_loop_end[];
+asm(".text\n.p2align 2\n"
+    CFZ_FN("cfz_sfc_soak")
+    "stp x29, x30, [sp, #-80]!\nmov x29, sp\nstp d8, d9, [sp, #16]\nstp d10, d11, [sp, #32]\nstp d12, d13, [sp, #48]\n"
+    "stp d14, d15, [sp, #64]\nmov x9, x0\nldr x10, [x9, #512]\nmsr fpcr, x10\nldr x10, [x9, #520]\nmsr fpsr, x10\n"
+    "ldp q0, q1, [x9, #0]\nldp q2, q3, [x9, #32]\nldp q4, q5, [x9, #64]\nldp q6, q7, [x9, #96]\n"
+    "ldp q8, q9, [x9, #128]\nldp q10, q11, [x9, #160]\nldp q12, q13, [x9, #192]\nldp q14, q15, [x9, #224]\n"
+    "ldp q16, q17, [x9, #256]\nldp q18, q19, [x9, #288]\nldp q20, q21, [x9, #320]\nldp q22, q23, [x9, #352]\n"
+    "ldp q24, q25, [x9, #384]\nldp q26, q27, [x9, #416]\nldp q28, q29, [x9, #448]\nldp q30, q31, [x9, #480]\n"
+    "ldr x11, [x9, #528]\nmov x12, #0\nfdiv d28, d29, d30\nfmov x13, d28\nstr x13, [x9, #1080]\n"
+    CFZ_AT("cfz_sfc_loop")
+    "fdiv d28, d29, d30\nfmov x14, d28\ncmp x14, x13\ncinc x12, x12, ne\nfmul d31, d28, d30\n"
+    "tst x11, #1023\nb.ne 2f\nmov x8, #172\nsvc #0\n2: subs x11, x11, #1\nb.ne " "cfz_sfc_loop\n"
+    CFZ_AT("cfz_sfc_loop_end")
+    "mrs x10, fpcr\nstr x10, [x9, #1056]\nmrs x10, fpsr\nstr x10, [x9, #1064]\nstr x12, [x9, #1072]\nadd x10, x9, #544\n"
+    "stp q0, q1, [x10, #0]\nstp q2, q3, [x10, #32]\nstp q4, q5, [x10, #64]\nstp q6, q7, [x10, #96]\n"
+    "stp q8, q9, [x10, #128]\nstp q10, q11, [x10, #160]\nstp q12, q13, [x10, #192]\nstp q14, q15, [x10, #224]\n"
+    "stp q16, q17, [x10, #256]\nstp q18, q19, [x10, #288]\nstp q20, q21, [x10, #320]\nstp q22, q23, [x10, #352]\n"
+    "stp q24, q25, [x10, #384]\nstp q26, q27, [x10, #416]\nstp q28, q29, [x10, #448]\nstp q30, q31, [x10, #480]\n"
+    "ldp d8, d9, [sp, #16]\nldp d10, d11, [sp, #32]\nldp d12, d13, [sp, #48]\nldp d14, d15, [sp, #64]\n"
+    "ldp x29, x30, [sp], #80\nret\n");
+struct sfc_thread { struct sfc s; pid_t tid; volatile int ready; long sigs, framebad, framechecked; };
+static struct sfc_thread sfc_t[2];
+static __thread struct sfc_thread *sfc_self;
+static volatile int sfc_stop, sfc_go;
+/* v28 holds the quotient and v31 scratch; every other vector register is a canary. */
+static int sfc_live(int k) { return k != 28 && k != 31; }
+static void sfc_handler(int s, siginfo_t *si, void *ucv) {
+    (void)s; (void)si;
+    ucontext_t *uc = ucv;
+    struct sfc_thread *t = sfc_self;
+    if (!t) return;
+    t->sigs++;
+    uintptr_t pc = uc->uc_mcontext.pc;
+    if (pc >= (uintptr_t)cfz_sfc_loop && pc < (uintptr_t)cfz_sfc_loop_end) {
+        struct cfz_walk w;
+        ctx_walk(uc, &w);
+        t->framechecked++;
+        int bad = !w.fp || w.fp->fpcr != (uint32_t)t->s.fpcr || (w.fp->fpsr & (uint32_t)t->s.fpsr) != (uint32_t)t->s.fpsr;
+        if (w.fp)
+            for (int i = 0; i < 32; i++)
+                if (sfc_live(i) && w.fp->vregs[i] != t->s.in[i]) bad = 1;
+        t->framebad += bad;
+    }
+    asm volatile("msr fpcr, xzr\nmsr fpsr, xzr\nmovi v0.16b, #0x5a\nmovi v16.16b, #0xa5\nmovi v29.16b, #0x33\n"
+                 "fmov d30, #1.0\nmovi d1, #0\nfdiv d2, d30, d1\n" ::: "v0", "v1", "v2", "v16", "v29", "v30", "memory");
+}
+static void *sfc_worker(void *p) {
+    struct sfc_thread *t = p;
+    sfc_self = t;
+    t->tid = gettid();
+    __atomic_store_n(&t->ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&sfc_go, __ATOMIC_ACQUIRE)) cfz_wait(&sfc_go, 0, 100);
+    cfz_sfc_soak(&t->s);
+    return NULL;
+}
+static void *sfc_signaler(void *p) {
+    (void)p;
+    for (long i = 0; !__atomic_load_n(&sfc_stop, __ATOMIC_ACQUIRE); i++) {
+        syscall(SYS_tgkill, getpid(), sfc_t[i & 1].tid, SIGUSR1);
+        cfz_sleep_us(300);
+    }
+    return NULL;
+}
+static int t_simdfpctl(void) {
+    uint64_t fpcr0;
+    asm volatile("mrs %0, fpcr" : "=r"(fpcr0));
+    const uint64_t modes = (3ULL << 22) | (1ULL << 24) | (1ULL << 25);
+    const double num[2] = {2.0, -1.0}, den[2] = {3.0, 3.0};
+    const uint64_t ctl[2] = {(1ULL << 22) | (1ULL << 24), (2ULL << 22) | (1ULL << 25)};
+    const uint64_t sticky[2] = {1ULL | (1ULL << 27), (1ULL << 1) | (1ULL << 3)};
+    for (int k = 0; k < 2; k++) {
+        struct sfc_thread *t = &sfc_t[k];
+        memset(t, 0, sizeof *t);
+        for (int i = 0; i < 32; i++) t->s.in[i] = ((__uint128_t)next() << 64) | next();
+        uint64_t nb, db;
+        memcpy(&nb, &num[k], 8);
+        memcpy(&db, &den[k], 8);
+        t->s.in[29] = (t->s.in[29] & ~(__uint128_t)UINT64_MAX) | nb;
+        t->s.in[30] = (t->s.in[30] & ~(__uint128_t)UINT64_MAX) | db;
+        t->s.fpcr = (fpcr0 & ~modes) | ctl[k];
+        t->s.fpsr = sticky[k];
+        t->s.iters = 128000000UL * (uint64_t)scale;
+    }
+    struct sigaction a;
+    memset(&a, 0, sizeof a);
+    a.sa_sigaction = sfc_handler;
+    a.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&a.sa_mask);
+    sigaction(SIGUSR1, &a, NULL);
+    sfc_stop = 0;
+    sfc_go = 0;
+    fl_stop = 0;
+    struct jitw j;
+    jit_init(&j);
+    pthread_t w[2], sg, fl;
+    for (int k = 0; k < 2; k++) {
+        pthread_create(&w[k], NULL, sfc_worker, &sfc_t[k]);
+        cfz_wait_for(&sfc_t[k].ready, 1, 5000);
+    }
+    pthread_create(&sg, NULL, sfc_signaler, NULL);
+    pthread_create(&fl, NULL, flusher, &j);
+    __atomic_store_n(&sfc_go, 1, __ATOMIC_RELEASE);
+    cfz_wake(&sfc_go);
+    for (int k = 0; k < 2; k++) pthread_join(w[k], NULL);
+    __atomic_store_n(&sfc_stop, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&fl_stop, 1, __ATOMIC_RELEASE);
+    pthread_join(sg, NULL);
+    pthread_join(fl, NULL);
+    signal(SIGUSR1, SIG_DFL);
+    for (int k = 0; k < 2; k++) {
+        struct sfc_thread *t = &sfc_t[k];
+        int regs = 1;
+        for (int i = 0; i < 32; i++)
+            if (sfc_live(i) && t->s.out[i] != t->s.in[i]) regs = 0;
+        char key[8];
+        snprintf(key, sizeof key, "t%d", k);
+        OUT(key, "quotient %016lx bad %lu regs %d fpcr %d fpsr %d frameBad %ld signaled %d jit %d", (unsigned long)t->s.quot,
+            (unsigned long)t->s.bad, regs, t->s.ofpcr == t->s.fpcr, t->s.ofpsr == (t->s.fpsr | (1ULL << 4)), t->framebad,
+            t->sigs > 0, j.calls > 0 && j.stale == 0);
+    }
+    return 1;
+}
+
+/* det: each of two threads publishes ledger slots through an rseq critical section
+ * that prepares a 32-byte payload, spins, and commits with one store of the next
+ * index; SIGALRM every 100 us and the other thread interrupt attempts. Every
+ * published slot must be complete and unique; reports whether aborts happened. */
+struct rc_slot { uint64_t seq, x, nseq, triple; };
+struct rc_thread { struct rc_slot *ledger; uint32_t commit; long n, attempts, aborts; };
+static struct rc_thread rc_t[2];
+static volatile sig_atomic_t rc_alarms;
+static void rc_alarm(int s) { (void)s; rc_alarms++; }
+static void *rc_worker(void *p) {
+    struct rc_thread *t = p;
+    struct rseq *r = (struct rseq *)((char *)__builtin_thread_pointer() + __rseq_offset);
+    while (__atomic_load_n(&t->commit, __ATOMIC_RELAXED) < (uint32_t)t->n) {
+        unsigned v;
+        asm volatile(
+            ".pushsection __rseq_cs, \"aw\"\n.balign 32\n1: .long 0, 0\n.quad 2f, 3f-2f, 4f\n.popsection\n"
+            "adrp x9, 1b\nadd x9, x9, :lo12:1b\nstr x9, [%[r], #8]\n"
+            "2: ldr w10, [%[c]]\nadd x11, %[l], x10, lsl #5\nstr x10, [x11]\neor x12, x10, #0x5555555555555555\n"
+            "str x12, [x11, #8]\nmov x13, #20000\n5: subs x13, x13, #1\nb.ne 5b\nmvn x12, x10\nstr x12, [x11, #16]\n"
+            "add x12, x10, x10, lsl #1\nstr x12, [x11, #24]\nadd w10, w10, #1\nstr w10, [%[c]]\n"
+            "3: mov %w[v], #1\nb 6f\n.inst 0xd428bc00\n4: mov %w[v], #2\n6: str xzr, [%[r], #8]\n"
+            : [v] "=&r"(v) : [r] "r"(r), [c] "r"(&t->commit), [l] "r"(t->ledger) : "x9", "x10", "x11", "x12", "x13", "cc", "memory");
+        t->attempts++;
+        t->aborts += v != 1;
+    }
+    return NULL;
+}
+static int t_rseqcommit(void) {
+    if (__rseq_size < 20) { puts("UNSUPPORTED rseq"); return 0; }
+    long n = 2000 * scale;
+    for (int k = 0; k < 2; k++) {
+        memset(&rc_t[k], 0, sizeof rc_t[k]);
+        rc_t[k].n = n;
+        rc_t[k].ledger = calloc((size_t)n + 1, sizeof(struct rc_slot));
+    }
+    signal(SIGALRM, rc_alarm);
+    struct itimerval it = {{0, 100}, {0, 100}};
+    setitimer(ITIMER_REAL, &it, NULL);
+    pthread_t t[2];
+    for (int k = 0; k < 2; k++) pthread_create(&t[k], NULL, rc_worker, &rc_t[k]);
+    for (int k = 0; k < 2; k++) pthread_join(t[k], NULL);
+    struct itimerval off = {{0, 0}, {0, 0}};
+    setitimer(ITIMER_REAL, &off, NULL);
+    signal(SIGALRM, SIG_DFL);
+    long aborts = 0;
+    for (int k = 0; k < 2; k++) {
+        struct rc_thread *r = &rc_t[k];
+        long ok = 0;
+        for (long i = 0; i < n; i++) {
+            struct rc_slot *s = &r->ledger[i];
+            ok += s->seq == (uint64_t)i && s->x == ((uint64_t)i ^ 0x5555555555555555ULL) && s->nseq == ~(uint64_t)i &&
+                  s->triple == 3 * (uint64_t)i;
+        }
+        aborts += r->aborts;
+        char key[8];
+        snprintf(key, sizeof key, "t%d", k);
+        OUT(key, "commits %u/%ld ledgerOk %ld/%ld attemptsCover %d", r->commit, n, ok, n, r->attempts == n + r->aborts);
+        free(r->ledger);
+    }
+    OUT("abortExercised", "%d", aborts > 0);
+    return 1;
+}
+
+/* ---- futex variants, epoll edges and seccomp user notification ---- */
+
+/* det: FUTEX_WAKE_OP, FUTEX_CMP_REQUEUE, FUTEX_WAIT_BITSET (absolute monotonic and
+ * realtime deadlines, selective bitset wakes), PI lock/unlock and requeue-PI, and
+ * futex_waitv indexed wakeups reusing the array; plus errno cases. Waiters are
+ * started one at a time and woken only once /proc shows them blocked, so wake order
+ * and counts are fixed. Prints the first round and how many rounds matched it. */
+static long fx(volatile uint32_t *u, int op, uint32_t val, const void *t, volatile uint32_t *u2, uint32_t v3) {
+    long r = syscall(SYS_futex, u, op, val, t, u2, v3);
+    return r < 0 ? -errno : r;
+}
+struct fx_waiter {
+    pthread_t th;
+    volatile pid_t tid;
+    volatile uint32_t *word, *word2;
+    int op;
+    uint32_t val, bits;
+    long ret, ret2, ret3;
+    int owner;
+    volatile int stage, done;
+};
+struct fx_waitv { uint64_t val, uaddr; uint32_t flags, reserved; };
+static void *fx_waiter_fn(void *p) {
+    struct fx_waiter *w = p;
+    w->tid = gettid();
+    __atomic_store_n(&w->stage, 1, __ATOMIC_RELEASE);
+    switch (w->op) {
+    case 0: w->ret = fx(w->word, FUTEX_WAIT_PRIVATE, w->val, NULL, NULL, 0); break;
+    case 1: w->ret = fx(w->word, FUTEX_WAIT_BITSET_PRIVATE, w->val, NULL, NULL, w->bits); break;
+    case 2:
+        w->ret = fx(w->word, FUTEX_LOCK_PI_PRIVATE, 0, NULL, NULL, 0);
+        w->owner = (*w->word & FUTEX_TID_MASK) == (uint32_t)w->tid;
+        w->ret2 = fx(w->word, FUTEX_UNLOCK_PI_PRIVATE, 0, NULL, NULL, 0);
+        break;
+    case 3:
+        w->ret = fx(w->word, FUTEX_WAIT_REQUEUE_PI_PRIVATE, w->val, NULL, w->word2, 0);
+        w->owner = (*w->word2 & FUTEX_TID_MASK) == (uint32_t)w->tid;
+        w->ret2 = fx(w->word2, FUTEX_UNLOCK_PI_PRIVATE, 0, NULL, NULL, 0);
+        break;
+    default: {
+        struct fx_waitv v[3];
+        for (int i = 0; i < 3; i++) v[i] = (struct fx_waitv){0, (uintptr_t)&w->word[i], 2 | 128, 0};
+        long r = syscall(449, v, 3, 0, NULL, CLOCK_MONOTONIC);
+        w->ret = r < 0 ? -errno : r;
+        v[1].val = 1;
+        __atomic_store_n(&w->stage, 2, __ATOMIC_RELEASE);
+        r = syscall(449, v, 3, 0, NULL, CLOCK_MONOTONIC);
+        w->ret2 = r < 0 ? -errno : r;
+        v[0].val = 5;
+        r = syscall(449, v, 3, 0, NULL, CLOCK_MONOTONIC);
+        w->ret3 = r < 0 ? -errno : r;
+    }
+    }
+    __atomic_store_n(&w->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+static void fx_until_stage(struct fx_waiter *w, int stage) {
+    uint64_t end = mono_ns(CLOCK_MONOTONIC) + 5000000000ULL;
+    while (__atomic_load_n(&w->stage, __ATOMIC_ACQUIRE) < stage && mono_ns(CLOCK_MONOTONIC) < end) cfz_sleep_us(100);
+}
+static void fx_start(struct fx_waiter *w, long nr, uintptr_t a0) {
+    w->stage = w->done = 0;
+    pthread_create(&w->th, NULL, fx_waiter_fn, w);
+    fx_until_stage(w, 1);
+    cfz_settle(getpid(), w->tid, nr, a0);
+}
+/* Waits until `want` of the n waiters are done; returns the mask of done ones. */
+static int fx_done(struct fx_waiter *w, int n, int want) {
+    uint64_t end = mono_ns(CLOCK_MONOTONIC) + 5000000000ULL;
+    for (;;) {
+        int m = 0, c = 0;
+        for (int i = 0; i < n; i++)
+            if (__atomic_load_n(&w[i].done, __ATOMIC_ACQUIRE)) { m |= 1 << i; c++; }
+        if (c >= want || mono_ns(CLOCK_MONOTONIC) > end) return m;
+        cfz_sleep_us(100);
+    }
+}
+static struct timespec fx_abs(clockid_t c, long ns, uint64_t *at) {
+    *at = mono_ns(c) + (uint64_t)ns;
+    struct timespec t = {(time_t)(*at / 1000000000ULL), (long)(*at % 1000000000ULL)};
+    return t;
+}
+static void fx_round(char *b, size_t n) {
+    int len = 0;
+#define FXP(...) len += snprintf(b + len, n - (size_t)len, __VA_ARGS__)
+    static volatile uint32_t a, c, p, m, x[3], y;
+    struct fx_waiter w[4];
+    /* WAKE_OP: wake one on a, set b to 1 and, since it was 0, wake one on b. */
+    a = c = 0;
+    memset(w, 0, sizeof w);
+    w[0].word = &a;
+    w[1].word = &c;
+    fx_start(&w[0], SYS_futex, (uintptr_t)&a);
+    fx_start(&w[1], SYS_futex, (uintptr_t)&c);
+    long r1 = fx(&a, FUTEX_WAKE_OP_PRIVATE, 1, (void *)1, &c, FUTEX_OP(FUTEX_OP_SET, 1, FUTEX_OP_CMP_EQ, 0));
+    uint32_t c1 = c;
+    for (int i = 0; i < 2; i++) pthread_join(w[i].th, NULL);
+    long r2 = fx(&a, FUTEX_WAKE_OP_PRIVATE, 1, (void *)1, &c, FUTEX_OP(FUTEX_OP_ADD, 2, FUTEX_OP_CMP_EQ, 0));
+    FXP("wakeOp %ld word %u waiters %ld %ld again %ld word %u\n", r1, c1, w[0].ret, w[1].ret, r2, c);
+    /* CMP_REQUEUE: four FIFO waiters on a; wake one, move two to c. */
+    a = c = 0;
+    memset(w, 0, sizeof w);
+    for (int i = 0; i < 4; i++) { w[i].word = &a; fx_start(&w[i], SYS_futex, (uintptr_t)&a); }
+    long q = fx(&a, FUTEX_CMP_REQUEUE_PRIVATE, 1, (void *)2, &c, 0);
+    int m1 = fx_done(w, 4, 1);
+    long qe = fx(&a, FUTEX_CMP_REQUEUE_PRIVATE, 1, (void *)2, &c, 9);
+    long qb = fx(&c, FUTEX_WAKE_PRIVATE, 2, NULL, NULL, 0);
+    int m2 = fx_done(w, 4, 3);
+    long qa = fx(&a, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+    for (int i = 0; i < 4; i++) pthread_join(w[i].th, NULL);
+    FXP("cmpRequeue %ld woke %#x mismatch %ld wakeMoved %ld woke %#x wakeRest %ld rets %ld %ld %ld %ld\n", q, m1, qe, qb, m2, qa,
+        w[0].ret, w[1].ret, w[2].ret, w[3].ret);
+    /* WAIT_BITSET deadlines and selective wakes. */
+    a = 0;
+    uint64_t at;
+    struct timespec dl = fx_abs(CLOCK_MONOTONIC, 2000000, &at);
+    long bm = fx(&a, FUTEX_WAIT_BITSET_PRIVATE, 0, &dl, NULL, FUTEX_BITSET_MATCH_ANY);
+    int bmok = mono_ns(CLOCK_MONOTONIC) >= at;
+    dl = fx_abs(CLOCK_REALTIME, 2000000, &at);
+    long br = fx(&a, FUTEX_WAIT_BITSET_PRIVATE | FUTEX_CLOCK_REALTIME, 0, &dl, NULL, FUTEX_BITSET_MATCH_ANY);
+    int brok = mono_ns(CLOCK_REALTIME) >= at;
+    memset(w, 0, sizeof w);
+    for (int i = 0; i < 3; i++) {
+        w[i].word = &a;
+        w[i].op = 1;
+        w[i].bits = 1u << i;
+        fx_start(&w[i], SYS_futex, (uintptr_t)&a);
+    }
+    long b2 = fx(&a, FUTEX_WAKE_BITSET_PRIVATE, INT_MAX, NULL, NULL, 2);
+    int bm1 = fx_done(w, 3, 1);
+    long b5 = fx(&a, FUTEX_WAKE_BITSET_PRIVATE, INT_MAX, NULL, NULL, 5);
+    for (int i = 0; i < 3; i++) pthread_join(w[i].th, NULL);
+    long b0 = fx(&a, FUTEX_WAIT_BITSET_PRIVATE, 0, NULL, NULL, 0);
+    FXP("bitset monoAbs %ld notEarly %d realtimeAbs %ld notEarly %d wake2 %ld woke %#x wake5 %ld rets %ld %ld %ld zero %ld\n", bm,
+        bmok, br, brok, b2, bm1, b5, w[0].ret, w[1].ret, w[2].ret, b0);
+    /* PI: lock, contend, hand over, unlock. */
+    p = 0;
+    long pl = fx(&p, FUTEX_LOCK_PI_PRIVATE, 0, NULL, NULL, 0);
+    int powner = (p & FUTEX_TID_MASK) == (uint32_t)gettid();
+    long pt = fx(&p, FUTEX_TRYLOCK_PI_PRIVATE, 0, NULL, NULL, 0);
+    long pd = fx(&p, FUTEX_LOCK_PI_PRIVATE, 0, NULL, NULL, 0);
+    memset(w, 0, sizeof w);
+    w[0].word = &p;
+    w[0].op = 2;
+    fx_start(&w[0], SYS_futex, (uintptr_t)&p);
+    int pwait = (p & FUTEX_WAITERS) != 0 && (p & FUTEX_TID_MASK) == (uint32_t)gettid();
+    long pu = fx(&p, FUTEX_UNLOCK_PI_PRIVATE, 0, NULL, NULL, 0);
+    pthread_join(w[0].th, NULL);
+    long pe = fx(&p, FUTEX_UNLOCK_PI_PRIVATE, 0, NULL, NULL, 0);
+    FXP("pi lock %ld owner %d trylock %ld relock %ld waitersBit %d unlock %ld handedOver %ld owner %d unlock %ld word %u notOwner %ld\n",
+        pl, powner, pt, pd, pwait, pu, w[0].ret, w[0].owner, w[0].ret2, p, pe);
+    /* Requeue-PI: a condition waiter moved to a held PI mutex, then handed the mutex. */
+    c = m = 0;
+    long ml = fx(&m, FUTEX_LOCK_PI_PRIVATE, 0, NULL, NULL, 0);
+    memset(w, 0, sizeof w);
+    w[0].word = &c;
+    w[0].word2 = &m;
+    w[0].op = 3;
+    fx_start(&w[0], SYS_futex, (uintptr_t)&c);
+    long rq = fx(&c, FUTEX_CMP_REQUEUE_PI_PRIVATE, 1, (void *)1, &m, 0);
+    int mwait = (m & FUTEX_WAITERS) != 0;
+    long mu = fx(&m, FUTEX_UNLOCK_PI_PRIVATE, 0, NULL, NULL, 0);
+    pthread_join(w[0].th, NULL);
+    FXP("requeuePi lock %ld requeued %ld waitersBit %d unlock %ld waiter %ld owner %d unlock %ld word %u\n", ml, rq, mwait, mu,
+        w[0].ret, w[0].owner, w[0].ret2, m);
+    /* futex_waitv: index of the woken word, reuse with an updated value, stale value. */
+    x[0] = x[1] = x[2] = y = 0;
+    memset(w, 0, sizeof w);
+    w[0].word = x;
+    w[0].op = 4;
+    fx_start(&w[0], 449, 0);
+    long wy = fx(&y, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+    x[1] = 1;
+    long w1 = fx(&x[1], FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+    fx_until_stage(&w[0], 2);
+    cfz_settle(getpid(), w[0].tid, 449, 0);
+    x[2] = 1;
+    long w2 = fx(&x[2], FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+    pthread_join(w[0].th, NULL);
+    FXP("waitv unselected %ld wake1 %ld index %ld wake2 %ld index %ld stale %ld\n", wy, w1, w[0].ret, w2, w[0].ret2, w[0].ret3);
+    /* errno */
+    a = 1;
+    FXP("errno mismatch %ld unaligned %ld null %ld badOp %ld badWakeOp %ld\n", fx(&a, FUTEX_WAIT_PRIVATE, 0, NULL, NULL, 0),
+        fx((volatile uint32_t *)((volatile char *)&a + 1), FUTEX_WAIT_PRIVATE, 1, NULL, NULL, 0),
+        fx(NULL, FUTEX_WAIT_PRIVATE, 0, NULL, NULL, 0), fx(&a, 99, 0, NULL, NULL, 0),
+        fx(&a, FUTEX_WAKE_OP_PRIVATE, 1, (void *)1, &c, FUTEX_OP(7, 0, 0, 0)));
+#undef FXP
+}
+static int t_futexops(void) {
+    long rounds = 10 * scale, same = 0;
+    char first[4096], cur[4096];
+    for (long r = 0; r < rounds; r++) {
+        fx_round(r ? cur : first, sizeof first);
+        if (r) same += !strcmp(first, cur);
+    }
+    fputs(first, stdout);
+    OUT("rounds", "%ld/%ld", same, rounds - 1);
+    return 1;
+}
+
+/* det: 100 pipes and 100 socket pairs registered EPOLLET with generation tags. Per
+ * round, in seeded orders: (1) one event per written descriptor, none on a second
+ * wait, events after refilling a partially drained one and after refilling a fully
+ * drained one; (2) EPOLLONESHOT: one event, none after another write, one after the
+ * EPOLL_CTL_MOD rearm; (3) closed and recreated descriptors reuse their numbers and
+ * report only the new tag, and none before they are registered again. */
+#define EE_N 200
+static int ee_r[EE_N], ee_w[EE_N];
+static uint32_t ee_gen[EE_N];
+static int ee_new(int i) {
+    int f[2];
+    if (i < 100 ? pipe(f) : socketpair(AF_UNIX, SOCK_STREAM, 0, f)) return 0;
+    ee_r[i] = f[0];
+    ee_w[i] = f[1];
+    fcntl(f[0], F_SETFL, O_NONBLOCK);
+    return 1;
+}
+static int ee_add(int ep, int i, int op, uint32_t extra) {
+    struct epoll_event e = {.events = EPOLLIN | EPOLLET | extra, .data.u64 = ((uint64_t)ee_gen[i] << 32) | (uint32_t)i};
+    return epoll_ctl(ep, op, ee_r[i], &e) == 0;
+}
+static void ee_drain(int i) {
+    char b[64];
+    while (read(ee_r[i], b, sizeof b) > 0) {}
+}
+/* Collects ready events: count, events for the listed descriptors, stale tags and an
+ * order hash. */
+struct ee_tally { long events, stale, other; uint64_t hash; };
+static void ee_wait(int ep, struct ee_tally *t, int *cnt) {
+    struct epoll_event ev[256];
+    int n = epoll_wait(ep, ev, 256, 0);
+    for (int k = 0; k < n; k++) {
+        uint32_t i = (uint32_t)ev[k].data.u64, g = (uint32_t)(ev[k].data.u64 >> 32);
+        t->hash = t->hash * 1000003ULL + ev[k].data.u64 * 31 + ev[k].events;
+        t->events++;
+        if (i >= EE_N) { t->other++; continue; }
+        if (g != ee_gen[i]) t->stale++;
+        if (cnt) cnt[i]++;
+    }
+}
+static int t_epolledge(void) {
+    int ep = epoll_create1(EPOLL_CLOEXEC);
+    for (int i = 0; i < EE_N; i++) {
+        if (!ee_new(i)) return 0;
+        ee_gen[i] = 1;
+        if (!ee_add(ep, i, EPOLL_CTL_ADD, 0)) return 0;
+    }
+    long rounds = 10 * scale;
+    struct ee_tally T[8];
+    memset(T, 0, sizeof T);
+    long once[8] = {0}, expect[8] = {0}, reused = 0, recreated = 0;
+    int perm[EE_N], cnt[EE_N];
+    for (long r = 0; r < rounds; r++) {
+        for (int i = 0; i < EE_N; i++) perm[i] = i;
+        for (int i = EE_N - 1; i > 0; i--) { int k = (int)(next() % (uint64_t)(i + 1)), t = perm[i]; perm[i] = perm[k]; perm[k] = t; }
+        /* (1) edges */
+        memset(cnt, 0, sizeof cnt);
+        for (int k = 0; k < 100; k++) if (write(ee_w[perm[k]], "ab", 2) != 2) return 0;
+        ee_wait(ep, &T[0], cnt);
+        for (int k = 0; k < 100; k++) once[0] += cnt[perm[k]] == 1;
+        expect[0] += 100;
+        ee_wait(ep, &T[1], NULL);
+        memset(cnt, 0, sizeof cnt);
+        for (int k = 0; k < 100; k++) {
+            char c;
+            if (read(ee_r[perm[k]], &c, 1) != 1 || write(ee_w[perm[k]], "c", 1) != 1) return 0;
+        }
+        ee_wait(ep, &T[2], cnt);
+        for (int k = 0; k < 100; k++) once[2] += cnt[perm[k]] == 1;
+        memset(cnt, 0, sizeof cnt);
+        for (int k = 0; k < 100; k++) { ee_drain(perm[k]); if (write(ee_w[perm[k]], "d", 1) != 1) return 0; }
+        ee_wait(ep, &T[3], cnt);
+        for (int k = 0; k < 100; k++) once[3] += cnt[perm[k]] == 1;
+        for (int k = 0; k < 100; k++) ee_drain(perm[k]);
+        ee_wait(ep, &T[7], NULL);
+        /* (2) one-shot */
+        for (int k = 100; k < 150; k++) ee_add(ep, perm[k], EPOLL_CTL_MOD, EPOLLONESHOT);
+        memset(cnt, 0, sizeof cnt);
+        for (int k = 100; k < 150; k++) if (write(ee_w[perm[k]], "e", 1) != 1) return 0;
+        ee_wait(ep, &T[4], cnt);
+        for (int k = 100; k < 150; k++) { once[4] += cnt[perm[k]] == 1; if (write(ee_w[perm[k]], "f", 1) != 1) return 0; }
+        ee_wait(ep, &T[5], NULL);
+        memset(cnt, 0, sizeof cnt);
+        for (int k = 100; k < 150; k++) ee_add(ep, perm[k], EPOLL_CTL_MOD, EPOLLONESHOT);
+        ee_wait(ep, &T[6], cnt);
+        for (int k = 100; k < 150; k++) once[6] += cnt[perm[k]] == 1;
+        ee_wait(ep, &T[5], NULL);
+        for (int k = 100; k < 150; k++) { ee_drain(perm[k]); ee_add(ep, perm[k], EPOLL_CTL_MOD, 0); }
+        ee_wait(ep, &T[7], NULL);
+        /* (3) close, reuse the numbers, register with a new tag */
+        for (int k = 150; k < 170; k++) {
+            int i = perm[k], orr = ee_r[i], ow = ee_w[i];
+            close(ee_r[i]);
+            close(ee_w[i]);
+            if (!ee_new(i)) return 0;
+            reused += ee_r[i] == orr && ee_w[i] == ow;
+            if (write(ee_w[i], "g", 1) != 1) return 0;
+        }
+        ee_wait(ep, &T[7], NULL);
+        memset(cnt, 0, sizeof cnt);
+        for (int k = 150; k < 170; k++) {
+            int i = perm[k];
+            ee_gen[i]++;
+            recreated += ee_add(ep, i, EPOLL_CTL_ADD, 0);
+            if (write(ee_w[i], "h", 1) != 1) return 0;
+        }
+        ee_wait(ep, &T[3], cnt);
+        for (int k = 150; k < 170; k++) { once[5] += cnt[perm[k]] == 1; ee_drain(perm[k]); }
+        expect[5] += 20;
+        ee_wait(ep, &T[7], NULL);
+    }
+    for (int i = 0; i < EE_N; i++) { close(ee_r[i]); close(ee_w[i]); }
+    close(ep);
+    long st = 0;
+    for (int k = 0; k < 8; k++) st += T[k].stale + T[k].other;
+    OUT("write", "once %ld/%ld events %ld secondWait %ld", once[0], expect[0], T[0].events, T[1].events);
+    OUT("refillPartial", "once %ld events %ld", once[2], T[2].events);
+    OUT("refillDrained", "once %ld", once[3]);
+    OUT("oneshot", "once %ld/%ld suppressed %ld rearmed %ld/%ld", once[4], rounds * 50, T[5].events, once[6], rounds * 50);
+    OUT("reuse", "numbers %ld/%ld strayEvents %ld registered %ld newTagOnce %ld/%ld", reused, rounds * 20, T[7].events,
+        recreated, once[5], expect[5]);
+    OUT("staleOrForeign", "%ld", st);
+    uint64_t h = 0;
+    for (int k = 0; k < 8; k++) h = h * 31 + T[k].hash;
+    OUT("orderHash", "%016lx", (unsigned long)h);
+    return 1;
+}
+
+/* det: a SECCOMP_RET_USER_NOTIF filter for openat with a sentinel mode argument; a
+ * supervisor thread checks each notification (pid, nr, arch, args, path under the
+ * test directory) and answers in three phases: CONTINUE (the real open runs), an
+ * injected EACCES, and a descriptor installed with SECCOMP_IOCTL_NOTIF_ADDFD.
+ * 100 opens from each of 4 threads per phase. */
+#define SN_MODE 0x5eed
+#define SN_THREADS 4
+#define SN_ITERS 100
+static char sn_dir[64];
+static int sn_listener;
+static volatile int sn_phase, sn_go, sn_quit;
+static volatile pid_t sn_tids[SN_THREADS];
+static struct { long fdok, content, eacces, other; } sn_res[3][SN_THREADS];
+static volatile long sn_notes;
+static long sn_pidok, sn_nrok, sn_archok, sn_argsok, sn_pathok, sn_replyok;
+static void sn_path(char *b, size_t n, int k) { snprintf(b, n, "%s/f%d", sn_dir, k); }
+static void *sn_supervisor(void *p) {
+    (void)p;
+    long total = 3L * SN_THREADS * SN_ITERS * scale;
+    size_t dl = strlen(sn_dir);
+    uint64_t end = mono_ns(CLOCK_MONOTONIC) + 60000000000ULL;
+    while (sn_notes < total && !sn_quit && mono_ns(CLOCK_MONOTONIC) < end) {
+        struct pollfd pf = {sn_listener, POLLIN, 0};
+        if (poll(&pf, 1, 100) <= 0) continue;
+        struct seccomp_notif n;
+        memset(&n, 0, sizeof n);
+        if (ioctl(sn_listener, SECCOMP_IOCTL_NOTIF_RECV, &n)) continue;
+        __atomic_add_fetch(&sn_notes, 1, __ATOMIC_RELEASE);
+        int k = -1;
+        for (int i = 0; i < SN_THREADS; i++)
+            if (sn_tids[i] == (pid_t)n.pid) k = i;
+        sn_pidok += k >= 0;
+        sn_nrok += n.data.nr == SYS_openat;
+        sn_archok += n.data.arch == AUDIT_ARCH_AARCH64;
+        sn_argsok += (int)n.data.args[0] == AT_FDCWD && (n.data.args[3] & 0xffff) == SN_MODE &&
+                     (n.data.args[2] & O_ACCMODE) == O_RDONLY;
+        const char *path = (const char *)(uintptr_t)n.data.args[1];
+        sn_pathok += !strncmp(path, sn_dir, dl) && path[dl] == '/';
+        struct seccomp_notif_resp r;
+        memset(&r, 0, sizeof r);
+        r.id = n.id;
+        int ok;
+        if (sn_phase == 0) {
+            r.flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+            ok = !ioctl(sn_listener, SECCOMP_IOCTL_NOTIF_SEND, &r);
+        } else if (sn_phase == 1) {
+            r.error = -EACCES;
+            ok = !ioctl(sn_listener, SECCOMP_IOCTL_NOTIF_SEND, &r);
+        } else {
+            int mfd = memfd_create("cfzsn", MFD_CLOEXEC);
+            char text[32];
+            int tl = snprintf(text, sizeof text, "addfd-%d", k);
+            ok = mfd >= 0 && write(mfd, text, (size_t)tl) == tl;
+            struct seccomp_notif_addfd af;
+            memset(&af, 0, sizeof af);
+            af.id = n.id;
+            af.flags = SECCOMP_ADDFD_FLAG_SEND;
+            af.srcfd = (uint32_t)mfd;
+            af.newfd_flags = O_CLOEXEC;
+            int nfd = ok ? ioctl(sn_listener, SECCOMP_IOCTL_NOTIF_ADDFD, &af) : -1;
+            if (nfd < 0 && ok) { /* kernels before 5.14: install, then reply with the number */
+                af.flags = 0;
+                nfd = ioctl(sn_listener, SECCOMP_IOCTL_NOTIF_ADDFD, &af);
+                r.val = nfd;
+                ok = nfd >= 0 && !ioctl(sn_listener, SECCOMP_IOCTL_NOTIF_SEND, &r);
+            }
+            ok &= nfd >= 0;
+            if (mfd >= 0) close(mfd);
+        }
+        sn_replyok += ok;
+    }
+    return NULL;
+}
+static void *sn_caller(void *p) {
+    long k = (long)p;
+    sn_tids[k] = gettid();
+    char path[96], want[32], got[32];
+    sn_path(path, sizeof path, (int)k);
+    for (int ph = 0; ph < 3; ph++) {
+        while (__atomic_load_n(&sn_go, __ATOMIC_ACQUIRE) <= ph) cfz_wait(&sn_go, ph, 100);
+        int wl = ph == 2 ? snprintf(want, sizeof want, "addfd-%ld", k) : snprintf(want, sizeof want, "real-%ld", k);
+        for (long i = 0; i < SN_ITERS * scale; i++) {
+            long fd = syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, SN_MODE);
+            int e = errno;
+            if (fd >= 0) {
+                sn_res[ph][k].fdok++;
+                ssize_t n = pread((int)fd, got, sizeof got, 0);
+                sn_res[ph][k].content += n == wl && !memcmp(got, want, (size_t)wl);
+                close((int)fd);
+            } else if (e == EACCES) sn_res[ph][k].eacces++;
+            else sn_res[ph][k].other++;
+        }
+    }
+    return NULL;
+}
+static int t_seccompnotify(void) {
+    snprintf(sn_dir, sizeof sn_dir, "/tmp/cfzsn.XXXXXX");
+    if (!mkdtemp(sn_dir)) { puts("UNSUPPORTED tmpdir"); return 0; }
+    for (int k = 0; k < SN_THREADS; k++) {
+        char path[96], text[32];
+        sn_path(path, sizeof path, k);
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        int tl = snprintf(text, sizeof text, "real-%d", k);
+        if (fd < 0 || write(fd, text, (size_t)tl) != tl) return 0;
+        close(fd);
+    }
+    pid_t c = fork();
+    if (!c) {
+        struct sock_filter f[] = {
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 0, 5),
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 3),
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[3])),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SN_MODE, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        };
+        struct sock_fprog prog = {sizeof f / sizeof f[0], f};
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) _exit(99);
+        sn_listener = (int)syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER, &prog);
+        if (sn_listener < 0) _exit(99);
+        pthread_t sup, t[SN_THREADS];
+        pthread_create(&sup, NULL, sn_supervisor, NULL);
+        for (long k = 0; k < SN_THREADS; k++) pthread_create(&t[k], NULL, sn_caller, (void *)k);
+        for (int k = 0; k < SN_THREADS; k++)
+            while (!sn_tids[k]) cfz_sleep_us(100);
+        /* Opens without the sentinel mode are not intercepted. */
+        char path[96], got[16];
+        sn_path(path, sizeof path, 0);
+        int plain = open(path, O_RDONLY | O_CLOEXEC);
+        int plainok = plain >= 0 && pread(plain, got, sizeof got, 0) == 6 && !memcmp(got, "real-0", 6);
+        if (plain >= 0) close(plain);
+        uint64_t end = mono_ns(CLOCK_MONOTONIC) + 60000000000ULL;
+        for (int ph = 0; ph < 3; ph++) {
+            sn_phase = ph;
+            __atomic_store_n(&sn_go, ph + 1, __ATOMIC_RELEASE);
+            cfz_wake(&sn_go);
+            for (;;) {
+                long done = 0;
+                for (int k = 0; k < SN_THREADS; k++)
+                    done += sn_res[ph][k].fdok + sn_res[ph][k].eacces + sn_res[ph][k].other;
+                if (done >= SN_THREADS * SN_ITERS * scale || mono_ns(CLOCK_MONOTONIC) > end) break;
+                cfz_sleep_us(500);
+            }
+        }
+        for (int k = 0; k < SN_THREADS; k++) pthread_join(t[k], NULL);
+        sn_quit = 1;
+        pthread_join(sup, NULL);
+        const char *names[3] = {"continue", "eacces", "addfd"};
+        long per = SN_ITERS * scale;
+        for (int ph = 0; ph < 3; ph++) {
+            long fdok = 0, content = 0, eacces = 0, other = 0;
+            for (int k = 0; k < SN_THREADS; k++) {
+                fdok += sn_res[ph][k].fdok;
+                content += sn_res[ph][k].content;
+                eacces += sn_res[ph][k].eacces;
+                other += sn_res[ph][k].other;
+            }
+            OUT(names[ph], "opened %ld content %ld eacces %ld other %ld of %ld", fdok, content, eacces, other, per * SN_THREADS);
+        }
+        OUT("notifications", "%ld pid %ld nr %ld arch %ld args %ld path %ld replied %ld", sn_notes, sn_pidok, sn_nrok, sn_archok,
+            sn_argsok, sn_pathok, sn_replyok);
+        OUT("plainOpen", "%d", plainok);
+        _exit(0);
+    }
+    int st = 0;
+    waitpid(c, &st, 0);
+    for (int k = 0; k < SN_THREADS; k++) {
+        char path[96];
+        sn_path(path, sizeof path, k);
+        unlink(path);
+    }
+    rmdir(sn_dir);
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 99) { puts("UNSUPPORTED seccomp_user_notif"); return 0; }
+    OUT("exit", "%d", WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st));
+    return 1;
+}
+
 static const struct { const char *name; int (*fn)(void); } TESTS[] = {
     {"casp", t_casp}, {"lse2", t_lse2}, {"ldapr", t_ldapr}, {"dczva", t_dczva}, {"carry", t_carry},
     {"fpcr", t_fpcr}, {"tbi", t_tbi}, {"rwrx", t_rwrx}, {"mremapcode", t_mremapcode},
@@ -3697,6 +5566,12 @@ static const struct { const char *name; int (*fn)(void); } TESTS[] = {
     {"exclusive", t_exclusive},
     {"sigframe", t_sigframe}, {"ctxrewrite", t_ctxrewrite}, {"restart", t_restart}, {"rtfifo", t_rtfifo},
     {"sigpressure", t_sigpressure}, {"tmpmask", t_tmpmask}, {"sigshare", t_sigshare}, {"sigstop", t_sigstop},
+    {"nestsig", t_nestsig}, {"execsig", t_execsig}, {"execsigrace", t_execsigrace},
+    {"autodisarmctx", t_autodisarmctx}, {"sigio", t_sigio}, {"timerstorm", t_timerstorm},
+    {"timerstormcounts", t_timerstormcounts}, {"chargelin", t_chargelin}, {"chargelinvalues", t_chargelinvalues},
+    {"unaligned", t_unaligned}, {"exclmaint", t_exclmaint}, {"exclmaintcounts", t_exclmaintcounts},
+    {"simdfpctl", t_simdfpctl}, {"rseqcommit", t_rseqcommit}, {"futexops", t_futexops}, {"epolledge", t_epolledge},
+    {"seccompnotify", t_seccompnotify},
     {"capabilities", t_capabilities},
 };
 
@@ -3711,6 +5586,7 @@ int main(int argc, char **argv) {
     scale = argc > 3 ? atol(argv[3]) : 1;
     rng = (uint64_t)seed * 0x9E3779B97F4A7C15ULL | 1;
     setvbuf(stdout, NULL, _IOLBF, 0);
+    if (!strcmp(argv[1], "execsighelper")) return es_helper(argc, argv);
     for (size_t i = 0; i < sizeof TESTS / sizeof TESTS[0]; i++) {
         if (strcmp(argv[1], TESTS[i].name)) continue;
         if (TESTS[i].fn()) printf("OK %s\n", argv[1]);

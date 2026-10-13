@@ -1,9 +1,9 @@
 // CoreCLR probes: tiered compilation (tier 0, call counting, tier 1 with PGO, on-stack
 // replacement) through interface stub dispatch, shared generics and hardware-fault exceptions;
 // and the generational, compacting collector with card-marking write barriers while other
-// threads run and must be suspended.
+// threads run and must be suspended; reverse P/Invoke from native threads (reversePInvoke).
 //
-// Usage: csfz tier|gc SEED SCALE
+// Usage: csfz tier|gc|reversePInvoke SEED SCALE
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -45,13 +45,14 @@ static class Fz
     {
         if (args.Length != 3 || !ulong.TryParse(args[1], out ulong seed) || !int.TryParse(args[2], out int scale) || scale < 1)
         {
-            Console.WriteLine("FAIL usage: csfz tier|gc SEED SCALE");
+            Console.WriteLine("FAIL usage: csfz tier|gc|reversePInvoke SEED SCALE");
             return 2;
         }
         switch (args[0])
         {
             case "tier": Tier.Run(seed | 1, scale); break;
             case "gc": Gc.Run(seed | 1, scale); break;
+            case "reversePInvoke": ReversePInvoke.Run(seed | 1, scale); break;
             default: Fail("unknown test " + args[0]); break;
         }
         Console.WriteLine($"OK Cs.{args[0]} {digest:x8}");
@@ -342,5 +343,160 @@ static class Gc
         GC.Collect();
         Fz.Emit("finalized", Finalized.Count);
         Fz.Emit("weak_alive", weak.Count(w => w.IsAlive));
+    }
+}
+
+// Reverse P/Invoke: pthreads created by a native helper (/fuzz/bin/libfzclr.so, probes/c/fzclr.c)
+// call [UnmanagedCallersOnly] methods with ten integer and nine floating-point arguments, so the
+// runtime attaches each new thread on its first call and detaches it when it exits. Each callback
+// holds live managed references across a nested P/Invoke (which may call a second callback) while
+// managed threads force compacting collections; the helper checks every result against its model
+// and the callbacks check every reference still holds its contents.
+static unsafe class ReversePInvoke
+{
+    const string Lib = "/fuzz/bin/libfzclr.so";
+
+    [DllImport(Lib)] static extern long fz_clr_threads(IntPtr cb, int threads, int calls, long seed, int inl, out long mismatch);
+    [DllImport(Lib)] static extern long fz_clr_leaf(long x, double y);
+    [DllImport(Lib)] static extern void fz_clr_set_leaf(IntPtr cb);
+
+    sealed class Payload
+    {
+        public readonly int Index;
+        public readonly long[] Data;
+        public readonly string Text;
+        public Payload(int index)
+        {
+            Index = index;
+            Data = new long[16 + index % 48];
+            for (int i = 0; i < Data.Length; i++) Data[i] = (long)((ulong)index * 0x9E3779B97F4A7C15UL + (ulong)i);
+            Text = "p" + index.ToString("x");
+        }
+        public bool Intact(int index)
+        {
+            if (Index != index || Text != "p" + index.ToString("x") || Data.Length != 16 + index % 48) return false;
+            for (int i = 0; i < Data.Length; i++) if (Data[i] != (long)((ulong)index * 0x9E3779B97F4A7C15UL + (ulong)i)) return false;
+            return true;
+        }
+    }
+
+    static readonly Payload[] Roots = new Payload[256];
+    static long refBad, callbacks, leafCallbacks;
+
+    [UnmanagedCallersOnly]
+    static long Leaf2(long x, double y)
+    {
+        Interlocked.Increment(ref leafCallbacks);
+        var junk = new byte[(int)((ulong)x % 512) + 1];
+        junk[0] = (byte)x;
+        return (long)(((ulong)x * 0x9E3779B97F4A7C15UL) ^ (ulong)BitConverter.DoubleToInt64Bits(y * 2.0)) + (junk[0] - (byte)x);
+    }
+
+    [UnmanagedCallersOnly]
+    static long Cb(long a, int b, double c, float d, long e, double f, long g, long h, long i, long j, long k, long l,
+                   double m, double n, double o, double p, double q, double r, double s)
+    {
+        Interlocked.Increment(ref callbacks);
+        long[] ints = { a, b, e, g, h, i, j, k, l, 5 };
+        ulong x = 0x84222325CBF29CE4UL;
+        for (int z = 0; z < ints.Length; z++) x = (x ^ (ulong)ints[z]) * 0x9E3779B97F4A7C15UL + (ulong)z;
+        double sum = c - f * 0.5 + m * 2.0 - n + o * 0.25 + p - q * 4.0 + r + s * 0.125;
+        x ^= (ulong)BitConverter.DoubleToInt64Bits(sum) ^ ((ulong)BitConverter.SingleToUInt32Bits(d * 2.0f) << 5);
+
+        // Live references across the nested call: a rooted payload, a fresh array and a string.
+        int idx = (int)((ulong)a % (ulong)Roots.Length);
+        Payload root = Roots[idx];
+        if ((a & 7) == 0) Interlocked.Exchange(ref Roots[idx], new Payload(idx));
+        var tmp = new long[8 + (int)((ulong)e % 120)];
+        for (int t = 0; t < tmp.Length; t++) tmp[t] = g ^ t;
+        string str = "s" + (h & 0xffff).ToString("x");
+        long leaf = fz_clr_leaf((long)x, sum);
+        bool ok = root.Intact(idx) && str == "s" + (h & 0xffff).ToString("x") && tmp.Length == 8 + (int)((ulong)e % 120);
+        for (int t = 0; ok && t < tmp.Length; t++) ok = tmp[t] == (g ^ t);
+        if (!ok) Interlocked.Increment(ref refBad);
+        return (long)(x ^ (ulong)leaf);
+    }
+
+    public static void Run(ulong seed, int scale)
+    {
+        for (int i = 0; i < Roots.Length; i++) Roots[i] = new Payload(i);
+        delegate* unmanaged<long, double, long> leaf2 = &Leaf2;
+        fz_clr_set_leaf((IntPtr)leaf2);
+        delegate* unmanaged<long, int, double, float, long, double, long, long, long, long, long, long,
+                            double, double, double, double, double, double, double, long> cb = &Cb;
+        IntPtr cbp = (IntPtr)cb;
+
+        // Managed threads forcing compacting collections (and the large-object heap) throughout.
+        bool stop = false;
+        var collectors = new Thread[2];
+        for (int t = 0; t < collectors.Length; t++)
+        {
+            int k = t;
+            collectors[t] = new Thread(() =>
+            {
+                var keep = new List<byte[]>();
+                for (int i = 0; !Volatile.Read(ref stop); i++)
+                {
+                    keep.Add(new byte[k == 0 ? 1000 + i % 5000 : 90_000]);
+                    if (keep.Count > 64) keep.Clear();
+                    if (k == 0 && i % 4 == 0)
+                    {
+                        if (i % 16 == 0) System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                        GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    }
+                    Thread.Sleep(1);
+                }
+            });
+            collectors[t].Start();
+        }
+
+        int batches = 40 * scale;
+        long mismatches = 0;
+        ulong h = 0;
+        for (int b = 0; b < batches; b++)
+        {
+            int threads = 1 + b % 8, calls = 20 + b % 13;
+            long s = (long)(seed * 0x2545F4914F6CDD1DUL) + b;
+            long want = fz_clr_threads(cbp, threads, calls, s, 1, out long mm1);
+            long got = fz_clr_threads(cbp, threads, calls, s, 0, out long mm2);
+            mismatches += mm1 + mm2;
+            if (got != want) Fz.Fail($"reversePInvoke batch {b}: threads {got:x16}, inline {want:x16}");
+            h = Fz.Mix(h, (ulong)got);
+        }
+        // Several managed threads starting native batches at once.
+        var results = new long[3];
+        var starters = new Thread[3];
+        for (int t = 0; t < starters.Length; t++)
+        {
+            int k = t;
+            starters[t] = new Thread(() =>
+            {
+                long acc = 0;
+                for (int b = 0; b < 4 * scale; b++)
+                {
+                    acc = acc * 31 + fz_clr_threads(cbp, 3, 10, (long)seed + k * 1000 + b, 0, out long mm);
+                    Interlocked.Add(ref mismatches, mm);
+                }
+                results[k] = acc;
+            });
+            starters[t].Start();
+        }
+        foreach (var th in starters) th.Join();
+        for (int t = 0; t < starters.Length; t++)
+        {
+            long acc = 0;
+            for (int b = 0; b < 4 * scale; b++) acc = acc * 31 + fz_clr_threads(cbp, 3, 10, (long)seed + t * 1000 + b, 1, out long mm);
+            if (acc != results[t]) Fz.Fail($"reversePInvoke starter {t}: {results[t]:x16}, want {acc:x16}");
+            h = Fz.Mix(h, (ulong)acc);
+        }
+        Volatile.Write(ref stop, true);
+        foreach (var th in collectors) th.Join();
+        if (mismatches != 0) Fz.Fail($"reversePInvoke: {mismatches} callback results differ from the native model");
+        if (refBad != 0) Fz.Fail($"reversePInvoke: {refBad} callbacks saw a changed managed reference");
+        for (int i = 0; i < Roots.Length; i++) if (!Roots[i].Intact(i)) Fz.Fail($"reversePInvoke: root {i} changed");
+        Fz.Emit("batches", batches);
+        Fz.Emit("result", h.ToString("x16"));
+        Fz.Emit("callbacks", callbacks);
+        Fz.Emit("leafCallbacks", leafCallbacks);
     }
 }

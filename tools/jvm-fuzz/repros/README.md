@@ -36,6 +36,11 @@ Open bugs found by the P0 probes (`C.*` signal and `cfzsync` tests, JVM and Go p
 | `jitspin W S MS` | flushes while threads call into the flushed code | 2 flushes in 3 s instead of thousands |
 | `pid1_raise_dfl` | PID 1 raising a signal with the default action | spins at 100% CPU |
 | `RedefineWrongMethod.java` | class redefinition with a thread parked in the class | JVM crash in `vframeStream` from `handle_wrong_method` |
+| `sigaltstack_onstack` | `sigaltstack` from a handler running on the alternate stack | `SS_ONSTACK` never reported |
+| `exec_sigign` | ignored dispositions across `execve` | ignored signals become default |
+| `unaligned_ldxr` | `ldxr` across 16 bytes or into a `PROT_NONE` page | faults at the `stxr`, or as `SEGV_ACCERR` at the page |
+| `stxr_flush_dup flush` | `ldxr`/`stxr` increments while another thread flushes code | increments applied twice |
+| `timer_signal_loss thread N` | process-directed timer signals with a `SIGEV_THREAD` helper exiting | signals dropped by the exiting thread |
 | `go_exec_flaky.sh` | runs `Go.exec` repeatedly | about 3% of runs lose a signal, crash a child or hang |
 
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple

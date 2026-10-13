@@ -30,7 +30,8 @@ RUN mkdir /native && gcc -O2 -pthread -o /native/cfz /src/c/cfz.c -ldl && \
     gcc -O2 -pthread -o /native/cfzprocfs /src/c/cfzprocfs.c && \
     gcc -O2 -pthread -o /native/cfzsync /src/c/cfzsync.c && \
     gcc -O2 -shared -fPIC -pthread -ffp-contract=off -I/opt/java/openjdk/include -I/opt/java/openjdk/include/linux \
-      -o /native/libfzjni.so /src/c/fzjni.c
+      -o /native/libfzjni.so /src/c/fzjni.c && \
+    gcc -O2 -shared -fPIC -pthread -ffp-contract=off -o /native/libfzclr.so /src/c/fzclr.c
 
 # Probes for other runtimes (probes/go, js, cs, erl, lua). Each runtime comes from an image pinned
 # by digest or a source archive pinned by checksum, and runs on the runtime image's glibc 2.35.
@@ -38,6 +39,17 @@ RUN mkdir /native && gcc -O2 -pthread -o /native/cfz /src/c/cfz.c -ldl && \
 FROM docker.io/library/golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS go
 COPY src/go /src/go
 RUN cd /src/go && CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -o /out/gofz .
+# The cgo variant links glibc, so it builds with the runtime image's toolchain.
+FROM native AS gocgo
+COPY --from=go /usr/local/go /usr/local/go
+COPY src/go /src/go
+RUN cd /src/go && CGO_ENABLED=1 GOTOOLCHAIN=local /usr/local/go/bin/go build -trimpath -o /out/gofzcgo .
+
+# CPython: a relocatable python-build-standalone release (glibc 2.17+), checked against its SHA256SUMS.
+FROM docker.io/library/ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401 AS python
+ADD --checksum=sha256:5ad58156cbec94e5643c13caa792e92df72a23f33d3a6425d4cbff5c4b7a040c \
+    https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.13.15%2B20260924-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz /python.tar.gz
+RUN mkdir /out && tar -xzf /python.tar.gz -C /out
 
 # Node.js: the official linux-arm64 build (needs glibc 2.28), as the node image installs it.
 FROM docker.io/library/node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS node
@@ -56,7 +68,8 @@ FROM docker.io/hexpm/erlang:28.5.0.6-ubuntu-jammy-20260810@sha256:32587e1dc22250
 RUN mkdir -p /otp/lib && cd /usr/local/lib/erlang && cp -a bin erts-* releases /otp/ && \
     cp -a lib/kernel-* lib/stdlib-* /otp/lib/ && rm -rf /otp/erts-*/doc /otp/erts-*/include /otp/lib/*/src
 COPY src/erl /src/erl
-RUN mkdir /out && erlc -o /out /src/erl/beamfz.erl
+RUN mkdir -p /out/hot/v1 /out/hot/v2 && erlc -o /out /src/erl/beamfz.erl && \
+    erlc -o /out/hot/v1 /src/erl/fzhot.erl && erlc -DV2 -o /out/hot/v2 /src/erl/fzhot.erl
 
 # LuaJIT from a pinned commit of the v2.1 branch.
 FROM docker.io/library/ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401 AS luajit
@@ -77,11 +90,14 @@ COPY --from=compile /classes /fuzz/classes
 COPY --from=compile /wb /fuzz/wb
 COPY --from=native /native /fuzz/bin
 COPY --from=go /out/gofz /fuzz/bin/
+COPY --from=gocgo /out/gofzcgo /fuzz/bin/
+COPY --from=python /out/python /fuzz/python
 COPY --from=dotnet /out/cs /fuzz/bin/
 COPY --from=erlang /out /fuzz/erl
 COPY src/js/jsfz.js /fuzz/js/
 COPY src/lua/luafz.lua /fuzz/lua/
-COPY --chmod=755 src/js/jsfz src/erl/erlfz src/lua/luafz /fuzz/bin/
+COPY src/py/pyfz.py /fuzz/py/
+COPY --chmod=755 src/js/jsfz src/erl/erlfz src/lua/luafz src/py/pyfz /fuzz/bin/
 COPY batches /fuzz/batches
 COPY run-batch.sh /fuzz/run-batch.sh
 ENTRYPOINT ["/fuzz/run-batch.sh"]

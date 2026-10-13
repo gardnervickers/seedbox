@@ -1,8 +1,10 @@
 // Go runtime probes: asynchronous preemption (sysmon's SIGURG and the context it rewrites),
-// goroutine stack growth, copying and shrinking, the concurrent collector's write barriers, and
-// child processes started through Go's own vfork-style clone (exec).
+// goroutine stack growth, copying and shrinking, the concurrent collector's write barriers,
+// child processes started through Go's own vfork-style clone (exec), memory faults turned into
+// recoverable panics (faultRecovery) and, in the cgo build, callbacks from C threads
+// (cgoThreads, cgo.go).
 //
-// Usage: gofz preempt|stack|gc|exec SEED SCALE
+// Usage: gofz preempt|stack|gc|exec|faultRecovery|cgoThreads SEED SCALE
 //
 // Every concurrent result is recomputed in one goroutine and must agree; the output is
 // independent of scheduling, addresses and timing.
@@ -26,6 +28,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 var digest = fnv.New64a()
@@ -791,12 +794,159 @@ func execChild(args []string) {
 	os.Exit(104)
 }
 
+// ---------------------------------------------------------------------------------------------
+// faultRecovery
+
+// With debug.SetPanicOnFault, a fault on a protected page becomes a runtime.Error panic carrying
+// the fault address, raised from the signal frame the kernel (or a translator) built. Faults are
+// taken through noinline loads and stores at several stack depths, on stacks that have just
+// grown, with defers to run; each is recovered, access restored and the data checked, while
+// other goroutines collect and spin so preemption and GC meet the faulting goroutines.
+
+type addrError interface{ Addr() uintptr }
+
+//go:noinline
+func faultLoad(p *uint64) uint64 { return *p }
+
+//go:noinline
+func faultStore(p *uint64, v uint64) { *p = v }
+
+var faultDefers atomic.Int64
+
+// faultDeep recurses n frames of 256 bytes, then loads (or stores) through p.
+//
+//go:noinline
+func faultDeep(n int, p *uint64, store bool, x uint64) uint64 {
+	var local [32]uint64
+	local[n%32] = x
+	if n%5 == 0 {
+		defer func() { faultDefers.Add(1) }()
+	}
+	if n == 0 {
+		if store {
+			faultStore(p, x)
+			return x
+		}
+		return faultLoad(p) ^ local[0]
+	}
+	return faultDeep(n-1, p, store, x*31+uint64(n)) + local[n%32]
+}
+
+// tryFault returns the fault address (0 when no fault happened) and the value read.
+func tryFault(n int, p *uint64, store bool, x uint64) (addr uintptr, v uint64) {
+	defer func() {
+		if e := recover(); e != nil {
+			ae, ok := e.(addrError)
+			if !ok {
+				fail("fault panic %v is not an address error", e)
+			}
+			if _, ok := e.(runtime.Error); !ok {
+				fail("fault panic %v is not a runtime.Error", e)
+			}
+			addr = ae.Addr()
+		}
+	}()
+	return 0, faultDeep(n, p, store, x)
+}
+
+func faultWorker(id int, seed uint64, rounds int) (uint64, int) {
+	debug.SetPanicOnFault(true)
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	pg := os.Getpagesize()
+	const pages = 8
+	mem, err := syscall.Mmap(-1, 0, pages*pg, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_ANON|syscall.MAP_PRIVATE)
+	if err != nil {
+		fail("mmap: %v", err)
+	}
+	defer syscall.Munmap(mem)
+	words := pages * pg / 8
+	word := func(i int) *uint64 { return (*uint64)(unsafe.Pointer(&mem[i*8])) }
+	x := seed | 1
+	for i := 0; i < words; i++ {
+		x = xorshift(x)
+		*word(i) = x
+	}
+	model := make([]uint64, words)
+	for i := range model {
+		model[i] = *word(i)
+	}
+	h := fnv.New64a()
+	faults := 0
+	for r := 0; r < rounds; r++ {
+		x = xorshift(x)
+		page := int(x % pages)
+		i := page*(pg/8) + int((x>>8)%uint64(pg/8))
+		depth := []int{0, 1, 7, 60, 300}[(x>>20)%5]
+		store := (x>>24)%3 == 0
+		prot := syscall.PROT_NONE
+		if store && (x>>26)%2 == 0 {
+			prot = syscall.PROT_READ // a store to a read-only page faults too
+		}
+		pageMem := mem[page*pg : (page+1)*pg]
+		if err := syscall.Mprotect(pageMem, prot); err != nil {
+			fail("mprotect: %v", err)
+		}
+		addr, _ := tryFault(depth, word(i), store, x)
+		if err := syscall.Mprotect(pageMem, syscall.PROT_READ|syscall.PROT_WRITE); err != nil {
+			fail("mprotect: %v", err)
+		}
+		if addr != uintptr(unsafe.Pointer(word(i))) {
+			fail("fault %d.%d at %#x, want %#x", id, r, addr, uintptr(unsafe.Pointer(word(i))))
+		}
+		faults++
+		// The page still holds the model; an unprotected access now succeeds.
+		if a, v := tryFault(0, word(i), false, x); a != 0 || v != model[i]^x {
+			fail("load after restore %d.%d: fault %#x, value %x", id, r, a, v)
+		}
+		if *word(i) != model[i] {
+			fail("word %d changed by a faulting store: %x, want %x", i, *word(i), model[i])
+		}
+		fmt.Fprintf(h, "%d:%d:%t,", i, depth, store)
+	}
+	for i := range model {
+		if *word(i) != model[i] {
+			fail("word %d: %x, want %x", i, *word(i), model[i])
+		}
+	}
+	return h.Sum64(), faults
+}
+
+func faultRecovery(seed uint64, scale int) {
+	runtime.GOMAXPROCS(2)
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	execNoise(&stop, &wg)
+	const W = 4
+	rounds := 400 * scale
+	hs := make([]uint64, W)
+	counts := make([]int, W)
+	var fw sync.WaitGroup
+	for w := 0; w < W; w++ {
+		fw.Add(1)
+		go func(w int) {
+			defer fw.Done()
+			hs[w], counts[w] = faultWorker(w, seed+uint64(w)*0x9E37, rounds)
+		}(w)
+	}
+	fw.Wait()
+	stop.Store(true)
+	wg.Wait()
+	total := 0
+	for _, c := range counts {
+		total += c
+	}
+	emit("fault.recovered", fmt.Sprintf("%d of %d", total, W*rounds))
+	emit("fault.shapes", hash64(hs))
+	emit("fault.defers", faultDefers.Load())
+}
+
 func main() {
 	if len(os.Args) > 2 && os.Args[1] == "exec-child" {
 		execChild(os.Args[2:])
 	}
 	if len(os.Args) != 4 {
-		fmt.Println("FAIL usage: gofz preempt|stack|gc|exec SEED SCALE")
+		fmt.Println("FAIL usage: gofz preempt|stack|gc|exec|faultRecovery|cgoThreads SEED SCALE")
 		os.Exit(2)
 	}
 	seed, err1 := strconv.ParseUint(os.Args[2], 10, 64)
@@ -804,7 +954,8 @@ func main() {
 	if err1 != nil || err2 != nil || scale < 1 {
 		fail("bad SEED or SCALE")
 	}
-	tests := map[string]func(uint64, int){"preempt": preempt, "stack": stack, "gc": gc, "exec": execProbe}
+	tests := map[string]func(uint64, int){"preempt": preempt, "stack": stack, "gc": gc, "exec": execProbe,
+		"faultRecovery": faultRecovery, "cgoThreads": cgoThreads}
 	test, ok := tests[os.Args[1]]
 	if !ok {
 		fail("unknown test %s", os.Args[1])

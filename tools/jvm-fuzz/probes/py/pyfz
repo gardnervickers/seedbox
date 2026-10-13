@@ -1,0 +1,3 @@
+#!/bin/sh
+# CPython probes (pyfz.py) on the image's CPython; -I ignores PYTHON* variables and user site.
+exec /fuzz/python/bin/python3 -I /fuzz/py/pyfz.py "$@"

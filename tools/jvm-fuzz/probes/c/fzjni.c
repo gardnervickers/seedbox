@@ -1,5 +1,5 @@
-// JNI and foreign-function helpers for the JVM probes ForeignThreadAttach, JniCriticalGc and
-// LibjsigChaining (/fuzz/bin/libfzjni.so). Every value is computed from the probe's seed, so a
+// JNI and foreign-function helpers for the JVM probes ForeignThreadAttach, JniCriticalGc,
+// LibjsigChaining and JniNativeRebinding (/fuzz/bin/libfzjni.so). Every value is computed from the probe's seed, so a
 // C model and the Java callee must agree bit for bit; built with -ffp-contract=off so neither
 // side fuses a multiply and an add.
 #define _GNU_SOURCE
@@ -430,4 +430,41 @@ JNIEXPORT jlong JNICALL Java_LibjsigChaining_foreignFaults(JNIEnv *env, jclass c
 JNIEXPORT jlong JNICALL Java_LibjsigChaining_count(JNIEnv *env, jclass cl, jint path) {
     (void)env; (void)cl;
     return sig_count[path];
+}
+
+// ------------------------------------------------------------------------------------------------
+// JniNativeRebinding: two implementations of JniNativeRebinding$T.f and .g, bound with
+// RegisterNatives only (no Java_ symbol exists for them, so an unregistered call cannot link).
+
+static jlong JNICALL nr_fA(JNIEnv *env, jclass cl, jlong x, jint y, jdouble d) {
+    (void)env; (void)cl;
+    return (jlong)(((uint64_t)x * 31 + (uint64_t)(int64_t)y) ^ (dbits(d) >> 3));
+}
+
+static jlong JNICALL nr_fB(JNIEnv *env, jclass cl, jlong x, jint y, jdouble d) {
+    (void)env; (void)cl;
+    return (jlong)(((uint64_t)x ^ 0x5bd1e995ULL) * 17 - (uint64_t)(int64_t)y + (dbits(d) << 1));
+}
+
+static jlong JNICALL nr_gA(JNIEnv *env, jclass cl, jlong x) {
+    (void)env; (void)cl;
+    uint64_t u = (uint64_t)x;
+    return (jlong)(((u << 13) | (u >> 51)) + 0x9E3779B97F4A7C15ULL);
+}
+
+static jlong JNICALL nr_gB(JNIEnv *env, jclass cl, jlong x) {
+    (void)env; (void)cl;
+    uint64_t u = (uint64_t)x;
+    return (jlong)(((u >> 7) | (u << 57)) ^ 0xC2B2AE3D27D4EB4FULL);
+}
+
+// which: 0 binds A, 1 binds B, 2 unregisters, 3 binds f to A and g to B.
+JNIEXPORT jint JNICALL Java_JniNativeRebinding_rebind(JNIEnv *env, jclass cl, jclass t, jint which) {
+    (void)cl;
+    if (which == 2) return (*env)->UnregisterNatives(env, t);
+    JNINativeMethod m[2] = {
+        {"f", "(JID)J", which == 1 ? (void *)nr_fB : (void *)nr_fA},
+        {"g", "(J)J", which == 0 ? (void *)nr_gA : (void *)nr_gB},
+    };
+    return (*env)->RegisterNatives(env, t, m, 2);
 }

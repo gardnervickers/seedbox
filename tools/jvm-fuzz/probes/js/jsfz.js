@@ -1,9 +1,10 @@
 'use strict';
 // V8 probes: WebAssembly out-of-bounds traps (the trap handler turns a guard-region SIGSEGV
 // into a RuntimeError) from Liftoff and TurboFan code, and a JIT-heavy JavaScript workload
-// (inline caches, deoptimization, on-stack replacement, regexp tier-up, code churn).
+// (inline caches, deoptimization, on-stack replacement, regexp tier-up, code churn); worker
+// threads passing a token through shared memory (workersToken).
 //
-// Usage: jsfz wasm|jit SEED SCALE
+// Usage: jsfz wasm|jit|workersToken SEED SCALE
 
 let digest = 0x811c9dc5;
 function emit(key, value) {
@@ -293,14 +294,133 @@ async function jit(seed, scale) {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// workersToken: four worker_threads pass a numbered token through a SharedArrayBuffer. The owner
+// of turn t waits (Atomics.wait) until the token is t, checks the payload the previous owner
+// wrote, does JIT and allocation work, writes the next payload, advances the token with
+// compareExchange and notifies. Midway, a worker spinning in a Wasm loop and one blocked in
+// Atomics.wait are terminated, and a new ring of workers continues the turns.
+
+const { Worker, isMainThread, workerData, parentPort } = require('worker_threads');
+
+// Shared layout (Int32Array): 0 token, 1 payload, 2 payload check, 3 spinning flag, 4 errors.
+const TOKEN = 0, PAYLOAD = 1, CHECK = 2, SPIN = 3, ERRORS = 4;
+const payloadFor = (seed, t) => mix(mix(seed | 0, t), t * 7919) | 0;
+const checkFor = (seed, t) => mix(payloadFor(seed, t), 0x5bd1e995) | 0;
+
+// JIT noise: polymorphic property access, closures and short-lived objects.
+function noise(seed, t) {
+  const objs = [{ a: 1, b: 2 }, { b: 3, a: 4 }, { a: 5, c: 6, b: 7 }, [8, 9], new Map([[1, 2]])];
+  let h = seed ^ t;
+  for (let i = 0; i < 400; i++) {
+    const o = objs[(i + t) % objs.length];
+    h = mix(h, (o.a | 0) + (o.b | 0) + (o.length | 0) + (o.size | 0));
+    const f = (x) => x * (i | 1) + t;
+    h = mix(h, f(i) | 0);
+    if (i % 50 === 0) h = mix(h, JSON.stringify({ i, t }).length);
+  }
+  return h;
+}
+
+function workerMain() {
+  const { mode, sab, k, ring, first, last, seed } = workerData;
+  const a = new Int32Array(sab);
+  if (mode === 'spin') {
+    // An infinite loop in Wasm: (func (loop br 0)).
+    const bytes = Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 7, 8, 1, 4, 115, 112,
+      105, 110, 0, 0, 10, 9, 1, 7, 0, 3, 64, 12, 0, 11, 11]);
+    const spin = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.spin;
+    Atomics.store(a, SPIN, 1);
+    Atomics.notify(a, SPIN);
+    spin();
+    return;
+  }
+  if (mode === 'block') {
+    Atomics.store(a, SPIN, 2);
+    Atomics.notify(a, SPIN);
+    Atomics.wait(a, SPIN, 2); // nobody wakes it; terminate must
+    return;
+  }
+  let h = 0, turns = 0;
+  for (let t = first + k; t < last; t += ring) {
+    for (;;) {
+      const v = Atomics.load(a, TOKEN);
+      if (v === t) break;
+      if (v > t) { Atomics.add(a, ERRORS, 1); break; }
+      Atomics.wait(a, TOKEN, v, 60000);
+    }
+    if (Atomics.load(a, PAYLOAD) !== payloadFor(seed, t) || Atomics.load(a, CHECK) !== checkFor(seed, t)) Atomics.add(a, ERRORS, 1);
+    h = mix(h, noise(seed, t));
+    Atomics.store(a, PAYLOAD, payloadFor(seed, t + 1));
+    Atomics.store(a, CHECK, checkFor(seed, t + 1));
+    if (Atomics.compareExchange(a, TOKEN, t, t + 1) !== t) Atomics.add(a, ERRORS, 1);
+    Atomics.notify(a, TOKEN);
+    turns++;
+  }
+  parentPort.postMessage({ h, turns });
+}
+
+function startWorker(data) {
+  const w = new Worker(__filename, { workerData: data, argv: ['worker'] });
+  const exited = new Promise((resolve) => w.on('exit', resolve));
+  const message = new Promise((resolve, reject) => { w.on('message', resolve); w.on('error', reject); });
+  return { w, exited, message };
+}
+
+async function workersToken(seed, scale) {
+  const sab = new SharedArrayBuffer(64);
+  const a = new Int32Array(sab);
+  const turnsPerRing = 1500 * scale;
+  Atomics.store(a, TOKEN, 0);
+  Atomics.store(a, PAYLOAD, payloadFor(seed, 0));
+  Atomics.store(a, CHECK, checkFor(seed, 0));
+  const results = [];
+  const runRing = async (base, first, last) => {
+    // Worker base+k takes turns first+k, first+k+4, ...
+    const ws = [0, 1, 2, 3].map((k) => startWorker({ mode: 'ring', sab, k, ring: 4, first, last, seed }));
+    const msgs = await Promise.all(ws.map((x) => x.message));
+    const codes = await Promise.all(ws.map((x) => x.exited));
+    msgs.forEach((m, k) => results.push(`${base + k}:${m.turns}:${hex(m.h)}`));
+    return codes;
+  };
+  const codes1 = await runRing(0, 0, turnsPerRing);
+  emit('ring1.exits', codes1.join(','));
+  emit('ring1.token', Atomics.load(a, TOKEN));
+
+  // Terminate a worker spinning in Wasm and one blocked in Atomics.wait.
+  const terms = [];
+  for (const [mode, flag] of [['spin', 1], ['block', 2]]) {
+    Atomics.store(a, SPIN, 0);
+    const x = startWorker({ mode, sab, seed });
+    while (Atomics.load(a, SPIN) !== flag) Atomics.wait(a, SPIN, 0, 1000);
+    const code = await x.w.terminate();
+    terms.push(`${mode}:${code}:${await x.exited}`);
+  }
+  emit('terminated', terms.join(','));
+
+  // A replacement ring continues the token from where the first stopped.
+  const codes2 = await runRing(4, turnsPerRing, 2 * turnsPerRing);
+  emit('ring2.exits', codes2.join(','));
+  emit('ring2.token', Atomics.load(a, TOKEN));
+  emit('payload', hex(Atomics.load(a, PAYLOAD)));
+  emit('errors', Atomics.load(a, ERRORS));
+  let h = 0;
+  for (const r of results) for (let i = 0; i < r.length; i++) h = mix(h, r.charCodeAt(i));
+  emit('workers', hex(h));
+  if (Atomics.load(a, ERRORS) !== 0) fail(`workersToken: ${Atomics.load(a, ERRORS)} errors`);
+  if (Atomics.load(a, TOKEN) !== 2 * turnsPerRing) fail('workersToken: token did not reach the end');
+}
+
 async function main() {
   const [test, seedArg, scaleArg] = process.argv.slice(2);
   const seed = Number(seedArg), scale = Number(scaleArg);
-  if (!Number.isInteger(seed) || !Number.isInteger(scale) || scale < 1) fail('usage: jsfz wasm|jit SEED SCALE');
+  if (!Number.isInteger(seed) || !Number.isInteger(scale) || scale < 1) fail('usage: jsfz wasm|jit|workersToken SEED SCALE');
   rs = seed >>> 0 || 1;
   if (test === 'wasm') wasm(seed, scale);
   else if (test === 'jit') await jit(seed, scale);
+  else if (test === 'workersToken') await workersToken(seed, scale);
   else fail(`unknown test ${test}`);
   console.log(`OK Js.${test} ${hex(digest)}`);
 }
-main().catch((e) => fail(String(e && e.stack || e).split('\n')[0]));
+if (isMainThread) main().catch((e) => fail(String(e && e.stack || e).split('\n')[0]));
+else workerMain();
