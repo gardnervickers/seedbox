@@ -155,6 +155,16 @@ PROBES = {
                                    ["-Djdk.reflect.useDirectMethodHandle=false",
                                     "-Dsun.reflect.inflationThreshold=2147483647"],
                                    ["-Djdk.reflect.useNativeAccessorOnly=true"]]},
+    # Compiled-code reuse, deoptimization with scalar replacement, class redefinition under old
+    # frames, foreign-thread attach, JNI critical sections against GC, and libjsig signal chaining.
+    "CodeReuseGenerations": {"whitebox": True, "extra": ["-XX:ReservedCodeCacheSize=6m", "-XX:-SegmentedCodeCache"],
+                             "skip_profiles": ["int", "c1", "xcomp", "zgc", "zgc-single"]},
+    "DeoptMaterialization": {"whitebox": True, "skip_profiles": ["int", "c1", "xcomp"]},
+    "RedefineOldFrames": {"extra": ["-javaagent:/fuzz/classes/agent.jar"]},
+    "ForeignThreadAttach": {"preview": True, "variants": [[], ["-Xcheck:jni"]],
+                            "skip_profiles": ["zgc", "zgc-single"]},
+    "JniCriticalGc": {"variants": [[], ["-Xcheck:jni"], ["-XX:+UseG1GC"], ["-XX:+UseZGC", "-XX:+ZGenerational"]]},
+    "LibjsigChaining": {},
     "ExitMatrix": {"isolate": True, "arg_variants": ["daemons", "exit7", "halt5", "uncaught"],
                    "exit_codes": {"daemons": 0, "exit7": 7, "halt5": 5, "uncaught": 1}},
     # Native AArch64 probes (probes/c/cfz.c), one test each, run without a JVM.
@@ -165,7 +175,8 @@ PROBES = {
         "epolloneshot", "pidfd", "clone3", "memfdexec", "vmops", "timerfd", "rseq", "iouring",
         "ptrace", "wipeonfork", "scmrights", "ifunc", "robust", "robustpi", "mapnoreplace",
         "pidns", "getrandom", "vmsplice", "unwind", "tlsdtor", "staticpie", "vdsoclock",
-        "waits", "affinity")},
+        "waits", "affinity", "sigframe", "ctxrewrite", "restart", "rtfifo", "sigpressure", "tmpmask",
+        "sigshare", "sigstop")},
     # Host-dependent values (entropy digests, load addresses, counters, exclusive-store failure
     # counts) are compared with the replay only.
     **{f"C.{name}": {"native": name, "det": False} for name in (
@@ -174,6 +185,10 @@ PROBES = {
     # Hashes of /proc files and kernel-visible syscalls after a fixed workload (cfzprocfs.c): any
     # host leak into guest kernel state shows as a replay or twin-run difference naming the file.
     "C.procfs": {"native": "procfs", "exe": "/fuzz/bin/cfzprocfs", "det": False},
+    # Code flushes against blocked syscalls, fork callers, cross-thread invalidation and reused
+    # clone stacks (cfzsync.c).
+    **{f"C.{name}": {"native": name, "exe": "/fuzz/bin/cfzsync"} for name in (
+        "flushmatrix", "syscallivau", "forkcallers", "crossivau", "clonestack")},
     # What the host offers; differences from native describe the guest ("info").
     "C.capabilities": {"native": "capabilities", "info": True},
     # The guest kernel has no process_vm_readv (CROSS_MEMORY_ATTACH); the difference is reported.
@@ -182,7 +197,7 @@ PROBES = {
     # preemption, stacks and GC; V8 Wasm traps and JIT; CoreCLR tiering and GC; BEAM; LuaJIT.
     # Go.preempt hangs if SIGURG preemption is lost.
     "Go.preempt": {"native": "preempt", "exe": "/fuzz/bin/gofz", "isolate": True},
-    **{f"Go.{name}": {"native": name, "exe": "/fuzz/bin/gofz"} for name in ("stack", "gc")},
+    **{f"Go.{name}": {"native": name, "exe": "/fuzz/bin/gofz"} for name in ("stack", "gc", "exec")},
     **{f"Js.{name}": {"native": name, "exe": "/fuzz/bin/jsfz"} for name in ("wasm", "jit")},
     **{f"Cs.{name}": {"native": name, "exe": "/fuzz/bin/csfz"} for name in ("tier", "gc")},
     # BEAM crawls in a simulation (about 250x slower than real time, while it is fast under the

@@ -36,7 +36,13 @@ This is a diagnostic tool, like `tools/mac-tcg`; it is not an acceptance suite.
   finalization, class-initialization states and `CONSTANT_Dynamic` (`ClassInit`),
   method-handle adapters, buffer atomics, stack overflow with locks held, JFR
   chunks, asynchronous files, vector masks, ZipFS and CheckJNI, TLS 1.3, EdDSA,
-  RMI/JMX and the legacy reflection backends. `probes/preview` use the JDK 21
+  RMI/JMX and the legacy reflection backends; compiled-code reuse at the same
+  address (`CodeReuseGenerations`), deoptimization that rematerializes eliminated
+  objects and locks (`DeoptMaterialization`), redefinition with old frames on
+  stack (`RedefineOldFrames`), JNI and upcall attach from foreign threads
+  (`ForeignThreadAttach`), JNI critical sections against GC (`JniCriticalGc`) and
+  `libjsig` signal chaining (`LibjsigChaining`), with JNI helpers in
+  `probes/c/fzjni.c`. `probes/preview` use the JDK 21
   foreign-function preview; `probes/whitebox` compile against the WhiteBox sources
   the image downloads for its JDK update.
 - `probes/c/cfz.c`: native AArch64 probes, one test per `C.<name>` probe, run
@@ -50,17 +56,22 @@ This is a diagnostic tool, like `tools/mac-tcg`; it is not an acceptance suite.
   reads, `MADV_WIPEONFORK`, `SCM_RIGHTS`, `IFUNC`, robust and PI mutexes,
   `MAP_FIXED_NOREPLACE`, PID namespaces, `getrandom`, `vmsplice`/`tee`, DWARF
   unwinding through signal frames, TLS destructors, static PIE re-exec, vDSO clocks,
-  counters, `WFE`/`WFI` and CPU affinity. Probes whose values depend on the host
+  counters, `WFE`/`WFI` and CPU affinity, signal frames and context rewrites,
+  syscall restart, realtime signal order, pending-signal pressure, temporary
+  masks, signals during flushes and SIGSTOP/SIGCONT. Probes whose values depend on the host
   (entropy digests, counters, `TPIDRRO_EL0`, exclusive-store failures) are compared
   with the replay only. `probes/c/cfzprocfs.c` (`C.procfs`, replay-only) hashes
   `/proc` files and kernel-visible syscalls one per line after threads, files,
   sockets, a timer and a fork, so a replay or twin-run difference names the
-  subsystem. `C.capabilities` lists the host's CPU features, syscalls and files;
+  subsystem. `probes/c/cfzsync.c` tests code flushes against threads blocked in
+  each syscall, syscalls between `IC IVAU` and `DSB`, competing fork callers,
+  cross-thread invalidation and reused clone stacks; its timing diagnostics go to
+  stderr only with `CFZ_DIAG` set. `C.capabilities` lists the host's CPU features, syscalls and files;
   its differences from native are reported as `GUEST_DIFF`, not failures. Run
   native passes with `--unconfined`, or the engine's seccomp filter hides some
   syscalls.
 - Other runtimes, as native probes with their own executables (`"exe"`): Go
-  asynchronous preemption, stacks and GC (`probes/go`); Node's WebAssembly traps
+  asynchronous preemption, stacks, GC and `os/exec` children (`probes/go`); Node's WebAssembly traps
   and JIT (`probes/js`); .NET tiering and compacting GC (`probes/cs`); BEAM
   reductions and per-process heaps (`probes/erl`); LuaJIT traces and FFI
   (`probes/lua`). The Erlang probes are `explicit`: BEAM runs about 250 times

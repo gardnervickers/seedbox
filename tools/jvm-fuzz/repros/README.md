@@ -18,6 +18,26 @@ they always print `OK`.
 | `map_noreplace` | `MAP_FIXED_NOREPLACE` over an existing mapping | `EPERM` instead of `EEXIST` |
 | `sigframe_unwind` | `_Unwind_Backtrace` from a SIGSEGV handler | stopped after the handler: its return address was DR's own sigreturn stub |
 
+Open bugs found by the P0 probes (`C.*` signal and `cfzsync` tests, JVM and Go probes):
+
+| Program | What it checks | Under the translator |
+| --- | --- | --- |
+| `sigsys_call_addr` | SIGSYS `si_call_addr` from seccomp | a code-cache address |
+| `tempmask_pending MODE` | `rt_sigpending`; ppoll, pselect6, epoll_pwait(2) and sigsuspend temporary masks | pending set empty; `epoll_pwait2` ignores its mask; signal delivered with EINTR although an fd is ready or the arguments are invalid |
+| `sigtimedwait_queued MODE`, `sigtimedwait before\|flush N` | `rt_sigtimedwait` for a pending or arriving signal | misses an already pending signal; returns EINTR during another thread's flush, then the signal kills the process |
+| `pending_overflow N` | N signals pending on one thread | crash at 9 or more; same-number realtime signals delivered in reverse order |
+| `pending_fork_signalfd MODE N` | pending signals seen by a later `signalfd` and a fork child | `signalfd` reads none; the child receives the parent's |
+| `suspend_signal_sharing SIG N [flush]` | queued SIGILL/SIGSTKFLT/SIGUSR2 while code is flushed | hangs with the client; SIGILL loses `si_pid`/`si_value`; SIGUSR2 handled more often than sent |
+| `stopcont_signals MODE N ...` | process-directed signals with blocking threads and SIGSTOP/SIGCONT | handled once per unblocked thread; EINTR in threads that block it |
+| `flush_eintr CALL N` | waits while another thread flushes code | spurious EINTR (thousands for `nanosleep`) |
+| `vfork_exit vfork\|clone\|spawn` | a vfork child that exits without exec, `posix_spawn` of a missing program | the parent crashes |
+| `clone_mask thread\|vm` | blocked mask inherited by raw `clone` children | not blocked |
+| `vfork_flush N 0 PERIOD [spin]` | a vfork child running before exec during flushes | hangs |
+| `jitspin W S MS` | flushes while threads call into the flushed code | 2 flushes in 3 s instead of thousands |
+| `pid1_raise_dfl` | PID 1 raising a signal with the default action | spins at 100% CPU |
+| `RedefineWrongMethod.java` | class redefinition with a thread parked in the class | JVM crash in `vframeStream` from `handle_wrong_method` |
+| `go_exec_flaky.sh` | runs `Go.exec` repeatedly | about 3% of runs lose a signal, crash a child or hang |
+
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple
 `posix_spawn` into `fork`; it separated the two spawn bugs.
 

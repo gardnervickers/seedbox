@@ -1,21 +1,27 @@
 // Go runtime probes: asynchronous preemption (sysmon's SIGURG and the context it rewrites),
-// goroutine stack growth, copying and shrinking, and the concurrent collector's write barriers.
+// goroutine stack growth, copying and shrinking, the concurrent collector's write barriers, and
+// child processes started through Go's own vfork-style clone (exec).
 //
-// Usage: gofz preempt|stack|gc SEED SCALE
+// Usage: gofz preempt|stack|gc|exec SEED SCALE
 //
 // Every concurrent result is recomputed in one goroutine and must agree; the output is
 // independent of scheduling, addresses and timing.
 package main
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -473,9 +479,324 @@ func gc(seed uint64, scale int) {
 	debug.SetGCPercent(100)
 }
 
+// ---------------------------------------------------------------------------------------------
+// exec
+
+// Go's forkExec clones with CLONE_VFORK|CLONE_VM through its own raw syscall path, not libc's.
+// The children are this executable again ("gofz exec-child MODE ..."). Background goroutines
+// allocate, collect and spin (so sysmon preempts them) throughout.
+
+const execMark = "GOFZ_EXEC_MARK"
+
+func self() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	return os.Args[0]
+}
+
+// execNoise allocates, collects and spins until stop is set.
+func execNoise(stop *atomic.Bool, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var keep [][]byte
+		for i := 0; !stop.Load(); i++ {
+			keep = append(keep, make([]byte, 32<<10))
+			if len(keep) > 64 {
+				keep = keep[:0]
+			}
+			if i%128 == 127 {
+				runtime.GC()
+			}
+			time.Sleep(50 * time.Microsecond)
+		}
+		sink.Add(uint64(len(keep)))
+	}()
+	spinners(2, stop, wg)
+}
+
+func childStatus(seed uint64, i int) int {
+	return []int{0, 1, 2, 3, 42}[(seed+uint64(i)*7)%5]
+}
+
+// runRecord starts one child that writes "rec I" and exits with its chosen status.
+func runRecord(seed uint64, i int) string {
+	want := childStatus(seed, i)
+	cmd := exec.Command(self(), "exec-child", "rec", strconv.Itoa(i), strconv.Itoa(want))
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
+		fail("start rec %d: %v", i, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(120 * time.Second):
+		fail("rec %d: child still running after 120 s (%s)", i, procStatus(cmd.Process.Pid))
+	}
+	out := stdout.String()
+	code := 0
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	} else if err != nil {
+		fail("exec rec %d: %v", i, err)
+	}
+	if code != want {
+		// The wait's own view: the pid it reaped and the raw status, against the started pid.
+		ps := cmd.ProcessState
+		fail("rec %d exit %d, want %d (started pid %d, waited pid %d, status %#x, output %q, stderr %q)", i, code,
+			want, cmd.Process.Pid, ps.Pid(), uint32(ps.Sys().(syscall.WaitStatus)), out, stderr.String())
+	}
+	return out
+}
+
+// records runs n record children from `workers` goroutines and checks every record once.
+func records(seed uint64, n, workers int) string {
+	got := make([]string, n)
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= n {
+					return
+				}
+				got[i] = runRecord(seed, i)
+			}
+		}()
+	}
+	wg.Wait()
+	h := fnv.New64a()
+	for i, rec := range got {
+		if rec != fmt.Sprintf("rec %d\n", i) {
+			fail("record %d is %q", i, rec)
+		}
+		fmt.Fprintf(h, "%d:%d,", i, childStatus(seed, i))
+	}
+	return fmt.Sprintf("%016x", h.Sum64())
+}
+
+// procStatus summarizes a process's state and pending signals for a failure message.
+func procStatus(pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return err.Error()
+	}
+	var parts []string
+	for _, line := range strings.Split(string(b), "\n") {
+		for _, key := range []string{"State:", "SigPnd:", "ShdPnd:", "SigBlk:", "SigCgt:", "Threads:"} {
+			if strings.HasPrefix(line, key) {
+				parts = append(parts, strings.Join(strings.Fields(line), " "))
+			}
+		}
+	}
+	// Each thread's system call (number and first argument), as /proc shows it to a parent.
+	if tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid)); err == nil {
+		for _, t := range tasks {
+			if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/syscall", pid, t.Name())); err == nil {
+				f := strings.Fields(string(b))
+				if len(f) > 2 {
+					f = f[:2]
+				}
+				parts = append(parts, "task "+strings.Join(f, " "))
+			}
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// pacedSignals runs `children` children one at a time from a goroutine locked to its thread;
+// each sends `per` SIGUSR1 to this process, waiting for an acknowledgement after each, so no
+// two are ever pending together. Returns the number received.
+func pacedSignals(usr1 chan os.Signal, children, per int) int {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	got := 0
+	for c := 0; c < children; c++ {
+		cmd := exec.Command(self(), "exec-child", "sig", strconv.Itoa(c), strconv.Itoa(per))
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			fail("stdin pipe: %v", err)
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			fail("stdout pipe: %v", err)
+		}
+		if err := cmd.Start(); err != nil {
+			fail("start sig child: %v", err)
+		}
+		type result struct {
+			out []byte
+			err error
+		}
+		exited := make(chan result, 1)
+		go func() {
+			out, _ := io.ReadAll(stdout)
+			exited <- result{out, cmd.Wait()}
+		}()
+		for k := 0; k < per; k++ {
+			select {
+			case <-usr1:
+				got++
+			case r := <-exited:
+				fail("sig child %d exited before signal %d: %v, printed %q", c, k, r.err, r.out)
+			case <-time.After(60 * time.Second):
+				// Does a signal this process sends itself still arrive?
+				syscall.Kill(os.Getpid(), syscall.SIGUSR1)
+				late := "no"
+				select {
+				case <-usr1:
+					late = "yes"
+				case <-time.After(10 * time.Second):
+				}
+				fail("sig child %d: signal %d never arrived (self-signal afterwards arrives: %s; child %s; parent %s)",
+					c, k, late, procStatus(cmd.Process.Pid), procStatus(os.Getpid()))
+			}
+			if _, err := stdin.Write([]byte{'a'}); err != nil {
+				fail("ack: %v", err)
+			}
+		}
+		stdin.Close()
+		r := <-exited
+		if r.err != nil {
+			fail("sig child %d: %v", c, r.err)
+		}
+		if want := fmt.Sprintf("sig %d %d\n", c, per); string(r.out) != want {
+			fail("sig child %d printed %q", c, r.out)
+		}
+	}
+	return got
+}
+
+func execProbe(seed uint64, scale int) {
+	runtime.GOMAXPROCS(2)
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	execNoise(&stop, &wg)
+
+	// (a) Record children from four goroutines at once.
+	n := 200 * scale
+	emit("exec.records", fmt.Sprintf("%d %s", n, records(seed, n, 4)))
+
+	// (b) The same with SIGCHLD and SIGUSR1 handled through os/signal, paced SIGUSR1 from
+	// children started on a locked thread, and record children running alongside.
+	usr1 := make(chan os.Signal, 64)
+	chld := make(chan os.Signal, 1024)
+	signal.Notify(usr1, syscall.SIGUSR1)
+	signal.Notify(chld, syscall.SIGCHLD)
+	var side sync.WaitGroup
+	side.Add(1)
+	var sideHash string
+	go func() {
+		defer side.Done()
+		sideHash = records(seed^0xabcdef, 40*scale, 2)
+	}()
+	children, per := 4*scale, 5
+	got := pacedSignals(usr1, children, per)
+	side.Wait()
+	signal.Stop(usr1)
+	signal.Stop(chld)
+	extra := len(usr1)
+	emit("exec.signals", fmt.Sprintf("%d of %d, extra %d", got, children*per, extra))
+	emit("exec.sigchld", len(chld) > 0)
+	emit("exec.side", sideHash)
+
+	// (c) Children that set a marker and syscall.Exec this program again, from the main
+	// goroutine or from a goroutine locked to another thread while others run.
+	h := fnv.New64a()
+	m := 20 * scale
+	for i := 0; i < m; i++ {
+		out, err := exec.Command(self(), "exec-child", "stage1", strconv.Itoa(i)).Output()
+		code := 0
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			code = ee.ExitCode()
+		} else if err != nil {
+			fail("stage1 %d: %v", i, err)
+		}
+		if want := fmt.Sprintf("exec %d m%d samepid\n", i, i); string(out) != want || code != i%4 {
+			fail("stage1 %d printed %q exit %d", i, out, code)
+		}
+		fmt.Fprintf(h, "%s%d,", out, code)
+	}
+	emit("exec.reexec", fmt.Sprintf("%d %016x", m, h.Sum64()))
+
+	stop.Store(true)
+	wg.Wait()
+	var ws syscall.WaitStatus
+	pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
+	emit("exec.leaked", pid > 0 || !errors.Is(err, syscall.ECHILD))
+}
+
+// execChild is the child side: "rec I STATUS", "sig I COUNT", "stage1 I", "stage2 I PID".
+func execChild(args []string) {
+	if len(args) < 2 {
+		os.Exit(100)
+	}
+	i, _ := strconv.Atoi(args[1])
+	switch args[0] {
+	case "rec":
+		status, _ := strconv.Atoi(args[2])
+		fmt.Printf("rec %d\n", i)
+		os.Exit(status)
+	case "sig":
+		count, _ := strconv.Atoi(args[2])
+		in := bufio.NewReader(os.Stdin)
+		for k := 0; k < count; k++ {
+			if err := syscall.Kill(os.Getppid(), syscall.SIGUSR1); err != nil {
+				os.Exit(101)
+			}
+			if _, err := in.ReadByte(); err != nil {
+				os.Exit(102)
+			}
+		}
+		fmt.Printf("sig %d %d\n", i, count)
+		os.Exit(0)
+	case "stage1":
+		runtime.GOMAXPROCS(2)
+		var stop atomic.Bool
+		var wg sync.WaitGroup
+		execNoise(&stop, &wg)
+		env := append(os.Environ(), fmt.Sprintf("%s=m%d", execMark, i))
+		argv := []string{"gofz", "exec-child", "stage2", strconv.Itoa(i), strconv.Itoa(os.Getpid())}
+		run := func() {
+			err := syscall.Exec(self(), argv, env)
+			fmt.Printf("exec failed: %v\n", err)
+			os.Exit(103)
+		}
+		if i%2 == 1 {
+			go func() {
+				runtime.LockOSThread()
+				run()
+			}()
+			select {}
+		}
+		run()
+	case "stage2":
+		pid, _ := strconv.Atoi(args[2])
+		same := "otherpid"
+		if pid == os.Getpid() {
+			same = "samepid"
+		}
+		fmt.Printf("exec %d %s %s\n", i, os.Getenv(execMark), same)
+		os.Exit(i % 4)
+	}
+	os.Exit(104)
+}
+
 func main() {
+	if len(os.Args) > 2 && os.Args[1] == "exec-child" {
+		execChild(os.Args[2:])
+	}
 	if len(os.Args) != 4 {
-		fmt.Println("FAIL usage: gofz preempt|stack|gc SEED SCALE")
+		fmt.Println("FAIL usage: gofz preempt|stack|gc|exec SEED SCALE")
 		os.Exit(2)
 	}
 	seed, err1 := strconv.ParseUint(os.Args[2], 10, 64)
@@ -483,7 +804,7 @@ func main() {
 	if err1 != nil || err2 != nil || scale < 1 {
 		fail("bad SEED or SCALE")
 	}
-	tests := map[string]func(uint64, int){"preempt": preempt, "stack": stack, "gc": gc}
+	tests := map[string]func(uint64, int){"preempt": preempt, "stack": stack, "gc": gc, "exec": execProbe}
 	test, ok := tests[os.Args[1]]
 	if !ok {
 		fail("unknown test %s", os.Args[1])
