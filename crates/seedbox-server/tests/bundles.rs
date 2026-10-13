@@ -619,6 +619,110 @@ async fn http_transfers_binary_spools_and_imports_without_enqueuing_work() {
     server.await.unwrap();
 }
 
+/// NEXT-100 case 10, uncertain-upload arm: an import whose client disconnects
+/// before the last byte publishes nothing; one whose client disconnects after
+/// the whole upload, before the response, publishes at most one complete
+/// resource, and exactly one once the import was published before the
+/// response was lost; nothing duplicates it (clients never retry an import).
+#[tokio::test]
+async fn disconnected_imports_publish_nothing_or_one_complete_resource() {
+    use tokio::io::AsyncWriteExt;
+    let directory = tempfile::tempdir().unwrap();
+    let (manager, execution, store) = service(directory.path());
+    let bytes = encode(&fixture(&store, true), &store);
+    let (queue, mut work) = tokio::sync::mpsc::channel(4);
+    let socket = directory.path().join("api.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let (shutdown, done) = tokio::sync::oneshot::channel::<()>();
+    let api = seedbox_server::http::router(
+        seedbox_server::http::ApiState::new(manager.clone(), queue).with_execution(execution),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, api)
+            .with_graceful_shutdown(async {
+                let _ = done.await;
+            })
+            .await
+            .unwrap();
+    });
+    let connect = |sent: usize| {
+        let socket = socket.clone();
+        let bytes = bytes.clone();
+        async move {
+            let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+            let headers = format!("POST /v1/bundles HTTP/1.1\r\nHost: localhost\r\nContent-Type: {BUNDLE_CONTENT_TYPE}\r\nContent-Length: {}\r\n\r\n", bytes.len());
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(&bytes[..sent]).await.unwrap();
+            stream.flush().await.unwrap();
+            stream
+        }
+    };
+    // Disconnect without reading any response.
+    let upload = |sent: usize| {
+        let connection = connect(sent);
+        async move { drop(connection.await) }
+    };
+    let count = || {
+        manager
+            .read(|catalogue| Ok(catalogue.list().count()))
+            .unwrap()
+    };
+    let settled = || async {
+        // Let any spawned import finish; its count must then stay fixed.
+        let mut last = count();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let now = count();
+            if now == last {
+                continue;
+            }
+            last = now;
+        }
+        last
+    };
+    for sent in [0, 1, bytes.len() / 2, bytes.len() - 1] {
+        upload(sent).await;
+        assert_eq!(
+            settled().await,
+            0,
+            "{sent} of {} bytes published",
+            bytes.len()
+        );
+    }
+    upload(bytes.len()).await;
+    let published = settled().await;
+    assert!(published <= 1, "one upload published {published} resources");
+    eprintln!("a full upload without its response published {published} resource(s)");
+    if published == 1 {
+        let id = manager
+            .read(|catalogue| Ok(catalogue.list().next().unwrap().metadata.id.clone()))
+            .unwrap();
+        let resource = manager.describe(&id).unwrap();
+        assert_eq!(resource.status.phase, Phase::Completed);
+        assert!(manager
+            .read(|catalogue| catalogue.checkpoints(&id))
+            .unwrap()
+            .iter()
+            .any(|r| r.request.request_id == "capture"));
+    }
+    // The response is lost after the import was published: exactly one resource.
+    let before = count();
+    let connection = connect(bytes.len()).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while count() == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "full upload never imported"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    drop(connection);
+    assert_eq!(settled().await, before + 1);
+    assert!(work.try_recv().is_err(), "an import enqueued execution");
+    shutdown.send(()).unwrap();
+    server.await.unwrap();
+}
+
 #[test]
 fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override_cursor() {
     let source = tempfile::tempdir().unwrap();
