@@ -401,3 +401,240 @@ impl<B: Backend> Machine<B> {
         Ok(effect)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Stop, IRQ_DEFERRED, LAST, NOW};
+    use super::*;
+    use std::{collections::VecDeque, rc::Rc};
+    #[derive(Default)]
+    struct Scripted {
+        exits: VecDeque<Exit>,
+        entries: usize,
+        interruptible: VecDeque<bool>,
+        injected: Vec<u8>,
+        window: bool,
+        responses: Vec<Option<u64>>,
+    }
+    impl Backend for Scripted {
+        fn create(_: Rc<Memory>, _: Rc<Memory>) -> Result<Self> {
+            Ok(Self::default())
+        }
+        fn boot(&mut self, _: backend::Boot) -> Result<()> {
+            Ok(())
+        }
+        fn enter(&mut self) -> Result<Exit> {
+            self.entries += 1;
+            self.exits
+                .pop_front()
+                .ok_or("unexpected scripted entry".into())
+        }
+        fn complete(&mut self, response: Option<u64>) -> Result<()> {
+            self.responses.push(response);
+            Ok(())
+        }
+        fn interruptible(&mut self) -> bool {
+            self.interruptible.pop_front().unwrap_or(false)
+        }
+        fn inject(&mut self, vector: u8) -> Result<()> {
+            self.injected.push(vector);
+            Ok(())
+        }
+        fn request_window(&mut self, enabled: bool) {
+            self.window = enabled;
+        }
+        fn location(&self) -> u64 {
+            0
+        }
+        fn capture(&mut self) -> Result<Architecture> {
+            Err("script capture unused".into())
+        }
+        fn restore(&mut self, _: &Architecture) -> Result<()> {
+            Err("script restore unused".into())
+        }
+    }
+    fn machine() -> Machine<Scripted> {
+        // Minimal 64-bit bzImage header; the scripted backend executes nothing.
+        let mut image = vec![0; 1024 + 0x210];
+        image[0x1f1] = 1;
+        image[0x201] = 0x66;
+        image[0x202..0x206].copy_from_slice(b"HdrS");
+        image[0x206..0x208].copy_from_slice(&0x020fu16.to_le_bytes());
+        image[0x211] = 1;
+        image[0x22c..0x230].copy_from_slice(&0x7fff_ffffu32.to_le_bytes());
+        image[0x236] = 1;
+        image[0x258..0x260].copy_from_slice(&0x10_0000u64.to_le_bytes());
+        Machine::boot(&image, b"initrd", 7, "").unwrap()
+    }
+    fn event(offset: u64, value: u64) -> Exit {
+        Exit::Mmio {
+            address: super::super::EVENT_MMIO + offset,
+            width: 8,
+            write: true,
+            value,
+        }
+    }
+    fn port(port: u16, write: bool, value: u64) -> Exit {
+        Exit::Port {
+            port,
+            width: 1,
+            write,
+            value,
+        }
+    }
+    fn halt() -> Exit {
+        Exit::Halt { interrupts: true }
+    }
+    /// Initialize the PIC like Linux: ICW1-4, then unmask lines 0, 4 and 5.
+    fn pic_setup() -> [Exit; 5] {
+        [
+            port(0x20, true, 0x11),
+            port(0x21, true, 0x30),
+            port(0x21, true, 0x04),
+            port(0x21, true, 0x01),
+            port(0x21, true, 0xce),
+        ]
+    }
+    #[test]
+    fn host_interruptions_neither_consume_time_nor_inject() {
+        let mut vm = machine();
+        vm.native
+            .exits
+            .extend([Exit::Interrupted, Exit::Interrupted, event(32, 3), halt()]);
+        assert!(matches!(
+            vm.run(0, 10, 1000, false, &[]).unwrap(),
+            Stop::Blocked(None)
+        ));
+        assert_eq!(vm.state.now, 0);
+        assert_eq!(vm.native.entries, 4);
+        assert!(vm.native.injected.is_empty());
+        let entries = vm.native.entries;
+        assert!(matches!(
+            vm.run(25, 25, 1000, false, &[]).unwrap(),
+            Stop::Blocked(None)
+        ));
+        assert_eq!(vm.native.entries, entries);
+        assert_eq!(vm.page.word(NOW), 25);
+    }
+    #[test]
+    fn zero_budget_adoption_marks_timer_without_entry_or_deferral() {
+        let mut vm = machine();
+        vm.state.ready = true;
+        vm.state.idle = true;
+        vm.state.deadline = Some(5);
+        assert!(matches!(
+            vm.run(20, 20, 1000, false, &[]).unwrap(),
+            Stop::Horizon
+        ));
+        assert_eq!(vm.native.entries, 0);
+        assert_eq!(vm.state.deadline, None);
+        assert!(vm.state.timer);
+        assert_eq!(vm.state.devices.lines, 1);
+        assert_eq!(vm.page.word(IRQ_DEFERRED), 0);
+        assert_eq!(vm.page.word(LAST), 20);
+        assert!(vm.native.injected.is_empty());
+    }
+    #[test]
+    fn timer_waits_for_an_interrupt_window_and_is_injected_once() {
+        let mut vm = machine();
+        vm.native.exits.extend([event(32, 3)]);
+        vm.native.exits.extend(pic_setup());
+        vm.native.exits.extend([event(0, 5), halt()]);
+        assert!(matches!(
+            vm.run(0, 100, 1000, false, &[]).unwrap(),
+            Stop::Blocked(Some(5))
+        ));
+        assert_eq!(vm.state.devices.pic.imr, 0xce);
+        // Zero-budget adoption raises the line without entering or injecting.
+        assert!(matches!(
+            vm.run(5, 5, 1000, false, &[]).unwrap(),
+            Stop::Horizon
+        ));
+        assert!(vm.native.injected.is_empty());
+        let entries = vm.native.entries;
+        // Not interruptible at entry: request a window; inject at its exit.
+        vm.native.interruptible.extend([false, true]);
+        vm.native.exits.extend([
+            Exit::Window,
+            // Linux's mask_and_ack: mask, specific EOI; handler acks the timer.
+            port(0x21, true, 0xcf),
+            port(0x20, true, 0x60),
+            event(8, 1),
+            port(0x21, true, 0xce),
+            halt(),
+        ]);
+        assert!(matches!(
+            vm.run(5, 100, 1000, false, &[]).unwrap(),
+            Stop::Blocked(None)
+        ));
+        assert_eq!(vm.native.entries, entries + 6);
+        assert_eq!(vm.native.injected, [0x30]);
+        assert_eq!(vm.state.devices.pic.isr, 0);
+        assert_eq!(vm.state.devices.lines, 0);
+        assert!(!vm.native.window);
+    }
+    #[test]
+    fn in_service_line_blocks_reinjection_until_eoi() {
+        let mut pic = Pic::default();
+        for (port, value) in [(0x20, 0x11), (0x21, 0x30), (0x21, 4), (0x21, 1), (0x21, 0)] {
+            pic.write(port, value);
+        }
+        assert_eq!(pic.next(0b10_0001), Some(0));
+        pic.isr |= 1;
+        assert_eq!(pic.next(0b10_0001), None, "lower priority waits for EOI");
+        pic.write(0x20, 0x0b);
+        assert_eq!(pic.read(0x20, 0b10_0001), 1);
+        pic.write(0x20, 0x20);
+        assert_eq!(pic.isr, 0);
+        assert_eq!(pic.next(0b10_0000), Some(5));
+        pic.isr |= 1 << 5;
+        assert_eq!(pic.next(0b10_0001), Some(0), "higher priority preempts");
+        pic.write(0x20, 0x65);
+        assert_eq!(pic.isr, 0);
+    }
+    #[test]
+    fn ports_uart_and_power_off_are_stopped_rendezvous() {
+        let mut vm = machine();
+        vm.native.exits.extend([
+            event(32, 3),
+            port(0x3f8, true, b'X' as u64),
+            port(0x3fd, false, 0),
+            Exit::Port {
+                port: 0x71,
+                width: 2,
+                write: false,
+                value: 0,
+            },
+            Exit::Mmio {
+                address: 0xfee0_0020,
+                width: 4,
+                write: false,
+                value: 0,
+            },
+            event(40, 1),
+        ]);
+        assert!(matches!(
+            vm.run(0, 10, 1000, false, &[]).unwrap(),
+            Stop::PoweredOff
+        ));
+        assert_eq!(vm.output, b"X");
+        assert_eq!(
+            vm.native.responses,
+            [None, None, Some(0x60), Some(0xffff), Some(0), None]
+        );
+    }
+    #[test]
+    fn masked_halt_and_shutdown_are_errors() {
+        let mut vm = machine();
+        vm.native
+            .exits
+            .extend([event(32, 3), Exit::Halt { interrupts: false }]);
+        assert!(vm.run(0, 10, 1000, false, &[]).is_err());
+        let mut vm = machine();
+        vm.native.exits.extend([halt()]);
+        assert!(vm.run(0, 10, 1000, false, &[]).is_err());
+        let mut vm = machine();
+        vm.native.exits.extend([event(32, 3), Exit::Shutdown]);
+        assert!(vm.run(0, 10, 1000, false, &[]).is_err());
+    }
+}
