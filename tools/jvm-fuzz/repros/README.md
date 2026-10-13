@@ -37,6 +37,7 @@ Open bugs found by the P0 probes (`C.*` signal and `cfzsync` tests, JVM and Go p
 | `pid1_raise_dfl` | PID 1 raising a signal with the default action | spins at 100% CPU |
 | `RedefineWrongMethod.java` | class redefinition with a thread parked in the class | JVM crash in `vframeStream` from `handle_wrong_method` |
 | `go_exec_flaky.sh` | runs `Go.exec` repeatedly | about 3% of runs lose a signal, crash a child or hang |
+| `altstack_onstack [ROUNDS]` | `sigaltstack(NULL, &old)` in a handler running on the alternate stack | `ss_flags` lacks `SS_ONSTACK` |
 
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple
 `posix_spawn` into `fork`; it separated the two spawn bugs.
