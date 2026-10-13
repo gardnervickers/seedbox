@@ -6,7 +6,7 @@ use crate::{
     execution::ExecutionConfig,
     rng::SeededRng,
 };
-use std::{collections::VecDeque, process::Command};
+use std::collections::VecDeque;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
@@ -15,14 +15,12 @@ fn input(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("set {name}"))
         .into()
 }
+/// Charge two syscall-priced work units through bounded clock reads, writing
+/// one console byte after each, then arm a timer 5000 ns after the last read,
+/// idle, and power off.
 fn image() -> Vec<u8> {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("charge.S");
-    let object = directory.path().join("charge.o");
-    let raw = directory.path().join("charge.bin");
-    fs::write(
-        &source,
-        r#".text
+    #[cfg(target_arch = "aarch64")]
+    let source = r#".text
 .global _start
 _start:
  movz x20, #0xa00, lsl #16
@@ -61,39 +59,47 @@ charged:
  movz x0, #8
  movk x0, #0x8400, lsl #16
  hvc #0
-"#,
-    )
-    .unwrap();
-    assert!(Command::new(input("SEEDBOX_PV_CLANG"))
-        .args(["--target=aarch64-none-elf", "-c"])
-        .arg(&source)
-        .arg("-o")
-        .arg(&object)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new(input("SEEDBOX_PV_LD"))
-        .args([
-            "-m",
-            "aarch64elf",
-            "-Ttext=0",
-            "--image-base=0",
-            "-e",
-            "_start",
-            "--oformat=binary"
-        ])
-        .arg(&object)
-        .arg("-o")
-        .arg(&raw)
-        .status()
-        .unwrap()
-        .success());
-    let mut kernel = vec![0; 64];
-    kernel[..4].copy_from_slice(&0x1400_0010u32.to_le_bytes());
-    kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
-    kernel[56..60].copy_from_slice(b"ARM\x64");
-    kernel.extend(fs::read(raw).unwrap());
-    kernel
+"#;
+    #[cfg(target_arch = "x86_64")]
+    let source = r#".text
+.code64
+.global _start
+_start:
+ mov $0x0a000000, %r12d
+ mov $0x0a010000, %r13d
+ xor %r14d, %r14d
+ movq $3, 32(%r13)
+unit:
+ mov 48(%r12), %rbx
+charge:
+ mov (%r12), %rax
+ mov 8(%r12), %rcx
+ cmp %rcx, %rax
+ ja candidate
+ lea 1(%rcx), %rax
+candidate:
+ mov 16(%r12), %rsi
+ cmp %rsi, %rax
+ jbe charged
+ movq $0, 24(%r13)
+ jmp charge
+charged:
+ mov %rax, 8(%r12)
+ dec %rbx
+ jnz charge
+ inc %r14
+ mov %r14d, %eax
+ mov $0x3f8, %dx
+ out %al, %dx
+ cmp $2, %r14
+ jb unit
+ mov 8(%r12), %rax
+ add $5000, %rax
+ mov %rax, (%r13)
+ movq $0, 16(%r13)
+ movq $1, 40(%r13)
+"#;
+    super::test_image::assemble(source)
 }
 fn start(kernel: Vec<u8>) -> PVMachine {
     PVMachine::from_boot_inputs(&input("SEEDBOX_PV_WORKER"), kernel, b"initrd".to_vec()).unwrap()
@@ -131,7 +137,7 @@ fn run(
     stopped
 }
 #[test]
-#[ignore = "requires signed HVF worker and ARM64 fixture clang/linker"]
+#[ignore = "requires a native PV worker and fixture clang/linker"]
 fn native_execution_price_partial_charge_restore_gap_and_sleep() {
     let kernel = image();
     let clock = SimulationClock::new(0);
@@ -215,7 +221,7 @@ fn native_execution_price_partial_charge_restore_gap_and_sleep() {
     assert_eq!(gap.console, [1, 2]);
 }
 #[test]
-#[ignore = "requires signed HVF worker and ARM64 fixture clang/linker"]
+#[ignore = "requires a native PV worker and fixture clang/linker"]
 fn native_execution_price_exact_subpercent_split_bounds_and_reboot() {
     let kernel = image();
     for factor in [1000, 1001, 1_000_000] {
@@ -257,11 +263,12 @@ fn native_execution_price_exact_subpercent_split_bounds_and_reboot() {
 #[path = "../../../tests/support/pv_guest.rs"]
 mod linux;
 #[test]
-#[ignore = "requires signed HVF worker, current PV Linux kernel and fixture clang/linker"]
+#[ignore = "requires a native PV worker, current PV Linux kernel and fixture clang/linker"]
 fn native_linux_syscall_work_observes_subpercent_execution_price() {
     let initrd = linux::initrd_source(
         r#"
-/* Freestanding Linux ARM64 PID1: measure syscall progress, then power off. */
+/* Freestanding Linux PID1: measure syscall progress, then power off. */
+#include "pv-syscall.h"
 enum {
     SYS_WRITE = 64, SYS_PPOLL = 73, SYS_CLOCK_GETTIME = 113,
     SYS_REBOOT = 142, SYS_GETPID = 172, CLOCK_MONOTONIC = 1,
@@ -269,17 +276,6 @@ enum {
     LINUX_REBOOT_MAGIC2 = 0x28121969,
     LINUX_REBOOT_CMD_POWER_OFF = 0x4321fedc,
 };
-static long call(long number, long a, long b, long c, long d, long e, long f)
-{
-    register long x8 __asm__("x8") = number;
-    register long x0 __asm__("x0") = a, x1 __asm__("x1") = b;
-    register long x2 __asm__("x2") = c, x3 __asm__("x3") = d;
-    register long x4 __asm__("x4") = e, x5 __asm__("x5") = f;
-    __asm__ volatile("svc 0" : "+r"(x0)
-                     : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
-                     : "memory");
-    return x0;
-}
 __attribute__((noreturn)) void _start(void)
 {
     long before[2], after[2];

@@ -17,11 +17,27 @@ fn input(name: &str) -> PathBuf {
 }
 fn application(code: u32) -> Vec<u8> {
     assert!(code < 65536);
-    let words = [0xd280_0000u32 | (code << 5), 0xd280_0ba8, 0xd400_0001]; // exit(code)
+    // exit(code)
+    #[cfg(target_arch = "aarch64")]
+    let (machine, code): (u16, Vec<u8>) = (
+        183,
+        [0xd280_0000u32 | (code << 5), 0xd280_0ba8, 0xd400_0001]
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect(),
+    );
+    // MOV EDI,code; MOV EAX,60; SYSCALL.
+    #[cfg(target_arch = "x86_64")]
+    let (machine, code): (u16, Vec<u8>) = (62, {
+        let mut bytes = vec![0xbf];
+        bytes.extend(code.to_le_bytes());
+        bytes.extend([0xb8, 60, 0, 0, 0, 0x0f, 0x05]);
+        bytes
+    });
     let mut elf = vec![0; 120];
     elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
     elf[16..18].copy_from_slice(&2u16.to_le_bytes());
-    elf[18..20].copy_from_slice(&183u16.to_le_bytes());
+    elf[18..20].copy_from_slice(&machine.to_le_bytes());
     elf[20..24].copy_from_slice(&1u32.to_le_bytes());
     elf[24..32].copy_from_slice(&0x400078u64.to_le_bytes());
     elf[32..40].copy_from_slice(&64u64.to_le_bytes());
@@ -32,13 +48,11 @@ fn application(code: u32) -> Vec<u8> {
     elf[68..72].copy_from_slice(&5u32.to_le_bytes());
     elf[80..88].copy_from_slice(&0x400000u64.to_le_bytes());
     elf[88..96].copy_from_slice(&0x400000u64.to_le_bytes());
-    let length = (elf.len() + words.len() * 4) as u64;
+    let length = (elf.len() + code.len()) as u64;
     elf[96..104].copy_from_slice(&length.to_le_bytes());
     elf[104..112].copy_from_slice(&length.to_le_bytes());
     elf[112..120].copy_from_slice(&4096u64.to_le_bytes());
-    for word in words {
-        elf.extend_from_slice(&word.to_le_bytes());
-    }
+    elf.extend_from_slice(&code);
     elf
 }
 fn replace_application(archive: &[u8], application: &[u8]) -> Vec<u8> {

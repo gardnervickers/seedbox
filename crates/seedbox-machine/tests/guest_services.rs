@@ -316,7 +316,7 @@ fn tcg_native_shutdown_preserves_graceful_cleanup() {
     shutdown(tcg());
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 fn pv() -> seedbox_machine::machine::pv::PVMachine {
     let definition = prepared::definition(
         fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
@@ -329,15 +329,15 @@ fn pv() -> seedbox_machine::machine::pv::PVMachine {
     .unwrap();
     backend.create(&definition).unwrap()
 }
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 #[test]
-#[ignore = "requires arm64 hypervisor, worker/kernel and SEEDBOX_PV_SERVICE_INITRD static helper+fixture"]
+#[ignore = "requires native PV hypervisor, worker/kernel and SEEDBOX_PV_SERVICE_INITRD static helper+fixture"]
 fn pv_native_application_controls_logs_and_outcome() {
     applications(pv());
 }
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 #[test]
-#[ignore = "requires arm64 hypervisor, worker/kernel and SEEDBOX_PV_SERVICE_INITRD static helper+fixture"]
+#[ignore = "requires native PV hypervisor, worker/kernel and SEEDBOX_PV_SERVICE_INITRD static helper+fixture"]
 fn pv_native_shutdown_preserves_graceful_cleanup() {
     shutdown(pv());
 }

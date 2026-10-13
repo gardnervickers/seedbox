@@ -408,7 +408,7 @@ pub fn tcg() -> super::machine_crate::machine::tcg::TcgMachine {
     .unwrap();
     backend.create(&definition).unwrap()
 }
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
+#[cfg(seedbox_pv)]
 pub fn pv() -> super::machine_crate::machine::pv::PVMachine {
     let definition = prepared::definition(
         fs::read(input("SEEDBOX_PV_CONTROL_INITRD")).unwrap(),

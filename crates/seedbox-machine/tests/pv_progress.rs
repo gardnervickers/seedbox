@@ -1,4 +1,4 @@
-#![cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#![cfg(seedbox_pv)]
 //! Public factory activation of real instrumentation, measured inside a CPU loop.
 use seedbox_machine::{
     clock::Clock,
@@ -30,8 +30,8 @@ fn input(name: &str) -> PathBuf {
     std::env::var_os(name).expect(name).into()
 }
 fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
-    // The existing static fixture samples CLOCK_MONOTONIC around an ARM
-    // subs/b.ne loop, with no syscall or polling inside the measured region.
+    // The existing static fixture samples CLOCK_MONOTONIC around a native
+    // countdown loop, with no syscall or polling inside the measured region.
     let binary = fs::read(input("SEEDBOX_PV_PROGRESS_FIXTURE")).unwrap();
     let mut tar = tar::Builder::new(Vec::new());
     let mut header = tar::Header::new_gnu();
@@ -121,7 +121,7 @@ fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
     delta
 }
 #[test]
-#[ignore = "requires native PV worker, factory guest assets and existing ARM CPU-loop fixture"]
+#[ignore = "requires native PV worker, factory guest assets and existing CPU-loop fixture"]
 fn factory_automatically_charges_cpu_work_and_execution_rate() {
     let mut factory =
         Factory::new(&input("SEEDBOX_PV_WORKER"), &input("SEEDBOX_PV_ASSETS")).unwrap();

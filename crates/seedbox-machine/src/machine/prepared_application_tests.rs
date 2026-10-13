@@ -6,7 +6,7 @@ use super::prepared_fixture::bootstrap;
 use crate::application::{boot_derived, with_runtime};
 use image::*;
 use std::fs;
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV worker/kernel and rebuilt prepared fixtures"]
 fn pv_native_prepared_image_launch_and_runtime_wrapper() {

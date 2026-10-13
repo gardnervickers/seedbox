@@ -251,3 +251,56 @@ pub(super) fn linux_initrd() -> Vec<u8> {
     }
     archive
 }
+
+/// Assemble a raw fixture with SEEDBOX_PV_CLANG/SEEDBOX_PV_LD into a boot image.
+/// x86 sources run in long mode at the bzImage entry; use RIP-relative data.
+pub(super) fn assemble(source: &str) -> Vec<u8> {
+    use std::{fs, process::Command};
+    let input = |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("set {name}"));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fixture.S");
+    let object = directory.path().join("fixture.o");
+    let raw = directory.path().join("fixture.bin");
+    fs::write(&path, source).unwrap();
+    #[cfg(target_arch = "aarch64")]
+    let (target, emulation) = ("--target=aarch64-none-elf", "aarch64elf");
+    #[cfg(target_arch = "x86_64")]
+    let (target, emulation) = ("--target=x86_64-none-elf", "elf_x86_64");
+    assert!(Command::new(input("SEEDBOX_PV_CLANG"))
+        .args([target, "-c"])
+        .arg(&path)
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new(input("SEEDBOX_PV_LD"))
+        .args([
+            "-m",
+            emulation,
+            "-Ttext=0",
+            "--image-base=0",
+            "-e",
+            "_start",
+            "--oformat=binary"
+        ])
+        .arg(&object)
+        .arg("-o")
+        .arg(&raw)
+        .status()
+        .unwrap()
+        .success());
+    let code = fs::read(raw).unwrap();
+    #[cfg(target_arch = "aarch64")]
+    let image = {
+        let mut kernel = vec![0; 64];
+        kernel[..4].copy_from_slice(&0x1400_0010u32.to_le_bytes());
+        kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
+        kernel[56..60].copy_from_slice(b"ARM\x64");
+        kernel.extend(code);
+        kernel
+    };
+    #[cfg(target_arch = "x86_64")]
+    let image = kernel(&code);
+    image
+}

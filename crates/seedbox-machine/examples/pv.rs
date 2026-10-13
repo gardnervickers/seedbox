@@ -1,14 +1,15 @@
-//! Drive two native ARM PV Linux guests with seeded sleeps of one to four seconds.
-//! Run on arm64 Linux/KVM or Apple Silicon macOS/HVF with prepared PV guest assets.
-//! Build this crate's worker; macOS also requires its Hypervisor entitlement.
+//! Drive two native PV Linux guests with seeded sleeps of one to four seconds.
+//! Run on arm64 Linux/KVM, Apple Silicon macOS/HVF or x86-64 Linux/KVM with
+//! prepared PV guest assets for the host architecture. Build this crate's
+//! worker; macOS also requires its Hypervisor entitlement.
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 #[path = "support/pv_init.rs"]
 mod pv_init;
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 mod support;
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use seedbox_machine::{
         definition::{
@@ -131,7 +132,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(not(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))))]
+#[cfg(not(seedbox_pv))]
 fn main() {
-    eprintln!("the PV example requires ARM64 with HVF on macOS or KVM on Linux");
+    eprintln!(
+        "the PV example requires ARM64 with HVF on macOS or KVM on Linux, or x86-64 KVM on Linux"
+    );
 }

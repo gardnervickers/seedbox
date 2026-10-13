@@ -16,14 +16,24 @@ pub(super) fn initrd() -> Vec<u8> {
         .unwrap(),
     )
 }
+/// Compile a freestanding static PID 1 for the host's guest architecture.
+/// Sources may include `pv-syscall.h` for portable generic syscall numbers.
 pub(super) fn initrd_source(source: String) -> Vec<u8> {
     let directory = tempfile::tempdir().unwrap();
     let output = directory.path().join("init");
     let source_path = directory.path().join("init.c");
     fs::write(&source_path, source).unwrap();
+    // The x86 process entry stack is not call-aligned: realign every frame.
+    let target: &[&str] = if cfg!(target_arch = "x86_64") {
+        &["--target=x86_64-linux-gnu", "-mstackrealign"]
+    } else {
+        &["--target=aarch64-linux-gnu"]
+    };
     let status = Command::new(input("SEEDBOX_PV_CLANG"))
+        .args(target)
         .args([
-            "--target=aarch64-linux-gnu",
+            "-I",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"),
             "-nostdlib",
             "-static",
             "-fno-stack-protector",

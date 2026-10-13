@@ -549,7 +549,7 @@ fn tcg(workers: usize) -> Vec<MachineResponse> {
 fn tcg_driver_queues_boot_tags_and_worker_count_match() {
     assert_eq!(tcg(1), tcg(2));
 }
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 fn pv(workers: usize) -> Vec<MachineResponse> {
     let definition = prepared::definition(
         fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
@@ -564,9 +564,9 @@ fn pv(workers: usize) -> Vec<MachineResponse> {
         backend.create(&definition).unwrap()
     })
 }
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 #[test]
-#[ignore = "requires arm64 hypervisor and SEEDBOX_PV_SERVICE_INITRD static guest fixtures"]
+#[ignore = "requires native PV hypervisor and SEEDBOX_PV_SERVICE_INITRD static guest fixtures"]
 fn pv_driver_queues_boot_tags_and_worker_count_match() {
     assert_eq!(pv(1), pv(2));
 }
@@ -818,7 +818,7 @@ fn tcg_driver_guest_receives_automatic_replies_and_real_peer_effects() {
     assert_eq!(run(1), run(2));
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV kernel/helper and driver-control application"]
 fn pv_driver_guest_receives_automatic_replies_and_real_peer_effects() {

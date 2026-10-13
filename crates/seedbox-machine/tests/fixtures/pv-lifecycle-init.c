@@ -1,13 +1,8 @@
-/* Freestanding ARM64 Linux PID 1. It owns the guest's shutdown policy: a
+/* Freestanding Linux PID 1. It owns the guest's shutdown policy: a
  * lifecycle request sends SIGTERM to its child, waits for cleanup evidence,
  * syncs, then asks Linux to power off. No host application-control protocol. */
 typedef unsigned long u64;
-static long call(long number,long a,long b,long c,long d,long e,long f) {
-    register long x8 __asm__("x8")=number;
-    register long x0 __asm__("x0")=a,x1 __asm__("x1")=b,x2 __asm__("x2")=c;
-    register long x3 __asm__("x3")=d,x4 __asm__("x4")=e,x5 __asm__("x5")=f;
-    __asm__ volatile("svc 0":"+r"(x0):"r"(x8),"r"(x1),"r"(x2),"r"(x3),"r"(x4),"r"(x5):"memory");return x0;
-}
+#include "pv-syscall.h"
 static unsigned length(const char *s){unsigned n=0;while(s[n])n++;return n;}
 static void say(const char *s){call(64,1,(long)s,length(s),0,0,0);}
 __attribute__((noreturn)) static void wait_forever(void){for(;;)call(73,0,0,0,0,8,0);}
@@ -30,7 +25,7 @@ __attribute__((noreturn)) void _start(void) {
     call(57,name,0,0,0,0,0);
     /* Install before clone so even an early host request cannot race child
      * handler registration. Both processes inherit it; only child is signaled. */
-    struct action action={cleanup,0,0,0};if(call(134,15,(long)&action,0,8,0,0)<0)fail();
+    struct action action={cleanup,PV_SIGNAL_FLAGS,wait_forever,0};if(call(134,15,(long)&action,0,8,0,0)<0)fail();
     int child=call(220,17,0,0,0,0,0);if(child<0)fail();if(child==0)wait_forever();
     say("PV_LIFECYCLE_READY\n");
     char command[9];unsigned used=0;

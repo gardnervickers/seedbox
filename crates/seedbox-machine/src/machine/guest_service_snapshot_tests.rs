@@ -274,9 +274,13 @@ fn tcg_accepted_application_command_snapshot_continues_exactly_once() {
         TcgMachine::from_snapshot(&executable, snapshot).unwrap()
     });
 }
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+// Native PV architectural snapshots: macOS/HVF and x86-64 Linux/KVM.
+#[cfg(any(
+    all(target_arch = "aarch64", target_os = "macos"),
+    all(target_arch = "x86_64", target_os = "linux")
+))]
 #[test]
-#[ignore = "requires signed HVF worker, kernel and static guest service initramfs"]
+#[ignore = "requires a native PV worker with snapshots, kernel and static guest service initramfs"]
 fn pv_accepted_application_command_snapshot_continues_exactly_once() {
     use super::pv::PVMachine;
     let executable = input("SEEDBOX_PV_WORKER");

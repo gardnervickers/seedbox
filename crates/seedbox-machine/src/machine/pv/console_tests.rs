@@ -5,16 +5,13 @@ use crate::{
     pv::{Inbox, Outbox, Output, Response as GuestResponse},
     rng::SeededRng,
 };
-use std::{collections::VecDeque, process::Command};
+use std::collections::VecDeque;
 
+/// Two lifecycle TX descriptors made available separately around console
+/// writes, with PV charges between them, then a yield to the bound.
 fn image() -> Vec<u8> {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("console.S");
-    let object = directory.path().join("console.o");
-    let raw = directory.path().join("console.bin");
-    fs::write(
-        &source,
-        r#".text
+    #[cfg(target_arch = "aarch64")]
+    let source = r#".text
 .global _start
 _start:
  movz x20, #0xa00, lsl #16
@@ -92,41 +89,78 @@ available: .hword 1,0,0,1,0
 used: .zero 32
 message1: .ascii "SBX_LOG1 1 42\n"
 message2: .ascii "SBX_LOG1 2 44\n"
-"#,
-    )
-    .unwrap();
-    let clang = std::env::var_os("SEEDBOX_PV_CLANG").unwrap();
-    let ld = std::env::var_os("SEEDBOX_PV_LD").unwrap();
-    assert!(Command::new(clang)
-        .args(["--target=aarch64-none-elf", "-c"])
-        .arg(&source)
-        .arg("-o")
-        .arg(&object)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new(ld)
-        .args([
-            "-m",
-            "aarch64elf",
-            "-Ttext=0",
-            "--image-base=0",
-            "-e",
-            "_start",
-            "--oformat=binary"
-        ])
-        .arg(&object)
-        .arg("-o")
-        .arg(&raw)
-        .status()
-        .unwrap()
-        .success());
-    let mut kernel = vec![0; 64];
-    kernel[..4].copy_from_slice(&0x1400_0010u32.to_le_bytes());
-    kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
-    kernel[56..60].copy_from_slice(b"ARM\x64");
-    kernel.extend(fs::read(raw).unwrap());
-    kernel
+"#;
+    #[cfg(target_arch = "x86_64")]
+    let source = r#".text
+.code64
+.global _start
+_start:
+ mov $0x0a000000, %r12d
+ mov $0x0a010000, %r13d
+ mov $0x0b010000, %r15d
+ movq $3, 32(%r13)
+ # Two TX descriptors, made available separately around a UART write.
+ lea descriptors(%rip), %r9
+ lea message1(%rip), %rax
+ mov %rax, (%r9)
+ movl $14, 8(%r9)
+ lea message2(%rip), %rax
+ mov %rax, 16(%r9)
+ movl $14, 24(%r9)
+ movl $1, 0x30(%r15)
+ movl $2, 0x38(%r15)
+ mov %r9d, 0x80(%r15)
+ lea available(%rip), %r10
+ mov %r10d, 0x90(%r15)
+ lea used(%rip), %rax
+ mov %eax, 0xa0(%r15)
+ movl $1, 0x44(%r15)
+ movl $4, 0x70(%r15)
+ mov $1, %rbx
+ call charge
+ mov $0x3f8, %dx
+ mov $65, %al
+ out %al, %dx
+ movw $1, 2(%r10)
+ movl $1, 0x50(%r15)
+ mov $67, %al
+ out %al, %dx
+ movw $2, 2(%r10)
+ movl $1, 0x50(%r15)
+ mov $4, %rbx
+ call charge
+ mov $0x3f8, %dx
+ mov $69, %al
+ out %al, %dx
+ movq $0, 24(%r13)
+ movq $1, 40(%r13)
+charge:
+ mov (%r12), %rax
+ mov 8(%r12), %rcx
+ cmp %rcx, %rax
+ ja candidate
+ lea 1(%rcx), %rax
+candidate:
+ mov 16(%r12), %rsi
+ cmp %rsi, %rax
+ jbe charged
+ movq $0, 24(%r13)
+ jmp charge
+charged:
+ mov %rax, 8(%r12)
+ dec %rbx
+ jnz charge
+ ret
+.balign 16
+descriptors: .zero 32
+# Suppress TX used-ring IRQ: the fixture has no exception handler.
+available: .short 1,0,0,1,0
+.balign 16
+used: .zero 32
+message1: .ascii "SBX_LOG1 1 42\n"
+message2: .ascii "SBX_LOG1 2 44\n"
+"#;
+    super::test_image::assemble(source)
 }
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
@@ -156,7 +190,7 @@ fn run(machine: &mut PVMachine, now: u64, upto: u64) -> Vec<Output> {
     outputs
 }
 #[test]
-#[ignore = "requires signed SEEDBOX_PV_WORKER and ARM64 SEEDBOX_PV_CLANG/SEEDBOX_PV_LD"]
+#[ignore = "requires a native SEEDBOX_PV_WORKER and SEEDBOX_PV_CLANG/SEEDBOX_PV_LD"]
 fn native_console_interleave_has_actual_times_across_partitions_and_restore() {
     let worker = PathBuf::from(std::env::var_os("SEEDBOX_PV_WORKER").unwrap());
     let image = image();

@@ -65,6 +65,7 @@
                 then "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4"
                 else "console=ttyS0 rdinit=/init random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4";
             };
+            testFixtures = import ./crates/seedbox-machine/pv-test-fixtures.nix { inherit pkgs guest; };
           };
         in {
           networkTools = pkgs.iproute2;
@@ -81,6 +82,7 @@
           machinePvProgress = machinePv.progress;
           machinePvGuest = machinePv.guest;
           machinePvAssets = machinePv.assets;
+          machinePvTestFixtures = machinePv.testFixtures;
         }
         );
     };

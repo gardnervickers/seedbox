@@ -8,7 +8,7 @@ pub(super) fn bootstrap(backend: &str) -> GuestBootstrap {
     GuestBootstrap {
         kernel: Kernel {
             image: fs::read(input(&format!("SEEDBOX_{backend}_KERNEL"))).unwrap(),
-            command_line: if backend == "PV" {
+            command_line: if backend == "PV" && cfg!(target_arch = "aarch64") {
                 "console=ttyAMA0 nosmp"
             } else {
                 "console=ttyS0"
