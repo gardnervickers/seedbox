@@ -397,7 +397,9 @@ mod tests {
         // each command; it records the first arrival of each wire request.
         let stop = Arc::new(AtomicBool::new(false));
         let released = Arc::new(AtomicBool::new(false));
-        let seen = Arc::new(std::sync::Mutex::new(Vec::<(u64, String, bool)>::new()));
+        // (wire request ID, command kind, sent after release) in arrival order.
+        type Seen = Arc<std::sync::Mutex<Vec<(u64, String, bool)>>>;
+        let seen: Seen = Default::default();
         let peer = {
             let (stop, released, seen) = (stop.clone(), released.clone(), seen.clone());
             std::thread::spawn(move || {
@@ -510,7 +512,7 @@ mod tests {
             })
         };
         let driver = tokio::spawn(run(manager.clone(), shutdown.clone()));
-        let kinds = |seen: &Arc<std::sync::Mutex<Vec<(u64, String, bool)>>>| -> Vec<String> {
+        let kinds = |seen: &Seen| -> Vec<String> {
             seen.lock()
                 .unwrap()
                 .iter()

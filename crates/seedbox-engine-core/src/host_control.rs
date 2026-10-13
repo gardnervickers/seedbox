@@ -695,7 +695,8 @@ mod tests {
             assert!(control.pending_checkpoint().is_some());
         };
         let target = directory.path().join("checkpoint-saved.json");
-        let attempts: [(&str, Box<dyn Fn(&str) -> Result<(), String>>); 3] = [
+        type Publish<'a> = Box<dyn Fn(&str) -> Result<(), String> + 'a>;
+        let attempts: [(&str, Publish); 3] = [
             (
                 "before writing",
                 Box::new(|_| Err("no space before writing".into())),
