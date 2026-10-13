@@ -216,6 +216,12 @@ fn queued_boots_use_caller_entropy_and_machine_only_snapshots() {
 
 #[test]
 fn driver_reboots_live_and_crashed_guest_with_fresh_state_and_retained_actions() {
+    for workers in [1, 2, 4] {
+        check_driver_reboot(workers);
+    }
+}
+
+fn check_driver_reboot(workers: usize) {
     use crate::driver::{Action, Driver, StepOutcome};
     use std::time::Duration;
 
@@ -223,27 +229,37 @@ fn driver_reboots_live_and_crashed_guest_with_fresh_state_and_retained_actions()
     let mut driver = crate::driver::fixture::driver(
         at(0),
         Duration::from_nanos(10),
-        2,
+        workers,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         || {
             let clock: Arc<dyn Clock + Send + Sync> =
                 Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
-            TcgMachine::configured(
-                Path::new("qemu-system-riscv64"),
-                Manifest {
-                    boot: Boot::Program(words.iter().flat_map(|word| word.to_le_bytes()).collect()),
-                    memory_mib: 16,
-                },
-                SeededRng::new(0),
-                clock,
-            )
-            .map(|guest| vec![guest])
+            // The reboot subject must not be the oracle: an oracle crash
+            // permanently completes Driver, even with a future reboot queued.
+            (0..2)
+                .map(|_| {
+                    TcgMachine::configured(
+                        Path::new("qemu-system-riscv64"),
+                        Manifest {
+                            boot: Boot::Program(
+                                words.iter().flat_map(|word| word.to_le_bytes()).collect(),
+                            ),
+                            memory_mib: 16,
+                        },
+                        SeededRng::new(0),
+                        clock.clone(),
+                    )
+                })
+                .collect()
         },
     )
     .unwrap();
-    let id = driver
-        .with_barrier(|barrier| Ok(barrier.machines().next().unwrap().0))
+    let (oracle, id) = driver
+        .with_barrier(|barrier| {
+            let mut machines = barrier.machines();
+            Ok((machines.next().unwrap().0, machines.next().unwrap().0))
+        })
         .unwrap();
     assert_eq!(
         driver.step(at(5)).unwrap(),
@@ -263,7 +279,7 @@ fn driver_reboots_live_and_crashed_guest_with_fresh_state_and_retained_actions()
     );
     let after = driver
         .with_barrier(|barrier| {
-            assert_eq!(barrier.machines().next().unwrap().0, id);
+            assert_eq!(barrier.machines().nth(1).unwrap().0, id);
             assert!(!barrier.paused(id)?);
             assert_eq!(barrier.stopped(id)?, StopReason::BoundaryReached);
             assert_eq!(barrier.machine(id)?.pending_boots, 0);
@@ -295,6 +311,7 @@ fn driver_reboots_live_and_crashed_guest_with_fresh_state_and_retained_actions()
                 (8, Action::Wake(id)),
                 (9, Action::Resume(id)),
                 (12, Action::Crash(id)),
+                (12, Action::Crash(oracle)),
             ] {
                 barrier.schedule(at(time), action)?;
             }
@@ -307,7 +324,7 @@ fn driver_reboots_live_and_crashed_guest_with_fresh_state_and_retained_actions()
     );
     driver
         .with_barrier(|barrier| {
-            assert_eq!(barrier.machines().next().unwrap().0, id);
+            assert_eq!(barrier.machines().nth(1).unwrap().0, id);
             assert!(barrier.paused(id)?);
             assert_eq!(barrier.stopped(id)?, StopReason::BoundaryReached);
             assert_eq!(barrier.machine(id)?.pending_boots, 0);
@@ -326,7 +343,7 @@ fn driver_reboots_live_and_crashed_guest_with_fresh_state_and_retained_actions()
         driver.step(at(100)).unwrap(),
         StepOutcome::Finished {
             at: at(12),
-            reason: ExitReason::Shutdown
+            reason: ExitReason::Crashed
         }
     );
     driver

@@ -534,8 +534,10 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
             || {
                 let clock: Arc<dyn Clock + Send + Sync> =
                     Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
-                guests
-                    .iter()
+                // The first machine is the oracle. Keep it alive beyond both
+                // observed guests so neither creation order cuts off the other.
+                std::iter::once(&("oracle", "3"))
+                    .chain(guests.iter())
                     .map(|(name, sleep)| {
                         let mut boot = boot.clone();
                         if let Boot::Linux { command_line, .. } = &mut boot {
@@ -560,7 +562,7 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
         fn assert_send<T: Send>() {}
         assert_send::<Driver<TcgMachine>>();
         let ids: Vec<_> = driver
-            .with_barrier(|barrier| Ok(barrier.machines().map(|(id, _)| id).collect()))
+            .with_barrier(|barrier| Ok(barrier.machines().skip(1).map(|(id, _)| id).collect()))
             .unwrap();
         let mut now = at(0);
         let mut booted = [false; 2];
@@ -730,7 +732,9 @@ fn driver_playback_controls_preserve_real_machine_execution_and_pre_crash_state(
             driver.step(at(100)).unwrap(),
             StepOutcome::Finished {
                 at: at(15),
-                reason: ExitReason::Shutdown
+                // Crashing the oracle completes the simulation with its actual
+                // exit reason, not the old all-machines-exited sentinel.
+                reason: ExitReason::Crashed
             }
         );
         assert_eq!(
