@@ -464,7 +464,7 @@ def sim_batch(a, meta, b, index):
         result.write_text(json.dumps(info, indent=1))
     if a.replay and info.get("id") and "replay_id" not in info:
         t1 = time.time()
-        p = seedbox(a, "replay", info["id"])
+        p = seedbox(a, "replay", info["id"], "--wall-time", a.wall_time)
         (d / "replay.stdout").write_text(p.stdout)
         (d / "replay.stderr").write_text(p.stderr)
         m = STATUS.search(p.stdout)
@@ -838,7 +838,7 @@ def cmd_jcstress(a):
             (d / "result.json").write_text(json.dumps(info, indent=1))
         if a.replay and info.get("id") and "replay_id" not in info:
             t0 = time.time()
-            p = seedbox(a, "replay", info["id"])
+            p = seedbox(a, "replay", info["id"], "--wall-time", a.wall_time)
             m = STATUS.search(p.stdout)
             info.update({"replay_status": m.group(1) if m else "ERROR", "replay_id": m.group(2) if m else None,
                          "replay_wall_seconds": round(time.time() - t0)})
