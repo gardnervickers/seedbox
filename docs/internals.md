@@ -139,8 +139,10 @@ which moves only `CLOCK_REALTIME`, re-evaluates absolute realtime timers and
 cancels cancel-on-set timerfds. Linux refuses a step that would put realtime
 below `CLOCK_MONOTONIC`. Steps end with their boot; drift survives
 crash and reboot. Every boot sets realtime to the epoch in
-`/seedbox/clock.bin` plus the machine counter before `Ready`; the TCG board RTC
-derives from the same epoch.
+`/seedbox/clock.bin` plus the machine counter before `Ready`; the epoch comes
+from the backend factory's `epoch_seconds` and the TCG board RTC derives from
+it. Host `Action::Drift` and `Action::StepRealtime` reach the same effects
+through the unified schedule.
 
 Code: [driver translation](../crates/seedbox-machine/src/driver.rs),
 [mapping](../crates/seedbox-machine/src/clock/projection.rs),

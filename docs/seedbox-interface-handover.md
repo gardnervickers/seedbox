@@ -256,43 +256,37 @@ objective.
    name to the machine of that name, for host `Target::Name` and guest
    `{"service": ...}` targets alike. Inspect, and how it represents deferred
    networking, remain open; public contracts remain to be agreed.
-5. **Injected clock faults — implemented in the approved shape (DECISIONS K),
-   except the epoch delivery path, which awaits a decision.** The Driver maps
-   each machine's time base at the machine boundary (rules in `Driver` rustdoc
-   and docs/internals.md); `Transition::ClockRate` publishes rate changes and
-   `FaultAction::{Drift, StepRealtime}` carry resolved values. Guest
-   `clock_drift` sets the rate (no stacking, persists across reboot, heal to
-   nominal keeps accrued offset); `clock_skew` sends `Request::StepRealtime`,
-   performed by the shared supervisor (needs Up, unpaused, Ready; deadline;
-   guest refusal settles Rejected), lost with its boot, and healing a lost step
-   applies with no guest effect. Seeded `max_*` draws are uniform in
-   `[-max, max]` from the simulation RNG at admission. Every boot sets realtime
-   to epoch + counter before Ready; TCG's RTC base derives from the epoch.
-   Portable evidence: `src/clock/projection.rs`, `src/driver/clock_tests.rs`,
-   `src/driver/clock_fault_tests.rs`, clock tests in
-   `src/oracle/service/tests.rs` and `src/oracle/handles.rs`. Native evidence:
-   `src/machine/clock_fault_tests.rs` with `tests/fixtures/clock-faults.c` on
-   TCG and x86 PV (workers 1/4, exact never-early timer wakeups including one
-   re-converted across a rate change, 1 ms guest sampling tolerance). Its
-   restore is in place: the machine is replaced from its own snapshot inside
-   the same Driver, which keeps the mapping, machine-time position and pending
-   timer; this does not prove reconstruction in another Driver, and no public
-   API returns those Driver-owned fields. Guest RPC payload times stay
-   simulation time (Driver rustdoc). Linux refuses a step that would put
-   realtime below CLOCK_MONOTONIC; with epoch 0, realtime leads monotonic only
-   by the pre-clocksource boot interval, so negative steps beyond it are
-   refused (settled Rejected). **Merge blockers:** the epoch decision, then
-   native negative-step and refused-step coverage with a real epoch.
-   **Open:** `Driver::new(.., epoch_seconds, ..)` is approved but no explicit
-   path carries the epoch to machines without a further public change; the
-   guest path exists (`GuestBootstrap::epoch_seconds` → `/seedbox/clock.bin`)
-   and factories currently use 0. **TODO after F lands:** add
-   `Action::Drift`/`Action::StepRealtime` mapped onto `Effect::Drift` /
-   `Effect::StepRealtime`, enforcing the same 365-day step bound as the guest
-   schema (which excludes `i64::MIN`; `Handles::step` rejects anything else);
-   the raw `Barrier::schedule_clock_rate` hook is test-only. Pending policy
-   decisions: step refusal non-fatal, skew on Down rejected, drift in any
-   state, draw source (shared simulation RNG), pN use on rejection. Not yet run on Apple Silicon/HVF or arm64 KVM.
+5. **Injected clock faults — implemented in the approved shape (DECISIONS K,
+   epoch via factories); service policy choices await decision.** The Driver
+   maps each machine's time base at the machine boundary (rules in `Driver`
+   rustdoc and docs/internals.md); `Transition::ClockRate` publishes rate
+   changes and `FaultAction::{Drift, StepRealtime}` carry resolved values.
+   `pv::Factory::new(worker, assets, epoch_seconds)` and
+   `tcg::Factory::new(qemu, assets, epoch_seconds)` give every machine of a run
+   realtime = epoch + counter on every boot (`Driver::new` is unchanged); tests
+   use the documented `TEST_EPOCH_SECONDS` (2000-01-01). Guest `clock_drift` /
+   `clock_skew` and host `Action::Drift { target, rate }` /
+   `Action::StepRealtime { target, nanoseconds }` share one admission path
+   (`Command::{Drift, StepRealtime}`); host steps are bounded to 365 days at
+   enqueue (`Error::InvalidClockStep`, also for `i64::MIN`) and use the default
+   5 s effect deadline. Linux refuses a step below `CLOCK_MONOTONIC`.
+   Portable evidence: `src/clock/projection.rs`, `src/driver/clock_tests.rs`
+   (public drift/heal; one private raw rate change remains for the paused-timer
+   translation test), `src/driver/clock_fault_tests.rs` (guest and host clock
+   faults, keys, bounds, holds, boot binding, workers 1/2/4), service and handle
+   tests. Native evidence on TCG and x86 PV (`src/machine/clock_fault_tests.rs`,
+   `tests/fixtures/clock-faults.c`): guest-driven drift/step/reboot/heal with
+   workers 1/4 and in-place restore; host-driven drift, successful negative
+   step, inverse heal, holds, a step bound to a crashed boot, reboot and heal
+   with workers 1/4; and a step below monotonic (epoch 3600 s), refused. Every
+   input-free timer wake is checked never early and earliest, including one
+   re-converted across a rate change; readings use a 1 ms tolerance. Restore is
+   in place only. **Pending decisions** (not implied by the epoch approval):
+   guest refusal settles Rejected without failing; skew on a Down target is
+   rejected; drift is admitted in any state; seeded draws use the shared
+   simulation RNG; a refused stacked drift draws no pN; a zero draw settles at
+   once and a zero drift holds a handle; `stopped` can report
+   `deadline == reached`. Not yet run on Apple Silicon/HVF or arm64 KVM.
 6. **Oracle-driven machine creation — implemented in the approved shape.**
    `Driver::new` accepts a separate `spawnable: Vec<MachineDefinition>` after
    `machines`; definitions remain unchanged and templating belongs to the caller.
