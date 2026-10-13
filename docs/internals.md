@@ -157,6 +157,28 @@ throttled it shows the effective nominal speed after backend rounding and
 clamping; healing restores that machine's configured speed. The fault's
 recorded input keeps the original request.
 
+## User CPU time
+
+Linux samples CPU time per tick: a tick that interrupts user mode is user time,
+anything else is system time. Guest time advances only in the kernel, so every
+tick interrupts it, and without a correction translated compute would all be
+system time: `utime` stayed zero, `ITIMER_VIRTUAL` never fired, and
+`getrusage` reported all work as system time. The kernel counts a tick that
+interrupts a progress charge directly, not a softirq or a nested interrupt, as
+user time. On ARM the mark covers the bulk charge, whose rendezvous takes the
+tick. On x86 it covers the progress call's yield, after which the VMM injects
+the timer interrupt. Only tick accounting reads the mark. RCU and the
+scheduler still see kernel mode, and the charges are unchanged. Syscall and
+translator charges remain system time.
+
+Precise (`VIRT_CPU_ACCOUNTING_GEN`) accounting would not help: it reads the
+clock at each kernel entry and exit, and the clock does not move in user mode.
+It also needs a `nohz_full` CPU, and the guest's one CPU is the boot CPU.
+
+Code: [ARM charge](../kernel-arm64/seedbox.c), [x86 hook](../kernel/seedbox.h),
+the `kernel/time/timer.c` edit in both patch scripts, and the
+[guest check](../guest/progress/fixtures/cputime.c).
+
 ## Progress inside kernel polling
 
 An x86 kernel `cpu_relax()` loop may hold a lock with interrupts disabled. It
