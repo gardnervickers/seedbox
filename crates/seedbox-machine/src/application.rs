@@ -20,7 +20,7 @@ pub(crate) struct GuestBootstrap {
     /// Optional base archive, represented by an empty vector when absent.
     pub base_initramfs: Vec<u8>,
     /// Guest CLOCK_REALTIME at boot is this many seconds plus the machine
-    /// counter. TODO: no explicit caller path supplies it yet; factories use 0.
+    /// counter; backend factories receive it from their caller.
     pub epoch_seconds: u32,
 }
 

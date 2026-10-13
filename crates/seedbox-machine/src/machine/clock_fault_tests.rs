@@ -3,7 +3,12 @@
 //! its own-time-base runs, so timer conversion is checked exactly against an
 //! independent reference mapping built from the published rate events.
 use crate::{
-    driver::{Driver, Event, EventKind, MachineId, SettlementStatus, StepOutcome, Transition},
+    clock::ClockRate,
+    driver::{
+        Action, Barrier, Driver, Error, Event, EventKind, FaultAction, FaultOrigin, FaultRecord,
+        HealTarget, InputKey, MachineId, PlaybackRate, SettlementStatus, StepOutcome, Target,
+        Transition,
+    },
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     pv::{Response, Stream},
     rng::RngStream,
@@ -11,6 +16,7 @@ use crate::{
 use std::{
     fmt::Debug,
     fs,
+    num::NonZeroI64,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -80,6 +86,7 @@ where
 
 fn definitions(
     backend: &str,
+    oracle_role: &str,
 ) -> (
     crate::definition::MachineDefinition,
     crate::definition::MachineDefinition,
@@ -95,8 +102,8 @@ fn definitions(
     header.set_cksum();
     tar.append_data(&mut header, "application", &application[..])
         .unwrap();
-    let controller = crate::definition::MachineDefinition {
-        name: "controller".into(),
+    let oracle = crate::definition::MachineDefinition {
+        name: "oracle".into(),
         resources: crate::definition::Resources {
             memory_bytes: if backend == "PV" {
                 128 << 20
@@ -108,25 +115,73 @@ fn definitions(
             filesystem: crate::definition::FilesystemArchive::new(tar.into_inner().unwrap())
                 .unwrap(),
             launch: crate::definition::Launch {
-                argv: vec!["/application".into(), "controller".into()],
+                argv: vec!["/application".into(), oracle_role.into()],
                 environment: Default::default(),
                 working_directory: "/".into(),
                 user: "0:0".into(),
             },
         },
     };
-    let mut clock = controller.clone();
+    let mut clock = oracle.clone();
     clock.name = "clock".into();
     clock.application.launch.argv = vec!["/application".into(), "clock".into()];
-    (controller, clock)
+    (oracle, clock)
 }
 
-/// Published events, the clock machine's identity and its recorded runs.
-type Outcome = (Vec<Event>, MachineId, Vec<Run>);
+/// Published events, the clock machine's identity, its recorded runs and the
+/// faults held before their effect.
+type Outcome = (Vec<Event>, MachineId, Vec<Run>, Vec<FaultRecord>);
+/// Host actions of a scenario, applied at the start, after every barrier and
+/// on every held fault.
+#[derive(Clone, Copy)]
+enum Plan {
+    /// Faults come from the guest controller (oracle role `controller`).
+    Guest,
+    /// Faults come from the public unified schedule (oracle role `idle`).
+    Host,
+    /// One host step below CLOCK_MONOTONIC (oracle role `idle`).
+    Refusal,
+}
+impl Plan {
+    fn oracle(self) -> &'static str {
+        match self {
+            Self::Guest => "controller",
+            Self::Host | Self::Refusal => "idle",
+        }
+    }
+    fn epoch(self) -> u32 {
+        match self {
+            Self::Refusal => REFUSAL_EPOCH_SECONDS,
+            Self::Guest | Self::Host => crate::machine::TEST_EPOCH_SECONDS,
+        }
+    }
+    fn apply<N>(
+        self,
+        b: &mut Barrier<'_, N>,
+        now: Timestamp,
+        held: Option<&FaultRecord>,
+        live: &mut bool,
+    ) where
+        N: Machine + Send + 'static,
+        N::Context: 'static,
+        N::Error: Debug + Send + 'static,
+    {
+        match self {
+            Self::Guest => {}
+            Self::Host => host_plan(b, now, held, live),
+            Self::Refusal => refusal_plan(b, now),
+        }
+    }
+}
+
+/// One run of the shared fixture: an oracle with `oracle_role` and the
+/// recorded `clock` machine. `migrate` restores the clock machine in place
+/// mid-drift, inside the same Driver.
 fn scenario<M, F>(
     backend: &str,
     workers: usize,
     migrate: bool,
+    plan: Plan,
     mut construct: impl FnMut(&crate::definition::MachineDefinition) -> M + Send + 'static,
     restore: F,
 ) -> Outcome
@@ -135,7 +190,8 @@ where
     M::Error: Debug + Send + 'static,
     F: Fn(&M::Snapshot) -> Result<M, M::Error> + Clone + Send + 'static,
 {
-    let (controller, clock) = definitions(backend);
+    let (oracle, clock) = definitions(backend, plan.oracle());
+    let mut live = false;
     let runs = Arc::new(Mutex::new(Vec::new()));
     let recorded = runs.clone();
     let mut driver = Driver::new(
@@ -144,7 +200,7 @@ where
         workers,
         FixtureRng(3),
         || Ok(()),
-        controller,
+        oracle,
         vec![clock],
         Vec::new(),
         move |definition| {
@@ -165,21 +221,46 @@ where
         .unwrap();
     let started = Instant::now();
     let mut events = driver.drain_events();
+    let mut held = Vec::new();
     let mut migrated = !migrate;
     let mut now = at(0);
+    driver
+        .with_barrier(|b| {
+            plan.apply(b, now, None, &mut live);
+            Ok(())
+        })
+        .unwrap();
     loop {
         let upto = at(now.as_nanos() + QUANTUM);
         let result = driver.step(upto).unwrap();
         events.extend(driver.drain_events());
-        now = match result {
+        match result {
             StepOutcome::Finished { reason, .. } => {
                 assert_eq!(reason, ExitReason::ProgramExit { code: 0 });
                 break;
             }
-            StepOutcome::BarrierReached { at } => at,
+            StepOutcome::BarrierReached { at } => {
+                now = at;
+                driver
+                    .with_barrier(|b| {
+                        plan.apply(b, now, None, &mut live);
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            StepOutcome::BeforeFault { at, fault } => {
+                now = at;
+                driver
+                    .with_barrier(|b| {
+                        plan.apply(b, now, Some(&fault), &mut live);
+                        Ok(())
+                    })
+                    .unwrap();
+                held.push(fault);
+            }
             other => panic!("{backend}: unexpected {other:?}"),
         };
-        // Mid-drift, after the step and before the crash: restore in place.
+        // Mid-drift, after the first step and before the crash: restore in place.
         if !migrated && upto >= at(3_000_000_000) {
             driver
                 .with_barrier(|b| b.snapshot(clock).map(drop))
@@ -192,7 +273,7 @@ where
         );
     }
     let runs = runs.lock().unwrap().clone();
-    (events, clock, runs)
+    (events, clock, runs, held)
 }
 
 /// Independent exact reference: G in 1e-9 ns from piecewise rates.
@@ -240,7 +321,9 @@ struct Line {
     raw: i128,
     cnt: i128,
 }
-fn lines(events: &[Event], clock: MachineId) -> Vec<Line> {
+/// Clock-machine stdout lines; `rt` is relative to the realtime epoch.
+fn lines(events: &[Event], clock: MachineId, epoch_seconds: u32) -> Vec<Line> {
+    let epoch = i128::from(epoch_seconds) * 1_000_000_000;
     let mut lines = Vec::new();
     let mut partial = Vec::new();
     for event in events {
@@ -278,7 +361,7 @@ fn lines(events: &[Event], clock: MachineId) -> Vec<Line> {
                 at: output.at.as_nanos(),
                 boot: output.boot,
                 tag,
-                rt: value("rt"),
+                rt: value("rt") - epoch,
                 mono: value("mono"),
                 raw: value("raw"),
                 cnt: value("cnt"),
@@ -293,39 +376,31 @@ fn lines(events: &[Event], clock: MachineId) -> Vec<Line> {
 /// not conversion error (see the exact timer checks). Measured 15-58 us on TCG
 /// and 39-51 us on x86 PV; 1 ms leaves headroom without hiding a rate error.
 const LATENCY: i128 = 1_000_000;
-fn check(backend: &str, (events, clock, runs): &Outcome) {
-    let rates: Vec<_> = events
-        .iter()
-        .filter_map(|event| match event.kind {
-            EventKind::Transition {
-                machine,
-                change: Transition::ClockRate(rate),
-                ..
-            } if machine == *clock => Some((event.at.as_nanos(), i64::from(rate.ppb()))),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(rates.len(), 2, "{backend}: drift then heal");
-    let healed = rates[1].0;
-    assert_eq!((rates[0].1, rates[1].1), (100_000_000, 0));
-    assert!(
-        healed >= 5_000_000_000,
-        "{backend}: heal after the reboot check"
-    );
-    let reference = Reference(rates);
-    for settlement in crate::driver::fixture::settlements(events) {
-        assert_eq!(settlement.1, SettlementStatus::Applied, "{settlement:?}");
-    }
-    let lost = events.iter().any(|event| {
-        matches!(&event.kind, EventKind::FaultSettled { record, detail, .. }
-            if record.handle.as_ref().map(ToString::to_string).as_deref() == Some("p2")
-                && detail == "realtime step ended with its machine incarnation")
-    });
-    assert!(lost, "{backend}: healing the step after reboot");
-    let lines = lines(events, *clock);
-    // Every reading follows the machine time base: the counter read just
-    // before the write is at most G(output time) and close to it.
-    for line in &lines {
+
+/// Rate changes of the clock machine, as published.
+fn rates(events: &[Event], clock: MachineId) -> Reference {
+    Reference(
+        events
+            .iter()
+            .filter_map(|event| match event.kind {
+                EventKind::Transition {
+                    machine,
+                    change: Transition::ClockRate(rate),
+                    ..
+                } if machine == clock => Some((event.at.as_nanos(), i64::from(rate.ppb()))),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// Checks shared by every scenario: each reading follows the machine time
+/// base, and every timer wake is never early, earliest, and re-converted when
+/// it straddles a rate change.
+fn check_time_base(backend: &str, lines: &[Line], runs: &[Run], reference: &Reference) {
+    // The counter read just before the write is at most G(output time) and
+    // close to it.
+    for line in lines {
         let mapped = i128::from(reference.floor(line.at));
         assert!(
             line.cnt <= mapped && mapped - line.cnt < LATENCY,
@@ -333,68 +408,10 @@ fn check(backend: &str, (events, clock, runs): &Outcome) {
         );
         assert!(line.raw <= line.cnt && line.mono <= line.cnt, "{line:?}");
     }
-    let find = |boot, tag: &str| {
-        lines
-            .iter()
-            .filter(|l| l.boot == boot && l.tag == tag)
-            .collect::<Vec<_>>()
-    };
-    // Each boot starts realtime at epoch (zero here) plus the counter.
-    for boot in [0, 1] {
-        let line = find(boot, "BOOT")[0];
-        assert!(
-            line.cnt - line.rt >= 0 && line.cnt - line.rt < LATENCY,
-            "{backend}: {line:?}"
-        );
-    }
-    // Drift persists across reboot: the new boot already runs ahead of
-    // simulation time by the accrued ten percent.
-    let reboot = find(1, "BOOT")[0];
-    assert!(reboot.at > 4_000_000_000 && reboot.cnt - i128::from(reboot.at) > 350_000_000);
-    // A guest 1 s sleep under drift: monotonic, raw and the counter agree.
-    let slept = find(0, "SLEPT");
-    let (first, second) = (slept[0], slept[1]);
-    assert!(
-        first.at > reference.0[0].0,
-        "{backend}: drift precedes the sleeps"
-    );
-    let delta = |f: fn(&Line) -> i128| f(second) - f(first);
-    assert!(delta(|l| l.mono) >= 1_000_000_000);
-    assert!((delta(|l| l.cnt) - delta(|l| l.mono)).abs() < 1_000_000);
-    assert!((delta(|l| l.raw) - delta(|l| l.cnt)).abs() < 1_000_000);
-    let simulated = i128::from(second.at - first.at);
-    assert!(
-        (simulated * 11 / 10 - delta(|l| l.cnt)).abs() < LATENCY,
-        "{backend}: rate"
-    );
-    // The step moved realtime only, cancelled the cancel-on-set timer and fired
-    // the absolute realtime timer well before its unstepped monotonic time.
-    let boot = find(0, "BOOT")[0];
-    let canceled = find(0, "CANCELED")[0];
-    let stepped = canceled.rt - canceled.cnt;
-    assert!(
-        stepped > 2_000_000_000 - LATENCY && stepped <= 2_000_000_000,
-        "{canceled:?}"
-    );
-    assert!(canceled.at >= 2_500_000_000);
-    let fired = find(0, "FIRED")[0];
-    assert!(fired.rt >= boot.rt + 5_000_000_000);
-    assert!(
-        fired.mono - boot.mono < 3_500_000_000,
-        "{backend}: {fired:?}"
-    );
-    assert!(find(1, "CANCELED").is_empty() && find(1, "FIRED").is_empty());
-    // Heal keeps the offset accrued until then: G(t) = t + accrued afterwards.
-    let accrued = i128::from(reference.floor(healed)) - i128::from(healed);
-    assert!(accrued > 400_000_000);
-    let last = lines.last().unwrap();
-    assert!(last.at > healed + 500_000_000);
-    let ahead = last.cnt - i128::from(last.at);
-    assert!(ahead <= accrued && ahead > accrued - LATENCY, "{last:?}");
     // Exact conversion. The Driver runs a blocked machine without inputs only
-    // when its converted deadline is due: rate changes, snapshots and other
-    // machines' work never run it, and this scenario has no pause/resume or
-    // wake actions. Runs with inputs (requests, replies, lifecycle) are the only
+    // when its converted deadline is due: rate changes, snapshots, holds and
+    // other machines' work never run it, and these scenarios have no
+    // pause/resume. Runs with inputs (requests, replies, lifecycle) are the only
     // legitimate earlier runs. So every input-free run after a Blocked stop is
     // that timer's wake: it must never be early, and it must happen at the
     // earliest simulation time whose mapped time reaches the deadline.
@@ -430,10 +447,9 @@ fn check(backend: &str, (events, clock, runs): &Outcome) {
             let boundary = reference.floor(change);
             if reached.as_nanos() < boundary && boundary < next.now {
                 straddled += 1;
-                // The deadline converted under the earlier rates alone gives
-                // another simulation wake. Rates here are never slow, so the
-                // mapping is injective and the observed clock identifies the
-                // wake: a stale (unconverted) wake would be observed differently.
+                // Rates here are never slow, so the mapping is injective and
+                // the observed clock identifies the wake: a stale (unconverted)
+                // wake would be observed differently.
                 let earlier = Reference(reference.0[..index].to_vec());
                 let stale = earlier.inverse(due);
                 if stale != wake {
@@ -444,56 +460,371 @@ fn check(backend: &str, (events, clock, runs): &Outcome) {
         }
     }
     assert!(exact > 10, "{backend}: {exact} timer wakeups checked");
+    if reference.0.len() > 1 {
+        assert!(
+            straddled >= 1 && reconverted >= 1,
+            "{backend}: {straddled} straddling timers, {reconverted} re-converted"
+        );
+    }
+}
+fn find<'l>(lines: &'l [Line], boot: u64, tag: &str) -> Vec<&'l Line> {
+    lines
+        .iter()
+        .filter(|l| l.boot == boot && l.tag == tag)
+        .collect()
+}
+/// Every boot starts realtime at the factory epoch plus the counter.
+fn check_boots(backend: &str, lines: &[Line], boots: u64) {
+    for boot in 0..boots {
+        let line = find(lines, boot, "BOOT")[0];
+        assert!(
+            line.cnt - line.rt >= 0 && line.cnt - line.rt < LATENCY,
+            "{backend}: {line:?}"
+        );
+    }
+}
+/// A guest 1 s sleep under +10% drift: monotonic, raw and the counter agree,
+/// and the sleep spans 1/1.1 of the simulation time.
+fn check_sleep(backend: &str, lines: &[Line], reference: &Reference) {
+    let slept = find(lines, 0, "SLEPT");
+    let (first, second) = (slept[0], slept[1]);
     assert!(
-        straddled >= 1 && reconverted >= 1,
-        "{backend}: {straddled} straddling timers, {reconverted} re-converted"
+        first.at > reference.0[0].0,
+        "{backend}: drift precedes the sleeps"
+    );
+    let delta = |f: fn(&Line) -> i128| f(second) - f(first);
+    assert!(delta(|l| l.mono) >= 1_000_000_000);
+    assert!((delta(|l| l.cnt) - delta(|l| l.mono)).abs() < 1_000_000);
+    assert!((delta(|l| l.raw) - delta(|l| l.cnt)).abs() < 1_000_000);
+    let simulated = i128::from(second.at - first.at);
+    assert!(
+        (simulated * 11 / 10 - delta(|l| l.cnt)).abs() < LATENCY,
+        "{backend}: rate"
     );
 }
+/// Heal keeps the offset accrued until then: G(t) = t + accrued afterwards.
+fn check_heal(backend: &str, lines: &[Line], reference: &Reference, healed: u64) {
+    let accrued = i128::from(reference.floor(healed)) - i128::from(healed);
+    assert!(accrued > 400_000_000, "{backend}");
+    let last = lines.last().unwrap();
+    assert!(last.at > healed + 500_000_000);
+    let ahead = last.cnt - i128::from(last.at);
+    assert!(ahead <= accrued && ahead > accrued - LATENCY, "{last:?}");
+}
 
-fn tcg(workers: usize, migrate: bool) -> Outcome {
+/// Guest-controller scenario: drift, +2 s step, crash/reboot, heals.
+fn check_guest(backend: &str, (events, clock, runs, held): &Outcome) {
+    assert!(held.is_empty());
+    let reference = rates(events, *clock);
+    assert_eq!(reference.0.len(), 2, "{backend}: drift then heal");
+    let healed = reference.0[1].0;
+    assert_eq!((reference.0[0].1, reference.0[1].1), (100_000_000, 0));
+    assert!(
+        healed >= 5_000_000_000,
+        "{backend}: heal after the reboot check"
+    );
+    for settlement in crate::driver::fixture::settlements(events) {
+        assert_eq!(settlement.1, SettlementStatus::Applied, "{settlement:?}");
+    }
+    let lost = events.iter().any(|event| {
+        matches!(&event.kind, EventKind::FaultSettled { record, detail, .. }
+            if record.handle.as_ref().map(ToString::to_string).as_deref() == Some("p2")
+                && detail == "realtime step ended with its machine incarnation")
+    });
+    assert!(lost, "{backend}: healing the step after reboot");
+    let lines = lines(events, *clock, crate::machine::TEST_EPOCH_SECONDS);
+    check_time_base(backend, &lines, runs, &reference);
+    check_boots(backend, &lines, 2);
+    check_sleep(backend, &lines, &reference);
+    // Drift persists across reboot: the new boot already runs ahead.
+    let reboot = find(&lines, 1, "BOOT")[0];
+    assert!(reboot.at > 4_000_000_000 && reboot.cnt - i128::from(reboot.at) > 350_000_000);
+    // The step moved realtime only, cancelled the cancel-on-set timer and fired
+    // the absolute realtime timer well before its unstepped monotonic time.
+    let boot = find(&lines, 0, "BOOT")[0];
+    let canceled = find(&lines, 0, "CANCELED")[0];
+    let stepped = canceled.rt - canceled.cnt;
+    assert!(
+        stepped > 2_000_000_000 - LATENCY && stepped <= 2_000_000_000,
+        "{canceled:?}"
+    );
+    assert!(canceled.at >= 2_500_000_000);
+    let fired = find(&lines, 0, "FIRED")[0];
+    assert!(fired.rt >= boot.rt + 5_000_000_000);
+    assert!(
+        fired.mono - boot.mono < 3_500_000_000,
+        "{backend}: {fired:?}"
+    );
+    assert!(find(&lines, 1, "CANCELED").is_empty() && find(&lines, 1, "FIRED").is_empty());
+    check_heal(backend, &lines, &reference, healed);
+}
+
+fn key(text: &str) -> InputKey {
+    InputKey::new(text).unwrap()
+}
+fn clock_target() -> Target {
+    Target::Name("clock".into())
+}
+fn step(nanoseconds: i64) -> Action {
+    Action::StepRealtime {
+        target: clock_target(),
+        nanoseconds: NonZeroI64::new(nanoseconds).unwrap(),
+    }
+}
+/// Host-driven scenario through the public unified schedule: drift, a
+/// negative step and its inverse heal, a step bound to a crashed boot,
+/// reboot and drift heal, with holds before the drift and the step.
+fn host_plan<N>(b: &mut Barrier<'_, N>, now: Timestamp, held: Option<&FaultRecord>, live: &mut bool)
+where
+    N: Machine + Send + 'static,
+    N::Context: 'static,
+    N::Error: Debug + Send + 'static,
+{
+    let result = (|| -> Result<(), Error<N::Error>> {
+        if now == at(0) && held.is_none() {
+            b.schedule(
+                at(500_000_000),
+                key("drift"),
+                Action::Drift {
+                    target: clock_target(),
+                    rate: ClockRate::new(100_000_000).unwrap(),
+                },
+            )?;
+            b.schedule(at(2_500_000_000), key("back"), step(-2_000_000_000))?;
+            b.schedule(
+                at(3_500_000_000),
+                key("heal-back"),
+                Action::Heal(HealTarget::Input(key("back"))),
+            )?;
+            b.schedule(
+                at(4_000_000_000),
+                key("crash"),
+                Action::Crash(clock_target()),
+            )?;
+            b.schedule(at(4_000_000_000), key("late"), step(1_000_000_000))?;
+            b.schedule(
+                at(4_500_000_000),
+                key("reboot"),
+                Action::Reboot(clock_target()),
+            )?;
+            b.schedule(
+                at(5_500_000_000),
+                key("heal-drift"),
+                Action::Heal(HealTarget::Input(key("drift"))),
+            )?;
+            return b.pause_before_next_fault(PlaybackRate::Unlimited);
+        }
+        match held.map(|record| record.action) {
+            // Release the drift and hold again before the next effective fault.
+            Some(FaultAction::Drift(_)) => b.pause_before_next_fault(PlaybackRate::Unlimited),
+            Some(_) => b.set_rate(PlaybackRate::Unlimited),
+            None => {
+                if !*live && now >= at(3_000_000_000) {
+                    // The applied step's handle keeps its key live.
+                    assert!(matches!(
+                        b.schedule(now, key("back"), step(1)),
+                        Err(Error::LiveInputKey(_))
+                    ));
+                    *live = true;
+                }
+                Ok(())
+            }
+        }
+    })();
+    result.unwrap();
+}
+fn check_host(backend: &str, (events, clock, runs, held): &Outcome) {
+    assert_eq!(
+        held.iter().map(|record| record.action).collect::<Vec<_>>(),
+        [
+            FaultAction::Drift(ClockRate::new(100_000_000).unwrap()),
+            FaultAction::StepRealtime(-2_000_000_000)
+        ]
+    );
+    let admitted: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::FaultAdmitted(record) => match &record.origin {
+                FaultOrigin::Input { key } => Some((key.as_str().to_owned(), record.action)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        admitted,
+        [
+            (
+                "drift".to_string(),
+                FaultAction::Drift(ClockRate::new(100_000_000).unwrap())
+            ),
+            ("back".into(), FaultAction::StepRealtime(-2_000_000_000)),
+            ("heal-back".into(), FaultAction::Heal),
+            ("crash".into(), FaultAction::Crash),
+            ("late".into(), FaultAction::StepRealtime(1_000_000_000)),
+            ("reboot".into(), FaultAction::Reboot),
+            ("heal-drift".into(), FaultAction::Heal),
+        ]
+    );
+    for (record, status, ..) in crate::driver::fixture::settlements(events) {
+        let expected = if record.action == FaultAction::StepRealtime(1_000_000_000) {
+            // Bound to the crashed boot at admission.
+            SettlementStatus::Unavailable
+        } else {
+            SettlementStatus::Applied
+        };
+        assert_eq!(status, expected, "{backend}: {record:?}");
+    }
+    let reference = rates(events, *clock);
+    assert_eq!(reference.0.len(), 2, "{backend}: drift then heal");
+    assert_eq!(reference.0[0], (500_000_000, 100_000_000));
+    assert_eq!(reference.0[1], (5_500_000_000, 0));
+    let lines = lines(events, *clock, crate::machine::TEST_EPOCH_SECONDS);
+    check_time_base(backend, &lines, runs, &reference);
+    check_boots(backend, &lines, 2);
+    check_sleep(backend, &lines, &reference);
+    // The negative step succeeded with a real epoch: realtime moved back 2 s,
+    // the cancel-on-set timer was cancelled, and the counter did not move.
+    let canceled = find(&lines, 0, "CANCELED")[0];
+    let stepped = canceled.rt - canceled.cnt;
+    assert!(
+        stepped > -2_000_000_000 - LATENCY && stepped <= -2_000_000_000,
+        "{backend}: {canceled:?}"
+    );
+    assert!(canceled.at >= 2_500_000_000 && canceled.at < 3_500_000_000);
+    // The inverse heal stepped realtime forward again.
+    let restored = find(&lines, 0, "TICK")
+        .into_iter()
+        .find(|line| line.at > 3_600_000_000)
+        .unwrap();
+    assert!(
+        restored.cnt - restored.rt >= 0 && restored.cnt - restored.rt < LATENCY,
+        "{backend}: {restored:?}"
+    );
+    // Drift persists across reboot.
+    let reboot = find(&lines, 1, "BOOT")[0];
+    assert!(reboot.at > 4_500_000_000 && reboot.cnt - i128::from(reboot.at) > 350_000_000);
+    check_heal(backend, &lines, &reference, 5_500_000_000);
+}
+
+/// A small epoch so a bounded negative step falls below CLOCK_MONOTONIC.
+const REFUSAL_EPOCH_SECONDS: u32 = 3_600;
+fn refusal_plan<N>(b: &mut Barrier<'_, N>, now: Timestamp)
+where
+    N: Machine + Send + 'static,
+    N::Context: 'static,
+    N::Error: Debug + Send + 'static,
+{
+    if now == at(0) {
+        b.schedule(at(1_500_000_000), key("below"), step(-7_200_000_000_000))
+            .unwrap();
+    }
+}
+/// Linux refuses a step below CLOCK_MONOTONIC. This records the branch's
+/// current, unapproved handling: the fault settles Rejected without failing
+/// the run, and realtime is unchanged.
+fn check_refusal(backend: &str, (events, clock, runs, _): &Outcome) {
+    let settled = crate::driver::fixture::settlements(events);
+    let refused: Vec<_> = settled
+        .iter()
+        .filter(|(record, ..)| record.action == FaultAction::StepRealtime(-7_200_000_000_000))
+        .collect();
+    assert_eq!(refused.len(), 1, "{backend}");
+    assert_eq!(refused[0].1, SettlementStatus::Rejected);
+    let detail = events.iter().find_map(|e| match &e.kind {
+        EventKind::FaultSettled { record, detail, .. }
+            if record.action == FaultAction::StepRealtime(-7_200_000_000_000) =>
+        {
+            Some(detail.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(detail.as_deref(), Some("guest refused the realtime step"));
+    let lines = lines(events, *clock, REFUSAL_EPOCH_SECONDS);
+    let reference = rates(events, *clock);
+    assert!(reference.0.is_empty());
+    check_time_base(backend, &lines, runs, &Reference(vec![]));
+    check_boots(backend, &lines, 1);
+    // Realtime was below the requested target: its lead over monotonic is the
+    // epoch plus the boot interval, less than the 2 h step.
+    let after = lines.iter().find(|line| line.at > 2_000_000_000).unwrap();
+    assert!(after.cnt - after.rt >= 0 && after.cnt - after.rt < LATENCY);
+    assert!(
+        i128::from(REFUSAL_EPOCH_SECONDS) * 1_000_000_000 + after.rt - after.mono
+            < 7_200_000_000_000
+    );
+    assert!(find(&lines, 0, "CANCELED").is_empty());
+}
+
+fn tcg(workers: usize, migrate: bool, plan: Plan) -> Outcome {
     let qemu = input("SEEDBOX_TCG_QEMU");
-    let mut factory = super::tcg::Factory::new(&qemu, &input("SEEDBOX_TCG_ASSETS")).unwrap();
-    let restore_qemu = qemu.clone();
+    let mut factory =
+        super::tcg::Factory::new(&qemu, &input("SEEDBOX_TCG_ASSETS"), plan.epoch()).unwrap();
     scenario(
         "TCG",
         workers,
         migrate,
+        plan,
         move |definition| factory.create(definition).unwrap(),
-        move |saved: &super::tcg::Snapshot| {
-            super::tcg::TcgMachine::from_snapshot(&restore_qemu, saved)
-        },
+        move |saved: &super::tcg::Snapshot| super::tcg::TcgMachine::from_snapshot(&qemu, saved),
     )
 }
 #[test]
 #[ignore = "requires native TCG kernel/helper and clock-fault application"]
-fn tcg_clock_faults_drift_step_reboot_snapshot_and_workers() {
-    let serial = tcg(1, false);
-    check("TCG", &serial);
-    assert_eq!(serial, tcg(4, false), "workers");
-    assert_eq!(serial, tcg(1, true), "restored mid-drift");
+fn tcg_clock_faults_guest_drift_step_reboot_snapshot_and_workers() {
+    let serial = tcg(1, false, Plan::Guest);
+    check_guest("TCG", &serial);
+    assert_eq!(serial, tcg(4, false, Plan::Guest), "workers");
+    assert_eq!(serial, tcg(1, true, Plan::Guest), "restored mid-drift");
+}
+#[test]
+#[ignore = "requires native TCG kernel/helper and clock-fault application"]
+fn tcg_clock_faults_host_drift_negative_step_heal_holds_and_workers() {
+    let serial = tcg(1, false, Plan::Host);
+    check_host("TCG", &serial);
+    assert_eq!(serial, tcg(4, false, Plan::Host), "workers");
+}
+#[test]
+#[ignore = "requires native TCG kernel/helper and clock-fault application"]
+fn tcg_clock_faults_step_below_monotonic_is_refused() {
+    check_refusal("TCG", &tcg(1, false, Plan::Refusal));
 }
 #[cfg(seedbox_pv)]
-fn pv(workers: usize, migrate: bool) -> Outcome {
+fn pv(workers: usize, migrate: bool, plan: Plan) -> Outcome {
     let worker = input("SEEDBOX_PV_WORKER");
-    let mut factory = super::pv::Factory::new(&worker, &input("SEEDBOX_PV_ASSETS")).unwrap();
-    let restore_worker = worker.clone();
+    let mut factory =
+        super::pv::Factory::new(&worker, &input("SEEDBOX_PV_ASSETS"), plan.epoch()).unwrap();
     scenario(
         "PV",
         workers,
         migrate,
+        plan,
         move |definition| factory.create(definition).unwrap(),
         move |saved: &super::pv::Snapshot| {
-            super::pv::PVMachine::from_snapshot(&restore_worker, saved)
-                .map_err(std::io::Error::other)
+            super::pv::PVMachine::from_snapshot(&worker, saved).map_err(std::io::Error::other)
         },
     )
 }
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV hypervisor/kernel/helper and clock-fault application"]
-fn pv_clock_faults_drift_step_reboot_snapshot_and_workers() {
-    let serial = pv(1, false);
-    check("PV", &serial);
-    assert_eq!(serial, pv(4, false), "workers");
-    assert_eq!(serial, pv(1, true), "restored mid-drift");
+fn pv_clock_faults_guest_drift_step_reboot_snapshot_and_workers() {
+    let serial = pv(1, false, Plan::Guest);
+    check_guest("PV", &serial);
+    assert_eq!(serial, pv(4, false, Plan::Guest), "workers");
+    assert_eq!(serial, pv(1, true, Plan::Guest), "restored mid-drift");
+}
+#[cfg(seedbox_pv)]
+#[test]
+#[ignore = "requires native PV hypervisor/kernel/helper and clock-fault application"]
+fn pv_clock_faults_host_drift_negative_step_heal_holds_and_workers() {
+    let serial = pv(1, false, Plan::Host);
+    check_host("PV", &serial);
+    assert_eq!(serial, pv(4, false, Plan::Host), "workers");
+}
+#[cfg(seedbox_pv)]
+#[test]
+#[ignore = "requires native PV hypervisor/kernel/helper and clock-fault application"]
+fn pv_clock_faults_step_below_monotonic_is_refused() {
+    check_refusal("PV", &pv(1, false, Plan::Refusal));
 }

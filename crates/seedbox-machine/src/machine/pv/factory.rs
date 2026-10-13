@@ -21,7 +21,13 @@ impl Factory {
     /// Load and validate the explicit offline-built guest asset directory once.
     /// Required files and supported structural formats are checked during load;
     /// runtime incompatibility can still fail when run. No alternate location is tried.
-    pub fn new(worker: &Path, guest_assets: &Path) -> io::Result<Self> {
+    ///
+    /// `epoch_seconds` is the realtime epoch of every machine this factory
+    /// creates: on every boot, before Ready, the guest sets `CLOCK_REALTIME` to
+    /// the epoch plus the machine counter (its time base). Use one epoch for
+    /// all machines of a run, including spawned machines; it is part of each
+    /// machine's boot inputs and snapshots, not a Driver setting.
+    pub fn new(worker: &Path, guest_assets: &Path, epoch_seconds: u32) -> io::Result<Self> {
         use super::super::assets;
         assets::executable(worker)?;
         let kernel = assets::read(guest_assets, "kernel")?;
@@ -41,7 +47,7 @@ impl Factory {
                 },
                 init,
                 base_initramfs: vec![],
-                epoch_seconds: 0,
+                epoch_seconds,
             },
             runtime,
         })
@@ -226,8 +232,12 @@ mod tests {
     fn mandatory_runtime_derivation_owns_inputs_and_preserves_original_workload() {
         let directory = tempfile::tempdir().unwrap();
         assets(directory.path());
-        let mut factory =
-            Factory::new(&std::env::current_exe().unwrap(), directory.path()).unwrap();
+        let mut factory = Factory::new(
+            &std::env::current_exe().unwrap(),
+            directory.path(),
+            crate::machine::TEST_EPOCH_SECONDS,
+        )
+        .unwrap();
         let definition = crate::driver::fixture::definition(0);
         let original = definition.clone();
         let first = factory.create(&definition).unwrap();
@@ -259,7 +269,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         assets(directory.path());
         fs::remove_file(directory.path().join("progress.tar")).unwrap();
-        assert!(Factory::new(&std::env::current_exe().unwrap(), directory.path()).is_err());
+        assert!(Factory::new(
+            &std::env::current_exe().unwrap(),
+            directory.path(),
+            crate::machine::TEST_EPOCH_SECONDS
+        )
+        .is_err());
     }
     #[test]
     fn runtime_preload_and_executable_modes_are_required_at_load() {
@@ -287,7 +302,11 @@ mod tests {
                 changed.into_inner().unwrap(),
             )
             .unwrap();
-            let error = match Factory::new(&std::env::current_exe().unwrap(), directory.path()) {
+            let error = match Factory::new(
+                &std::env::current_exe().unwrap(),
+                directory.path(),
+                crate::machine::TEST_EPOCH_SECONDS,
+            ) {
                 Ok(_) => panic!("broken runtime accepted"),
                 Err(error) => error.to_string(),
             };

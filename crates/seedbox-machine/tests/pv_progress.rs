@@ -1,5 +1,7 @@
 #![cfg(seedbox_pv)]
 //! Public factory activation of real instrumentation, measured inside a CPU loop.
+#[path = "support/epoch.rs"]
+mod epoch;
 use seedbox_machine::{
     clock::Clock,
     definition::{FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources},
@@ -123,8 +125,12 @@ fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
 #[test]
 #[ignore = "requires native PV worker, factory guest assets and existing CPU-loop fixture"]
 fn factory_automatically_charges_cpu_work_and_execution_rate() {
-    let mut factory =
-        Factory::new(&input("SEEDBOX_PV_WORKER"), &input("SEEDBOX_PV_ASSETS")).unwrap();
+    let mut factory = Factory::new(
+        &input("SEEDBOX_PV_WORKER"),
+        &input("SEEDBOX_PV_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
     let short = measured(&mut factory, 200_000, 1000);
     let long = measured(&mut factory, 400_000, 1000);
     assert!(
@@ -210,8 +216,12 @@ fn instruction_run(
             }
         }
     }
-    let mut factory =
-        Factory::new(&input("SEEDBOX_PV_WORKER"), &input("SEEDBOX_PV_ASSETS")).unwrap();
+    let mut factory = Factory::new(
+        &input("SEEDBOX_PV_WORKER"),
+        &input("SEEDBOX_PV_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
     let quantum = 5_000_000;
     let mut driver = Driver::new(
         Timestamp::from_nanos(0),

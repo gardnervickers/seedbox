@@ -1,3 +1,6 @@
+mod epoch {
+    include!("epoch.rs");
+}
 use super::machine_crate;
 use super::machine_crate::{
     clock::Clock,
@@ -403,6 +406,7 @@ pub fn tcg() -> super::machine_crate::machine::tcg::TcgMachine {
     let mut backend = machine_crate::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     backend.create(&definition).unwrap()
@@ -416,6 +420,7 @@ pub fn pv() -> super::machine_crate::machine::pv::PVMachine {
     let mut backend = machine_crate::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     backend.create(&definition).unwrap()

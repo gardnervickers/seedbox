@@ -413,10 +413,30 @@ fn host_drift_step_and_heal_follow_keys_and_publish_resolved_payloads() {
             ),
             // The refused second drift drew no handle number: this documents
             // the branch's current choice, which awaits a policy decision.
-            (200, "back".into(), FaultAction::StepRealtime(-2_000), Some("p2".into())),
-            (400, "heal-back".into(), FaultAction::Heal, Some("p2".into())),
-            (500, "back".into(), FaultAction::StepRealtime(7), Some("p3".into())),
-            (600, "heal-drift".into(), FaultAction::Heal, Some("p1".into())),
+            (
+                200,
+                "back".into(),
+                FaultAction::StepRealtime(-2_000),
+                Some("p2".into())
+            ),
+            (
+                400,
+                "heal-back".into(),
+                FaultAction::Heal,
+                Some("p2".into())
+            ),
+            (
+                500,
+                "back".into(),
+                FaultAction::StepRealtime(7),
+                Some("p3".into())
+            ),
+            (
+                600,
+                "heal-drift".into(),
+                FaultAction::Heal,
+                Some("p1".into())
+            ),
         ]
     );
     // Drifts never stack: the second is refused at admission with its key.

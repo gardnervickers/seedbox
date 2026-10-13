@@ -321,7 +321,12 @@ where
 }
 fn tcg(workers: usize, migrate: bool) -> (Vec<StepOutcome>, Vec<MachineResponse>) {
     let qemu = input("SEEDBOX_TCG_QEMU");
-    let mut factory = super::tcg::Factory::new(&qemu, &input("SEEDBOX_TCG_ASSETS")).unwrap();
+    let mut factory = super::tcg::Factory::new(
+        &qemu,
+        &input("SEEDBOX_TCG_ASSETS"),
+        crate::machine::TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
     scenario("TCG", workers, migrate, move |definition| {
         let qemu = qemu.clone();
         Migrating {
@@ -346,7 +351,12 @@ fn tcg_driver_guest_sleep_and_trigger_match_workers_and_snapshot() {
 #[cfg(seedbox_pv)]
 fn pv(workers: usize, migrate: bool) -> (Vec<StepOutcome>, Vec<MachineResponse>) {
     let worker = input("SEEDBOX_PV_WORKER");
-    let mut factory = super::pv::Factory::new(&worker, &input("SEEDBOX_PV_ASSETS")).unwrap();
+    let mut factory = super::pv::Factory::new(
+        &worker,
+        &input("SEEDBOX_PV_ASSETS"),
+        crate::machine::TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
     scenario("PV", workers, migrate, move |definition| {
         let worker = worker.clone();
         Migrating {

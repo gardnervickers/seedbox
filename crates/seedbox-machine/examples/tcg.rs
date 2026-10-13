@@ -8,6 +8,9 @@ mod support;
 mod tcg_program;
 
 #[cfg(unix)]
+/// Realtime epoch of the example machines: 2000-01-01T00:00:00Z.
+const EXAMPLE_EPOCH_SECONDS: u32 = 946_684_800;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use seedbox_machine::{
         definition::{
@@ -29,7 +32,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     }
     let executable = input("SEEDBOX_TCG_QEMU")?;
-    let mut backend = Factory::new(&executable, &input("SEEDBOX_TCG_ASSETS")?)?;
+    let mut backend = Factory::new(
+        &executable,
+        &input("SEEDBOX_TCG_ASSETS")?,
+        EXAMPLE_EPOCH_SECONDS,
+    )?;
     let guests = support::sleeping_guests();
     fn definition(
         name: String,

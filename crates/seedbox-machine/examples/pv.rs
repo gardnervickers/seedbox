@@ -10,6 +10,9 @@ mod pv_init;
 mod support;
 
 #[cfg(seedbox_pv)]
+/// Realtime epoch of the example machines: 2000-01-01T00:00:00Z.
+const EXAMPLE_EPOCH_SECONDS: u32 = 946_684_800;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use seedbox_machine::{
         definition::{
@@ -31,7 +34,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     }
     let executable = input("SEEDBOX_PV_WORKER")?;
-    let mut backend = Factory::new(&executable, &input("SEEDBOX_PV_ASSETS")?)?;
+    let mut backend = Factory::new(
+        &executable,
+        &input("SEEDBOX_PV_ASSETS")?,
+        EXAMPLE_EPOCH_SECONDS,
+    )?;
     let guests = support::sleeping_guests();
     fn definition(
         name: String,

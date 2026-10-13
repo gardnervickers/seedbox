@@ -3,6 +3,7 @@
  *               counter, sleeps, and arms absolute realtime timerfds.
  *   controller  applies drift, a realtime step, crash/reboot and heals to the
  *               machine named "clock" at fixed simulation times, then exits 0.
+ *   idle        an oracle for host-driven runs: sleeps 6.5 s, then exits 0.
  * Every line is "<TAG> rt=<ns> mono=<ns> raw=<ns> cnt=<ns>". */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -166,6 +167,10 @@ int main(int argc, char **argv) {
     if (argc != 2) fail("role");
     if (!strcmp(argv[1], "clock")) clock_role();
     else if (!strcmp(argv[1], "controller")) controller_role();
+    else if (!strcmp(argv[1], "idle")) {
+        struct timespec rest = {.tv_sec = 6, .tv_nsec = 500000000};
+        while (nanosleep(&rest, &rest)) if (errno != EINTR) fail("idle");
+    }
     else fail("unknown role");
     return 0;
 }

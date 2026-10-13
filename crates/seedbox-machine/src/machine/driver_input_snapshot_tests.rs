@@ -212,7 +212,12 @@ where
 }
 fn tcg(workers: usize, migrate: bool) -> Vec<Event> {
     let qemu = input("SEEDBOX_TCG_QEMU");
-    let mut factory = super::tcg::Factory::new(&qemu, &input("SEEDBOX_TCG_ASSETS")).unwrap();
+    let mut factory = super::tcg::Factory::new(
+        &qemu,
+        &input("SEEDBOX_TCG_ASSETS"),
+        crate::machine::TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
     scenario(
         256 << 20,
         fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
@@ -240,7 +245,12 @@ fn tcg_host_inputs_continue_after_snapshot_with_pending_input_and_unacknowledged
 #[cfg(seedbox_pv)]
 fn pv(workers: usize, migrate: bool) -> Vec<Event> {
     let worker = input("SEEDBOX_PV_WORKER");
-    let mut factory = super::pv::Factory::new(&worker, &input("SEEDBOX_PV_ASSETS")).unwrap();
+    let mut factory = super::pv::Factory::new(
+        &worker,
+        &input("SEEDBOX_PV_ASSETS"),
+        crate::machine::TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
     scenario(
         128 << 20,
         fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),

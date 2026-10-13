@@ -1,4 +1,6 @@
 #![cfg(unix)]
+#[path = "support/epoch.rs"]
+mod epoch;
 
 use seedbox_machine as machine_crate;
 use seedbox_machine::{
@@ -58,6 +60,7 @@ fn driver(restore_initial: bool) -> Harness {
     let mut backend = machine_crate::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let driver = Driver::new(

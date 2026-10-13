@@ -1,6 +1,8 @@
 #![cfg(unix)]
 //! Actual Linux guest service acceptance. Opt-in separately for each backend;
 //! inputs are statically linked helper + fixture initramfs from guest.nix.
+#[path = "support/epoch.rs"]
+mod epoch;
 use seedbox_machine as machine_crate;
 #[path = "support/prepared_application.rs"]
 mod prepared;
@@ -301,6 +303,7 @@ fn tcg() -> seedbox_machine::machine::tcg::TcgMachine {
     let mut backend = machine_crate::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     backend.create(&definition).unwrap()
@@ -325,6 +328,7 @@ fn pv() -> seedbox_machine::machine::pv::PVMachine {
     let mut backend = machine_crate::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     backend.create(&definition).unwrap()

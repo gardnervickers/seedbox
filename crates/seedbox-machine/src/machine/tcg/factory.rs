@@ -16,7 +16,14 @@ impl Factory {
     /// Load and validate the explicit offline-built guest asset directory once.
     /// Required files and supported structural formats are checked during load;
     /// runtime incompatibility can still fail when run. No alternate location is tried.
-    pub fn new(qemu: &Path, guest_assets: &Path) -> Result<Self, Error> {
+    ///
+    /// `epoch_seconds` is the realtime epoch of every machine this factory
+    /// creates: on every boot, before Ready, the guest sets `CLOCK_REALTIME` to
+    /// the epoch plus the machine counter (its time base), and the board RTC
+    /// derives from the same epoch. Use one epoch for all machines of a run,
+    /// including spawned machines; it is part of each machine's boot inputs
+    /// and snapshots, not a Driver setting.
+    pub fn new(qemu: &Path, guest_assets: &Path, epoch_seconds: u32) -> Result<Self, Error> {
         use super::super::assets;
         assets::executable(qemu)?;
         let kernel = assets::read(guest_assets, "kernel")?;
@@ -37,7 +44,7 @@ impl Factory {
                 },
                 init,
                 base_initramfs: vec![],
-                epoch_seconds: 0,
+                epoch_seconds,
             },
             firmware,
         })
@@ -70,7 +77,12 @@ mod tests {
         fs::write(root.join("init"), crate::machine::assets::tests::image(243)).unwrap();
         fs::write(root.join("command-line"), " custom=x\n").unwrap();
         fs::write(root.join("firmware"), [1]).unwrap();
-        let mut factory = Factory::new(&std::env::current_exe().unwrap(), root).unwrap();
+        let mut factory = Factory::new(
+            &std::env::current_exe().unwrap(),
+            root,
+            crate::machine::TEST_EPOCH_SECONDS,
+        )
+        .unwrap();
         let definition = crate::driver::fixture::definition(0);
         let original = definition.clone();
         let first = factory.create(&definition).unwrap();

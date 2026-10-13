@@ -24,6 +24,11 @@ pub struct RunContext<'a, C> {
 #[cfg(test)]
 mod test_environment;
 
+/// Documented nonzero realtime epoch of this crate's tests: 2000-01-01T00:00:00Z.
+/// It is a test choice, not a library default; factories have no default.
+#[cfg(test)]
+pub(crate) const TEST_EPOCH_SECONDS: u32 = 946_684_800;
+
 #[cfg(all(test, unix))]
 mod clock_fault_tests;
 #[cfg(all(test, unix))]

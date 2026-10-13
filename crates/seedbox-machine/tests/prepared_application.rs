@@ -1,5 +1,7 @@
 #![cfg(unix)]
 //! Public factory and retained image launch acceptance.
+#[path = "support/epoch.rs"]
+mod epoch;
 use seedbox_machine as machine_crate;
 #[path = "support/prepared_image.rs"]
 mod image;
@@ -10,6 +12,7 @@ fn pv(script: bool) {
     let mut backend = machine_crate::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let binary = fs::read(input("SEEDBOX_PV_PREPARED_FIXTURE")).unwrap();
@@ -23,6 +26,7 @@ fn tcg(script: bool) {
     let mut backend = machine_crate::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let binary = fs::read(input("SEEDBOX_TCG_PREPARED_FIXTURE")).unwrap();
@@ -51,6 +55,7 @@ fn pv_native_prepared_image_readable_elf_launch() {
     let mut backend = machine_crate::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let binary = fs::read(input("SEEDBOX_PV_PREPARED_FIXTURE")).unwrap();
@@ -77,6 +82,7 @@ fn tcg_native_runtime_respects_execute_traversal_and_uid_authorization() {
     let mut backend = machine_crate::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let binary = fs::read(input("SEEDBOX_TCG_PREPARED_FIXTURE")).unwrap();
@@ -100,6 +106,7 @@ fn pv_native_runtime_respects_execute_traversal_and_uid_authorization() {
     let mut backend = machine_crate::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let binary = fs::read(input("SEEDBOX_PV_PREPARED_FIXTURE")).unwrap();

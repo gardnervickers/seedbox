@@ -1,6 +1,8 @@
 #![cfg(unix)]
 //! Native public Driver acceptance with ordinary targets and a required oracle.
 //! Guest inputs are shared with isolated Machine checks through explicit fixture paths.
+#[path = "support/epoch.rs"]
+mod epoch;
 use seedbox_machine as machine_crate;
 #[path = "support/input_key.rs"]
 mod input_key;
@@ -551,6 +553,7 @@ fn tcg(workers: usize) -> Vec<Event> {
     let mut backend = machine_crate::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     scenario(workers, definition, move |definition| {
@@ -573,6 +576,7 @@ fn pv(workers: usize) -> Vec<Event> {
     let mut backend = machine_crate::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     scenario(workers, definition, move |definition| {
@@ -843,6 +847,7 @@ fn tcg_driver_guest_receives_automatic_replies_and_real_peer_effects() {
         let mut backend = machine_crate::machine::tcg::Factory::new(
             &input("SEEDBOX_TCG_QEMU"),
             &input("SEEDBOX_TCG_ASSETS"),
+            epoch::TEST_EPOCH_SECONDS,
         )
         .unwrap();
         automatic_rpc_scenario(
@@ -869,6 +874,7 @@ fn pv_driver_guest_receives_automatic_replies_and_real_peer_effects() {
         let mut backend = machine_crate::machine::pv::Factory::new(
             &input("SEEDBOX_PV_WORKER"),
             &input("SEEDBOX_PV_ASSETS"),
+            epoch::TEST_EPOCH_SECONDS,
         )
         .unwrap();
         automatic_rpc_scenario(
@@ -1021,6 +1027,7 @@ fn tcg_driver_oracle_spawns_declared_peer_workers_match() {
         let mut backend = machine_crate::machine::tcg::Factory::new(
             &input("SEEDBOX_TCG_QEMU"),
             &input("SEEDBOX_TCG_ASSETS"),
+            epoch::TEST_EPOCH_SECONDS,
         )
         .unwrap();
         spawn_scenario(
@@ -1044,6 +1051,7 @@ fn pv_driver_oracle_spawns_declared_peer_workers_match() {
         let mut backend = machine_crate::machine::pv::Factory::new(
             &input("SEEDBOX_PV_WORKER"),
             &input("SEEDBOX_PV_ASSETS"),
+            epoch::TEST_EPOCH_SECONDS,
         )
         .unwrap();
         spawn_scenario(
@@ -1069,6 +1077,7 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
     let mut backend = machine_crate::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
+        epoch::TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let driver = Driver::new(
@@ -1132,12 +1141,14 @@ fn tcg_native_boot_realtime_is_epoch_plus_machine_counter() {
     assert_eq!(clocks.len(), 4);
     assert!(clocks[0] <= clocks[3]);
     assert!(clocks[0] <= clocks[2] && clocks[2] <= clocks[3]);
-    // Every boot sets REALTIME to the epoch (zero: factories have no epoch
-    // input yet) plus the machine counter before Ready. MONOTONIC starts when
-    // the kernel's clocksource does, after the counter, so REALTIME leads it
-    // by the constant pre-clocksource boot interval. The board RTC derives
-    // from the same epoch; no host wall clock is consulted.
-    assert!(clocks[1] > clocks[0] && clocks[1] - clocks[0] < 1_000_000_000);
+    // Every boot sets REALTIME to the factory's epoch plus the machine
+    // counter before Ready. MONOTONIC starts when the kernel's clocksource
+    // does, after the counter, so REALTIME - epoch leads it by the constant
+    // pre-clocksource boot interval. The board RTC derives from the same
+    // epoch; no host wall clock is consulted.
+    let epoch = u64::from(epoch::TEST_EPOCH_SECONDS) * 1_000_000_000;
+    let since_epoch = clocks[1] - epoch;
+    assert!(since_epoch > clocks[0] && since_epoch - clocks[0] < 1_000_000_000);
     for clock in clocks {
         assert_eq!(clock % 100, 0, "current 10 MHz time CSR resolution");
     }
