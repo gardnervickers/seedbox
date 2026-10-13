@@ -757,6 +757,154 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     assert!(archive::export(&bad, &store, Vec::new(), &Options::default()).is_err());
 }
 
+/// NEXT-100 case 97, server arm: a checkpoint acknowledged as requested
+/// whose run ends before capture, and one refused because the run completed,
+/// are never exported, imported or branchable as checkpoints, even when the
+/// engine had already written its native checkpoint file before the ack.
+#[test]
+fn terminated_pending_checkpoints_never_become_branchable() {
+    let source = tempfile::tempdir().unwrap();
+    let store = ContentStore::with_ephemeral_evidence(
+        source.path().join("cache"),
+        source.path().join("evidence"),
+    );
+    let fixture = fixture(&store, false);
+    let mut catalogue = Catalogue::in_memory();
+    let mut request = support::resolved_request("pending-source");
+    request.spec = fixture.simulation.spec.clone();
+    let mut simulation = catalogue.submit(request).unwrap().0;
+    let id = simulation.metadata.id.clone();
+    for phase in [Phase::Preparing, Phase::Running] {
+        simulation.status.phase = phase;
+        simulation = catalogue.update(simulation).unwrap();
+    }
+    let checkpoint = |name: &str| ControlRequest {
+        request_id: name.into(),
+        command: ControlCommand::Checkpoint,
+    };
+    let status = PlaybackStatus {
+        position: Default::default(),
+        rate: PlaybackRate::Paused,
+        achieved_rate: None,
+        stepping: false,
+        terminal: true,
+        application_ready: true,
+    };
+    catalogue
+        .accept_control(&id, checkpoint("refused"))
+        .unwrap();
+    catalogue
+        .acknowledge_control(
+            &id,
+            "refused",
+            ControlState::Acknowledged {
+                status,
+                error: Some(seedbox_engine_protocol::host_control::ControlError::Completed),
+                intervention: None,
+                detail: None,
+                checkpoint: None,
+            },
+        )
+        .unwrap();
+    // Acknowledged by the worker as requested only: the receipt stays Accepted.
+    catalogue
+        .accept_control(&id, checkpoint("pending"))
+        .unwrap();
+    simulation.status.phase = Phase::Completed;
+    catalogue.update(simulation).unwrap();
+    let receipts = catalogue.checkpoints(&id).unwrap();
+    assert_eq!(receipts.len(), 2);
+    let pending = receipts
+        .iter()
+        .find(|r| r.request.request_id == "pending")
+        .unwrap();
+    assert_eq!(pending.state, ControlState::Interrupted);
+
+    let manager = Arc::new(Manager::new(catalogue));
+    let execution = ExecutionService::new(
+        manager.clone(),
+        source.path().into(),
+        store.clone(),
+        Arc::new(NeverExecute),
+    )
+    .unwrap();
+    let attempt = source
+        .path()
+        .join("runs")
+        .join(id.as_str())
+        .join("owned-attempt");
+    std::fs::create_dir_all(attempt.join("output/machines")).unwrap();
+    // The engine published its capture, then ended before acknowledging it.
+    let memory = attempt.join("ram.bin");
+    std::fs::write(&memory, b"published but unacknowledged RAM").unwrap();
+    let ram = seedbox_artifacts::store::ContentDigest::of(b"published but unacknowledged RAM");
+    let native = serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[],"failed":false}}}, "ram":{"path":std::path::absolute(&memory).unwrap(), "sha256":ram.hex()}});
+    std::fs::write(
+        attempt.join("output/machines/checkpoint-pending.json"),
+        serde_json::to_vec(&native).unwrap(),
+    )
+    .unwrap();
+    let record = fixture.record.as_ref().unwrap();
+    write_record(&attempt, record).unwrap();
+    seedbox_artifacts::interventions::Journal::initialize(&attempt.join("interventions.json"))
+        .unwrap();
+    std::fs::write(source.path().join("inputs").join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({"checkpoint":null,"prepared":record.identity.inputs,"interventions":null,"attempt":std::path::absolute(&attempt).unwrap()})).unwrap()).unwrap();
+    for name in ["pending", "refused"] {
+        assert!(
+            execution.checkpoint_definition(&id, name).is_err(),
+            "{name}"
+        );
+    }
+    let mut bytes = Vec::new();
+    execution
+        .export_bundle(&id, &mut bytes, &Options::default())
+        .unwrap();
+    let portable = archive::import(bytes.as_slice(), &store, &Options::default()).unwrap();
+    assert!(portable.checkpoints.is_empty());
+    for name in ["pending", "refused"] {
+        assert_eq!(
+            portable
+                .omissions
+                .get(&format!("checkpoint:{name}"))
+                .map(String::as_str),
+            Some("capture unavailable"),
+            "{:?}",
+            portable.omissions
+        );
+    }
+    execution.delete(&id).unwrap();
+    drop(execution);
+    let destination = tempfile::tempdir().unwrap();
+    let (manager, execution, _) = service(destination.path());
+    let imported = execution
+        .import_bundle(bytes.as_slice(), &Options::default())
+        .unwrap()
+        .metadata
+        .id;
+    let receipts = manager
+        .read(|catalogue| catalogue.checkpoints(&imported))
+        .unwrap();
+    assert_eq!(receipts.len(), 2);
+    for receipt in &receipts {
+        assert!(
+            !matches!(
+                &receipt.state,
+                ControlState::Acknowledged {
+                    checkpoint: Some(CheckpointStatus {
+                        state: CheckpointState::Captured,
+                        ..
+                    }),
+                    ..
+                }
+            ),
+            "{receipt:?}"
+        );
+        assert!(execution
+            .checkpoint_definition(&imported, &receipt.request.request_id)
+            .is_err());
+    }
+}
+
 #[test]
 fn export_holds_a_stable_snapshot_until_spooled_before_deletion() {
     struct PausedWriter {
