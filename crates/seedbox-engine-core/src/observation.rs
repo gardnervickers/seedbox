@@ -1,13 +1,15 @@
-//! Nonblocking worker-side observation delivery. No delivery outcome can change
-//! guest state, a witness, or an execution result.
+//! Worker-side observation delivery. No delivery outcome can change guest
+//! state, a witness, or an execution result: the coordinator publishes between
+//! rounds, so waiting for the observer only delays the next round.
 use seedbox_engine_protocol::{
     application_log,
-    observation::{Kind, Observation, MAX_DATAGRAM_BYTES},
+    observation::{receiver_full, Kind, Observation, MAX_DATAGRAM_BYTES},
 };
 use std::{
     os::unix::net::UnixDatagram,
     path::Path,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 /// Runtime-only observations waiting for coordinator commit.
@@ -82,9 +84,45 @@ impl Buffer {
     }
 }
 
+/// How long one mandatory observation waits for a live observer to drain
+/// earlier datagrams before it is dropped as a source gap.
+const STALL: Duration = Duration::from_secs(2);
+
 struct Sender {
     socket: UnixDatagram,
     sequence: u64,
+    stall: Duration,
+    /// The observer let a datagram time out. Later sends try once until one is
+    /// accepted, so a stopped observer delays a worker at most once.
+    stalled: bool,
+}
+
+impl Sender {
+    /// Wait for a full receiver only when asked and not already stalled.
+    fn send(&mut self, bytes: &[u8], wait: bool) -> bool {
+        let mut deadline = None;
+        let mut pause = Duration::from_micros(20);
+        loop {
+            match self.socket.send(bytes) {
+                Ok(_) => {
+                    self.stalled = false;
+                    return true;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if wait && !self.stalled && receiver_full(&error) => {
+                    let now = Instant::now();
+                    let deadline = *deadline.get_or_insert(now + self.stall);
+                    if now >= deadline {
+                        self.stalled = true;
+                        return false;
+                    }
+                    std::thread::sleep(pause.min(deadline - now));
+                    pause = (pause * 2).min(Duration::from_millis(1));
+                }
+                Err(_) => return false,
+            }
+        }
+    }
 }
 
 pub struct Publisher(Mutex<Sender>);
@@ -99,6 +137,10 @@ impl Drop for Publisher {
 
 impl Publisher {
     pub fn connect(path: &Path) -> std::io::Result<Arc<Self>> {
+        Self::connect_with_stall(path, STALL)
+    }
+
+    fn connect_with_stall(path: &Path, stall: Duration) -> std::io::Result<Arc<Self>> {
         let socket = UnixDatagram::unbound()?;
         seedbox_engine_protocol::observation::configure_socket(&socket)?;
         socket.connect(path)?;
@@ -106,6 +148,8 @@ impl Publisher {
         Ok(Arc::new(Self(Mutex::new(Sender {
             socket,
             sequence: 0,
+            stall,
+            stalled: false,
         }))))
     }
 
@@ -133,9 +177,11 @@ impl Publisher {
             simulated_time_ns,
             kind,
         };
+        // Mandatory observations wait for a live observer; optional frame
+        // batches never delay a round.
         if let Ok(bytes) = serde_json::to_vec(&observation) {
             if bytes.len() <= MAX_DATAGRAM_BYTES
-                && sender.socket.send(&bytes).is_ok()
+                && sender.send(&bytes, !optional_frames)
                 && optional_frames
             {
                 sender.sequence = sequence;
@@ -240,6 +286,7 @@ impl Decoder {
 mod tests {
     use super::*;
     use seedbox_engine_protocol::application_log::{Chunk, Stream};
+    use seedbox_engine_protocol::observation::configure_socket;
 
     #[test]
     fn slice_and_round_overflow_preserve_exact_omission_count() {
@@ -268,7 +315,7 @@ mod tests {
 
     #[test]
     fn large_frame_batches_cross_darwin_default_limit_and_omissions_do_not_gap_logs() {
-        use seedbox_engine_protocol::observation::{configure_socket, Frame, FrameFate};
+        use seedbox_engine_protocol::observation::{Frame, FrameFate};
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("observer");
         let receiver = UnixDatagram::bind(&path).unwrap();
@@ -417,16 +464,59 @@ mod tests {
     }
 
     #[test]
-    fn datagram_delivery_is_bounded_nonblocking_and_reports_sequence_gaps() {
+    fn mandatory_observations_wait_for_a_slow_live_observer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observations.sock");
+        let receiver = UnixDatagram::bind(&path).unwrap();
+        configure_socket(&receiver).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let publisher = Publisher::connect(&path).unwrap();
+        // Far more than the receive buffer holds: the observer falls behind.
+        const COUNT: u64 = 1024;
+        let reader = std::thread::spawn(move || {
+            let mut buffer = [0; MAX_DATAGRAM_BYTES];
+            let mut sequences = Vec::new();
+            while sequences.len() < COUNT as usize {
+                let count = receiver.recv(&mut buffer).unwrap();
+                let observation: Observation = serde_json::from_slice(&buffer[..count]).unwrap();
+                sequences.push(observation.sequence);
+                if sequences.len() % 64 == 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+            sequences
+        });
+        for _ in 0..COUNT {
+            publisher.publish(
+                "app",
+                1,
+                9,
+                Kind::Log(Chunk {
+                    stream: Stream::Stdout,
+                    bytes: vec![0xff; application_log::MAX_BYTES],
+                }),
+            );
+        }
+        assert_eq!(reader.join().unwrap(), (1..=COUNT).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_stopped_observer_delays_once_and_reports_sequence_gaps() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("observations.sock");
         let receiver = UnixDatagram::bind(&path).unwrap();
         receiver.set_nonblocking(true).unwrap();
-        let publisher = Publisher::connect(&path).unwrap();
+        let stall = std::time::Duration::from_millis(50);
+        let publisher = Publisher::connect_with_stall(&path, stall).unwrap();
         let emit = || publisher.publish("oracle", 3, 42, Kind::MalformedLog);
+        let started = Instant::now();
         for _ in 0..4096 {
             emit();
         }
+        // One timed-out wait, not one per lost observation.
+        assert!(started.elapsed() >= stall && started.elapsed() < stall * 20);
         let mut buffer = [0; MAX_DATAGRAM_BYTES];
         let mut last = 0;
         while let Ok(count) = receiver.recv(&mut buffer) {
