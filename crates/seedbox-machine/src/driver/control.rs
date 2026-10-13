@@ -106,6 +106,9 @@ impl Control {
             .map(Ok)
             .unwrap_or_else(|| self.named(name))
     }
+    pub(super) fn spawn_pending(&self) -> bool {
+        !self.spawning.is_empty()
+    }
     pub(super) fn add_unnamed(&mut self, at: Timestamp) {
         let key = Self::source(MachineId(self.entries.len()));
         self.entries.push(Observed {

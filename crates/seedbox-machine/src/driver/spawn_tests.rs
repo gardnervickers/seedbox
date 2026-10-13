@@ -458,6 +458,90 @@ fn finish_and_stop_cut_off_already_admitted_spawn_effects() {
 }
 
 #[test]
+fn pending_spawn_rejects_host_add_without_mutation_then_allows_next_identity() {
+    for workers in [1, 2, 4] {
+        let (mut driver, draws, built) = build(workers, vec![], None);
+        let Response::SimulationControl { id, payload } = spawn(1, "fixture-1") else {
+            unreachable!()
+        };
+        driver.control.record_call(MachineId(0), id, 0);
+        let plans = driver
+            .control
+            .invoke_plans(|service, view| {
+                service.admit(
+                    view,
+                    control::Control::source(MachineId(0)),
+                    id,
+                    0,
+                    0,
+                    &payload,
+                )
+            })
+            .unwrap();
+        driver.control_plans(plans).unwrap();
+        driver.flush_events().unwrap();
+        let position = driver.position();
+        let published = driver.published.clone();
+        let queued = driver.events[&at(0)].len();
+        let definitions = driver.definitions.clone();
+        assert_eq!(
+            driver.control.spawn_target("fixture-1").unwrap(),
+            MachineId(1)
+        );
+        assert!(driver.control.target("fixture-1").is_err());
+        driver
+            .with_barrier(|b| {
+                assert!(matches!(
+                    b.add(|| panic!("pending spawn invoked host factory")),
+                    Err(Error::SpawnPending)
+                ));
+                assert_eq!(
+                    b.machines().map(|(id, _)| id).collect::<Vec<_>>(),
+                    [MachineId(0)]
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(driver.position(), position);
+        assert_eq!(driver.published, published);
+        assert_eq!(driver.events[&at(0)].len(), queued);
+        assert_eq!(driver.definitions, definitions);
+        assert_eq!(
+            driver.control.spawn_target("fixture-1").unwrap(),
+            MachineId(1)
+        );
+        assert_eq!(draws.load(Ordering::SeqCst), 1);
+        assert_eq!(*built.lock().unwrap(), ["fixture-0"]);
+        driver.step(at(0)).unwrap();
+        assert_eq!(driver.control.target("fixture-1").unwrap(), MachineId(1));
+        assert_eq!(draws.load(Ordering::SeqCst), 2);
+        assert_eq!(*built.lock().unwrap(), ["fixture-0", "fixture-1"]);
+        let host = driver
+            .with_barrier(|b| b.add(|| Ok(Probe::default())))
+            .unwrap();
+        assert_eq!(host, MachineId(2));
+        assert_eq!(
+            driver
+                .control
+                .reply_target(&control::Control::source(host))
+                .unwrap(),
+            host
+        );
+        assert_eq!(draws.load(Ordering::SeqCst), 3);
+        assert_eq!(driver.machines.len(), 3);
+        let events = driver.drain_events();
+        assert_eq!(fixture::settlements(&events).len(), 1);
+        assert!(events.iter().any(|e| matches!(
+            e.kind,
+            EventKind::MachineAdded {
+                machine: MachineId(2),
+                cause: Cause::Host
+            }
+        )));
+    }
+}
+
+#[test]
 fn spawned_machine_has_equal_control_access() {
     let (mut driver, draws, _) = build(2, vec![vec![spawn(1, "fixture-1")]], None);
     driver.step(at(10)).unwrap();

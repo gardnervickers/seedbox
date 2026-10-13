@@ -1744,6 +1744,9 @@ where
     /// Construct and admit a machine at this barrier's time. Construction
     /// failure leaves the existing set unchanged. The returned identity follows
     /// all earlier additions; removal and identity reuse are not supported.
+    /// While a guest spawn identity is reserved but not yet dispatched, returns
+    /// `Error::SpawnPending` without invoking the factory, drawing a seed or
+    /// changing state. Drive the pending spawn before attempting a host addition.
     /// Success publishes `EventKind::MachineAdded` with `Cause::Host`
     /// immediately, so it survives a later error from the same callback.
     pub fn add(
@@ -1751,6 +1754,9 @@ where
         machine: impl FnOnce() -> Result<M, M::Error>,
     ) -> Result<MachineId, Error<M::Error>> {
         self.check_mutation()?;
+        if self.driver.control.spawn_pending() {
+            return Err(Error::SpawnPending);
+        }
         let machine = machine().map_err(Error::Construction)?;
         let mut bytes = [0; 8];
         self.driver.rng.fill_bytes(&mut bytes);
@@ -1854,6 +1860,8 @@ pub enum Error<E> {
     Construction(E),
     /// Definition names must be unique across oracle, initial and spawnable machines.
     DuplicateName(String),
+    /// A reserved guest spawn identity prevents host machine addition until dispatch.
+    SpawnPending,
     /// Simulation-control policy or correlation failed.
     Control(String),
     /// Quantum must be positive and representable in u64 nanoseconds.
@@ -1921,6 +1929,9 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateName(name) => write!(f, "duplicate machine definition name: {name}"),
+            Self::SpawnPending => {
+                f.write_str("host addition must wait for pending guest spawn dispatch")
+            }
             Self::Control(message) => write!(f, "simulation control: {message}"),
             Self::InvalidQuantum => {
                 f.write_str("quantum must be positive and fit in u64 nanoseconds")
