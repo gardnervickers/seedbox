@@ -132,15 +132,19 @@ pub enum Action {
     /// Thaw a frozen application. Settled by acknowledgment.
     ResumeProcess { target: Target, deadline: Duration },
     /// Install an execution configuration and allocate a [`FaultHandle`].
-    /// At most one throttle per machine is active or pending. The setting
-    /// survives crash and reboot, applies while paused or exited, and does not
-    /// execute or wake the machine. Already charged partial work keeps its
-    /// original cost.
+    /// At most one throttle per machine is active or pending. Once applied, the
+    /// setting survives later crashes and reboots, applies while paused or
+    /// exited, and does not execute or wake the machine. Already charged
+    /// partial work keeps its original cost. Like every effect, the pending
+    /// throttle is bound to the boot current at admission: if that boot ends
+    /// before the effect's turn, it settles Unavailable and installs nothing.
     Throttle {
         target: Target,
         config: ExecutionConfig,
     },
-    /// Restore nominal execution cost for an active handle.
+    /// Restore nominal execution cost for an active handle. The pending heal is
+    /// bound to the target's boot at admission; if that boot ends first, the
+    /// heal settles Unavailable and the handle stays active.
     Heal(HealTarget),
     /// Create the declared spawnable machine with this definition name,
     /// through the same admission path as a guest `spawn` call. Each name is

@@ -1867,8 +1867,10 @@ where
     /// `paused`, global RNG cursor, the independently continuing RNG cursor
     /// of every machine, and the control timeline: host inputs scheduled but
     /// not yet admitted, live input keys (with the handles they own), and
-    /// admitted faults awaiting their effect or settlement. Restoration must
-    /// neither repeat consumed inputs nor lose pending ones.
+    /// admitted faults awaiting their effect or settlement. The Driver offers
+    /// no snapshot or restore of that state: the host reconstructs it from its
+    /// own schedule history and the published event stream, and must neither
+    /// repeat consumed inputs nor lose pending ones.
     pub fn snapshot(&mut self, id: MachineId) -> Result<M::Snapshot, Error<M::Error>> {
         if self.driver.finished.is_none() {
             self.check_mutation()?;
@@ -1936,7 +1938,10 @@ where
     /// inputs at a later time, or after observing the settlement. Driver
     /// changes publish [`EventKind::Transition`] with [`Cause::Fault`]. Only
     /// [`SettlementStatus::Applied`] in [`EventKind::FaultSettled`] proves the
-    /// change. Process commands wait for the guest's readiness, are dispatched
+    /// change. Every effect is bound to the target's boot at admission; if that
+    /// boot ends before the effect's turn (for example, a same-time Reboot
+    /// effect applies first), it settles Unavailable or Rejected without
+    /// mutating the machine, and its key is released. Process commands wait for the guest's readiness, are dispatched
     /// with a driver-allocated command ID and settle on acknowledgment; their
     /// `deadline`, measured from admission, bounds dispatch and acknowledgment,
     /// and expiry fails the driver with a Failed settlement, as for guest
