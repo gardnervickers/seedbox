@@ -98,7 +98,6 @@ static int literal(struct value value, const char *expected) {
     return (size_t)(value.end - value.start) == strlen(expected) && !memcmp(value.start, expected, strlen(expected));
 }
 static char reply[4096];
-static int stream_marker;
 static void marker_delay(void) {
     struct timespec delay = {.tv_nsec = 20000000};
     while (nanosleep(&delay, &delay)) if (errno != EINTR) fail("marker delay");
@@ -108,13 +107,6 @@ static struct value call(int fd, unsigned id, const char *operation, int now) {
     int size = snprintf(request, sizeof(request), "{\"version\":1,\"id\":%u,%s}\n", id, operation);
     if (size < 0 || (size_t)size >= sizeof(request)) fail("request size");
     put(fd, request, (size_t)size);
-    if (stream_marker) {
-        stream_marker = 0;
-        /* Allow the arm to be admitted before emitting the prefix. Stream the
-         * marker before reading its reply: guest reply polling can take longer
-         * than this trigger's deliberately short 100 ms matching deadline. */
-        marker_delay(); marker("nee"); marker_delay(); marker("dle\n");
-    }
     size_t used = 0;
     for (;;) {
         if (used + 1 == sizeof(reply)) fail("reply size");
@@ -123,7 +115,9 @@ static struct value call(int fd, unsigned id, const char *operation, int now) {
         if (count != 1) fail("reply read");
         if (reply[used++] == '\n') break;
     }
+    /* Report before validating: the marker's write time bounds read completion. */
     reply[used] = 0;
+    marker("RPC_REPLY "); put(STDOUT_FILENO, reply, used);
     const char *end = value_end(reply, 0);
     if (*space(end)) fail("reply trailing bytes");
     struct value root = {reply, end};
@@ -140,7 +134,6 @@ static struct value call(int fd, unsigned id, const char *operation, int now) {
     }
     struct value result = field(root, "result");
     if (now && number(field(result, "now_ns")) != admitted) fail("Now canonical time");
-    marker("RPC_REPLY "); put(STDOUT_FILENO, reply, used);
     return result;
 }
 int main(int argc, char **argv) {
@@ -183,8 +176,10 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (sleep_trigger) {
-        stream_marker = 1;
         call(fd, 1, "\"op\":\"arm_trigger\",\"source\":{\"machine\":\"oracle\"},\"marker\":[110,101,101,100,108,101],\"match_timeout_ns\":100000000,\"fault\":{\"action\":\"stop\",\"target\":{\"machine\":\"peer\"}}", 0);
+        /* The read reply proves admission. Split the marker across a real
+         * timer so it spans distinct writes within the 100 ms deadline. */
+        marker("nee"); marker_delay(); marker("dle\n");
         call(fd, 2, "\"op\":\"sleep\",\"duration_ns\":20000000", 0);
         call(fd, 3, "\"op\":\"sleep\",\"duration_ns\":20000000", 0);
         call(fd, 4, "\"op\":\"now\"", 1); marker("DONE\n");

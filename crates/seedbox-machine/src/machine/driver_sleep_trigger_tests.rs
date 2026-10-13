@@ -68,6 +68,44 @@ fn output(events: &[MachineResponse], machine: MachineId, stream: Stream) -> Vec
         .copied()
         .collect()
 }
+/// Bound on reply admission to the application's complete read, as observed
+/// by the stdout write that immediately follows it. The program waits idle in a
+/// blocking read, so this covers interrupt delivery, the init relay and the
+/// fixture's one-byte reads of a ~170-byte reply. Both backends measured about
+/// 0.22-0.25 ms at the default execution rate; a missed wake waits for an
+/// unrelated guest timer instead (about 400 ms here before the TCG fix).
+const REPLY_READ_BOUND_NS: u64 = 1_000_000;
+/// Occurrence time of the output fragment holding each `RPC_REPLY ` marker. The
+/// fixture writes that marker only after reading its whole reply, so these
+/// times bound the read completion from above.
+fn reply_read_times(events: &[MachineResponse], machine: MachineId) -> Vec<u64> {
+    let mut text = Vec::new();
+    let mut fragments = Vec::new();
+    for event in events {
+        if let Response::ApplicationOutput {
+            stream: Stream::Stdout,
+            bytes,
+        } = &event.payload
+        {
+            if event.machine == machine {
+                fragments.push((text.len(), event.at.as_nanos()));
+                text.extend_from_slice(bytes);
+            }
+        }
+    }
+    text.windows(10)
+        .enumerate()
+        .filter(|(_, window)| *window == b"RPC_REPLY ")
+        .map(|(offset, _)| {
+            fragments
+                .iter()
+                .rev()
+                .find(|(start, _)| *start <= offset)
+                .unwrap()
+                .1
+        })
+        .collect()
+}
 fn scenario<M>(
     backend: &str,
     workers: usize,
@@ -211,8 +249,10 @@ where
         .filter_map(|line| line.strip_prefix("RPC_REPLY "))
         .map(|json| serde_json::from_str(json).unwrap())
         .collect();
+    let reads = reply_read_times(&events, oracle);
     assert_eq!(calls.len(), 4);
     assert_eq!(replies.len(), 4);
+    assert_eq!(reads.len(), 4);
     for (index, (call, reply)) in calls.iter().zip(&replies).enumerate() {
         let Response::SimulationControl { id, payload } = &call.payload else {
             unreachable!()
@@ -230,6 +270,14 @@ where
         let admitted = reply["admitted_at_ns"].as_u64().unwrap();
         let replied = reply["replied_at_ns"].as_u64().unwrap();
         assert!(call.at.as_nanos() <= admitted && admitted <= replied);
+        // Idle-wait delivery: a positive Sleep reply generated at its wake and
+        // an immediate reply are both read promptly after admission.
+        assert!(
+            replied <= reads[index] && reads[index] - replied < REPLY_READ_BOUND_NS,
+            "reply {} admitted at {replied} but read by {}",
+            index + 1,
+            reads[index]
+        );
         if index == 1 || index == 2 {
             assert_eq!(reply["effect_at_ns"], admitted + 20_000_000);
             assert_eq!(replied, admitted + 20_000_000);
