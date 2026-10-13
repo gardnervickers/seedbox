@@ -345,6 +345,9 @@ def oracle():
         steps["request"] = client("request")
         steps["flood"] = client("flood")
         steps["held"] = server("status")
+        # The capture follows the first fault after this line (applications.rs).
+        print("CAPTURE_NEXT", flush=True)
+        world.now_ns()
         # Capture point: a nominal-speed throttle changes nothing but marks the phase.
         marker = world.throttle("client", "1GHz")
         print(f"CAPTURE_PHASE at_ns={marker.effect.effect_at_ns}", flush=True)
