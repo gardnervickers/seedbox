@@ -27,9 +27,18 @@ This is a diagnostic tool, like `tools/mac-tcg`; it is not an acceptance suite.
   (`MmapChurn`, `AddressSpace`, `Durability`, `ClassStorm`), VM operations
   (`SafepointsNative`, `SigquitAttach` through the attach socket), thread and
   process lifetime (`ThreadChurn`, `VthreadStorm`, `ExitMatrix`, `Crash`) and
-  timers (`SleepSort`, `Clocks`). `probes/preview` use the JDK 21 foreign-function
-  preview; `probes/whitebox` compile against the WhiteBox sources the image
-  downloads for its JDK update.
+  timers (`SleepSort`, `Clocks`). JVM features beyond the defaults: foreign-function
+  ABI corners and arenas (`FfmAbi`), virtual threads with scoped values and
+  structured concurrency (`VthreadScopes`), the attach listener and `agentmain`
+  (`AttachLoad`), dynamic CDS (`Cds`), perfdata, heap dumps and NMT (`PerfData`,
+  `HeapNmt`), a raw JDWP debugger (`Jdwp`), allocation without TLABs, Epsilon and
+  string deduplication (`AllocPaths`), out-of-memory recovery (`OomRecovery`),
+  finalization, class-initialization states and `CONSTANT_Dynamic` (`ClassInit`),
+  method-handle adapters, buffer atomics, stack overflow with locks held, JFR
+  chunks, asynchronous files, vector masks, ZipFS and CheckJNI, TLS 1.3, EdDSA,
+  RMI/JMX and the legacy reflection backends. `probes/preview` use the JDK 21
+  foreign-function preview; `probes/whitebox` compile against the WhiteBox sources
+  the image downloads for its JDK update.
 - `probes/c/cfz.c`: native AArch64 probes, one test per `C.<name>` probe, run
   without a JVM: LSE pair atomics, `DC ZVA`, flags and FPCR across progress
   calls, tagged pointers, RW/RX code aliases and moved code, `membarrier`,
@@ -38,10 +47,21 @@ This is a diagnostic tool, like `tools/mac-tcg`; it is not an acceptance suite.
   `SS_AUTODISARM`, `signalfd`, `pselect`, CPU-time timers, `futex_waitv`,
   `EPOLLONESHOT`, pidfds, `clone3`, `memfd` exec, `madvise`/`mremap` and seals,
   `timerfd`, a real `rseq` critical section, raw `io_uring`, `ptrace` register
-  reads, `MADV_WIPEONFORK`, `SCM_RIGHTS` and `IFUNC`. `C.capabilities` lists the host's CPU features, syscalls and files;
+  reads, `MADV_WIPEONFORK`, `SCM_RIGHTS`, `IFUNC`, robust and PI mutexes,
+  `MAP_FIXED_NOREPLACE`, PID namespaces, `getrandom`, `vmsplice`/`tee`, DWARF
+  unwinding through signal frames, TLS destructors, static PIE re-exec, vDSO clocks,
+  counters, `WFE`/`WFI` and CPU affinity. Probes whose values depend on the host
+  (entropy digests, counters, `TPIDRRO_EL0`, exclusive-store failures) are compared
+  with the replay only. `C.capabilities` lists the host's CPU features, syscalls and files;
   its differences from native are reported as `GUEST_DIFF`, not failures. Run
   native passes with `--unconfined`, or the engine's seccomp filter hides some
   syscalls.
+- Other runtimes, as native probes with their own executables (`"exe"`): Go
+  asynchronous preemption, stacks and GC (`probes/go`); Node's WebAssembly traps
+  and JIT (`probes/js`); .NET tiering and compacting GC (`probes/cs`); BEAM
+  reductions and per-process heaps (`probes/erl`); LuaJIT traces and FFI
+  (`probes/lua`). The Erlang probes are `explicit`: BEAM runs about 250 times
+  slower than real time in a simulation, so they run only when `--only` names them.
 - `randprog.py`: seeded random programs (arithmetic edge cases, caught
   arithmetic and bounds exceptions, virtual calls, monitors, string building)
   run through interpreter, C1 and C2 phases with a checksum after each.

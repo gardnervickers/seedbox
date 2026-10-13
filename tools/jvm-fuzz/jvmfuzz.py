@@ -114,6 +114,47 @@ PROBES = {
               "arg_variants": ["segv-int", "segv-c2", "oom", "halthook"],
               "exit_codes": {"segv-int": 134, "segv-c2": 134, "oom": 134, "halthook": 3}},
     "Redefine": {"extra": ["-javaagent:/fuzz/classes/agent.jar"]}, "CodeChurn": {"whitebox": True},
+    # Foreign-function ABI corners: HFA/complex aggregates through calls and upcalls, trivial
+    # calls, closed library-lookup arenas and arena-owned file mappings.
+    "FfmAbi": {"preview": True},
+    # Virtual threads with confined arenas, scoped values, structured cancellation and moving GC
+    # over parked continuations.
+    "VthreadScopes": {"preview": True, "extra": ["-Djdk.virtualThreadScheduler.parallelism=4",
+                                                  "-Djdk.preserveScopedValueCache=false",
+                                                  "-Djava.lang.ScopedValue.cacheSize=2"]},
+    # The attach listener started lazily, then agentmain through `load instrument`, in itself
+    # and a child JVM; dynamic application CDS archives written and used by child JVMs.
+    "AttachLoad": {"preview": True, "isolate": True, "extra": ["-XX:+EnableDynamicAgentLoading"]},
+    "Cds": {"isolate": True},
+    "PerfData": {"extra": ["-XX:+UsePerfData"]},
+    "HeapNmt": {"extra": ["-XX:NativeMemoryTracking=detail"]},
+    # A raw JDWP debugger in the same JVM: forced early return, PopFrames, single steps.
+    "Jdwp": {"isolate": True, "extra": ["-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,"
+                                        "address=127.0.0.1:38629,quiet=y"]},
+    "AllocPaths": {"variants": [["-XX:-UseTLAB"], ["-XX:+UnlockExperimentalVMOptions", "-XX:+UseEpsilonGC"],
+                                ["-XX:+UseStringDeduplication", "-XX:StringDeduplicationAgeThreshold=1",
+                                 "--add-opens", "java.base/java.lang=ALL-UNNAMED"]]},
+    # Out-of-memory paths: soft references cleared before heap OOM, direct-memory retry, an
+    # OnOutOfMemoryError command (${IFS}: batch flags split on spaces), metaspace exhaustion.
+    # ZGC with class-loader churn is pathologically slow under the translator, so no ZGC yet.
+    "OomRecovery": {"isolate": True, "timeout": 600, "skip_profiles": ["zgc", "zgc-single"],
+                    "extra": ["-Xms32m", "-Xmx64m", "-XX:MaxDirectMemorySize=4m", "-XX:MaxMetaspaceSize=40m",
+                              "-XX:OnOutOfMemoryError=touch${IFS}fz-oom-mark"]},
+    "Finalization": {"variants": [[], ["--finalization=disabled"]]},
+    # CONSTANT_Dynamic through ldc, erroneous and parked class initialization, classData; method
+    # handle adapters at the argument-slot limit and cleanup combinators; VarHandle atomics on
+    # (mis)aligned buffer views; stack overflow while holding locks.
+    "ClassInit": {}, "MhAdapters": {}, "BufferAtomics": {}, "LockOverflow": {"extra": ["-XX:-PrintWarnings"]},
+    "JfrChunks": {"extra": ["-XX:FlightRecorderOptions=maxchunksize=1m"]}, "AsyncFiles": {},
+    "VectorMasks": {"extra": ["--add-modules", "jdk.incubator.vector"]},
+    "ZipJni": {"variants": [[], ["-Xcheck:jni"]]}, "EdCurves": {},
+    "Tls13": {"isolate": True}, "JmxRmi": {"isolate": True},
+    "LegacyReflect": {"variants": [[], ["-Djdk.reflect.useDirectMethodHandle=false"],
+                                   ["-Djdk.reflect.useDirectMethodHandle=false", "-Dsun.reflect.inflationThreshold=0"],
+                                   ["-Djdk.reflect.useDirectMethodHandle=false", "-Dsun.reflect.noInflation=true"],
+                                   ["-Djdk.reflect.useDirectMethodHandle=false",
+                                    "-Dsun.reflect.inflationThreshold=2147483647"],
+                                   ["-Djdk.reflect.useNativeAccessorOnly=true"]]},
     "ExitMatrix": {"isolate": True, "arg_variants": ["daemons", "exit7", "halt5", "uncaught"],
                    "exit_codes": {"daemons": 0, "exit7": 7, "halt5": 5, "uncaught": 1}},
     # Native AArch64 probes (probes/c/cfz.c), one test each, run without a JVM.
@@ -122,9 +163,30 @@ PROBES = {
         "membarrier", "dlopen", "segvbarrier", "siglongjmp", "ucontext", "pthreadcancel",
         "seccomp", "autodisarm", "signalfd", "pselect", "sigsuspend", "cputimer", "futexwaitv",
         "epolloneshot", "pidfd", "clone3", "memfdexec", "vmops", "timerfd", "rseq", "iouring",
-        "ptrace", "wipeonfork", "scmrights", "ifunc")},
+        "ptrace", "wipeonfork", "scmrights", "ifunc", "robust", "robustpi", "mapnoreplace",
+        "pidns", "getrandom", "vmsplice", "unwind", "tlsdtor", "staticpie", "vdsoclock",
+        "waits", "affinity")},
+    # Host-dependent values (entropy digests, load addresses, counters, exclusive-store failure
+    # counts) are compared with the replay only.
+    **{f"C.{name}": {"native": name, "det": False} for name in (
+        "getrandomhash", "staticpieaddr", "counters", "vdsogetrandom", "rndr", "tpidrro", "prtsc",
+        "exclusive")},
     # What the host offers; differences from native describe the guest ("info").
     "C.capabilities": {"native": "capabilities", "info": True},
+    # The guest kernel has no process_vm_readv (CROSS_MEMORY_ATTACH); the difference is reported.
+    "C.vmreadv": {"native": "vmreadv", "info": True},
+    # Other runtimes' JITs, signals and collectors ("exe" runs NAME SEED SCALE): Go asynchronous
+    # preemption, stacks and GC; V8 Wasm traps and JIT; CoreCLR tiering and GC; BEAM; LuaJIT.
+    # Go.preempt hangs if SIGURG preemption is lost.
+    "Go.preempt": {"native": "preempt", "exe": "/fuzz/bin/gofz", "isolate": True},
+    **{f"Go.{name}": {"native": name, "exe": "/fuzz/bin/gofz"} for name in ("stack", "gc")},
+    **{f"Js.{name}": {"native": name, "exe": "/fuzz/bin/jsfz"} for name in ("wasm", "jit")},
+    **{f"Cs.{name}": {"native": name, "exe": "/fuzz/bin/csfz"} for name in ("tier", "gc")},
+    # BEAM crawls in a simulation (about 250x slower than real time, while it is fast under the
+    # translator elsewhere), so the Erlang probes run only when --only names them.
+    **{f"Erl.{name}": {"native": name, "exe": "/fuzz/bin/erlfz", "explicit": True}
+       for name in ("reductions", "heap")},
+    **{f"Lua.{name}": {"native": name, "exe": "/fuzz/bin/luafz"} for name in ("trace", "ffi")},
     "Jfr": {"arg_variants": ["all 1", "exec 1", "exec 10", "alloc,monitor,park 1", "none 1",
                              "exec 1 soe", "exec 1 npe", "exec 1 alloc", "exec 5 lock", "exec 1 native",
                              "exec,threaddump 1 vthread", "native 1 native", "threaddump 1 lock",
@@ -171,8 +233,13 @@ def cmd_gen(a):
         (src / sub).mkdir()
         for f in sorted(list((HERE / "probes" / sub).glob("*.java")) + list((HERE / "probes" / sub).glob("*.c"))):
             shutil.copy(f, src / sub / f.name)
+    # Probes for other runtimes, built by their own image stages.
+    for sub in ("go", "js", "cs", "erl", "lua"):
+        shutil.copytree(HERE / "probes" / sub, src / sub)
     instances = []  # (main, args, extra flags, det, expected exit)
-    probes = [p for p in PROBES if not a.only or re.search(a.only, p)]
+    # "explicit" probes run only when --only names them.
+    probes = [p for p in PROBES if re.search(a.only, p)] if a.only else \
+        [p for p in PROBES if not PROBES[p].get("explicit")]
     for name in probes:
         spec = PROBES[name]
         for k in range(a.probe_seeds):
@@ -204,14 +271,18 @@ def cmd_gen(a):
     for main, args, extra, det, expect_exit in instances:
         if extra is None:  # a native probe: no JVM, so no flag profiles
             seed_tag = args.split()[1]
-            cases.append({"id": f"{main}.{seed_tag}.native", "main": "/fuzz/bin/cfz", "args": args,
+            cases.append({"id": f"{main}.{seed_tag}.native", "main": PROBES[main].get("exe", "/fuzz/bin/cfz"), "args": args,
                           "profile": "native", "flags": ["-"], "det": det, "timeout": CASE_TIMEOUT,
                           "exit": 0, "info": PROBES[main].get("info", False), "probe": main})
             continue
+        # A case whose own flags pick a collector (an Epsilon variant) skips the collector profiles.
+        picks_gc = lambda flags: any(re.fullmatch(r"-XX:\+Use\w+GC", f) for f in flags)
+        usable = [p for p in profiles if not (picks_gc(extra) and picks_gc(PROFILES[p]))
+                  and p not in PROBES.get(main, {}).get("skip_profiles", ())]
         chosen = []
-        if "default" in profiles and rnd.random() < 0.5:
+        if "default" in usable and rnd.random() < 0.5:
             chosen.append("default")
-        others = [p for p in profiles if p not in chosen]
+        others = [p for p in usable if p not in chosen]
         chosen += rnd.sample(others, min(len(others), a.profiles_per_instance - len(chosen)))
         for prof in chosen:
             seed_tag = "_".join([args.split()[0]] + args.split()[2:])
@@ -224,8 +295,8 @@ def cmd_gen(a):
                           "exit": expect_exit})
     rnd.shuffle(cases)
     # Probes that can hang get a simulation of their own, so a hang cuts no other case.
-    isolated = [c for c in cases if PROBES.get(c["main"], {}).get("isolate")]
-    shared = [c for c in cases if not PROBES.get(c["main"], {}).get("isolate")]
+    isolated = [c for c in cases if PROBES.get(c.get("probe", c["main"]), {}).get("isolate")]
+    shared = [c for c in cases if not PROBES.get(c.get("probe", c["main"]), {}).get("isolate")]
     groups = [shared[i:i + a.batch_size] for i in range(0, len(shared), a.batch_size)] + [[c] for c in isolated]
     batches = {f"b{i:03d}": [c["id"] for c in group] for i, group in enumerate(groups)}
     bdir = out / "batches"
@@ -238,7 +309,7 @@ def cmd_gen(a):
     shutil.copy(HERE / "runtime" / "Dockerfile", out / "Dockerfile")
     shutil.copy(HERE / "runtime" / "run-batch.sh", out / "run-batch.sh")
     digest = hashlib.sha256()
-    for f in sorted(list(src.glob("**/*.java")) + list(src.glob("**/*.c")) + list(bdir.iterdir())
+    for f in sorted([f for f in src.glob("**/*") if f.is_file()] + list(bdir.iterdir())
                     + [out / "Dockerfile", out / "run-batch.sh"]):
         digest.update(f.name.encode() + f.read_bytes())
     tag = digest.hexdigest()[:12]
@@ -489,6 +560,12 @@ def cmd_report(a):
             cid = c["id"]
             p = replay.get(cid)
             verdict, notes = case_verdict(c, native.get(cid, []), sim.get(cid), p, batch_of[cid] in meta_d)
+            # `seedbox replay` compares the whole run (memory, disk, console), not only this case's
+            # output; anything but MATCH fails every case of the batch.
+            status = meta_d.get(batch_of[cid], {}).get("replay_status")
+            if status not in (None, "MATCH") and not verdict.startswith(("NATIVE_", "NO_NATIVE")):
+                notes = [f"seedbox replay: {status}"] + notes
+                verdict = f"REPLAY_{status}"
             rows.append({"id": cid, "batch": batch_of[cid], "profile": c["profile"], "main": c["main"],
                          "sim": label, "verdict": verdict, "replayed": p is not None})
             if not verdict.startswith("OK") and verdict != "NO_SIM":
