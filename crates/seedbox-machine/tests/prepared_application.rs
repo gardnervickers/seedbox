@@ -5,6 +5,7 @@ use seedbox_machine as machine_crate;
 mod image;
 use image::*;
 use std::fs;
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
 fn pv(script: bool) {
     let mut backend = machine_crate::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
@@ -31,16 +32,19 @@ fn tcg(script: bool) {
         false,
     );
 }
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
 #[test]
 #[ignore = "requires native PV worker, factory assets and prepared ELF fixture"]
 fn pv_native_prepared_image_elf_launch() {
     pv(false);
 }
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
 #[test]
 #[ignore = "requires native PV worker, factory assets and prepared script fixture"]
 fn pv_native_prepared_image_script_launch() {
     pv(true);
 }
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
 #[test]
 #[ignore = "requires native PV worker, factory assets and prepared ELF fixture"]
 fn pv_native_prepared_image_readable_elf_launch() {
@@ -67,6 +71,7 @@ fn tcg_native_prepared_image_script_launch() {
     tcg(true);
 }
 
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
 #[test]
 #[ignore = "requires native PV worker, factory assets and prepared ELF fixture"]
 fn pv_native_runtime_respects_execute_traversal_and_uid_authorization() {

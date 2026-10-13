@@ -119,11 +119,9 @@ fn setting_is_admitted_at_barrier_in_fifo_order_without_a_run_of_its_own() {
         [1000, 2000, 1001, 1000]
     );
     assert_eq!(calls(&driver, id)[2].lifecycle, ["shutdown"]);
-    assert!(
-        calls(&driver, id)
-            .iter()
-            .all(|call| call.now == 0 && call.upto == 0)
-    );
+    assert!(calls(&driver, id)
+        .iter()
+        .all(|call| call.now == 0 && call.upto == 0));
     assert_eq!(driver.machines[0].execution, ExecutionConfig::default());
 }
 

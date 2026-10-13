@@ -9,8 +9,8 @@ use std::{
     collections::VecDeque,
     io,
     marker::PhantomData,
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
-    sync::{Arc, mpsc},
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    sync::{mpsc, Arc},
     thread::{self, JoinHandle},
 };
 

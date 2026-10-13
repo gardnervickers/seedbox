@@ -5,9 +5,9 @@ use crate::{
     definition::MachineDefinition,
     execution::ExecutionConfig,
     oracle::{
-        OperationError, Target,
         observation::{Origin, State},
         service::{Adapter, CommandOwner, Facts, Service},
+        OperationError, Target,
     },
     pv::ApplicationCommand,
 };

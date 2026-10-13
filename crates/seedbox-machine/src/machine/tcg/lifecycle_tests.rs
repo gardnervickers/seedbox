@@ -324,7 +324,10 @@ fn driver_reboots_live_and_crashed_guest_with_fresh_state_and_retained_actions()
     }
     assert_eq!(
         driver.step(at(100)).unwrap(),
-        StepOutcome::Finished { at: at(12), reason: ExitReason::Shutdown }
+        StepOutcome::Finished {
+            at: at(12),
+            reason: ExitReason::Shutdown
+        }
     );
     driver
         .with_barrier(|barrier| {

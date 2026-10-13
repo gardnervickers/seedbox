@@ -3,7 +3,7 @@
 use seedbox_machine as machine_crate;
 use seedbox_machine::{
     driver::{Action, Driver, MachineId, MachineResponse, StepOutcome},
-    machine::{ExitReason, Machine, StopReason, Timestamp, tcg::TcgMachine},
+    machine::{tcg::TcgMachine, ExitReason, Machine, StopReason, Timestamp},
     rng::RngStream,
 };
 #[path = "support/prepared_application.rs"]

@@ -4,7 +4,7 @@
 //! Codec state, queued commands and partial frames belong to machine snapshots.
 
 use super::{
-    ApplicationCommand, CommandResult, Request, Response, Stream, oracle, transport::LifecycleWrite,
+    oracle, transport::LifecycleWrite, ApplicationCommand, CommandResult, Request, Response, Stream,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -417,11 +417,10 @@ mod tests {
     fn snapshot_retains_partial_and_command_until_matching_ack() {
         let mut c = Codec::default();
         command(&mut c, 3, ApplicationCommand::Stop);
-        assert!(
-            c.receive(&write(10, b"SEEDBOX_EFFECT id=3 action=st"))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(c
+            .receive(&write(10, b"SEEDBOX_EFFECT id=3 action=st"))
+            .unwrap()
+            .is_empty());
         let mut c: Codec = serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();
         assert_eq!(c.pending.len(), 1);
         assert_eq!(
@@ -459,11 +458,10 @@ mod tests {
     #[test]
     fn oracle_has_one_framing_owner_and_exact_reply_bytes() {
         let mut c = Codec::default();
-        assert!(
-            c.receive(&write(1, b"SBX_RPC1 1 1 {\"version\":1,"))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(c
+            .receive(&write(1, b"SBX_RPC1 1 1 {\"version\":1,"))
+            .unwrap()
+            .is_empty());
         let events = c
             .receive(&write(2, b"\"id\":1,\"op\":false}\nSBX_LOG1 1 61\n"))
             .unwrap();
@@ -596,12 +594,10 @@ mod tests {
         let Event::Oracle(old) = &events[0] else {
             panic!()
         };
-        assert!(
-            codec
-                .oracle_reply(old.correlation, b"{}")
-                .unwrap()
-                .is_some()
-        );
+        assert!(codec
+            .oracle_reply(old.correlation, b"{}")
+            .unwrap()
+            .is_some());
         let events = codec
             .receive(&write(2, b"SBX_RPC1 2 2 {\"version\":1,\"id\":1}\n"))
             .unwrap();
@@ -612,18 +608,14 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&codec).unwrap()).unwrap();
         assert_eq!(restored.oracle_reply(old.correlation, b"{}"), Ok(None));
         assert_eq!(restored.oracle_delivered(old.correlation), Ok(false));
-        assert!(
-            restored
-                .oracle_reply(new.correlation, b"{}")
-                .unwrap()
-                .is_some()
-        );
+        assert!(restored
+            .oracle_reply(new.correlation, b"{}")
+            .unwrap()
+            .is_some());
         assert_eq!(restored.oracle_delivered(new.correlation), Ok(true));
-        assert!(
-            restored
-                .receive(&write(3, b"SBX_RPC1 3 2 {\"version\":1,\"id\":2}\n"))
-                .is_ok()
-        );
+        assert!(restored
+            .receive(&write(3, b"SBX_RPC1 3 2 {\"version\":1,\"id\":2}\n"))
+            .is_ok());
     }
     #[test]
     fn public_reply_identity_payload_and_duplicate_acceptance_fail_closed() {

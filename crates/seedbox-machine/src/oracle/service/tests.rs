@@ -205,8 +205,8 @@ fn process_waits_ready_and_exact_correlated_completion() {
         panic!()
     };
     assert_eq!(command.get(), 41);
-    assert!(
-        s.acknowledged(
+    assert!(s
+        .acknowledged(
             &o,
             "app",
             0,
@@ -216,8 +216,7 @@ fn process_waits_ready_and_exact_correlated_completion() {
             13
         )
         .unwrap()
-        .is_empty()
-    );
+        .is_empty());
     let r = reply(
         &s.acknowledged(&o, "app", 0, command, CommandResult::Completed, 14, 14)
             .unwrap(),
@@ -301,12 +300,11 @@ fn failures_do_not_fabricate_success_or_continue() {
     else {
         panic!()
     };
-    assert!(
-        s.acknowledged(&o, "app", 0, c, CommandResult::Rejected, 2, 2)
-            .is_err()
-    );
-    assert!(
-        s.admit(
+    assert!(s
+        .acknowledged(&o, "app", 0, c, CommandResult::Rejected, 2, 2)
+        .is_err());
+    assert!(s
+        .admit(
             &mut o,
             "caller".into(),
             id(2),
@@ -314,8 +312,7 @@ fn failures_do_not_fabricate_success_or_continue() {
             2,
             br#"{"version":1,"id":2,"op":"now"}"#
         )
-        .is_err()
-    );
+        .is_err());
 }
 #[test]
 fn batch_trigger_arm_order_and_no_retroactive_effect() {
@@ -447,10 +444,9 @@ fn concurrent_process_effects_deadline_and_early_wake_guards() {
     assert!(s.applied(fault(&p), 10, 10).is_err()); // cannot bypass guest ack
     assert!(s.deadline(fault(&p), 11).is_err());
     assert!(!s.poisoned);
-    assert!(
-        s.deadline(fault(&p), 10 + PROCESS_EFFECT_TIMEOUT_NS)
-            .is_err()
-    );
+    assert!(s
+        .deadline(fault(&p), 10 + PROCESS_EFFECT_TIMEOUT_NS)
+        .is_err());
     assert!(s.poisoned);
     let (mut s, mut o) = (Service::default(), Owner::default());
     let p = call(&mut s, &mut o, 1, 10, json!({"op":"sleep","duration_ns":5}));
@@ -515,11 +511,9 @@ fn earlier_observations_only_emit_at_current_commit() {
     let plans = s
         .acknowledged(&o, "app", 0, c, CommandResult::Completed, 22, 30)
         .unwrap();
-    assert!(
-        plans
-            .iter()
-            .any(|p| matches!(p, Plan::Reply { at: 30, .. }))
-    );
+    assert!(plans
+        .iter()
+        .any(|p| matches!(p, Plan::Reply { at: 30, .. })));
     assert_eq!(reply(&plans)["effect_at_ns"], 22);
     assert_eq!(reply(&plans)["replied_at_ns"], 30);
     call(
@@ -530,11 +524,9 @@ fn earlier_observations_only_emit_at_current_commit() {
         json!({"op":"stop","target":{"machine":"app"}}),
     );
     let plans = s.ended("app", 0, 32, 40).unwrap();
-    assert!(
-        plans
-            .iter()
-            .any(|p| matches!(p, Plan::Reply { at: 40, .. }))
-    );
+    assert!(plans
+        .iter()
+        .any(|p| matches!(p, Plan::Reply { at: 40, .. })));
     let r = reply(&plans);
     assert_eq!(r["effect_at_ns"], 32);
     assert_eq!(r["replied_at_ns"], 40);
@@ -581,14 +573,13 @@ fn unknown_and_mismatched_service_acks_poison_but_known_external_is_ignored() {
         panic!()
     };
     o.commands.get_mut(&(0, c.get())).unwrap().1 = ApplicationCommand::Resume;
-    assert!(
-        s.acknowledged(&o, "app", 0, c, CommandResult::Completed, 11, 20)
-            .is_err()
-    );
+    assert!(s
+        .acknowledged(&o, "app", 0, c, CommandResult::Completed, 11, 20)
+        .is_err());
     assert!(s.poisoned);
     let mut s = Service::default();
-    assert!(
-        s.acknowledged(
+    assert!(s
+        .acknowledged(
             &o,
             "app",
             0,
@@ -597,8 +588,7 @@ fn unknown_and_mismatched_service_acks_poison_but_known_external_is_ignored() {
             11,
             20
         )
-        .is_err()
-    );
+        .is_err());
     assert!(s.poisoned);
 }
 
@@ -623,18 +613,16 @@ fn shared_allocator_excludes_future_external_ids_and_unaccepted_receipts() {
         panic!()
     };
     assert_eq!(c.get(), 42);
-    assert!(
-        s.acknowledged(&o, "app", 0, c, CommandResult::Completed, 11, 20)
-            .is_err()
-    );
+    assert!(s
+        .acknowledged(&o, "app", 0, c, CommandResult::Completed, 11, 20)
+        .is_err());
     assert!(s.poisoned);
     let mut s = Service::default();
     o.facts.boot = 1;
-    assert!(
-        s.acknowledged(&o, "app", 0, c, CommandResult::Completed, 11, 20)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(s
+        .acknowledged(&o, "app", 0, c, CommandResult::Completed, 11, 20)
+        .unwrap()
+        .is_empty());
     assert!(!s.poisoned);
 }
 
@@ -658,10 +646,9 @@ fn acknowledgment_cannot_precede_dispatch_commit() {
     else {
         panic!()
     };
-    assert!(
-        s.acknowledged(&o, "app", 0, c, CommandResult::Completed, 12, 30)
-            .is_err()
-    );
+    assert!(s
+        .acknowledged(&o, "app", 0, c, CommandResult::Completed, 12, 30)
+        .is_err());
     assert!(s.poisoned);
 }
 #[test]
@@ -1193,11 +1180,9 @@ fn invalid_receipt_time_is_diagnostic_not_fault_occurrence() {
         assert_eq!(outcome.status, SettlementStatus::Failed);
         assert_eq!(outcome.outcome_at, None);
         assert_eq!(outcome.committed_at, commit);
-        assert!(
-            outcome
-                .detail
-                .contains(&format!("receipt_time_ns={observed}"))
-        );
+        assert!(outcome
+            .detail
+            .contains(&format!("receipt_time_ns={observed}")));
         assert!(s.poisoned);
     }
 }
@@ -1269,11 +1254,10 @@ fn application_end_settles_old_commands_once_but_preserves_new_start() {
         assert_eq!(settlement(&ended).status, SettlementStatus::Unavailable);
         assert_eq!(s.pending.len(), 1);
         o.retired.insert((0, old.get()));
-        assert!(
-            s.acknowledged(&o, "app", 0, old, result, 13, 13)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(s
+            .acknowledged(&o, "app", 0, old, result, 13, 13)
+            .unwrap()
+            .is_empty());
         let done = s
             .acknowledged(&o, "app", 0, fresh, CommandResult::Completed, 14, 14)
             .unwrap();

@@ -195,12 +195,10 @@ where
     session.command(17, Pause, Completed);
     session.command(18, Resume, Completed);
     session.command(19, Stop, Completed);
-    assert!(
-        !session
-            .events
-            .iter()
-            .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. }))
-    );
+    assert!(!session
+        .events
+        .iter()
+        .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. })));
     session.command(20, Start, Completed);
     session.command(21, Start, Rejected);
     session.until(|payload| matches!(payload, Response::ApplicationOutcome { code: 23 }));
@@ -279,12 +277,10 @@ where
     while !session.exited {
         session.pump();
     }
-    assert!(
-        !session
-            .events
-            .iter()
-            .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. }))
-    );
+    assert!(!session
+        .events
+        .iter()
+        .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. })));
     session.inbox.push_back(pv::Input {
         at: Timestamp::from_nanos(session.clock.now()),
         payload: pv::Request::Shutdown,

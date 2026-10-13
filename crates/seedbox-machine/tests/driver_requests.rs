@@ -131,12 +131,10 @@ fn responses_keep_emitting_boot_across_reused_ids_and_drain_once() {
         [(id, 0, at(0)), (id, 1, at(0))]
     );
     assert!(outputs.iter().all(|output|matches!(output.payload,Response::CommandAcknowledged { id,result:CommandResult::Completed } if id.get()==1)));
-    assert!(
-        driver
-            .with_barrier(|barrier| Ok(barrier.drain_responses()))
-            .unwrap()
-            .is_empty()
-    );
+    assert!(driver
+        .with_barrier(|barrier| Ok(barrier.drain_responses()))
+        .unwrap()
+        .is_empty());
 }
 #[test]
 fn paused_and_exited_requests_share_action_order_and_reboots_are_distinct() {

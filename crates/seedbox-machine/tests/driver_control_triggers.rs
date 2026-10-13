@@ -418,12 +418,10 @@ fn positive_sleep_wakes_at_admission_plus_duration_even_if_caller_exits() {
             vec![],
         );
         world.advance(10);
-        assert!(
-            world
-                .driver
-                .with_barrier(|b| Ok(b.machine(world.caller)?.replies.is_empty()))
-                .unwrap()
-        );
+        assert!(world
+            .driver
+            .with_barrier(|b| Ok(b.machine(world.caller)?.replies.is_empty()))
+            .unwrap());
         if crash {
             world
                 .driver
@@ -431,32 +429,26 @@ fn positive_sleep_wakes_at_admission_plus_duration_even_if_caller_exits() {
                 .unwrap();
         }
         world.advance(16);
-        assert!(
-            world
-                .driver
-                .with_barrier(|b| Ok(b.machine(world.caller)?.replies.is_empty()))
-                .unwrap()
-        );
+        assert!(world
+            .driver
+            .with_barrier(|b| Ok(b.machine(world.caller)?.replies.is_empty()))
+            .unwrap());
         world.advance(17);
         if crash {
-            assert!(
-                world
-                    .driver
-                    .with_barrier(|b| Ok(b.machine(world.caller)?.replies.is_empty()))
-                    .unwrap()
-            );
-            assert!(
-                world
-                    .driver
-                    .with_barrier(|b| Ok(matches!(
-                        b.stopped(world.caller)?,
-                        StopReason::Exited {
-                            reason: ExitReason::Crashed,
-                            ..
-                        }
-                    )))
-                    .unwrap()
-            );
+            assert!(world
+                .driver
+                .with_barrier(|b| Ok(b.machine(world.caller)?.replies.is_empty()))
+                .unwrap());
+            assert!(world
+                .driver
+                .with_barrier(|b| Ok(matches!(
+                    b.stopped(world.caller)?,
+                    StopReason::Exited {
+                        reason: ExitReason::Crashed,
+                        ..
+                    }
+                )))
+                .unwrap());
         } else {
             let (received, reply) = world.reply(1);
             assert_eq!(received, 17);
@@ -497,12 +489,10 @@ fn accepted_peer_effect_finishes_after_its_caller_exits() {
     world.advance(13);
     assert!(world.peer().stopped);
     assert_eq!(world.peer().acknowledgments, [(command, 13)]);
-    assert!(
-        world
-            .driver
-            .with_barrier(|b| Ok(b.machine(world.caller)?.replies.is_empty()))
-            .unwrap()
-    );
+    assert!(world
+        .driver
+        .with_barrier(|b| Ok(b.machine(world.caller)?.replies.is_empty()))
+        .unwrap());
     for _ in 0..3 {
         assert_eq!(world.step(100), StepOutcome::Blocked { at: at(13) });
     }

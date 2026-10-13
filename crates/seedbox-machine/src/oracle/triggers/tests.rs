@@ -21,11 +21,9 @@ fn limits_are_lifetime_bounds_and_failed_arm_does_not_allocate() {
         (vec![1], u64::MAX, 1),
         (vec![1], u64::MAX - PROCESS_EFFECT_TIMEOUT_NS, 1),
     ] {
-        assert!(
-            engine
-                .arm("source".into(), marker, now, timeout, "target".into())
-                .is_err()
-        );
+        assert!(engine
+            .arm("source".into(), marker, now, timeout, "target".into())
+            .is_err());
         assert!(engine.records().is_empty());
     }
     assert_eq!(arm(&mut engine, "source", &[255; 256], 0, 1), 1);
@@ -34,12 +32,10 @@ fn limits_are_lifetime_bounds_and_failed_arm_does_not_allocate() {
         assert_eq!(arm(&mut engine, "source", b"x", 0, 1), id);
     }
     engine.expire(1);
-    assert!(
-        engine
-            .arm("source".into(), b"x".to_vec(), 1, 1, "target".into())
-            .unwrap_err()
-            .contains("budget")
-    );
+    assert!(engine
+        .arm("source".into(), b"x".to_vec(), 1, 1, "target".into())
+        .unwrap_err()
+        .contains("budget"));
     assert_eq!(engine.records().len(), 64);
 }
 
@@ -47,24 +43,18 @@ fn limits_are_lifetime_bounds_and_failed_arm_does_not_allocate() {
 fn streaming_overlap_matches_across_chunks_and_ignores_old_or_wrong_source_bytes() {
     let mut engine = Triggers::default();
     let id = arm(&mut engine, "source", b"ABABAC", 10, 100);
-    assert!(
-        engine
-            .committed("source", 9, b"ABABA", 10)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        engine
-            .committed("other", 11, b"ABABAC", 11)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        engine
-            .committed("source", 11, b"ABA", 11)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(engine
+        .committed("source", 9, b"ABABA", 10)
+        .unwrap()
+        .is_empty());
+    assert!(engine
+        .committed("other", 11, b"ABABAC", 11)
+        .unwrap()
+        .is_empty());
+    assert!(engine
+        .committed("source", 11, b"ABA", 11)
+        .unwrap()
+        .is_empty());
     assert_eq!(engine.records()[0].prefix, 3);
     let mut branch = engine.clone();
     for e in [&mut engine, &mut branch] {

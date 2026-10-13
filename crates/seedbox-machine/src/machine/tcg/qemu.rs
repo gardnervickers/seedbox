@@ -2,7 +2,7 @@
 //! test builds additionally open a GDB socket for independent state inspection.
 
 use super::{Boot, Error, Manifest, Timestamp};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -22,7 +22,7 @@ const MAX_PACKET: usize = 8 * 1024 * 1024;
 #[path = "inspector.rs"]
 mod inspector;
 #[cfg(test)]
-use inspector::{Gdb, decode_hex};
+use inspector::{decode_hex, Gdb};
 
 pub(super) struct Process {
     child: Child,

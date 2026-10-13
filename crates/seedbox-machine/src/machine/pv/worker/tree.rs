@@ -175,16 +175,12 @@ mod tests {
         let bytes = build(0x42000000, 512, 7, arguments).unwrap();
         let mut expected = arguments.as_bytes().to_vec();
         expected.push(0);
-        assert!(
-            bytes
-                .windows(expected.len())
-                .any(|window| window == expected)
-        );
-        assert!(
-            !bytes
-                .windows(b"earlycon=pl011".len())
-                .any(|window| window == b"earlycon=pl011")
-        );
+        assert!(bytes
+            .windows(expected.len())
+            .any(|window| window == expected));
+        assert!(!bytes
+            .windows(b"earlycon=pl011".len())
+            .any(|window| window == b"earlycon=pl011"));
         assert!(build(0x42000000, 512, 7, &"x".repeat(65536)).is_err());
     }
 }

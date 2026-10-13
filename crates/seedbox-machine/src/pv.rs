@@ -334,7 +334,7 @@ mod queue_tests {
             assert_eq!(inbox.front(), Some(&first));
         }
         assert_eq!(pending.pop_front(), Some(first)); // Caller owns unaccepted work.
-        // Caller processes intervening lifecycle action before this admission.
+                                                      // Caller processes intervening lifecycle action before this admission.
         pending.push_back(after_action.clone());
         assert_eq!(Inbox::new(&mut pending, at(0)).take(), Some(after_action));
     }

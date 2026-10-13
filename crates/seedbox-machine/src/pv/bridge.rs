@@ -1,9 +1,10 @@
 //! Machine-owned guest service acceptance and observation. Whole-driver queues
 //! remain caller-owned; only accepted pending work belongs in this snapshot.
 use super::{
-    Output, oracle,
+    oracle,
     protocol::{Codec, Event},
     transport::{GuestWrite, LifecycleWrite},
+    Output,
 };
 use crate::machine::{RunContext, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -266,24 +267,20 @@ mod tests {
         let Response::SimulationControl { id: new, .. } = outputs[1].payload.clone() else {
             panic!()
         };
-        assert!(
-            restored
-                .request(&Request::SimulationReply {
-                    id: old,
-                    payload: b"{}".to_vec()
-                })
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            !restored
-                .request(&Request::SimulationReply {
-                    id: new,
-                    payload: b"{}".to_vec()
-                })
-                .unwrap()
-                .is_empty()
-        );
+        assert!(restored
+            .request(&Request::SimulationReply {
+                id: old,
+                payload: b"{}".to_vec()
+            })
+            .unwrap()
+            .is_empty());
+        assert!(!restored
+            .request(&Request::SimulationReply {
+                id: new,
+                payload: b"{}".to_vec()
+            })
+            .unwrap()
+            .is_empty());
         assert_eq!(restored.prepared_replies.len(), 1);
         restored.input_delivered().unwrap();
         assert!(restored.prepared_replies.is_empty());
@@ -352,26 +349,22 @@ mod tests {
         assert_eq!(queued, b"SBX_REPLY1 1 1 {}\n");
         assert_eq!(restored.prepared_replies.len(), 1);
         let mut premature = restored.clone();
-        assert!(
-            premature
-                .codec
-                .receive(&LifecycleWrite {
-                    time: 10,
-                    bytes: b"SBX_RPC1 2 1 {\"version\":1,\"id\":2}\n".to_vec()
-                })
-                .is_err()
-        );
+        assert!(premature
+            .codec
+            .receive(&LifecycleWrite {
+                time: 10,
+                bytes: b"SBX_RPC1 2 1 {\"version\":1,\"id\":2}\n".to_vec()
+            })
+            .is_err());
         restored.input_delivered().unwrap();
         restored.input_delivered().unwrap(); // Empty batches do not acknowledge twice.
-        assert!(
-            restored
-                .codec
-                .receive(&LifecycleWrite {
-                    time: 10,
-                    bytes: b"SBX_RPC1 2 1 {\"version\":1,\"id\":2}\n".to_vec()
-                })
-                .is_ok()
-        );
+        assert!(restored
+            .codec
+            .receive(&LifecycleWrite {
+                time: 10,
+                bytes: b"SBX_RPC1 2 1 {\"version\":1,\"id\":2}\n".to_vec()
+            })
+            .is_ok());
     }
     fn call(
         bridge: &mut GuestBridge,
@@ -446,16 +439,14 @@ mod tests {
         assert_eq!(bridge.session_highwater, 2);
         assert!(reply(&mut bridge, replaced).unwrap().is_empty());
         let mut invalid = bridge.clone();
-        assert!(
-            reply(
-                &mut invalid,
-                super::super::SimulationControlId {
-                    session: NonZeroU32::new(3).unwrap(),
-                    request: NonZeroU32::new(1).unwrap()
-                }
-            )
-            .is_err()
-        );
+        assert!(reply(
+            &mut invalid,
+            super::super::SimulationControlId {
+                session: NonZeroU32::new(3).unwrap(),
+                request: NonZeroU32::new(1).unwrap()
+            }
+        )
+        .is_err());
         let rebooted = call(&mut bridge, 1, 1, 1).unwrap();
         assert_eq!(rebooted.session.get(), 3);
         assert!(reply(&mut bridge, replaced).unwrap().is_empty());
@@ -525,14 +516,12 @@ mod tests {
             b"SBX_REPLY1 1 1 {}\n"
         );
         let mut malformed = bridge.clone();
-        assert!(
-            malformed
-                .request(&Request::SimulationReply {
-                    id: first,
-                    payload: b"invalid".to_vec()
-                })
-                .is_err()
-        );
+        assert!(malformed
+            .request(&Request::SimulationReply {
+                id: first,
+                payload: b"invalid".to_vec()
+            })
+            .is_err());
         let mut wrong = current;
         wrong.request = NonZeroU32::new(2).unwrap();
         assert!(reply(&mut bridge, wrong).is_err());

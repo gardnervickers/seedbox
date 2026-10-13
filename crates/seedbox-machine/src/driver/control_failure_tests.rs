@@ -223,14 +223,12 @@ fn ack_batch(final_batch: bool, bad_ack: bool) -> Driver<AckBatchProbe> {
         }
     );
     assert!(driver.control.settlements.is_empty());
-    assert!(
-        driver.machines[2]
-            .machine
-            .as_ref()
-            .unwrap()
-            .pending
-            .is_some()
-    );
+    assert!(driver.machines[2]
+        .machine
+        .as_ref()
+        .unwrap()
+        .pending
+        .is_some());
     driver
 }
 fn assert_ack_settlement(driver: &Driver<AckBatchProbe>) {

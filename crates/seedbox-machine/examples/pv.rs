@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources,
         },
         driver::{Driver, StepOutcome},
-        machine::{ExitReason, Timestamp, pv::Factory},
+        machine::{pv::Factory, ExitReason, Timestamp},
     };
     use std::path::PathBuf;
 

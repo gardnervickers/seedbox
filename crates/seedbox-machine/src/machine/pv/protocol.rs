@@ -1,5 +1,5 @@
 //! Private process protocol. No world scheduling or worker-local semantic state.
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 

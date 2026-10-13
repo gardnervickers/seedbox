@@ -70,11 +70,9 @@ fn private_guest_archive_preserves_binary_inputs_and_overlays_without_extraction
     assert_eq!(parsed["dev/console"].device, (5, 1));
     assert_eq!(parsed["tmp"].mode, 0o041777);
     assert_eq!(parsed.len(), 11);
-    assert!(
-        parsed["seedbox/application.bin"]
-            .bytes
-            .starts_with(b"SBXAPP2\0")
-    );
+    assert!(parsed["seedbox/application.bin"]
+        .bytes
+        .starts_with(b"SBXAPP2\0"));
     fs::write(directory.join("application"), b"replacement\0bytes").unwrap();
     let overlay = directory.join("overlay.cpio");
     pack(directory, Some(&base), &overlay);

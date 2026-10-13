@@ -16,8 +16,8 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     num::NonZeroU32,
-    panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, mpsc},
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::{mpsc, Arc},
     time::{Duration, Instant},
 };
 

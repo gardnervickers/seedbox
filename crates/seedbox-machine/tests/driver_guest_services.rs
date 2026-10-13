@@ -477,19 +477,15 @@ where
         );
         assert_eq!(session.output(id, 1, Stream::Stderr), b"\xff\0z");
     }
-    assert!(
-        !session
-            .events
-            .iter()
-            .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. }))
-    );
-    assert!(
-        session
-            .driver
-            .with_barrier(|b| Ok(b.drain_responses()))
-            .unwrap()
-            .is_empty()
-    );
+    assert!(!session
+        .events
+        .iter()
+        .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. })));
+    assert!(session
+        .driver
+        .with_barrier(|b| Ok(b.drain_responses()))
+        .unwrap()
+        .is_empty());
     // Each ordinary machine emits one control call from each boot. Driver
     // interprets and replies automatically; emitted calls stay drainable.
     for &machine in &session.ids {

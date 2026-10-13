@@ -357,12 +357,10 @@ fn oracle_application_outcome_finishes_without_claiming_machine_exit() {
     driver
         .with_barrier(|b| {
             assert!(matches!(b.stopped(ids[0])?, StopReason::Blocked { .. }));
-            assert!(
-                b.drain_responses().iter().any(|output| matches!(
-                    output.payload,
-                    Response::ApplicationOutcome { code: 23 }
-                ))
-            );
+            assert!(b
+                .drain_responses()
+                .iter()
+                .any(|output| matches!(output.payload, Response::ApplicationOutcome { code: 23 })));
             Ok(())
         })
         .unwrap();

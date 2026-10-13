@@ -14,8 +14,8 @@ pub use seedbox_machine::{
 pub use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };

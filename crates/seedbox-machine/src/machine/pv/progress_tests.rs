@@ -1,7 +1,7 @@
 //! Actual private DynamoRIO injection; wrapper-only tests are not this proof.
 use super::*;
 use crate::{
-    application::{GuestBootstrap, Kernel, boot_derived, with_runtime},
+    application::{boot_derived, with_runtime, GuestBootstrap, Kernel},
     clock::{Clock, SimulationClock},
     definition::{FilesystemArchive, Launch, PreparedApplication},
     execution::ExecutionConfig,

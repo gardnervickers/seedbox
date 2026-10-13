@@ -381,12 +381,10 @@ fn flattened_snapshot_rejects_duplicate_target_hardlink_overwrite() {
         ("alias", tar::EntryType::Link, 0, 0, 0, b"", Some("target")),
         ("target", tar::EntryType::Regular, 0o644, 0, 0, b"new", None),
     ]);
-    assert!(
-        validate_filesystem(&input)
-            .unwrap_err()
-            .to_string()
-            .contains("duplicate canonical")
-    );
+    assert!(validate_filesystem(&input)
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate canonical"));
 }
 
 #[cfg(unix)]
@@ -478,14 +476,12 @@ fn retained_recipe_decodes_and_linux_executes_path_script_wrapper_and_restart() 
     let mut bad = recipe(&launch, &[]).unwrap();
     bad.pop();
     fs::write(&recipe_path, bad).unwrap();
-    assert!(
-        !Command::new(executable)
-            .arg(recipe_path)
-            .arg("--inspect")
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(!Command::new(executable)
+        .arg(recipe_path)
+        .arg("--inspect")
+        .status()
+        .unwrap()
+        .success());
 }
 
 #[cfg(target_os = "linux")]

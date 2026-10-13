@@ -1,4 +1,4 @@
-use super::protocol::{Request, Response, Result, receive, send};
+use super::protocol::{receive, send, Request, Response, Result};
 use std::{
     io::{BufReader, BufWriter},
     path::Path,

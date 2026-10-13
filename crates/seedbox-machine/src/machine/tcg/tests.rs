@@ -775,28 +775,26 @@ fn deferred_startup_failure_is_a_run_error_and_invalidates_the_machine() {
         .unwrap_err();
     assert!(error.to_string().contains("/missing/qemu"));
     assert!(machine.snapshot().is_err());
-    assert!(
-        machine
-            .run(
-                &mut RunContext {
-                    execution: Default::default(),
-                    worker: &mut (),
-                    clock: &clock,
-                    rng: &mut rng,
-                    inbox: crate::pv::Inbox::new(
-                        &mut Default::default(),
-                        Timestamp::from_nanos(crate::clock::Clock::now(&clock))
-                    ),
-                    outbox: crate::pv::Outbox::new(
-                        &mut Vec::new(),
-                        Timestamp::from_nanos(crate::clock::Clock::now(&clock)),
-                        at(1)
-                    ),
-                },
-                at(1)
-            )
-            .is_err()
-    );
+    assert!(machine
+        .run(
+            &mut RunContext {
+                execution: Default::default(),
+                worker: &mut (),
+                clock: &clock,
+                rng: &mut rng,
+                inbox: crate::pv::Inbox::new(
+                    &mut Default::default(),
+                    Timestamp::from_nanos(crate::clock::Clock::now(&clock))
+                ),
+                outbox: crate::pv::Outbox::new(
+                    &mut Vec::new(),
+                    Timestamp::from_nanos(crate::clock::Clock::now(&clock)),
+                    at(1)
+                ),
+            },
+            at(1)
+        )
+        .is_err());
     let mut got = [0; 8];
     let mut want = [0; 8];
     rng.fill_bytes(&mut got);
@@ -1129,10 +1127,10 @@ printf 'SBX_EXIT1 status=%s\n' "$status" >&9
                 StopReason::Exited { .. }
             ));
         }
-        assert!(
-            outputs.iter().any(|output| output.payload
-                == crate::pv::Response::ApplicationOutcome { code: code as u8 })
-        );
+        assert!(outputs
+            .iter()
+            .any(|output| output.payload
+                == crate::pv::Response::ApplicationOutcome { code: code as u8 }));
         let pending_rng = rng.clone();
         assert!(
             !matches!(source.state, State::Exited(_)),
@@ -1223,8 +1221,8 @@ fn common_inputs() -> (
     crate::application::GuestBootstrap,
     crate::definition::MachineDefinition,
 ) {
-    use crate::definition::*;
     use crate::application::{GuestBootstrap, Kernel};
+    use crate::definition::*;
     let mut tar = tar::Builder::new(Vec::new());
     let mut header = tar::Header::new_gnu();
     header.set_size(1);
@@ -1315,26 +1313,22 @@ fn common_constructor_checks_resource_and_kernel_argument_bounds() {
     }
     for accepted in ["a".repeat(1023), format!("{}a", "é".repeat(511))] {
         bootstrap.kernel.command_line = accepted;
-        assert!(
-            super::TcgMachine::new(
-                Path::new("/missing/qemu"),
-                vec![3],
-                &bootstrap,
-                definition.clone()
-            )
-            .is_ok()
-        );
+        assert!(super::TcgMachine::new(
+            Path::new("/missing/qemu"),
+            vec![3],
+            &bootstrap,
+            definition.clone()
+        )
+        .is_ok());
     }
     for rejected in ["a".repeat(1024), "é".repeat(512), "a\0b".into()] {
         bootstrap.kernel.command_line = rejected;
-        assert!(
-            super::TcgMachine::new(
-                Path::new("/missing/qemu"),
-                vec![3],
-                &bootstrap,
-                definition.clone()
-            )
-            .is_err()
-        );
+        assert!(super::TcgMachine::new(
+            Path::new("/missing/qemu"),
+            vec![3],
+            &bootstrap,
+            definition.clone()
+        )
+        .is_err());
     }
 }

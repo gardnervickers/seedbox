@@ -2,8 +2,8 @@ use super::*;
 use std::{
     collections::VecDeque,
     sync::{
-        Mutex,
         atomic::{AtomicBool, Ordering},
+        Mutex,
     },
 };
 
@@ -610,19 +610,17 @@ fn invalid_configuration_never_calls_factories_and_overflow_never_runs_work() {
         (0, Duration::from_nanos(1), 0),
         (u64::MAX, Duration::from_nanos(1), 1),
     ] {
-        assert!(
-            Driver::<TestMachine>::new(
-                at(start),
-                quantum,
-                workers,
-                crate::rng::SeededRng::new(0),
-                || panic!("invalid configuration created a context"),
-                super::fixture::definition(0),
-                Vec::new(),
-                |_| panic!("invalid configuration created machines")
-            )
-            .is_err()
-        );
+        assert!(Driver::<TestMachine>::new(
+            at(start),
+            quantum,
+            workers,
+            crate::rng::SeededRng::new(0),
+            || panic!("invalid configuration created a context"),
+            super::fixture::definition(0),
+            Vec::new(),
+            |_| panic!("invalid configuration created machines")
+        )
+        .is_err());
     }
     let mut driver = super::fixture::driver(
         at(u64::MAX - 3),
@@ -942,11 +940,9 @@ fn machine_rng_cursors_follow_identity_across_work_stealing_and_failed_addition(
         driver.step(at(10)).unwrap();
         driver
             .with_barrier(|barrier| {
-                assert!(
-                    barrier
-                        .add(|| Err(std::io::Error::other("fixture failed addition")))
-                        .is_err()
-                );
+                assert!(barrier
+                    .add(|| Err(std::io::Error::other("fixture failed addition")))
+                    .is_err());
                 let id = barrier.add(|| {
                     Ok(RandomMachine {
                         bytes: Vec::new(),

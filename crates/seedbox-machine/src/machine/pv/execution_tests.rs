@@ -64,34 +64,30 @@ charged:
 "#,
     )
     .unwrap();
-    assert!(
-        Command::new(input("SEEDBOX_PV_CLANG"))
-            .args(["--target=aarch64-none-elf", "-c"])
-            .arg(&source)
-            .arg("-o")
-            .arg(&object)
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        Command::new(input("SEEDBOX_PV_LD"))
-            .args([
-                "-m",
-                "aarch64elf",
-                "-Ttext=0",
-                "--image-base=0",
-                "-e",
-                "_start",
-                "--oformat=binary"
-            ])
-            .arg(&object)
-            .arg("-o")
-            .arg(&raw)
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(Command::new(input("SEEDBOX_PV_CLANG"))
+        .args(["--target=aarch64-none-elf", "-c"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new(input("SEEDBOX_PV_LD"))
+        .args([
+            "-m",
+            "aarch64elf",
+            "-Ttext=0",
+            "--image-base=0",
+            "-e",
+            "_start",
+            "--oformat=binary"
+        ])
+        .arg(&object)
+        .arg("-o")
+        .arg(&raw)
+        .status()
+        .unwrap()
+        .success());
     let mut kernel = vec![0; 64];
     kernel[..4].copy_from_slice(&0x1400_0010u32.to_le_bytes());
     kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());

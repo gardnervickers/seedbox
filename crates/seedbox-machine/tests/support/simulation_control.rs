@@ -121,11 +121,9 @@ where
             StopReason::BoundaryReached => end,
             StopReason::Blocked { reached, .. } | StopReason::Exited { reached, .. } => reached,
         };
-        assert!(
-            outputs
-                .iter()
-                .all(|output| output.at >= start && output.at <= reached)
-        );
+        assert!(outputs
+            .iter()
+            .all(|output| output.at >= start && output.at <= reached));
         // Publication happens only after the synchronous machine has stopped.
         for output in &outputs {
             if let pv::Response::SimulationControl { id, payload } = &output.payload {
@@ -293,12 +291,10 @@ where
         b"FIRST\nSECOND\nCLOSED\nRECONNECTED\nRESTARTED\n"
     );
     assert_eq!(session.calls.len(), 6);
-    assert!(
-        !session
-            .outputs
-            .iter()
-            .any(|output| matches!(output.payload, pv::Response::ApplicationOutcome { .. }))
-    );
+    assert!(!session
+        .outputs
+        .iter()
+        .any(|output| matches!(output.payload, pv::Response::ApplicationOutcome { .. })));
 }
 
 pub fn late_reply_after_reset<M: Machine<Context = ()>>(machine: M)

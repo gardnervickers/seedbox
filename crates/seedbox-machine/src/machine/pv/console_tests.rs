@@ -97,34 +97,30 @@ message2: .ascii "SBX_LOG1 2 44\n"
     .unwrap();
     let clang = std::env::var_os("SEEDBOX_PV_CLANG").unwrap();
     let ld = std::env::var_os("SEEDBOX_PV_LD").unwrap();
-    assert!(
-        Command::new(clang)
-            .args(["--target=aarch64-none-elf", "-c"])
-            .arg(&source)
-            .arg("-o")
-            .arg(&object)
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        Command::new(ld)
-            .args([
-                "-m",
-                "aarch64elf",
-                "-Ttext=0",
-                "--image-base=0",
-                "-e",
-                "_start",
-                "--oformat=binary"
-            ])
-            .arg(&object)
-            .arg("-o")
-            .arg(&raw)
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(Command::new(clang)
+        .args(["--target=aarch64-none-elf", "-c"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new(ld)
+        .args([
+            "-m",
+            "aarch64elf",
+            "-Ttext=0",
+            "--image-base=0",
+            "-e",
+            "_start",
+            "--oformat=binary"
+        ])
+        .arg(&object)
+        .arg("-o")
+        .arg(&raw)
+        .status()
+        .unwrap()
+        .success());
     let mut kernel = vec![0; 64];
     kernel[..4].copy_from_slice(&0x1400_0010u32.to_le_bytes());
     kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
@@ -164,7 +160,8 @@ fn run(machine: &mut PVMachine, now: u64, upto: u64) -> Vec<Output> {
 fn native_console_interleave_has_actual_times_across_partitions_and_restore() {
     let worker = PathBuf::from(std::env::var_os("SEEDBOX_PV_WORKER").unwrap());
     let image = image();
-    let create = || PVMachine::from_boot_inputs(&worker, image.clone(), b"initrd".to_vec()).unwrap();
+    let create =
+        || PVMachine::from_boot_inputs(&worker, image.clone(), b"initrd".to_vec()).unwrap();
     let mut whole = create();
     let expected = run(&mut whole, 0, 10);
     assert_eq!(

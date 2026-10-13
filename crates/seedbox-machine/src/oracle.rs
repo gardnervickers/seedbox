@@ -16,7 +16,7 @@
 //! be supplied by its owner without defining a misleading partial schema here.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{collections::BTreeMap, num::NonZeroU32};
 
 const MAX_FRAME: usize = 16384; // Includes the public JSON frame's trailing newline.

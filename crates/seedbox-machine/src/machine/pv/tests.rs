@@ -110,7 +110,10 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
     );
     assert_eq!(
         driver.step(at(10)).unwrap(),
-        StepOutcome::Finished { at: at(5), reason: ExitReason::Shutdown }
+        StepOutcome::Finished {
+            at: at(5),
+            reason: ExitReason::Shutdown
+        }
     );
     drop(driver);
     // The checkpoint survives the workers and temporary boot/checkpoint files.
@@ -123,10 +126,8 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
         || {
             let clock: Arc<dyn Clock + Send + Sync> =
                 Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
-            Ok(vec![
-                PVMachine::from_snapshot(executable, &snapshot, clock)
-                    .map_err(std::io::Error::other)?,
-            ])
+            Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
+                .map_err(std::io::Error::other)?])
         },
     )
     .unwrap();
@@ -140,7 +141,10 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
     );
     assert_eq!(
         restored.step(at(10)).unwrap(),
-        StepOutcome::Finished { at: at(5), reason: ExitReason::Shutdown }
+        StepOutcome::Finished {
+            at: at(5),
+            reason: ExitReason::Shutdown
+        }
     );
     let mut second = crate::driver::fixture::driver(
         at(0),
@@ -151,10 +155,8 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
         || {
             let clock: Arc<dyn Clock + Send + Sync> =
                 Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
-            Ok(vec![
-                PVMachine::from_snapshot(executable, &snapshot, clock)
-                    .map_err(std::io::Error::other)?,
-            ])
+            Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
+                .map_err(std::io::Error::other)?])
         },
     )
     .unwrap();
@@ -168,7 +170,10 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
     );
     assert_eq!(
         second.step(at(10)).unwrap(),
-        StepOutcome::Finished { at: at(5), reason: ExitReason::Shutdown }
+        StepOutcome::Finished {
+            at: at(5),
+            reason: ExitReason::Shutdown
+        }
     );
 }
 
@@ -195,13 +200,11 @@ fn native_indefinite_idle_and_capture_failure_keep_valid_machine() {
     );
     assert_eq!(clock.now(), 37);
     let existing = machine.directory.path().join("kernel");
-    assert!(
-        machine
-            .worker()
-            .unwrap()
-            .call(Request::Capture(existing))
-            .is_err()
-    );
+    assert!(machine
+        .worker()
+        .unwrap()
+        .call(Request::Capture(existing))
+        .is_err());
     let snapshot = machine.snapshot().unwrap();
     assert_eq!(
         machine.run(&mut (), at(100)).unwrap(),
@@ -397,7 +400,10 @@ fn native_horizon_is_accepted_before_following_poweroff() {
         .unwrap();
     assert_eq!(
         driver.step(at(50)).unwrap(),
-        StepOutcome::Finished { at: at(40), reason: ExitReason::Shutdown }
+        StepOutcome::Finished {
+            at: at(40),
+            reason: ExitReason::Shutdown
+        }
     );
     drop(driver);
     let mut branch = crate::driver::fixture::driver(
@@ -409,16 +415,17 @@ fn native_horizon_is_accepted_before_following_poweroff() {
         || {
             let clock: Arc<dyn Clock + Send + Sync> =
                 Arc::new(crate::clock::SimulationClock::new((at(40)).as_nanos()));
-            Ok(vec![
-                PVMachine::from_snapshot(executable, &snapshot, clock)
-                    .map_err(std::io::Error::other)?,
-            ])
+            Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
+                .map_err(std::io::Error::other)?])
         },
     )
     .unwrap();
     assert_eq!(
         branch.step(at(50)).unwrap(),
-        StepOutcome::Finished { at: at(40), reason: ExitReason::Shutdown }
+        StepOutcome::Finished {
+            at: at(40),
+            reason: ExitReason::Shutdown
+        }
     );
 }
 
@@ -655,28 +662,26 @@ fn deferred_startup_failure_is_a_run_error_and_invalidates_the_machine() {
         .unwrap_err();
     assert!(error.to_string().contains("/missing/pv-worker"));
     assert!(machine.snapshot().is_err());
-    assert!(
-        machine
-            .run(
-                &mut RunContext {
-                    execution: Default::default(),
-                    worker: &mut (),
-                    clock: &clock,
-                    rng: &mut rng,
-                    inbox: crate::pv::Inbox::new(
-                        &mut Default::default(),
-                        Timestamp::from_nanos(crate::clock::Clock::now(&clock))
-                    ),
-                    outbox: crate::pv::Outbox::new(
-                        &mut Vec::new(),
-                        Timestamp::from_nanos(crate::clock::Clock::now(&clock)),
-                        at(1)
-                    ),
-                },
-                at(1)
-            )
-            .is_err()
-    );
+    assert!(machine
+        .run(
+            &mut RunContext {
+                execution: Default::default(),
+                worker: &mut (),
+                clock: &clock,
+                rng: &mut rng,
+                inbox: crate::pv::Inbox::new(
+                    &mut Default::default(),
+                    Timestamp::from_nanos(crate::clock::Clock::now(&clock))
+                ),
+                outbox: crate::pv::Outbox::new(
+                    &mut Vec::new(),
+                    Timestamp::from_nanos(crate::clock::Clock::now(&clock)),
+                    at(1)
+                ),
+            },
+            at(1)
+        )
+        .is_err());
     let mut got = [0; 8];
     let mut want = [0; 8];
     rng.fill_bytes(&mut got);
@@ -697,15 +702,13 @@ fn complete_kernel_arguments_survive_uninitialized_snapshot() {
     let snapshot = machine.capture().unwrap();
     let restored = super::PVMachine::from_snapshot(Path::new("/not-spawned"), &snapshot).unwrap();
     assert_eq!(restored.command_line, arguments);
-    assert!(
-        super::PVMachine::construct(
-            Path::new("/not-spawned"),
-            timed_guest(),
-            b"initrd".to_vec(),
-            "bad\0argument".into()
-        )
-        .is_err()
-    );
+    assert!(super::PVMachine::construct(
+        Path::new("/not-spawned"),
+        timed_guest(),
+        b"initrd".to_vec(),
+        "bad\0argument".into()
+    )
+    .is_err());
 }
 
 #[test]

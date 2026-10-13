@@ -4,7 +4,7 @@ use seedbox_machine::{
     clock::Clock,
     definition::{FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources},
     execution::ExecutionConfig,
-    machine::{Machine, RunContext, StopReason, Timestamp, pv::Factory},
+    machine::{pv::Factory, Machine, RunContext, StopReason, Timestamp},
     pv::{Inbox, Outbox, Response, Stream},
     rng::RngStream,
 };

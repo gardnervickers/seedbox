@@ -374,8 +374,8 @@ fn confirmed_repeated_transitions_refresh_time_but_no_effect_does_not() {
 #[test]
 fn service_correlation_is_consumed_after_settlement_then_terminal() {
     use super::super::{
-        OperationError, Target,
         service::{Adapter, Plan, Service},
+        OperationError, Target,
     };
     struct Owner {
         state: State,

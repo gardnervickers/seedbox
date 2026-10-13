@@ -1,6 +1,6 @@
-use super::{PVMachine, boot};
+use super::{boot, PVMachine};
 use crate::{
-    application::{GuestBootstrap, Kernel, boot_derived, with_runtime},
+    application::{boot_derived, with_runtime, GuestBootstrap, Kernel},
     definition::{FilesystemArchive, MachineDefinition},
 };
 use std::{
@@ -205,12 +205,10 @@ mod tests {
             b"-ldstex2cas",
             b"SBXAPP2",
         ] {
-            assert!(
-                first
-                    .initrd
-                    .windows(required.len())
-                    .any(|bytes| bytes == required)
-            );
+            assert!(first
+                .initrd
+                .windows(required.len())
+                .any(|bytes| bytes == required));
         }
         let mut unsupported = definition;
         unsupported.resources.memory_bytes = 1;
