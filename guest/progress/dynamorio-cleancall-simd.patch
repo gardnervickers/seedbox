@@ -1,6 +1,8 @@
+diff --git a/core/arch/aarchxx/mangle.c b/core/arch/aarchxx/mangle.c
+index bd5a6dd..73ed2ce 100644
 --- a/core/arch/aarchxx/mangle.c
 +++ b/core/arch/aarchxx/mangle.c
-@@ -146,6 +146,21 @@
+@@ -146,6 +146,21 @@ insert_save_or_restore_gpr_simd_registers(
              num_regs = (rtype == GPR_REG_TYPE) ? 30 : MCXT_NUM_SIMD_SVE_SLOTS;
      uint saved_regs = 0;
      instr_t *new_instr;

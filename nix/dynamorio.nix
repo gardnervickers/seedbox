@@ -4,17 +4,22 @@ let
 in
 pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio";
-  # ARM needs a newer core for JITs. x86 builds the source of its existing
-  # release; nix/progress.nix fetches the matching SDK for each.
-  version = if arm then "11.91.20735" else "11.3.0";
+  # ARM needs a newer core for JITs: upstream main at a842f0e, the base of the
+  # fork where these patches are developed (`seedbox` and `main` branches).
+  # x86 builds the source of its existing release; nix/progress.nix fetches
+  # the matching SDK for each.
+  version = if arm then "11.91-unstable-2026-10-12" else "11.3.0";
   src = pkgs.fetchurl (if arm then {
-    url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/cronbuild-11.91.20735.tar.gz";
-    hash = "sha256-VNzTsfM80ByTlTeHGTDqE5cKa48oAWiNgdZ6oKCpOZo=";
+    url = "https://github.com/DynamoRIO/dynamorio/archive/a842f0eb3463f2c1846d082ecac0b4b2d5f894c9.tar.gz";
+    hash = "sha256-l3iaagqwiOJy0lKK8r2vGSNSrnGblW5/AYd1z3bGMho=";
   } else {
     url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/release_11.3.0-1.tar.gz";
     hash = "sha256-aj7BN0bravXAY72wVB37ZbTJvS+hZTxC61RAMiBDLsI=";
   });
   patches = if arm then [
+    # AArch64 decoder, encoder and IR fixes found by fuzzing the IR and
+    # checking it against the A64 specification.
+    ../guest/progress/dynamorio-aarch64-ir-fixes.patch
     ../guest/progress/dynamorio-exclusives.patch
     # Rebuilding a block discards its region list and must recheck the start.
     ../guest/progress/dynamorio-rebuild-vmareas.patch

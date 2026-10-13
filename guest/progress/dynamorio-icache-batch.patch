@@ -1,8 +1,8 @@
 diff --git a/core/arch/aarchxx/mangle.c b/core/arch/aarchxx/mangle.c
-index 73aa66e..c48f7d4 100644
+index 73ed2ce..71ecd4e 100644
 --- a/core/arch/aarchxx/mangle.c
 +++ b/core/arch/aarchxx/mangle.c
-@@ -3058,8 +3058,17 @@ mangle_icache_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
+@@ -3076,8 +3076,17 @@ mangle_icache_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                   instr_t *next_instr, app_pc pc)
  {
      int opc = instr_get_opcode(instr);

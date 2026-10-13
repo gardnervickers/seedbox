@@ -2,7 +2,9 @@
 let
   arm = pkgs.stdenv.hostPlatform.isAarch64;
   # Both use the matching SDK launcher/preload libraries with the patched core
-  # from nix/dynamorio.nix. Keep its version and hash aligned with that source.
+  # from nix/dynamorio.nix. x86 uses the SDK of that source's release. ARM's
+  # core is upstream main three days after this cronbuild, with the same 11.91
+  # client interface; move the SDK forward with the core when it changes.
   # The x86 runtime remains on its existing release; the ARM upgrade fixes JITs.
   sdkTag = if arm then "cronbuild-11.91.20735" else "release_11.3.0-1";
   sdkVersion = if arm then "11.91.20735" else "11.3.0";
