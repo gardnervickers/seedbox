@@ -2,13 +2,15 @@
 let
   arm = pkgs.stdenv.hostPlatform.isAarch64;
   # Keep this SDK release and its hashes aligned with dynamorio.nix.
-  # ARM uses its launcher/preload libraries with that patched core and extensions.
+  # The bundle uses the SDK's preload library with the patched core and extensions.
   sdk = pkgs.fetchurl {
     url = "https://github.com/DynamoRIO/dynamorio/releases/download/release_11.3.0-1/DynamoRIO-${if arm then "AArch64-Linux" else "Linux"}-11.3.0.tar.gz";
     hash = if arm then "sha256-n/e3uHdovA0O2hjyJH5VS6sbPoxXbvxXmS87dcEoqGM=" else "sha256-rgIEnfXE2uuC1Ah6qg04v1jN0ms4+2BC3M8ny8Ms7tk=";
   };
   loader = if arm then "ld-linux-aarch64.so.1" else "ld-linux-x86-64.so.2";
-  armRuntime = import ./dynamorio.nix { inherit pkgs; };
+  # Both architectures use the patched launcher, core and extensions: the
+  # execute-only handoff lives in drrun and the core loader.
+  runtime = import ./dynamorio.nix { inherit pkgs; };
 in pkgs.runCommand "seedbox-progress.tar" {
   passthru = { inherit sdk; glibcSource = pkgs.glibc.src; };
   nativeBuildInputs = [ pkgs.stdenv.cc ] ++ (with pkgs.buildPackages; [ cmake ninja patchelf python3 ]);
@@ -24,13 +26,11 @@ in pkgs.runCommand "seedbox-progress.tar" {
   cp sdk/bin64/drrun bundle/bin64/
   cp sdk/lib64/release/*.so bundle/lib64/release/
   cp sdk/ext/lib64/release/libdrmgr.so sdk/ext/lib64/release/libdrreg.so bundle/ext/lib64/release/
-  ${pkgs.lib.optionalString arm ''
-    cp ${armRuntime}/bin64/drrun bundle/bin64/drrun
-    rm bundle/lib64/release/libdynamorio.so
-    cp ${armRuntime}/lib64/release/libdynamorio.so bundle/lib64/release/
-    rm bundle/ext/lib64/release/libdrmgr.so bundle/ext/lib64/release/libdrreg.so
-    cp ${armRuntime}/ext/lib64/release/*.so bundle/ext/lib64/release/
-  ''}
+  cp ${runtime}/bin64/drrun bundle/bin64/drrun
+  rm bundle/lib64/release/libdynamorio.so
+  cp ${runtime}/lib64/release/libdynamorio.so bundle/lib64/release/
+  rm bundle/ext/lib64/release/libdrmgr.so bundle/ext/lib64/release/libdrreg.so
+  cp ${runtime}/ext/lib64/release/*.so bundle/ext/lib64/release/
   cp build/libseedbox_progress.so bundle/
   # Only the launcher needs libc. Its private loader/search path must never
   # override the application's libc, including musl and static images.

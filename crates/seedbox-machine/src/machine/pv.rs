@@ -79,7 +79,7 @@ pub struct PVMachine {
 #[cfg(all(test, target_arch = "aarch64"))]
 const TEST_COMMAND_LINE: &str = "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4";
 #[cfg(all(test, target_arch = "x86_64"))]
-const TEST_COMMAND_LINE: &str = "console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit=/init nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4";
+const TEST_COMMAND_LINE: &str = "console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit=/init random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4";
 
 impl PVMachine {
     /// Prepare a stopped machine from a workload and separately supplied boot assets.

@@ -47,7 +47,26 @@
     in {
       devShells = nixpkgs.lib.genAttrs systems shell;
       packages = nixpkgs.lib.genAttrs systems (system:
-        let pkgs = import nixpkgs { inherit system; }; in {
+        let
+          pkgs = import nixpkgs { inherit system; };
+          machinePv = rec {
+            arm = pkgs.stdenv.hostPlatform.isAarch64;
+            kernel = import ./crates/seedbox-machine/pv-kernel.nix { inherit pkgs; };
+            progress = import ./crates/seedbox-machine/progress.nix { inherit pkgs; };
+            guest = (import ./crates/seedbox-machine/guest.nix {
+              inherit pkgs;
+              withFixture = true;
+            }).${if arm then "aarch64" else "x86_64"};
+            assets = import ./crates/seedbox-machine/guest-assets.nix {
+              inherit pkgs progress;
+              kernel = "${kernel}/kernel";
+              init = "${guest}/bin/init";
+              commandLine = if arm
+                then "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4"
+                else "console=ttyS0 rdinit=/init random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4";
+            };
+          };
+        in {
           networkTools = pkgs.iproute2;
           tcgQemu = import ./nix/tcg.nix { inherit pkgs; };
           tcgLinux = import ./nix/tcg-linux.nix { inherit pkgs; };
@@ -58,8 +77,10 @@
           tcgKernel = import ./nix/tcg-kernel.nix { inherit pkgs; };
         } // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.isAarch64 || pkgs.stdenv.hostPlatform.isx86_64) {
           # seedbox-machine's own native PV guest inputs, for this host's architecture.
-          machinePvKernel = import ./crates/seedbox-machine/pv-kernel.nix { inherit pkgs; };
-          machinePvProgress = import ./crates/seedbox-machine/progress.nix { inherit pkgs; };
+          machinePvKernel = machinePv.kernel;
+          machinePvProgress = machinePv.progress;
+          machinePvGuest = machinePv.guest;
+          machinePvAssets = machinePv.assets;
         }
         );
     };

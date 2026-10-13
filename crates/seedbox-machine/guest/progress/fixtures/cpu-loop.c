@@ -20,10 +20,12 @@ int main(int argc, char **argv) {
     uint64_t start = observed_time();
     printf("START=%" PRIu64 "\n", start);
     fflush(stdout);
-#ifdef __aarch64__
+#if defined(__aarch64__)
     __asm__ volatile("1: subs %0, %0, #1\n b.ne 1b" : "+r"(count) : : "cc");
+#elif defined(__x86_64__)
+    __asm__ volatile("1: dec %0\n jnz 1b" : "+r"(count) : : "cc");
 #else
-#error This fixture measures ARM64 PV instrumentation only
+#error This fixture measures ARM64 or x86-64 PV instrumentation only
 #endif
     uint64_t finish = observed_time();
     printf("END=%" PRIu64 " DELTA=%" PRIu64 "\n", finish, finish - start);

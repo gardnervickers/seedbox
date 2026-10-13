@@ -12,6 +12,10 @@ use std::{
     collections::{BTreeMap, VecDeque},
     time::{Duration, Instant},
 };
+#[cfg(target_arch = "aarch64")]
+const COMMAND_LINE: &str = "console=ttyAMA0 nosmp";
+#[cfg(target_arch = "x86_64")]
+const COMMAND_LINE: &str = "console=ttyS0";
 fn input(name: &str) -> PathBuf {
     std::env::var_os(name).expect(name).into()
 }
@@ -39,7 +43,7 @@ fn machine(iterations: u64, instrumented: bool) -> PVMachine {
     let bootstrap = GuestBootstrap {
         kernel: Kernel {
             image: fs::read(input("SEEDBOX_PV_KERNEL")).unwrap(),
-            command_line: "console=ttyAMA0 nosmp".into(),
+            command_line: COMMAND_LINE.into(),
         },
         init: fs::read(input("SEEDBOX_PV_INIT")).unwrap(),
         base_initramfs: Vec::new(),
@@ -48,18 +52,7 @@ fn machine(iterations: u64, instrumented: bool) -> PVMachine {
         let runtime =
             FilesystemArchive::new(fs::read(input("SEEDBOX_PV_PROGRESS_RUNTIME")).unwrap())
                 .unwrap();
-        let prefix = [
-            "/seedbox/progress/bin64/drrun",
-            "-opt_speed",
-            "-disable_traces",
-            "-ldstex2cas",
-            "-c",
-            "/seedbox/progress/libseedbox_progress.so",
-            "--blocks-per-progress-call",
-            "32",
-            "--",
-        ]
-        .map(str::to_owned);
+        let prefix = super::factory::runtime_prefix();
         boot_derived(&with_runtime(&app, &runtime, &prefix).unwrap(), &bootstrap).unwrap()
     } else {
         crate::application::boot_archive(&app, &bootstrap).unwrap()

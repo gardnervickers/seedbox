@@ -1,5 +1,6 @@
 # Private, static Linux guest helpers. Import with the project's pinned nixpkgs:
 #   import ./guest.nix { pkgs = import nixpkgs { system = "aarch64-linux"; }; }
+# (or x86_64-linux for the x86-64 PV guest).
 # Build on Linux (including the project's persistent Nix container on macOS).
 # Each result provides bin/init and lib/libseedbox-guest.a. Its mkInitramfs
 # passthru accepts a target-architecture static /application executable.
@@ -73,4 +74,5 @@ let
 in {
   aarch64 = make "aarch64" "aarch64-linux-musl" "AArch64";
   riscv64 = make "riscv64" "riscv64-linux-musl" "RISC-V";
+  x86_64 = make "x86_64" "x86_64-linux-musl" "X86-64";
 }
