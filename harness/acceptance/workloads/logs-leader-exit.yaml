@@ -1,0 +1,26 @@
+name: logs-leader-exit
+machines:
+  app:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/leader_exit.py"
+    - app
+    files:
+    - source: "../driver/leader_exit.py"
+      target: "/scenario/leader_exit.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/leader_exit.py"
+  - oracle
+  files:
+  - source: "../driver/leader_exit.py"
+    target: "/scenario/leader_exit.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms
