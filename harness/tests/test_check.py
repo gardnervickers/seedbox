@@ -33,6 +33,25 @@ class SelectionTests(unittest.TestCase):
                 patch.object(check, "engine_sockets", return_value=[]):
             return check.requirements(suite, "Linux", machine, inputs or {}, probe, root)
 
+    def test_machine_suites_are_explicit_and_require_inputs(self):
+        self.assertEqual(check.expand(["machine-tcg"], "x86_64"), ["portable", "machine-tcg"])
+        self.assertNotIn("machine-tcg", check.expand(["linux"], "x86_64"))
+        missing = self.linux("machine-tcg", {"kvm": "unavailable"})
+        self.assertTrue(any("SEEDBOX_TCG_ASSETS" in reason for reason in missing))
+        self.assertFalse(any("/dev/kvm" in reason for reason in missing))
+        self.assertIn("requires Linux x86-64", self.linux("machine-tcg", {}, machine="aarch64"))
+        self.assertTrue(any("/dev/kvm" in reason for reason in
+                            self.linux("machine-pv-x86", {"kvm": "denied"})))
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "input"
+            executable.write_text("fixture")
+            executable.chmod(0o755)
+            inputs = {f"SEEDBOX_TCG_{key}": str(executable) for key in (
+                "QEMU", "FIRMWARE", "KERNEL", "INIT", "SERVICE_INITRD", "CONTROL_INITRD",
+                "DRIVER_CONTROL_APPLICATION", "PREPARED_FIXTURE")}
+            inputs["SEEDBOX_TCG_ASSETS"] = directory
+            self.assertEqual(self.linux("machine-tcg", {"kvm": "denied"}, inputs=inputs), [])
+
     def test_default_is_portable_only(self):
         self.assertEqual(check.expand(["portable"], "x86_64"), ["portable"])
 

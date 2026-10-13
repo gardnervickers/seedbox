@@ -49,6 +49,22 @@
       packages = nixpkgs.lib.genAttrs systems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          machineTcg = rec {
+            qemu = import ./nix/tcg.nix { inherit pkgs; };
+            kernel = import ./nix/tcg-kernel.nix { inherit pkgs; };
+            guest = (import ./crates/seedbox-machine/guest.nix {
+              inherit pkgs;
+              withFixture = true;
+            }).riscv64;
+            assets = import ./crates/seedbox-machine/guest-assets.nix {
+              inherit pkgs;
+              kernel = "${kernel}/kernel";
+              init = "${guest}/bin/init";
+              commandLine = "console=ttyS0 earlycon=sbi rdinit=/init nokaslr";
+              firmware = "${qemu}/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin";
+            };
+            testFixtures = import ./crates/seedbox-machine/tcg-test-fixtures.nix { inherit pkgs guest; };
+          };
           machinePv = rec {
             arm = pkgs.stdenv.hostPlatform.isAarch64;
             kernel = import ./crates/seedbox-machine/pv-kernel.nix { inherit pkgs; };
@@ -76,6 +92,8 @@
           inherit (import ./nix/runtime.nix { inherit pkgs; }) runtimeAssets runtimeArchive runtimeSources;
           inherit (import ./nix/kernels.nix { inherit pkgs; }) guestKernel guestKernelArchive guestKernelSources;
           tcgKernel = import ./nix/tcg-kernel.nix { inherit pkgs; };
+          machineTcgAssets = machineTcg.assets;
+          machineTcgTestFixtures = machineTcg.testFixtures;
         } // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.isAarch64 || pkgs.stdenv.hostPlatform.isx86_64) {
           # seedbox-machine's own native PV guest inputs, for this host's architecture.
           machinePvKernel = machinePv.kernel;

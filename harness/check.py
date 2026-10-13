@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 SUITES = {
     "portable": "Any host: fmt, clippy, workspace and standalone unit tests, Python suites, YAML validation.",
+    "machine-tcg": "Linux x86-64 with patched QEMU and explicit SEEDBOX_TCG_* inputs (machineTcgAssets / machineTcgTestFixtures); no KVM needed.",
+    "machine-pv-x86": "Linux x86-64 with /dev/kvm, a native PV worker and explicit SEEDBOX_PV_* inputs (machinePvAssets / machinePvTestFixtures).",
     "linux-kvm": "Linux x86-64 or ARM64 with /dev/kvm: native backend KVM tests; no root needed.",
     "linux-guests": "Fixture kernel and initrd on Linux KVM: real guest determinism and checkpoints.",
     "linux-oci": "Linux x86-64 with a running Docker-compatible engine: real image import and Dockerfile builds.",
@@ -182,6 +184,24 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
              "no Docker-compatible engine (set DOCKER_HOST, or install Docker or Podman)")
 
     if suite == "portable":
+        return missing
+    if suite in ("machine-tcg", "machine-pv-x86"):
+        need(x86, "requires Linux x86-64")
+        backend = "TCG" if suite == "machine-tcg" else "PV"
+        if backend == "PV":
+            need(probe.get("kvm") == "", "/dev/kvm: " + (probe.get("kvm") or "not probed"))
+        keys = ["ASSETS", "SERVICE_INITRD", "CONTROL_INITRD",
+                "DRIVER_CONTROL_APPLICATION", "PREPARED_FIXTURE"]
+        keys += ["QEMU", "FIRMWARE", "KERNEL", "INIT"] if backend == "TCG" else [
+            "WORKER", "KERNEL", "INIT", "PROGRESS_RUNTIME", "PROGRESS_FIXTURE"]
+        for suffix in keys:
+            key = f"SEEDBOX_{backend}_{suffix}"
+            value = environment.get(key)
+            path = Path(value) if value else None
+            valid = path and (path.is_dir() if suffix == "ASSETS" else path.is_file())
+            need(valid, f"set {key} to an existing {'directory' if suffix == 'ASSETS' else 'file'}")
+            if valid and suffix in ("QEMU", "WORKER"):
+                need(os.access(path, os.X_OK), f"{key} is not executable")
         return missing
     if suite.startswith("linux-"):
         if not linux:
@@ -355,7 +375,7 @@ def main(argv=None):
     hardware = [suite for suite in suites if suite != "portable"]
     prefix = root_prefix() if system == "Linux" and hardware else None
     probe = None
-    if system == "Linux" and hardware:
+    if system == "Linux" and any(suite != "machine-tcg" for suite in hardware):
         result = subprocess.run(privileged(prefix, [sys.executable, str(Path(__file__).resolve()), "--probe-linux"], environment),
                                 capture_output=True, text=True, check=True)
         probe = json.loads(result.stdout)
@@ -378,6 +398,13 @@ def main(argv=None):
     # acceptance.sh already ran the root and native backend without hardware.
     if not hardware or checks.failed:
         return int(checks.failed)
+    for suite, selector in (("machine-tcg", "tcg"), ("machine-pv-x86", "pv")):
+        if suite in suites:
+            checks.run(suite, ["cargo", "test", "-p", "seedbox-machine", "--locked",
+                               "--", "--ignored", selector, "--test-threads=1"])
+            target = "tcg_shutdown" if selector == "tcg" else "pv_progress"
+            checks.run(suite + "-" + target, ["cargo", "test", "-p", "seedbox-machine",
+                       "--locked", "--test", target, "--", "--ignored", "--test-threads=1"])
     reports_root = ROOT / "target/check-reports"
     reports_root.mkdir(parents=True, exist_ok=True)
     reports = Path(tempfile.mkdtemp(prefix="run-", dir=reports_root))
