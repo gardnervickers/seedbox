@@ -3,11 +3,11 @@
     "dynamorio-arm": {
       "flake": false,
       "locked": {
-        "lastModified": 1791897779,
-        "narHash": "sha256-jAkRt0ptxSiPqLNnqqnoAmE/adwnfw2dz3IP1jHAHJ8=",
+        "lastModified": 1791921674,
+        "narHash": "sha256-hU+vCjruG/YOZr8rKCvqdGv163urTyQAEiCnoSryBrQ=",
         "ref": "master",
-        "rev": "f86fb04437c048d902c353ed39d47dc0adfe87d1",
-        "revCount": 7278,
+        "rev": "d799d570cf2873f2c5a0486c9ee31bb31413601a",
+        "revCount": 7347,
         "type": "git",
         "url": "ssh://git@github.com/lbradstreet/dynamorio.git"
       },
