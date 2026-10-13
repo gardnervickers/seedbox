@@ -124,9 +124,23 @@ fn driver(machines: Vec<Timers>, quantum: u64, workers: usize) -> Driver<Timers>
     )
     .unwrap()
 }
+/// Public host drift through the unified schedule, keyed by machine and time.
 fn set_rate(driver: &mut Driver<Timers>, when: u64, id: usize, ppb: i64) {
+    let key = InputKey::new(format!("drift-{id}-{when}")).unwrap();
+    let action = Action::Drift {
+        target: Target::Machine(MachineId(id)),
+        rate: rate(ppb),
+    };
     driver
-        .with_barrier(|b| b.schedule_clock_rate(at(when), MachineId(id), rate(ppb)))
+        .with_barrier(|b| b.schedule(at(when), key, action))
+        .unwrap();
+}
+/// Heal the drift that `set_rate(_, set, id, _)` installed: nominal rate.
+fn heal_rate(driver: &mut Driver<Timers>, when: u64, id: usize, set: u64) {
+    let key = InputKey::new(format!("heal-{id}-{when}")).unwrap();
+    let drift = InputKey::new(format!("drift-{id}-{set}")).unwrap();
+    driver
+        .with_barrier(|b| b.schedule(at(when), key, Action::Heal(HealTarget::Input(drift))))
         .unwrap();
 }
 fn run_until(driver: &mut Driver<Timers>, end: u64) -> Vec<Event> {
@@ -185,7 +199,7 @@ fn fast_and_slow_timers_fire_at_the_earliest_converted_simulation_time() {
             EventKind::Transition {
                 machine,
                 change: Transition::ClockRate(rate),
-                cause: Cause::Host,
+                cause: Cause::Fault(_),
                 ..
             } => Some((event.at, *machine, rate.ppb())),
             _ => None,
@@ -264,7 +278,7 @@ fn rate_change_keeps_accrued_offset_and_reconverts_pending_timers() {
     let (machine, calls) = Timers::new(&[3_000_000_000], false);
     let mut driver = driver(vec![machine], 1_000_000_000, 1);
     set_rate(&mut driver, 0, 0, 100_000_000);
-    set_rate(&mut driver, 1_000_000_000, 0, 0);
+    heal_rate(&mut driver, 1_000_000_000, 0, 0);
     let events = run_until(&mut driver, 5_000_000_000);
     assert_eq!(fired(&events), [(2_900_000_000, 0, 1)]);
     // The machine was never run for the rate change itself.
@@ -274,7 +288,7 @@ fn rate_change_keeps_accrued_offset_and_reconverts_pending_timers() {
     let (machine, _) = Timers::new(&[2_000_000_000], false);
     let mut driver = self::driver(vec![machine], 1_000_000_000, 1);
     set_rate(&mut driver, 0, 0, 1);
-    set_rate(&mut driver, 1_500_000_001, 0, 0);
+    heal_rate(&mut driver, 1_500_000_001, 0, 0);
     // G(1_500_000_001) = 1_500_000_002.500000001; machine 2e9 is reached at
     // 1_500_000_001 + 499_999_997.499999999, rounded up.
     assert_eq!(
@@ -295,6 +309,9 @@ fn paused_machine_adopts_the_new_rate_on_its_zero_budget_resume() {
                 InputKey::new("pause").unwrap(),
                 Action::Pause(target()),
             )?;
+            // Raw rate change: this test is about the translation of a paused
+            // machine's timer, independent of whether control policy admits
+            // drift for paused targets (an open policy decision).
             b.schedule_clock_rate(at(1_000_000_000), MachineId(0), rate(100_000_000))?;
             b.schedule(
                 at(2_000_000_000),
@@ -373,7 +390,8 @@ fn worker_count_never_changes_the_translated_event_stream() {
         let mut driver = driver(machines, 100_000_000, workers);
         set_rate(&mut driver, 0, 0, 100_000_000);
         set_rate(&mut driver, 0, 1, -100_000_000);
-        set_rate(&mut driver, 1_000_000_000, 0, -7);
+        heal_rate(&mut driver, 1_000_000_000, 0, 0);
+        set_rate(&mut driver, 1_000_000_001, 0, -7);
         set_rate(&mut driver, 1_200_000_000, 2, 33);
         run_until(&mut driver, 5_000_000_000)
     };
@@ -388,7 +406,8 @@ fn snapshots_hold_machine_time_and_the_mapping_is_rebuilt_from_events() {
     let (machine, calls) = Timers::new(&[u64::MAX], true);
     let mut driver = driver(vec![machine], 1_000_000, 1);
     set_rate(&mut driver, 0, 0, 100_000_000);
-    set_rate(&mut driver, 3_000_000, 0, -50_000_001);
+    heal_rate(&mut driver, 3_000_000, 0, 0);
+    set_rate(&mut driver, 3_000_001, 0, -50_000_001);
     let events = run_until(&mut driver, 6_000_000);
     // The machine-owned snapshot is unaffected by the Driver's mapping.
     let snapshot = driver.with_barrier(|b| b.snapshot(MachineId(0))).unwrap();
@@ -412,7 +431,7 @@ fn snapshots_hold_machine_time_and_the_mapping_is_rebuilt_from_events() {
     let mapping = mapping.unwrap();
     let position = calls.lock().unwrap().last().unwrap().upto;
     assert_eq!(mapping.floor(6_000_000), Ok(position));
-    assert_eq!(position, 3_300_000 + mapped(0, 0, -50_000_001, 3_000_000));
+    assert_eq!(position, 3_300_001 + mapped(0, 0, -50_000_001, 2_999_999));
 }
 
 #[test]

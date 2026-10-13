@@ -281,3 +281,252 @@ fn seeded_draws_and_translated_streams_are_independent_of_workers() {
     // Draws come from the simulation RNG: another seed draws differently.
     assert_ne!(serial.1.steps, scenario(1, 8).1.steps);
 }
+
+/// A guest-free oracle and a stepping target driven only by host inputs.
+fn host_driver(workers: usize) -> (Driver<Guest>, Arc<Mutex<Observed>>) {
+    let target = Arc::new(Mutex::new(Observed::default()));
+    let guest = |observed| Guest {
+        script: VecDeque::new(),
+        request: 0,
+        ready: false,
+        boot: 0,
+        exited: false,
+        observed,
+    };
+    let machines = vec![guest(Arc::default()), guest(target.clone())];
+    let driver = fixture::driver(
+        at(0),
+        Duration::from_nanos(50),
+        workers,
+        crate::rng::SeededRng::new(7),
+        || Ok(()),
+        || Ok(machines),
+    )
+    .unwrap();
+    (driver, target)
+}
+fn key(text: &str) -> InputKey {
+    InputKey::new(text).unwrap()
+}
+fn target() -> Target {
+    Target::Machine(MachineId(1))
+}
+fn step_action(nanoseconds: i64) -> Action {
+    Action::StepRealtime {
+        target: target(),
+        nanoseconds: std::num::NonZeroI64::new(nanoseconds).unwrap(),
+    }
+}
+fn drift_action(ppb: i64) -> Action {
+    Action::Drift {
+        target: target(),
+        rate: ClockRate::new(ppb).unwrap(),
+    }
+}
+fn advance(driver: &mut Driver<Guest>, end: u64, events: &mut Vec<Event>) {
+    while driver.now() < at(end) {
+        if matches!(driver.step(at(end)).unwrap(), StepOutcome::Blocked { .. }) {
+            break;
+        }
+        events.extend(driver.drain_events());
+    }
+    events.extend(driver.drain_events());
+}
+
+fn host_scenario(workers: usize) -> (Vec<Event>, Observed) {
+    let (mut driver, observed) = host_driver(workers);
+    let mut events = driver.drain_events();
+    driver
+        .with_barrier(|b| {
+            b.schedule(
+                at(100),
+                key("drift"),
+                Action::Drift {
+                    target: Target::Name("fixture-1".into()),
+                    rate: ClockRate::new(100_000_000).unwrap(),
+                },
+            )?;
+            b.schedule(at(100), key("again"), drift_action(5))?;
+            b.schedule(at(200), key("back"), step_action(-2_000))?;
+            b.schedule(
+                at(400),
+                key("heal-back"),
+                Action::Heal(HealTarget::Input(key("back"))),
+            )
+        })
+        .unwrap();
+    advance(&mut driver, 300, &mut events);
+    // The applied step's handle keeps its key live until healed.
+    driver
+        .with_barrier(|b| {
+            assert!(matches!(
+                b.schedule(at(300), key("back"), step_action(1)),
+                Err(Error::LiveInputKey(_))
+            ));
+            Ok(())
+        })
+        .unwrap();
+    advance(&mut driver, 450, &mut events);
+    driver
+        .with_barrier(|b| {
+            // Healed: the key is free again.
+            b.schedule(at(500), key("back"), step_action(7))?;
+            b.schedule(
+                at(600),
+                key("heal-drift"),
+                Action::Heal(HealTarget::Input(key("drift"))),
+            )
+        })
+        .unwrap();
+    advance(&mut driver, 1_000, &mut events);
+    let observed = observed.lock().unwrap().clone();
+    (events, observed)
+}
+
+#[test]
+fn host_drift_step_and_heal_follow_keys_and_publish_resolved_payloads() {
+    let (events, observed) = host_scenario(1);
+    assert_eq!(observed.steps, [(0, -2_000), (0, 2_000), (0, 7)]);
+    let admitted: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::FaultAdmitted(record) => Some((
+                e.at.as_nanos(),
+                match &record.origin {
+                    FaultOrigin::Input { key } => key.as_str().to_owned(),
+                    other => panic!("{other:?}"),
+                },
+                record.action,
+                record.handle.as_ref().map(ToString::to_string),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        admitted,
+        [
+            (
+                100,
+                "drift".into(),
+                FaultAction::Drift(ClockRate::new(100_000_000).unwrap()),
+                Some("p1".into())
+            ),
+            // The refused second drift drew no handle number: this documents
+            // the branch's current choice, which awaits a policy decision.
+            (200, "back".into(), FaultAction::StepRealtime(-2_000), Some("p2".into())),
+            (400, "heal-back".into(), FaultAction::Heal, Some("p2".into())),
+            (500, "back".into(), FaultAction::StepRealtime(7), Some("p3".into())),
+            (600, "heal-drift".into(), FaultAction::Heal, Some("p1".into())),
+        ]
+    );
+    // Drifts never stack: the second is refused at admission with its key.
+    let rejected: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::InputRejected { key, rejection } => {
+                Some((key.as_str().to_owned(), rejection.reason))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rejected, [("again".into(), RejectionReason::InvalidState)]);
+    assert!(fixture::settlements(&events)
+        .iter()
+        .all(|(_, status, _, _)| *status == SettlementStatus::Applied));
+    let rates: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Transition {
+                change: Transition::ClockRate(rate),
+                cause: Cause::Fault(_),
+                ..
+            } => Some((e.at.as_nanos(), rate.ppb())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rates, [(100, 100_000_000), (600, 0)]);
+}
+
+#[test]
+fn host_clock_inputs_are_independent_of_workers() {
+    let serial = host_scenario(1);
+    assert_eq!(serial, host_scenario(2));
+    assert_eq!(serial, host_scenario(4));
+}
+
+#[test]
+fn host_realtime_steps_are_bounded_at_enqueue_without_mutation() {
+    let (mut driver, observed) = host_driver(1);
+    let bound = crate::oracle::MAX_CLOCK_OFFSET_NS as i64;
+    let before = driver.drain_events();
+    driver
+        .with_barrier(|b| {
+            for outside in [i64::MIN, -bound - 1, bound + 1, i64::MAX] {
+                assert!(matches!(
+                    b.schedule(at(10), key("step"), step_action(outside)),
+                    Err(Error::InvalidClockStep(n)) if n.get() == outside
+                ));
+            }
+            // Nothing was queued or reserved: the key is still free.
+            b.schedule(at(10), key("step"), step_action(-bound))
+        })
+        .unwrap();
+    assert!(driver.drain_events().is_empty() && !before.is_empty());
+    let mut events = Vec::new();
+    advance(&mut driver, 100, &mut events);
+    let first = events
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::FaultAdmitted(record) => Some(record.fault),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(first, FaultId(1), "rejected enqueues allocated no fault ID");
+    assert_eq!(observed.lock().unwrap().steps, [(0, -bound)]);
+}
+
+#[test]
+fn host_clock_effects_hold_before_applying_and_bind_their_boot() {
+    let (mut driver, observed) = host_driver(1);
+    driver
+        .with_barrier(|b| {
+            b.schedule(at(100), key("drift"), drift_action(100_000_000))?;
+            b.schedule(at(300), key("crash"), Action::Crash(target()))?;
+            b.schedule(at(300), key("late"), step_action(5))?;
+            b.pause_before_next_fault(PlaybackRate::Unlimited)
+        })
+        .unwrap();
+    let mut events = driver.drain_events();
+    let held = loop {
+        let outcome = driver.step(at(1_000)).unwrap();
+        events.extend(driver.drain_events());
+        if let StepOutcome::BeforeFault { at: when, fault } = outcome {
+            break (when, fault);
+        }
+    };
+    assert_eq!(held.0, at(100));
+    assert_eq!(
+        held.1.action,
+        FaultAction::Drift(ClockRate::new(100_000_000).unwrap())
+    );
+    // Held before the rate changed.
+    assert!(!events.iter().any(|e| matches!(
+        e.kind,
+        EventKind::Transition {
+            change: Transition::ClockRate(_),
+            ..
+        }
+    )));
+    driver
+        .with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    advance(&mut driver, 1_000, &mut events);
+    // The step admitted after the crash's admission is bound to the crashed
+    // boot: it settles without reaching any guest.
+    let late = fixture::settlements(&events)
+        .into_iter()
+        .find(|(record, ..)| record.action == FaultAction::StepRealtime(5))
+        .unwrap();
+    assert_eq!(late.1, SettlementStatus::Unavailable);
+    assert!(observed.lock().unwrap().steps.is_empty());
+}

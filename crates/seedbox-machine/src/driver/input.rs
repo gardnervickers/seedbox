@@ -5,8 +5,8 @@
 //! admission and completion contract.
 
 use super::MachineId;
-use crate::execution::ExecutionConfig;
-use std::{fmt, time::Duration};
+use crate::{clock::ClockRate, execution::ExecutionConfig};
+use std::{fmt, num::NonZeroI64, time::Duration};
 
 /// Caller-chosen identity of one scheduled input: 1 to 128 characters from
 /// `[A-Za-z0-9_-]`.
@@ -152,6 +152,29 @@ pub enum Action {
     /// admitted is rejected. The new identity is reserved at admission and the
     /// machine is built at its FIFO effect turn.
     Spawn { name: String },
+    /// Set the rate of the machine's time base from the effect's barrier and
+    /// allocate a [`FaultHandle`]. The time-base mapping keeps the machine time
+    /// already reached, so the offset accrued so far is kept. At most one drift
+    /// per machine is active or pending. Once applied, the rate survives later
+    /// crashes and reboots and does not execute or wake the machine; its
+    /// pending timers are re-converted. Heal restores the nominal rate and
+    /// keeps the accrued offset. Like every effect, the pending drift is bound
+    /// to the boot current at admission.
+    Drift { target: Target, rate: ClockRate },
+    /// Step the guest's `CLOCK_REALTIME` by `nanoseconds`, performed by the
+    /// guest as a [`Request::StepRealtime`](crate::pv::Request::StepRealtime)
+    /// and settled by its acknowledgment; allocates a [`FaultHandle`] whose heal
+    /// sends the inverse step. |`nanoseconds`| must be at most 365 days, which
+    /// also excludes `i64::MIN`; anything else is refused at enqueue. Like a
+    /// process command it waits for the guest's readiness, with the default
+    /// control deadline (5 s of simulation time from admission) bounding
+    /// dispatch and acknowledgment. Linux refuses a step that would put
+    /// realtime below `CLOCK_MONOTONIC`. The step ends with its boot; healing
+    /// it afterwards changes nothing.
+    StepRealtime {
+        target: Target,
+        nanoseconds: NonZeroI64,
+    },
 }
 
 /// The installed fault a [`Action::Heal`] undoes.
@@ -200,7 +223,9 @@ impl Action {
             | Self::Restart { target, .. }
             | Self::PauseProcess { target, .. }
             | Self::ResumeProcess { target, .. }
-            | Self::Throttle { target, .. } => Some(target),
+            | Self::Throttle { target, .. }
+            | Self::Drift { target, .. }
+            | Self::StepRealtime { target, .. } => Some(target),
             Self::Heal(_) | Self::Spawn { .. } => None,
         }
     }

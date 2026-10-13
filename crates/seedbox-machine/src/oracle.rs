@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, num::NonZeroU32};
 
 const MAX_FRAME: usize = 16384; // Includes the public JSON frame's trailing newline.
-const MAX_CLOCK_OFFSET_NS: u64 = 365 * 86_400 * 1_000_000_000;
+pub(crate) const MAX_CLOCK_OFFSET_NS: u64 = 365 * 86_400 * 1_000_000_000;
 const MAX_CLOCK_RATE_PPB: u64 = 100_000_000;
 pub(crate) const PROCESS_EFFECT_TIMEOUT_NS: u64 = 5_000_000_000;
 

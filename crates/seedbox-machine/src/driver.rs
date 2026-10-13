@@ -467,17 +467,26 @@ where
             .extend(notices.into_iter().map(Staged::Notice));
     }
 
+    fn creates_handle(action: &crate::oracle::service::FaultAction) -> bool {
+        use crate::oracle::service::{Effect, FaultAction};
+        matches!(
+            action,
+            FaultAction::Effect(Effect::Execution(_) | Effect::Drift(_) | Effect::StepRealtime(_))
+        )
+    }
+
     /// Follow a host input key from admission to settlement and, for a
-    /// throttle, until its handle is healed.
+    /// handle-creating fault (throttle, drift, step), until its handle is healed.
     fn track_input(&mut self, notice: &crate::oracle::service::Notice) {
         use crate::oracle::service::{
-            Effect, FaultAction as Action, Notice, Requester, SettlementStatus as Status,
+            FaultAction as Action, Notice, Requester, SettlementStatus as Status,
         };
         match notice {
             Notice::Admitted(admitted) => {
                 if let Requester::Input(key) = &admitted.requester {
-                    // Only a throttle creates its handle; a heal merely names one.
-                    let created = matches!(admitted.action, Action::Effect(Effect::Execution(_)));
+                    // Throttle, drift and step create their handle; a heal
+                    // merely names one.
+                    let created = Self::creates_handle(&admitted.action);
                     self.inputs.insert(
                         InputKey::validated(key.clone()),
                         LiveInput::Admitted {
@@ -490,7 +499,7 @@ where
                 if let Requester::Input(key) = &settled.requester {
                     let key = InputKey::validated(key.clone());
                     match (&settled.action, settled.status, &settled.handle) {
-                        (Action::Effect(Effect::Execution(_)), Status::Applied, Some(handle)) => {
+                        (action, Status::Applied, Some(handle)) if Self::creates_handle(action) => {
                             self.inputs.insert(key, LiveInput::Handle(handle.clone()));
                         }
                         _ => {
@@ -1703,7 +1712,7 @@ where
         now: Timestamp,
     ) -> Result<(), Error<M::Error>> {
         use crate::oracle::{
-            service::{Command, Effect},
+            service::{Amount, Command, Effect},
             ErrorCode, OperationError, Target as Wire, PROCESS_EFFECT_TIMEOUT_NS,
         };
         use crate::pv::ApplicationCommand as App;
@@ -1751,6 +1760,17 @@ where
             },
             Action::Spawn { name } => Ok(Command::Spawn {
                 machine: name.clone(),
+            }),
+            Action::Drift { target, rate } => Ok(Command::Drift {
+                target: wire(target),
+                ppb: Amount::Exact(i64::from(rate.ppb())),
+            }),
+            Action::StepRealtime {
+                target,
+                nanoseconds,
+            } => Ok(Command::StepRealtime {
+                target: wire(target),
+                nanoseconds: Amount::Exact(nanoseconds.get()),
             }),
         };
         let deadline = match action.deadline() {
@@ -2121,6 +2141,8 @@ where
     ///   ([`Error::UnknownName`]);
     /// - a process command's `deadline` is positive and `at + deadline` is
     ///   representable ([`Error::InvalidDeadline`]);
+    /// - a realtime step's magnitude is at most 365 days
+    ///   ([`Error::InvalidClockStep`]);
     /// - `key` is not live ([`Error::LiveInputKey`]). A key is live while its
     ///   input is pending, while its admitted fault is unsettled, and while the
     ///   handle its admission created is active. The driver keeps only live
@@ -2141,7 +2163,8 @@ where
     /// target's current boot is bound at admission. No guest call, reply or
     /// message is fabricated.
     ///
-    /// - Admitted: allocates a fault ID (and a handle for a throttle) from the
+    /// - Admitted: allocates a fault ID (and a handle for a throttle, drift or
+    ///   realtime step) from the
     ///   shared owners and publishes [`EventKind::FaultAdmitted`] with
     ///   [`FaultOrigin::Input`] carrying `key`.
     /// - Rejected: publishes [`EventKind::InputRejected`] with `key`; no fault
@@ -2161,11 +2184,14 @@ where
     /// change. Every effect is bound to the target's boot at admission; if that
     /// boot ends before the effect's turn (for example, a same-time Reboot
     /// effect applies first), it settles Unavailable or Rejected without
-    /// mutating the machine, and its key is released. Process commands wait for the guest's readiness, are dispatched
-    /// with a driver-allocated command ID and settle on acknowledgment; their
-    /// `deadline`, measured from admission, bounds dispatch and acknowledgment,
-    /// and expiry fails the driver with a Failed settlement, as for guest
-    /// controls. Accepted work survives caller loss.
+    /// mutating the machine, and its key is released. Process commands and
+    /// realtime steps wait for the guest's readiness, are dispatched with a
+    /// driver-allocated command ID and settle on acknowledgment; a process
+    /// command's `deadline`, or the default 5 s for a realtime step, measured
+    /// from admission, bounds dispatch and acknowledgment, and expiry fails the
+    /// driver with a Failed settlement, as for guest controls. A guest refusal
+    /// of a realtime step currently settles Rejected without failing the
+    /// driver (a policy awaiting decision). Accepted work survives caller loss.
     ///
     /// After oracle completion, a permanent stop or a driver failure, pending
     /// inputs are never admitted and no per-key event is published.
@@ -2199,6 +2225,11 @@ where
         if let Action::Spawn { name } = &action {
             if !driver.control.spawnable(name) {
                 return Err(Error::UnknownName(name.clone()));
+            }
+        }
+        if let Action::StepRealtime { nanoseconds, .. } = action {
+            if nanoseconds.get().unsigned_abs() > crate::oracle::MAX_CLOCK_OFFSET_NS {
+                return Err(Error::InvalidClockStep(nanoseconds));
             }
         }
         if let Some(deadline) = action.deadline() {
@@ -2258,6 +2289,8 @@ pub enum Error<E> {
     /// A process command deadline must be positive and representable after
     /// its scheduled time.
     InvalidDeadline(Duration),
+    /// A realtime step's magnitude exceeds 365 days (including `i64::MIN`).
+    InvalidClockStep(std::num::NonZeroI64),
     /// This input key is live: pending, unsettled or owning an active handle.
     LiveInputKey(InputKey),
     /// The next full quantum boundary cannot be represented.
@@ -2329,6 +2362,9 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                 f.write_str("only playback controls are allowed before the held fault")
             }
             Self::UnknownName(name) => write!(f, "no unique machine named {name:?}"),
+            Self::InvalidClockStep(nanoseconds) => {
+                write!(f, "realtime step {nanoseconds} ns exceeds 365 days")
+            }
             Self::InvalidDeadline(deadline) => {
                 write!(f, "process command deadline {deadline:?} is invalid")
             }
