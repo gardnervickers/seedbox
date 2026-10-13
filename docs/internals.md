@@ -346,6 +346,15 @@ waits for a new readiness observation. Application exits retain their exit code.
 Persistent stop and pause effects remain active until reversed or ended by a
 lifecycle transition.
 
+Process faults signal the application's process group, as job control does.
+`stop` kills the group and reaps its descendants, including those adopted by
+PID 1, before it is confirmed; `pause_process` stops the group with SIGSTOP. A
+descendant that calls `setsid()` has left the group: it keeps running through
+both, keeps its listening ports across `restart` (the new incarnation cannot
+bind them until it exits), and ends only by exiting or with a machine crash.
+Daemonizing applications must close inherited listeners, or the survivor also
+holds the application's own port.
+
 A checkpoint captures the world and its input-program cursor together. Restoring
 it must neither repeat consumed overrides nor lose pending ones. Capture requires
 a committed boundary with no outstanding I/O cost. A requested checkpoint may
@@ -362,6 +371,7 @@ changes entropy must update the guest's generator as well as the host's streams.
 The x86 PV page carries an entropy generation consumed by kernel hooks.
 
 Code: [world](../crates/seedbox-engine-core/src/world.rs),
+[supervisor](../guest/compose-init.c),
 [ARM checkpoint adapter](../crates/seedbox-arm64/src/application/world/checkpoint.rs),
 [x86 entropy hooks](../kernel/apply.py).
 
@@ -394,6 +404,9 @@ change request validation or completed-prefix mutation rules.
 
 The disk model separates stable and volatile writes. Flush and FUA affect what
 is stable; a crash applies the configured survival policy to volatile state.
+The default policy drops every unflushed sector; `simulator.disk.torn_writes`
+in a resolved definition keeps each one with probability one half. Neither
+keeps the guest's unwritten page cache.
 Restarting an application process is different from crashing its machine and disk.
 
 Code: [block](../crates/seedbox-engine-core/src/virtio_block.rs),
