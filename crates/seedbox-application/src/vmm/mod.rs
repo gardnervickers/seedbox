@@ -1,16 +1,13 @@
 //! Adapter for the controlled Seedbox KVM engine. World JSON is an internal
 //! execution artifact generated from verified inputs, not the authoring format.
 
-use crate::{
-    execution::*,
-    store::{ContentDigest, ContentStore},
-    Error, Result,
-};
+use crate::{execution::*, store::ContentDigest, Error, Result};
 use serde::Serialize;
 use std::{collections::BTreeMap, path::Path};
 
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
+    engine: Engine,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
     admission: std::sync::Arc<std::sync::Mutex<Vec<Vec<crate::admission::CoreObservation>>>>,
@@ -19,9 +16,7 @@ pub struct VmmExecutor {
 /// Successful compatibility observation; it is not empirical replay qualification.
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
-    pub engine: ContentDigest,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub simulator_version: Option<String>,
+    pub engine: EngineDescriptor,
     pub kernel: ContentDigest,
     pub observations: Vec<crate::admission::CoreObservation>,
 }
@@ -32,108 +27,31 @@ struct AdmissionProbe {
 }
 
 impl VmmExecutor {
-    /// Detect the launch contract of an explicitly supplied executable.
-    pub fn new_detected(
-        engine: &Path,
-        store: &ContentStore,
-        memory_mb: u32,
-        witness_mode: WitnessMode,
-    ) -> Result<Self> {
-        Self::new(engine, store, memory_mb, witness_mode)?.with_detected_contract(store, engine)
+    /// Run worlds in the built-in worker of `engine`, the running executable.
+    pub fn new(engine: Engine, memory_mb: u32, witness_mode: WitnessMode) -> Result<Self> {
+        if !(64..=65536).contains(&memory_mb) {
+            return Err(Error::Execution(
+                "guest memory must be 64..65536 MiB".into(),
+            ));
+        }
+        Self::for_profile(
+            engine,
+            ExecutionProfile {
+                backend: Backend::Kvm,
+                witness_mode,
+                semantic_parameters: SemanticParameters::new(memory_mb),
+            },
+        )
     }
 
-    /// Preserve simulation settings and use the replacement's own argv contract.
-    /// Normal replay uses `from_retained` without probing or rewriting metadata.
-    pub fn from_override(
-        engine: &Path,
-        store: &ContentStore,
-        profile: ExecutionProfile,
-    ) -> Result<Self> {
-        Self::from_retained(engine, store, profile)?.with_detected_contract(store, engine)
-    }
-
-    /// Detect a retained executable after resolving other inputs.
-    /// `supplied_path` identifies the original --vmm value in diagnostics.
-    pub fn with_detected_contract(
-        mut self,
-        store: &ContentStore,
-        supplied_path: &Path,
-    ) -> Result<Self> {
-        // Probe the retained copy, so the metadata describes the bytes we run.
-        let scratch = tempfile::tempdir()?;
-        let engine = store.materialize(&self.profile.engine, scratch.path())?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o500))?;
-        let version = crate::worker_process::replacement_version(&engine, supplied_path)?;
-        self.profile.semantic_parameters.engine = version.map(|version| {
-            crate::engine::kvm_descriptor(crate::engine::ExecutableKind::InternalWorker, version)
-        });
-        Ok(self)
-    }
-
-    /// Retain this Seedbox executable and explicitly record its worker contract.
-    pub fn new_internal(
-        engine: &Path,
-        store: &ContentStore,
-        memory_mb: u32,
-        witness_mode: WitnessMode,
-    ) -> Result<Self> {
-        let descriptor = crate::engine::internal_descriptor()?;
-        let mut executor = Self::new(engine, store, memory_mb, witness_mode)?;
-        executor.profile.semantic_parameters.engine = Some(descriptor);
-        Ok(executor)
-    }
-
-    /// Preserve retained metadata exactly, without detecting a new launch contract.
-    /// A replacement executable changes only
-    /// its digest, so the orchestrator can retain profile/admission rejection.
-    pub fn from_retained(
-        engine: &Path,
-        store: &ContentStore,
-        mut profile: ExecutionProfile,
-    ) -> Result<Self> {
-        profile.engine = store.put_file(engine)?;
+    /// Execute previously resolved inputs with the current engine.
+    /// Execution itself requires Linux x86-64; profiles are portable data.
+    pub fn for_profile(engine: Engine, profile: ExecutionProfile) -> Result<Self> {
         Ok(Self {
+            engine,
             profile,
             performance: BTreeMap::new(),
             admission: Default::default(),
-        })
-    }
-
-    pub fn new(
-        engine: &Path,
-        store: &ContentStore,
-        memory_mb: u32,
-        witness_mode: WitnessMode,
-    ) -> Result<Self> {
-        if !(64..=65536).contains(&memory_mb) {
-            return Err(Error::Execution(
-                "guest memory must be 64..65536 MiB".into(),
-            ));
-        }
-        Self::from_engine_digest(store.put_file(engine)?, memory_mb, witness_mode)
-    }
-
-    fn from_engine_digest(
-        engine: ContentDigest,
-        memory_mb: u32,
-        witness_mode: WitnessMode,
-    ) -> Result<Self> {
-        if !(64..=65536).contains(&memory_mb) {
-            return Err(Error::Execution(
-                "guest memory must be 64..65536 MiB".into(),
-            ));
-        }
-        let semantic_parameters = SemanticParameters::new(memory_mb);
-        Ok(Self {
-            admission: Default::default(),
-            profile: ExecutionProfile {
-                backend: Backend::Kvm,
-                engine,
-                witness_mode,
-                semantic_parameters,
-            },
-            performance: BTreeMap::new(),
         })
     }
 
@@ -151,24 +69,8 @@ impl VmmExecutor {
 
     /// Check the existing execution policy without storing inputs or starting guests.
     /// Host observations are the same bounded probe used by execution preflight.
-    pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
-        let executor = Self::from_engine_digest(
-            crate::admission::file_digest(engine)?,
-            1024,
-            WitnessMode::Exits,
-        )?;
-        Self::doctor_executor(executor, kernel)
-    }
-
-    /// Inspect the built-in worker without storing bytes or invoking it.
-    pub fn doctor_internal(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
-        let descriptor = crate::engine::internal_descriptor()?;
-        let mut executor = Self::from_engine_digest(
-            crate::admission::file_digest(engine)?,
-            1024,
-            WitnessMode::Exits,
-        )?;
-        executor.profile.semantic_parameters.engine = Some(descriptor);
+    pub fn doctor(engine: Engine, kernel: &Path) -> Result<DoctorReport> {
+        let executor = Self::new(engine, 1024, WitnessMode::Exits)?;
         Self::doctor_executor(executor, kernel)
     }
 
@@ -186,8 +88,7 @@ impl VmmExecutor {
             crate::admission::validate_observation(observation)?;
         }
         Ok(DoctorReport {
-            engine: self.profile.engine.clone(),
-            simulator_version: self.simulator_version(),
+            engine: self.descriptor(),
             kernel,
             observations: probe.observations,
         })
@@ -220,12 +121,8 @@ impl VmmExecutor {
         self
     }
 
-    fn simulator_version(&self) -> Option<String> {
-        self.profile
-            .semantic_parameters
-            .engine
-            .as_ref()
-            .map(|engine| engine.simulator_version.clone())
+    fn descriptor(&self) -> EngineDescriptor {
+        crate::engine::kvm_descriptor(self.engine.revision.clone())
     }
 
     /// Host CPU interval between watchdog observations; does not change guest time.
@@ -282,11 +179,10 @@ impl ExecutionBackend for VmmExecutor {
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
         self.preflight_host(output)
     }
-    /// The engine runs the retained executable and reads only the kernel and
-    /// each machine's guest image; image layers stay in the store.
+    /// The engine reads only the kernel and each machine's guest image;
+    /// image layers stay in the store.
     fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
-        [&inputs.profile.engine, &inputs.kernel]
-            .into_iter()
+        std::iter::once(&inputs.kernel)
             .chain(inputs.guests.values())
             .collect()
     }
@@ -296,6 +192,9 @@ impl ExecutionBackend for VmmExecutor {
 
     fn profile(&self) -> ExecutionProfile {
         self.profile.clone()
+    }
+    fn engine(&self) -> Option<EngineDescriptor> {
+        Some(self.descriptor())
     }
     fn performance_parameters(&self) -> BTreeMap<String, String> {
         self.performance.clone()

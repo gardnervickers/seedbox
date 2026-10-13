@@ -1,9 +1,5 @@
 //! Native HVF application admission and execution.
-use crate::{
-    execution::*,
-    store::{ContentDigest, ContentStore},
-    Error, Result,
-};
+use crate::{execution::*, store::ContentDigest, Error, Result};
 use seedbox_arm64::{
     backend::{hvf::Hvf, Backend, SysReg},
     boot::BootSpec,
@@ -16,14 +12,14 @@ const DEVICE_POLICY: &str = "net-console-optional-block/supervisor-pid1-v1";
 
 #[derive(Clone, Debug)]
 pub struct MacExecutor {
+    engine: Engine,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
 }
 #[derive(Debug, serde::Serialize)]
 pub struct DoctorReport {
-    pub engine: ContentDigest,
+    pub engine: EngineDescriptor,
     pub kernel: ContentDigest,
-    pub simulator_version: String,
     pub observations: BTreeMap<String, String>,
 }
 
@@ -75,10 +71,10 @@ pub fn check_host_access() -> Result<()> {
     observe().map(|_| ())
 }
 impl MacExecutor {
+    /// Run worlds in the ARM worker of `engine`, the running signed executable.
     pub fn new(
-        engine: &Path,
+        engine: Engine,
         kernel: &Path,
-        store: &ContentStore,
         memory_mb: u32,
         witness_mode: WitnessMode,
         torn_writes: bool,
@@ -97,7 +93,6 @@ impl MacExecutor {
         };
         let parameters = SemanticParameters {
             torn_writes,
-            engine: Some(crate::engine::arm_descriptor()),
             hvf: Some(HvfParameters {
                 boot_policy: BOOT_POLICY.into(),
                 entropy_policy: ENTROPY_POLICY.into(),
@@ -110,32 +105,28 @@ impl MacExecutor {
             ..SemanticParameters::new(memory_mb)
         };
         Ok(Self {
+            engine,
             profile: ExecutionProfile {
                 backend: crate::execution::Backend::Hvf,
-                engine: store.put_file(engine)?,
                 witness_mode,
                 semantic_parameters: parameters,
             },
             performance: BTreeMap::new(),
         })
     }
-    pub fn from_retained(
-        engine: &Path,
-        store: &ContentStore,
-        mut profile: ExecutionProfile,
-    ) -> Result<Self> {
-        profile.engine = store.put_file(engine)?;
-        Ok(Self {
+    /// Execute previously resolved inputs with the current engine.
+    pub fn for_profile(engine: Engine, profile: ExecutionProfile) -> Self {
+        Self {
+            engine,
             profile,
             performance: BTreeMap::new(),
-        })
+        }
     }
-    pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
+    pub fn doctor(engine: &Engine, kernel: &Path) -> Result<DoctorReport> {
         validate_kernel(kernel, 3072)?;
         Ok(DoctorReport {
-            engine: crate::admission::file_digest(engine)?,
+            engine: crate::engine::arm_descriptor(engine.revision.clone()),
             kernel: crate::admission::file_digest(kernel)?,
-            simulator_version: crate::engine::SIMULATOR_VERSION.into(),
             observations: observe()?,
         })
     }
@@ -164,11 +155,9 @@ fn validate_kernel(kernel: &Path, memory_mb: u32) -> Result<()> {
 }
 fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
     let p = &profile.semantic_parameters;
-    if profile.backend != crate::execution::Backend::Hvf
-        || p.launch() != crate::engine::ExecutableKind::ArmWorld
-    {
+    if profile.backend != crate::execution::Backend::Hvf {
         return Err(Error::Integrity(
-            "retained HVF application profile is missing its world descriptor".into(),
+            "retained profile does not use the HVF backend".into(),
         ));
     }
     if p.hvf.is_none() {
@@ -186,6 +175,9 @@ fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
 impl ExecutionBackend for MacExecutor {
     fn profile(&self) -> ExecutionProfile {
         self.profile.clone()
+    }
+    fn engine(&self) -> Option<EngineDescriptor> {
+        Some(crate::engine::arm_descriptor(self.engine.revision.clone()))
     }
     fn performance_parameters(&self) -> BTreeMap<String, String> {
         self.performance.clone()
@@ -233,11 +225,15 @@ impl ExecutionBackend for MacExecutor {
         if request.cancellation.is_cancelled() {
             return Ok(incomplete(StopReason::Cancelled));
         }
-        WorkerLaunch::prepare(&request)?.spawn()?.wait(
-            request.cancellation,
-            request.limits.wall_time_ns,
-            |bytes| crate::engine_adapter::report_hvf(bytes, &request),
-        )
+        WorkerLaunch::prepare(
+            &request,
+            &self.engine.executable,
+            crate::engine::ExecutableKind::ArmWorld,
+        )?
+        .spawn()?
+        .wait(request.cancellation, request.limits.wall_time_ns, |bytes| {
+            crate::engine_adapter::report_hvf(bytes, &request)
+        })
     }
 }
 
@@ -464,10 +460,8 @@ mod process_tests {
     fn profile() -> ExecutionProfile {
         ExecutionProfile {
             backend: crate::execution::Backend::Hvf,
-            engine: ContentDigest::of(b"engine"),
             witness_mode: WitnessMode::FullState,
             semantic_parameters: SemanticParameters {
-                engine: Some(crate::engine::arm_descriptor()),
                 hvf: Some(HvfParameters {
                     boot_policy: BOOT_POLICY.into(),
                     entropy_policy: ENTROPY_POLICY.into(),
@@ -484,6 +478,10 @@ mod process_tests {
     #[test]
     fn preflight_workers_admits_the_linux_range_without_core_reservation() {
         let executor = MacExecutor {
+            engine: Engine {
+                executable: "seedbox".into(),
+                revision: None,
+            },
             profile: profile(),
             performance: BTreeMap::new(),
         };
@@ -574,24 +572,5 @@ mod process_tests {
         let mut json = serde_json::to_value(&complete).unwrap();
         json["semantic_parameters"]["hvf"]["guest_kernel"] = "not-a-hash".into();
         assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
-    }
-    #[test]
-    fn retained_constructor_preserves_descriptive_metadata() {
-        let temp = tempfile::tempdir().expect("temp");
-        let engine = temp.path().join("engine");
-        fs::write(&engine, b"new executable").expect("engine");
-        let store = ContentStore::new(temp.path().join("objects"));
-        let previous = profile();
-        let executor =
-            MacExecutor::from_retained(&engine, &store, previous.clone()).expect("retain");
-        assert_eq!(
-            executor.profile.semantic_parameters,
-            previous.semantic_parameters
-        );
-        assert_eq!(
-            executor.profile.engine,
-            ContentDigest::of(b"new executable")
-        );
-        validate_profile(&executor.profile).unwrap();
     }
 }

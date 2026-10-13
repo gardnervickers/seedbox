@@ -198,6 +198,7 @@ pub(super) fn explore(
     {
         return Err(Error::Setup("seed range overflows u64".into()));
     }
+    super::defaults::warn_dirty_build();
     let request = seedbox_api::SeedRangeRequest {
         options: seedbox_api::ExecutionOptions {
             start_paused: paused,
@@ -454,6 +455,7 @@ fn submit_with_comparison(
     json: bool,
     baseline: Option<&SimulationId>,
 ) -> Result<u8> {
+    super::defaults::warn_dirty_build();
     let request = SubmitRequest {
         options,
         metadata,

@@ -13,10 +13,8 @@ use seedbox_application::{
 use std::{collections::BTreeMap, fs, path::Path};
 fn fixture(root: &Path) -> (OciPreparer, config::Simulation, ContentStore) {
     let kernel = root.join("kernel");
-    let engine = root.join("engine");
     let helper = root.join("helper");
     fs::write(&kernel, b"kernel").unwrap();
-    fs::write(&engine, b"engine").unwrap();
     let mut header = [0u8; 20];
     header[..6].copy_from_slice(b"\x7fELF\x02\x01");
     header[18] = 62;
@@ -40,13 +38,11 @@ fn fixture(root: &Path) -> (OciPreparer, config::Simulation, ContentStore) {
     let store = ContentStore::new(root.join("store"));
     let profile = ExecutionProfile {
         backend: Backend::Other("test-only".into()),
-        engine: ContentDigest::of(b"engine"),
         witness_mode: WitnessMode::Exits,
         semantic_parameters: SemanticParameters::new(1024),
     };
     let preparer = OciPreparer {
         kernel,
-        engine,
         init: helper,
         progress,
         mke2fs: None,

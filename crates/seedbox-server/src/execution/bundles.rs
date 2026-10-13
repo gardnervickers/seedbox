@@ -545,22 +545,6 @@ pub(super) fn semantic_definition(
     if let Some(value) = definition
         .runtime
         .execution
-        .pointer_mut("/semantic_parameters/engine")
-        .filter(|value| !value.is_null())
-    {
-        let mut descriptor: seedbox_artifacts::execution::EngineDescriptor =
-            serde_json::from_value(value.clone())?;
-        descriptor.simulator_version.clear();
-        descriptor.host_os.clear();
-        descriptor.host_arch.clear();
-        descriptor.guest_arch.clear();
-        descriptor.engine_backend.clear();
-        descriptor.engine_timebase.clear();
-        *value = serde_json::to_value(descriptor)?;
-    }
-    if let Some(value) = definition
-        .runtime
-        .execution
         .pointer_mut("/semantic_parameters/hvf")
         .filter(|value| !value.is_null())
     {

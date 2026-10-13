@@ -12,7 +12,11 @@ pub(super) fn execute(
     }
     use crate::worker_process::{incomplete, WorkerLaunch};
     // Performance values travel in the launch request; the environment stays cleared.
-    let launch = WorkerLaunch::prepare(&request)?;
+    let launch = WorkerLaunch::prepare(
+        &request,
+        &backend.engine.executable,
+        crate::engine::ExecutableKind::InternalWorker,
+    )?;
 
     if request.cancellation.is_cancelled() {
         return Ok(incomplete(StopReason::Cancelled));

@@ -36,7 +36,6 @@ fn fixture() -> sb::record::RunRecord {
             guests: BTreeMap::from([("workload".into(), digest.clone())]),
             profile: ExecutionProfile {
                 backend: Backend::Kvm,
-                engine: digest.clone(),
                 witness_mode: WitnessMode::Exits,
                 semantic_parameters: SemanticParameters::new(512),
             },
@@ -49,7 +48,7 @@ fn fixture() -> sb::record::RunRecord {
         identity,
         attempt: "fixture".into(),
         performance_parameters: BTreeMap::new(),
-        allow_engine_change: false,
+        engine: None,
         log_policy: LogPolicy::default(),
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,

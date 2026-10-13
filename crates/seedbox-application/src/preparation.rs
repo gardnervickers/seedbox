@@ -16,7 +16,6 @@ const CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct OciPreparer {
     pub kernel: PathBuf,
-    pub engine: PathBuf,
     pub init: PathBuf,
     /// Architecture-specific automatic application instrumentation bundle.
     pub progress: PathBuf,
@@ -37,11 +36,6 @@ impl PreparationBackend for OciPreparer {
         )?;
         if self.profile.backend == Backend::Kvm {
             crate::admission::validate_profile(&self.profile)?;
-            if crate::admission::file_digest(&self.engine)? != self.profile.engine {
-                return Err(Error::Integrity(
-                    "VMM changed after profile construction".into(),
-                ));
-            }
         }
         Ok(())
     }
@@ -55,7 +49,7 @@ impl PreparationBackend for OciPreparer {
                 docker: self.docker.clone(),
                 cancellation: Default::default(),
                 progress: |_| {},
-                export_cache: Some(self.profile.engine.clone()),
+                export_cache: true,
             },
         )
     }
@@ -75,7 +69,7 @@ impl PreparationBackend for OciPreparer {
                 docker: self.docker.clone(),
                 cancellation: context.cancellation.clone(),
                 progress: |_| {},
-                export_cache: Some(self.profile.engine.clone()),
+                export_cache: true,
             },
         )
     }
@@ -126,12 +120,6 @@ impl OciPreparer {
             )?;
         }
         let kernel = store.put_file(&self.kernel)?;
-        let engine = store.put_file(&self.engine)?;
-        if engine != self.profile.engine {
-            return Err(Error::Integrity(
-                "VMM changed after profile construction".into(),
-            ));
-        }
         architecture.validate_elf(&self.init)?;
         for (name, service) in &simulation.services {
             for mount in &service.volumes {
@@ -167,7 +155,7 @@ impl OciPreparer {
             configs.insert(name, data);
         }
         if let Some(context) = context {
-            context.setup_inputs(&auxiliary, &engine, &kernel)?;
+            context.setup_inputs(&auxiliary, &kernel)?;
         }
         let addresses: BTreeMap<_, _> = simulation
             .services

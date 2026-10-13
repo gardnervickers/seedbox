@@ -226,6 +226,18 @@ pub struct Metadata {
     pub checkpoint: Option<String>,
 }
 
+/// The engine build that executed a simulation. Provenance only: comparison
+/// and replay never depend on it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EngineBuild {
+    pub version: String,
+    /// Source revision, suffixed `-dirty` when built with uncommitted changes;
+    /// absent when the build had no Git metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SimulationStatus {
     pub phase: Phase,
@@ -236,6 +248,8 @@ pub struct SimulationStatus {
     pub oracle_exit_code: Option<u8>,
     pub termination: Option<ExecutionTermination>,
     pub stop_requested: bool,
+    /// Set when execution starts on this server's engine.
+    pub engine: Option<EngineBuild>,
 }
 
 // Keep the derived verdict at the wire boundary, never in mutable status. The
@@ -252,6 +266,8 @@ struct StatusDocument {
     oracle_exit_code: Option<u8>,
     termination: Option<ExecutionTermination>,
     stop_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine: Option<EngineBuild>,
     #[serde(default, deserialize_with = "ignore_verdict")]
     verdict: Option<TestVerdict>,
 }
@@ -274,6 +290,7 @@ impl Serialize for SimulationStatus {
             oracle_exit_code: self.oracle_exit_code,
             termination: self.termination.clone(),
             stop_requested: self.stop_requested,
+            engine: self.engine.clone(),
             verdict: Some(self.verdict()),
         }
         .serialize(serializer)
@@ -292,6 +309,7 @@ impl<'de> Deserialize<'de> for SimulationStatus {
             oracle_exit_code: document.oracle_exit_code,
             termination: document.termination,
             stop_requested: document.stop_requested,
+            engine: document.engine,
         })
     }
 }
@@ -307,6 +325,7 @@ impl Default for SimulationStatus {
             oracle_exit_code: None,
             termination: None,
             stop_requested: false,
+            engine: None,
         }
     }
 }
