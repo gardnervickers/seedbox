@@ -28,7 +28,7 @@ pub struct ContainerTransport {
 
 /// Keys cached image exports. Change it whenever export or layer merging
 /// changes the bytes produced for the same image.
-const EXPORT_FORMAT: &str = "image-export-v2";
+const EXPORT_FORMAT: &str = "image-export-v3";
 fn setup(error: impl std::fmt::Display) -> Error {
     Error::Setup(format!("container image preparation: {error}"))
 }
@@ -466,6 +466,9 @@ pub(crate) fn export_header<R: std::io::Read>(
     }
     Ok(header)
 }
+
+#[cfg(test)]
+mod layer_merge_tests;
 
 #[cfg(test)]
 mod tests {
