@@ -98,11 +98,23 @@ static int literal(struct value value, const char *expected) {
     return (size_t)(value.end - value.start) == strlen(expected) && !memcmp(value.start, expected, strlen(expected));
 }
 static char reply[4096];
+static int stream_marker;
+static void marker_delay(void) {
+    struct timespec delay = {.tv_nsec = 20000000};
+    while (nanosleep(&delay, &delay)) if (errno != EINTR) fail("marker delay");
+}
 static struct value call(int fd, unsigned id, const char *operation, int now) {
     char request[512];
     int size = snprintf(request, sizeof(request), "{\"version\":1,\"id\":%u,%s}\n", id, operation);
     if (size < 0 || (size_t)size >= sizeof(request)) fail("request size");
     put(fd, request, (size_t)size);
+    if (stream_marker) {
+        stream_marker = 0;
+        /* Allow the arm to be admitted before emitting the prefix. Stream the
+         * marker before reading its reply: guest reply polling can take longer
+         * than this trigger's deliberately short 100 ms matching deadline. */
+        marker_delay(); marker("nee"); marker_delay(); marker("dle\n");
+    }
     size_t used = 0;
     for (;;) {
         if (used + 1 == sizeof(reply)) fail("reply size");
@@ -150,12 +162,22 @@ int main(int argc, char **argv) {
         marker("PEER_RUNNING\n");
         for (;;) pause();
     }
-    if (strcmp(argv[1], "oracle")) fail("unknown role");
+    int sleep_trigger = !strcmp(argv[1], "sleep-trigger-oracle");
+    if (!sleep_trigger && strcmp(argv[1], "oracle")) fail("unknown role");
     struct sockaddr_un address = {.sun_family = AF_UNIX};
     const char path[] = "/run/seedbox/control.sock";
     memcpy(address.sun_path, path, sizeof(path));
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0 || connect(fd, (struct sockaddr *)&address, sizeof(address))) fail("connect");
+    if (sleep_trigger) {
+        stream_marker = 1;
+        call(fd, 1, "\"op\":\"arm_trigger\",\"source\":{\"machine\":\"oracle\"},\"marker\":[110,101,101,100,108,101],\"match_timeout_ns\":100000000,\"fault\":{\"action\":\"stop\",\"target\":{\"machine\":\"peer\"}}", 0);
+        call(fd, 2, "\"op\":\"sleep\",\"duration_ns\":20000000", 0);
+        call(fd, 3, "\"op\":\"sleep\",\"duration_ns\":20000000", 0);
+        call(fd, 4, "\"op\":\"now\"", 1); marker("DONE\n");
+        if (close(fd)) fail("close");
+        return 0;
+    }
     call(fd, 1, "\"op\":\"now\"", 1); marker("NOW_OK\n");
     call(fd, 2, "\"op\":\"pause\",\"target\":{\"machine\":\"peer\"}", 0); marker("PAUSED\n");
     struct value result = call(fd, 3, "\"op\":\"throttle\",\"target\":{\"machine\":\"peer\"},\"factor_permille\":2000", 0);

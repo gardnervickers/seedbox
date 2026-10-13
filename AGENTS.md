@@ -173,7 +173,10 @@ bash harness/check.sh mac             # Apple Silicon
 
 Suites are named, never auto-detected: `portable`, `linux-kvm`,
 `linux-guests`, `linux-oci`, `linux-apps`, `linux-pause`, `mac-hvf`,
-`mac-guests`, `mac-apps`, plus the `linux` and `mac` groups. `portable` compiles
+`mac-guests`, `mac-apps`, `machine-tcg`, `machine-pv-x86`, plus the `linux`
+and `mac` groups. The machine suites require explicit crate-owned fixture inputs
+from `machineTcgAssets` / `machineTcgTestFixtures` or the corresponding
+`machinePv*` flake packages. TCG needs no KVM; x86 PV requires `/dev/kvm`. `portable` compiles
 every feature-gated test with `--no-run` and executes only portable tests; it
 opens no KVM/HVF device and needs no root or registry access. It always runs
 first and must pass before hardware execution. A named suite whose host
