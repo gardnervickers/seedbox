@@ -476,6 +476,10 @@ full state and fault history under slowed, paused and observed playback, beside
 a concurrently controlled simulation, with checkpoints captured, and with fault
 previews issued while paused. Its branches must match each other, and edited
 inputs must reproduce output, events and faults before their first changed time.
+A keyed fault whose HTTP client disconnects must be admitted once. Runs exported
+from that server are imported into a second one with a fresh state directory,
+where fresh runs of the same projects (one image pinned by registry digest) must
+match them and an imported checkpoint of a deleted source must branch.
 
 Unit tests live beside their component under `src/`. Integration tests live in
 the owning crate's `tests/` and exercise public boundaries. Give each scenario
