@@ -64,6 +64,29 @@ fn branch(snapshot: &Snapshot) -> TcgMachine {
 }
 
 #[test]
+fn inspector_attachment_completes_before_first_bounded_run() {
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..32)
+            .map(|_| {
+                scope.spawn(|| {
+                    for _ in 0..4 {
+                        let mut machine = start(&LOOP);
+                        assert_eq!(
+                            drive(&mut machine, 0, 100_000, 1000, vec![]),
+                            StopReason::BoundaryReached
+                        );
+                        assert_eq!(registers(&mut machine)[10], 50_000);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    });
+}
+
+#[test]
 fn execution_cost_fractional_and_maximum_rates_match_segmented_cpu_work() {
     for factor in [1000, 1001, 1_000_000] {
         let mut whole = start(&LOOP);

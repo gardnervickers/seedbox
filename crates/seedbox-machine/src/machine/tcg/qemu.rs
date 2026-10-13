@@ -272,8 +272,10 @@ impl Process {
             Ok(qmp) => {
                 // Tests use a read-only GDB inspector; failed setup reaps QEMU.
                 #[cfg(test)]
-                let gdb = match connect(&directory.path().join("gdb"), &mut child) {
-                    Ok(socket) => Gdb(socket),
+                let gdb = match connect(&directory.path().join("gdb"), &mut child)
+                    .and_then(Gdb::attach)
+                {
+                    Ok(gdb) => gdb,
                     Err(error) => {
                         let _ = child.kill();
                         let _ = child.wait();

@@ -7,6 +7,21 @@ use std::os::unix::net::UnixStream;
 pub(super) struct Gdb(pub(super) UnixStream);
 
 impl Gdb {
+    pub(super) fn attach(socket: UnixStream) -> Result<Self, Error> {
+        let mut gdb = Self(socket);
+        // UnixStream::connect only queues a connection. QEMU's acceptance
+        // callback calls vm_stop(PAUSED), even if seedbox-run has meanwhile
+        // started the CPU. A read-only RSP reply proves that callback finished
+        // before setup returns; no guest execution or timing retry is involved.
+        let attached = gdb.request("qAttached")?;
+        if attached != "1" {
+            return Err(Error(format!(
+                "unexpected GDB attachment response: {attached}"
+            )));
+        }
+        Ok(gdb)
+    }
+
     fn byte(&mut self) -> Result<u8, Error> {
         let mut byte = [0];
         self.0.read_exact(&mut byte)?;
@@ -49,4 +64,35 @@ impl Gdb {
 
 pub(super) fn decode_hex(value: &str) -> Result<Vec<u8>, Error> {
     hex::decode(value).map_err(|_| Error(format!("invalid GDB hex data: {value}")))
+}
+
+#[test]
+fn attachment_requires_a_read_only_protocol_acknowledgment() {
+    for attached in [b'1', b'0'] {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        client.set_read_timeout(Some(super::TIMEOUT)).unwrap();
+        server.set_read_timeout(Some(super::TIMEOUT)).unwrap();
+        let peer = std::thread::spawn(move || {
+            let request = "qAttached";
+            let checksum = request.bytes().fold(0u8, u8::wrapping_add);
+            let expected = format!("${request}#{checksum:02x}");
+            let mut packet = vec![0; expected.len()];
+            server.read_exact(&mut packet).unwrap();
+            assert_eq!(packet, expected.as_bytes());
+            write!(server, "+${}#{attached:02x}", char::from(attached)).unwrap();
+            let mut ack = [0];
+            server.read_exact(&mut ack).unwrap();
+            assert_eq!(ack, [b'+']);
+        });
+        let result = Gdb::attach(client);
+        if attached == b'1' {
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(
+                result.err().unwrap().to_string(),
+                "unexpected GDB attachment response: 0"
+            );
+        }
+        peer.join().unwrap();
+    }
 }
