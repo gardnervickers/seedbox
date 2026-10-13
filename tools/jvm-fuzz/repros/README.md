@@ -41,6 +41,12 @@ Open bugs found by the P0 probes (`C.*` signal and `cfzsync` tests, JVM and Go p
 | `unaligned_ldxr` | `ldxr` across 16 bytes or into a `PROT_NONE` page | faults at the `stxr`, or as `SEGV_ACCERR` at the page |
 | `stxr_flush_dup flush` | `ldxr`/`stxr` increments while another thread flushes code | increments applied twice |
 | `timer_signal_loss thread N` | process-directed timer signals with a `SIGEV_THREAD` helper exiting | signals dropped by the exiting thread |
+| `failed_clone_vm MODE [fork\|flush\|thread]` | a rejected `CLONE_VM` clone or `clone3` (e.g. `pthread_create` hitting a pids limit) | the next fork, flush or exit spins forever |
+| `mapfixed_stale file\|revert\|remap` | `MAP_FIXED` replacing executable memory with other contents | the old code keeps running |
+| `sigchld_flags ign\|nocldwait\|nocldstop` | `SIGCHLD` auto-reaping and `SA_NOCLDSTOP` | children become zombies; the handler runs on stops |
+| `close_range_all range\|cloexec` | `close_range(N, ~0U)` as `closefrom` and Python's `close_fds` use it | hangs |
+| `rlimit_nofile` | `RLIMIT_NOFILE` enforcement and inheritance across exec | not enforced; the exec'd image sees the translator's limit |
+| `clear_sighand_child exit` | a `CLONE_CLEAR_SIGHAND` fork child of a multithreaded parent | debug builds assert |
 | `go_exec_flaky.sh` | runs `Go.exec` repeatedly | about 3% of runs lose a signal, crash a child or hang |
 
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple

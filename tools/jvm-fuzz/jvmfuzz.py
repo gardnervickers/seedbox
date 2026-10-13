@@ -196,6 +196,14 @@ PROBES = {
     # clone stacks (cfzsync.c).
     **{f"C.{name}": {"native": name, "exe": "/fuzz/bin/cfzsync"} for name in (
         "flushmatrix", "syscallivau", "forkcallers", "crossivau", "clonestack")},
+    # IC IVAU range shapes, failed clone3, exec from a non-leader thread, failed vfork and
+    # posix_spawn attributes, atfork order, MAP_FIXED code replacement, descriptor hygiene,
+    # setxid across threads, condition-wait cancellation and exit storms (cfzproc.c).
+    **{f"C.{name}": {"native": name, "exe": "/fuzz/bin/cfzproc"} for name in (
+        "ivaurange", "clone3fail", "execnonleader", "spawnattrs", "atfork", "mapfixed",
+        "fdhygiene", "setxid", "condcancel", "procexit")},
+    # The same exit storm with its procfs reader counts, compared with the replay only.
+    "C.procexitcounts": {"native": "procexitcounts", "exe": "/fuzz/bin/cfzproc", "det": False},
     # What the host offers; differences from native describe the guest ("info").
     "C.capabilities": {"native": "capabilities", "info": True},
     # The guest kernel has no process_vm_readv (CROSS_MEMORY_ATTACH); the difference is reported.

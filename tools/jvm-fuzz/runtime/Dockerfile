@@ -29,6 +29,7 @@ RUN mkdir /native && gcc -O2 -pthread -o /native/cfz /src/c/cfz.c -ldl && \
     gcc -O2 -static-pie -o /native/cfzpie /src/c/cfzpie.c && \
     gcc -O2 -pthread -o /native/cfzprocfs /src/c/cfzprocfs.c && \
     gcc -O2 -pthread -o /native/cfzsync /src/c/cfzsync.c && \
+    gcc -O2 -pthread -o /native/cfzproc /src/c/cfzproc.c && \
     gcc -O2 -shared -fPIC -pthread -ffp-contract=off -I/opt/java/openjdk/include -I/opt/java/openjdk/include/linux \
       -o /native/libfzjni.so /src/c/fzjni.c && \
     gcc -O2 -shared -fPIC -pthread -ffp-contract=off -o /native/libfzclr.so /src/c/fzclr.c
