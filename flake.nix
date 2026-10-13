@@ -56,6 +56,10 @@
           inherit (import ./nix/runtime.nix { inherit pkgs; }) runtimeAssets runtimeArchive runtimeSources;
           inherit (import ./nix/kernels.nix { inherit pkgs; }) guestKernel guestKernelArchive guestKernelSources;
           tcgKernel = import ./nix/tcg-kernel.nix { inherit pkgs; };
+        } // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.isAarch64 || pkgs.stdenv.hostPlatform.isx86_64) {
+          # seedbox-machine's own native PV guest inputs, for this host's architecture.
+          machinePvKernel = import ./crates/seedbox-machine/pv-kernel.nix { inherit pkgs; };
+          machinePvProgress = import ./crates/seedbox-machine/progress.nix { inherit pkgs; };
         }
         );
     };
