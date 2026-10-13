@@ -287,18 +287,17 @@ async fn oracle_printed(
     Ok(output.windows(marker.len()).any(|window| window == marker))
 }
 
-/// Run until the fault that follows the oracle's `CAPTURE_NEXT` line, step
-/// through it, and capture there. Each checkpoint workload prints that line,
-/// then makes a non-fault call, then marks its capture phase with a
-/// nominal-speed throttle, so the capture lands at the same committed boundary
-/// on every run. Earlier faults are passed one at a time, pausing before each.
-async fn capture_at_marked_phase(
+/// Hold a paused run before the effect of the fault that follows the oracle's
+/// `marker` line. The oracle prints the line, then makes a non-fault call, so
+/// the line is published before that fault. Earlier faults are passed one at a
+/// time, pausing before each.
+async fn hold_before_marked_fault(
     client: &seedbox_client::Client,
     id: &seedbox_api::SimulationId,
-) -> Result<(String, u64), String> {
-    use seedbox_api::{CheckpointState, ControlCommand, ControlState, PlaybackRate};
-    use seedbox_engine_protocol::host_control::ControlError;
-    let deadline = Instant::now() + Duration::from_secs(600);
+    marker: &[u8],
+    deadline: Instant,
+) -> Result<(), String> {
+    use seedbox_api::{ControlCommand, PlaybackRate};
     while client.playback(id).await.is_err() {
         if Instant::now() > deadline {
             return Err("no live playback endpoint".into());
@@ -338,19 +337,31 @@ async fn capture_at_marked_phase(
         };
         // The line precedes a full RPC round trip, so it is published by now;
         // allow for observation latency before passing this fault.
-        let mut marked = false;
         for _ in 0..20 {
-            if oracle_printed(client, id, b"CAPTURE_NEXT\n").await? {
-                marked = true;
-                break;
+            if oracle_printed(client, id, marker).await? {
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        if marked {
-            break;
-        }
         passed = Some(held);
     }
+}
+
+/// Run until the fault that follows the oracle's `CAPTURE_NEXT` line, step
+/// through it, and capture there. Each checkpoint workload prints that line,
+/// then makes a non-fault call, then marks its capture phase with a fault:
+/// usually a nominal-speed throttle, so the capture lands at the same
+/// committed boundary on every run. checkpoint-pending-stop marks it with a
+/// stop whose acknowledgement the guest holds back, so the capture lands while
+/// that call is admitted and awaiting its effect.
+async fn capture_at_marked_phase(
+    client: &seedbox_client::Client,
+    id: &seedbox_api::SimulationId,
+) -> Result<(String, u64), String> {
+    use seedbox_api::{CheckpointState, ControlCommand, ControlState, PlaybackRate};
+    use seedbox_engine_protocol::host_control::ControlError;
+    let deadline = Instant::now() + Duration::from_secs(600);
+    hold_before_marked_fault(client, id, b"CAPTURE_NEXT\n", deadline).await?;
     for _ in 0..16 {
         acknowledged(client, id, ControlCommand::Step).await?;
         while client
@@ -502,6 +513,25 @@ fn checkpoint_branches(
                 "{name} {branch} continuation differs from source {id}: {evidence} != {expected}"
             ));
         }
+        // The branch restores the source's fault history and must continue it
+        // exactly: the same IDs, outcomes and effect times, with no fault the
+        // checkpoint held pending applied twice or lost.
+        let source_faults = runtime
+            .block_on(client.world(&id))
+            .map_err(|e| e.to_string())?
+            .faults;
+        let branch_id: seedbox_api::SimulationId = branch
+            .parse()
+            .map_err(|e| format!("branch ID {branch}: {e}"))?;
+        let branch_faults = runtime
+            .block_on(client.world(&branch_id))
+            .map_err(|e| e.to_string())?
+            .faults;
+        if branch_faults != source_faults {
+            return Err(format!(
+                "{name} {branch} fault history differs from source {id}: {branch_faults:?} != {source_faults:?}"
+            ));
+        }
         branches.push(branch);
     }
     compare(
@@ -579,9 +609,181 @@ fn torn_writes(cli: &Path, directory: &Path, state: &Path, workload: &Path) -> R
     Ok(())
 }
 
+/// Hold the run before the stop that follows the oracle's `CRASH_NEXT` line,
+/// step through its admission and let the guest run on for half a second, so
+/// the application leader is dead and the supervisor is waiting on the reap the
+/// stale-ack gatekeeper holds back for two seconds. Then crash the machine
+/// interactively.
+async fn crash_during_held_stop(
+    client: &seedbox_client::Client,
+    id: &seedbox_api::SimulationId,
+) -> Result<u64, String> {
+    use seedbox_api::{ControlCommand, ControlState, PlaybackRate};
+    let deadline = Instant::now() + Duration::from_secs(600);
+    hold_before_marked_fault(client, id, b"CRASH_NEXT\n", deadline).await?;
+    let held = client
+        .playback(id)
+        .await
+        .map_err(|e| e.to_string())?
+        .state
+        .position
+        .simulated_time_ns;
+    loop {
+        acknowledged(client, id, ControlCommand::Step).await?;
+        let state = loop {
+            let observation = client.playback(id).await.map_err(|e| e.to_string())?;
+            if !observation.state.stepping {
+                break observation.state;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        if state.terminal {
+            return Err("run completed before the held stop was crashed".into());
+        }
+        if state.position.simulated_time_ns >= held + 500_000_000 {
+            break;
+        }
+        if Instant::now() > deadline {
+            return Err("run did not reach the crash point".into());
+        }
+    }
+    let crash = acknowledged(
+        client,
+        id,
+        ControlCommand::InjectFault {
+            action: seedbox_api::FaultAction::Crash {
+                machine: "app".into(),
+            },
+        },
+    )
+    .await?;
+    let at = match crash.state {
+        ControlState::Acknowledged {
+            error: None,
+            status,
+            ..
+        } => status.position.simulated_time_ns,
+        state => return Err(format!("crash injection failed: {state:?}")),
+    };
+    acknowledged(
+        client,
+        id,
+        ControlCommand::SetRate {
+            rate: PlaybackRate::Unlimited,
+        },
+    )
+    .await?;
+    Ok(at)
+}
+
+/// stale-ack.yaml with an interactive crash while the oracle's stop is
+/// admitted but unacknowledged. The pending call must end unavailable, the
+/// rebooted incarnation's own stop must be confirmed once, and a replay of the
+/// interactive history must MATCH.
+fn crashed_pending_stop(
+    cli: &Path,
+    directory: &Path,
+    state: &Path,
+    workload: &Path,
+) -> Result<(), String> {
+    use seedbox_api::FaultStatus;
+    let source = submitted(&invoke(
+        cli,
+        directory,
+        state,
+        "source",
+        &[
+            "run",
+            workload.to_str().unwrap(),
+            "--paused",
+            "--detach",
+            "--json",
+            "--wall-time",
+            "30m",
+        ],
+    )?)?;
+    let id = source.metadata.id.clone();
+    let client = seedbox_client::Client::connect_to(&state.join("server.sock"))
+        .map_err(|e| e.to_string())?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let crashed_ns = runtime.block_on(crash_during_held_stop(&client, &id))?;
+    invoke(
+        cli,
+        directory,
+        state,
+        "source-wait",
+        &["wait", id.as_str(), "--for", "completed"],
+    )?;
+    let finished = runtime
+        .block_on(client.describe(&id))
+        .map_err(|e| e.to_string())?;
+    if finished.status.verdict() != seedbox_api::TestVerdict::Passed {
+        return Err(format!("{id} did not pass: {:?}", finished.status));
+    }
+    let result = oracle_line(cli, directory, state, "result", id.as_str(), "RESULT ")?;
+    if !result.ends_with(" mode=crashed") {
+        return Err(format!(
+            "{id}: the injected crash did not interrupt the stop: {result}"
+        ));
+    }
+    let world = runtime
+        .block_on(client.world(&id))
+        .map_err(|e| e.to_string())?;
+    let mut faults = world.faults.clone();
+    faults.sort_by_key(|fault| fault.id);
+    let rows: Vec<_> = faults
+        .iter()
+        .map(|f| (f.action.as_str(), f.status, f.applied_time_ns))
+        .collect();
+    let expected = [
+        ("stop", FaultStatus::Unavailable),
+        ("crash", FaultStatus::Applied),
+        ("reboot", FaultStatus::Applied),
+        ("stop", FaultStatus::Applied),
+        ("restart", FaultStatus::Applied),
+    ];
+    if rows.len() != expected.len()
+        || rows
+            .iter()
+            .zip(expected)
+            .any(|(row, (action, status))| row.0 != action || row.1 != status)
+    {
+        return Err(format!("{id}: unexpected fault history {rows:?}"));
+    }
+    if rows[0].2.is_some() || rows[1].2 != Some(crashed_ns) {
+        return Err(format!(
+            "{id}: the stop must have no effect and the crash land at {crashed_ns} ns: {rows:?}"
+        ));
+    }
+    let app = world
+        .machines
+        .iter()
+        .find(|machine| machine.name == "app")
+        .ok_or("no app machine")?;
+    // Incarnations count from zero.
+    if app.incarnation != 1 {
+        return Err(format!(
+            "{id}: app incarnation {} after one reboot",
+            app.incarnation
+        ));
+    }
+    invoke(
+        cli,
+        directory,
+        state,
+        "replay",
+        &["replay", id.as_str(), "--wall-time", "30m"],
+    )?;
+    Ok(())
+}
+
 /// Simulations derived from a workload run rather than submitted from its file:
-/// checkpoint branches of every `checkpoint-*` workload, and the disk
-/// workloads under torn writes. They share one server and run one at a time.
+/// checkpoint branches of every `checkpoint-*` workload, stale-ack with an
+/// interactive crash, and the disk workloads under torn writes. They share one
+/// server and run one at a time.
 #[test]
 fn derived_simulations_pass_and_replay() {
     let cli = std::env::var_os("SEEDBOX_TEST_CLI")
@@ -629,6 +831,14 @@ fn derived_simulations_pass_and_replay() {
         {
             failures.push(format!("{}: {error}", workload.display()));
         }
+    }
+    if let Err(error) = crashed_pending_stop(
+        Path::new(&cli),
+        &directory("stale-ack-crashed"),
+        state,
+        &workloads.join("stale-ack.yaml"),
+    ) {
+        failures.push(format!("stale-ack.yaml (crashed while held): {error}"));
     }
     for name in ["durability", "two-crash"] {
         let workload = workloads.join(format!("{name}.yaml"));
