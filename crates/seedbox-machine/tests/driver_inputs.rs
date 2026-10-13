@@ -805,3 +805,163 @@ fn name_targets_match_identity_targets_and_streams_are_worker_independent() {
         );
     }
 }
+
+#[test]
+fn oracle_completion_cuts_off_pending_inputs_without_per_key_events() {
+    let (mut driver, ids) = world(1, &["target"], &[], |name| Scripted {
+        script: if name == "oracle" {
+            vec![Output {
+                at: at(3),
+                payload: Response::ApplicationOutcome { code: 0 },
+            }]
+        } else {
+            vec![]
+        }
+        .into(),
+        ..Scripted::default()
+    });
+    schedule(
+        &mut driver,
+        2,
+        "before",
+        Action::Pause(Target::Machine(ids[1])),
+    );
+    schedule(
+        &mut driver,
+        6,
+        "after",
+        Action::Pause(Target::Machine(ids[1])),
+    );
+    let events = run_to(&mut driver, 10);
+    assert!(matches!(
+        driver.step(at(10)).unwrap(),
+        StepOutcome::Finished { at: t, .. } if t == at(3)
+    ));
+    assert_eq!(
+        settlement(&events, "before"),
+        Some(SettlementStatus::Applied)
+    );
+    assert!(input_record(&events, "after").is_none());
+    assert_eq!(rejection(&events, "after"), None);
+    assert!(driver.drain_events().is_empty());
+    // Completion also refuses further scheduling.
+    assert!(matches!(
+        driver.with_barrier(|b| b.schedule(
+            at(6),
+            key("late"),
+            Action::Resume(Target::Machine(ids[1]))
+        )),
+        Err(Error::Completed)
+    ));
+}
+
+#[test]
+fn a_display_name_equal_to_an_internal_key_is_only_a_name() {
+    // Machine 1 is named "machine:0"; no machine is named "machine:2".
+    let (mut driver, ids) = world(1, &["machine:0", "caller", "other"], &[], |name| Scripted {
+        script: if name == "caller" {
+            vec![
+                call(2, 1, on("pause", "machine:0")),
+                call(3, 2, on("pause", "machine:3")),
+                call(
+                    3,
+                    3,
+                    serde_json::json!({"op":"pause","target":{"service":"other"}}),
+                ),
+            ]
+        } else {
+            vec![]
+        }
+        .into(),
+        ..Scripted::default()
+    });
+    let (named, other) = (ids[1], ids[3]);
+    schedule(
+        &mut driver,
+        1,
+        "host",
+        Action::Throttle {
+            target: Target::Name("machine:0".into()),
+            config: slow(),
+        },
+    );
+    driver
+        .with_barrier(|b| {
+            assert!(matches!(
+                b.schedule(at(1), key("missing"), Action::Pause(Target::Name("machine:3".into()))),
+                Err(Error::UnknownName(n)) if n == "machine:3"
+            ));
+            Ok(())
+        })
+        .unwrap();
+    let events = run_to(&mut driver, 5);
+    assert_eq!(input_record(&events, "host").unwrap().target, named);
+    let guest: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::FaultAdmitted(r) if matches!(r.origin, FaultOrigin::Control { .. }) => {
+                Some(r.target)
+            }
+            _ => None,
+        })
+        .collect();
+    // "machine:3" resolves no display name (the key machine:3 exists, but is
+    // never a wire target); the service name resolves its machine.
+    assert_eq!(guest, [named, other]);
+    driver
+        .with_barrier(|b| {
+            assert!(!b.paused(ids[0])?);
+            assert!(b.paused(named)? && b.paused(other)?);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_key_is_reusable_after_its_stale_boot_settlement() {
+    let (mut driver, ids) = world(1, &["target"], &[], |_| Scripted::default());
+    let target = Target::Machine(ids[1]);
+    schedule(&mut driver, 1, "crash", Action::Crash(target.clone()));
+    run_to(&mut driver, 2);
+    // Both admitted against the crashed boot 0; the reboot effect applies
+    // first, so the throttle is stale at its turn and installs nothing.
+    schedule(&mut driver, 2, "reboot", Action::Reboot(target.clone()));
+    schedule(
+        &mut driver,
+        2,
+        "slow",
+        Action::Throttle {
+            target: target.clone(),
+            config: slow(),
+        },
+    );
+    let events = run_to(&mut driver, 2);
+    assert_eq!(input_record(&events, "slow").unwrap().boot, 0);
+    assert_eq!(
+        settlement(&events, "slow"),
+        Some(SettlementStatus::Unavailable)
+    );
+    assert!(!events.iter().any(|e| matches!(
+        e.kind,
+        EventKind::Transition {
+            change: seedbox_machine::driver::Transition::ExecutionSet(_),
+            ..
+        }
+    )));
+    // The stale settlement released the key; its reuse binds the new boot.
+    schedule(
+        &mut driver,
+        2,
+        "slow",
+        Action::Throttle {
+            target,
+            config: slow(),
+        },
+    );
+    let events = run_to(&mut driver, 3);
+    let record = input_record(&events, "slow").unwrap();
+    assert_eq!(record.boot, 1);
+    assert_eq!(settlement(&events, "slow"), Some(SettlementStatus::Applied));
+    // The stale attempt's handle was released, so a fresh one is allocated.
+    assert_eq!(record.handle.unwrap().to_string(), "p2");
+}
