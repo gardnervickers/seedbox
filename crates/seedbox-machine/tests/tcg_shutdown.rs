@@ -66,7 +66,7 @@ fn driver(restore_initial: bool) -> Harness {
         definition,
         Vec::new(),
         move |definition| {
-            let mut machine = backend.create(&definition)?;
+            let mut machine = backend.create(definition)?;
             if restore_initial {
                 let snapshot = machine.snapshot()?;
                 drop(machine);

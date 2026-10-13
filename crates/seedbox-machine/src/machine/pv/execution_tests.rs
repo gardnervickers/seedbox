@@ -260,8 +260,7 @@ fn native_execution_price_exact_subpercent_split_bounds_and_reboot() {
     assert_eq!(split.reached, 2002);
 }
 
-#[path = "../../../tests/support/pv_guest.rs"]
-mod linux;
+use super::guest as linux;
 #[test]
 #[ignore = "requires a native PV worker, current PV Linux kernel and fixture clang/linker"]
 fn native_linux_syscall_work_observes_subpercent_execution_price() {

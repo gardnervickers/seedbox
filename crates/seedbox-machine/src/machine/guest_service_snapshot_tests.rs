@@ -1,7 +1,7 @@
 //! Native accepted-command snapshot continuation, separate from host codec tests.
 use crate as machine_crate;
 #[path = "../../tests/support/prepared_application.rs"]
-mod prepared;
+pub(super) mod prepared;
 use super::{Machine, RunContext, StopReason, Timestamp};
 use crate::{
     clock::{Clock, SimulationClock},

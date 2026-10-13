@@ -542,7 +542,7 @@ fn tcg(workers: usize) -> Vec<MachineResponse> {
     )
     .unwrap();
     scenario(workers, definition, move |definition| {
-        backend.create(&definition).unwrap()
+        backend.create(definition).unwrap()
     })
 }
 #[test]
@@ -564,7 +564,7 @@ fn pv(workers: usize) -> Vec<MachineResponse> {
     )
     .unwrap();
     scenario(workers, definition, move |definition| {
-        backend.create(&definition).unwrap()
+        backend.create(definition).unwrap()
     })
 }
 #[cfg(seedbox_pv)]
@@ -607,7 +607,7 @@ fn install_application(
     header.set_gid(0);
     header.set_mtime(0);
     header.set_cksum();
-    tar.append_data(&mut header, "application", &application[..])
+    tar.append_data(&mut header, "application", application)
         .unwrap();
     base.application.filesystem =
         machine_crate::definition::FilesystemArchive::new(tar.into_inner().unwrap()).unwrap();
@@ -835,7 +835,7 @@ fn tcg_driver_guest_receives_automatic_replies_and_real_peer_effects() {
             workers,
             definition,
             fs::read(input("SEEDBOX_TCG_DRIVER_CONTROL_APPLICATION")).unwrap(),
-            move |definition| backend.create(&definition).unwrap(),
+            move |definition| backend.create(definition).unwrap(),
         )
     };
     let serial = run(1);
@@ -861,7 +861,7 @@ fn pv_driver_guest_receives_automatic_replies_and_real_peer_effects() {
             workers,
             definition,
             fs::read(input("SEEDBOX_PV_DRIVER_CONTROL_APPLICATION")).unwrap(),
-            move |definition| backend.create(&definition).unwrap(),
+            move |definition| backend.create(definition).unwrap(),
         )
     };
     assert_eq!(run(1), run(2));

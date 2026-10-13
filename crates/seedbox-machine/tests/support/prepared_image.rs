@@ -159,6 +159,8 @@ pub(crate) fn archive_with_modes(
     }
     FilesystemArchive::new(tar.into_inner().unwrap()).unwrap()
 }
+// Used by integration admission tests, not the private snapshot fixture.
+#[allow(dead_code)]
 pub(crate) fn check_denied<M: Machine<Context = ()>>(mut machine: M, diagnostic: &str)
 where
     M::Error: Debug + std::fmt::Display,

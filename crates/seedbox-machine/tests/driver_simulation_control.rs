@@ -14,6 +14,8 @@ mod driver_definition;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
+type Replies = Arc<Mutex<Vec<(usize, u64, Vec<u8>)>>>;
+
 #[derive(Clone)]
 struct Caller {
     label: usize,
@@ -21,7 +23,7 @@ struct Caller {
     crashed: bool,
     last_factor: u32,
     operation: &'static str,
-    replies: Arc<Mutex<Vec<(usize, u64, Vec<u8>)>>>,
+    replies: Replies,
 }
 impl Machine for Caller {
     type Context = ();
@@ -90,14 +92,7 @@ impl RngStream for Rng {
         bytes.fill(0)
     }
 }
-fn setup(
-    workers: usize,
-    operation: &'static str,
-) -> (
-    Driver<Caller>,
-    Arc<Mutex<Vec<(usize, u64, Vec<u8>)>>>,
-    Vec<MachineId>,
-) {
+fn setup(workers: usize, operation: &'static str) -> (Driver<Caller>, Replies, Vec<MachineId>) {
     let replies = Arc::new(Mutex::new(vec![]));
     let captured = replies.clone();
     let mut next = 0;
@@ -152,7 +147,7 @@ fn duplicate_display_names_route_identical_rpc_ids_to_exact_sources() {
             })
             .collect::<Vec<_>>();
         driver
-            .with_barrier(|b| {
+            .with_barrier(|_| {
                 assert_eq!(
                     outputs
                         .iter()
@@ -212,11 +207,7 @@ fn queued_pair(
     first: &'static str,
     second: &'static str,
     crash_peer: bool,
-) -> (
-    Driver<Caller>,
-    Arc<Mutex<Vec<(usize, u64, Vec<u8>)>>>,
-    Vec<MachineId>,
-) {
+) -> (Driver<Caller>, Replies, Vec<MachineId>) {
     let replies = Arc::new(Mutex::new(vec![]));
     let observed = replies.clone();
     let mut next = 0;

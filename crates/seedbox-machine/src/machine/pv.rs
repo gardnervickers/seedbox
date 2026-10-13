@@ -13,6 +13,9 @@
 mod boot;
 mod client;
 mod factory;
+#[cfg(test)]
+#[path = "../../tests/support/pv_guest.rs"]
+mod guest;
 mod protocol;
 use super::{ExitReason, Machine, RunContext, StopReason, Timestamp};
 use client::Worker;
@@ -86,6 +89,7 @@ impl PVMachine {
     /// Unsupported resource requests are rejected before execution.
     /// The first run initializes boot using its clock and eight RNG bytes in
     /// little-endian order. Each pending reboot draws another eight bytes.
+    #[cfg(test)]
     pub(crate) fn new(
         executable: &Path,
         bootstrap: &crate::application::GuestBootstrap,

@@ -222,7 +222,7 @@ fn driver_reboots_live_and_crashed_guest_with_fresh_state_and_retained_actions()
 }
 
 fn check_driver_reboot(workers: usize) {
-    use crate::driver::{Action, Driver, StepOutcome};
+    use crate::driver::{Action, StepOutcome};
     use std::time::Duration;
 
     let words = [0x0015_0513u32, 0xffdf_f06f]; // Increment a0; loop.

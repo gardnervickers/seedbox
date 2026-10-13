@@ -4,6 +4,8 @@
 use seedbox_machine as machine_crate;
 #[path = "support/simulation_control.rs"]
 mod control;
+#[path = "support/prepared_application.rs"]
+mod prepared;
 
 #[test]
 #[ignore = "requires patched QEMU, Linux inputs and SEEDBOX_TCG_CONTROL_INITRD"]

@@ -2,7 +2,7 @@ use super::*;
 use crate::clock::Clock;
 use std::sync::Arc;
 type PVMachine = crate::machine::test_environment::Environment<super::PVMachine>;
-use crate::driver::{Action, Driver, StepOutcome};
+use crate::driver::{Action, StepOutcome};
 use crate::rng::SeededRng;
 
 fn at(n: u64) -> Timestamp {

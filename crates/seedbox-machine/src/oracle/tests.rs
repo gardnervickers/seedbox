@@ -260,7 +260,7 @@ fn oversized_success_becomes_bounded_correlated_error_and_large_error_fails() {
     assert_eq!(reply["id"], 1);
     assert_eq!(reply["error"]["code"], "result_too_large");
     assert!(reply.get("result").is_none());
-    assert!(bytes.len() + 1 <= MAX_FRAME);
+    assert!(bytes.len() < MAX_FRAME);
     assert_eq!(
         encode::<Value>(
             id,

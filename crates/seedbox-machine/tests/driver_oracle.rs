@@ -10,12 +10,14 @@ mod driver_definition;
 use seedbox_machine::pv::{ApplicationCommand, CommandResult, Output};
 use std::sync::Mutex;
 
+type Calls = Arc<Mutex<Vec<(bool, Timestamp)>>>;
+
 #[derive(Clone)]
 struct Probe {
     oracle: bool,
     main_only: bool,
     reason: ExitReason,
-    calls: Arc<Mutex<Vec<(bool, Timestamp)>>>,
+    calls: Calls,
 }
 impl Machine for Probe {
     type Context = ();
@@ -98,11 +100,7 @@ fn build(
     workers: usize,
     reason: ExitReason,
     main_only: bool,
-) -> (
-    Driver<Probe>,
-    Arc<Mutex<Vec<(bool, Timestamp)>>>,
-    Vec<MachineId>,
-) {
+) -> (Driver<Probe>, Calls, Vec<MachineId>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let observed = calls.clone();
     let mut driver = Driver::new(

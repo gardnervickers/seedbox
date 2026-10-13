@@ -1,6 +1,9 @@
 //! PV restore is intentionally private; public control-channel behavior and the
 //! generic snapshot scenario are shared with integration tests.
+use super::guest_service_snapshot_tests::prepared;
 use crate as machine_crate;
+// Unit snapshots use only part of the integration control fixture.
+#[allow(dead_code)]
 #[path = "../../tests/support/simulation_control.rs"]
 mod control;
 

@@ -1,6 +1,16 @@
 use super::*;
 
-fn tar(entries: &[(&str, tar::EntryType, u32, u64, u64, &[u8], Option<&str>)]) -> Vec<u8> {
+type TarEntry<'a> = (
+    &'a str,
+    tar::EntryType,
+    u32,
+    u64,
+    u64,
+    &'a [u8],
+    Option<&'a str>,
+);
+
+fn tar(entries: &[TarEntry<'_>]) -> Vec<u8> {
     let mut archive = tar::Builder::new(vec![]);
     for (name, kind, mode, uid, gid, data, link) in entries {
         let mut h = tar::Header::new_gnu();

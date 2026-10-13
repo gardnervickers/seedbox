@@ -68,7 +68,7 @@ pub(super) fn decode_hex(value: &str) -> Result<Vec<u8>, Error> {
 
 #[test]
 fn attachment_requires_a_read_only_protocol_acknowledgment() {
-    for attached in [b'1', b'0'] {
+    for attached in *b"10" {
         let (client, mut server) = UnixStream::pair().unwrap();
         client.set_read_timeout(Some(super::TIMEOUT)).unwrap();
         server.set_read_timeout(Some(super::TIMEOUT)).unwrap();

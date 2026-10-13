@@ -198,7 +198,7 @@ fn repeated_capture_preserves_stopped_reason_timer_and_next_execution() {
 
 #[test]
 fn driver_resumes_a_runnable_guest_without_replaying_paused_instructions() {
-    use crate::driver::{Action, Driver, StepOutcome};
+    use crate::driver::{Action, StepOutcome};
     let mut driver = crate::driver::fixture::driver(
         at(0),
         std::time::Duration::from_nanos(10_000),
@@ -274,7 +274,7 @@ fn driver_resumes_a_runnable_guest_without_replaying_paused_instructions() {
 
 #[test]
 fn driver_resume_delivers_overdue_timer_before_post_resume_instructions() {
-    use crate::driver::{Action, Driver, StepOutcome};
+    use crate::driver::{Action, StepOutcome};
     // First machine sleeps on CLINT's 1003 ns deadline, then increments a0.
     let programs = [
         vec![

@@ -1,12 +1,11 @@
 use super::machine_crate;
-#[path = "prepared_application.rs"]
-mod prepared;
 use super::machine_crate::{
     clock::Clock,
     machine::{Machine, RunContext, StopReason, Timestamp},
     pv::{self, SimulationControlId},
     rng::RngStream,
 };
+use super::prepared;
 use std::{
     collections::VecDeque,
     fmt::Debug,

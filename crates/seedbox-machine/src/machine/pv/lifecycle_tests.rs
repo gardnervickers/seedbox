@@ -81,8 +81,7 @@ fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() 
     );
 }
 
-#[path = "../../../tests/support/pv_guest.rs"]
-mod guest;
+use super::guest;
 
 fn finish(machine: &mut PVMachine, clock: &crate::clock::SimulationClock) {
     let started = std::time::Instant::now();
