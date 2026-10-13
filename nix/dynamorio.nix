@@ -63,6 +63,11 @@ pkgs.stdenv.mkDerivation {
     # A thread starting a stop-all-threads lets waiting ones go first: a JIT
     # thread flushing after every code write starved a forking thread.
     ../guest/progress/dynamorio-synch-fairness.patch
+    # A MAP_FIXED_NOREPLACE mmap that overlaps keeps its address (EEXIST, not
+    # EPERM), and signal handlers return through the vDSO trampoline that
+    # unwinders recognize, as on the kernel.
+    ../guest/progress/dynamorio-mmap-noreplace.patch
+    ../guest/progress/dynamorio-vdso-sigreturn.patch
   ] else [
     # The same translator syscall mark, in rbx.
     ../guest/progress/dynamorio-x86-translator-syscalls.patch

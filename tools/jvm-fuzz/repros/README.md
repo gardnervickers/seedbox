@@ -13,6 +13,10 @@ they always print `OK`.
 | `regcheck ROUNDS [SPINS [x28]]` | x0–x26 and q0–q31 across progress checkpoints and x28-based accesses | passes |
 | `srsample SAMPLES` | HotSpot-style suspend/resume sampling (JFR's protocol) against fixed registers | passes |
 | `sigregs WORKERS SIGNALS [SPINS [x28\|ibl]]` | x0–x26 and q0–q31 across `tgkill` signals whose handler posts a semaphore | `ibl` (a `blr`/`ret` loop, no client) hung in about one run in five |
+| `spawnjit 60 1 fork 1 0` | `fork` while one thread rewrites and runs its code | the fork never ran: the writer's back-to-back flushes won every race for the stop-all lock |
+| `mjit THREADS ITERS` | each thread rewrites `movz; ret` slots in its own page, flushes and calls | passes; with per-page flush tracking, a flush abandoned when another thread's flush redirected its thread left stale code |
+| `map_noreplace` | `MAP_FIXED_NOREPLACE` over an existing mapping | `EPERM` instead of `EEXIST` |
+| `sigframe_unwind` | `_Unwind_Backtrace` from a SIGSEGV handler | stopped after the handler: its return address was DR's own sigreturn stub |
 
 `spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple
 `posix_spawn` into `fork`; it separated the two spawn bugs.
@@ -55,3 +59,13 @@ The fixes are in [`guest/progress`](../../../guest/progress):
   its translator initialized was dropped, so `kill` right after `fork` or through
   a pidfd did nothing) and `dynamorio-clone-clear-sighand.patch` (`clone3`'s
   `CLONE_CLEAR_SIGHAND` left the parent's handlers in the child).
+- `dynamorio-icache-batch.patch`, `dynamorio-synch-fairness.patch`: JIT flushes
+  join a thread's consecutive `IC IVAU` lines and run at its next `DSB`, waiting
+  for other flushes without being redirected; a thread starting a stop-all lets
+  waiting ones go first (`spawnjit 60 1 fork 1 0`).
+- `dynamorio-clone-record.patch`: a new AArch64 thread found its clone record by
+  reading unused stack and could read a stale record (the `Signals` probe hung).
+- `dynamorio-sigsuspend-pending.patch`: upstream PR #7958; `sigsuspend` hung for a
+  signal it unblocked that was already pending (`C.sigsuspend`).
+- `dynamorio-mmap-noreplace.patch` (`map_noreplace`) and
+  `dynamorio-vdso-sigreturn.patch` (`sigframe_unwind`).
