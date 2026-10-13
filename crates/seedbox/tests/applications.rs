@@ -272,9 +272,26 @@ async fn acknowledged(
     Ok(receipt)
 }
 
-/// Run until the oracle's first fault effect, step through it, and capture there.
-/// Each checkpoint workload marks its capture phase with a nominal-speed throttle,
-/// so the capture lands at the same committed boundary on every run.
+/// Whether the oracle's retained output already contains `marker`.
+async fn oracle_printed(
+    client: &seedbox_client::Client,
+    id: &seedbox_api::SimulationId,
+    marker: &[u8],
+) -> Result<bool, String> {
+    let mut output = Vec::new();
+    for entry in retained_logs(client, id, "oracle").await? {
+        if let Logged::Bytes { bytes, .. } = entry {
+            output.extend(bytes);
+        }
+    }
+    Ok(output.windows(marker.len()).any(|window| window == marker))
+}
+
+/// Run until the fault that follows the oracle's `CAPTURE_NEXT` line, step
+/// through it, and capture there. Each checkpoint workload prints that line,
+/// then makes a non-fault call, then marks its capture phase with a
+/// nominal-speed throttle, so the capture lands at the same committed boundary
+/// on every run. Earlier faults are passed one at a time, pausing before each.
 async fn capture_at_marked_phase(
     client: &seedbox_client::Client,
     id: &seedbox_api::SimulationId,
@@ -288,31 +305,51 @@ async fn capture_at_marked_phase(
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    acknowledged(
-        client,
-        id,
-        ControlCommand::PauseBeforeNextFault {
-            rate: PlaybackRate::Unlimited,
-        },
-    )
-    .await?;
-    // Held before the throttle effect: paused and no longer moving.
-    let mut last = None;
+    let mut passed = None;
     loop {
-        let observation = client.playback(id).await.map_err(|e| e.to_string())?;
-        if observation.state.terminal {
-            return Err("run completed before its marked capture phase".into());
+        acknowledged(
+            client,
+            id,
+            ControlCommand::PauseBeforeNextFault {
+                rate: PlaybackRate::Unlimited,
+            },
+        )
+        .await?;
+        // Held before the next fault effect: paused, moved past the last
+        // fault passed, and no longer moving.
+        let mut last = None;
+        let held = loop {
+            let observation = client.playback(id).await.map_err(|e| e.to_string())?;
+            if observation.state.terminal {
+                return Err("run completed before its marked capture phase".into());
+            }
+            let position = observation.state.position;
+            if observation.state.rate == PlaybackRate::Paused
+                && last == Some(position)
+                && passed != Some(position)
+            {
+                break position;
+            }
+            last = Some(position);
+            if Instant::now() > deadline {
+                return Err("run did not pause before its marked phase".into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        // The line precedes a full RPC round trip, so it is published by now;
+        // allow for observation latency before passing this fault.
+        let mut marked = false;
+        for _ in 0..20 {
+            if oracle_printed(client, id, b"CAPTURE_NEXT\n").await? {
+                marked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        if observation.state.rate == PlaybackRate::Paused
-            && last == Some(observation.state.position)
-        {
+        if marked {
             break;
         }
-        last = Some(observation.state.position);
-        if Instant::now() > deadline {
-            return Err("run did not pause before its marked phase".into());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        passed = Some(held);
     }
     for _ in 0..16 {
         acknowledged(client, id, ControlCommand::Step).await?;
@@ -485,9 +522,10 @@ fn checkpoint_branches(
     Ok(())
 }
 
-/// Run durability.yaml under the torn-write disk model, which only a resolved
-/// definition selects: derive it from a fresh run's definition, switch the
-/// model and the oracle's policy, then require PASS and a replay MATCH.
+/// Run a disk workload (durability.yaml, two-crash.yaml) under the torn-write
+/// disk model, which only a resolved definition selects: derive it from a fresh
+/// run's definition, switch the model and the oracle's policy, then require
+/// PASS and a replay MATCH.
 fn torn_writes(cli: &Path, directory: &Path, state: &Path, workload: &Path) -> Result<(), String> {
     let drop = invoke(
         cli,
@@ -542,8 +580,8 @@ fn torn_writes(cli: &Path, directory: &Path, state: &Path, workload: &Path) -> R
 }
 
 /// Simulations derived from a workload run rather than submitted from its file:
-/// checkpoint branches of every `checkpoint-*` workload, and the durability
-/// workload under torn writes. They share one server and run one at a time.
+/// checkpoint branches of every `checkpoint-*` workload, and the disk
+/// workloads under torn writes. They share one server and run one at a time.
 #[test]
 fn derived_simulations_pass_and_replay() {
     let cli = std::env::var_os("SEEDBOX_TEST_CLI")
@@ -592,14 +630,550 @@ fn derived_simulations_pass_and_replay() {
             failures.push(format!("{}: {error}", workload.display()));
         }
     }
-    let durability = workloads.join("durability.yaml");
-    if let Err(error) = torn_writes(
-        Path::new(&cli),
-        &directory("durability-torn"),
+    for name in ["durability", "two-crash"] {
+        let workload = workloads.join(format!("{name}.yaml"));
+        if let Err(error) = torn_writes(
+            Path::new(&cli),
+            &directory(&format!("{name}-torn")),
+            state,
+            &workload,
+        ) {
+            failures.push(format!("{} (torn writes): {error}", workload.display()));
+        }
+    }
+    drop(server);
+    if !failures.is_empty() {
+        let retained = state_directory.keep();
+        panic!(
+            "{}\nretained server state: {}",
+            failures.join("\n"),
+            retained.display()
+        );
+    }
+}
+
+/// A machine's retained log history in delivery order. Worker gaps depend only
+/// on execution; source gaps are observation loss between worker and reader.
+#[derive(Clone, Debug, PartialEq)]
+enum Logged {
+    Bytes {
+        incarnation: u32,
+        time_ns: u64,
+        stderr: bool,
+        bytes: Vec<u8>,
+    },
+    WorkerGap {
+        incarnation: u32,
+        time_ns: u64,
+        records: u64,
+    },
+    SourceGap {
+        observations: u64,
+    },
+}
+
+impl Logged {
+    fn time_ns(&self) -> Option<u64> {
+        match self {
+            Self::Bytes { time_ns, .. } | Self::WorkerGap { time_ns, .. } => Some(*time_ns),
+            Self::SourceGap { .. } => None,
+        }
+    }
+}
+
+async fn retained_logs(
+    client: &seedbox_client::Client,
+    id: &seedbox_api::SimulationId,
+    machine: &str,
+) -> Result<Vec<Logged>, String> {
+    use futures_util::StreamExt;
+    use seedbox_api::{LogDelivery, LogEntry, LogStream};
+    let mut stream = client
+        .logs_with(id, machine, false)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut logged = Vec::new();
+    while let Some(delivery) = stream.next().await {
+        match delivery.map_err(|e| e.to_string())? {
+            LogDelivery::Entry { entry, .. } => logged.push(match entry {
+                LogEntry::Bytes {
+                    incarnation,
+                    simulated_time_ns,
+                    stream,
+                    bytes,
+                    ..
+                } => Logged::Bytes {
+                    incarnation,
+                    time_ns: simulated_time_ns,
+                    stderr: stream == LogStream::Stderr,
+                    bytes,
+                },
+                LogEntry::MachineGap {
+                    incarnation,
+                    simulated_time_ns,
+                    records,
+                    ..
+                } => Logged::WorkerGap {
+                    incarnation,
+                    time_ns: simulated_time_ns,
+                    records,
+                },
+                LogEntry::SourceGap { first, last } => Logged::SourceGap {
+                    observations: last - first + 1,
+                },
+                LogEntry::SourceUnavailable => return Err("log source unavailable".into()),
+            }),
+            LogDelivery::Gap { first, last } => logged.push(Logged::SourceGap {
+                observations: last - first + 1,
+            }),
+            LogDelivery::Closed => break,
+        }
+    }
+    Ok(logged)
+}
+
+/// Logs are best effort, so compare two histories only where both are certain:
+/// at a simulated time with no observation loss on either side of it, both runs
+/// must retain the same entries in the same order. Returns the times compared.
+fn same_retained_logs(source: &[Logged], replay: &[Logged]) -> Result<usize, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    type Times<'a> = BTreeMap<u64, Vec<&'a Logged>>;
+    fn index(logged: &[Logged]) -> (Times<'_>, Vec<(u64, u64)>) {
+        let mut times = Times::new();
+        let mut uncertain = Vec::new();
+        for (i, entry) in logged.iter().enumerate() {
+            match entry.time_ns() {
+                Some(time) => times.entry(time).or_default().push(entry),
+                None => {
+                    let before = logged[..i].iter().rev().find_map(Logged::time_ns);
+                    let after = logged[i + 1..].iter().find_map(Logged::time_ns);
+                    uncertain.push((before.unwrap_or(0), after.unwrap_or(u64::MAX)));
+                }
+            }
+        }
+        (times, uncertain)
+    }
+    let certain = |ranges: &[(u64, u64)], time: u64| {
+        !ranges.iter().any(|&(from, to)| (from..=to).contains(&time))
+    };
+    let (a, a_uncertain) = index(source);
+    let (b, b_uncertain) = index(replay);
+    let mut compared = 0;
+    for time in a.keys().chain(b.keys()).collect::<BTreeSet<_>>() {
+        if certain(&a_uncertain, *time) && certain(&b_uncertain, *time) {
+            if a.get(time) != b.get(time) {
+                return Err(format!("retained output at {time} ns differs in replay"));
+            }
+            compared += 1;
+        }
+    }
+    if compared == 0 {
+        return Err("no simulated time was retained without loss by both runs".into());
+    }
+    Ok(compared)
+}
+
+/// The record format of harness/acceptance/driver/output_storm.py.
+mod storm {
+    const ANSI: [&[u8]; 4] = [b"\x1b[31m", b"\x1b[0m", b"\x1b[2K", b"\x1b[1;32m"];
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct Header {
+        pub boot: String,
+        pub process: u32,
+        pub thread: u32,
+        pub sequence: u64,
+        pub length: usize,
+    }
+
+    fn unit(boot: &str, process: u32, thread: u32) -> Vec<u8> {
+        let mut seed = (u64::from_str_radix(boot, 16).unwrap_or(0)
+            ^ (u64::from(process) << 20)
+            ^ (u64::from(thread) << 16))
+            & 0xFFFF_FFFF;
+        let mut out = Vec::new();
+        for i in 0..251 {
+            seed = (seed * 1_103_515_245 + 12_345) & 0x7FFF_FFFF;
+            let value = ((seed >> 16) & 0xFF) as u8;
+            out.push(if i % 17 == 0 {
+                0
+            } else if value == 0x1e {
+                0x1d
+            } else {
+                value
+            });
+            if i % 61 == 0 {
+                out.extend_from_slice(ANSI[((seed >> 8) % 4) as usize]);
+            }
+        }
+        out
+    }
+
+    pub fn body(header: &Header) -> Vec<u8> {
+        let unit = unit(&header.boot, header.process, header.thread);
+        let k = (header.sequence % unit.len() as u64) as usize;
+        unit[k..]
+            .iter()
+            .chain(&unit[..k])
+            .copied()
+            .cycle()
+            .take(header.length)
+            .collect()
+    }
+
+    /// The header at the start of `data` and its length; `None` if `data`
+    /// does not start with a complete header.
+    pub fn header(data: &[u8]) -> Option<(Header, usize)> {
+        let end = data.iter().position(|&b| b == 0x1f)?;
+        let text = std::str::from_utf8(data.get(..end)?.strip_prefix(b"\x1eREC ")?).ok()?;
+        let mut fields = text.split(' ');
+        let mut field = |name: &str| fields.next()?.strip_prefix(name).map(str::to_owned);
+        let boot = field("b=")?;
+        let header = Header {
+            process: field("p=")?.parse().ok()?,
+            thread: field("t=")?.parse().ok()?,
+            sequence: field("s=")?.parse().ok()?,
+            length: field("n=")?.parse().ok()?,
+            boot,
+        };
+        (header.boot.len() == 8 && fields.next().is_none()).then_some((header, end + 1))
+    }
+}
+
+/// Check one machine's storm output against the app's own totals.
+fn check_storm(logged: &[Logged], totals: &serde_json::Value) -> Result<String, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    // Each stream splits into segments at every gap; bytes keep their incarnation.
+    let mut segments: [Vec<Vec<(u32, u8)>>; 2] = [vec![Vec::new()], vec![Vec::new()]];
+    let (mut worker_gaps, mut source_gaps) = (0, 0);
+    let mut logged_bytes = [0u64; 2];
+    for entry in logged {
+        match entry {
+            Logged::Bytes {
+                incarnation,
+                stderr,
+                bytes,
+                ..
+            } => {
+                let stream = usize::from(*stderr);
+                logged_bytes[stream] += bytes.len() as u64;
+                let segment = segments[stream].last_mut().unwrap();
+                segment.extend(bytes.iter().map(|&b| (*incarnation, b)));
+            }
+            Logged::WorkerGap { records, .. }
+            | Logged::SourceGap {
+                observations: records,
+            } => {
+                if matches!(entry, Logged::WorkerGap { .. }) {
+                    worker_gaps += records;
+                } else {
+                    source_gaps += records;
+                }
+                for stream in &mut segments {
+                    stream.push(Vec::new());
+                }
+            }
+        }
+    }
+    let mut records = Vec::new();
+    for (stream, segments) in segments.iter().enumerate() {
+        let name = ["stdout", "stderr"][stream];
+        for (index, segment) in segments.iter().enumerate() {
+            let (after_gap, before_gap) = (index > 0, index + 1 < segments.len());
+            let data: Vec<u8> = segment.iter().map(|&(_, b)| b).collect();
+            let mut position = data.iter().position(|&b| b == 0x1e).unwrap_or(data.len());
+            if position > 0 && !after_gap {
+                return Err(format!("{name}: {position} bytes before the first record"));
+            }
+            while position < data.len() {
+                let Some((header, length)) = storm::header(&data[position..]) else {
+                    if before_gap && !data[position + 1..].contains(&0x1f) {
+                        break; // A header cut by a gap.
+                    }
+                    return Err(format!("{name}: no record header at byte {position}"));
+                };
+                let start = position + length;
+                let end = (start + header.length).min(data.len());
+                let expected = storm::body(&header);
+                if data[start..end] != expected[..end - start] {
+                    return Err(format!("{name}: record {header:?} is torn or interleaved"));
+                }
+                if start + header.length > data.len() {
+                    if !before_gap {
+                        return Err(format!("{name}: record {header:?} is incomplete"));
+                    }
+                    break;
+                }
+                let incarnations: BTreeSet<u32> =
+                    segment[position..end].iter().map(|&(i, _)| i).collect();
+                if incarnations.len() != 1 {
+                    return Err(format!("{name}: record {header:?} spans incarnations"));
+                }
+                records.push((stream, *incarnations.first().unwrap(), header));
+                position = end;
+            }
+        }
+    }
+    let storms = totals.as_array().ok_or("TOTALS is not a list")?;
+    let mut written = [0u64; 2];
+    let mut expected_records = BTreeMap::new();
+    for storm in storms {
+        let key = (
+            storm["boot"].as_str().ok_or("boot")?.to_owned(),
+            storm["process"].as_u64().ok_or("process")? as u32,
+        );
+        for (stream, name) in ["stdout", "stderr"].iter().enumerate() {
+            written[stream] += storm["bytes"][name].as_u64().ok_or("bytes")?;
+            expected_records.insert(
+                (key.clone(), stream),
+                storm["records"][name].as_u64().ok_or("records")?,
+            );
+        }
+    }
+    // Incarnations attribute boots one to one, in boot order.
+    let mut boots = BTreeMap::new();
+    let mut found = BTreeMap::new();
+    let mut sequences: BTreeMap<_, Vec<u64>> = BTreeMap::new();
+    for (stream, incarnation, header) in &records {
+        let key = (header.boot.clone(), header.process);
+        if !expected_records.contains_key(&(key.clone(), *stream)) {
+            return Err(format!("record {header:?} from no reported storm"));
+        }
+        if *boots.entry(header.boot.clone()).or_insert(*incarnation) != *incarnation {
+            return Err(format!("boot {} logged in two incarnations", header.boot));
+        }
+        *found.entry((key.clone(), *stream)).or_insert(0u64) += 1;
+        sequences
+            .entry((key, header.thread, *stream))
+            .or_default()
+            .push(header.sequence);
+    }
+    let incarnations: BTreeSet<_> = boots.values().collect();
+    if incarnations.len() != boots.len() || boots.len() != 2 {
+        return Err(format!("boots and incarnations do not match: {boots:?}"));
+    }
+    for ((key, thread, stream), sequence) in &sequences {
+        if sequence.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(format!(
+                "{key:?} thread {thread} stream {stream}: records out of order"
+            ));
+        }
+    }
+    let storms_seen: BTreeSet<_> = found.keys().map(|(key, _)| key).collect();
+    if storms_seen.len() != storms.len() {
+        return Err(format!(
+            "records of only {} storms retained",
+            storms_seen.len()
+        ));
+    }
+    // Each lost record or observation carried at most one 2048-byte chunk.
+    let gap_chunks = worker_gaps + source_gaps;
+    for stream in 0..2 {
+        let missing = written[stream]
+            .checked_sub(logged_bytes[stream])
+            .ok_or_else(|| format!("stream {stream}: more bytes logged than written"))?;
+        let bound = gap_chunks * 2048;
+        if missing > bound {
+            return Err(format!(
+                "stream {stream}: {missing} bytes missing but gaps cover at most {bound}"
+            ));
+        }
+    }
+    if gap_chunks == 0 && found != expected_records {
+        return Err(format!(
+            "records without gaps {found:?} != {expected_records:?}"
+        ));
+    }
+    Ok(format!(
+        "records={} worker_gap_records={worker_gaps} source_gap_observations={source_gaps} \
+         logged={logged_bytes:?} written={written:?}",
+        records.len()
+    ))
+}
+
+/// Check what `logs` retained of an exited leader and its orphaned writer, and
+/// that the simulation ended at the oracle's exit, before the writer finished.
+fn check_leader_exit(world: &seedbox_api::WorldState, logged: &[Logged]) -> Result<String, String> {
+    use seedbox_api::MachineCondition;
+    let machine = |name: &str| {
+        world
+            .machines
+            .iter()
+            .find(|m| m.name == name)
+            .ok_or_else(|| format!("no machine {name}"))
+    };
+    let (app, oracle) = (machine("app")?, machine("oracle")?);
+    if app.condition != MachineCondition::Exited || app.exit_code != Some(0) {
+        return Err(format!(
+            "app is {:?} with {:?}",
+            app.condition, app.exit_code
+        ));
+    }
+    let exited = app.condition_since_ns.ok_or("app exit has no time")?;
+    if oracle.condition != MachineCondition::Exited
+        || oracle.condition_since_ns != Some(world.simulated_time_ns)
+    {
+        return Err(format!(
+            "simulation ended at {} ns, not at the oracle's exit {:?}",
+            world.simulated_time_ns, oracle.condition_since_ns
+        ));
+    }
+    // The writer prints for 10 s after it starts, about 1 s before the leader exits.
+    if world.simulated_time_ns >= exited + 9_000_000_000 {
+        return Err("simulation waited for the orphaned writer".into());
+    }
+    let mut text = Vec::new();
+    for entry in logged {
+        match entry {
+            Logged::Bytes {
+                time_ns,
+                stderr,
+                bytes,
+                ..
+            } => {
+                if *time_ns > exited {
+                    return Err(format!(
+                        "output logged at {time_ns} ns, after exit at {exited}"
+                    ));
+                }
+                if *stderr {
+                    return Err(format!(
+                        "unexpected stderr {:?}",
+                        String::from_utf8_lossy(bytes)
+                    ));
+                }
+                text.extend_from_slice(bytes);
+            }
+            Logged::WorkerGap { .. } | Logged::SourceGap { .. } => {
+                return Err("small output has a log gap".into())
+            }
+        }
+    }
+    let text = String::from_utf8(text).map_err(|e| e.to_string())?;
+    let leader: Vec<_> = text.lines().filter(|l| l.starts_with("LEADER")).collect();
+    let expected: Vec<String> = (0..5)
+        .map(|n| format!("LEADER {n}"))
+        .chain(["LEADER_EXIT".into()])
+        .collect();
+    if leader != expected {
+        return Err(format!("leader output {leader:?}"));
+    }
+    let orphan: Vec<_> = text.lines().filter(|l| l.starts_with("ORPHAN ")).collect();
+    for (n, line) in orphan.iter().enumerate() {
+        if !line.starts_with(&format!("ORPHAN {n:03} ")) {
+            return Err(format!("orphan line {n} is {line:?}"));
+        }
+    }
+    // A bounded drain: the lines queued at the leader's exit, not 10 s of output.
+    if orphan.is_empty() || orphan.len() >= 50 {
+        return Err(format!("{} orphan lines retained", orphan.len()));
+    }
+    if text.lines().count() != leader.len() + orphan.len() {
+        return Err(format!("unexpected app output {text:?}"));
+    }
+    Ok(format!("exited_ns={exited} orphan_lines={}", orphan.len()))
+}
+
+/// Run each `logs-*` workload, check what `logs` retained against the guest's
+/// own account, then replay it and require the same retained entries.
+fn retained_output(
+    cli: &Path,
+    directory: &Path,
+    state: &Path,
+    workload: &Path,
+) -> Result<(), String> {
+    let output = invoke(
+        cli,
+        directory,
         state,
-        &durability,
-    ) {
-        failures.push(format!("{} (torn writes): {error}", durability.display()));
+        "run",
+        &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
+    )?;
+    let id: seedbox_api::SimulationId = simulation_id(&output)?
+        .parse()
+        .map_err(|e| format!("{e:?}"))?;
+    let client = seedbox_client::Client::connect_to(&state.join("server.sock"))
+        .map_err(|e| e.to_string())?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let logged = runtime.block_on(retained_logs(&client, &id, "app"))?;
+    let summary = if workload.file_stem().is_some_and(|s| s == "logs-storm") {
+        let totals = oracle_line(cli, directory, state, "totals", id.as_str(), "TOTALS ")?;
+        let totals = serde_json::from_str(&totals["TOTALS ".len()..]).map_err(|e| e.to_string())?;
+        check_storm(&logged, &totals)?
+    } else {
+        let world = runtime
+            .block_on(client.world(&id))
+            .map_err(|e| e.to_string())?;
+        check_leader_exit(&world, &logged)?
+    };
+    eprintln!("retained output: {} {summary}", workload.display());
+    let replay = invoke(
+        cli,
+        directory,
+        state,
+        "replay",
+        &["replay", id.as_str(), "--wall-time", "30m"],
+    )?;
+    let replayed: seedbox_api::SimulationId = replay
+        .lines()
+        .find_map(|line| line.strip_prefix("MATCH: "))
+        .ok_or_else(|| format!("replay did not match: {replay}"))?
+        .parse()
+        .map_err(|e| format!("{e:?}"))?;
+    let again = runtime.block_on(retained_logs(&client, &replayed, "app"))?;
+    let compared = same_retained_logs(&logged, &again)?;
+    eprintln!("retained output: {compared} simulated times agree with replay {replayed}");
+    Ok(())
+}
+
+/// Application output retention: a stdout/stderr storm across a restart and a
+/// reboot, and a leader that exits while an orphaned writer continues.
+#[test]
+fn retained_output_is_accounted_attributed_and_replayed() {
+    let cli = std::env::var_os("SEEDBOX_TEST_CLI")
+        .expect("harness/check.sh supplies the current release CLI");
+    let reports =
+        std::env::var_os("SEEDBOX_TEST_REPORT_DIR").expect("set a fresh SEEDBOX_TEST_REPORT_DIR");
+    let workloads =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../harness/acceptance/workloads");
+    let mut selected: Vec<_> = fs::read_dir(&workloads)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension().is_some_and(|e| e == "yaml")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("logs-"))
+        })
+        .collect();
+    selected.sort();
+    assert_eq!(selected.len(), 2);
+    let state_directory = tempfile::Builder::new()
+        .prefix("seedbox-logs-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let state_path = state_directory.path().join("state");
+    let state = state_path.as_path();
+    let server = match Server::start(Path::new(&cli), state) {
+        Ok(server) => server,
+        Err(error) => {
+            let retained = state_directory.keep();
+            panic!("{error}; retained server state: {}", retained.display());
+        }
+    };
+    let mut failures = Vec::new();
+    for workload in selected {
+        let directory = Path::new(&reports)
+            .join("retained-output")
+            .join(workload.file_stem().unwrap());
+        fs::create_dir_all(&directory).unwrap();
+        if let Err(error) = retained_output(Path::new(&cli), &directory, state, &workload) {
+            failures.push(format!("{}: {error}", workload.display()));
+        }
     }
     drop(server);
     if !failures.is_empty() {
