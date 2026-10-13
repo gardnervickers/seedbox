@@ -1241,6 +1241,132 @@ mod spi_regression {
         assert!(fresh().restore_checkpoint(checkpoint.as_slice()).is_err());
     }
 
+    /// NEXT-100 case 9: one-component mutations of a stopped application
+    /// machine against each retained comparison field. The application witness
+    /// and the full-state digest are different projections: the witness covers
+    /// the exit trace, the console stream, the clock and the disk; the full
+    /// state covers RAM, CPU, devices (with the disk), UART registers and the
+    /// interrupt and clock state. The matrix states what each mutation must
+    /// change and what it must leave alone.
+    #[test]
+    fn each_component_mutation_changes_exactly_its_comparison_fields() {
+        use std::collections::BTreeMap;
+        let fresh = || {
+            let mut m = machine();
+            let mut disk = crate::disk::Disk::new(None, Some(16)).unwrap();
+            disk.write(1, &[3; 512]).unwrap();
+            disk.flush();
+            disk.write(2, &[5; 512]).unwrap();
+            m.application.as_mut().unwrap().block = Some(application::virtio::Virtio::block(disk));
+            m.uart.console.extend_from_slice(b"ready\n");
+            m.trace.push(crate::witness::Record {
+                kind: 1,
+                time: 10,
+                pc: 0x1000,
+                addr: 0x900_0000,
+                data: 1,
+                len: 4,
+                write: true,
+            });
+            unsafe {
+                m.ram.write(0x2000, b"guest data").unwrap();
+            }
+            m
+        };
+        /// Change only the disk: a fresh block device over the edited disk has
+        /// the same transport state as the fixture's.
+        fn edit_disk(m: &mut Machine<Fake>, edit: impl FnOnce(&mut crate::disk::Disk)) {
+            let devices = m.application.as_mut().unwrap();
+            let mut disk = devices.block.as_ref().unwrap().disk().unwrap().clone();
+            edit(&mut disk);
+            devices.block = Some(application::virtio::Virtio::block(disk));
+        }
+        let fields = |m: &Machine<Fake>| -> BTreeMap<&'static str, String> {
+            let evidence = m.application_evidence(true).unwrap();
+            let parts = evidence.state_digest_parts.unwrap();
+            let disk = m
+                .application
+                .as_ref()
+                .unwrap()
+                .block
+                .as_ref()
+                .unwrap()
+                .disk()
+                .unwrap();
+            BTreeMap::from([
+                ("witness", evidence.witness),
+                ("full_state", evidence.state_digest.unwrap()),
+                ("trace", evidence.trace_hash),
+                ("console", evidence.console_hash),
+                ("disk", evidence.disk_digest.unwrap()),
+                // What survives a crash under the default drop-volatile policy.
+                ("disk_stable", disk.crashed().0.digest()),
+                ("ram", parts["ram"].clone()),
+                ("cpu", parts["cpu"].clone()),
+                ("devices", parts["devices"].clone()),
+                ("uart", parts["uart"].clone()),
+                ("clock", parts["clock"].clone()),
+            ])
+        };
+        let original = fields(&fresh());
+        assert_eq!(fields(&fresh()), original, "evidence is not reproducible");
+        type Mutation = fn(&mut Machine<Fake>);
+        let matrix: [(&str, Mutation, &[&str]); 7] = [
+            (
+                "console byte",
+                |m| m.uart.console[0] ^= 1,
+                &["witness", "console"],
+            ),
+            (
+                "exit record",
+                |m| m.trace.last_mut().unwrap().data ^= 1,
+                &["witness", "trace"],
+            ),
+            (
+                "timer delivery",
+                |m| m.inject_spi(TIMER_SPI, true).unwrap(),
+                &["full_state", "clock"],
+            ),
+            (
+                "volatile sector",
+                |m| edit_disk(m, |d| d.write(2, &[6; 512]).unwrap()),
+                &["witness", "full_state", "disk", "devices"],
+            ),
+            (
+                "stable sector",
+                |m| {
+                    edit_disk(m, |d| {
+                        d.write(1, &[4; 512]).unwrap();
+                        d.flush();
+                    })
+                },
+                &["witness", "full_state", "disk", "disk_stable", "devices"],
+            ),
+            (
+                "guest RAM byte",
+                |m| unsafe { m.ram.write(0x2000, b"G").unwrap() },
+                &["full_state", "ram"],
+            ),
+            (
+                "CPU register",
+                |m| m.backend.set_reg(CoreReg::X(3), 7).unwrap(),
+                &["full_state", "cpu"],
+            ),
+        ];
+        for (name, mutate, expected) in matrix {
+            let mut m = fresh();
+            mutate(&mut m);
+            let changed: Vec<&str> = fields(&m)
+                .into_iter()
+                .filter(|(field, value)| original[field] != *value)
+                .map(|(field, _)| field)
+                .collect();
+            let mut expected = expected.to_vec();
+            expected.sort_unstable();
+            assert_eq!(changed, expected, "{name}");
+        }
+    }
+
     #[test]
     fn throttle_changes_only_future_syscall_cost_and_survives_publication() {
         let mut m = machine();
