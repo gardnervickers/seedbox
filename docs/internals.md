@@ -136,6 +136,9 @@ A signal that interrupts a thread waiting for such a flush is delayed until the
 thread re-enters the code cache: running the handler at once abandoned the wait
 while the thread still looked parked, so later flushes redirected it from a
 stale context (JFR sampling and `tgkill` crashed compiled Java code this way).
+A thread starting a stop-all-threads lets threads already waiting for one go
+first: forking also stops all threads, and a JIT thread flushing after every
+code write otherwise retook the lock each time and the fork never ran.
 Minimal reproducers are in [`tools/jvm-fuzz/repros`](../tools/jvm-fuzz/repros).
 
 Code: [progress client](../guest/progress/progress.c),

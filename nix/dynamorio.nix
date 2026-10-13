@@ -60,6 +60,9 @@ pkgs.stdenv.mkDerivation {
     # Backport of upstream PR #7958: sigsuspend hung when a signal it unblocks
     # was already pending in the translator.
     ../guest/progress/dynamorio-sigsuspend-pending.patch
+    # A thread starting a stop-all-threads lets waiting ones go first: a JIT
+    # thread flushing after every code write starved a forking thread.
+    ../guest/progress/dynamorio-synch-fairness.patch
   ] else [
     # The same translator syscall mark, in rbx.
     ../guest/progress/dynamorio-x86-translator-syscalls.patch
