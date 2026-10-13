@@ -353,7 +353,10 @@ descendant that calls `setsid()` has left the group: it keeps running through
 both, keeps its listening ports across `restart` (the new incarnation cannot
 bind them until it exits), and ends only by exiting or with a machine crash.
 Daemonizing applications must close inherited listeners, or the survivor also
-holds the application's own port.
+holds the application's own port. When the application's main process exits,
+the supervisor relays the output already queued and reports the exit at once;
+it does not wait for descendants that inherited stdout or stderr, and nothing
+they write later is logged.
 
 A checkpoint captures the world and its input-program cursor together. Restoring
 it must neither repeat consumed overrides nor lose pending ones. Capture requires
