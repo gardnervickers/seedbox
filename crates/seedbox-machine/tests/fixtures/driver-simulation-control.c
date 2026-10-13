@@ -163,12 +163,25 @@ int main(int argc, char **argv) {
         for (;;) pause();
     }
     int sleep_trigger = !strcmp(argv[1], "sleep-trigger-oracle");
-    if (!sleep_trigger && strcmp(argv[1], "oracle")) fail("unknown role");
+    int spawn_oracle = !strcmp(argv[1], "spawn-oracle");
+    if (!sleep_trigger && !spawn_oracle && strcmp(argv[1], "oracle")) fail("unknown role");
     struct sockaddr_un address = {.sun_family = AF_UNIX};
     const char path[] = "/run/seedbox/control.sock";
     memcpy(address.sun_path, path, sizeof(path));
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0 || connect(fd, (struct sockaddr *)&address, sizeof(address))) fail("connect");
+    if (spawn_oracle) {
+        struct value result = call(fd, 1, "\"op\":\"spawn\",\"machine\":\"peer\"", 0);
+        if (!literal(field(result, "machine"), "\"peer\"")) fail("spawn machine name");
+        struct value root = {reply, value_end(reply, 0)};
+        if (number(field(root, "effect_at_ns")) != number(field(root, "admitted_at_ns")) ||
+            number(field(root, "effect_at_ns")) != number(field(root, "replied_at_ns"))) fail("spawn Applied evidence");
+        marker("SPAWN_APPLIED\n");
+        call(fd, 2, "\"op\":\"sleep\",\"duration_ns\":2000000000", 0);
+        marker("DONE\n");
+        if (close(fd)) fail("close");
+        return 0;
+    }
     if (sleep_trigger) {
         stream_marker = 1;
         call(fd, 1, "\"op\":\"arm_trigger\",\"source\":{\"machine\":\"oracle\"},\"marker\":[110,101,101,100,108,101],\"match_timeout_ns\":100000000,\"fault\":{\"action\":\"stop\",\"target\":{\"machine\":\"peer\"}}", 0);

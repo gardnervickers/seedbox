@@ -877,6 +877,173 @@ fn tcg_native_repeat_run_has_identical_trace() {
     }
 }
 
+/// Real guest spawn with an oracle-only initial set and a separately declared peer.
+fn spawn_scenario<M>(
+    workers: usize,
+    mut definition: machine_crate::definition::MachineDefinition,
+    application: Vec<u8>,
+    factory: impl FnMut(&machine_crate::definition::MachineDefinition) -> Result<M, M::Error>
+        + Send
+        + 'static,
+) -> (Vec<StepOutcome>, Vec<machine_crate::driver::Event>)
+where
+    M: Machine<Context = ()> + Send + 'static,
+    M::Error: Debug + Send + 'static,
+{
+    use machine_crate::driver::{Cause, FaultAction, SettlementStatus};
+    install_application(&mut definition, &application);
+    let mut oracle = definition.clone();
+    oracle.name = "oracle".into();
+    oracle.application.launch.argv = vec!["/application".into(), "spawn-oracle".into()];
+    definition.name = "peer".into();
+    definition.application.launch.argv = vec!["/application".into(), "peer".into()];
+    let mut driver = Driver::new(
+        at(0),
+        Duration::from_nanos(QUANTUM),
+        workers,
+        FixtureRng(9),
+        || Ok(()),
+        oracle,
+        vec![],
+        vec![definition],
+        factory,
+    )
+    .unwrap();
+    let initial = driver
+        .with_barrier(|b| Ok(b.machines().map(|(id, _)| id).collect::<Vec<_>>()))
+        .unwrap();
+    assert_eq!(initial.len(), 1);
+    let mut events = driver.drain_events();
+    let mut outcomes = Vec::new();
+    let started = Instant::now();
+    let mut now = at(0);
+    for _ in 0..20000 {
+        assert!(
+            started.elapsed() < Duration::from_secs(180),
+            "native spawn deadline"
+        );
+        let outcome = driver.step(at(now.as_nanos() + QUANTUM)).unwrap();
+        events.extend(driver.drain_events());
+        outcomes.push(outcome);
+        match outcome {
+            StepOutcome::BarrierReached { at } => now = at,
+            StepOutcome::Finished {
+                reason: ExitReason::ProgramExit { code: 0 },
+                ..
+            } => break,
+            _ => panic!("unexpected native spawn outcome: {outcome:?}"),
+        }
+    }
+    assert!(matches!(
+        outcomes.last(),
+        Some(StepOutcome::Finished {
+            reason: ExitReason::ProgramExit { code: 0 },
+            ..
+        })
+    ));
+    let ids = driver
+        .with_barrier(|b| Ok(b.machines().map(|(id, _)| id).collect::<Vec<_>>()))
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    let output = |id| {
+        events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::Output(MachineResponse {
+                    machine,
+                    payload:
+                        Response::ApplicationOutput {
+                            stream: Stream::Stdout,
+                            bytes,
+                        },
+                    ..
+                }) if *machine == id => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(output(ids[1]), b"PEER_RUNNING\n");
+    let oracle_bytes = output(ids[0]);
+    let text = std::str::from_utf8(&oracle_bytes).unwrap();
+    assert!(text.contains("\nSPAWN_APPLIED\n"), "{text}");
+    assert!(text.ends_with("DONE\n"), "{text}");
+    let replies: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("RPC_REPLY "))
+        .map(|json| serde_json::from_str(json).unwrap())
+        .collect();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[0]["ok"], true);
+    assert_eq!(replies[0]["result"], serde_json::json!({"machine":"peer"}));
+    let added = events.iter().position(|e| matches!(e.kind, EventKind::MachineAdded { machine, cause: Cause::Fault(_), .. } if machine == ids[1])).unwrap();
+    let settled = events.iter().position(|e| matches!(&e.kind, EventKind::FaultSettled { record, status: SettlementStatus::Applied, .. } if record.target == ids[1] && record.boot == 0 && record.action == FaultAction::Spawn)).unwrap();
+    let reply = events
+        .iter()
+        .position(
+            |e| matches!(e.kind, EventKind::ReplyAdmitted { id, .. } if id.request.get() == 1),
+        )
+        .unwrap();
+    let first_output = events
+        .iter()
+        .position(|e| matches!(&e.kind, EventKind::Output(o) if o.machine == ids[1]))
+        .unwrap();
+    assert!(added < settled && settled < reply && reply < first_output);
+    driver
+        .with_barrier(|b| {
+            b.snapshot(ids[1])?;
+            Ok(())
+        })
+        .unwrap();
+    (outcomes, events)
+}
+#[test]
+#[ignore = "requires native TCG owned kernel/helper and driver-control application"]
+fn tcg_driver_oracle_spawns_declared_peer_workers_match() {
+    let run = |workers| {
+        let definition = prepared::definition(
+            fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
+            256 << 20,
+        );
+        let mut backend = machine_crate::machine::tcg::Factory::new(
+            &input("SEEDBOX_TCG_QEMU"),
+            &input("SEEDBOX_TCG_ASSETS"),
+        )
+        .unwrap();
+        spawn_scenario(
+            workers,
+            definition,
+            fs::read(input("SEEDBOX_TCG_DRIVER_CONTROL_APPLICATION")).unwrap(),
+            move |d| backend.create(d),
+        )
+    };
+    assert_eq!(run(1), run(4));
+}
+#[cfg(seedbox_pv)]
+#[test]
+#[ignore = "requires native PV kernel/helper and driver-control application"]
+fn pv_driver_oracle_spawns_declared_peer_workers_match() {
+    let run = |workers| {
+        let definition = prepared::definition(
+            fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
+            128 << 20,
+        );
+        let mut backend = machine_crate::machine::pv::Factory::new(
+            &input("SEEDBOX_PV_WORKER"),
+            &input("SEEDBOX_PV_ASSETS"),
+        )
+        .unwrap();
+        spawn_scenario(
+            workers,
+            definition,
+            fs::read(input("SEEDBOX_PV_DRIVER_CONTROL_APPLICATION")).unwrap(),
+            move |d| backend.create(d),
+        )
+    };
+    assert_eq!(run(1), run(4));
+}
+
 fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
     let mut oracle = prepared::definition(
         fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),

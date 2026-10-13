@@ -236,12 +236,25 @@ objective.
    inverse timer deadlines, zero-budget application, epoch, reboot and restore
    policy need resolution. Current guest inputs lack the stopped timekeeper
    mechanism; the ordinary TCG kernel constraint must be addressed explicitly.
-6. **Oracle-driven machine creation.** Finalize MachineDefinition and Launch
-   representation **before merge**. An oracle-only run must create machines at
-   barriers through the retained factory, with deterministic identity/RNG
-   allocation and clear failure semantics. Large filesystem payloads cannot be
-   treated as ordinary small control messages. Factory retention alone is not
-   implementation of Launch.
+6. **Oracle-driven machine creation — implemented in the approved shape.**
+   `Driver::new` accepts a separate `spawnable: Vec<MachineDefinition>` after
+   `machines`; definitions remain unchanged and templating belongs to the caller.
+   All names are unique across oracle, initial machines and spawnable definitions,
+   validated before factories run. Any guest may call `{"op":"spawn","machine":"name"}`;
+   declared inputs stay host-owned rather than travelling as filesystem payloads.
+   Admission reserves an insertion-order identity at boot zero and a fault ID;
+   unknown, already-admitted and same-barrier duplicate names reserve neither
+   identity nor fault ID and draw no seed. At its FIFO effect turn, creation uses
+   the retained factory, draws the next machine seed and registers the name.
+   MachineAdded(Fault) precedes Applied settlement and reply admission; the machine
+   runs from the next round. Factory failure publishes Failed, poisons Driver and
+   leaves confirmed event prefixes drainable. Terminal cutoff withholds pending work.
+   Portable evidence is in `src/driver/spawn_tests.rs` (1/2/4 workers, ordering,
+   rejections, cutoff, equal control access, targeting, snapshots and failure).
+   Native `tests/driver_guest_services.rs` verifies an oracle-only boot spawning a
+   printing peer and reading the Applied reply, with identical complete events
+   and barriers at workers 1 and 4 on both TCG and x86 PV.
+   **TODO BEFORE MERGE: re-evaluate the MachineDefinition / spawnable representation.**
 7. **Final semantic audit and native acceptance.** Map every discussed,
    non-deferred UI/API operation to code and meaningful evidence. Add native
    positive Sleep/trigger coverage and verify both backends for new capabilities.
@@ -258,7 +271,7 @@ objective.
 
 Networking and storage integration/faults, whole-simulation checkpoint/branch,
 and implementing a PMU backend are deferred. Host readback, clock faults,
-inspection and dynamic creation are not deferred.
+inspection are not deferred; dynamic creation is implemented as described above.
 
 Native evidence is from Apple Silicon/HVF, x86-64 Linux/KVM and TCG. The x86
 PV backend passes the existing native PV suites on an AMD KVM host, including
