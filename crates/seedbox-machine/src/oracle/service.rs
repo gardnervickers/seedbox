@@ -3,11 +3,12 @@
 //! first terminal-transition times must come from that owner, including changes
 //! made outside this service. Machine snapshots alone do not snapshot this state.
 use super::{
-    handles::{ExecutionPlan, Handles},
+    handles::{Change, ExecutionPlan, Handles},
     triggers::Triggers,
     *,
 };
 use crate::{
+    clock::ClockRate,
     execution::ExecutionConfig,
     pv::{ApplicationCommand, CommandResult, SimulationControlId},
 };
@@ -54,12 +55,20 @@ pub(crate) enum CommandOwner {
     External,
     RetiredBoot,
     RetiredApplication,
-    Service {
-        fault: u32,
-        action: ApplicationCommand,
-    },
+    Service { fault: u32, action: CommandKind },
+}
+/// A correlated guest command: an application operation or a realtime step.
+/// Both share one per-boot ID space and acknowledge through CommandAcknowledged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandKind {
+    Application(ApplicationCommand),
+    StepRealtime,
 }
 pub(crate) trait Adapter {
+    /// Draw 64 seeded bits from the simulation RNG at the admission barrier.
+    fn draw(&mut self) -> Result<u64, OperationError> {
+        Err(OperationError::unsupported())
+    }
     /// Reserve a declared machine once, without building it or drawing entropy.
     fn reserve_spawn(&mut self, _: &str) -> Result<(), OperationError> {
         Err(OperationError::unsupported())
@@ -73,7 +82,7 @@ pub(crate) trait Adapter {
         target: &str,
         boot: u64,
         fault: u32,
-        action: ApplicationCommand,
+        action: CommandKind,
     ) -> Result<NonZeroU32, String>;
     /// Authoritative admitted-command table, including external commands and
     /// retired boot policy. Unknown/current miscorrelation is an error.
@@ -99,7 +108,24 @@ pub(crate) enum Effect {
     /// Latch graceful shutdown of the current boot (host inputs only).
     Shutdown,
     Execution(ExecutionConfig),
+    /// Driver-applied rate of the target's time base.
+    Drift(ClockRate),
+    /// Guest-performed realtime step; zero settles without a guest command.
+    StepRealtime(i64),
     Process(ApplicationCommand),
+}
+impl Effect {
+    /// Effects carried out by the guest and completed by its acknowledgment.
+    pub(crate) fn guest_command(&self) -> bool {
+        self.command_kind().is_some()
+    }
+    fn command_kind(&self) -> Option<CommandKind> {
+        match *self {
+            Self::Process(action) => Some(CommandKind::Application(action)),
+            Self::StepRealtime(_) => Some(CommandKind::StepRealtime),
+            _ => None,
+        }
+    }
 }
 /// Terminal observations are handed to the timeline/history owner once. No
 /// duplicate unbounded history is kept here. Outcome time is not applied time:
@@ -147,8 +173,33 @@ pub(crate) enum Command {
     Spawn {
         machine: String,
     },
+    /// Step the target's guest realtime (`clock_skew`).
+    StepRealtime {
+        target: Target,
+        nanoseconds: Amount,
+    },
+    /// Set the rate of the target's time base in ppb (`clock_drift`).
+    Drift {
+        target: Target,
+        ppb: Amount,
+    },
+}
+/// A clock fault value: exact, or drawn uniformly from [-max, max] by the
+/// simulation RNG at admission.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Amount {
+    Exact(i64),
+    Seeded(u64),
 }
 impl Command {
+    /// Exactly one of the exact or seeded value; the schema has bounded both.
+    fn amount(exact: Option<i64>, max: Option<u64>) -> Result<Amount, OperationError> {
+        match (exact, max) {
+            (Some(exact), None) => Ok(Amount::Exact(exact)),
+            (None, Some(max)) => Ok(Amount::Seeded(max)),
+            _ => Err(OperationError::invalid("clock fault needs one value")),
+        }
+    }
     fn from_operation(op: Operation) -> Result<Self, OperationError> {
         let effect = |target, effect| Ok(Self::Effect { target, effect });
         match op {
@@ -178,6 +229,22 @@ impl Command {
             }),
             Operation::Heal { handle } => Ok(Self::Heal { handle }),
             Operation::Spawn { machine } => Ok(Self::Spawn { machine }),
+            Operation::ClockSkew {
+                target,
+                offset_ns,
+                max_offset_ns,
+            } => Ok(Self::StepRealtime {
+                target,
+                nanoseconds: Self::amount(offset_ns, max_offset_ns)?,
+            }),
+            Operation::ClockDrift {
+                target,
+                rate_ppb,
+                max_rate_ppb,
+            } => Ok(Self::Drift {
+                target,
+                ppb: Self::amount(rate_ppb, max_rate_ppb)?,
+            }),
             _ => Err(OperationError::unsupported()),
         }
     }
@@ -341,6 +408,8 @@ struct Pending {
     handle: Option<ExecutionPlan>,
     result: Value,
     healing: bool,
+    /// Settlement detail of an effect applied without a guest command.
+    note: Option<&'static str>,
 }
 #[derive(Clone, Default)]
 pub(crate) struct Service {
@@ -523,6 +592,8 @@ impl Service {
                 | Operation::Reboot { .. }
                 | Operation::Throttle { .. }
                 | Operation::Heal { .. }
+                | Operation::ClockSkew { .. }
+                | Operation::ClockDrift { .. }
                 | Operation::Spawn { .. }),
             ) => match Command::from_operation(op) {
                 Err(e) => Err(e),
@@ -623,16 +694,30 @@ impl Service {
                     .handles
                     .heal(&text)
                     .map_err(|e| error(ErrorCode::InvalidState, format!("heal: {e:?}")))?;
-                let facts = match adapter.resolve(&Target::Key(plan.target.clone())) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        self.handles
-                            .rejected(&plan)
-                            .expect("matching local reservation");
-                        return Err(e.into());
-                    }
+                let facts =
+                    match adapter
+                        .resolve(&Target::Key(plan.target.clone()))
+                        .and_then(|facts| {
+                            // Undoing a live step needs the same guest as the step.
+                            if matches!(plan.change, Change::Step(_)) && !plan.lost {
+                                Self::step_state(mode, &facts)?;
+                            }
+                            Ok(facts)
+                        }) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            self.handles
+                                .rejected(&plan)
+                                .expect("matching local reservation");
+                            return Err(e.into());
+                        }
+                    };
+                let effect = match plan.change {
+                    Change::Execution(config) => Effect::Execution(config),
+                    Change::Drift(rate) => Effect::Drift(rate),
+                    Change::Step(nanoseconds) => Effect::StepRealtime(nanoseconds),
                 };
-                (facts, Effect::Execution(plan.config), Some(plan), true)
+                (facts, effect, Some(plan), true)
             }
             Command::Throttle { target, config } => {
                 let facts = adapter.resolve(&target)?;
@@ -642,11 +727,78 @@ impl Service {
                     .map_err(|e| error(ErrorCode::InvalidState, format!("throttle: {e:?}")))?;
                 (facts, Effect::Execution(config), Some(plan), false)
             }
+            Command::StepRealtime {
+                target,
+                nanoseconds,
+            } => {
+                let facts = adapter.resolve(&target)?;
+                Self::step_state(mode, &facts)?;
+                // Draw only after admission checks, at this barrier.
+                let offset = match nanoseconds {
+                    Amount::Exact(offset) => offset,
+                    Amount::Seeded(max) => Self::uniform(adapter, max)?,
+                };
+                let plan = self
+                    .handles
+                    .step(facts.name.clone(), offset)
+                    .map_err(|e| error(ErrorCode::InvalidState, format!("clock_skew: {e:?}")))?;
+                (facts, Effect::StepRealtime(offset), Some(plan), false)
+            }
+            Command::Drift { target, ppb } => {
+                let facts = adapter.resolve(&target)?;
+                // A machine runs at one rate; check before drawing.
+                if self.handles.drifting(&facts.name) {
+                    return Err(error(
+                        ErrorCode::InvalidState,
+                        "target machine clock is already drifting",
+                    )
+                    .into());
+                }
+                let ppb = match ppb {
+                    Amount::Exact(rate) => rate,
+                    Amount::Seeded(max) => Self::uniform(adapter, max)?,
+                };
+                let rate =
+                    ClockRate::new(ppb).map_err(|e| OperationError::invalid(e.to_string()))?;
+                let plan = self
+                    .handles
+                    .drift(facts.name.clone(), rate)
+                    .map_err(|e| error(ErrorCode::InvalidState, format!("clock_drift: {e:?}")))?;
+                (facts, Effect::Drift(rate), Some(plan), false)
+            }
             Command::Effect { target, effect } => (adapter.resolve(&target)?, effect, None, false),
         };
         self.install(
             adapter, mode, requester, call, facts, effect, handle, healing, now, deadline,
         )
+    }
+    /// Realtime steps need a live, unpaused guest to perform them, like
+    /// process commands; unlike them, a down target is rejected outright.
+    fn step_state(mode: AdmissionMode, facts: &Facts) -> Result<(), OperationError> {
+        if matches!(mode, AdmissionMode::Control) && facts.physically_ended && facts.vm != Vm::Down
+        {
+            return Err(error(ErrorCode::TargetUnavailable, "target VM has exited"));
+        }
+        match facts.vm {
+            Vm::Down => Err(error(ErrorCode::InvalidState, "target machine is down")),
+            Vm::Paused => Err(error(ErrorCode::InvalidState, "target machine is paused")),
+            Vm::Up => Ok(()),
+        }
+    }
+    /// Uniform in [-max, max] by rejection sampling of seeded 64-bit draws.
+    fn uniform(adapter: &mut impl Adapter, max: u64) -> Result<i64, OperationError> {
+        let span = max
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(1))
+            .filter(|_| i64::try_from(max).is_ok())
+            .ok_or_else(|| OperationError::invalid("seeded clock bound overflow"))?;
+        let limit = u64::MAX - u64::MAX % span;
+        loop {
+            let draw = adapter.draw()?;
+            if draw < limit {
+                return Ok((draw % span) as i64 - max as i64);
+            }
+        }
     }
     #[allow(clippy::too_many_arguments)]
     fn install(
@@ -691,7 +843,10 @@ impl Service {
             Effect::Crash => facts.vm != Vm::Down,
             Effect::Reboot => facts.vm == Vm::Down,
             Effect::Shutdown => facts.vm != Vm::Down,
-            Effect::Execution(_) | Effect::Spawn => true,
+            // Clock effects were checked before drawing their values.
+            Effect::Execution(_) | Effect::Spawn | Effect::Drift(_) | Effect::StepRealtime(_) => {
+                true
+            }
         };
         if !allowed {
             return Err(error(ErrorCode::InvalidState, "target state rejects operation").into());
@@ -712,8 +867,21 @@ impl Service {
             admitted: now,
             result: match &handle {
                 _ if effect == Effect::Spawn => json!({"machine":facts.name}),
-                Some(h) if !healing => json!({"handle":h.handle.to_string()}),
+                Some(h) if !healing => match effect {
+                    Effect::StepRealtime(offset) => {
+                        json!({"handle":h.handle.to_string(),"offset_ns":offset})
+                    }
+                    Effect::Drift(rate) => {
+                        json!({"handle":h.handle.to_string(),"rate_ppb":rate.ppb()})
+                    }
+                    _ => json!({"handle":h.handle.to_string()}),
+                },
                 _ => json!({}),
+            },
+            note: match &handle {
+                Some(h) if h.lost => Some("realtime step ended with its machine incarnation"),
+                _ if effect == Effect::StepRealtime(0) => Some("zero realtime step"),
+                _ => None,
             },
             handle,
             healing,
@@ -730,17 +898,21 @@ impl Service {
             requested_at: Self::requested_at(&pending),
             admitted_at: now,
         }));
+        let immediate = pending.effect == Effect::StepRealtime(0);
         self.pending.insert(fault, pending);
+        if immediate {
+            // Nothing for the guest to do: a zero draw, or healing a step
+            // whose kernel already ended.
+            return Ok((fault, self.finish(fault, now, now, Ok(()))?));
+        }
         let mut plans = vec![];
-        if !unavailable
-            && (!matches!(self.pending[&fault].effect, Effect::Process(_)) || facts.ready)
-        {
+        if !unavailable && (!self.pending[&fault].effect.guest_command() || facts.ready) {
             match Self::dispatch(adapter, fault, self.pending.get_mut(&fault).unwrap(), now) {
                 Ok(plan) => plans.push(plan),
                 Err(e) => return Err(self.fatal(Some(fault), Some(now), now, e.message).into()),
             }
         }
-        if matches!(self.pending[&fault].effect, Effect::Process(_)) {
+        if self.pending[&fault].effect.guest_command() {
             plans.push(Plan::Deadline {
                 fault,
                 at: deadline,
@@ -765,7 +937,7 @@ impl Service {
         p: &mut Pending,
         at: u64,
     ) -> Result<Plan, Failure> {
-        if let Effect::Process(action) = p.effect {
+        if let Some(action) = p.effect.command_kind() {
             p.command = Some(adapter.command_id(&p.target, p.boot, fault, action)?);
             p.dispatched = Some(at);
         }
@@ -794,7 +966,7 @@ impl Service {
         for (&fault, p) in &mut self.pending {
             if p.target == target
                 && p.boot == boot
-                && matches!(p.effect, Effect::Process(_))
+                && p.effect.guest_command()
                 && p.command.is_none()
                 && at <= p.deadline
             {
@@ -837,7 +1009,11 @@ impl Service {
             && facts.vm != Vm::Down
             && matches!(
                 pending.effect,
-                Effect::Pause | Effect::Resume | Effect::Shutdown | Effect::Process(_)
+                Effect::Pause
+                    | Effect::Resume
+                    | Effect::Shutdown
+                    | Effect::Process(_)
+                    | Effect::StepRealtime(_)
             )
         {
             return Ok(Some(Err(error(
@@ -851,10 +1027,12 @@ impl Service {
             Effect::Crash => facts.vm != Vm::Down,
             Effect::Reboot => facts.vm == Vm::Down,
             Effect::Shutdown => facts.vm != Vm::Down,
-            Effect::Execution(_) | Effect::Spawn => true,
+            Effect::Execution(_) | Effect::Spawn | Effect::Drift(_) => true,
             // Commands already reserved for the application are decided by its
             // actual acknowledgment. Earlier commands can change process state.
-            Effect::Process(_) => facts.vm != Vm::Down && !facts.physically_ended,
+            Effect::Process(_) | Effect::StepRealtime(_) => {
+                facts.vm != Vm::Down && !facts.physically_ended
+            }
         };
         Ok(Some(if allowed {
             Ok(())
@@ -874,9 +1052,9 @@ impl Service {
         if self
             .pending
             .get(&fault)
-            .is_some_and(|p| matches!(p.effect, Effect::Process(_)))
+            .is_some_and(|p| p.effect.guest_command())
         {
-            return Err("process completion requires acknowledgment".into());
+            return Err("guest command completion requires acknowledgment".into());
         }
         self.finish(fault, observed, at, Ok(()))
     }
@@ -921,7 +1099,7 @@ impl Service {
             || !self
                 .pending
                 .get(&fault)
-                .is_some_and(|p| p.effect == Effect::Process(action))
+                .is_some_and(|p| p.effect.command_kind() == Some(action))
         {
             return Err(self.fatal(
                 actual,
@@ -929,6 +1107,30 @@ impl Service {
                 at,
                 "miscorrelated service acknowledgment",
             ));
+        }
+        if result == CommandResult::Rejected && action == CommandKind::StepRealtime {
+            // The kernel may refuse a valid request (realtime before the
+            // epoch); nothing changed, so settle Rejected without poisoning.
+            if self.pending[&fault]
+                .dispatched
+                .is_some_and(|sent| observed < sent)
+            {
+                return Err(self.fatal(
+                    Some(fault),
+                    Some(observed),
+                    at,
+                    "acknowledgment precedes dispatch",
+                ));
+            }
+            return self.finish(
+                fault,
+                observed,
+                at,
+                Err(error(
+                    ErrorCode::InvalidState,
+                    "guest refused the realtime step",
+                )),
+            );
         }
         if result == CommandResult::Rejected {
             return Err(self.fatal(
@@ -989,7 +1191,7 @@ impl Service {
             .as_ref()
             .err()
             .map(|e| e.message.clone())
-            .unwrap_or_else(|| "confirmed effect".into());
+            .unwrap_or_else(|| p.note.unwrap_or("confirmed effect").into());
         let settlement = Self::settlement(fault, p, Some(observed), at, status, detail);
         if let Some(handle) = &p.handle {
             let completion = if result.is_ok() {
@@ -1037,7 +1239,10 @@ impl Service {
         observed: u64,
         at: u64,
     ) -> Result<Vec<Plan>, Failure> {
-        self.end_processes(target, boot, observed, at, true)
+        let plans = self.end_processes(target, boot, observed, at, true)?;
+        // Settled realtime steps ended with this kernel; drift persists.
+        self.handles.machine_ended(target);
+        Ok(plans)
     }
     /// Natural application exit retires operations on that old group. A queued
     /// Start belongs to the next application and must still receive its Ack.
@@ -1063,7 +1268,16 @@ impl Service {
             .pending
             .iter()
             .filter(|(_, p)| {
-                p.target == target && p.boot == boot && matches!(p.effect, Effect::Process(action) if include_start || action!=ApplicationCommand::Start)
+                p.target == target
+                    && p.boot == boot
+                    && match p.effect {
+                        Effect::Process(action) => {
+                            include_start || action != ApplicationCommand::Start
+                        }
+                        // Steps are kernel work: application exit keeps them.
+                        Effect::StepRealtime(_) => include_start,
+                        _ => false,
+                    }
             })
             .map(|(&id, _)| id)
             .collect();

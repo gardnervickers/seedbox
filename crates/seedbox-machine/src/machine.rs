@@ -4,7 +4,9 @@ use crate::{clock::Clock, execution::ExecutionConfig, rng::RngStream};
 
 /// Dependencies supplied for one stopped execution interval.
 /// Worker resources belong to the executing thread; clock and RNG belong to
-/// the driver. The execution rate is a copied driver-owned setting.
+/// the driver. The execution rate is a copied driver-owned setting. The clock
+/// reads this machine's time base, which the Driver maps to simulation time;
+/// the mapping itself is never exposed to or captured by the machine.
 /// The RNG cursor follows the machine, independently of the worker.
 pub struct RunContext<'a, C> {
     pub worker: &'a mut C,
@@ -80,8 +82,10 @@ pub trait Machine {
     ///
     /// # Time and execution boundaries
     ///
-    /// All timestamps use simulation time, before guest clock offset or skew.
-    /// Execution starts at the later of the machine's current execution position
+    /// All timestamps (the clock, `upto`, input and output times and returned
+    /// positions and deadlines) use this machine's time base, which the Driver
+    /// maps to simulation time. A guest realtime step does not change it.
+    /// The machine needs no knowledge of that mapping. Execution starts at the later of the machine's current execution position
     /// and the current simulation time supplied by its environment. The caller
     /// must provide `upto` at or after both. Execution must not expose effects
     /// beyond `upto`. Returned `reached` timestamps never move backwards or

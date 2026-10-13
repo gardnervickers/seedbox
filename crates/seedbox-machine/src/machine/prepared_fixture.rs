@@ -17,5 +17,6 @@ pub(super) fn bootstrap(backend: &str) -> GuestBootstrap {
         },
         init: fs::read(input(&format!("SEEDBOX_{backend}_INIT"))).unwrap(),
         base_initramfs: Vec::new(),
+        epoch_seconds: 0,
     }
 }

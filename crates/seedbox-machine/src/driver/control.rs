@@ -10,10 +10,11 @@ use crate::{
     execution::ExecutionConfig,
     oracle::{
         observation::{Origin, State},
-        service::{Adapter, CommandOwner, Facts, Service},
+        service::{Adapter, CommandKind, CommandOwner, Facts, Service},
         OperationError, Target,
     },
-    pv::ApplicationCommand,
+    pv::Request,
+    rng::RngStream,
 };
 use serde_json::Value;
 use std::{
@@ -24,10 +25,19 @@ use std::{
 #[derive(Default)]
 struct Commands {
     next: u32,
-    used: BTreeMap<NonZeroU32, (ApplicationCommand, Origin, bool)>,
+    used: BTreeMap<NonZeroU32, (CommandKind, Origin, bool)>,
+}
+/// The correlated guest command carried by a request, if any. Application
+/// commands and realtime steps share one per-boot ID space.
+pub(super) fn command(request: &Request) -> Option<(NonZeroU32, CommandKind)> {
+    match *request {
+        Request::Application { id, command } => Some((id, CommandKind::Application(command))),
+        Request::StepRealtime { id, .. } => Some((id, CommandKind::StepRealtime)),
+        _ => None,
+    }
 }
 impl Commands {
-    fn reserve(&mut self, fault: u32, action: ApplicationCommand) -> Result<NonZeroU32, String> {
+    fn reserve(&mut self, fault: u32, action: CommandKind) -> Result<NonZeroU32, String> {
         loop {
             self.next = self
                 .next
@@ -187,7 +197,7 @@ impl Control {
         &mut self,
         id: MachineId,
         command: NonZeroU32,
-        action: ApplicationCommand,
+        action: CommandKind,
         origin: Origin,
     ) -> Result<(), String> {
         let used = &mut self.entries[id.0].commands.used;
@@ -245,6 +255,8 @@ impl Control {
     }
 }
 pub(super) struct View<'a> {
+    /// Simulation RNG for seeded fault draws, lent only to call admission.
+    rng: Option<&'a mut dyn RngStream>,
     entries: &'a mut [Observed],
     spawnable: &'a mut BTreeSet<String>,
     spawning: &'a mut BTreeMap<String, MachineId>,
@@ -255,6 +267,12 @@ impl View<'_> {
     }
 }
 impl Adapter for View<'_> {
+    fn draw(&mut self) -> Result<u64, OperationError> {
+        let rng = self.rng.as_mut().ok_or_else(OperationError::unsupported)?;
+        let mut bytes = [0; 8];
+        rng.fill_bytes(&mut bytes);
+        Ok(u64::from_le_bytes(bytes))
+    }
     fn reserve_spawn(&mut self, name: &str) -> Result<(), OperationError> {
         if !self.spawnable.remove(name) {
             return Err(OperationError::invalid("unknown or already admitted spawn"));
@@ -283,7 +301,7 @@ impl Adapter for View<'_> {
         target: &str,
         boot: u64,
         fault: u32,
-        action: ApplicationCommand,
+        action: CommandKind,
     ) -> Result<NonZeroU32, String> {
         let index = self.index(target)?;
         let entry = &mut self.entries[index];
@@ -350,20 +368,34 @@ mod tests {
     fn boot_allocator_restarts_per_boot_and_never_wraps() {
         let mut commands = Commands::default();
         assert_eq!(
-            commands.reserve(7, ApplicationCommand::Stop).unwrap().get(),
+            commands
+                .reserve(
+                    7,
+                    CommandKind::Application(crate::pv::ApplicationCommand::Stop)
+                )
+                .unwrap()
+                .get(),
             1
         );
         commands.reset();
         assert_eq!(
             commands
-                .reserve(8, ApplicationCommand::Start)
+                .reserve(
+                    8,
+                    CommandKind::Application(crate::pv::ApplicationCommand::Start)
+                )
                 .unwrap()
                 .get(),
             1
         );
         commands.next = u32::MAX;
         let before = commands.used.clone();
-        assert!(commands.reserve(9, ApplicationCommand::Pause).is_err());
+        assert!(commands
+            .reserve(
+                9,
+                CommandKind::Application(crate::pv::ApplicationCommand::Pause)
+            )
+            .is_err());
         assert_eq!(commands.used, before);
     }
 }
@@ -392,9 +424,18 @@ impl Control {
         &mut self,
         f: impl FnOnce(&mut Service, &mut View<'_>) -> Result<T, crate::oracle::service::Failure>,
     ) -> Result<T, String> {
+        self.invoke_with(None, f)
+    }
+    /// Invoke with the simulation RNG available for seeded draws.
+    pub(super) fn invoke_with<'r, T>(
+        &'r mut self,
+        rng: Option<&'r mut (dyn RngStream + 'r)>,
+        f: impl FnOnce(&mut Service, &mut View<'_>) -> Result<T, crate::oracle::service::Failure>,
+    ) -> Result<T, String> {
         let result = f(
             &mut self.service,
             &mut View {
+                rng,
                 entries: &mut self.entries,
                 spawnable: &mut self.spawnable,
                 spawning: &mut self.spawning,
@@ -604,6 +645,10 @@ impl Control {
                 FaultAction::Effect(Effect::Reboot) => Public::Reboot,
                 FaultAction::Effect(Effect::Shutdown) => Public::Shutdown,
                 FaultAction::Effect(Effect::Execution(config)) => Public::SetExecution(*config),
+                FaultAction::Effect(Effect::Drift(rate)) => Public::Drift(*rate),
+                FaultAction::Effect(Effect::StepRealtime(nanoseconds)) => {
+                    Public::StepRealtime(*nanoseconds)
+                }
                 FaultAction::Effect(Effect::Process(command)) => Public::Application(*command),
             },
             handle: handle.clone().map(super::FaultHandle),

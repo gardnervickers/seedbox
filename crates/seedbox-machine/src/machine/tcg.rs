@@ -47,6 +47,9 @@ pub(crate) enum Boot {
         initramfs: Arc<[u8]>,
         firmware: Arc<[u8]>,
         command_line: String,
+        /// Realtime epoch of every boot. The supervisor sets realtime from it;
+        /// the board RTC derives from it too, so no host wall clock is read.
+        epoch_seconds: u32,
     },
 }
 
@@ -162,6 +165,7 @@ impl TcgMachine {
                     initramfs: initramfs.into(),
                     firmware: firmware.into(),
                     command_line: bootstrap.kernel.command_line.clone(),
+                    epoch_seconds: bootstrap.epoch_seconds,
                 },
             },
         )
@@ -434,6 +438,7 @@ impl Machine for TcgMachine {
                     crate::pv::Request::Reboot => self.request_reboot(now.max(self.reached))?,
                     crate::pv::Request::Shutdown => self.request_shutdown()?,
                     request @ (crate::pv::Request::Application { .. }
+                    | crate::pv::Request::StepRealtime { .. }
                     | crate::pv::Request::SimulationReply { .. }) => {
                         if !matches!(self.state, State::Exited(_)) || self.pending_boots > 0 {
                             self.input

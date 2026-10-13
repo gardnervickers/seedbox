@@ -39,7 +39,7 @@ fn retired_boot_ack_does_not_complete_current_boot_pending_stop() {
         .offered(
             MachineId(0),
             command,
-            crate::pv::ApplicationCommand::Stop,
+            crate::oracle::service::CommandKind::Application(crate::pv::ApplicationCommand::Stop),
             crate::oracle::observation::Origin::External,
         )
         .unwrap();
@@ -94,7 +94,9 @@ fn first_terminal_response_wins_and_physical_shutdown_is_only_a_fallback() {
             .offered(
                 MachineId(0),
                 id,
-                crate::pv::ApplicationCommand::Stop,
+                crate::oracle::service::CommandKind::Application(
+                    crate::pv::ApplicationCommand::Stop,
+                ),
                 crate::oracle::observation::Origin::External,
             )
             .unwrap();

@@ -2,8 +2,9 @@ use super::*;
 struct Owner {
     facts: Facts,
     next: u32,
-    commands: BTreeMap<(u64, u32), (u32, ApplicationCommand, bool)>,
+    commands: BTreeMap<(u64, u32), (u32, CommandKind, bool)>,
     retired: std::collections::BTreeSet<(u64, u32)>,
+    draws: std::collections::VecDeque<u64>,
 }
 impl Default for Owner {
     fn default() -> Self {
@@ -20,6 +21,7 @@ impl Default for Owner {
             next: 40,
             commands: BTreeMap::new(),
             retired: Default::default(),
+            draws: Default::default(),
         }
     }
 }
@@ -38,6 +40,9 @@ impl Owner {
     }
 }
 impl Adapter for Owner {
+    fn draw(&mut self) -> Result<u64, OperationError> {
+        Ok(self.draws.pop_front().expect("scripted seeded draw"))
+    }
     fn resolve(&self, target: &Target) -> Result<Facts, OperationError> {
         match target {
             Target::Machine(n) | Target::Service(n) | Target::Key(n)
@@ -53,7 +58,7 @@ impl Adapter for Owner {
         _: &str,
         boot: u64,
         fault: u32,
-        action: ApplicationCommand,
+        action: CommandKind,
     ) -> Result<NonZeroU32, String> {
         assert_eq!(boot, self.facts.boot);
         self.next += 1;
@@ -338,20 +343,12 @@ fn batch_trigger_arm_order_and_no_retroactive_effect() {
     assert!(s.trigger_effects(&mut o, 10).unwrap().is_empty());
 }
 #[test]
-fn unsupported_projection_clock_and_invalid_target_have_no_effect() {
+fn unsupported_projection_and_invalid_target_have_no_effect() {
     let (mut s, mut o) = (Service::default(), Owner::default());
-    for (n, op) in [
-        (1, json!({"op":"inspect"})),
-        (
-            2,
-            json!({"op":"clock_skew","target":{"machine":"app"},"offset_ns":1}),
-        ),
-    ] {
-        assert_eq!(
-            reply(&call(&mut s, &mut o, n, 0, op))["error"]["code"],
-            "unsupported"
-        );
-    }
+    assert_eq!(
+        reply(&call(&mut s, &mut o, 1, 0, json!({"op":"inspect"})))["error"]["code"],
+        "unsupported"
+    );
     let p = call(
         &mut s,
         &mut o,
@@ -574,7 +571,8 @@ fn unknown_and_mismatched_service_acks_poison_but_known_external_is_ignored() {
     else {
         panic!()
     };
-    o.commands.get_mut(&(0, c.get())).unwrap().1 = ApplicationCommand::Resume;
+    o.commands.get_mut(&(0, c.get())).unwrap().1 =
+        CommandKind::Application(ApplicationCommand::Resume);
     assert!(s
         .acknowledged(&o, "app", 0, c, CommandResult::Completed, 11, 20)
         .is_err());
@@ -876,7 +874,8 @@ fn malformed_ack_failure_retains_known_fault_without_success_reply() {
     else {
         panic!()
     };
-    o.commands.get_mut(&(0, command.get())).unwrap().1 = ApplicationCommand::Resume;
+    o.commands.get_mut(&(0, command.get())).unwrap().1 =
+        CommandKind::Application(ApplicationCommand::Resume);
     let e = s
         .acknowledged(&o, "app", 0, command, CommandResult::Completed, 12, 20)
         .unwrap_err();
@@ -993,7 +992,7 @@ fn dispatch_allocation_failure_does_not_lose_admitted_fault_evidence() {
             _: &str,
             _: u64,
             _: u32,
-            _: ApplicationCommand,
+            _: CommandKind,
         ) -> Result<NonZeroU32, String> {
             Err("command IDs exhausted".into())
         }
@@ -1095,7 +1094,7 @@ fn fatal_later_trigger_preserves_earlier_owned_settlement_in_arm_order() {
             _: &str,
             _: u64,
             _: u32,
-            _: ApplicationCommand,
+            _: CommandKind,
         ) -> Result<NonZeroU32, String> {
             Err("shared command IDs exhausted".into())
         }
@@ -1335,4 +1334,268 @@ fn host_input_admission_uses_its_own_deadline_and_never_replies() {
         .unwrap();
     assert_eq!(rejected.unwrap_err().code, ErrorCode::InvalidRequest);
     assert_eq!(service.last, fault);
+}
+fn effect(plans: &[Plan]) -> (u32, Effect, Option<NonZeroU32>) {
+    plans
+        .iter()
+        .find_map(|p| match p {
+            Plan::Effect {
+                fault,
+                effect,
+                command,
+                ..
+            } => Some((*fault, effect.clone(), *command)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no effect: {plans:?}"))
+}
+fn admitted_actions(s: &mut Service) -> Vec<FaultAction> {
+    s.take_notices()
+        .into_iter()
+        .filter_map(|n| match n {
+            Notice::Admitted(a) => Some(a.action),
+            _ => None,
+        })
+        .collect()
+}
+fn rate(ppb: i64) -> ClockRate {
+    ClockRate::new(ppb).unwrap()
+}
+#[test]
+fn drift_applies_at_dispatch_never_stacks_and_heals_to_nominal() {
+    let (mut s, mut o) = (Service::default(), Owner::default());
+    o.facts.ready = false; // Drift needs no guest and no readiness.
+    let p = call(
+        &mut s,
+        &mut o,
+        1,
+        10,
+        json!({"op":"clock_drift","target":{"machine":"app"},"rate_ppb":100_000_000}),
+    );
+    let (drift, change, command) = effect(&p);
+    assert_eq!((change, command), (Effect::Drift(rate(100_000_000)), None));
+    assert!(!p.iter().any(|p| matches!(p, Plan::Deadline { .. })));
+    let r = reply(&s.applied(drift, 10, 10).unwrap());
+    assert_eq!(r["result"], json!({"handle":"p1","rate_ppb":100_000_000}));
+    assert_eq!(r["effect_at_ns"], 10);
+    let r = reply(&call(
+        &mut s,
+        &mut o,
+        2,
+        11,
+        json!({"op":"clock_drift","target":{"machine":"app"},"rate_ppb":-5}),
+    ));
+    assert_eq!(r["error"]["code"], "invalid_state");
+    // Drift is a Driver-owned dependency: it survives the machine's end.
+    s.ended("app", 0, 12, 12).unwrap();
+    o.facts.vm = Vm::Down;
+    let p = call(&mut s, &mut o, 3, 13, json!({"op":"heal","handle":"p1"}));
+    let (heal, change, _) = effect(&p);
+    assert_eq!(change, Effect::Drift(ClockRate::NOMINAL));
+    s.applied(heal, 13, 13).unwrap();
+    assert!(s.handles.active_handles().unwrap().is_empty());
+    let p = call(
+        &mut s,
+        &mut o,
+        4,
+        14,
+        json!({"op":"clock_drift","target":{"machine":"app"},"rate_ppb":-5}),
+    );
+    assert_eq!(effect(&p).1, Effect::Drift(rate(-5)));
+    assert_eq!(
+        admitted_actions(&mut s),
+        [
+            FaultAction::Effect(Effect::Drift(rate(100_000_000))),
+            FaultAction::Heal,
+            FaultAction::Effect(Effect::Drift(rate(-5))),
+        ]
+    );
+}
+#[test]
+fn step_waits_ready_completes_on_ack_and_heals_inversely() {
+    let (mut s, mut o) = (Service::default(), Owner::default());
+    o.facts.ready = false;
+    let p = call(
+        &mut s,
+        &mut o,
+        1,
+        10,
+        json!({"op":"clock_skew","target":{"machine":"app"},"offset_ns":-7}),
+    );
+    assert!(matches!(
+        p[..],
+        [Plan::Deadline {
+            at: 5_000_000_010,
+            ..
+        }]
+    ));
+    o.facts.ready = true;
+    let p = s.ready(&mut o, "app", 0, 12, 12).unwrap();
+    o.accept(&p);
+    let (step, change, command) = effect(&p);
+    assert_eq!(change, Effect::StepRealtime(-7));
+    let command = command.unwrap();
+    assert!(s.applied(step, 13, 13).is_err());
+    let r = reply(
+        &s.acknowledged(&o, "app", 0, command, CommandResult::Completed, 14, 15)
+            .unwrap(),
+    );
+    assert_eq!(r["result"], json!({"handle":"p1","offset_ns":-7}));
+    assert_eq!(r["effect_at_ns"], 14);
+    let p = call(&mut s, &mut o, 2, 20, json!({"op":"heal","handle":"p1"}));
+    let (_, change, command) = effect(&p);
+    assert_eq!(change, Effect::StepRealtime(7));
+    let p = s
+        .acknowledged(
+            &o,
+            "app",
+            0,
+            command.unwrap(),
+            CommandResult::Completed,
+            21,
+            21,
+        )
+        .unwrap();
+    assert_eq!(settlement(&p).status, SettlementStatus::Applied);
+    assert!(s.handles.active_handles().unwrap().is_empty());
+}
+#[test]
+fn step_admission_requires_a_live_unpaused_guest_without_drawing() {
+    for (vm, ended, code) in [
+        (Vm::Paused, false, "invalid_state"),
+        (Vm::Down, true, "invalid_state"),
+        (Vm::Up, true, "target_unavailable"),
+    ] {
+        let (mut s, mut o) = (Service::default(), Owner::default());
+        o.facts.vm = vm;
+        o.facts.physically_ended = ended;
+        let r = reply(&call(
+            &mut s,
+            &mut o,
+            1,
+            10,
+            json!({"op":"clock_skew","target":{"machine":"app"},"max_offset_ns":5}),
+        ));
+        assert_eq!(r["error"]["code"], code);
+        assert!(s.pending.is_empty() && admitted_actions(&mut s).is_empty());
+        // No scripted draw was consumed (draw() would have panicked).
+    }
+}
+#[test]
+fn settled_steps_are_lost_with_their_boot_and_healing_them_applies_without_guest() {
+    let (mut s, mut o) = (Service::default(), Owner::default());
+    let p = call(
+        &mut s,
+        &mut o,
+        1,
+        10,
+        json!({"op":"clock_skew","target":{"machine":"app"},"offset_ns":3}),
+    );
+    let command = effect(&p).2.unwrap();
+    s.acknowledged(&o, "app", 0, command, CommandResult::Completed, 11, 11)
+        .unwrap();
+    // A second step still pending at the crash settles Unavailable.
+    let p = call(
+        &mut s,
+        &mut o,
+        2,
+        12,
+        json!({"op":"clock_skew","target":{"machine":"app"},"offset_ns":4}),
+    );
+    let pending = effect(&p).0;
+    let p = s.ended("app", 0, 13, 13).unwrap();
+    let ended = settlement(&p);
+    assert_eq!(
+        (ended.fault, ended.status),
+        (pending, SettlementStatus::Unavailable)
+    );
+    o.facts.vm = Vm::Down;
+    o.facts.boot = 1;
+    let p = call(&mut s, &mut o, 3, 14, json!({"op":"heal","handle":"p1"}));
+    assert!(!p.iter().any(|p| matches!(p, Plan::Effect { .. })));
+    let healed = settlement(&p);
+    assert_eq!(healed.status, SettlementStatus::Applied);
+    assert_eq!(
+        healed.detail,
+        "realtime step ended with its machine incarnation"
+    );
+    assert_eq!(reply(&p)["ok"], true);
+    assert!(s.handles.active_handles().unwrap().is_empty());
+    // Natural application exit does not end a pending kernel step.
+    o.facts.vm = Vm::Up;
+    let p = call(
+        &mut s,
+        &mut o,
+        4,
+        15,
+        json!({"op":"clock_skew","target":{"machine":"app"},"offset_ns":5}),
+    );
+    assert!(s.application_ended("app", 1, 16, 16).unwrap().is_empty());
+    let command = effect(&p).2.unwrap();
+    let p = s
+        .acknowledged(&o, "app", 1, command, CommandResult::Completed, 17, 17)
+        .unwrap();
+    assert_eq!(settlement(&p).status, SettlementStatus::Applied);
+}
+#[test]
+fn seeded_draws_are_uniform_rejection_samples_resolved_at_admission() {
+    let (mut s, mut o) = (Service::default(), Owner::default());
+    // span 201: u64::MAX is in the rejected tail; 205 maps to 205 % 201 - 100.
+    assert_ne!(u64::MAX % 201, 200);
+    o.draws.extend([u64::MAX, 205, 100]);
+    let p = call(
+        &mut s,
+        &mut o,
+        1,
+        10,
+        json!({"op":"clock_skew","target":{"machine":"app"},"max_offset_ns":100}),
+    );
+    assert_eq!(effect(&p).1, Effect::StepRealtime(-96));
+    assert_eq!(
+        admitted_actions(&mut s),
+        [FaultAction::Effect(Effect::StepRealtime(-96))]
+    );
+    // A zero draw is a no-op step that settles at once with its handle.
+    let p = call(
+        &mut s,
+        &mut o,
+        2,
+        11,
+        json!({"op":"clock_skew","target":{"machine":"app"},"max_offset_ns":100}),
+    );
+    assert!(!p.iter().any(|p| matches!(p, Plan::Effect { .. })));
+    assert_eq!(settlement(&p).detail, "zero realtime step");
+    assert_eq!(reply(&p)["result"], json!({"handle":"p2","offset_ns":0}));
+    o.draws.push_back(7);
+    let p = call(
+        &mut s,
+        &mut o,
+        3,
+        12,
+        json!({"op":"clock_drift","target":{"machine":"app"},"max_rate_ppb":5}),
+    );
+    assert_eq!(effect(&p).1, Effect::Drift(rate(2)));
+    assert!(o.draws.is_empty());
+}
+#[test]
+fn guest_refusal_of_a_step_is_rejected_without_poisoning() {
+    let (mut s, mut o) = (Service::default(), Owner::default());
+    let p = call(
+        &mut s,
+        &mut o,
+        1,
+        10,
+        json!({"op":"clock_skew","target":{"machine":"app"},"offset_ns":-9}),
+    );
+    let command = effect(&p).2.unwrap();
+    let p = s
+        .acknowledged(&o, "app", 0, command, CommandResult::Rejected, 11, 11)
+        .unwrap();
+    assert_eq!(settlement(&p).status, SettlementStatus::Rejected);
+    assert_eq!(reply(&p)["error"]["code"], "invalid_state");
+    assert!(s.handles.active_handles().unwrap().is_empty());
+    assert_eq!(
+        reply(&call(&mut s, &mut o, 2, 12, json!({"op":"now"})))["ok"],
+        true
+    );
 }

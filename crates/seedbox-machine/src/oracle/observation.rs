@@ -2,7 +2,7 @@
 //! supplies authoritative logical admissions and ordered committed observations;
 //! polling later adopted StopReason::Exited boundaries cannot replace this seam.
 //! No scheduling, fault history, complete Inspect or network projection lives here.
-use super::service::{CommandOwner, Facts, Process, Vm};
+use super::service::{CommandKind, CommandOwner, Facts, Process, Vm};
 use crate::{
     execution::ExecutionConfig,
     machine::ExitReason,
@@ -50,6 +50,7 @@ pub(crate) enum Transition {
     Crash,
     Reboot { new_boot: u64 },
     Execution(ExecutionConfig),
+    ClockRate(crate::clock::ClockRate),
 }
 /// Applied means confirmed logical effect, not that native RAM changed. A
 /// logical Crash still applies to an exited machine whose ProgramExit is sticky.
@@ -71,7 +72,7 @@ pub(crate) enum Origin {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AcceptedCommand {
-    pub action: ApplicationCommand,
+    pub action: CommandKind,
     pub origin: Origin,
     pub accepted_at: u64,
 }
@@ -299,6 +300,7 @@ impl State {
                 };
             }
             Transition::Execution(config) => self.execution = config,
+            Transition::ClockRate(_) => {}
         }
         self.last_transition = Some((transition, at));
         self.committed_at = commit;
@@ -310,7 +312,7 @@ impl State {
         &mut self,
         boot: u64,
         id: NonZeroU32,
-        action: ApplicationCommand,
+        action: CommandKind,
         origin: Origin,
         at: u64,
         commit: u64,
@@ -403,7 +405,11 @@ impl State {
                 let ended: Vec<_> = self
                     .commands
                     .iter()
-                    .filter(|(_, command)| command.action != ApplicationCommand::Start)
+                    .filter(|(_, command)| {
+                        // Kernel clock steps outlive the application group.
+                        matches!(command.action, CommandKind::Application(action)
+                            if action != ApplicationCommand::Start)
+                    })
                     .map(|(&id, _)| id)
                     .collect();
                 for id in ended {
@@ -422,10 +428,15 @@ impl State {
                     return Err(Error::InvalidTime);
                 }
                 self.commands.remove(id);
+                let CommandKind::Application(action) = command.action else {
+                    // A realtime step changes no lifecycle or process state.
+                    self.committed_at = commit;
+                    return Ok(Change::Unchanged);
+                };
                 if *result == CommandResult::Rejected {
                     Change::Unchanged
                 } else {
-                    let (policy, view) = match command.action {
+                    let (policy, view) = match action {
                         ApplicationCommand::Start | ApplicationCommand::Resume => {
                             (Process::Running, ApplicationCondition::Running)
                         }

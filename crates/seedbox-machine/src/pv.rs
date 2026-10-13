@@ -24,7 +24,10 @@ pub(crate) mod transport;
 mod guest_supervisor_tests;
 
 use crate::machine::Timestamp;
-use std::{collections::VecDeque, num::NonZeroU32};
+use std::{
+    collections::VecDeque,
+    num::{NonZeroI64, NonZeroU32},
+};
 
 /// Identity of a simulation-control call on one machine.
 /// Sessions are never reused across crash or reboot. Request IDs must not be
@@ -85,6 +88,22 @@ pub enum Request {
         id: NonZeroU32,
         /// Operation on the application's process group.
         command: ApplicationCommand,
+    },
+    /// Step the guest's CLOCK_REALTIME by a signed offset, leaving monotonic,
+    /// boot and raw clocks and the machine's time base unchanged. The guest
+    /// re-evaluates absolute realtime timers and cancels timers armed with
+    /// cancel-on-set, as for any Linux clock step. Completion is the matching
+    /// [`Response::CommandAcknowledged`]: Completed after the guest kernel has
+    /// applied the step, Rejected if it refused (for example, a step before the
+    /// realtime epoch). The ID shares the per-boot correlation space of
+    /// `Application` and must not be reused within a machine incarnation.
+    /// The step is guest kernel state: it ends with crash, reboot or exit, and
+    /// every boot starts realtime from the machine's epoch again.
+    StepRealtime {
+        /// Caller-assigned command correlation ID.
+        id: NonZeroU32,
+        /// Signed realtime step in nanoseconds.
+        nanoseconds: NonZeroI64,
     },
 }
 
@@ -155,8 +174,9 @@ pub enum Response {
     /// point, distinct from accepting responsibility for an input. A failed
     /// Start produces rejection without readiness or an application outcome.
     /// Initial launch failure is a setup diagnostic and machine failure.
+    /// `StepRealtime` requests acknowledge through this same response.
     CommandAcknowledged {
-        /// Correlation ID from the accepted application request.
+        /// Correlation ID from the accepted application or clock request.
         id: NonZeroU32,
         /// Guest-observed operation result.
         result: CommandResult,
@@ -181,10 +201,12 @@ pub enum CommandResult {
     Rejected,
 }
 
-/// Input offered to one machine, in canonical simulation time.
+/// Input offered to one machine, timestamped in the time base of the inbox's
+/// owner. The Driver keeps inputs in simulation time and offers them to a
+/// machine in that machine's time base (see [`crate::machine::Machine::run`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Input {
-    /// Earliest delivery time, unaffected by guest clock skew or drift.
+    /// Earliest delivery time. Guest realtime steps never change it.
     pub at: Timestamp,
     /// Work offered to the guest supervisor.
     pub payload: Request,
@@ -244,7 +266,8 @@ impl<'a> Inbox<'a> {
 /// incarnation on publication. Buffer position supplies emission order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Output {
-    /// Canonical time when observed; never a guest-clock timestamp.
+    /// Time when observed, in the emitting machine's time base (the Driver
+    /// converts it to simulation time); never a guest realtime reading.
     pub at: Timestamp,
     /// Observed supervisor effect.
     pub payload: Response,

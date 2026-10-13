@@ -50,6 +50,7 @@ fn bootstrap() -> GuestBootstrap {
         },
         init: b"static-init".to_vec(),
         base_initramfs: vec![],
+        epoch_seconds: 0,
     }
 }
 #[derive(Debug)]

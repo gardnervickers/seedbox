@@ -47,6 +47,7 @@ fn machine(iterations: u64, instrumented: bool) -> PVMachine {
         },
         init: fs::read(input("SEEDBOX_PV_INIT")).unwrap(),
         base_initramfs: Vec::new(),
+        epoch_seconds: 0,
     };
     let archive = if instrumented {
         let runtime =

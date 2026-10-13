@@ -5,7 +5,8 @@
 
 use super::{FaultHandle, InputKey, InputRejection, MachineId, MachineResponse, Position};
 use crate::{
-    execution::ExecutionConfig, machine::Timestamp, pv::ApplicationCommand, pv::SimulationControlId,
+    clock::ClockRate, execution::ExecutionConfig, machine::Timestamp, pv::ApplicationCommand,
+    pv::SimulationControlId,
 };
 
 /// One fact committed by the driver, in publication order.
@@ -124,6 +125,11 @@ pub enum Transition {
     ShutdownRequested,
     /// The execution configuration used by subsequent runs.
     ExecutionSet(ExecutionConfig),
+    /// The rate of the machine's time base from `at` on. The mapping keeps
+    /// the machine time already reached at `at`, so accrued offset is kept;
+    /// the mapping is a pure function of the machine's addition time and
+    /// these events. It survives crash and reboot.
+    ClockRate(ClockRate),
 }
 
 /// Why the driver applied a change or added a machine.
@@ -193,7 +199,14 @@ pub enum FaultAction {
     SetExecution(ExecutionConfig),
     /// Operate on the prepared application.
     Application(ApplicationCommand),
-    /// Restore the configuration replaced by an earlier fault's handle.
+    /// Set the rate of the machine's time base, resolved from any seeded bound.
+    Drift(ClockRate),
+    /// Step the guest's realtime clock by these nanoseconds, resolved from any
+    /// seeded bound. Zero (a possible seeded draw) applies without a guest step.
+    StepRealtime(i64),
+    /// Restore the configuration replaced by an earlier fault's handle: nominal
+    /// execution cost, nominal clock rate (keeping accrued offset), or the
+    /// inverse realtime step. A step whose boot ended applies without effect.
     Heal,
 }
 

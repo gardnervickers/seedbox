@@ -163,8 +163,6 @@ impl Process {
             "none",
             "-S",           // Start stopped; only seedbox-run may execute code.
             "-no-shutdown", // Retain the stopped guest so it can be inspected/snapshotted.
-            "-rtc",
-            "base=2000-01-01T00:00:00,clock=vm", // No host wall-clock input.
             "-icount",
             "shift=0,align=off,sleep=off", // Nominal icount base; bounded execution applies fractional work pricing.
             "-global",
@@ -191,6 +189,7 @@ impl Process {
         match &manifest.boot {
             #[cfg(test)]
             Boot::Program(program) => {
+                command.args(["-rtc", "base=1970-01-01T00:00:00,clock=vm"]);
                 let path = directory.path().join("program");
                 fs::write(&path, program)?;
                 command.args(["-bios", "none"]).arg("-device").arg(format!(
@@ -203,7 +202,13 @@ impl Process {
                 initramfs,
                 firmware,
                 command_line,
+                epoch_seconds,
             } => {
+                // The board RTC reads epoch plus the virtual counter, matching
+                // the realtime the supervisor sets; no host wall clock is read.
+                command
+                    .arg("-rtc")
+                    .arg(format!("base={},clock=vm", utc(*epoch_seconds)));
                 for (name, bytes, flag) in [
                     ("kernel", kernel, "-kernel"),
                     ("initramfs", initramfs, "-initrd"),
@@ -424,5 +429,40 @@ impl Qmp {
             }
             return Err(Error(format!("QMP {name}: {response}")));
         }
+    }
+}
+
+/// QEMU `-rtc base=` form of whole seconds since the Unix epoch, in UTC.
+fn utc(seconds: u32) -> String {
+    let days = i64::from(seconds / 86_400);
+    let time = seconds % 86_400;
+    // Proleptic Gregorian civil date from days since 1970-01-01.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}",
+        time / 3_600,
+        time / 60 % 60,
+        time % 60
+    )
+}
+
+#[cfg(test)]
+mod utc_tests {
+    #[test]
+    fn rtc_base_is_the_utc_civil_time_of_the_epoch() {
+        assert_eq!(super::utc(0), "1970-01-01T00:00:00");
+        assert_eq!(super::utc(946_684_800), "2000-01-01T00:00:00");
+        assert_eq!(super::utc(951_782_399), "2000-02-28T23:59:59");
+        assert_eq!(super::utc(951_868_800), "2000-03-01T00:00:00");
+        assert_eq!(super::utc(1_700_000_000), "2023-11-14T22:13:20");
+        assert_eq!(super::utc(u32::MAX), "2106-02-07T06:28:15");
     }
 }

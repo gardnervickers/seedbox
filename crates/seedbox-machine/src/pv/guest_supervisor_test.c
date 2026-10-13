@@ -73,6 +73,14 @@ static int collect(struct sbx_supervisor *s, struct captured *captured) {
     assert(sbx_supervisor_collect(s, &code, output, captured) == 0);
     return code;
 }
+static int64_t stepped[8];
+static unsigned steps;
+static int refuse_step;
+static int record_step(int64_t ns) {
+    stepped[steps++] = ns;
+    if (refuse_step) { errno = EINVAL; return -1; }
+    return 0;
+}
 int main(int argc, char **argv) {
     if (argc == 2) {
         sigset_t mask;
@@ -269,6 +277,27 @@ int main(int argc, char **argv) {
     assert(!strstr(wire.bytes, "SEEDBOX_FAILURE") && !strstr(wire.bytes, "SEEDBOX_EFFECT"));
     assert(sbx_service_feed(&service, "start 23\n", 9) == -1 && errno == EPIPE);
     assert(wire.writes == 2 && service.supervisor.child == -1);
+    /* Realtime steps parse signed nonzero offsets and acknowledge as step. */
+    wire = (struct wire){0};
+    sbx_service_init(&service, launch, &recipe, write_wire, &wire);
+    service.step_realtime = record_step;
+    assert(sbx_service_feed(&service, "step 5 -1500000000\nstep 6 9223372036854775807\n", 46) == 0);
+    assert(stepped[0] == -1500000000LL && stepped[1] == INT64_MAX && steps == 2);
+    assert(strstr(wire.bytes, "SEEDBOX_EFFECT id=5 action=step guest_ns="));
+    assert(strstr(wire.bytes, "SEEDBOX_EFFECT id=6 action=step guest_ns="));
+    refuse_step = 1;
+    assert(sbx_service_feed(&service, "step 7 -9223372036854775808\n", 28) == 0);
+    assert(stepped[2] == INT64_MIN && steps == 3);
+    assert(strstr(wire.bytes, "SEEDBOX_FAILURE id=7 action=step guest_ns="));
+    const char *malformed[] = {"step 8 0\n", "step 0 5\n", "step 8 05\n", "step 8 -\n",
+                               "step 8\n", "step 8 1 2\n", "step 8 9223372036854775808\n",
+                               "step 8 -9223372036854775809\n", "step 8 +1\n"};
+    for (size_t i = 0; i < sizeof(malformed) / sizeof(*malformed); ++i) {
+        sbx_service_init(&service, launch, &recipe, write_wire, &wire);
+        service.step_realtime = record_step;
+        assert(sbx_service_feed(&service, malformed[i], strlen(malformed[i])) == -1 && errno == EINVAL);
+    }
+    assert(steps == 3);
     /* Exhaust only this isolated fixture's descriptor allowance: a local pipe
      * setup failure is fatal, unlike a reported child exec failure. */
     wire = (struct wire){0};

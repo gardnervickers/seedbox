@@ -9,8 +9,15 @@ fn ready(s: &mut State, at: u64) {
     s.response(s.boot, at, at, &Response::Ready).unwrap();
 }
 fn command(s: &mut State, n: u32, action: ApplicationCommand, at: u64) {
-    s.command_admitted(s.boot, id(n), action, Origin::External, at, at)
-        .unwrap();
+    s.command_admitted(
+        s.boot,
+        id(n),
+        CommandKind::Application(action),
+        Origin::External,
+        at,
+        at,
+    )
+    .unwrap();
 }
 fn ack(s: &mut State, n: u32, result: CommandResult, observed: u64, commit: u64) {
     s.response(
@@ -92,7 +99,7 @@ fn external_ids_need_not_be_admitted_monotonically() {
     s.command_admitted(
         0,
         id(1),
-        ApplicationCommand::Resume,
+        CommandKind::Application(ApplicationCommand::Resume),
         Origin::Service { fault: 8 },
         3,
         3,
@@ -106,7 +113,7 @@ fn external_ids_need_not_be_admitted_monotonically() {
         s.command_owner(0, id(1)).unwrap(),
         CommandOwner::Service {
             fault: 8,
-            action: ApplicationCommand::Resume
+            action: CommandKind::Application(ApplicationCommand::Resume)
         }
     ));
     ack(&mut s, 100, CommandResult::Completed, 4, 5);
@@ -396,7 +403,7 @@ fn service_correlation_is_consumed_after_settlement_then_terminal() {
             _: &str,
             _: u64,
             _: u32,
-            _: ApplicationCommand,
+            _: CommandKind,
         ) -> Result<NonZeroU32, String> {
             self.next += 1;
             Ok(id(self.next))
@@ -457,7 +464,7 @@ fn service_correlation_is_consumed_after_settlement_then_terminal() {
         .command_admitted(
             0,
             command,
-            ApplicationCommand::Stop,
+            CommandKind::Application(ApplicationCommand::Stop),
             Origin::Service { fault },
             2,
             2,

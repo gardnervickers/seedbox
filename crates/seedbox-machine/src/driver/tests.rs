@@ -69,6 +69,7 @@ impl Machine for TestMachine {
                     self.shutdown()?;
                 }
                 crate::pv::Request::Application { .. }
+                | crate::pv::Request::StepRealtime { .. }
                 | crate::pv::Request::SimulationReply { .. } => break,
             }
         }
@@ -692,6 +693,7 @@ impl Machine for ProbeMachine {
                     self.shutdown()?;
                 }
                 crate::pv::Request::Application { .. }
+                | crate::pv::Request::StepRealtime { .. }
                 | crate::pv::Request::SimulationReply { .. } => break,
             }
         }
@@ -856,6 +858,7 @@ impl Machine for RandomMachine {
                     self.shutdown()?;
                 }
                 crate::pv::Request::Application { .. }
+                | crate::pv::Request::StepRealtime { .. }
                 | crate::pv::Request::SimulationReply { .. } => break,
             }
         }

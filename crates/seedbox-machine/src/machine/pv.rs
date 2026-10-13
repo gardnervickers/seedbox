@@ -458,6 +458,7 @@ impl Machine for PVMachine {
                         self.request_shutdown().map_err(|e| e.to_string())?
                     }
                     request @ (crate::pv::Request::Application { .. }
+                    | crate::pv::Request::StepRealtime { .. }
                     | crate::pv::Request::SimulationReply { .. }) => {
                         if !matches!(self.state, State::Exited | State::Crashed)
                             || self.pending_boots > 0

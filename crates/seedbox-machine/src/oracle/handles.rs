@@ -4,7 +4,7 @@
 //! cannot bypass the per-machine reservation. Legacy planning allocates pN before checking live
 //! fault state, so a later state rejection consumes that number. Other fault
 //! categories must use this same owner/allocator when their records are added.
-use crate::execution::ExecutionConfig;
+use crate::{clock::ClockRate, execution::ExecutionConfig};
 use std::{collections::BTreeMap, fmt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -27,6 +27,7 @@ pub(crate) enum Error {
     HandlesExhausted,
     AttemptsExhausted,
     AlreadyThrottled,
+    AlreadyDrifting,
     InactiveHandle,
     Unsettled,
     UnexpectedEffect,
@@ -47,17 +48,29 @@ enum Phase {
     Pending,
     Active,
     Healing,
+    /// A realtime step whose guest kernel ended; healing it changes nothing.
+    Lost,
+}
+/// The change a handle installed. Execution and drift are Driver-owned
+/// dependencies that survive crash and reboot; a realtime step is guest kernel
+/// state that ends with the machine's boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Change {
+    Execution(ExecutionConfig),
+    Drift(ClockRate),
+    Step(i64),
+}
+impl Change {
+    fn same_kind(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
 }
 #[derive(Clone)]
-struct Throttle {
+struct Record {
     target: String,
-    config: ExecutionConfig,
+    change: Change,
     phase: Phase,
     revision: u64,
-}
-#[derive(Clone)]
-enum Record {
-    Throttle(Throttle),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transition {
@@ -65,13 +78,16 @@ enum Transition {
     Heal,
 }
 
-/// A proposed execution setting. This is neither a queue entry nor evidence
-/// of application. The owner confirms only after the Driver effect succeeds.
+/// A proposed handle change. This is neither a queue entry nor evidence of
+/// application. The owner confirms only after the effect succeeds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExecutionPlan {
     pub(crate) handle: Handle,
     pub(crate) target: String,
-    pub(crate) config: ExecutionConfig,
+    /// The change to make now: the installed change, or its inverse when healing.
+    pub(crate) change: Change,
+    /// Healing a lost realtime step: it settles with no guest effect.
+    pub(crate) lost: bool,
     transition: Transition,
     revision: u64,
 }
@@ -102,50 +118,100 @@ impl Handles {
         target: String,
         config: ExecutionConfig,
     ) -> Result<ExecutionPlan, Error> {
+        self.install(target, Change::Execution(config))
+    }
+    /// A machine runs at one rate: drifts do not stack, including pending ones.
+    pub(crate) fn drift(
+        &mut self,
+        target: String,
+        rate: ClockRate,
+    ) -> Result<ExecutionPlan, Error> {
+        self.install(target, Change::Drift(rate))
+    }
+    /// Realtime steps stack; each has its own handle.
+    pub(crate) fn step(
+        &mut self,
+        target: String,
+        nanoseconds: i64,
+    ) -> Result<ExecutionPlan, Error> {
+        self.install(target, Change::Step(nanoseconds))
+    }
+    /// Whether `target` already has a drift record in any phase.
+    pub(crate) fn drifting(&self, target: &str) -> bool {
+        self.exclusive(target, Change::Drift(ClockRate::NOMINAL))
+    }
+    fn exclusive(&self, target: &str, change: Change) -> bool {
+        !matches!(change, Change::Step(_))
+            && self
+                .records
+                .values()
+                .any(|record| record.target == target && record.change.same_kind(change))
+    }
+    fn install(&mut self, target: String, change: Change) -> Result<ExecutionPlan, Error> {
         let handle = self.reserve()?;
         // A pending operation reserves its target until admission resolves.
         // This preserves sequential single-active admission with multiple callers.
-        if self.records.values().any(|record| match record {
-            Record::Throttle(t) => t.target == target,
-        }) {
-            return Err(Error::AlreadyThrottled);
+        if self.exclusive(&target, change) {
+            return Err(match change {
+                Change::Drift(_) => Error::AlreadyDrifting,
+                _ => Error::AlreadyThrottled,
+            });
         }
         self.records.insert(
             handle,
-            Record::Throttle(Throttle {
+            Record {
                 target: target.clone(),
-                config,
+                change,
                 phase: Phase::Pending,
                 revision: 0,
-            }),
+            },
         );
         Ok(ExecutionPlan {
             handle,
             target,
-            config,
+            change,
+            lost: false,
             transition: Transition::Apply,
             revision: 0,
         })
     }
+    fn inverse(change: Change) -> Change {
+        match change {
+            // Nominal cost is the legacy inverse, not a captured previous rate.
+            Change::Execution(_) => Change::Execution(ExecutionConfig::default()),
+            // Nominal rate keeps the offset accrued so far.
+            Change::Drift(_) => Change::Drift(ClockRate::NOMINAL),
+            Change::Step(nanoseconds) => Change::Step(nanoseconds.wrapping_neg()),
+        }
+    }
     /// Healing is a distinct operation on an existing active handle; it does
-    /// not allocate a new pN. Nominal cost is the legacy inverse, not a captured
-    /// previous rate. No clock, idle time or partially charged work is changed.
+    /// not allocate a new pN. No clock, idle time or partially charged work is
+    /// changed by healing a throttle.
     pub(crate) fn heal(&mut self, text: &str) -> Result<ExecutionPlan, Error> {
         self.valid()?;
         let handle = Handle::parse(text).ok_or(Error::InactiveHandle)?;
-        let Some(Record::Throttle(t)) = self.records.get_mut(&handle) else {
+        let Some(record) = self.records.get_mut(&handle) else {
             return Err(Error::InactiveHandle);
         };
-        if t.phase != Phase::Active {
+        if !matches!(record.phase, Phase::Active | Phase::Lost) {
             return Err(Error::Unsettled);
         }
-        let revision = t.revision.checked_add(1).ok_or(Error::AttemptsExhausted)?;
-        t.revision = revision;
-        t.phase = Phase::Healing;
+        let revision = record
+            .revision
+            .checked_add(1)
+            .ok_or(Error::AttemptsExhausted)?;
+        let lost = record.phase == Phase::Lost;
+        record.revision = revision;
+        record.phase = Phase::Healing;
         Ok(ExecutionPlan {
             handle,
-            target: t.target.clone(),
-            config: ExecutionConfig::default(),
+            target: record.target.clone(),
+            change: if lost {
+                Change::Step(0)
+            } else {
+                Self::inverse(record.change)
+            },
+            lost,
             transition: Transition::Heal,
             revision,
         })
@@ -156,21 +222,17 @@ impl Handles {
             Transition::Apply => Phase::Pending,
             Transition::Heal => Phase::Healing,
         };
-        let matches = self
-            .records
-            .get(&plan.handle)
-            .is_some_and(|record| match record {
-                Record::Throttle(t) => {
-                    t.target == plan.target
-                        && t.revision == plan.revision
-                        && t.phase == expected_phase
-                        && plan.config
-                            == match plan.transition {
-                                Transition::Apply => t.config,
-                                Transition::Heal => ExecutionConfig::default(),
-                            }
-                }
-            });
+        let matches = self.records.get(&plan.handle).is_some_and(|record| {
+            record.target == plan.target
+                && record.revision == plan.revision
+                && record.phase == expected_phase
+                && plan.change
+                    == match (plan.transition, plan.lost) {
+                        (Transition::Apply, _) => record.change,
+                        (Transition::Heal, false) => Self::inverse(record.change),
+                        (Transition::Heal, true) => Change::Step(0),
+                    }
+        });
         if !matches {
             self.poisoned = true;
             return Err(Error::UnexpectedEffect);
@@ -182,10 +244,7 @@ impl Handles {
         self.matching(plan)?;
         match plan.transition {
             Transition::Apply => {
-                let Some(Record::Throttle(t)) = self.records.get_mut(&plan.handle) else {
-                    unreachable!()
-                };
-                t.phase = Phase::Active;
+                self.records.get_mut(&plan.handle).unwrap().phase = Phase::Active;
             }
             Transition::Heal => {
                 self.records.remove(&plan.handle);
@@ -193,8 +252,8 @@ impl Handles {
         }
         Ok(())
     }
-    /// Admission was rejected with a guarantee that no execution setting was
-    /// applied. This bookkeeping success is not an operation success response.
+    /// Admission was rejected with a guarantee that no setting was applied.
+    /// This bookkeeping success is not an operation success response.
     pub(crate) fn rejected(&mut self, plan: &ExecutionPlan) -> Result<(), Error> {
         self.matching(plan)?;
         match plan.transition {
@@ -202,13 +261,27 @@ impl Handles {
                 self.records.remove(&plan.handle);
             }
             Transition::Heal => {
-                let Some(Record::Throttle(t)) = self.records.get_mut(&plan.handle) else {
-                    unreachable!()
+                self.records.get_mut(&plan.handle).unwrap().phase = if plan.lost {
+                    Phase::Lost
+                } else {
+                    Phase::Active
                 };
-                t.phase = Phase::Active;
             }
         }
         Ok(())
+    }
+    /// The target's guest kernel ended (crash, reboot or exit). Its settled
+    /// realtime steps ended with it; throttles and drifts are Driver-owned and
+    /// persist. Pending and healing steps settle through their own faults first.
+    pub(crate) fn machine_ended(&mut self, target: &str) {
+        for record in self.records.values_mut() {
+            if record.target == target
+                && matches!(record.change, Change::Step(_))
+                && record.phase == Phase::Active
+            {
+                record.phase = Phase::Lost;
+            }
+        }
     }
     /// The Driver/execution failed without a rollback guarantee. Neither the
     /// prior nor requested configuration is authoritative; continuation is fatal.
@@ -221,9 +294,8 @@ impl Handles {
         let mut active: Vec<_> = self
             .records
             .iter()
-            .filter_map(|(handle, record)| match record {
-                Record::Throttle(t) => (t.phase != Phase::Pending).then(|| handle.to_string()),
-            })
+            .filter(|(_, record)| record.phase != Phase::Pending)
+            .map(|(handle, _)| handle.to_string())
             .collect();
         active.sort(); // Legacy inspection uses lexical handle order.
         Ok(active)
@@ -270,7 +342,7 @@ mod tests {
         assert_eq!(handles.allocator.last, u32::MAX);
         assert_eq!(handles.active_handles().unwrap(), ["p4294967295"]);
         let heal = handles.heal("p4294967295").unwrap();
-        assert_eq!(heal.config, ExecutionConfig::default());
+        assert_eq!(heal.change, Change::Execution(ExecutionConfig::default()));
         handles.applied(&heal).unwrap();
         assert!(handles.active_handles().unwrap().is_empty());
     }
@@ -287,8 +359,8 @@ mod tests {
         }
         let heal = handles.heal("p1").unwrap();
         assert_eq!(
-            (heal.target.as_str(), heal.config.factor_permille()),
-            ("a", 1000)
+            (heal.target.as_str(), heal.change),
+            ("a", Change::Execution(ExecutionConfig::default()))
         );
         assert_eq!(handles.heal("p1"), Err(Error::Unsettled));
         handles.applied(&heal).unwrap();
@@ -341,8 +413,8 @@ mod tests {
         assert!(handles.active_handles().unwrap().is_empty());
         assert_eq!(whole_service_copy.active_handles().unwrap(), ["p1"]);
         assert_eq!(
-            whole_service_copy.heal("p1").unwrap().config,
-            ExecutionConfig::default()
+            whole_service_copy.heal("p1").unwrap().change,
+            Change::Execution(ExecutionConfig::default())
         );
     }
     #[test]
@@ -356,16 +428,63 @@ mod tests {
             handles.active_handles().unwrap(),
             ["p1", "p10", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"]
         );
-        let Some(Record::Throttle(record)) = handles.records.get_mut(&Handle(1)) else {
-            panic!()
-        };
+        let record = handles.records.get_mut(&Handle(1)).unwrap();
         record.revision = u64::MAX;
         assert_eq!(handles.heal("p1"), Err(Error::AttemptsExhausted));
-        let Some(Record::Throttle(record)) = handles.records.get(&Handle(1)) else {
-            panic!()
-        };
+        let record = &handles.records[&Handle(1)];
         assert_eq!(record.phase, Phase::Active);
         assert_eq!(record.revision, u64::MAX);
         assert_eq!(handles.active_handles().unwrap().len(), 10);
+    }
+    #[test]
+    fn drifts_do_not_stack_and_heal_to_nominal_keeping_kind() {
+        let rate = |ppb| ClockRate::new(ppb).unwrap();
+        let mut handles = Handles::default();
+        let throttle = handles.throttle("a".into(), config(2000)).unwrap();
+        handles.applied(&throttle).unwrap();
+        // Throttle and drift are independent categories on one machine.
+        let drift = handles.drift("a".into(), rate(5)).unwrap();
+        assert!(handles.drifting("a") && !handles.drifting("b"));
+        assert_eq!(
+            handles.drift("a".into(), rate(6)),
+            Err(Error::AlreadyDrifting)
+        );
+        handles.applied(&drift).unwrap();
+        assert_eq!(
+            handles.drift("a".into(), rate(6)),
+            Err(Error::AlreadyDrifting)
+        );
+        // The machine ending leaves a drift active: it is a host dependency.
+        handles.machine_ended("a");
+        let heal = handles.heal(&drift.handle.to_string()).unwrap();
+        assert_eq!(heal.change, Change::Drift(ClockRate::NOMINAL));
+        assert!(!heal.lost);
+        handles.applied(&heal).unwrap();
+        assert!(!handles.drifting("a"));
+        assert_eq!(handles.active_handles().unwrap(), ["p1"]);
+    }
+    #[test]
+    fn steps_stack_heal_inversely_and_become_lost_with_their_boot() {
+        let mut handles = Handles::default();
+        let first = handles.step("a".into(), -7).unwrap();
+        let second = handles.step("a".into(), 9).unwrap();
+        // A pending step is unaffected by the machine ending: its fault settles.
+        handles.machine_ended("a");
+        handles.applied(&first).unwrap();
+        handles.applied(&second).unwrap();
+        let heal = handles.heal("p1").unwrap();
+        assert_eq!((heal.change, heal.lost), (Change::Step(7), false));
+        handles.rejected(&heal).unwrap();
+        handles.machine_ended("a");
+        assert_eq!(handles.active_handles().unwrap(), ["p1", "p2"]);
+        let heal = handles.heal("p1").unwrap();
+        assert_eq!((heal.change, heal.lost), (Change::Step(0), true));
+        // A refused lost heal remains lost and healable.
+        handles.rejected(&heal).unwrap();
+        let heal = handles.heal("p1").unwrap();
+        assert!(heal.lost);
+        handles.applied(&heal).unwrap();
+        assert_eq!(handles.active_handles().unwrap(), ["p2"]);
+        assert_eq!(handles.heal("p1"), Err(Error::InactiveHandle));
     }
 }

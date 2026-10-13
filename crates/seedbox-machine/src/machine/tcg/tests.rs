@@ -398,6 +398,7 @@ fn linux_boots_sleeps_and_shuts_down_with_the_machine_driver() {
                         initramfs: fs::read(assets.join("initramfs")).unwrap().into(),
                         firmware: fs::read(input("SEEDBOX_TCG_FIRMWARE")).unwrap().into(),
                         command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
+                        epoch_seconds: 0,
                     },
                 },
                 SeededRng::new(0),
@@ -517,6 +518,7 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
         initramfs: fs::read(assets.join("initramfs")).unwrap().into(),
         firmware: fs::read(input("SEEDBOX_TCG_FIRMWARE")).unwrap().into(),
         command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
+        epoch_seconds: 0,
     };
     let started = Instant::now();
     let mut reference = None;
@@ -872,6 +874,7 @@ fn linux_lifecycle_tx_retains_fragments_and_snapshot_drain_position() {
                 .into(),
             command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr seedbox_sleep=100"
                 .into(),
+            epoch_seconds: 0,
         },
     };
     let mut source = Process::start(&qemu, &manifest, None, 3).unwrap();
@@ -960,6 +963,7 @@ fn lifecycle_rx_backpressure_and_pending_suffix_survive_qemu_migration() {
             firmware: fs::read(std::env::var_os("SEEDBOX_TCG_FIRMWARE").unwrap()).unwrap().into(),
             command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr seedbox_sleep=100"
                 .into(),
+            epoch_seconds: 0,
         },
     };
     let bytes: Vec<_> = (0..700013).map(|i| (i % 251) as u8).collect();
@@ -1116,6 +1120,7 @@ printf 'SBX_EXIT1 status=%s\n' "$status" >&9
                     .unwrap()
                     .into(),
                 command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
+                epoch_seconds: 0,
             },
         };
         let clock = clock(0);
@@ -1249,6 +1254,7 @@ fn common_inputs() -> (
             },
             init: vec![2],
             base_initramfs: Vec::new(),
+            epoch_seconds: 0,
         },
         MachineDefinition {
             name: "portable".into(),
@@ -1340,6 +1346,7 @@ fn tcg_initramfs_memory_bound_is_inclusive() {
                     initramfs: vec![0; length].into(),
                     firmware: Arc::from([3]),
                     command_line: String::new(),
+                    epoch_seconds: 0,
                 },
             },
         );

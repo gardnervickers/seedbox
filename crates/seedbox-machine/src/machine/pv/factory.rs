@@ -41,6 +41,7 @@ impl Factory {
                 },
                 init,
                 base_initramfs: vec![],
+                epoch_seconds: 0,
             },
             runtime,
         })

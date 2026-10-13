@@ -5,7 +5,7 @@
 //! and external events to establish simulation-wide barriers.
 
 use crate::{
-    clock::{Clock, SimulationClock},
+    clock::{Clock, ClockRate, FixedClock, Projection, SimulationClock},
     definition::MachineDefinition,
     execution::ExecutionConfig,
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
@@ -69,6 +69,13 @@ struct Entry<M> {
     machine: Option<M>,
     rng: Option<SeededRng>,
     execution: ExecutionConfig,
+    /// Exact mapping from simulation time to this machine's time base.
+    time: Projection,
+    /// Last accepted execution position, in machine time.
+    position: Timestamp,
+    /// Pending timer of a Blocked stop, in machine time; re-converted to
+    /// simulation time whenever the rate changes.
+    timer: Option<Timestamp>,
     reached: Timestamp,
     stopped: StopReason,
     paused: bool,
@@ -84,6 +91,10 @@ enum DriverEvent {
     SetExecution {
         machine: MachineId,
         config: ExecutionConfig,
+    },
+    SetClockRate {
+        machine: MachineId,
+        rate: ClockRate,
     },
 }
 
@@ -102,6 +113,41 @@ enum Scheduled {
 }
 
 impl<M> Entry<M> {
+    /// A machine joining at `at`, with the identity time mapping from there.
+    fn new(machine: M, seed: u64, at: Timestamp) -> Self {
+        Self {
+            machine: Some(machine),
+            rng: Some(SeededRng::new(seed)),
+            execution: ExecutionConfig::default(),
+            time: Projection::new(at.as_nanos()),
+            position: at,
+            timer: None,
+            reached: at,
+            stopped: StopReason::BoundaryReached,
+            paused: false,
+            inbox: VecDeque::new(),
+            staged: Vec::new(),
+            boot: 0,
+        }
+    }
+
+    /// Map a simulation time at or after the last rate change into machine time.
+    fn machine_time(&self, id: MachineId, at: Timestamp) -> Result<Timestamp, ClockOverflow> {
+        self.time
+            .floor(at.as_nanos())
+            .map(Timestamp::from_nanos)
+            .map_err(|_| ClockOverflow(id))
+    }
+
+    /// Earliest simulation time at or after `not_before` whose machine time
+    /// reaches `machine`; `None` when no representable simulation time does.
+    fn simulation_time(&self, not_before: Timestamp, machine: Timestamp) -> Option<Timestamp> {
+        self.time
+            .deadline(not_before.as_nanos(), machine.as_nanos())
+            .ok()
+            .map(Timestamp::from_nanos)
+    }
+
     fn next(&self) -> Option<Timestamp> {
         if self.paused {
             return None;
@@ -126,10 +172,46 @@ enum LiveInput {
     Handle(String),
 }
 
+/// A machine's time base cannot represent the requested simulation time.
+struct ClockOverflow(MachineId);
+impl<E> From<ClockOverflow> for Error<E> {
+    fn from(ClockOverflow(id): ClockOverflow) -> Self {
+        Error::ClockOverflow { id }
+    }
+}
+
 type MachineFactory<M> =
     Box<dyn FnMut(&MachineDefinition) -> Result<M, <M as Machine>::Error> + Send>;
 
 /// Owns simulation scheduling and shared time.
+///
+/// # Machine time bases
+///
+/// Each machine runs in its own time base `G`, a continuous, strictly
+/// increasing map from simulation time, kept exactly in units of 1e-9 ns. It
+/// is the identity from the machine's addition until a clock rate change; a
+/// rate change at barrier `T` reanchors `G` at `T` keeping `G(T)` (so accrued
+/// offset is kept), and survives crash and reboot. Machines observe
+/// `g(t) = floor(G(t))`. The driver translates at the machine boundary:
+/// - Into the machine: its clock reads `g(now)`, it runs to `g(upto)`, and
+///   due inputs are offered at `g(at)` (or `g` of the last rate change, if
+///   the input became due before it).
+/// - Out of the machine: an output, `Blocked`/`Exited` position or timer
+///   deadline at machine time `m` maps to the earliest simulation time at or
+///   after the run's start whose `G` reaches `m`. Results are never early;
+///   rounding is to whole nanoseconds. A timer no representable simulation
+///   time reaches never fires. Pending timers are re-converted at a rate change.
+///
+/// A machine has reached simulation barrier `T` exactly when its machine
+/// position reaches `g(T)`: a machine time `m` maps to at most `T` if and only
+/// if `m <= g(T)`. Every machine therefore stops at the same common barriers,
+/// consecutive runs tile its own time without gaps, and no state beyond a
+/// barrier is exposed. Outputs are published in simulation time after
+/// conversion. Execution pricing is not compensated: a fast machine completes
+/// proportionally more work per simulation nanosecond. Conversions happen on
+/// the driver thread and never depend on worker count. A machine time base
+/// that cannot represent a required simulation time fails with
+/// `Error::ClockOverflow`.
 ///
 /// Execution uses a fixed pool of worker threads. Each worker owns its context;
 /// contexts must not contain machine-specific simulation state. Worker count and
@@ -268,17 +350,7 @@ where
         };
         let machines = machines
             .into_iter()
-            .map(|machine| Entry {
-                machine: Some(machine),
-                rng: Some(SeededRng::new(draw_seed())),
-                execution: ExecutionConfig::default(),
-                reached: start,
-                stopped: StopReason::BoundaryReached,
-                paused: false,
-                inbox: VecDeque::new(),
-                staged: Vec::new(),
-                boot: 0,
-            })
+            .map(|machine| Entry::new(machine, draw_seed(), start))
             .collect();
         let mut control = control::Control::new(&definitions, start);
         control.declare_spawnable(&spawnable);
@@ -894,15 +966,14 @@ where
             return Ok(());
         }
         let now = self.now();
-        let offered_apps: Vec<_> = ids
+        let offered_commands: Vec<_> = ids
             .iter()
             .flat_map(|&machine| {
                 self.machines[machine.0]
                     .inbox
                     .iter()
-                    .filter_map(move |input| match input.payload {
-                        Request::Application { id, .. } => Some((machine, id, input.at)),
-                        _ => None,
+                    .filter_map(move |input| {
+                        control::command(&input.payload).map(|(id, _)| (machine, id, input.at))
                     })
             })
             .collect();
@@ -925,34 +996,55 @@ where
         } else {
             Vec::new()
         };
+        // Map the common barrier into every machine's own time base before
+        // submitting any work: start, bound and due inputs. Inputs that became
+        // due before the last rate change are offered at that change.
+        let mut bounds = BTreeMap::new();
+        let mut views = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let entry = &self.machines[id.0];
+            let start = entry.machine_time(id, now)?;
+            let bound = entry.machine_time(id, upto)?;
+            let anchor = Timestamp::from_nanos(entry.time.anchor());
+            let inbox = entry
+                .inbox
+                .iter()
+                .map(|input| {
+                    Ok(Input {
+                        at: entry.machine_time(id, input.at.max(anchor))?.min(start),
+                        payload: input.payload.clone(),
+                    })
+                })
+                .collect::<Result<VecDeque<_>, ClockOverflow>>()?;
+            bounds.insert(id, (start, bound, inbox.len()));
+            views.push((id, start, bound, inbox));
+        }
         let (send, receive) = mpsc::channel();
         let mut submission_error = None;
-        for &id in ids {
+        for (id, start, bound, mut inbox) in views {
             let entry = &mut self.machines[id.0];
             let mut machine = entry.machine.take().expect("stopped machine");
             let mut rng = entry.rng.take().expect("stopped machine RNG");
             let execution = entry.execution;
-            let mut inbox = std::mem::take(&mut entry.inbox);
             let mut outputs = Vec::new();
-            let clock = self.clock.clone();
             let result = send.clone();
             if let Err(error) = self.workers.submit(id.0, move |context| {
                 let stopped = catch_unwind(AssertUnwindSafe(|| {
                     machine.run(
                         &mut RunContext {
                             worker: context,
-                            clock: clock.as_ref(),
+                            clock: &FixedClock(start.as_nanos()),
                             rng: &mut rng,
                             execution,
-                            inbox: Inbox::new(&mut inbox, now),
-                            outbox: Outbox::new(&mut outputs, now, upto),
+                            inbox: Inbox::new(&mut inbox, start),
+                            outbox: Outbox::new(&mut outputs, start, bound),
                         },
-                        upto,
+                        bound,
                     )
                 }))
                 .map_err(|_| Error::Panicked { id })
                 .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
-                let _ = result.send((id, machine, rng, inbox, outputs, stopped));
+                let _ = result.send((id, machine, rng, inbox.len(), outputs, stopped));
             }) {
                 submission_error = Some(error);
                 break;
@@ -964,29 +1056,38 @@ where
         let mut reports: Vec<_> = receive.into_iter().collect();
         reports.sort_by_key(|(id, _, _, _, _, _)| *id);
         let mut stops = Vec::with_capacity(reports.len());
-        for (id, machine, rng, inbox, outputs, stopped) in reports {
-            self.machines[id.0].machine = Some(machine);
-            self.machines[id.0].rng = Some(rng);
-            self.machines[id.0].inbox = inbox;
+        for (id, machine, rng, remaining, outputs, stopped) in reports {
+            let entry = &mut self.machines[id.0];
+            entry.machine = Some(machine);
+            entry.rng = Some(rng);
+            // Accepted inputs are the taken prefix; the rest stay in simulation time.
+            let taken = bounds[&id].2.saturating_sub(remaining);
+            entry.inbox.drain(..taken.min(entry.inbox.len()));
             stops.push((id, outputs, stopped));
         }
         if let Some(error) = submission_error {
             return Err(error);
         }
+        // Validate each stop in its machine's time base, then convert back.
+        // The conversion returns the earliest simulation time whose machine
+        // time reaches the reported one, so nothing is reported early, and a
+        // machine time at most the mapped bound maps to at most `upto`.
         let mut accepted = Vec::with_capacity(stops.len());
         for (id, outputs, result) in stops {
             let stopped = result?;
+            let (start, bound, _) = bounds[&id];
+            let entry = &self.machines[id.0];
             let reached = match stopped {
-                StopReason::BoundaryReached => upto,
+                StopReason::BoundaryReached => bound,
                 StopReason::Blocked { reached, deadline } => {
-                    if deadline.is_some_and(|at| at <= reached.max(now)) {
+                    if deadline.is_some_and(|at| at <= reached.max(start)) {
                         return Err(Error::InvalidStop { id, stopped });
                     }
                     reached
                 }
                 StopReason::Exited { reached, .. } => reached,
             };
-            if reached < self.machines[id.0].reached.max(now) || reached > upto {
+            if reached < entry.position.max(start) || reached > bound {
                 return Err(Error::InvalidStop { id, stopped });
             }
             if let Some(output) = outputs.iter().find(|output| output.at > reached) {
@@ -996,14 +1097,51 @@ where
                     reached,
                 });
             }
-            accepted.push((id, reached, stopped, outputs));
+            let simulation = |at| entry.simulation_time(now, at).ok_or(ClockOverflow(id));
+            let (converted, timer) = match stopped {
+                StopReason::BoundaryReached => (StopReason::BoundaryReached, None),
+                StopReason::Blocked { deadline, .. } => (
+                    StopReason::Blocked {
+                        reached: simulation(reached)?,
+                        // A timer no simulation time can reach never fires.
+                        deadline: deadline.and_then(|at| entry.simulation_time(now, at)),
+                    },
+                    deadline,
+                ),
+                StopReason::Exited { reason, .. } => (
+                    StopReason::Exited {
+                        reached: simulation(reached)?,
+                        reason,
+                    },
+                    None,
+                ),
+            };
+            let outputs = outputs
+                .into_iter()
+                .map(|output| {
+                    Ok(crate::pv::Output {
+                        at: simulation(output.at)?,
+                        payload: output.payload,
+                    })
+                })
+                .collect::<Result<Vec<_>, ClockOverflow>>()?;
+            let simulated = match converted {
+                StopReason::BoundaryReached => upto,
+                StopReason::Blocked { reached, .. } | StopReason::Exited { reached, .. } => reached,
+            };
+            debug_assert!(simulated >= now && simulated <= upto);
+            accepted.push((id, simulated, converted, outputs, reached, timer));
         }
-        for &(id, command, at) in &offered_apps {
-            if !self.machines[id.0].inbox.iter().any(|input| matches!(input.payload, Request::Application { id: pending, .. } if pending == command)) {
-                self.control.accepted(id, self.machines[id.0].boot, command, at, upto).map_err(Error::Control)?;
+        for &(id, command, at) in &offered_commands {
+            if !self.machines[id.0].inbox.iter().any(|input| {
+                control::command(&input.payload).is_some_and(|(pending, _)| pending == command)
+            }) {
+                self.control
+                    .accepted(id, self.machines[id.0].boot, command, at, upto)
+                    .map_err(Error::Control)?;
             }
         }
-        for (id, reached, stopped, outputs) in accepted {
+        for (id, reached, stopped, outputs, position, timer) in accepted {
             let entry = &mut self.machines[id.0];
             if id == self.oracle {
                 for &command in &offered_stops {
@@ -1016,6 +1154,8 @@ where
             }
             entry.reached = reached;
             entry.stopped = stopped;
+            entry.position = position;
+            entry.timer = timer;
             entry
                 .staged
                 .extend(outputs.into_iter().map(|output| MachineResponse {
@@ -1108,7 +1248,7 @@ where
                             self.control.record_call(source, id, boot);
                             let plans = self
                                 .control
-                                .invoke_plans(|service, view| {
+                                .invoke_with(Some(&mut *self.rng), |service, view| {
                                     service.admit(
                                         view,
                                         control::Control::source(source),
@@ -1229,7 +1369,7 @@ where
                             accepted_fault = Some(fault);
                             let id = self.control.reply_target(&target).map_err(Error::Control)?;
                             debug_assert_eq!(self.machines[id.0].boot, boot);
-                            if !matches!(effect, Effect::Process(_)) {
+                            if !effect.guest_command() {
                                 service_effect = Some(fault);
                             }
                             match effect {
@@ -1241,6 +1381,35 @@ where
                                         machine: id,
                                         config,
                                     })
+                                }
+                                Effect::Drift(rate) => {
+                                    Scheduled::Driver(DriverEvent::SetClockRate {
+                                        machine: id,
+                                        rate,
+                                    })
+                                }
+                                Effect::StepRealtime(nanoseconds) => {
+                                    service_origin =
+                                        Some(crate::oracle::observation::Origin::Service { fault });
+                                    Scheduled::Input {
+                                        id,
+                                        input: Input {
+                                            at: now,
+                                            payload: Request::StepRealtime {
+                                                id: command.ok_or_else(|| {
+                                                    Error::Control(
+                                                        "clock plan lacks command".into(),
+                                                    )
+                                                })?,
+                                                nanoseconds: std::num::NonZeroI64::new(nanoseconds)
+                                                    .ok_or_else(|| {
+                                                        Error::Control(
+                                                            "zero clock step plan".into(),
+                                                        )
+                                                    })?,
+                                            },
+                                        },
+                                    }
                                 }
                                 Effect::Crash => Scheduled::Input {
                                     id,
@@ -1302,14 +1471,10 @@ where
                 match scheduled {
                     Scheduled::Control(_) => unreachable!(),
                     Scheduled::Input { id, input } => {
-                        if let Request::Application {
-                            id: command,
-                            command: action,
-                        } = input.payload
-                        {
-                            // Public scheduling creates application requests only
-                            // from admitted process faults. Only private queue
-                            // tests inject raw (external) application requests.
+                        if let Some((command, action)) = control::command(&input.payload) {
+                            // Public scheduling creates guest commands only from
+                            // admitted faults. Only private queue tests inject raw
+                            // (external) application requests.
                             let origin = service_origin
                                 .unwrap_or(crate::oracle::observation::Origin::External);
                             if !matches!(self.machines[id.0].stopped, StopReason::Exited { .. }) {
@@ -1339,12 +1504,15 @@ where
                                 entry.inbox.clear();
                                 entry.paused = false;
                             }
-                            Request::Application { .. } | Request::SimulationReply { .. }
+                            Request::Application { .. }
+                            | Request::StepRealtime { .. }
+                            | Request::SimulationReply { .. }
                                 if matches!(entry.stopped, StopReason::Exited { .. }) =>
                             {
                                 return Ok(());
                             }
                             Request::Application { .. }
+                            | Request::StepRealtime { .. }
                             | Request::SimulationReply { .. }
                             | Request::Shutdown => {}
                         }
@@ -1391,12 +1559,16 @@ where
                     Scheduled::Driver(event) => {
                         let (DriverEvent::Pause(id)
                         | DriverEvent::Resume(id)
-                        | DriverEvent::SetExecution { machine: id, .. }) = event;
+                        | DriverEvent::SetExecution { machine: id, .. }
+                        | DriverEvent::SetClockRate { machine: id, .. }) = event;
                         use crate::oracle::observation::Transition;
                         let entry = &self.machines[id.0];
                         let transition = match event {
                             DriverEvent::SetExecution { config, .. } => {
                                 Some(Transition::Execution(config))
+                            }
+                            DriverEvent::SetClockRate { rate, .. } => {
+                                Some(Transition::ClockRate(rate))
                             }
                             DriverEvent::Pause(_)
                                 if !entry.paused
@@ -1417,6 +1589,7 @@ where
                                 Transition::Execution(config) => {
                                     event::Transition::ExecutionSet(config)
                                 }
+                                Transition::ClockRate(rate) => event::Transition::ClockRate(rate),
                                 Transition::Crash | Transition::Reboot { .. } => unreachable!(),
                             },
                             cause,
@@ -1424,6 +1597,22 @@ where
                         let entry = &mut self.machines[id.0];
                         match event {
                             DriverEvent::SetExecution { config, .. } => entry.execution = config,
+                            DriverEvent::SetClockRate { rate, .. } => {
+                                // Reanchor keeping the mapped time at this
+                                // barrier, then re-convert a pending timer.
+                                entry
+                                    .time
+                                    .set_drift(now.as_nanos(), i64::from(rate.ppb()))
+                                    .map_err(|_| Error::ClockOverflow { id })?;
+                                if let (StopReason::Blocked { reached, .. }, Some(timer)) =
+                                    (entry.stopped, entry.timer)
+                                {
+                                    entry.stopped = StopReason::Blocked {
+                                        reached,
+                                        deadline: entry.simulation_time(now, timer),
+                                    };
+                                }
+                            }
                             _ if matches!(entry.stopped, StopReason::Exited { .. }) => {}
                             DriverEvent::Pause(_) => entry.paused = true,
                             DriverEvent::Resume(_) if entry.paused => {
@@ -1614,17 +1803,9 @@ where
         let machine = (self.factory)(&self.definitions[index]).map_err(Error::Construction)?;
         let mut bytes = [0; 8];
         self.rng.fill_bytes(&mut bytes);
-        self.machines.push(Entry {
-            machine: Some(machine),
-            rng: Some(SeededRng::new(u64::from_le_bytes(bytes))),
-            execution: ExecutionConfig::default(),
-            reached: self.now(),
-            stopped: StopReason::BoundaryReached,
-            paused: false,
-            inbox: VecDeque::new(),
-            staged: Vec::new(),
-            boot: 0,
-        });
+        let now = self.now();
+        self.machines
+            .push(Entry::new(machine, u64::from_le_bytes(bytes), now));
         self.control
             .spawned(name, self.now())
             .map_err(Error::Control)?;
@@ -1835,19 +2016,11 @@ where
         let machine = machine().map_err(Error::Construction)?;
         let mut bytes = [0; 8];
         self.driver.rng.fill_bytes(&mut bytes);
-        let rng = SeededRng::new(u64::from_le_bytes(bytes));
         let id = MachineId(self.driver.machines.len());
-        self.driver.machines.push(Entry {
-            machine: Some(machine),
-            rng: Some(rng),
-            execution: ExecutionConfig::default(),
-            reached: self.driver.now(),
-            stopped: StopReason::BoundaryReached,
-            paused: false,
-            inbox: VecDeque::new(),
-            staged: Vec::new(),
-            boot: 0,
-        });
+        let now = self.driver.now();
+        self.driver
+            .machines
+            .push(Entry::new(machine, u64::from_le_bytes(bytes), now));
         self.driver.control.add_unnamed(self.driver.now());
         self.driver.stage(
             self.driver.now(),
@@ -1861,16 +2034,18 @@ where
     }
 
     /// Capture one machine without changing its scheduling state or running it,
-    /// including while paused. Reconstructing a whole simulation also requires
-    /// its environment and driver-owned scheduling/lifecycle state, including
-    /// each machine's execution configuration and pause flag observed through
-    /// `paused`, global RNG cursor, the independently continuing RNG cursor
-    /// of every machine, and the control timeline: host inputs scheduled but
-    /// not yet admitted, live input keys (with the handles they own), and
-    /// admitted faults awaiting their effect or settlement. The Driver offers
-    /// no snapshot or restore of that state: the host reconstructs it from its
-    /// own schedule history and the published event stream, and must neither
-    /// repeat consumed inputs nor lose pending ones.
+    /// including while paused. The snapshot is in the machine's own time base.
+    /// Reconstructing a whole simulation also requires its environment and
+    /// driver-owned scheduling/lifecycle state, including each machine's
+    /// execution configuration and pause flag observed through `paused`, its
+    /// time-base mapping (a pure function of its addition time and its
+    /// `Transition::ClockRate` events), global RNG cursor, the independently
+    /// continuing RNG cursor of every machine, and the control timeline: host
+    /// inputs scheduled but not yet admitted, live input keys (with the handles
+    /// they own), and admitted faults awaiting their effect or settlement. The
+    /// Driver offers no snapshot or restore of that state: the host
+    /// reconstructs it from its own schedule history and the published event
+    /// stream, and must neither repeat consumed inputs nor lose pending ones.
     pub fn snapshot(&mut self, id: MachineId) -> Result<M::Snapshot, Error<M::Error>> {
         if self.driver.finished.is_none() {
             self.check_mutation()?;
@@ -1882,6 +2057,34 @@ where
             .expect("stopped machine")
             .snapshot()
             .map_err(|source| Error::Machine { id, source })
+    }
+
+    /// Private test mechanics: queue a raw rate change in the FIFO timeline,
+    /// bypassing control policy, for mock machines without control facts.
+    #[cfg(test)]
+    pub(crate) fn schedule_clock_rate(
+        &mut self,
+        at: Timestamp,
+        id: MachineId,
+        rate: ClockRate,
+    ) -> Result<(), Error<M::Error>> {
+        self.check_mutation()?;
+        if at < self.driver.now() {
+            return Err(Error::PastTime {
+                now: self.driver.now(),
+                requested: at,
+            });
+        }
+        self.driver.entry(id)?;
+        self.driver
+            .events
+            .entry(at)
+            .or_default()
+            .push_back(Scheduled::Driver(DriverEvent::SetClockRate {
+                machine: id,
+                rate,
+            }));
+        Ok(())
     }
 
     /// Enqueue a host input: `action` is admitted through the control policy
@@ -2079,6 +2282,10 @@ pub enum Error<E> {
         at: Timestamp,
         reached: Timestamp,
     },
+    /// A machine's time base cannot represent a required simulation time.
+    ClockOverflow {
+        id: MachineId,
+    },
     /// A previous step failed; further execution is prohibited.
     Failed,
 }
@@ -2133,6 +2340,13 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                 at.as_nanos(),
                 reached.as_nanos()
             ),
+            Self::ClockOverflow { id } => {
+                write!(
+                    f,
+                    "machine {} time base exceeds its representable range",
+                    id.0
+                )
+            }
             Self::Failed => f.write_str("driver cannot execute after a failed step"),
         }
     }
@@ -2188,6 +2402,10 @@ mod execution_tests;
 #[cfg(test)]
 pub(crate) mod fixture;
 
+#[cfg(test)]
+mod clock_fault_tests;
+#[cfg(test)]
+mod clock_tests;
 #[cfg(test)]
 mod control_failure_tests;
 #[cfg(test)]

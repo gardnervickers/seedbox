@@ -58,6 +58,7 @@ impl Machine for QueueMachine {
                     self.shutdown()?;
                 }
                 crate::pv::Request::Application { .. }
+                | crate::pv::Request::StepRealtime { .. }
                 | crate::pv::Request::SimulationReply { .. } => break,
             }
         }
@@ -256,7 +257,7 @@ fn later_batch_failure_discards_earlier_uncommitted_outputs() {
         .offered(
             MachineId(0),
             NonZeroU32::new(1).unwrap(),
-            ApplicationCommand::Start,
+            crate::oracle::service::CommandKind::Application(ApplicationCommand::Start),
             crate::oracle::observation::Origin::External,
         )
         .unwrap();

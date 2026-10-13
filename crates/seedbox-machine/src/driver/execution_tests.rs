@@ -36,7 +36,9 @@ impl Machine for RecordingMachine {
                     lifecycle.push("reboot");
                 }
                 Request::Shutdown => lifecycle.push("shutdown"),
-                Request::Application { .. } | Request::SimulationReply { .. } => {}
+                Request::Application { .. }
+                | Request::StepRealtime { .. }
+                | Request::SimulationReply { .. } => {}
             }
         }
         self.calls.push(Call {

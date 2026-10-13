@@ -85,6 +85,13 @@ impl Codec {
                 self.pending.push_back((*id, action.into()));
                 Ok(format!("{action} {id}\n").into_bytes())
             }
+            Request::StepRealtime { id, nanoseconds } => {
+                if !self.used_ids.insert(*id) {
+                    return Err(Error::ReusedId);
+                }
+                self.pending.push_back((*id, "step".into()));
+                Ok(format!("step {id} {nanoseconds}\n").into_bytes())
+            }
             Request::Crash
             | Request::Reboot
             | Request::Shutdown
@@ -651,5 +658,33 @@ mod tests {
         assert!(prepare().prepare_reply(id(1, 1), &maximum).is_ok());
         maximum.insert(1, b'a');
         assert!(prepare().prepare_reply(id(1, 1), &maximum).is_err());
+    }
+    #[test]
+    fn realtime_steps_share_command_ids_and_acknowledge_as_step() {
+        let mut c = Codec::default();
+        let step = |n| Request::StepRealtime {
+            id: id(1),
+            nanoseconds: std::num::NonZeroI64::new(n).unwrap(),
+        };
+        assert_eq!(c.request(&step(-5)).unwrap(), b"step 1 -5\n");
+        assert_eq!(c.request(&step(5)), Err(Error::ReusedId));
+        assert_eq!(
+            c.request(&Request::Application {
+                id: id(1),
+                command: ApplicationCommand::Start
+            }),
+            Err(Error::ReusedId)
+        );
+        assert_eq!(
+            c.receive(&write(3, b"SEEDBOX_FAILURE id=1 action=step guest_ns=9\n"))
+                .unwrap(),
+            [Event::Response {
+                time: 3,
+                response: Response::CommandAcknowledged {
+                    id: id(1),
+                    result: CommandResult::Rejected
+                }
+            }]
+        );
     }
 }

@@ -15,6 +15,7 @@
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int management = -1;
@@ -113,6 +114,65 @@ static int launch(void *opaque, int error_fd) {
     dprintf(diagnostic, "seedbox init: exec %s: %s\n", application->arguments[0], strerror(error));
     return error;
 }
+/* Machine counter in nanoseconds of this machine's time base. PV kernels
+ * present the counter at 1 GHz (x86 RDTSC and arm64 CNTVCT are emulated);
+ * RISC-V reads the time CSR at the device tree's timebase frequency. */
+static int counter_ns(uint64_t *out) {
+#if defined(__x86_64__)
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi) :: "memory");
+    *out = (uint64_t)hi << 32 | lo;
+    return 0;
+#elif defined(__aarch64__)
+    uint64_t ticks, frequency;
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(ticks) :: "memory");
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+    if (!frequency) { errno = EINVAL; return -1; }
+    *out = (uint64_t)((unsigned __int128)ticks * 1000000000u / frequency);
+    return 0;
+#elif defined(__riscv)
+    static uint64_t frequency;
+    if (!frequency) {
+        unsigned char bytes[4];
+        int fd = open("/sys/firmware/devicetree/base/cpus/timebase-frequency", O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return -1;
+        ssize_t count = read(fd, bytes, sizeof(bytes)); close(fd);
+        if (count != (ssize_t)sizeof(bytes)) { errno = EINVAL; return -1; }
+        frequency = (uint64_t)bytes[0] << 24 | (uint64_t)bytes[1] << 16 | (uint64_t)bytes[2] << 8 | bytes[3];
+        if (!frequency) { errno = EINVAL; return -1; }
+    }
+    uint64_t ticks;
+    __asm__ volatile("rdtime %0" : "=r"(ticks) :: "memory");
+    *out = (uint64_t)((unsigned __int128)ticks * 1000000000u / frequency);
+    return 0;
+#else
+#error seedbox guest clock requires x86-64, AArch64 or RISC-V
+#endif
+}
+/* Every boot starts CLOCK_REALTIME at the simulation epoch plus the machine
+ * counter, before Ready. /seedbox/clock.bin is "SBXCLK1\0" followed by the
+ * little-endian u32 epoch seconds; an archive without it uses epoch zero. */
+static void set_realtime(void) {
+    failure_phase = "read clock epoch"; failure_path = "/seedbox/clock.bin";
+    uint32_t epoch = 0;
+    int fd = open(failure_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0 && errno != ENOENT) failed();
+    if (fd >= 0) {
+        unsigned char bytes[13];
+        ssize_t count = read(fd, bytes, sizeof(bytes)); close(fd);
+        if (count != 12 || memcmp(bytes, "SBXCLK1\0", 8)) { errno = EINVAL; failed(); }
+        epoch = (uint32_t)bytes[8] | (uint32_t)bytes[9] << 8 |
+                (uint32_t)bytes[10] << 16 | (uint32_t)bytes[11] << 24;
+    }
+    failure_phase = "set realtime"; failure_path = "CLOCK_REALTIME";
+    uint64_t now;
+    if (counter_ns(&now)) failed();
+    struct timespec realtime = {
+        .tv_sec = (time_t)((uint64_t)epoch + now / 1000000000u),
+        .tv_nsec = (long)(now % 1000000000u),
+    };
+    if (clock_settime(CLOCK_REALTIME, &realtime)) failed();
+}
 int main(void) {
     sbx_oracle_init(&oracle, write_all, &management);
     mount_fs("devtmpfs", "/dev");
@@ -138,6 +198,7 @@ int main(void) {
     struct sbx_application application;
     failure_phase = "read launch recipe"; failure_path = "/seedbox/application.bin";
     if (sbx_application_load(&application, failure_path)) failed();
+    set_realtime();
     failure_phase = "enter application root"; failure_path = "/rootfs";
     if (mount("/rootfs", "/rootfs", NULL, MS_BIND | MS_REC, NULL) ||
         chdir("/rootfs") || mount(".", "/", NULL, MS_MOVE, NULL) ||

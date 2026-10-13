@@ -19,6 +19,9 @@ pub(crate) struct GuestBootstrap {
     pub init: Vec<u8>,
     /// Optional base archive, represented by an empty vector when absent.
     pub base_initramfs: Vec<u8>,
+    /// Guest CLOCK_REALTIME at boot is this many seconds plus the machine
+    /// counter. TODO: no explicit caller path supplies it yet; factories use 0.
+    pub epoch_seconds: u32,
 }
 
 const RECIPE_MAGIC: &[u8; 8] = b"SBXAPP2\0";
@@ -400,6 +403,11 @@ fn package(
     )?;
     archive.owned(b"init", 0o100755, &bootstrap.init)?;
     archive.owned(b"seedbox/application.bin", 0o100400, &recipe)?;
+    // Realtime epoch for every boot; the shared PID 1 sets CLOCK_REALTIME
+    // to epoch plus the machine counter from it before Ready.
+    let mut clock = b"SBXCLK1\0".to_vec();
+    clock.extend(bootstrap.epoch_seconds.to_le_bytes());
+    archive.owned(b"seedbox/clock.bin", 0o100400, &clock)?;
     let mut groups: BTreeMap<Vec<u8>, (u32, u32)> = BTreeMap::new();
     for name in nodes.keys() {
         let (key, node) = resolve(&nodes, name)?;
