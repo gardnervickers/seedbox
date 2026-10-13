@@ -196,7 +196,7 @@ pub(super) fn load(
     put(ram, GDT, &gdt)?;
     // Identity-map the first 4 GiB with 2 MiB pages, covering RAM and PV MMIO.
     let mut tables = vec![0u8; 6 * 4096];
-    tables[..8].copy_from_slice(&(PML4 + 0x1000 | 3).to_le_bytes());
+    tables[..8].copy_from_slice(&((PML4 + 0x1000) | 3).to_le_bytes());
     for directory in 0..4u64 {
         let entry = (PML4 + 0x2000 + directory * 0x1000) | 3;
         let at = 0x1000 + directory as usize * 8;
