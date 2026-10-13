@@ -182,8 +182,11 @@ Each hook charges a 100 ns read and is inactive before PV activation.
 This covers the patched kernel `cpu_relax`/`rep_nop` paths. It does not cover
 arbitrary assembly `PAUSE`, early decompression, the vDSO, or every ARM kernel
 polling loop. Application polling is handled by binary instrumentation.
+The `seedbox-machine` x86 kernel patches the same sites; its shared PV ABI 3
+read, like every ABI 3 clock read on both architectures, charges 1 ns instead.
 
-Code: [kernel clock](../kernel/seedbox.c), [patch sites](../kernel/apply.py).
+Code: [kernel clock](../kernel/seedbox.c), [patch sites](../kernel/apply.py),
+[seedbox-machine patch sites](../crates/seedbox-machine/guest/kernel/x86_64/apply.py).
 
 ## Observation without guest progress
 
