@@ -107,9 +107,54 @@ pub(crate) enum FaultAction {
     Effect(Effect),
     Heal,
 }
+/// Who requested an admitted fault: a guest control call or a matched trigger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Requester {
+    Call {
+        source: String,
+        id: SimulationControlId,
+    },
+    Trigger(u32),
+}
+/// Policy admission of a fault. Admission is not completion; a later
+/// Settlement reports the outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Admitted {
+    pub fault: u32,
+    pub requester: Requester,
+    pub target: String,
+    pub boot: u64,
+    pub action: FaultAction,
+    pub handle: Option<String>,
+    pub requested_at: u64,
+    pub admitted_at: u64,
+}
+/// Incremental control facts in the order this service confirmed them. The
+/// timeline owner takes them after every call, including failed calls, and
+/// publishes them; this service keeps no history of drained notices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Notice {
+    Admitted(Admitted),
+    Settled(Settlement),
+    TriggerArmed {
+        trigger: u32,
+        source: String,
+        target: String,
+        at: u64,
+        deadline: u64,
+    },
+    /// `status` is a final trigger status, never Armed or Matched.
+    TriggerResolved {
+        trigger: u32,
+        at: u64,
+        status: super::triggers::Status,
+        fault: Option<u32>,
+    },
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settlement {
     pub fault: u32,
+    pub requester: Requester,
     pub target: String,
     pub boot: u64,
     pub action: FaultAction,
@@ -165,7 +210,7 @@ impl Failure {
 #[derive(Clone, Copy)]
 enum AdmissionMode {
     Control,
-    Trigger,
+    Trigger { trigger: u32 },
 }
 
 enum PreparationError {
@@ -219,6 +264,7 @@ struct Call {
 #[derive(Clone)]
 struct Pending {
     call: Option<Call>,
+    requester: Requester,
     target: String,
     boot: u64,
     effect: Effect,
@@ -239,6 +285,7 @@ pub(crate) struct Service {
     pending: BTreeMap<u32, Pending>,
     sleepers: BTreeMap<u32, (Call, u64)>,
     poisoned: bool,
+    notices: Vec<Notice>,
 }
 fn error(code: ErrorCode, message: impl Into<String>) -> OperationError {
     OperationError {
@@ -248,6 +295,10 @@ fn error(code: ErrorCode, message: impl Into<String>) -> OperationError {
     }
 }
 impl Service {
+    /// Transfer confirmed facts once, in confirmation order.
+    pub(crate) fn take_notices(&mut self) -> Vec<Notice> {
+        std::mem::take(&mut self.notices)
+    }
     fn valid(&self) -> Result<(), Failure> {
         if self.poisoned {
             Err("control service poisoned".into())
@@ -347,16 +398,39 @@ impl Service {
                 fault: TriggerFault::Stop { target },
             }) => adapter.resolve(&source).and_then(|source| {
                 adapter.resolve(&target).and_then(|target| {
-                    self.triggers
-                        .arm(source.name, marker, now, match_timeout_ns, target.name)
-                        .map(|id| json!({"trigger_id":id}))
-                        .map_err(|e| error(ErrorCode::InvalidState, e))
+                    let id = self
+                        .triggers
+                        .arm(
+                            source.name.clone(),
+                            marker,
+                            now,
+                            match_timeout_ns,
+                            target.name.clone(),
+                        )
+                        .map_err(|e| error(ErrorCode::InvalidState, e))?;
+                    let deadline = self.triggers.records()[id as usize - 1].match_deadline;
+                    self.notices.push(Notice::TriggerArmed {
+                        trigger: id,
+                        source: source.name,
+                        target: target.name,
+                        at: now,
+                        deadline,
+                    });
+                    Ok(json!({"trigger_id":id}))
                 })
             }),
             Ok(Operation::CancelTrigger { trigger_id }) => self
                 .triggers
                 .cancel(trigger_id, now)
-                .map(|_| json!({}))
+                .map(|_| {
+                    self.notices.push(Notice::TriggerResolved {
+                        trigger: trigger_id,
+                        at: now,
+                        status: super::triggers::Status::Cancelled,
+                        fault: None,
+                    });
+                    json!({})
+                })
                 .map_err(|e| error(ErrorCode::InvalidState, e)),
             Ok(
                 op @ (Operation::Stop { .. }
@@ -453,6 +527,7 @@ impl Service {
                             facts,
                             Effect::Execution(config),
                             handle,
+                            false,
                             now,
                         );
                     }
@@ -462,14 +537,9 @@ impl Service {
             }
         };
         let heal = matches!(effect, Effect::Execution(_)) && handle.is_some();
-        let result = self.install(adapter, mode, call, facts, effect, handle, now)?;
-        if heal {
-            let p = self.pending.get_mut(&result.0).unwrap();
-            p.result = json!({});
-            p.healing = true;
-        }
-        Ok(result)
+        self.install(adapter, mode, call, facts, effect, handle, heal, now)
     }
+    #[allow(clippy::too_many_arguments)]
     fn install(
         &mut self,
         adapter: &mut impl Adapter,
@@ -478,6 +548,7 @@ impl Service {
         facts: Facts,
         effect: Effect,
         handle: Option<ExecutionPlan>,
+        healing: bool,
         now: u64,
     ) -> Result<(u32, Vec<Plan>), PreparationError> {
         // The control API's physical-availability preflight precedes Faults'
@@ -510,12 +581,23 @@ impl Service {
         if !allowed {
             return Err(error(ErrorCode::InvalidState, "target state rejects operation").into());
         }
+        let requester = match (&call, mode) {
+            (Some(call), _) => Requester::Call {
+                source: call.source.clone(),
+                id: call.id,
+            },
+            (None, AdmissionMode::Trigger { trigger }) => Requester::Trigger(trigger),
+            (None, AdmissionMode::Control) => {
+                return Err(Failure::from("control admission lacks its call").into());
+            }
+        };
         let fault = self.token()?;
         let deadline = now
             .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
             .ok_or_else(|| OperationError::invalid("effect deadline overflow"))?;
         let pending = Pending {
             call,
+            requester,
             target: facts.name,
             boot: facts.boot,
             effect,
@@ -523,15 +605,25 @@ impl Service {
             dispatched: None,
             deadline,
             admitted: now,
-            result: handle
-                .as_ref()
-                .map(|h| json!({"handle":h.handle.to_string()}))
-                .unwrap_or_else(|| json!({})),
+            result: match &handle {
+                Some(h) if !healing => json!({"handle":h.handle.to_string()}),
+                _ => json!({}),
+            },
             handle,
-            healing: false,
+            healing,
         };
         let unavailable = matches!(pending.effect, Effect::Process(_))
             && (facts.vm == Vm::Down || facts.physically_ended);
+        self.notices.push(Notice::Admitted(Admitted {
+            fault,
+            requester: pending.requester.clone(),
+            target: pending.target.clone(),
+            boot: pending.boot,
+            action: Self::action(&pending),
+            handle: Self::handle(&pending),
+            requested_at: Self::requested_at(&pending),
+            admitted_at: now,
+        }));
         self.pending.insert(fault, pending);
         let mut plans = vec![];
         if !unavailable
@@ -803,6 +895,7 @@ impl Service {
             }
         }
         let p = self.pending.remove(&fault).unwrap();
+        self.notices.push(Notice::Settled(settlement.clone()));
         let mut plans = vec![Plan::Settled(settlement)];
         if let Some(call) = p.call {
             let effect = (result.is_ok()
@@ -913,22 +1006,32 @@ impl Service {
     ) -> Settlement {
         Settlement {
             fault,
+            requester: p.requester.clone(),
             target: p.target.clone(),
             boot: p.boot,
-            action: if p.healing {
-                FaultAction::Heal
-            } else {
-                FaultAction::Effect(p.effect.clone())
-            },
-            requested_at: p.call.as_ref().map_or(p.admitted, |c| c.requested),
+            action: Self::action(p),
+            requested_at: Self::requested_at(p),
             admitted_at: p.admitted,
             outcome_at: observed,
             committed_at: commit,
             status,
-            handle: p.handle.as_ref().map(|h| h.handle.to_string()),
+            handle: Self::handle(p),
             command: p.command,
             detail,
         }
+    }
+    fn action(p: &Pending) -> FaultAction {
+        if p.healing {
+            FaultAction::Heal
+        } else {
+            FaultAction::Effect(p.effect.clone())
+        }
+    }
+    fn requested_at(p: &Pending) -> u64 {
+        p.call.as_ref().map_or(p.admitted, |c| c.requested)
+    }
+    fn handle(p: &Pending) -> Option<String> {
+        p.handle.as_ref().map(|h| h.handle.to_string())
     }
     fn fatal(
         &mut self,
@@ -962,7 +1065,9 @@ impl Service {
                 })
             })
             .into_iter()
-            .collect();
+            .collect::<Vec<_>>();
+        self.notices
+            .extend(settlements.iter().cloned().map(Notice::Settled));
         self.poison();
         Failure {
             message,
@@ -1008,9 +1113,19 @@ impl Service {
         self.valid()?;
         let mut plans = vec![];
         for effect in self.triggers.due(at) {
+            // The resolution causes any fault admission; publish it first.
+            let mark = self.notices.len();
+            let resolved = |status, fault| Notice::TriggerResolved {
+                trigger: effect.trigger_id,
+                at,
+                status,
+                fault,
+            };
             let result = self.prepare(
                 adapter,
-                AdmissionMode::Trigger,
+                AdmissionMode::Trigger {
+                    trigger: effect.trigger_id,
+                },
                 None,
                 Operation::Stop {
                     target: Target::Machine(effect.target),
@@ -1020,19 +1135,25 @@ impl Service {
             match result {
                 Ok((id, p)) => {
                     self.triggers.resolve(effect.trigger_id, at, Ok(id))?;
+                    self.notices
+                        .insert(mark, resolved(super::triggers::Status::Fired, Some(id)));
                     plans.extend(p);
                 }
                 Err(PreparationError::Rejected(e)) => {
                     self.triggers
-                        .resolve(effect.trigger_id, at, Err(e.message))?
+                        .resolve(effect.trigger_id, at, Err(e.message))?;
+                    self.notices
+                        .insert(mark, resolved(super::triggers::Status::Rejected, None));
                 }
                 Err(PreparationError::Fatal(mut e)) => {
                     // A preparation failure after policy admission can already
                     // carry the new fault's Failed settlement. Fired records
                     // admission, not a successful guest effect.
                     if let Some(settlement) = e.settlements.first() {
-                        self.triggers
-                            .resolve(effect.trigger_id, at, Ok(settlement.fault))?;
+                        let fault = settlement.fault;
+                        self.triggers.resolve(effect.trigger_id, at, Ok(fault))?;
+                        self.notices
+                            .insert(mark, resolved(super::triggers::Status::Fired, Some(fault)));
                     }
                     e.retain_before(plans);
                     return Err(e);
@@ -1046,10 +1167,24 @@ impl Service {
         self.triggers.reset_source(source).map_err(Into::into)
     }
     pub(crate) fn expire_triggers(&mut self, at: u64) {
-        self.triggers.expire(at);
+        for trigger in self.triggers.expire(at) {
+            self.notices.push(Notice::TriggerResolved {
+                trigger,
+                at,
+                status: super::triggers::Status::Expired,
+                fault: None,
+            });
+        }
     }
     pub(crate) fn cut_off_triggers(&mut self, at: u64) {
-        self.triggers.cut_off(at);
+        for trigger in self.triggers.cut_off(at) {
+            self.notices.push(Notice::TriggerResolved {
+                trigger,
+                at,
+                status: super::triggers::Status::CutOff,
+                fault: None,
+            });
+        }
     }
     pub(crate) fn trigger_boundary(&self) -> Option<u64> {
         self.triggers.boundary()

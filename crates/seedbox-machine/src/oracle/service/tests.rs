@@ -1285,11 +1285,16 @@ fn ordinary_control_preflight_does_not_depend_on_a_reply_destination() {
     }
     assert_eq!(service.last, 0);
     assert!(service.pending.is_empty());
-    let (fault, plans) =
-        match service.prepare(&mut owner, AdmissionMode::Trigger, None, operation(), 10) {
-            Ok(result) => result,
-            Err(_) => panic!("bare trigger must admit an unavailable fault"),
-        };
+    let (fault, plans) = match service.prepare(
+        &mut owner,
+        AdmissionMode::Trigger { trigger: 1 },
+        None,
+        operation(),
+        10,
+    ) {
+        Ok(result) => result,
+        Err(_) => panic!("bare trigger must admit an unavailable fault"),
+    };
     assert_eq!(fault, 1);
     assert_eq!(settlement(&plans).status, SettlementStatus::Unavailable);
     assert_eq!(settlement(&plans).outcome_at, Some(10));

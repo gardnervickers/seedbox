@@ -210,12 +210,16 @@ impl Triggers {
 
     /// Expire due unmatched triggers. Caller ordering decides whether a cancel
     /// at the exact deadline runs before this expiry; bytes at that time never match.
-    pub(crate) fn expire(&mut self, now: u64) {
+    /// Returns the newly expired IDs in arm order.
+    pub(crate) fn expire(&mut self, now: u64) -> Vec<u32> {
+        let mut expired = Vec::new();
         for record in &mut self.records {
             if record.status == Status::Armed && record.match_deadline <= now {
                 record.status = Status::Expired;
+                expired.push(record.id);
             }
         }
+        expired
     }
 
     /// Mark policy admission (not application completion) at the scheduled time.
@@ -268,13 +272,17 @@ impl Triggers {
         Ok(())
     }
 
-    pub(crate) fn cut_off(&mut self, now: u64) {
+    /// Returns the newly cut-off IDs in arm order.
+    pub(crate) fn cut_off(&mut self, now: u64) -> Vec<u32> {
+        let mut cut = Vec::new();
         for record in &mut self.records {
             if matches!(record.status, Status::Armed | Status::Matched) {
                 record.status = Status::CutOff;
                 record.cut_off_at = Some(now);
+                cut.push(record.id);
             }
         }
+        cut
     }
 
     fn record_mut(&mut self, id: u32) -> Result<&mut Record, String> {

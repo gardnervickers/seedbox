@@ -126,6 +126,7 @@ fn settlement_retires_its_deadline_without_deleting_other_policy_or_external_wor
     driver
         .control_plans(vec![Plan::Settled(Settlement {
             fault: 7,
+            requester: crate::oracle::service::Requester::Trigger(1),
             target: "fixture-0".into(),
             boot: 0,
             action: FaultAction::Effect(Effect::Process(crate::pv::ApplicationCommand::Stop)),
