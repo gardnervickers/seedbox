@@ -457,6 +457,13 @@ root Cargo aliases when building them directly. ARM guest fixtures read
 `SEEDBOX_ARM64_KERNEL` and `SEEDBOX_ARM64_INITRD`; `harness/check.py` defines
 their checkout defaults and the other suite requirements.
 
+The application suites also run `crates/seedbox/tests/determinism.rs`: one
+definition built from `harness/fixtures/determinism` must keep its witness,
+full state and fault history under slowed, paused and observed playback, beside
+a concurrently controlled simulation, with checkpoints captured, and with fault
+previews issued while paused. Its branches must match each other, and edited
+inputs must reproduce output, events and faults before their first changed time.
+
 Unit tests live beside their component under `src/`. Integration tests live in
 the owning crate's `tests/` and exercise public boundaries. Give each scenario
 one owner. Check determinism with independent fresh runs as well as replay;

@@ -1,0 +1,30 @@
+# Owned by crates/seedbox/tests/determinism.rs; see driver.py.
+name: determinism-oracles
+machines:
+  server:
+    build:
+      context: .
+    command: [python3, -u, /driver.py, server]
+    files:
+    - source: driver.py
+      target: /driver.py
+  worker:
+    build:
+      context: .
+    command: [python3, -u, /driver.py, worker]
+    files:
+    - source: driver.py
+      target: /driver.py
+oracle:
+  build:
+    context: .
+  command: [python3, -u, /driver.py, scenario]
+  files:
+  - source: driver.py
+    target: /driver.py
+  - source: ../../../python/seedbox/__init__.py
+    target: /seedbox/__init__.py
+  - source: ../../../python/seedbox/control.py
+    target: /seedbox/control.py
+network:
+  latency: 1ms

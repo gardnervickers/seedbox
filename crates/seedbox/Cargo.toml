@@ -45,5 +45,9 @@ name = "applications"
 required-features = ["application-tests"]
 
 [[test]]
+name = "determinism"
+required-features = ["application-tests"]
+
+[[test]]
 name = "host_pause"
 required-features = ["retained-run-tests"]
