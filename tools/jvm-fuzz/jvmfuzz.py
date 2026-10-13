@@ -476,6 +476,20 @@ def same(x, y):
     return x is not None and y is not None and x["exit"] == y["exit"] and x["lines"] == y["lines"]
 
 
+OK_MARKER = re.compile(r"^(OK|UNSUPPORTED) \S")
+
+
+def needs_marker(c):
+    """Probes end a successful run with `OK <probe> <hash>` (or `UNSUPPORTED <what>` when the
+    host lacks a feature). Probes that exit on purpose (`exit_codes`) are judged by status alone."""
+    return c.get("exit", 0) == 0 and "exit_codes" not in PROBES.get(c.get("probe", c["main"]), {})
+
+
+def finished(r, c):
+    """Whether one run of a case ended as expected: its status, and its marker when one is due."""
+    return r["exit"] == c.get("exit", 0) and (not needs_marker(c) or any(OK_MARKER.match(l) for l in r["lines"]))
+
+
 def diff(x, y, a_name, b_name, limit=40):
     d = list(difflib.unified_diff(x["lines"] + [f"<exit {x['exit']}>"], y["lines"] + [f"<exit {y['exit']}>"],
                                   a_name, b_name, lineterm="", n=1))
@@ -498,24 +512,27 @@ def sim_dirs(corpus):
     return dirs + sorted(d for d in corpus.glob("sim-*") if d.is_dir())
 
 
-def case_verdict(c, ns, s, p, simulated):
-    """Verdict and notes for one case in one simulation directory."""
+def case_verdict(c, ns, s, p, simulated, replayed=False):
+    """Verdict and notes for one case in one simulation directory. `replayed`: the batch was
+    replayed, so a case the simulation ran must also be in the replay's output."""
     stable = len(ns) >= 1 and all(same(ns[0], n) for n in ns[1:])
     want = c.get("exit", 0)
-    native_ok = bool(ns) and all(n["exit"] == want for n in ns)
+    native_ok = bool(ns) and all(finished(n, c) for n in ns)
     notes = []
     if not ns:
         verdict = "NO_NATIVE"
     elif not native_ok:
         verdict = "NATIVE_FAIL"
-        notes += ns[0]["lines"][-15:]
+        bad = next(n for n in ns if not finished(n, c))
+        notes += ([] if bad["exit"] != want else [f"exit {want} without an OK marker"]) + bad["lines"][-15:]
     else:
         verdict = None
     if s is None:
         v2 = "SIM_NOT_REACHED" if simulated else "NO_SIM"
-    elif s["exit"] != want:
+    elif not finished(s, c):
         v2 = failure_kind(s)
-        notes += s["lines"][-25:] + s["hserr"][:60]
+        notes += ([f"exit {s['exit']}, expected {want}"] if s["exit"] != want else
+                  [f"exit {want} without an OK marker"]) + s["lines"][-25:] + s["hserr"][:60]
     elif c["det"] and stable and ns:
         v2 = "OK" if same(ns[0], s) else "MISMATCH"
         if v2 == "MISMATCH":
@@ -525,6 +542,9 @@ def case_verdict(c, ns, s, p, simulated):
     if p is not None and s is not None and not same(s, p):
         v2 = "REPLAY_DIVERGE"
         notes += diff(s, p, "sim", "replay")
+    elif p is None and s is not None and replayed:
+        v2 = "REPLAY_DIVERGE"
+        notes.append("the replay's output lacks this case")
     if verdict is None or verdict == "NATIVE_FAIL" and v2.startswith("SIM"):
         verdict = v2 if verdict is None else f"{verdict}+{v2}"
     if c.get("info") and verdict == "MISMATCH":
@@ -559,7 +579,8 @@ def cmd_report(a):
         for c in meta["cases"]:
             cid = c["id"]
             p = replay.get(cid)
-            verdict, notes = case_verdict(c, native.get(cid, []), sim.get(cid), p, batch_of[cid] in meta_d)
+            replayed = bool(meta_d.get(batch_of[cid], {}).get("replay_id"))
+            verdict, notes = case_verdict(c, native.get(cid, []), sim.get(cid), p, batch_of[cid] in meta_d, replayed)
             # `seedbox replay` compares the whole run (memory, disk, console), not only this case's
             # output; anything but MATCH fails every case of the batch.
             status = meta_d.get(batch_of[cid], {}).get("replay_status")
@@ -627,6 +648,28 @@ JCSTRESS_GROUPS = {
     "problems": r"samples\.problems\.",
 }
 JCSTRESS_RESULTS = re.compile(r"\(Results: (\d+) planned; (\d+) passed, (\d+) failed, (\d+) soft errs, (\d+) hard errs\)")
+
+
+def jcstress_state(x):
+    """PASS only for a complete run that selected tests and passed all of them: a missing exit
+    or results summary is TRUNCATED, and a filter that selected nothing is NO_TESTS."""
+    if x["crash"]:
+        return "CRASH"
+    if x["exit"] is None or x["planned"] is None:
+        return "TRUNCATED"
+    if x["planned"] == 0:
+        return "NO_TESTS"
+    if x["exit"] != 0 or x["failed"] or x["errors"] or x["passed"] != x["planned"]:
+        return "FAIL"
+    return "PASS"
+
+
+def jcstress_bad(n, s, replay_status, replay_output):
+    """Whether one group fails: its simulation is not PASS, selected a different number of tests
+    than native, or its replay is not a MATCH (`seedbox replay`, or the printed output)."""
+    if s is not None and (jcstress_state(s) != "PASS" or n is not None and s["planned"] != n["planned"]):
+        return True
+    return replay_status not in (None, "-", "MATCH") or replay_output == "DIVERGE"
 
 
 def jcstress_summary(path):
@@ -707,14 +750,13 @@ def cmd_jcstress(a):
         def fmt(x):
             if x is None:
                 return "-"
-            state = "CRASH" if x["crash"] else "PASS" if x["exit"] == 0 and not x["failed"] and not x["errors"] else "FAIL"
             extra = f" {','.join(x['failing_tests'])}" if x["failing_tests"] else ""
-            return f"{state} {x['passed']}/{x['planned']}{extra}"
+            return f"{jcstress_state(x)} {x['passed']}/{x['planned']}{extra}"
         rep = "-"
         if (d / "replay.out").exists() and (d / "run.out").exists():
             rep = "MATCH" if (d / "replay.out").read_text() == (d / "run.out").read_text() else "DIVERGE"
         row = [fmt(n), fmt(s), f"{info.get('replay_status', '-')}, output {rep}"]
-        if s and n and (not fmt(s).startswith("PASS") or s["planned"] != n["planned"]) or rep == "DIVERGE":
+        if jcstress_bad(n, s, info.get("replay_status"), rep):
             bad += 1
         lines.append(f"| {name} | " + " | ".join(row) + " |")
     (out / "report.md").write_text("\n".join(lines) + "\n")

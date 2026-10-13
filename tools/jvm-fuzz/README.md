@@ -114,11 +114,19 @@ simulation of its own.
 | `OK` | Simulation output equals the (stable) native output. |
 | `OK_NONDET` | Output is not expected to match native; only replay is checked. |
 | `MISMATCH` | Deterministic case whose simulated output differs from native. |
-| `SIM_CRASH`, `SIM_FAIL`, `SIM_TIMEOUT` | The JVM crashed (hs_err included), failed, or hit the per-case limit only in simulation. |
+| `SIM_CRASH`, `SIM_FAIL`, `SIM_TIMEOUT` | The JVM crashed (hs_err included), failed, or hit the per-case limit only in simulation. A wrong exit status, or exit 0 without the `OK` (or `UNSUPPORTED`) line, is `SIM_FAIL`. |
 | `SIM_CUT`, `SIM_NOT_REACHED` | The simulation ended during or before the case. |
-| `REPLAY_DIVERGE` | The replay printed different output from the original simulation. |
+| `REPLAY_DIVERGE` | The replay printed different output from the original simulation, or lacks the case. |
+| `REPLAY_MISMATCH`, `REPLAY_NOT_COMPARABLE`, `REPLAY_ERROR` | `seedbox replay` of the batch did not report `MATCH` (witness or full state), whatever the output; every case of the batch gets it. |
 | `NATIVE_FAIL`, `NATIVE_UNSTABLE` | The probe itself is broken or nondeterministic; fix the probe. |
 | `GUEST_DIFF` | An informational probe (`C.capabilities`) found the guest differs from the host. |
+
+Probes with `exit_codes` are judged by exit status alone; every other case must
+exit 0 and print its `OK` line. A jcstress group passes only when its run
+selected tests, printed the results summary and exit status, passed every
+planned test (as many as natively) and replayed with `MATCH`; otherwise it is
+`FAIL`, `CRASH`, `TRUNCATED` or `NO_TESTS`. `test_jvmfuzz.py` checks these
+verdicts on fixture result directories (portable suite).
 
 The report also lists programs whose native output changes with the flag
 profile: a probe bug or a HotSpot bug, independent of Seedbox.
