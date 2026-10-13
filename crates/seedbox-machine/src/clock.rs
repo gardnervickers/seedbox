@@ -4,6 +4,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod projection;
+
 pub trait Clock {
     /// Returns the current simulation time in nanoseconds.
     ///

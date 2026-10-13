@@ -1,6 +1,6 @@
 //! Drive two native ARM PV Linux guests with seeded sleeps of one to four seconds.
-//! Run inside `nix develop` with SEEDBOX_PV_WORKER and SEEDBOX_PV_KERNEL set.
-//! The worker is the standalone seedbox-arm64 executable, signed for HVF on macOS.
+//! Run on arm64 Linux/KVM or Apple Silicon macOS/HVF with prepared PV guest assets.
+//! Build this crate's worker; macOS also requires its Hypervisor entitlement.
 
 #[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
 #[path = "support/pv_init.rs"]
@@ -11,43 +11,77 @@ mod support;
 #[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use seedbox_machine::{
+        definition::{
+            FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources,
+        },
         driver::{Driver, StepOutcome},
-        machine::{pv::PVMachine, ExitReason, StopReason, Timestamp},
+        machine::{ExitReason, Timestamp, pv::Factory},
     };
-    use std::{fs, path::PathBuf};
+    use std::path::PathBuf;
 
     fn input(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .ok_or_else(|| format!("{name} is missing; set it to the prepared PV input").into())
+        std::env::var_os(name).map(PathBuf::from).ok_or_else(|| {
+            let fix = match name {
+                "SEEDBOX_PV_WORKER" => "build seedbox-pv-worker and set this to its path",
+                "SEEDBOX_PV_ASSETS" => "set this to the backend guest asset directory",
+                _ => "set this to the required PV input",
+            };
+            format!("{name} is missing; {fix}").into()
+        })
     }
     let executable = input("SEEDBOX_PV_WORKER")?;
-    let kernel = fs::read(input("SEEDBOX_PV_KERNEL")?)?;
+    let mut backend = Factory::new(&executable, &input("SEEDBOX_PV_ASSETS")?)?;
     let guests = support::sleeping_guests();
+    fn definition(
+        name: String,
+        seconds: u32,
+    ) -> Result<MachineDefinition, Box<dyn std::error::Error>> {
+        let program = pv_init::sleeping_program(seconds);
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(program.len() as u64);
+        header.set_mode(0o755);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_cksum();
+        tar.append_data(&mut header, "application", &program[..])?;
+        Ok(MachineDefinition {
+            name,
+            resources: Resources {
+                memory_bytes: 128 << 20,
+            },
+            application: PreparedApplication {
+                filesystem: FilesystemArchive::new(tar.into_inner()?)?,
+                launch: Launch {
+                    argv: vec!["/application".into()],
+                    environment: Default::default(),
+                    working_directory: "/".into(),
+                    user: "0:0".into(),
+                },
+            },
+        })
+    }
+    // The oracle outlives both ordinary sleepers and ends this demonstration.
+    let oracle = definition("oracle".into(), 5)?;
+    let machines = guests
+        .iter()
+        .map(|(name, seconds)| definition((*name).into(), *seconds))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut driver = Driver::new(
         Timestamp::from_nanos(0),
         std::time::Duration::from_millis(1),
         2,
+        support::driver_rng(),
         || Ok(()),
-        |clock| {
-            guests
-                .iter()
-                .map(|(_, seconds)| {
-                    PVMachine::new(
-                        &executable,
-                        kernel.clone(),
-                        pv_init::sleeping_initrd(*seconds),
-                        support::SEED,
-                        clock.clone(),
-                    )
-                })
-                .collect()
-        },
+        oracle,
+        machines,
+        move |definition| backend.create(definition),
     )?;
-    let ids: Vec<_> =
-        driver.with_barrier(|barrier| Ok(barrier.machines().map(|(id, _)| id).collect()))?;
+    let ids: Vec<_> = driver
+        .with_barrier(|barrier| Ok(barrier.machines().skip(1).map(|(id, _)| id).collect()))?;
     println!("[seed={}, sleep range=1..=4 seconds]", support::SEED);
-    for (name, sleep) in guests {
+    for (name, sleep) in &guests {
         println!("[{name} sleeping for {sleep} seconds]");
     }
     let mut now = Timestamp::from_nanos(0);
@@ -56,32 +90,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let outcome = driver.step(Timestamp::from_nanos(now.as_nanos() + QUANTUM_NS))?;
         now = match outcome {
-            StepOutcome::BarrierReached { at } | StepOutcome::Finished { at } => at,
+            StepOutcome::BarrierReached { at } | StepOutcome::Finished { at, .. } => at,
             StepOutcome::Blocked { .. } => return Err("PV guests blocked without a timer".into()),
             StepOutcome::Waiting { .. }
             | StepOutcome::BeforeAction { .. }
             | StepOutcome::Stopped { .. } => {
-                return Err("unexpected playback control in example".into())
+                return Err("unexpected playback control in example".into());
             }
         };
-        let stops: Vec<_> =
-            driver.with_barrier(|barrier| ids.iter().map(|&id| barrier.stopped(id)).collect())?;
-        for (index, stopped) in stops.into_iter().enumerate() {
-            if let StopReason::Exited { reached, reason } = stopped {
-                let (name, seconds) = guests[index];
-                if reason != ExitReason::Shutdown {
-                    return Err(format!("{name} exited: {reason:?}").into());
-                }
-                if reached.as_nanos() < u64::from(seconds) * 1_000_000_000 {
-                    return Err(format!("{name} shut down before its sleep elapsed").into());
-                }
-                if !exited[index] {
-                    println!("[{name} shut down at {} ns]", reached.as_nanos());
+        let outputs = driver.with_barrier(|barrier| Ok(barrier.drain_responses()))?;
+        for output in outputs {
+            if let seedbox_machine::pv::Response::ApplicationOutcome { code } = output.payload {
+                if let Some(index) = ids.iter().position(|&id| id == output.machine) {
+                    let (name, seconds) = &guests[index];
+                    if code != 0 || output.at.as_nanos() < u64::from(*seconds) * 1_000_000_000 {
+                        return Err(format!(
+                            "{name} unexpected application outcome: {code} at {} ns",
+                            output.at.as_nanos()
+                        )
+                        .into());
+                    }
+                    if exited[index] {
+                        return Err(format!("{name} duplicate application outcome").into());
+                    }
+                    println!("[{name} application exited at {} ns]", output.at.as_nanos());
                     exited[index] = true;
                 }
             }
         }
-        if matches!(outcome, StepOutcome::Finished { .. }) {
+        if let StepOutcome::Finished { reason, .. } = outcome {
+            if reason != (ExitReason::ProgramExit { code: 0 }) || exited != [true; 2] {
+                return Err(format!(
+                    "oracle finished before successful ordinary outcomes: {reason:?}"
+                )
+                .into());
+            }
             break;
         }
     }

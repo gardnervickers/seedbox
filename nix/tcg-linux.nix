@@ -13,12 +13,19 @@ let
     sha256 = "57132e6e4f3a4ba9ffdf24e485513ce507e45471e7fd565aeed91c055cd63f7b";
   };
 in pkgs.runCommand "seedbox-tcg-linux" {
-  nativeBuildInputs = [ pkgs.cpio pkgs.gnutar pkgs.gzip ];
+  nativeBuildInputs = [ pkgs.cpio pkgs.gnutar pkgs.gzip pkgs.squashfsTools ];
 } ''
   mkdir -p "$out" boot root
-  tar -xzf ${boot} -C boot ./boot/vmlinuz-lts
+  tar -xzf ${boot} -C boot ./boot/vmlinuz-lts ./boot/modloop-lts
   gzip -dc boot/boot/vmlinuz-lts > "$out/kernel"
   tar -xzf ${root} -C root
+  # Alpine ships virtio console as a module. Keep its dependencies and module
+  # indexes with this fixture rather than depending on a mounted modloop.
+  unsquashfs -no-progress -d modules boot/boot/modloop-lts \
+    'modules/*/kernel/drivers/char/virtio_console.ko*' \
+    'modules/*/kernel/drivers/virtio/*' 'modules/*/modules.*'
+  mkdir -p root/lib/modules
+  cp -R modules/modules/. root/lib/modules/
   cp ${../crates/seedbox-machine/examples/tcg-init} root/init
   chmod +x root/init
   cd root

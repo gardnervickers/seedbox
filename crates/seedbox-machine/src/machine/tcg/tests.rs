@@ -1,4 +1,8 @@
 use super::*;
+use crate::clock::Clock;
+use crate::rng::SeededRng;
+use std::sync::Arc;
+type TcgMachine = crate::machine::test_environment::Environment<super::TcgMachine>;
 use crate::driver::{Driver, MachineId, StepOutcome};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
@@ -26,8 +30,13 @@ fn clock(nanos: u64) -> Arc<TestClock> {
 }
 
 fn start(words: &[u32]) -> TcgMachine {
-    TcgMachine::new(Path::new("qemu-system-riscv64"), manifest(words), clock(0))
-        .expect("QEMU fixture startup; run tests inside nix develop")
+    TcgMachine::new(
+        Path::new("qemu-system-riscv64"),
+        manifest(words),
+        SeededRng::new(0),
+        clock(0),
+    )
+    .expect("QEMU fixture startup; run tests inside nix develop")
 }
 
 fn at(nanos: u64) -> Timestamp {
@@ -59,7 +68,7 @@ fn step(driver: &mut Driver<TcgMachine>, id: MachineId, now: &mut Timestamp, qua
         _ => at(now.as_nanos() + quantum),
     };
     *now = match driver.step(upto).unwrap() {
-        StepOutcome::BarrierReached { at } | StepOutcome::Finished { at } => at,
+        StepOutcome::BarrierReached { at } | StepOutcome::Finished { at, .. } => at,
         StepOutcome::Blocked { .. } => panic!("guest blocked without a timer"),
         StepOutcome::Waiting { .. }
         | StepOutcome::BeforeAction { .. }
@@ -124,15 +133,23 @@ const SHUTDOWN: [u32; 4] = [
 
 #[test]
 fn driver_starts_at_its_clock_and_records_early_exit() {
-    let mut driver = Driver::new(
+    let mut driver = crate::driver::fixture::driver(
         at(37),
         std::time::Duration::from_millis(1),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
-            let machine =
-                TcgMachine::new(Path::new("qemu-system-riscv64"), manifest(&SHUTDOWN), clock)?;
-            assert_eq!(machine.reached, at(37));
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> =
+                Arc::new(crate::clock::SimulationClock::new((at(37)).as_nanos()));
+            let machine = TcgMachine::configured(
+                Path::new("qemu-system-riscv64"),
+                manifest(&SHUTDOWN),
+                SeededRng::new(0),
+                clock,
+            )?;
+            assert_eq!(machine.pending_boots, 1);
+            assert!(machine.process.is_none());
             Ok(vec![machine])
         },
     )
@@ -140,7 +157,10 @@ fn driver_starts_at_its_clock_and_records_early_exit() {
     let id = machine_id(&mut driver);
     assert_eq!(
         driver.step(at(100)).unwrap(),
-        StepOutcome::Finished { at: at(41) }
+        StepOutcome::Finished {
+            at: at(41),
+            reason: ExitReason::Shutdown
+        }
     );
     assert_eq!(
         stopped(&mut driver, id),
@@ -156,7 +176,8 @@ fn execution_does_not_advance_shared_clock_and_adopts_elapsed_time() {
     let clock = clock(0);
     let mut machine = TcgMachine::new(
         Path::new("qemu-system-riscv64"),
-        manifest(&[0x0015_0513, 0xffdf_f06f]), // addi a0,a0,1; jal zero,-4.
+        manifest(&[0x0015_0513, 0xffdf_f06f]),
+        SeededRng::new(0), // addi a0,a0,1; jal zero,-4.
         clock.clone(),
     )
     .unwrap();
@@ -299,10 +320,16 @@ fn crash_terminates_process_without_changing_saved_state() {
     ]);
     machine.run(&mut (), at(4)).unwrap();
     let snapshot = machine.snapshot().unwrap();
-    machine.crash().unwrap();
+    machine.request(crate::pv::Request::Crash).unwrap();
     assert!(machine.process.is_none());
     assert!(machine.run(&mut (), at(6)).is_err());
-    assert!(machine.crash().is_err());
+    assert!(matches!(
+        machine.request(crate::pv::Request::Crash).unwrap(),
+        StopReason::Exited {
+            reason: ExitReason::Crashed,
+            ..
+        }
+    ));
     let crashed = machine.snapshot().unwrap();
     let mut dead =
         TcgMachine::from_snapshot(Path::new("qemu-system-riscv64"), &crashed, clock(0)).unwrap();
@@ -320,6 +347,7 @@ fn invalid_requests_and_execution_failures_are_distinct() {
         TcgMachine::new(
             Path::new("/missing/qemu"),
             manifest(&[0x0000_0013]),
+            SeededRng::new(0),
             clock(0)
         )
         .err()
@@ -351,13 +379,16 @@ fn linux_boots_sleeps_and_shuts_down_with_the_machine_driver() {
             .into()
     }
     let assets = input("SEEDBOX_TCG_LINUX");
-    let mut driver = Driver::new(
+    let mut driver = crate::driver::fixture::driver(
         at(0),
         std::time::Duration::from_millis(1),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
-            TcgMachine::new(
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> =
+                Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
+            TcgMachine::configured(
                 &input("SEEDBOX_TCG_QEMU"),
                 Manifest {
                     memory_mib: 256,
@@ -368,6 +399,7 @@ fn linux_boots_sleeps_and_shuts_down_with_the_machine_driver() {
                         command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
                     },
                 },
+                SeededRng::new(0),
                 clock,
             )
             .map(|machine| vec![machine])
@@ -427,12 +459,16 @@ fn linux_boots_sleeps_and_shuts_down_with_the_machine_driver() {
     // Restore after source destruction and drive with a different quantum.
     // The remaining console bytes and final simulation position must agree.
     let fork = fork.expect("Linux slept after its boot marker");
-    let mut driver = Driver::new(
+    let mut driver = crate::driver::fixture::driver(
         fork.reached,
         std::time::Duration::from_millis(1),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> = Arc::new(crate::clock::SimulationClock::new(
+                (fork.reached).as_nanos(),
+            ));
             TcgMachine::from_snapshot(&input("SEEDBOX_TCG_QEMU"), &fork, clock)
                 .map(|machine| vec![machine])
         },
@@ -486,14 +522,18 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
     for (guests, step_limit, workers) in [
         ([("slow", "2"), ("fast", "1")], 1_000_000, 1),
         ([("slow", "2"), ("fast", "1")], 1_000_000, 2),
+        ([("slow", "2"), ("fast", "1")], 131_071, 4),
         ([("fast", "1"), ("slow", "2")], 131_071, 4),
     ] {
-        let mut driver = Driver::new(
+        let mut driver = crate::driver::fixture::driver(
             at(0),
             std::time::Duration::from_millis(1),
             workers,
+            crate::rng::SeededRng::new(0),
             || Ok(()),
-            |clock| {
+            || {
+                let clock: Arc<dyn Clock + Send + Sync> =
+                    Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
                 guests
                     .iter()
                     .map(|(name, sleep)| {
@@ -502,12 +542,13 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
                             command_line
                                 .push_str(&format!(" seedbox_name={name} seedbox_sleep={sleep}"));
                         }
-                        TcgMachine::new(
+                        TcgMachine::configured(
                             &input("SEEDBOX_TCG_QEMU"),
                             Manifest {
                                 boot,
                                 memory_mib: 256,
                             },
+                            SeededRng::new(0),
                             clock.clone(),
                         )
                     })
@@ -534,7 +575,7 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
             let upto = at(before.as_nanos() + step_limit);
             let outcome = driver.step(upto).unwrap();
             now = match outcome {
-                StepOutcome::BarrierReached { at } | StepOutcome::Finished { at } => at,
+                StepOutcome::BarrierReached { at } | StepOutcome::Finished { at, .. } => at,
                 StepOutcome::Blocked { .. } => panic!("Linux guests blocked without timers"),
                 StepOutcome::Waiting { .. }
                 | StepOutcome::BeforeAction { .. }
@@ -591,10 +632,14 @@ fn driver_coordinates_linux_guests_without_exceeding_step_limits() {
             (900_000_000..1_100_000_000).contains(&gap),
             "exit gap: {gap} ns"
         );
-        if let Some(reference) = &reference {
-            assert_eq!(&exits, reference);
-        } else {
-            reference = Some(exits);
+        // Reversing creation order assigns the independent RNG streams to
+        // different inputs, so only unchanged input order has identical times.
+        if guests[0].0 == "slow" {
+            if let Some(reference) = &reference {
+                assert_eq!(&exits, reference);
+            } else {
+                reference = Some(exits);
+            }
         }
     }
 }
@@ -605,14 +650,22 @@ fn driver_playback_controls_preserve_real_machine_execution_and_pre_crash_state(
     let code = [0x0015_0513, 0xffdf_f06f]; // Increment a0; jump back one instruction.
     let mut reference = None;
     for workers in [1, 2, 4] {
-        let mut driver = Driver::new(
+        let mut driver = crate::driver::fixture::driver(
             at(0),
             Duration::from_nanos(10),
             workers,
+            crate::rng::SeededRng::new(0),
             || Ok(()),
-            |clock| {
-                TcgMachine::new(Path::new("qemu-system-riscv64"), manifest(&code), clock)
-                    .map(|guest| vec![guest])
+            || {
+                let clock: Arc<dyn Clock + Send + Sync> =
+                    Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
+                TcgMachine::configured(
+                    Path::new("qemu-system-riscv64"),
+                    manifest(&code),
+                    SeededRng::new(0),
+                    clock,
+                )
+                .map(|guest| vec![guest])
             },
         )
         .unwrap();
@@ -675,7 +728,10 @@ fn driver_playback_controls_preserve_real_machine_execution_and_pre_crash_state(
             .unwrap();
         assert_eq!(
             driver.step(at(100)).unwrap(),
-            StepOutcome::Finished { at: at(15) }
+            StepOutcome::Finished {
+                at: at(15),
+                reason: ExitReason::Shutdown
+            }
         );
         assert_eq!(
             stopped(&mut driver, id),
@@ -683,6 +739,602 @@ fn driver_playback_controls_preserve_real_machine_execution_and_pre_crash_state(
                 reached: at(15),
                 reason: ExitReason::Crashed
             }
+        );
+    }
+}
+
+#[test]
+fn deferred_startup_failure_is_a_run_error_and_invalidates_the_machine() {
+    let mut machine =
+        super::TcgMachine::new_raw(Path::new("/missing/qemu"), manifest(&[0x0000_0013])).unwrap();
+    let clock = TestClock(AtomicU64::new(0));
+    let mut rng = SeededRng::new(9);
+    let mut expected = rng.clone();
+    use crate::rng::RngStream;
+    expected.fill_bytes(&mut [0; 8]);
+    assert!(machine.snapshot().is_ok());
+    let error = machine
+        .run(
+            &mut RunContext {
+                execution: Default::default(),
+                worker: &mut (),
+                clock: &clock,
+                rng: &mut rng,
+                inbox: crate::pv::Inbox::new(
+                    &mut Default::default(),
+                    Timestamp::from_nanos(crate::clock::Clock::now(&clock)),
+                ),
+                outbox: crate::pv::Outbox::new(
+                    &mut Vec::new(),
+                    Timestamp::from_nanos(crate::clock::Clock::now(&clock)),
+                    at(0),
+                ),
+            },
+            at(0),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("/missing/qemu"));
+    assert!(machine.snapshot().is_err());
+    assert!(
+        machine
+            .run(
+                &mut RunContext {
+                    execution: Default::default(),
+                    worker: &mut (),
+                    clock: &clock,
+                    rng: &mut rng,
+                    inbox: crate::pv::Inbox::new(
+                        &mut Default::default(),
+                        Timestamp::from_nanos(crate::clock::Clock::now(&clock))
+                    ),
+                    outbox: crate::pv::Outbox::new(
+                        &mut Vec::new(),
+                        Timestamp::from_nanos(crate::clock::Clock::now(&clock)),
+                        at(1)
+                    ),
+                },
+                at(1)
+            )
+            .is_err()
+    );
+    let mut got = [0; 8];
+    let mut want = [0; 8];
+    rng.fill_bytes(&mut got);
+    expected.fill_bytes(&mut want);
+    assert_eq!(got, want);
+}
+
+// Replace one newc member in the Linux fixture without requiring host cpio.
+fn lifecycle_tx_initramfs(input: &[u8]) -> Vec<u8> {
+    // A simulated 10ms wait allows Linux's asynchronous TTY worker to drain
+    // each short UART marker before the next device is written.
+    lifecycle_initramfs(
+        input,
+        "while [ ! -e /sys/class/virtio-ports/vport0p1/name ]; do /bin/busybox sleep 0.001; done\nexec 9<>/dev/vport0p1\nprintf console-A >/dev/ttyS0\n/bin/busybox sleep 0.01\nprintf fra >&9\nprintf console-B >/dev/ttyS0\n/bin/busybox sleep 0.01\nprintf 'gment\\nsecond\\n' >&9\nprintf console-C >/dev/ttyS0\n/bin/busybox sleep 0.01\necho 'seedbox: Linux userspace booted'",
+    )
+}
+fn lifecycle_initramfs(input: &[u8], injection: &str) -> Vec<u8> {
+    transform_initramfs(input, |init| {
+        init.replace("echo 'seedbox: Linux userspace booted'", injection)
+    })
+}
+fn transform_initramfs(input: &[u8], transform: impl Fn(&str) -> String) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut at = 0;
+    while at + 110 <= input.len() {
+        let mut header = input[at..at + 110].to_vec();
+        assert_eq!(&header[..6], b"070701");
+        let hex = |offset| {
+            usize::from_str_radix(
+                std::str::from_utf8(&header[offset..offset + 8]).unwrap(),
+                16,
+            )
+            .unwrap()
+        };
+        let size = hex(54);
+        let namesize = hex(94);
+        let name_end = at + 110 + namesize;
+        let data_at = (name_end + 3) & !3;
+        let end = (data_at + size + 3) & !3;
+        let name = &input[at + 110..name_end - 1];
+        let bytes = if name == b"init" || name == b"./init" {
+            transform(std::str::from_utf8(&input[data_at..data_at + size]).unwrap()).into_bytes()
+        } else {
+            input[data_at..data_at + size].to_vec()
+        };
+        header[54..62].copy_from_slice(format!("{:08x}", bytes.len()).as_bytes());
+        output.extend(header);
+        output.extend_from_slice(&input[at + 110..data_at]);
+        output.extend(bytes);
+        while output.len() % 4 != 0 {
+            output.push(0);
+        }
+        at = end;
+        if name == b"TRAILER!!!" {
+            break;
+        }
+    }
+    output
+}
+#[test]
+#[ignore = "requires TCG Linux fixture"]
+fn linux_lifecycle_tx_retains_fragments_and_snapshot_drain_position() {
+    let assets = std::path::PathBuf::from(std::env::var_os("SEEDBOX_TCG_LINUX").unwrap());
+    let qemu = std::path::PathBuf::from(std::env::var_os("SEEDBOX_TCG_QEMU").unwrap());
+    let manifest = Manifest {
+        memory_mib: 256,
+        boot: Boot::Linux {
+            kernel: fs::read(assets.join("kernel")).unwrap(),
+            initramfs: lifecycle_tx_initramfs(&fs::read(assets.join("initramfs")).unwrap()),
+            firmware: fs::read(std::env::var_os("SEEDBOX_TCG_FIRMWARE").unwrap()).unwrap(),
+            command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr seedbox_sleep=100"
+                .into(),
+        },
+    };
+    let mut source = Process::start(&qemu, &manifest, None, 3).unwrap();
+    let mut now = at(0);
+    let started = std::time::Instant::now();
+    for _ in 0..10000 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "lifecycle TX guest did not become ready"
+        );
+        let result = source
+            .execute(now, at(now.as_nanos() + 1_000_000), Default::default())
+            .unwrap();
+        now = timestamp(&result, "time").unwrap();
+        if String::from_utf8_lossy(&source.console().unwrap())
+            .contains("seedbox: Linux userspace booted")
+        {
+            break;
+        }
+        if result["reason"] == "blocked" {
+            now = timestamp(&result, "deadline").unwrap();
+            source.advance(now).unwrap();
+        }
+    }
+    use crate::pv::transport::GuestWrite;
+    let pending = source.snapshot().unwrap();
+    let writes = source.drain_guest().unwrap();
+    assert!(writes.windows(2).all(|w| w[0].time() <= w[1].time()));
+    let lifecycle: Vec<_> = writes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, w)| match w {
+            GuestWrite::Lifecycle(write) => Some((i, write)),
+            GuestWrite::Console(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        lifecycle
+            .iter()
+            .flat_map(|(_, w)| w.bytes.iter().copied())
+            .collect::<Vec<_>>(),
+        b"fragment\nsecond\n"
+    );
+    let console = |range: std::ops::Range<usize>| -> String {
+        String::from_utf8_lossy(
+            &writes[range]
+                .iter()
+                .flat_map(|w| match w {
+                    GuestWrite::Console(w) => w.bytes.clone(),
+                    GuestWrite::Lifecycle(_) => vec![],
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_owned()
+    };
+    assert_eq!(
+        console(0..writes.len()).as_bytes(),
+        source.console().unwrap()
+    );
+    let first = lifecycle.first().unwrap().0;
+    let last = lifecycle.last().unwrap().0;
+    assert!(console(0..first).contains("console-A"));
+    assert!(console(first..last).contains("console-B"));
+    assert!(console(last..writes.len()).contains("console-C"));
+    let mut restored = Process::start(&qemu, &manifest, Some(&pending), 3).unwrap();
+    assert_eq!(restored.drain_guest().unwrap(), writes);
+    assert!(restored.drain_guest().unwrap().is_empty());
+    let drained = restored.snapshot().unwrap();
+    let mut restored = Process::start(&qemu, &manifest, Some(&drained), 3).unwrap();
+    assert!(restored.drain_guest().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires TCG Linux fixture"]
+fn lifecycle_rx_backpressure_and_pending_suffix_survive_qemu_migration() {
+    let assets = std::path::PathBuf::from(std::env::var_os("SEEDBOX_TCG_LINUX").unwrap());
+    let qemu = std::path::PathBuf::from(std::env::var_os("SEEDBOX_TCG_QEMU").unwrap());
+    let manifest = Manifest {
+        memory_mib: 256,
+        boot: Boot::Linux {
+            kernel: fs::read(assets.join("kernel")).unwrap(),
+            initramfs: lifecycle_initramfs(
+                &fs::read(assets.join("initramfs")).unwrap(),
+                "while [ ! -e /sys/class/virtio-ports/vport0p1/name ]; do /bin/busybox sleep 0.001; done\nexec 9<>/dev/vport0p1\necho RX_OPEN\n/bin/busybox sleep 0.1\n/bin/busybox dd bs=700013 count=1 iflag=fullblock <&9 >&9 2>/dev/null\necho RX_DONE\n/bin/busybox sleep 100",
+            ),
+            firmware: fs::read(std::env::var_os("SEEDBOX_TCG_FIRMWARE").unwrap()).unwrap(),
+            command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr seedbox_sleep=100"
+                .into(),
+        },
+    };
+    let bytes: Vec<_> = (0..700013).map(|i| (i % 251) as u8).collect();
+    let mut source = Process::start(&qemu, &manifest, None, 3).unwrap();
+    source.input(&bytes[..25000]).unwrap();
+    source.input(&bytes[25000..]).unwrap();
+    let mut now = at(0);
+    let started = Instant::now();
+    loop {
+        assert!(started.elapsed() < Duration::from_secs(60));
+        let result = source
+            .execute(now, at(now.as_nanos() + 1_000_000), Default::default())
+            .unwrap();
+        now = timestamp(&result, "time").unwrap();
+        if String::from_utf8_lossy(&source.console().unwrap()).contains("RX_OPEN") {
+            break;
+        }
+        if result["reason"] == "blocked" {
+            now = timestamp(&result, "deadline").unwrap();
+            source.advance(now).unwrap();
+        }
+    }
+    let pending = source.snapshot().unwrap();
+    let mut restored = Process::start(&qemu, &manifest, Some(&pending), 3).unwrap();
+    assert!(restored.drain_lifecycle().unwrap().is_empty());
+    let mut observed = Vec::new();
+    loop {
+        assert!(started.elapsed() < Duration::from_secs(60));
+        let result = restored
+            .execute(now, at(now.as_nanos() + 1_000_000), Default::default())
+            .unwrap();
+        now = timestamp(&result, "time").unwrap();
+        for write in restored.drain_lifecycle().unwrap() {
+            observed.extend(write.bytes);
+        }
+        if String::from_utf8_lossy(&restored.console().unwrap()).contains("RX_DONE") {
+            break;
+        }
+        if result["reason"] == "blocked" {
+            now = timestamp(&result, "deadline").unwrap();
+            restored.advance(now).unwrap();
+        }
+    }
+    assert_eq!(observed, bytes);
+    assert!(restored.drain_lifecycle().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires patched QEMU and TCG Linux inputs"]
+fn application_outcome_remains_distinct_from_later_shutdown_across_snapshot() {
+    let assets = std::path::PathBuf::from(std::env::var_os("SEEDBOX_TCG_LINUX").unwrap());
+    let qemu = std::path::PathBuf::from(std::env::var_os("SEEDBOX_TCG_QEMU").unwrap());
+    fn advance(
+        machine: &mut super::TcgMachine,
+        clock: &TestClock,
+        rng: &mut SeededRng,
+        outputs: &mut Vec<crate::pv::Output>,
+    ) -> StopReason {
+        if let State::Blocked {
+            deadline: Some(deadline),
+        } = machine.state
+        {
+            clock.0.store(deadline.as_nanos(), Ordering::Relaxed);
+        }
+        let end = machine.reached.as_nanos().max(clock.now()) + 100_000;
+        machine
+            .run(
+                &mut RunContext {
+                    execution: Default::default(),
+                    worker: &mut (),
+                    clock,
+                    rng,
+                    inbox: crate::pv::Inbox::new(&mut Default::default(), at(clock.now())),
+                    outbox: crate::pv::Outbox::new(outputs, at(clock.now()), at(end)),
+                },
+                at(end),
+            )
+            .unwrap()
+    }
+    fn finish(
+        machine: &mut super::TcgMachine,
+        clock: &TestClock,
+        rng: &mut SeededRng,
+        outputs: &mut Vec<crate::pv::Output>,
+    ) -> StopReason {
+        let wall = Instant::now();
+        loop {
+            assert!(wall.elapsed() < Duration::from_secs(30));
+            let stop = advance(machine, clock, rng, outputs);
+            if matches!(stop, StopReason::Exited { .. }) {
+                return stop;
+            }
+        }
+    }
+    fn run_at(
+        machine: &mut super::TcgMachine,
+        clock: &TestClock,
+        rng: &mut SeededRng,
+        outputs: &mut Vec<crate::pv::Output>,
+    ) -> StopReason {
+        clock.0.store(
+            clock.now().max(machine.reached.as_nanos()),
+            Ordering::Relaxed,
+        );
+        let now = at(clock.now());
+        machine
+            .run(
+                &mut RunContext {
+                    execution: Default::default(),
+                    worker: &mut (),
+                    clock,
+                    rng,
+                    inbox: crate::pv::Inbox::new(&mut Default::default(), now),
+                    outbox: crate::pv::Outbox::new(outputs, now, now),
+                },
+                now,
+            )
+            .unwrap()
+    }
+    for code in [0, 23] {
+        // This child defines the fixture's lifetime. Its actual wait status is
+        // reported first; PID1 deliberately keeps Linux alive before poweroff.
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+exec </dev/console >/dev/console 2>&1
+/bin/busybox modprobe virtio_mmio
+/bin/busybox modprobe virtio_console
+while [ ! -e /sys/class/virtio-ports/vport0p1/name ]; do /bin/busybox sleep 0.001; done
+exec 9<>/dev/vport0p1
+printf 'SBX_READY1\n' >&9
+set +e
+/bin/busybox sh -c 'exit {code}'
+status=$?
+set -e
+printf 'SBX_EXIT1 status=%s\n' "$status" >&9
+/bin/busybox sleep 0.05
+/bin/busybox poweroff -f
+"#
+        );
+        let manifest = Manifest {
+            memory_mib: 256,
+            boot: Boot::Linux {
+                kernel: fs::read(assets.join("kernel")).unwrap(),
+                initramfs: transform_initramfs(
+                    &fs::read(assets.join("initramfs")).unwrap(),
+                    |_| script.clone(),
+                ),
+                firmware: fs::read(std::env::var_os("SEEDBOX_TCG_FIRMWARE").unwrap()).unwrap(),
+                command_line: "console=ttyS0 earlycon=sbi rdinit=/init nokaslr".into(),
+            },
+        };
+        let clock = clock(0);
+        let mut rng = SeededRng::new(7);
+        let mut outputs: Vec<crate::pv::Output> = Vec::new();
+        let mut source = super::TcgMachine::new_raw(&qemu, manifest).unwrap();
+        let wall = Instant::now();
+        while !outputs.iter().any(|output| {
+            matches!(
+                output.payload,
+                crate::pv::Response::ApplicationOutcome { .. }
+            )
+        }) {
+            assert!(wall.elapsed() < Duration::from_secs(30));
+            assert!(!matches!(
+                advance(&mut source, &clock, &mut rng, &mut outputs),
+                StopReason::Exited { .. }
+            ));
+        }
+        assert!(
+            outputs.iter().any(|output| output.payload
+                == crate::pv::Response::ApplicationOutcome { code: code as u8 })
+        );
+        let pending_rng = rng.clone();
+        assert!(
+            !matches!(source.state, State::Exited(_)),
+            "application outcome must leave Linux running"
+        );
+        let pending = source.snapshot().unwrap();
+        let expected = finish(&mut source, &clock, &mut rng, &mut outputs);
+        assert!(matches!(
+            expected,
+            StopReason::Exited {
+                reason: ExitReason::Shutdown,
+                ..
+            }
+        ));
+        for _ in 0..2 {
+            let branch_clock = super::tests::clock(pending.reached.as_nanos());
+            let mut branch = super::TcgMachine::from_snapshot(&qemu, &pending).unwrap();
+            let mut branch_rng = pending_rng.clone();
+            let mut branch_outputs = Vec::new();
+            assert_eq!(
+                finish(
+                    &mut branch,
+                    &branch_clock,
+                    &mut branch_rng,
+                    &mut branch_outputs
+                ),
+                expected
+            );
+            assert_eq!(
+                run_at(
+                    &mut branch,
+                    &branch_clock,
+                    &mut branch_rng,
+                    &mut branch_outputs
+                ),
+                expected
+            );
+            let adopted = branch.reached.as_nanos() + 17;
+            branch_clock.0.store(adopted, Ordering::Relaxed);
+            assert_eq!(
+                run_at(
+                    &mut branch,
+                    &branch_clock,
+                    &mut branch_rng,
+                    &mut branch_outputs
+                ),
+                StopReason::Exited {
+                    reached: at(adopted),
+                    reason: ExitReason::Shutdown
+                }
+            );
+            let exited = branch.snapshot().unwrap();
+            let mut restored = super::TcgMachine::from_snapshot(&qemu, &exited).unwrap();
+            assert_eq!(
+                run_at(
+                    &mut restored,
+                    &branch_clock,
+                    &mut branch_rng,
+                    &mut branch_outputs
+                ),
+                StopReason::Exited {
+                    reached: at(adopted),
+                    reason: ExitReason::Shutdown
+                }
+            );
+        }
+        let crash_clock = super::tests::clock(pending.reached.as_nanos());
+        let mut crashed = super::TcgMachine::from_snapshot(&qemu, &pending).unwrap();
+        assert!(matches!(
+            crate::machine::test_environment::run_requests(
+                &mut crashed,
+                crash_clock.as_ref(),
+                &mut pending_rng.clone(),
+                [crate::pv::Request::Crash],
+                at(crash_clock.now())
+            )
+            .unwrap(),
+            StopReason::Exited {
+                reason: ExitReason::Crashed,
+                ..
+            }
+        ));
+    }
+}
+
+// Constructor checks remain portable: process creation is deferred until run.
+fn common_inputs() -> (
+    crate::application::GuestBootstrap,
+    crate::definition::MachineDefinition,
+) {
+    use crate::definition::*;
+    use crate::application::{GuestBootstrap, Kernel};
+    let mut tar = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(1);
+    header.set_mode(0o755);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_cksum();
+    tar.append_data(&mut header, "application", &[0_u8][..])
+        .unwrap();
+    (
+        GuestBootstrap {
+            kernel: Kernel {
+                image: vec![1],
+                command_line: "custom=verbatim".into(),
+            },
+            init: vec![2],
+            base_initramfs: Vec::new(),
+        },
+        MachineDefinition {
+            name: "portable".into(),
+            resources: Resources {
+                memory_bytes: 128 << 20,
+            },
+            application: PreparedApplication {
+                filesystem: FilesystemArchive::new(tar.into_inner().unwrap()).unwrap(),
+                launch: Launch {
+                    argv: vec!["/application".into()],
+                    environment: Default::default(),
+                    working_directory: "/".into(),
+                    user: "0:0".into(),
+                },
+            },
+        },
+    )
+}
+
+#[test]
+fn common_constructor_preserves_inputs_and_reuses_prepared_application() {
+    let (bootstrap, definition) = common_inputs();
+    let original = definition.application.clone();
+    let first = super::TcgMachine::new(
+        Path::new("/missing/qemu"),
+        vec![3],
+        &bootstrap,
+        definition.clone(),
+    )
+    .unwrap();
+    let second = super::TcgMachine::new(
+        Path::new("/missing/qemu"),
+        vec![3],
+        &bootstrap,
+        definition.clone(),
+    )
+    .unwrap();
+    assert_eq!(definition.application, original);
+    assert_eq!(first.manifest.memory_mib, 128);
+    match (&first.manifest.boot, &second.manifest.boot) {
+        (
+            Boot::Linux {
+                kernel,
+                initramfs,
+                command_line,
+                ..
+            },
+            Boot::Linux {
+                initramfs: again, ..
+            },
+        ) => {
+            assert_eq!(kernel, &[1]);
+            assert_eq!(command_line, "custom=verbatim");
+            assert_eq!(initramfs, again);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn common_constructor_checks_resource_and_kernel_argument_bounds() {
+    let (mut bootstrap, definition) = common_inputs();
+    for memory_bytes in [0, 1, (u64::from(u32::MAX) + 1) << 20] {
+        let mut invalid = definition.clone();
+        invalid.resources.memory_bytes = memory_bytes;
+        assert!(
+            super::TcgMachine::new(Path::new("/missing/qemu"), vec![3], &bootstrap, invalid)
+                .is_err()
+        );
+    }
+    for accepted in ["a".repeat(1023), format!("{}a", "é".repeat(511))] {
+        bootstrap.kernel.command_line = accepted;
+        assert!(
+            super::TcgMachine::new(
+                Path::new("/missing/qemu"),
+                vec![3],
+                &bootstrap,
+                definition.clone()
+            )
+            .is_ok()
+        );
+    }
+    for rejected in ["a".repeat(1024), "é".repeat(512), "a\0b".into()] {
+        bootstrap.kernel.command_line = rejected;
+        assert!(
+            super::TcgMachine::new(
+                Path::new("/missing/qemu"),
+                vec![3],
+                &bootstrap,
+                definition.clone()
+            )
+            .is_err()
         );
     }
 }

@@ -42,3 +42,6 @@ pub trait RngStreamExt: RngStream {
         usize::from_le_bytes(buffer)
     }
 }
+
+mod seeded;
+pub(crate) use seeded::SeededRng;

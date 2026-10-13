@@ -6,14 +6,15 @@ Each section links to the code that owns it.
 ## Reference TCG machine
 
 `seedbox-machine` has a diskless, single-CPU RV64 reference backend using QEMU
-software emulation. Run its Linux example inside `nix develop` with
-`cargo run -p seedbox-machine --example tcg`. The development shell builds the
-patched QEMU and prepares the kernel, firmware, and initramfs inputs. The example
-boots two Linux guests on one shared clock. A seeded `RngStream` chooses each
-sleep uniformly from one through four seconds. Their init processes sleep,
-print wakeup markers, and shut down. Seed 7 gives guest `a` four seconds and
-`b` two seconds; the shorter sleeper finishes first despite being inserted second. This example
-is separate from the production `seedbox run` backends.
+software emulation. Its example uses `SEEDBOX_TCG_QEMU` and
+`SEEDBOX_TCG_ASSETS` for the explicit patched executable and prepared backend
+asset directory. Run `cargo run -p seedbox-machine --example tcg` inside the
+project development environment after preparing those inputs. Factories load
+owned guest assets; runtime construction does not build them.
+
+The example runs two applications with seeded sleeps from one through four
+seconds, plus an oracle that ends the run. Application outcomes are distinct
+from kernel shutdown. It is separate from the production `seedbox run` backends.
 
 The driver repeatedly calls `Machine::run`. A private QMP command limits QEMU's
 native instruction budget, with one instruction mapped to one simulation
@@ -23,23 +24,41 @@ timer deadline. The [driver](../crates/seedbox-machine/src/driver.rs)
 tracks each machine's execution position and next timer, advancing the shared
 clock only when no eligible runnable work or timer remains before it. Each round
 brings active machines to its boundary, a blocked state, or exit. The machine observes the
-injected read-only clock on its next `run`, delivering due timers before executing
+read-only clock borrowed through its run context on its next `run`, delivering due timers before executing
 more instructions. Guest shutdown returns `Exited`. The driver runs ready machines
 on a persistent thread pool, holding the shared clock fixed until every call in
-the batch returns. Each worker creates and retains its own execution context.
+the batch returns. Each worker creates and retains its own host execution resources, which may be
+thread-affine. Every run separately borrows those resources, the simulation clock,
+and the machine's RNG through `RunContext`. The driver owns an injected global RNG
+and derives an independent stream for each admitted machine in insertion order.
+The machine's RNG cursor moves with it between workers; worker threads own no
+simulation randomness. Failed additions consume no global RNG bytes.
 Worker count does not change simulation results. Machine access, additions, and
-scheduled wake/pause/resume/crash actions go through barrier callbacks.
+scheduled wake/pause/resume/crash/reboot actions go through barrier callbacks.
 
-An individually paused machine receives no execution or timer wakeups while
-other machines advance. Resuming calls `run` at the current time with a zero
-execution budget: elapsed time is adopted, overdue timers become deliverable,
-and no instructions from the paused interval are executed. A machine with no
+An individually paused machine receives no positive execution budget while
+other machines advance. Due requests still receive zero-budget admission runs:
+elapsed time is adopted and overdue timers become eligible, without executing
+guest instructions. Resuming also performs a zero-budget run at the current
+time, without replaying CPU work from the paused interval. A machine with no
 wakeup remains blocked. Pausing is driver state; `Machine` needs no separate
 pause or resume methods.
 
-Both reference machines implement hard reboot through `Machine::reboot`.
-Driver-mediated reboot and externally requested graceful shutdown are not yet
-implemented; the guest fixtures currently have no shutdown request channel.
+Both reference machines expose lifecycle through queued `Request::Crash`,
+`Reboot`, and `Shutdown`; the `Machine` interface consists of `run` and
+`snapshot`. Enqueueing a request executes no work and does not acknowledge its
+completion. The driver admits due requests in order through zero-budget `run`
+calls, including while paused or exited. Lifecycle actions map into that same
+request path. Reboot retains the machine identity and future queued work,
+clears pause and old-boot work, and performs a fresh reset in its admission run.
+Construction initializes on the first `run` using its borrowed dependencies.
+Initial boot and each admitted reboot consume eight RNG bytes; repeated reboots
+perform distinct resets. These calls execute no guest instructions. An exited
+machine retains its exit reason until Reboot. Reboot clears earlier shutdown
+requests; Shutdown after Reboot targets the new boot. Both backends carry
+graceful shutdown requests through the named `seedbox-lifecycle` virtio-console
+port, even while execution is paused. The guest supervisor performs cleanup and
+poweroff only when guest execution resumes.
 
 Playback controls can change at every barrier. Paused playback holds all work,
 including current-time actions; limited rational rates wait on the host without
@@ -56,12 +75,15 @@ The quantum is fixed at construction, with boundaries anchored at the initial
 time. Each step respects both its requested time limit and the next quantum
 boundary; intermediate barriers do not shift that boundary. Both examples use
 two workers and a one-millisecond quantum. Packet
-routing is not implemented; console chunks are observed after each round rather
-than timestamped byte by byte.
+routing is not implemented. Console and lifecycle output preserve their native
+occurrence timestamps and cross-channel order, then publish at committed barriers.
 GDB is used only by tests to inspect stopped register and RAM state.
 
 Snapshots own their boot inputs and QEMU migration state, including RAM, CPU,
-devices, and virtual timers. The QEMU process and control connection are recreated
+devices, virtual timers, and pending lifecycle transitions. Machine snapshots
+exclude driver-owned clock/RNG, worker resources, other machines, and networking.
+Full simulation capture must preserve those dependencies and driver scheduling
+state consistently; that capture API remains deferred. The QEMU process and control connection are recreated
 on restore. Serial output already emitted by an instance is external observation
 and is not emitted again by restoring its snapshot.
 
@@ -71,15 +93,19 @@ Code: [TCG machine](../crates/seedbox-machine/src/machine/tcg.rs),
 
 ## Reference PV machine
 
-`cargo run -p seedbox-machine --example pv` drives two native ARM64 Linux guests
-through the same driver, using the same seeded sleep durations as the TCG example.
-Set `SEEDBOX_PV_KERNEL` to the prepared ARM PV kernel (`build/assets/kernel`) and
-`SEEDBOX_PV_WORKER` to the standalone ARM worker executable. Build the worker with
-`cargo build-arm64` inside `nix develop`; on macOS, sign it with
-`bash crates/seedbox-arm64/codesign.sh`. The example generates a minimal initramfs
-whose init program calls Linux `nanosleep` and powers off. It reports each guest's
-shutdown time through the driver's barrier API. It requires ARM64 KVM on Linux or
-HVF on macOS. Each machine owns a separate worker process.
+`cargo run -p seedbox-machine --example pv` uses the same Driver and common
+machine definitions for native ARM64 guests. Set `SEEDBOX_PV_WORKER` to this
+crate's standalone worker and `SEEDBOX_PV_ASSETS` to its prepared guest asset
+directory. The factory owns the PV kernel, helper and mandatory DynamoRIO
+runtime; it prepares the application launch without exposing those details to
+Driver. The host worker executable is not bundled into the guest filesystem.
+
+Build `seedbox-pv-worker` from this crate inside the project development shell.
+On Apple Silicon, sign a disposable worker copy with
+[the Hypervisor entitlement](../crates/seedbox-machine/hvf.entitlements.plist).
+The worker uses ARM64 KVM on Linux or HVF on macOS, with one worker process per
+machine. Architectural snapshot/restore currently requires macOS/HVF; Linux
+KVM snapshot/restore is unsupported.
 
 Code: [PV example](../crates/seedbox-machine/examples/pv.rs),
 [shared example RNG](../crates/seedbox-machine/examples/support/mod.rs).

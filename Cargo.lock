@@ -2048,11 +2048,16 @@ dependencies = [
 name = "seedbox-machine"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "hex",
- "seedbox-arm64",
- "seedbox-engine-core",
+ "kvm-bindings",
+ "kvm-ioctls 0.24.0",
+ "libc",
+ "rayon",
  "serde",
  "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
 ]
 

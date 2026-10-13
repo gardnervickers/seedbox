@@ -2,7 +2,7 @@
 //! test builds additionally open a GDB socket for independent state inspection.
 
 use super::{Boot, Error, Manifest, Timestamp};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -15,13 +15,14 @@ use tempfile::TempDir;
 const RAM_BASE: u64 = 0x8000_0000;
 // Host transport/startup limits; these do not advance simulation time.
 const TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_PACKET: usize = 1024 * 1024;
+// Match the private worker bound; byte arrays expand when encoded as JSON.
+const MAX_PACKET: usize = 8 * 1024 * 1024;
 
 #[cfg(test)]
 #[path = "inspector.rs"]
 mod inspector;
 #[cfg(test)]
-use inspector::{decode_hex, Gdb};
+use inspector::{Gdb, decode_hex};
 
 pub(super) struct Process {
     child: Child,
@@ -33,12 +34,18 @@ pub(super) struct Process {
 }
 
 impl Process {
-    pub(super) fn execute(&mut self, start: Timestamp, upto: Timestamp) -> Result<Value, Error> {
+    pub(super) fn execute(
+        &mut self,
+        start: Timestamp,
+        upto: Timestamp,
+        execution: crate::execution::ExecutionConfig,
+    ) -> Result<Value, Error> {
         self.qmp.stopped = false;
         self.qmp.command(
             "seedbox-run",
             json!({
                 "time": start.as_nanos(), "budget": upto.as_nanos() - start.as_nanos(),
+                "factor": execution.factor_permille(),
             }),
         )?;
         // STOP acknowledges the CPU is stopped. It may precede the command's
@@ -49,10 +56,63 @@ impl Process {
         self.qmp.command("query-seedbox-run", json!({}))
     }
 
+    pub(super) fn drain_guest(&mut self) -> Result<Vec<crate::pv::transport::GuestWrite>, Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum Kind {
+            Console,
+            Lifecycle,
+        }
+        #[derive(serde::Deserialize)]
+        struct Write {
+            kind: Kind,
+            time: u64,
+            bytes: Vec<u8>,
+        }
+        let writes: Vec<Write> =
+            serde_json::from_value(self.qmp.command("seedbox-drain-lifecycle", json!({}))?)?;
+        use crate::pv::transport::{GuestWrite, LifecycleWrite};
+        Ok(writes
+            .into_iter()
+            .map(|write| {
+                let payload = LifecycleWrite {
+                    time: write.time,
+                    bytes: write.bytes,
+                };
+                match write.kind {
+                    Kind::Console => GuestWrite::Console(payload),
+                    Kind::Lifecycle => GuestWrite::Lifecycle(payload),
+                }
+            })
+            .collect())
+    }
+
+    // Existing device-focused tests intentionally inspect lifecycle bytes only.
+    #[cfg(test)]
+    pub(super) fn drain_lifecycle(
+        &mut self,
+    ) -> Result<Vec<crate::pv::transport::LifecycleWrite>, Error> {
+        Ok(self
+            .drain_guest()?
+            .into_iter()
+            .filter_map(|write| match write {
+                crate::pv::transport::GuestWrite::Lifecycle(write) => Some(write),
+                crate::pv::transport::GuestWrite::Console(_) => None,
+            })
+            .collect())
+    }
+
     pub(super) fn advance(&mut self, at: Timestamp) -> Result<(), Error> {
         self.qmp
             .command("seedbox-advance", json!({"time": at.as_nanos()}))?;
         Ok(())
+    }
+
+    pub(super) fn input(&mut self, bytes: &[u8]) -> Result<bool, Error> {
+        self.qmp
+            .command("seedbox-input-lifecycle", json!({"bytes": bytes}))?["runnable"]
+            .as_bool()
+            .ok_or_else(|| Error("invalid lifecycle input response".into()))
     }
 
     pub(super) fn console(&self) -> Result<Vec<u8>, Error> {
@@ -105,16 +165,30 @@ impl Process {
             "-rtc",
             "base=2000-01-01T00:00:00,clock=vm", // No host wall-clock input.
             "-icount",
-            "shift=0,align=off,sleep=off", // Exactly 1 ns per instruction.
+            "shift=0,align=off,sleep=off", // Nominal icount base; bounded execution applies fractional work pricing.
             "-global",
             "migration.store-global-state=off", // Lifecycle is saved separately.
+            "-global",
+            "virtio-mmio.ioeventfd=off", // Queue kicks execute at their guest MMIO instruction.
+            "-global",
+            "serial.seedbox-console=on", // Only the reference UART opts into canonical capture.
         ]);
         command.arg("-seed").arg(seed.to_string());
         command.arg("-m").arg(format!("{}M", manifest.memory_mib));
+        // A dedicated standard virtio-serial port keeps lifecycle requests out
+        // of the guest's interactive console. Its private backend owns the
+        // early-boot backlog and migrates it with the rest of the machine.
+        command.args([
+            "-device",
+            "virtio-serial-device,id=lifecycle-bus",
+            "-device",
+            "seedbox-lifecycle-port,bus=lifecycle-bus.0,name=seedbox-lifecycle",
+        ]);
         command
             .arg("-serial")
             .arg(format!("file:{}", console.display()));
         match &manifest.boot {
+            #[cfg(test)]
             Boot::Program(program) => {
                 let path = directory.path().join("program");
                 fs::write(&path, program)?;

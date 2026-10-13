@@ -1,0 +1,262 @@
+# Seedbox interface refactor handover
+
+**Temporary handover — REMOVE BEFORE MERGE.** Implementation is paused at the
+user's request. This is an incomplete checkpoint, not a claim of API parity.
+Before removing this document, move lasting decisions into rustdoc and the
+existing architecture documentation.
+
+## Objective and scope
+
+Build an isolated interface-oriented simulation stack that could support the
+existing UI/API through a later bridge. Do not connect that bridge yet. Work
+belongs in `crates/seedbox-machine` and its own guest/build inputs; do not import
+or modify legacy crates to make the new design fit. Existing code is read-only
+semantic evidence. Prefer copying a needed mechanism into the new ownership
+boundary over introducing a legacy dependency.
+
+PV and TCG must both implement guest-facing capabilities. A compiling trait
+implementation or a placeholder backend does not establish support. A future
+PMU implementation should fit the same execution boundary, but implementing it
+is outside this checkpoint.
+
+## Interface policy
+
+[AGENTS.md](../crates/seedbox-machine/AGENTS.md) freezes the major interfaces:
+Machine, Clock, RNG and Driver, including their public supporting types.
+**An interface is a contract, not necessarily a Rust trait.**
+
+The freeze includes:
+
+- Trait methods, associated types, bounds and default implementations.
+- Public structs and their fields, constructors and inherent methods: for
+  example Driver, Barrier, RunContext, MachineDefinition and backend factories.
+- Public enums and their variants: for example requests, responses, actions,
+  stop reasons and execution outcomes.
+- Supporting configuration, identity, queue, event and snapshot boundaries.
+- Documented behavior: ownership, ordering, timing, lifecycle, completion,
+  failure, snapshot and caller obligations. Keeping a signature unchanged does
+  not authorize changing its meaning.
+
+**Agents must obtain explicit user authorization before changing these
+contracts.** Approval to build a feature, fix an implementation or refactor code
+is not approval to change an interface. Already approved changes do not need
+another approval. Error variants are the explicit exception; that exception
+must not be used to change a non-error contract indirectly. Private mechanical
+changes that preserve the contracts can proceed normally.
+
+Write specifications in terms that apply to every implementation. Do not put
+KVM, PMU, QEMU, DynamoRIO or other backend mechanisms into generic contracts.
+Explain preconditions, state ownership, what counts as completion, effects on
+future behavior, error guarantees and what the caller should do for every
+return case. Distinguish enqueueing, admission, execution and completion.
+Keep backend explanations beside the implementation. If an implementation
+cannot satisfy the interface, review the boundary rather than quietly weakening
+it or leaking backend details upward.
+
+The coordinator delegates bounded implementation work and independently reviews
+it. Keep one checklist item active, and close it with relevant evidence before
+opening the next interface discussion.
+
+## Design and ownership
+
+### Machine and injected dependencies
+
+[Machine](../crates/seedbox-machine/src/machine.rs) exposes `run` and `snapshot`.
+`RunContext` supplies worker resources, the clock, the machine's continuing RNG
+stream, execution configuration, inbox and outbox. Worker threads are part of
+Driver; resources may be thread-affine, while machines can move between workers.
+
+Driver owns the simulation RNG and derives one stream per machine in deterministic
+creation order. A stream follows machine identity, not worker assignment. There
+is no RNG replacement/reseeding control. Machine snapshots preserve machine-owned
+execution and accepted work, but exclude injected dependencies and the wider
+simulation. A simulation fork must capture those owners consistently too.
+
+The ownership test is: does an operation change the machine, or change what the
+machine encounters when it runs? Clock faults and execution pricing belong to
+Driver-owned dependencies. Storage is also intended to become an injected
+dependency; its interface and integration remain deferred.
+
+### Driver and ordering
+
+[Driver](../crates/seedbox-machine/src/driver.rs) owns shared time, parallel
+execution, playback and one ordered timeline. Current quanta are fixed and
+anchored at construction. Intermediate barriers do not shift their endpoints.
+Worker count must not change results. Global playback pause holds timeline
+admission; an individual machine pause suppresses positive execution budget.
+
+Machine requests and Driver actions share timestamp/FIFO ordering, but machines
+see only their own requests. Due requests may receive zero-budget `run` calls:
+these adopt elapsed time and make timers eligible without replaying instructions
+from a paused interval. Additions and controls happen at barriers.
+
+Outputs commit only after a successful execution batch, ordered by occurrence
+time, machine identity and per-machine emission order. Failed batches discard
+staged outputs. A later control-processing failure must preserve the already
+committed output batch and confirmed results. Failure poisons execution; readable
+evidence must not imply rollback or resumability.
+
+### Lifecycle, application and oracle
+
+[Requests and responses](../crates/seedbox-machine/src/pv.rs) carry lifecycle,
+application commands, logs, outcomes and simulation-control messages. Crash,
+Reboot and Shutdown are requests; pause is Driver policy. Reboot clears individual
+pause and old-boot work. Future external schedules bind to the boot at admission.
+Application exit does not end the kernel: Start can restart the program within
+that boot. Whole-machine exit requires Reboot before positive execution resumes.
+Graceful shutdown requires later guest execution and is not guaranteed to finish.
+
+Driver construction requires an oracle definition and a possibly empty list of
+other definitions. The oracle is created first. Its application exit determines
+the verdict: zero passes; nonzero, confirmed forced Stop, crash or whole-machine
+termination fails. Queueing Stop is not confirmation. The result is permanent,
+after full-batch publication. Every machine has the same simulation-control
+access and remains faultable; the oracle's special responsibility is the verdict.
+
+### Shared control service
+
+The concrete [control service](../crates/seedbox-machine/src/oracle/service.rs)
+belongs to Driver. It interprets committed calls and returns effects, replies,
+wakes and deadlines for the same timeline. There is no generic EventHandler or
+second scheduler. Calls and trigger matches act at their discovery barrier, with
+zero additional control latency; their original timestamps remain observations,
+not permission to change another machine's past.
+
+Admission and completion are separate. Generated effects join the existing FIFO
+tail and revalidate state when dispatched. Accepted work survives caller loss.
+Only Applied proves a successful mutation; unknown failure time stays unknown.
+Fault IDs, application command IDs, trigger IDs and fault handles have distinct
+ownership. Ordinary controls and bare triggers intentionally have different
+availability preflight, now represented explicitly instead of inferred from the
+presence of an RPC reply destination.
+
+Public control-session IDs persist across crash/reboot, even when private wire
+sessions restart. Retired replies are discarded without canceling accepted host
+work. Restoring old snapshots requires matching external history or a separate
+branch identity. Reply generation, transport completion and application reading
+are different facts; the current interface does not expose exact reply delivery.
+
+### Definitions and factories
+
+The common [MachineDefinition](../crates/seedbox-machine/src/definition.rs)
+contains a prepared filesystem, launch recipe and resources. Backend factories
+own their kernel, helper, firmware and instrumentation privately. Driver sees
+only definitions and a retained factory. No runtime build or implicit asset
+search belongs in library construction.
+
+PV prepares its own kernel/runtime and mandatory instrumentation; TCG uses its
+own ordinary kernel. Guest assets exclude the host executable. Factories own
+loaded bytes independently of their source directories. The exact definition
+API still needs review before merge.
+
+## Implemented and verified baseline
+
+- Parallel Driver with worker-owned resources, clock/RNG injection, ordered
+  lifecycle and application requests, playback, execution pricing and oracle
+  completion.
+- Shared guest framing/helper, binary logs, application restart and graceful
+  shutdown on PV and TCG; snapshot continuation for accepted guest work.
+- Automatic control dispatch for Now/Sleep, process and machine controls,
+  throttle/heal and streaming triggers. Native tests cover real control RPCs
+  and worker-count determinism; positive Sleep/trigger dispatch have portable
+  integration coverage but still need native operation coverage.
+- Backend factories, owned guest assets and common prepared applications.
+  Native preparation tests cover scripts, PATH, non-root credentials,
+  execute-only workloads, same-boot restart and metadata preservation. PV's
+  instrumentation path passes CPU-cost, partition and mid-work snapshot checks.
+- Confirmed fault settlements survive a later malformed acknowledgment and final
+  oracle cutoff without early dispatch or duplicate retention. Private admission
+  mode changes preserve ordinary-control versus trigger semantics.
+
+Evidence owners, rather than a duplicate test catalogue:
+
+| Area | Owning tests |
+| --- | --- |
+| Driver ordering, controls, oracle and failures | `tests/driver_*.rs`, `src/driver/*tests.rs` |
+| Native control and worker determinism | `tests/driver_guest_services.rs` |
+| Prepared workloads and instrumentation | `tests/prepared_application.rs`, `tests/pv_progress.rs`, `src/machine/pv/progress_tests.rs` |
+| Guest services and channel | `tests/guest_services.rs`, `tests/simulation_control.rs`, `src/machine/*snapshot_tests.rs` |
+| Shared control policy and observations | `src/oracle/service/tests.rs`, `src/oracle/observation/tests.rs`, `src/oracle/triggers/tests.rs` |
+
+Paths in this table are relative to `crates/seedbox-machine`. Latest focused
+checks passed: 54 Driver tests, 30 service tests, 8 trigger tests, 10 public
+control/trigger tests, and four settlement-retention regressions. A fresh
+`cargo check -p seedbox-machine --all-targets` also passed for this checkpoint. Native factory,
+Driver, shutdown and instrumentation evidence predates this documentation-only
+checkpoint; it is not a fresh native rerun. Keep private unit tests beside their
+owner and public multi-component tests under `tests/`. Use focused checks for
+this new family, not the whole legacy suite.
+
+## TODO — remaining work
+
+Resume with item 1. Do not interpret this checkpoint or the approved event stream
+as completion of the full compatibility objective.
+
+1. **Host event stream — approved to add, not yet implemented.** Replace the
+   response-only drain with a single Driver event stream, usable after failure.
+   Include committed machine/Driver changes, outputs, fault/trigger results and
+   host-generated control results. The host owns retained history; Driver keeps
+   only live bookkeeping and undrained publications.
+   **TODO BEFORE MERGE: re-evaluate this event interface**, as explicitly requested
+   by the user. Preserve confirmed prefixes when later processing fails and
+   successful barrier mutations when their callback later returns an error.
+   Control facts should be incremental so a late delivery does not require a
+   second retained history store. No event types or drain implementation had
+   landed when implementation was paused.
+2. **Reply delivery evidence — requires approval.** Consider a backend-neutral
+   `Response::SimulationReplyDelivered { id }`, timestamped when the entire reply
+   reaches the program-readable transport with completion published. Inbox
+   consumption or host FIFO acceptance is insufficient. Both backends need
+   private partial-transfer accounting and snapshot support. A buffered old-session
+   reply can complete later under its original identity; do not confuse retirement
+   with discard. Silent disconnect/discard timing remains unobservable and needs
+   an explicit decision if required. Do not claim delivery parity yet.
+3. **Host fault admission — requires approval.** Add a typed barrier-only entrance
+   to the same control policy/ID/handle owner. Proposed direction: scheduled time,
+   caller-owned key and typed action; echo the key on admission or rejection.
+   Enqueueing must not reserve runtime fault IDs. Raw Driver actions do not supply
+   equivalent policy. Preserve ordinary-control versus trigger validation and
+   bind the target boot at due admission. No fabricated guest RPC.
+4. **Complete control compatibility.** Generalize pause-before-next-fault beyond
+   effective crashes. Complete Inspect and service-name targeting from
+   authoritative state; decide how inspection represents deferred networking
+   without inventing empty data. Public contracts remain to be agreed.
+5. **Injected clock faults.** Agree the Driver-owned dependency boundary, then
+   implement step, drift and heal on both backends with correct reads and timers.
+   Canonical execution/barrier time must remain coherent. Private projection
+   arithmetic is not native support. Realtime versus monotonic/raw behavior,
+   inverse timer deadlines, zero-budget application, epoch, reboot and restore
+   policy need resolution. Current guest inputs lack the stopped timekeeper
+   mechanism; the ordinary TCG kernel constraint must be addressed explicitly.
+6. **Oracle-driven machine creation.** Finalize MachineDefinition and Launch
+   representation **before merge**. An oracle-only run must create machines at
+   barriers through the retained factory, with deterministic identity/RNG
+   allocation and clear failure semantics. Large filesystem payloads cannot be
+   treated as ordinary small control messages. Factory retention alone is not
+   implementation of Launch.
+7. **Final semantic audit and native acceptance.** Map every discussed,
+   non-deferred UI/API operation to code and meaningful evidence. Add native
+   positive Sleep/trigger coverage and verify both backends for new capabilities.
+   Cover failures, cutoff/readback, ordering, worker count and snapshot continuation.
+   Record intentional approved differences, including equal control access for
+   all machines and FIFO admission of generated effects. Do not connect the old
+   UI/server or call compilation proof of native behavior.
+8. **Finish documentation and final checkpoint.** Update rustdoc and lasting
+   architecture documentation, resolve the TODOs above and remove this temporary
+   handover before merge. The user requested this intermediate commit/push while
+   implementation is paused; it does not replace the final completion audit.
+
+## Explicit deferrals and limits
+
+Networking and storage integration/faults, whole-simulation checkpoint/branch,
+and implementing a PMU backend are deferred. Host readback, clock faults,
+inspection and dynamic creation are not deferred.
+
+Native evidence is from Apple Silicon/HVF and TCG. Linux ARM KVM architectural
+snapshot support remains absent/unvalidated; do not claim cross-platform parity.
+PV work accounting covers instrumentation charge points, not arbitrary polling
+or uninstrumented execution. The execute-only handoff covers configured startup
+and same-boot restart, not arbitrary application-initiated exec. RTC epochs, raw
+hardware entropy and broader CPU portability remain limitations. Dependency
+snapshot consistency remains the caller's responsibility until a simulation-wide
+capture boundary is designed.

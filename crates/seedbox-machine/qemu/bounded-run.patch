@@ -8,16 +8,48 @@
  #include "qemu/error-report.h"
  #include "system/cpus.h"
  #include "system/qtest.h"
-@@ -53,6 +54,171 @@
+@@ -53,10 +54,321 @@
  /* Do not count executed instructions */
  ICountMode use_icount = ICOUNT_DISABLED;
 
 +/* Seedbox owns idle-time advancement once it starts bounded execution. */
 +static bool seedbox_controlled;
 +static bool seedbox_active;
-+static int64_t seedbox_target;
++static int64_t seedbox_end;
 +static SeedboxStopReason seedbox_reason = SEEDBOX_STOP_REASON_BOUNDARY;
 +static int64_t seedbox_deadline = -1;
++static bool (*seedbox_shutdown_handler)(void);
++static void (*seedbox_console_handler)(uint8_t);
++
++void seedbox_icount_set_console_handler(void (*handler)(uint8_t))
++{
++    seedbox_console_handler = handler;
++}
++
++void seedbox_icount_console(uint8_t byte)
++{
++    /* The collector exists before bounded execution, including early boot. */
++    if (seedbox_console_handler) {
++        seedbox_console_handler(byte);
++    }
++}
++
++void seedbox_icount_set_shutdown_handler(bool (*handler)(void))
++{
++    seedbox_shutdown_handler = handler;
++}
++
++SeedboxShutdownResult *qmp_seedbox_request_shutdown(Error **errp)
++{
++    SeedboxShutdownResult *result;
++    if (runstate_is_running() || seedbox_active || !seedbox_shutdown_handler) {
++        error_setg(errp, "shutdown delivery needs a stopped lifecycle port");
++        return NULL;
++    }
++    result = g_new0(SeedboxShutdownResult, 1);
++    result->runnable = seedbox_shutdown_handler();
++    return result;
++}
 +
 +/* Guest MMIO shutdown must stop its CPU at the requesting instruction,
 + * rather than running until the main thread happens to process the request. */
@@ -43,6 +75,88 @@
 +    }
 +}
 +
++/* Integer timestamps expose the ceiling of exact instruction completion time.
++ * An unfinished first charge keeps its remaining old-rate cost; subsequent
++ * instructions use factor. All fixed-point arithmetic uses 128 bits so a
++ * valid signed-nanosecond horizon never overflows intermediate products. */
++typedef struct SeedboxCost {
++    bool enabled;
++    int64_t count;
++    int64_t time;
++    uint32_t first;
++    uint32_t factor;
++} SeedboxCost;
++
++static SeedboxCost seedbox_cost;
++
++static const VMStateDescription vmstate_seedbox_cost = {
++    .name = "seedbox-execution-cost",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_BOOL(enabled, SeedboxCost),
++        VMSTATE_INT64(count, SeedboxCost),
++        VMSTATE_INT64(time, SeedboxCost),
++        VMSTATE_UINT32(first, SeedboxCost),
++        VMSTATE_UINT32(factor, SeedboxCost),
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static __int128 seedbox_completion(int64_t count)
++{
++    int64_t delta = count - qatomic_read(&seedbox_cost.count);
++    __int128 time = (__int128)qatomic_read(&seedbox_cost.time) * 1000;
++    uint32_t first = qatomic_read(&seedbox_cost.first);
++    uint32_t factor = qatomic_read(&seedbox_cost.factor);
++    if (delta > 0) {
++        time += (first ? first : factor) + (__int128)(delta - 1) * factor;
++    }
++    return time;
++}
++
++static int64_t seedbox_time(int64_t count)
++{
++    return (seedbox_completion(count) + 999) / 1000;
++}
++
++/* Called stopped or by the CPU thread under the BQL. Advance only actual
++ * charged CPU time here. Idle/adopted time moves the anchor separately. */
++static void seedbox_reanchor(int64_t time)
++{
++    int64_t count = icount_get_raw();
++    int64_t delta = count - seedbox_cost.count;
++    __int128 credit;
++    uint32_t first = seedbox_cost.first;
++    uint32_t factor = seedbox_cost.factor;
++    uint32_t remaining;
++    if (delta == 0) {
++        credit = (__int128)(time - seedbox_cost.time) * 1000;
++        remaining = credit || first ? (first ? first : factor) - credit : 0;
++    } else {
++        credit = (__int128)time * 1000 - seedbox_completion(count);
++        remaining = credit ? factor - credit : 0;
++    }
++    g_assert(credit >= 0 && credit < (delta ? factor : (first ? first : factor)));
++    seqlock_write_lock(&timers_state.vm_clock_seqlock,
++                       &timers_state.vm_clock_lock);
++    qatomic_set(&seedbox_cost.count, count);
++    qatomic_set(&seedbox_cost.time, time);
++    qatomic_set(&seedbox_cost.first, remaining);
++    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
++                         &timers_state.vm_clock_lock);
++}
++
++static int64_t seedbox_count_until(int64_t time)
++{
++    __int128 available = (__int128)(time - seedbox_cost.time) * 1000;
++    uint32_t first = seedbox_cost.first ? seedbox_cost.first : seedbox_cost.factor;
++    if (available < first) {
++        return seedbox_cost.count;
++    }
++    return seedbox_cost.count + 1 + (available - first) / seedbox_cost.factor;
++}
++
 +void qmp_seedbox_advance(int64_t time, Error **errp)
 +{
 +    int64_t now = icount_get();
@@ -50,14 +164,22 @@
 +        error_setg(errp, "advance requires a stopped VM and monotonic time");
 +        return;
 +    }
-+    seqlock_write_lock(&timers_state.vm_clock_seqlock,
-+                       &timers_state.vm_clock_lock);
-+    qatomic_set(&timers_state.qemu_icount_bias,
-+                timers_state.qemu_icount_bias + time - now);
-+    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
-+                         &timers_state.vm_clock_lock);
-+    /* Elapsed stopped time executes no guest instructions. Timers overdue
-+     * during the gap observe the adopted time when their callbacks run. */
++    if (seedbox_cost.enabled) {
++        seedbox_reanchor(now);
++        /* Withheld/idle time neither earns nor discards charged CPU work. */
++        seqlock_write_lock(&timers_state.vm_clock_seqlock,
++                           &timers_state.vm_clock_lock);
++        qatomic_set(&seedbox_cost.time, time);
++        seqlock_write_unlock(&timers_state.vm_clock_seqlock,
++                             &timers_state.vm_clock_lock);
++    } else {
++        seqlock_write_lock(&timers_state.vm_clock_seqlock,
++                           &timers_state.vm_clock_lock);
++        qatomic_set(&timers_state.qemu_icount_bias,
++                    timers_state.qemu_icount_bias + time - now);
++        seqlock_write_unlock(&timers_state.vm_clock_seqlock,
++                             &timers_state.vm_clock_lock);
++    }
 +    qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
 +}
 +
@@ -72,7 +194,7 @@
 +    runstate_set(RUN_STATE_PRELAUNCH);
 +}
 +
-+void qmp_seedbox_run(int64_t time, int64_t budget, Error **errp)
++void qmp_seedbox_run(int64_t time, int64_t budget, int64_t factor, Error **errp)
 +{
 +    int64_t now = icount_get();
 +    int64_t count = icount_get_raw();
@@ -92,7 +214,7 @@
 +        return;
 +    }
 +    if (time < now || budget <= 0 || budget > INT64_MAX - time ||
-+        budget > INT64_MAX - count) {
++        budget > INT64_MAX - count || factor < 1000 || factor > 1000000) {
 +        error_setg(errp, "invalid simulation time or instruction budget");
 +        return;
 +    }
@@ -100,15 +222,18 @@
 +        qemu_add_vm_change_state_handler(seedbox_state_changed, NULL);
 +        seedbox_controlled = true;
 +    }
-+    /* The coordinator explicitly advances idle time; this bias is already
-+     * included in QEMU's timer migration state. No guest instruction runs. */
++    if (seedbox_cost.enabled) {
++        seedbox_reanchor(now);
++    }
 +    seqlock_write_lock(&timers_state.vm_clock_seqlock,
 +                       &timers_state.vm_clock_lock);
-+    qatomic_set(&timers_state.qemu_icount_bias,
-+                timers_state.qemu_icount_bias + time - now);
++    qatomic_set(&seedbox_cost.count, count);
++    qatomic_set(&seedbox_cost.time, time);
++    qatomic_set(&seedbox_cost.factor, factor);
++    qatomic_set(&seedbox_cost.enabled, true);
 +    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
 +                         &timers_state.vm_clock_lock);
-+    seedbox_target = count + budget;
++    seedbox_end = time + budget;
 +    seedbox_deadline = -1;
 +    seedbox_reason = SEEDBOX_STOP_REASON_ERROR;
 +    seedbox_active = true;
@@ -138,20 +263,24 @@
 +int64_t seedbox_icount_limit(int64_t limit)
 +{
 +    if (seedbox_active) {
-+        return MIN(limit, MAX(0, seedbox_target - icount_get_raw()));
++        int64_t now = icount_get();
++        int64_t end = now + MIN(limit, seedbox_end - now);
++        return MAX(0, seedbox_count_until(end) - icount_get_raw());
 +    }
-+    return limit;
++    return icount_round(limit);
 +}
 +
 +/* Called under the BQL between CPU executions, never from a translated block.
 + * Stop before the idle loop can wait or the main loop can warp virtual time. */
 +void seedbox_icount_poll(void)
 +{
-+    int64_t delay;
++    int64_t now, delay, horizon;
 +    if (!seedbox_active || !runstate_is_running()) {
 +        return;
 +    }
-+    if (icount_get_raw() >= seedbox_target) {
++    now = icount_get();
++    if (now >= seedbox_end) {
++        seedbox_reanchor(now);
 +        seedbox_reason = SEEDBOX_STOP_REASON_BOUNDARY;
 +    } else if (all_cpu_threads_idle()) {
 +        delay = qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL,
@@ -168,10 +297,26 @@
 +                return;
 +            }
 +        }
++        seedbox_reanchor(now);
 +        seedbox_reason = SEEDBOX_STOP_REASON_BLOCKED;
-+        seedbox_deadline = delay < 0 ? -1 : icount_get() + delay;
++        seedbox_deadline = delay < 0 ? -1 : now + delay;
 +    } else {
-+        return;
++        delay = qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL,
++                                           QEMU_TIMER_ATTR_ALL);
++        horizon = delay < 0 ? seedbox_end : now + MIN(delay, seedbox_end - now);
++        if (horizon > now && seedbox_count_until(horizon) == icount_get_raw()) {
++            /* Pay a partial instruction charge without executing its effects.
++             * This also handles a timer earlier than the next completion. */
++            seedbox_reanchor(horizon);
++            qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
++            if (horizon == seedbox_end) {
++                seedbox_reason = SEEDBOX_STOP_REASON_BOUNDARY;
++            } else {
++                return;
++            }
++        } else {
++            return;
++        }
 +    }
 +    seedbox_active = false;
 +    vm_stop(RUN_STATE_PAUSED);
@@ -180,7 +325,22 @@
  static void icount_enable_precise(void)
  {
      /* Fixed conversion of insn to ns via "shift" option */
-@@ -295,6 +449,10 @@
+     use_icount = ICOUNT_PRECISE;
++    vmstate_register(NULL, 0, &vmstate_seedbox_cost, &seedbox_cost);
+ }
+
+ static void icount_enable_adaptive(void)
+@@ -123,6 +435,9 @@
+ static int64_t icount_get_locked(void)
+ {
+     int64_t icount = icount_get_raw_locked();
++    if (qatomic_read(&seedbox_cost.enabled)) {
++        return seedbox_time(icount);
++    }
+     return qatomic_read(&timers_state.qemu_icount_bias) + icount_to_ns(icount);
+ }
+
+@@ -295,6 +610,10 @@
      int64_t deadline;
 
      assert(icount_enabled());
@@ -198,7 +358,7 @@
          }
 
 -        return icount_round(deadline);
-+        return seedbox_icount_limit(icount_round(deadline));
++        return seedbox_icount_limit(deadline);
      } else {
          return replay_get_instructions();
      }
@@ -213,9 +373,268 @@
 
          if (icount_enabled() && all_cpu_threads_idle()) {
              /*
+--- a/hw/char/meson.build
++++ b/hw/char/meson.build
+@@ -19,6 +19,7 @@
+ system_ss.add(when: 'CONFIG_SHAKTI_UART', if_true: files('shakti_uart.c'))
+ system_ss.add(when: 'CONFIG_VIRTIO', if_true: files('virtio-serial-bus.c'))
+ system_ss.add(when: 'CONFIG_VIRTIO_SERIAL', if_true: files('virtio-console.c'))
++system_ss.add(when: ['CONFIG_VIRTIO_SERIAL', 'CONFIG_TCG'], if_true: files('seedbox-lifecycle.c'))
+ system_ss.add(when: 'CONFIG_XEN_BUS', if_true: files('xen_console.c'))
+ system_ss.add(when: 'CONFIG_XILINX', if_true: files('xilinx_uartlite.c'))
+ system_ss.add(when: 'CONFIG_DIVA_GSP', if_true: files('diva-gsp.c'))
+--- /dev/null
++++ b/hw/char/seedbox-lifecycle.c
+@@ -0,0 +1,246 @@
++/* Deterministic stopped ingress for Seedbox's machine lifecycle port. */
++#include "qemu/osdep.h"
++#include "exec/icount.h"
++#include "hw/virtio/virtio-serial.h"
++#include "migration/vmstate.h"
++#include "qapi/error.h"
++#include "qapi/qapi-commands-run-state.h"
++#include "qemu/bswap.h"
++#include "system/runstate.h"
++#include "qemu/module.h"
++#include "system/cpus.h"
++
++#define TYPE_SEEDBOX_LIFECYCLE "seedbox-lifecycle-port"
++OBJECT_DECLARE_SIMPLE_TYPE(SeedboxLifecycle, SEEDBOX_LIFECYCLE)
++
++struct SeedboxLifecycle {
++    VirtIOSerialPort parent_obj;
++    bool requested;
++    uint32_t input_size;
++    uint32_t cursor;
++    uint8_t *input;
++    uint32_t output_size;
++    uint8_t *output;
++};
++
++/* The reference machine has exactly one lifecycle port. No socket, host I/O
++ * callback or timer may introduce input between accepted execution barriers. */
++static SeedboxLifecycle *lifecycle;
++static const uint8_t request[] = "shutdown\n";
++
++static void drain_input(VirtIOSerialPort *port)
++{
++    SeedboxLifecycle *s = SEEDBOX_LIFECYCLE(port);
++    size_t length = s->input_size;
++    if (s->cursor < length) {
++        ssize_t written = virtio_serial_write(port, s->input + s->cursor,
++                                              length - s->cursor);
++        /* Zero/negative writes leave input pending; partial writes retain the
++         * exact suffix. Never wrap a signed return into the migrated cursor. */
++        if (written > 0) {
++            g_assert(written <= length - s->cursor);
++            s->cursor += written;
++        }
++    }
++}
++
++/* Migration callbacks must never deliver retained input during restore. */
++static void drain_request(VirtIOSerialPort *port)
++{
++    if (runstate_is_running()) {
++        drain_input(port);
++    }
++}
++
++static void append_input(const uint8_t *bytes, size_t length)
++{
++    SeedboxLifecycle *s = lifecycle;
++    uint32_t pending = s->input_size - s->cursor;
++    g_assert((uint64_t)pending + length <= UINT32_MAX);
++    if (pending) {
++        memmove(s->input, s->input + s->cursor, pending);
++    }
++    s->input_size = pending + length;
++    s->cursor = 0;
++    s->input = g_realloc(s->input, s->input_size);
++    memcpy(s->input + pending, bytes, length);
++}
++
++SeedboxShutdownResult *qmp_seedbox_input_lifecycle(uint8List *bytes,
++                                                Error **errp)
++{
++    SeedboxShutdownResult *result;
++    GByteArray *input;
++    if (runstate_is_running() || !lifecycle) {
++        error_setg(errp, "lifecycle input requires a stopped port");
++        return NULL;
++    }
++    input = g_byte_array_new();
++    for (uint8List *item = bytes; item; item = item->next) {
++        g_byte_array_append(input, &item->value, 1);
++    }
++    if (input->len) {
++        append_input(input->data, input->len);
++        drain_input(VIRTIO_SERIAL_PORT(lifecycle));
++    }
++    g_byte_array_unref(input);
++    result = g_new0(SeedboxShutdownResult, 1);
++    result->runnable = !all_cpu_threads_idle();
++    return result;
++}
++
++static bool request_shutdown(void)
++{
++    if (!lifecycle->requested) {
++        lifecycle->requested = true;
++        append_input(request, sizeof(request) - 1);
++    }
++    drain_input(VIRTIO_SERIAL_PORT(lifecycle));
++    return !all_cpu_threads_idle();
++}
++
++static void guest_connected(VirtIOSerialPort *port, int connected)
++{
++    if (connected) {
++        drain_request(port);
++    }
++}
++
++/* One stream, in synchronous device observation order. No host callbacks
++ * reconstruct ordering or time after the CPU has stopped. */
++static void retain_output(uint8_t kind, const uint8_t *buf, uint32_t length)
++{
++    SeedboxLifecycle *s = lifecycle;
++    g_assert((uint64_t)s->output_size + 13 + (uint64_t)length <= UINT32_MAX);
++    uint32_t at = s->output_size;
++    s->output_size += 13 + length;
++    s->output = g_realloc(s->output, s->output_size);
++    s->output[at] = kind;
++    stq_le_p(s->output + at + 1, icount_get());
++    stl_le_p(s->output + at + 9, length);
++    memcpy(s->output + at + 13, buf, length);
++}
++
++static void retain_console(uint8_t byte)
++{
++    retain_output(SEEDBOX_OUTPUT_KIND_CONSOLE, &byte, 1);
++}
++
++static ssize_t retain_reply(VirtIOSerialPort *port, const uint8_t *buf,
++                            ssize_t length)
++{
++    if (length > 0) {
++        g_assert((uint64_t)length <= UINT32_MAX);
++        retain_output(SEEDBOX_OUTPUT_KIND_LIFECYCLE, buf, length);
++    }
++    return length;
++}
++
++SeedboxLifecycleWriteList *qmp_seedbox_drain_lifecycle(Error **errp)
++{
++    SeedboxLifecycleWriteList *result = NULL, **tail = &result;
++    if (runstate_is_running() || !lifecycle) {
++        error_setg(errp, "lifecycle drain requires a stopped port");
++        return NULL;
++    }
++    for (uint32_t at = 0; at < lifecycle->output_size;) {
++        SeedboxLifecycleWrite *write = g_new0(SeedboxLifecycleWrite, 1);
++        uint8List **bytes = &write->bytes;
++        uint32_t length = ldl_le_p(lifecycle->output + at + 9);
++        write->kind = lifecycle->output[at];
++        write->time = ldq_le_p(lifecycle->output + at + 1);
++        for (uint32_t i = 0; i < length; i++) {
++            *bytes = g_new0(uint8List, 1);
++            (*bytes)->value = lifecycle->output[at + 13 + i];
++            bytes = &(*bytes)->next;
++        }
++        *tail = g_new0(SeedboxLifecycleWriteList, 1);
++        (*tail)->value = write;
++        tail = &(*tail)->next;
++        at += 13 + length;
++    }
++    g_clear_pointer(&lifecycle->output, g_free);
++    lifecycle->output_size = 0;
++    return result;
++}
++
++static void lifecycle_realize(DeviceState *dev, Error **errp)
++{
++    if (lifecycle) {
++        error_setg(errp, "only one Seedbox lifecycle port is supported");
++        return;
++    }
++    lifecycle = SEEDBOX_LIFECYCLE(dev);
++    seedbox_icount_set_shutdown_handler(request_shutdown);
++    seedbox_icount_set_console_handler(retain_console);
++    virtio_serial_open(VIRTIO_SERIAL_PORT(dev));
++}
++
++static void lifecycle_unrealize(DeviceState *dev)
++{
++    g_clear_pointer(&lifecycle->output, g_free);
++    g_clear_pointer(&lifecycle->input, g_free);
++    lifecycle = NULL;
++    seedbox_icount_set_shutdown_handler(NULL);
++    seedbox_icount_set_console_handler(NULL);
++}
++
++static int lifecycle_post_load(void *opaque, int version)
++{
++    SeedboxLifecycle *s = opaque;
++    for (uint32_t at = 0; at < s->output_size;) {
++        if (s->output_size - at < 13 ||
++            s->output[at] > SEEDBOX_OUTPUT_KIND_LIFECYCLE) {
++            return -EINVAL;
++        }
++        uint32_t length = ldl_le_p(s->output + at + 9);
++        if (length > s->output_size - at - 13) {
++            return -EINVAL;
++        }
++        at += 13 + length;
++    }
++    /* Validation only: capture/restore must not deliver pending input. */
++    return s->cursor > s->input_size ? -EINVAL : 0;
++}
++
++static const VMStateDescription lifecycle_state = {
++    .name = TYPE_SEEDBOX_LIFECYCLE,
++    .version_id = 2,
++    .minimum_version_id = 2,
++    .post_load = lifecycle_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_BOOL(requested, SeedboxLifecycle),
++        VMSTATE_UINT32(input_size, SeedboxLifecycle),
++        VMSTATE_UINT32(cursor, SeedboxLifecycle),
++        VMSTATE_VBUFFER_ALLOC_UINT32(input, SeedboxLifecycle, 1, NULL, input_size),
++        VMSTATE_UINT32(output_size, SeedboxLifecycle),
++        VMSTATE_VBUFFER_ALLOC_UINT32(output, SeedboxLifecycle, 1, NULL, output_size),
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static void lifecycle_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    VirtIOSerialPortClass *pc = VIRTIO_SERIAL_PORT_CLASS(klass);
++    dc->vmsd = &lifecycle_state;
++    pc->realize = lifecycle_realize;
++    pc->unrealize = lifecycle_unrealize;
++    pc->guest_ready = drain_request;
++    pc->guest_writable = drain_request;
++    pc->set_guest_connected = guest_connected;
++    pc->have_data = retain_reply;
++}
++
++static const TypeInfo lifecycle_info = {
++    .name = TYPE_SEEDBOX_LIFECYCLE,
++    .parent = TYPE_VIRTIO_SERIAL_PORT,
++    .instance_size = sizeof(SeedboxLifecycle),
++    .class_init = lifecycle_class_init,
++};
++
++static void lifecycle_register_types(void)
++{
++    type_register_static(&lifecycle_info);
++}
++type_init(lifecycle_register_types)
 --- a/include/exec/icount.h
 +++ b/include/exec/icount.h
-@@ -73,4 +73,9 @@
+@@ -73,4 +73,13 @@
  void icount_account_warp_timer(void);
  void icount_notify_exit(void);
 
@@ -223,11 +642,15 @@
 +int64_t seedbox_icount_limit(int64_t limit);
 +void seedbox_icount_poll(void);
 +void seedbox_icount_shutdown(void);
++void seedbox_icount_set_shutdown_handler(bool (*handler)(void));
++
++void seedbox_icount_set_console_handler(void (*handler)(uint8_t));
++void seedbox_icount_console(uint8_t byte);
 +
  #endif /* EXEC_ICOUNT_H */
 --- a/qapi/run-state.json
 +++ b/qapi/run-state.json
-@@ -749,3 +749,83 @@
+@@ -749,3 +749,167 @@
  ##
  { 'enum': 'NotifyVmexitOption',
    'data': [ 'run', 'internal-error', 'disable' ] }
@@ -269,11 +692,13 @@
 +# Start bounded execution.  Wait for STOP, then query-seedbox-run.
 +#
 +# @time: Simulation time at which execution starts.
-+# @budget: Maximum number of instructions to execute.
++# @budget: Maximum simulation nanoseconds to advance.
++# @factor: Instruction cost in thousandths of a nanosecond
++#     (1000..1000000).
 +#
 +# Since: 11.1
 +##
-+{ 'command': 'seedbox-run', 'data': { 'time': 'int', 'budget': 'int' },
++{ 'command': 'seedbox-run', 'data': { 'time': 'int', 'budget': 'int', 'factor': 'int' },
 +  'if': 'CONFIG_TCG' }
 +
 +##
@@ -311,6 +736,88 @@
 +# Since: 11.1
 +##
 +{ 'command': 'seedbox-capture-complete', 'if': 'CONFIG_TCG' }
++
++##
++# @SeedboxShutdownResult:
++#
++# Stopped state after buffering the lifecycle request.
++#
++# @runnable: A CPU is runnable after input delivery.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxShutdownResult', 'data': { 'runnable': 'bool' },
++  'if': 'CONFIG_TCG' }
++
++##
++# @seedbox-request-shutdown:
++#
++# Buffer one shutdown request on the private lifecycle virtio port.
++# Guest instructions and virtual time remain stopped.  Pending bytes
++# belong to the device's migrated state, including before guest boot.
++#
++# Returns: Stopped scheduling state after input delivery.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-request-shutdown', 'returns': 'SeedboxShutdownResult',
++  'if': 'CONFIG_TCG' }
++
++##
++# @SeedboxOutputKind:
++#
++# Private physical output source.
++#
++# @console: Reference UART transmission.
++# @lifecycle: Lifecycle virtio port transmission.
++#
++# Since: 11.1
++##
++{ 'enum': 'SeedboxOutputKind', 'data': [ 'console', 'lifecycle' ],
++  'if': 'CONFIG_TCG' }
++
++##
++# @SeedboxLifecycleWrite:
++#
++# Private transport bytes at their synchronous guest emission time.
++#
++# @kind: Physical output source.
++# @time: Simulation nanoseconds when the write was serviced.
++# @bytes: Raw bytes; writes do not imply message boundaries.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxLifecycleWrite',
++  'data': { 'kind': 'SeedboxOutputKind', 'time': 'uint64', 'bytes': ['uint8'] }, 'if': 'CONFIG_TCG' }
++
++##
++# @seedbox-drain-lifecycle:
++#
++# Transfer pending lifecycle output exactly once while stopped.
++# Pending output is migrated until drained.  This command executes no
++# guest work.
++#
++# Returns: Writes in deterministic emission order.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-drain-lifecycle',
++  'returns': ['SeedboxLifecycleWrite'], 'if': 'CONFIG_TCG' }
++
++##
++# @seedbox-input-lifecycle:
++#
++# Append private management bytes to a stopped lifecycle port.
++# Pending suffixes migrate without delivering input during restore.
++#
++# @bytes: Ordered raw input, without implied message boundaries.
++#
++# Returns: Stopped scheduling state after input delivery.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-input-lifecycle', 'data': { 'bytes': ['uint8'] },
++  'returns': 'SeedboxShutdownResult', 'if': 'CONFIG_TCG' }
 --- a/system/runstate.c
 +++ b/system/runstate.c
 @@ -30,6 +30,7 @@
@@ -343,3 +850,48 @@
      return true;
  #else
      return false;
+--- a/hw/char/serial.c
++++ b/hw/char/serial.c
+@@ -26,6 +26,9 @@
+ #include "qemu/osdep.h"
+ #include "qemu/bitops.h"
+ #include "hw/char/serial.h"
++#ifdef CONFIG_TCG
++#include "exec/icount.h"
++#endif
+ #include "hw/core/irq.h"
+ #include "migration/vmstate.h"
+ #include "chardev/char-serial.h"
+@@ -257,6 +260,14 @@
+             }
+         }
+
++#ifdef CONFIG_TCG
++        /* Observe a new physical transmission once, before host chardev I/O.
++         * A retry already owns this byte; loopback never leaves the UART. */
++        if (s->seedbox_console && s->tsr_retry == 0 &&
++            !(s->mcr & UART_MCR_LOOP)) {
++            seedbox_icount_console(s->tsr);
++        }
++#endif
+         if (s->mcr & UART_MCR_LOOP) {
+             /* in loopback mode, say that we just received a char */
+             serial_receive1(s, &s->tsr, 1);
+@@ -966,6 +977,7 @@
+     DEFINE_PROP_CHR("chardev", SerialState, chr),
+     DEFINE_PROP_UINT32("baudbase", SerialState, baudbase, 115200),
+     DEFINE_PROP_BOOL("wakeup", SerialState, wakeup, false),
++    DEFINE_PROP_BOOL("seedbox-console", SerialState, seedbox_console, false),
+ };
+
+ static void serial_class_init(ObjectClass *klass, const void *data)
+--- a/include/hw/char/serial.h
++++ b/include/hw/char/serial.h
+@@ -61,6 +61,7 @@
+     uint32_t tsr_retry;
+     guint watch_tag;
+     bool wakeup;
++    bool seedbox_console;
+
+     /* Time when the last byte was successfully sent out of the tsr */
+     uint64_t last_xmit_ts;

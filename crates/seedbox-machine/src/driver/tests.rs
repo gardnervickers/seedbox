@@ -2,8 +2,8 @@ use super::*;
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Mutex,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -23,16 +23,19 @@ enum Op {
 
 struct TestMachine {
     name: usize,
-    clock: Arc<dyn Clock + Send + Sync>,
     reached: u64,
     executed: u64,
     sleeping: Option<Option<u64>>,
     fail_run_at: Option<u64>,
-    retain_blocked_position: bool,
     input: Arc<AtomicBool>,
     ops: VecDeque<Op>,
+    boot: VecDeque<Op>,
+    lifecycle: Vec<(&'static str, u64)>,
+    fail_reboot: bool,
     log: Arc<Mutex<Vec<(usize, u64, u64)>>>,
     crashed: bool,
+    pending_reboots: u64,
+    pending_at: Option<u64>,
     fail_crash: bool,
 }
 
@@ -41,11 +44,48 @@ impl Machine for TestMachine {
     type Error = std::io::Error;
     type Snapshot = ();
 
-    fn run(&mut self, _: &mut (), upto: Timestamp) -> Result<StopReason, Self::Error> {
-        assert!(!self.crashed, "ran a crashed machine");
-        let now = self.clock.now();
+    fn run(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        upto: Timestamp,
+    ) -> Result<StopReason, Self::Error> {
+        while let Some(input) = context.inbox.front() {
+            match input.payload {
+                crate::pv::Request::Crash => {
+                    context.inbox.take();
+                    self.crash()?;
+                    return Ok(StopReason::Exited {
+                        reached: Timestamp::from_nanos(context.clock.now()),
+                        reason: ExitReason::Crashed,
+                    });
+                }
+                crate::pv::Request::Reboot => {
+                    context.inbox.take();
+                    self.reboot(Timestamp::from_nanos(context.clock.now()))?;
+                }
+                crate::pv::Request::Shutdown => {
+                    context.inbox.take();
+                    self.shutdown()?;
+                }
+                crate::pv::Request::Application { .. }
+                | crate::pv::Request::SimulationReply { .. } => break,
+            }
+        }
+
+        assert!(
+            !self.crashed || self.pending_reboots > 0,
+            "ran a crashed machine"
+        );
+        let now = context.clock.now();
+        if self.pending_reboots > 0 {
+            self.reached = now.max(self.reached).max(self.pending_at.unwrap());
+            self.sleeping = None;
+            self.ops = self.boot.clone();
+            self.crashed = false;
+            self.pending_reboots = 0;
+            self.pending_at = None;
+        }
         let end = upto.as_nanos();
-        let previous = self.reached;
         self.reached = self.reached.max(now);
         if self.fail_run_at == Some(now) {
             return Err(std::io::Error::other("fixture adoption failure"));
@@ -54,11 +94,6 @@ impl Machine for TestMachine {
         if let Some(deadline) = self.sleeping {
             let input = self.input.swap(false, Ordering::Relaxed);
             if !deadline.is_some_and(|at| at <= now) && !input {
-                // An unchanged blocked report may retain the position at which
-                // blocking began; adoption produces no CPU work or new effects.
-                if self.retain_blocked_position {
-                    self.reached = previous;
-                }
                 return Ok(StopReason::Blocked {
                     reached: at(self.reached),
                     deadline: deadline.map(at),
@@ -97,31 +132,18 @@ impl Machine for TestMachine {
                     return Ok(StopReason::Exited {
                         reached: at(self.reached),
                         reason: ExitReason::Shutdown,
-                    })
+                    });
                 }
                 Op::Fail => return Err(std::io::Error::other("fixture execution failure")),
                 Op::BadStop => {
                     return Ok(StopReason::Blocked {
                         reached: at(end + 1),
                         deadline: None,
-                    })
+                    });
                 }
             }
         }
         Ok(StopReason::BoundaryReached)
-    }
-
-    fn crash(&mut self) -> Result<(), Self::Error> {
-        assert!(!self.crashed, "crashed twice");
-        if self.fail_crash {
-            return Err(std::io::Error::other("fixture crash failure"));
-        }
-        self.crashed = true;
-        Ok(())
-    }
-
-    fn reboot(&mut self, _: Timestamp) -> Result<(), Self::Error> {
-        Err(std::io::Error::other("fixture reboot is unsupported"))
     }
 
     fn snapshot(&mut self) -> Result<(), Self::Error> {
@@ -129,35 +151,39 @@ impl Machine for TestMachine {
     }
 }
 
-fn machine(clock: Arc<dyn Clock + Send + Sync>, name: usize, ops: &[Op]) -> TestMachine {
-    let reached = clock.now();
+fn machine(name: usize, ops: &[Op]) -> TestMachine {
+    let reached = 0;
     TestMachine {
         name,
-        clock,
         reached,
         executed: 0,
         sleeping: None,
         fail_run_at: None,
-        retain_blocked_position: false,
         input: Arc::new(AtomicBool::new(false)),
         ops: ops.iter().copied().collect(),
+        boot: ops.iter().copied().collect(),
+        lifecycle: Vec::new(),
+        fail_reboot: false,
         log: Arc::new(Mutex::new(Vec::new())),
         crashed: false,
+        pending_reboots: 0,
+        pending_at: None,
         fail_crash: false,
     }
 }
 
 fn build(start: u64, programs: &[&[Op]]) -> Driver<TestMachine> {
-    Driver::new(
+    super::fixture::driver(
         at(start),
         std::time::Duration::from_nanos(1000),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
+        || {
             Ok(programs
                 .iter()
                 .enumerate()
-                .map(|(index, ops)| machine(clock.clone(), index, ops))
+                .map(|(index, ops)| machine(index, ops))
                 .collect())
         },
     )
@@ -180,16 +206,13 @@ fn schedule(
 
 #[test]
 fn an_ineffective_wakeup_does_not_rewind_shared_time() {
-    let mut driver = Driver::new(
+    let mut driver = super::fixture::driver(
         at(3),
         std::time::Duration::from_nanos(1000),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
-            let mut guest = machine(clock, 0, &[Op::Park]);
-            guest.retain_blocked_position = true;
-            Ok(vec![guest])
-        },
+        || Ok(vec![machine(0, &[Op::Park])]),
     )
     .unwrap();
     let id = ids(&mut driver)[0];
@@ -200,7 +223,7 @@ fn an_ineffective_wakeup_does_not_rewind_shared_time() {
     );
     driver
         .with_barrier(|barrier| {
-            assert_eq!(barrier.machine(id)?.reached, 3);
+            assert_eq!(barrier.machine(id)?.reached, 10);
             Ok(())
         })
         .unwrap();
@@ -226,10 +249,7 @@ fn initial_set_and_barrier_addition_share_the_current_time() {
     let first = ids(&mut driver)[0];
     let added = driver
         .with_barrier(|barrier| {
-            let added = barrier.add(|clock| {
-                assert_eq!(clock.now(), 10);
-                Ok(machine(clock, 1, &[Op::Work(2), Op::Exit]))
-            })?;
+            let added = barrier.add(|| Ok(machine(1, &[Op::Work(2), Op::Exit])))?;
             assert_ne!(first, added);
             assert_eq!(
                 barrier.machines().map(|(id, _)| id).collect::<Vec<_>>(),
@@ -264,7 +284,10 @@ fn failed_construction_preserves_existing_machines_and_id_order() {
         at(0),
         std::time::Duration::from_nanos(1000),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
+        super::fixture::definition(0),
+        Vec::new(),
         |_| Err(std::io::Error::other("construction failed")),
     );
     assert!(matches!(failed, Err(Error::Construction(_))));
@@ -273,36 +296,31 @@ fn failed_construction_preserves_existing_machines_and_id_order() {
         .with_barrier(|barrier| {
             let initial = barrier.machines().map(|(id, _)| id).collect::<Vec<_>>();
             assert!(matches!(
-                barrier.add(|_| Err(std::io::Error::other("construction failed"))),
+                barrier.add(|| Err(std::io::Error::other("construction failed"))),
                 Err(Error::Construction(_))
             ));
             assert_eq!(
                 barrier.machines().map(|(id, _)| id).collect::<Vec<_>>(),
                 initial
             );
-            let added = barrier.add(|clock| Ok(machine(clock, 1, &[Op::Exit])))?;
+            let added = barrier.add(|| Ok(machine(1, &[Op::Exit])))?;
             assert_eq!(added, MachineId(1));
             Ok(())
         })
         .unwrap();
     assert_eq!(
         driver.step(at(1)).unwrap(),
-        StepOutcome::Finished { at: at(0) }
+        StepOutcome::Finished {
+            at: at(0),
+            reason: ExitReason::Shutdown
+        }
     );
 }
 
 #[test]
-fn empty_and_blocked_are_distinct_and_do_not_poll() {
-    let mut driver = build(7, &[]);
-    assert_eq!(
-        driver.step(at(100)).unwrap(),
-        StepOutcome::Finished { at: at(7) }
-    );
-    let id = driver
-        .with_barrier(|barrier| {
-            barrier.add(|clock| Ok(machine(clock, 0, &[Op::Park, Op::Work(2), Op::Exit])))
-        })
-        .unwrap();
+fn blocked_oracle_does_not_poll() {
+    let mut driver = build(7, &[&[Op::Park, Op::Work(2), Op::Exit]]);
+    let id = ids(&mut driver)[0];
     assert_eq!(
         driver.step(at(100)).unwrap(),
         StepOutcome::Blocked { at: at(7) }
@@ -324,7 +342,10 @@ fn empty_and_blocked_are_distinct_and_do_not_poll() {
     );
     assert_eq!(
         driver.step(at(100)).unwrap(),
-        StepOutcome::Finished { at: at(9) }
+        StepOutcome::Finished {
+            at: at(9),
+            reason: ExitReason::Shutdown
+        }
     );
 }
 
@@ -362,7 +383,10 @@ fn idle_jump_respects_limit_and_delivers_timer_at_exact_boundary() {
         .unwrap();
     assert_eq!(
         driver.step(at(50)).unwrap(),
-        StepOutcome::Finished { at: at(23) }
+        StepOutcome::Finished {
+            at: at(23),
+            reason: ExitReason::Shutdown
+        }
     );
 }
 
@@ -412,7 +436,10 @@ fn actions_bound_execution_and_crash_precedes_a_same_time_timer() {
         .unwrap();
     assert_eq!(
         driver.step(at(100)).unwrap(),
-        StepOutcome::Finished { at: at(5) }
+        StepOutcome::Finished {
+            at: at(5),
+            reason: ExitReason::Crashed
+        }
     );
     driver
         .with_barrier(|barrier| {
@@ -429,7 +456,10 @@ fn actions_bound_execution_and_crash_precedes_a_same_time_timer() {
         .unwrap();
     assert_eq!(
         driver.step(at(100)).unwrap(),
-        StepOutcome::Finished { at: at(5) }
+        StepOutcome::Finished {
+            at: at(5),
+            reason: ExitReason::Crashed
+        }
     );
 }
 
@@ -444,7 +474,10 @@ fn future_action_keeps_an_indefinitely_blocked_simulation_alive() {
     );
     assert_eq!(
         driver.step(at(100)).unwrap(),
-        StepOutcome::Finished { at: at(50) }
+        StepOutcome::Finished {
+            at: at(50),
+            reason: ExitReason::Crashed
+        }
     );
 }
 
@@ -467,13 +500,14 @@ fn execution_and_invalid_stop_failures_prevent_all_further_dispatch() {
 
 #[test]
 fn crash_failure_and_backwards_step_prevent_retry() {
-    let mut driver = Driver::new(
+    let mut driver = super::fixture::driver(
         at(3),
         std::time::Duration::from_nanos(1000),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
-            let mut guest = machine(clock, 0, &[Op::Fail]);
+        || {
+            let mut guest = machine(0, &[Op::Fail]);
             guest.fail_crash = true;
             Ok(vec![guest])
         },
@@ -483,7 +517,7 @@ fn crash_failure_and_backwards_step_prevent_retry() {
     schedule(&mut driver, 3, Action::Crash(id)).unwrap();
     assert!(matches!(driver.step(at(3)), Err(Error::Machine { .. })));
     assert!(matches!(driver.step(at(4)), Err(Error::Failed)));
-    let mut driver = build(3, &[]);
+    let mut driver = build(3, &[&[Op::Park]]);
     assert!(matches!(driver.step(at(2)), Err(Error::PastTime { .. })));
     assert!(matches!(driver.step(at(3)), Err(Error::Failed)));
 }
@@ -502,18 +536,22 @@ fn invalid_schedule_does_not_mutate_the_queue_or_poison_the_driver() {
     ));
     assert_eq!(
         driver.step(at(10)).unwrap(),
-        StepOutcome::Finished { at: at(3) }
+        StepOutcome::Finished {
+            at: at(3),
+            reason: ExitReason::Shutdown
+        }
     );
 }
 
 #[test]
 fn quantum_boundaries_survive_short_steps_actions_and_additions() {
-    let mut driver = Driver::new(
+    let mut driver = super::fixture::driver(
         at(7),
         Duration::from_nanos(10),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| Ok(vec![machine(clock, 0, &[Op::Work(100), Op::Exit])]),
+        || Ok(vec![machine(0, &[Op::Work(100), Op::Exit])]),
     )
     .unwrap();
     assert_eq!(
@@ -522,7 +560,7 @@ fn quantum_boundaries_survive_short_steps_actions_and_additions() {
     );
     driver
         .with_barrier(|barrier| {
-            let id = barrier.add(|clock| Ok(machine(clock, 1, &[Op::Park])))?;
+            let id = barrier.add(|| Ok(machine(1, &[Op::Park])))?;
             barrier.schedule(at(15), Action::Crash(id))
         })
         .unwrap();
@@ -540,12 +578,13 @@ fn quantum_boundaries_survive_short_steps_actions_and_additions() {
 
 #[test]
 fn idle_time_does_not_skip_quantum_boundaries() {
-    let mut driver = Driver::new(
+    let mut driver = super::fixture::driver(
         at(0),
         Duration::from_nanos(10),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| Ok(vec![machine(clock, 0, &[Op::Sleep(25), Op::Exit])]),
+        || Ok(vec![machine(0, &[Op::Sleep(25), Op::Exit])]),
     )
     .unwrap();
     for end in [10, 20, 25] {
@@ -556,7 +595,10 @@ fn idle_time_does_not_skip_quantum_boundaries() {
     }
     assert_eq!(
         driver.step(at(100)).unwrap(),
-        StepOutcome::Finished { at: at(25) }
+        StepOutcome::Finished {
+            at: at(25),
+            reason: ExitReason::Shutdown
+        }
     );
 }
 
@@ -568,21 +610,27 @@ fn invalid_configuration_never_calls_factories_and_overflow_never_runs_work() {
         (0, Duration::from_nanos(1), 0),
         (u64::MAX, Duration::from_nanos(1), 1),
     ] {
-        assert!(Driver::<TestMachine>::new(
-            at(start),
-            quantum,
-            workers,
-            || panic!("invalid configuration created a context"),
-            |_| panic!("invalid configuration created machines")
-        )
-        .is_err());
+        assert!(
+            Driver::<TestMachine>::new(
+                at(start),
+                quantum,
+                workers,
+                crate::rng::SeededRng::new(0),
+                || panic!("invalid configuration created a context"),
+                super::fixture::definition(0),
+                Vec::new(),
+                |_| panic!("invalid configuration created machines")
+            )
+            .is_err()
+        );
     }
-    let mut driver = Driver::new(
+    let mut driver = super::fixture::driver(
         at(u64::MAX - 3),
         Duration::from_nanos(2),
         1,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| Ok(vec![machine(clock, 0, &[Op::Work(100)])]),
+        || Ok(vec![machine(0, &[Op::Work(100)])]),
     )
     .unwrap();
     assert_eq!(
@@ -605,24 +653,17 @@ fn invalid_configuration_never_calls_factories_and_overflow_never_runs_work() {
 fn worker_count_preserves_barriers_machine_progress_and_action_order() {
     let mut reference = None;
     for workers in [1, 2, 4] {
-        let mut driver = Driver::new(
+        let mut driver = super::fixture::driver(
             at(0),
             Duration::from_nanos(7),
             workers,
+            crate::rng::SeededRng::new(0),
             || Ok(()),
-            |clock| {
+            || {
                 Ok(vec![
-                    machine(
-                        clock.clone(),
-                        0,
-                        &[Op::Work(2), Op::Sleep(15), Op::Work(3), Op::Exit],
-                    ),
-                    machine(
-                        clock.clone(),
-                        1,
-                        &[Op::Sleep(4), Op::Work(1), Op::Sleep(8), Op::Exit],
-                    ),
-                    machine(clock, 2, &[Op::Sleep(7), Op::Fail]),
+                    machine(0, &[Op::Work(2), Op::Sleep(15), Op::Work(3), Op::Exit]),
+                    machine(1, &[Op::Sleep(4), Op::Work(1), Op::Sleep(8), Op::Exit]),
+                    machine(2, &[Op::Sleep(7), Op::Fail]),
                 ])
             },
         )
@@ -669,14 +710,38 @@ impl Machine for ProbeMachine {
     type Context = ();
     type Error = std::io::Error;
     type Snapshot = ();
-    fn run(&mut self, _: &mut (), _: Timestamp) -> Result<StopReason, Self::Error> {
-        (self.0)()
-    }
-    fn crash(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-    fn reboot(&mut self, _: Timestamp) -> Result<(), Self::Error> {
-        Err(std::io::Error::other("fixture reboot is unsupported"))
+    fn run(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        _: Timestamp,
+    ) -> Result<StopReason, Self::Error> {
+        while let Some(input) = context.inbox.front() {
+            match input.payload {
+                crate::pv::Request::Crash => {
+                    context.inbox.take();
+                    self.crash()?;
+                    return Ok(StopReason::Exited {
+                        reached: Timestamp::from_nanos(context.clock.now()),
+                        reason: ExitReason::Crashed,
+                    });
+                }
+                crate::pv::Request::Reboot => {
+                    context.inbox.take();
+                    self.reboot(Timestamp::from_nanos(context.clock.now()))?;
+                }
+                crate::pv::Request::Shutdown => {
+                    context.inbox.take();
+                    self.shutdown()?;
+                }
+                crate::pv::Request::Application { .. }
+                | crate::pv::Request::SimulationReply { .. } => break,
+            }
+        }
+
+        let before = context.clock.now();
+        let result = (self.0)();
+        assert_eq!(context.clock.now(), before);
+        result
     }
 
     fn snapshot(&mut self) -> Result<(), Self::Error> {
@@ -693,12 +758,13 @@ fn calls_overlap_clock_stays_fixed_and_failure_joins_the_whole_batch() {
         let completed = peer_completed.clone();
         let overlapped = Arc::new(AtomicBool::new(false));
         let observed_overlap = overlapped.clone();
-        let mut driver = Driver::new(
+        let mut driver = super::fixture::driver(
             at(0),
             Duration::from_nanos(10),
             2,
+            crate::rng::SeededRng::new(0),
             || Ok(()),
-            |clock| {
+            || {
                 let waiter = gate.clone();
                 let first = ProbeMachine(Box::new(move || {
                     let (lock, signal) = &*waiter;
@@ -709,7 +775,6 @@ fn calls_overlap_clock_stays_fixed_and_failure_joins_the_whole_batch() {
                         .unwrap();
                     assert!(!timeout.timed_out(), "machine calls did not overlap");
                     observed_overlap.store(true, Ordering::Relaxed);
-                    assert_eq!(clock.now(), 0);
                     if panic_first {
                         panic!("fixture panic");
                     }
@@ -753,12 +818,13 @@ fn a_failed_step_waits_for_a_still_running_peer() {
     let (entered, running) = mpsc::channel();
     let (release, continue_run) = mpsc::channel();
     let (finished, returned) = mpsc::channel();
-    let mut driver = Driver::new(
+    let mut driver = super::fixture::driver(
         at(0),
         Duration::from_nanos(10),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |_| {
+        || {
             Ok(vec![
                 ProbeMachine(Box::new(|| Err(std::io::Error::other("fixture failure")))),
                 ProbeMachine(Box::new(move || {
@@ -795,3 +861,255 @@ mod control_tests;
 
 #[path = "pause_tests.rs"]
 mod pause_tests;
+
+#[path = "reboot_tests.rs"]
+mod reboot_tests;
+
+struct RandomMachine {
+    bytes: Vec<[u8; 9]>,
+    reached: u64,
+}
+impl Machine for RandomMachine {
+    // Thread-affine host bookkeeping must not carry simulation entropy.
+    type Context = std::rc::Rc<std::cell::Cell<usize>>;
+    type Error = std::io::Error;
+    type Snapshot = Vec<[u8; 9]>;
+    fn run(
+        &mut self,
+        context: &mut RunContext<'_, Self::Context>,
+        upto: Timestamp,
+    ) -> Result<StopReason, Self::Error> {
+        while let Some(input) = context.inbox.front() {
+            match input.payload {
+                crate::pv::Request::Crash => {
+                    context.inbox.take();
+                    self.crash()?;
+                    return Ok(StopReason::Exited {
+                        reached: Timestamp::from_nanos(context.clock.now()),
+                        reason: ExitReason::Crashed,
+                    });
+                }
+                crate::pv::Request::Reboot => {
+                    context.inbox.take();
+                    self.reboot(Timestamp::from_nanos(context.clock.now()))?;
+                }
+                crate::pv::Request::Shutdown => {
+                    context.inbox.take();
+                    self.shutdown()?;
+                }
+                crate::pv::Request::Application { .. }
+                | crate::pv::Request::SimulationReply { .. } => break,
+            }
+        }
+
+        context.worker.set(context.worker.get() + 1);
+        self.reached = self.reached.max(context.clock.now());
+        if self.reached < upto.as_nanos() {
+            let mut bytes = [0; 9];
+            context.rng.fill_bytes(&mut bytes);
+            self.bytes.push(bytes);
+            self.reached = upto.as_nanos();
+            std::thread::yield_now();
+        }
+        Ok(StopReason::BoundaryReached)
+    }
+
+    fn snapshot(&mut self) -> Result<Self::Snapshot, Self::Error> {
+        Ok(self.bytes.clone())
+    }
+}
+
+#[test]
+fn machine_rng_cursors_follow_identity_across_work_stealing_and_failed_addition() {
+    let mut reference = None;
+    for workers in [1, 2, 4] {
+        let mut driver = super::fixture::driver(
+            at(0),
+            Duration::from_nanos(10),
+            workers,
+            crate::rng::SeededRng::new(123),
+            || Ok(std::rc::Rc::new(std::cell::Cell::new(0))),
+            || {
+                Ok((0..7)
+                    .map(|_| RandomMachine {
+                        bytes: Vec::new(),
+                        reached: 0,
+                    })
+                    .collect())
+            },
+        )
+        .unwrap();
+        driver.step(at(10)).unwrap();
+        driver
+            .with_barrier(|barrier| {
+                assert!(
+                    barrier
+                        .add(|| Err(std::io::Error::other("fixture failed addition")))
+                        .is_err()
+                );
+                let id = barrier.add(|| {
+                    Ok(RandomMachine {
+                        bytes: Vec::new(),
+                        reached: 0,
+                    })
+                })?;
+                barrier.schedule(at(20), Action::Pause(id))?;
+                barrier.schedule(at(40), Action::Resume(id))?;
+                // Capturing machine state never borrows or advances its RNG.
+                let first = barrier.machines().next().unwrap().0;
+                barrier.snapshot(first)?;
+                Ok(())
+            })
+            .unwrap();
+        while driver.now() < at(60) {
+            driver.step(at(60)).unwrap();
+        }
+        let histories = driver
+            .with_barrier(|barrier| {
+                Ok(barrier
+                    .machines()
+                    .map(|(_, m)| m.bytes.clone())
+                    .collect::<Vec<_>>())
+            })
+            .unwrap();
+        let mut global = crate::rng::SeededRng::new(123);
+        use crate::rng::{RngStream, RngStreamExt};
+        for history in &histories {
+            let mut child = crate::rng::SeededRng::new(global.next_u64());
+            for observed in history {
+                let mut expected = [0; 9];
+                child.fill_bytes(&mut expected);
+                assert_eq!(*observed, expected);
+            }
+        }
+        assert_ne!(histories[0], histories[1]);
+        if let Some(expected) = &reference {
+            assert_eq!(&histories, expected);
+        } else {
+            reference = Some(histories);
+        }
+    }
+}
+
+#[test]
+fn stale_adoption_reports_are_rejected_and_poison_before_another_dispatch() {
+    use std::sync::atomic::AtomicUsize;
+    for resume in [false, true] {
+        for exited in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            let mut driver = super::fixture::driver(
+                at(0),
+                Duration::from_nanos(10),
+                1,
+                crate::rng::SeededRng::new(0),
+                || Ok(()),
+                || {
+                    Ok(vec![ProbeMachine(Box::new(move || {
+                        let call = calls.fetch_add(1, Ordering::Relaxed);
+                        if !resume && call == 0 {
+                            return Ok(StopReason::Blocked {
+                                reached: at(0),
+                                deadline: None,
+                            });
+                        }
+                        Ok(if exited {
+                            StopReason::Exited {
+                                reached: at(4),
+                                reason: ExitReason::Shutdown,
+                            }
+                        } else {
+                            StopReason::Blocked {
+                                reached: at(4),
+                                deadline: None,
+                            }
+                        })
+                    }))])
+                },
+            )
+            .unwrap();
+            let id = driver
+                .with_barrier(|barrier| Ok(barrier.machines().next().unwrap().0))
+                .unwrap();
+            driver
+                .with_barrier(|barrier| {
+                    if resume {
+                        barrier.schedule(at(0), Action::Pause(id))?;
+                    }
+                    barrier.schedule(
+                        at(5),
+                        if resume {
+                            Action::Resume(id)
+                        } else {
+                            Action::Wake(id)
+                        },
+                    )
+                })
+                .unwrap();
+            assert!(
+                matches!(driver.step(at(100)), Err(Error::InvalidStop { id: rejected, .. }) if rejected == id),
+                "resume={resume}, exited={exited}"
+            );
+            let count = observed.load(Ordering::Relaxed);
+            assert_eq!(count, if resume { 1 } else { 2 });
+            assert!(matches!(driver.step(at(100)), Err(Error::Failed)));
+            assert_eq!(observed.load(Ordering::Relaxed), count);
+            assert!(matches!(
+                driver.with_barrier::<()>(|_| panic!("entered poisoned driver")),
+                Err(Error::Failed)
+            ));
+        }
+    }
+}
+
+impl TestMachine {
+    fn crash(&mut self) -> Result<(), std::io::Error> {
+        assert!(!self.crashed || self.pending_reboots > 0, "crashed twice");
+        self.lifecycle.push(("crash", self.reached));
+        if self.fail_crash {
+            return Err(std::io::Error::other("fixture crash failure"));
+        }
+        self.crashed = true;
+        self.pending_reboots = 0;
+        self.pending_at = None;
+        Ok(())
+    }
+    fn reboot(&mut self, at: Timestamp) -> Result<(), std::io::Error> {
+        self.lifecycle.push(("reboot", at.as_nanos()));
+        if self.fail_reboot {
+            return Err(std::io::Error::other("fixture reboot failure"));
+        }
+        assert!(at.as_nanos() >= self.reached);
+        self.pending_reboots += 1;
+        self.pending_at = Some(at.as_nanos());
+        Ok(())
+    }
+    fn shutdown(&mut self) -> Result<(), std::io::Error> {
+        Err(std::io::Error::other("fixture shutdown is unsupported"))
+    }
+}
+
+impl ProbeMachine {
+    fn crash(&mut self) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+    fn reboot(&mut self, _: Timestamp) -> Result<(), std::io::Error> {
+        Err(std::io::Error::other("fixture reboot is unsupported"))
+    }
+    fn shutdown(&mut self) -> Result<(), std::io::Error> {
+        Err(std::io::Error::other("fixture shutdown is unsupported"))
+    }
+}
+
+impl RandomMachine {
+    fn crash(&mut self) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+    fn reboot(&mut self, at: Timestamp) -> Result<(), std::io::Error> {
+        self.reached = at.as_nanos();
+        Ok(())
+    }
+    fn shutdown(&mut self) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+}

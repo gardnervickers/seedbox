@@ -55,6 +55,7 @@
           # Name outputs explicitly so selecting helpers never imports the kernel recipe.
           inherit (import ./nix/runtime.nix { inherit pkgs; }) runtimeAssets runtimeArchive runtimeSources;
           inherit (import ./nix/kernels.nix { inherit pkgs; }) guestKernel guestKernelArchive guestKernelSources;
+          tcgKernel = import ./nix/tcg-kernel.nix { inherit pkgs; };
         }
         );
     };

@@ -1,8 +1,41 @@
 //! Machine execution, lifecycle, and snapshot contracts.
 
+use crate::{clock::Clock, execution::ExecutionConfig, rng::RngStream};
+
+/// Dependencies supplied for one stopped execution interval.
+/// Worker resources belong to the executing thread; clock and RNG belong to
+/// the driver. The execution rate is a copied driver-owned setting.
+/// The RNG cursor follows the machine, independently of the worker.
+pub struct RunContext<'a, C> {
+    pub worker: &'a mut C,
+    pub clock: &'a dyn Clock,
+    pub rng: &'a mut dyn RngStream,
+    /// CPU-work pricing for this run, independent of clocks and idle time.
+    /// Already-charged partial work retains its earlier price. The configured
+    /// rate belongs to the caller; snapshots retain work progress and charge
+    /// caches, not authority over this external setting.
+    pub execution: ExecutionConfig,
+    pub inbox: crate::pv::Inbox<'a>,
+    pub outbox: crate::pv::Outbox<'a>,
+}
+
+#[cfg(test)]
+mod test_environment;
+
+#[cfg(all(test, unix))]
+mod control_snapshot_tests;
+#[cfg(all(test, unix))]
+mod guest_service_snapshot_tests;
+#[cfg(all(test, unix))]
+mod prepared_application_tests;
+#[cfg(all(test, unix))]
+mod prepared_fixture;
+
 #[cfg(unix)]
 pub mod tcg;
 
+#[cfg(unix)]
+mod assets;
 #[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
 pub mod pv;
 
@@ -22,8 +55,8 @@ impl Timestamp {
 }
 
 pub trait Machine {
-    /// Context under which this machine runs. This is used to associate
-    /// a machine with a specific kind of worker.
+    /// Worker-local host resources required to execute this machine. They contain
+    /// no persistent simulation dependencies and need not implement Send.
     type Context;
     type Error;
 
@@ -35,7 +68,11 @@ pub trait Machine {
     ///
     /// This call is synchronous: it returns with execution stopped. The machine
     /// retains its execution state for a later call; `context` supplies the
-    /// compatible worker's execution resources.
+    /// compatible worker's execution resources and borrows driver-owned simulation
+    /// dependencies for this call. The machine must not retain those borrows.
+    /// Initialization, including boot entropy, occurs through this context on
+    /// the first run after construction or reboot. Initialization may occur with
+    /// zero execution budget, but must execute no program instructions.
     ///
     /// # Time and execution boundaries
     ///
@@ -56,8 +93,14 @@ pub trait Machine {
     /// With `upto` equal to the starting time, the machine may adopt time and
     /// make due wakeups visible, but must not execute program instructions.
     /// A runnable machine remains eligible for subsequent calls; no separate
-    /// pause or resume operation is required. An exited machine still requires
-    /// an explicit reboot before execution can continue.
+    /// pause or resume operation is required. Due requests are accepted in FIFO
+    /// order, including on zero-budget calls while execution is withheld or the
+    /// machine has exited. An exited machine preserves its exit state and reason until
+    /// a Reboot request is accepted; positive-budget execution requires a live
+    /// machine. Invalid state remains an error. Lifecycle request acceptance
+    /// executes no program instructions. Crash and Reboot discard old-boot work;
+    /// repeated Reboot requests perform distinct resets. Reboot clears an
+    /// earlier shutdown request; Shutdown after Reboot targets the new boot.
     ///
     /// A successful return describes an accepted simulation boundary, with no
     /// speculative state or effects exposed to the caller.
@@ -78,7 +121,7 @@ pub trait Machine {
     ///   before calling `run` again. Do not busy-poll or treat blocking as exit.
     /// - [`StopReason::Exited`]: execution ended at `reached`. The caller should
     ///   record the position and exit reason, remove the machine from runnable
-    ///   work, and stop calling `run` on it. Exiting does not by itself establish
+    ///   work. Zero-budget calls may still service lifecycle requests. Exiting does not by itself establish
     ///   whether the simulation's test passed or failed.
     ///
     /// These results describe this machine's progress. The caller must account
@@ -95,59 +138,9 @@ pub trait Machine {
     /// the machine and propagate the failure rather than blindly retrying.
     fn run(
         &mut self,
-        context: &mut Self::Context,
+        context: &mut RunContext<'_, Self::Context>,
         upto: Timestamp,
     ) -> Result<StopReason, Self::Error>;
-
-    /// Crash the machine at a simulation barrier, without graceful shutdown.
-    ///
-    /// # Preconditions
-    ///
-    /// The caller must hold the machine at a simulation barrier, with no active
-    /// `run` call or concurrent delivery of external inputs. The machine must
-    /// be in a valid state and must not have exited.
-    ///
-    /// # Effect and caller responsibilities
-    ///
-    /// This operation is synchronous: `Ok(())` means the machine has exited
-    /// with [`ExitReason::Crashed`]. It must not execute further machine work or
-    /// advance simulation time. Each machine defines and documents how a crash
-    /// affects its disk state. Previously committed external effects are not
-    /// undone, and existing snapshots remain unchanged.
-    ///
-    /// The caller must remove the machine from runnable work. Further execution
-    /// requires an explicit [`Machine::reboot`]; calling `run` is not a reboot. The caller
-    /// records the crash at the barrier where it applied this operation, without
-    /// calling `run` to obtain an exit result.
-    ///
-    /// # Errors
-    ///
-    /// `Err` does not establish that the crash completed or that the machine is
-    /// resumable. The caller must stop scheduling it and propagate the failure.
-    fn crash(&mut self) -> Result<(), Self::Error>;
-
-    /// Reset the machine to a fresh, runnable boot at `at`.
-    ///
-    /// The caller must hold a valid machine at a simulation barrier and prevent
-    /// concurrent external inputs. `at` is that barrier's simulation time and
-    /// must not precede the machine's accepted execution position. A machine
-    /// may reboot while live, after natural exit, or after a crash; an invalid
-    /// machine must reject reboot.
-    ///
-    /// Reboot is immediate, without graceful shutdown. Resetting a live machine
-    /// discards volatile state with the same disk effects as [`Machine::crash`].
-    /// Each implementation documents persistent state and boot entropy. Reboot
-    /// must not rewind a machine-owned random stream. Pending operations and
-    /// timers from the old boot are discarded; existing snapshots and previously
-    /// committed external effects remain unchanged.
-    ///
-    /// This call executes no guest work and advances no simulation time. On
-    /// success, the caller records a runnable machine at `at`; subsequent work
-    /// executes only through [`Machine::run`]. Reboot is not snapshot restoration.
-    /// Repeated calls perform separate resets. An error does not guarantee a
-    /// resumable machine; the caller must stop scheduling it and propagate the
-    /// failure.
-    fn reboot(&mut self, at: Timestamp) -> Result<(), Self::Error>;
 
     /// Capture the stopped machine without advancing execution.
     ///
@@ -165,13 +158,15 @@ pub trait Machine {
     /// The snapshot contains the machine manifest and all machine-owned state
     /// needed to reconstruct the captured machine. This includes its execution
     /// position, runnable/blocked/exited status, pending operations, timers,
-    /// disk state (both durable and volatile), RNG state, and all remaining
-    /// execution state needed to resume from the capture point.
+    /// disk state (both durable and volatile), pending lifecycle transitions,
+    /// and all remaining execution state needed to resume from the capture point.
     ///
-    /// Worker resources supplied through [`Machine::Context`] are not captured.
-    /// They are supplied again for execution.
-    /// Shared simulation time, the external network, and other machines are not
-    /// owned by this snapshot. Reproducing a whole simulation requires the caller
+    /// Worker resources and dependencies supplied through [`RunContext`] are not
+    /// captured as configuration authority. Execution progress and already-charged
+    /// work caches are captured; the caller supplies the matching execution
+    /// configuration again at restore. RNG continuation belongs
+    /// to the driver. Shared simulation time, the external network, and other
+    /// machines are not owned by this snapshot. Reproducing a whole simulation requires the caller
     /// to capture and restore that environment consistently as well.
     ///
     /// The returned snapshot must remain valid and unchanged if the source
@@ -210,9 +205,12 @@ pub enum StopReason {
         /// stimulus can wake the machine.
         deadline: Option<Timestamp>,
     },
-    /// The machine has exited. Calling `run` again requires an explicit reboot.
+    /// The machine has exited. Zero-budget runs may accept lifecycle requests;
+    /// execution requires an accepted Reboot request.
     Exited {
-        /// The machine has exited at this timestamp.
+        /// Accepted boundary at which the exited state was observed.
+        /// Later zero-budget observations may adopt a later boundary; callers
+        /// retain the original exit occurrence separately.
         reached: Timestamp,
         /// The cause of machine termination, not a simulator failure.
         reason: ExitReason,
@@ -222,10 +220,15 @@ pub enum StopReason {
 /// Why execution of the machine ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitReason {
-    /// The machine requested shutdown without a program exit status.
+    /// Shutdown without a program exit status. In a Machine exit this means
+    /// the machine requested shutdown. A Driver result also uses this reason
+    /// for a confirmed stop of its oracle application; that does not imply
+    /// physical machine exit.
     Shutdown,
-    /// The program defining the machine's lifetime exited with this status.
-    /// Exiting work that leaves the machine running does not qualify.
+    /// The program defining the observed lifetime exited with this status.
+    /// Machine::run uses this only when the machine also exits. A Driver
+    /// result may instead report its oracle application's outcome while the
+    /// corresponding machine remains alive.
     ProgramExit { code: i32 },
     /// A failure within the machine or an explicit crash ended execution.
     /// Failures of the simulator or host execution resources use `Machine::Error`.

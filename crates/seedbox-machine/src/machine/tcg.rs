@@ -1,7 +1,7 @@
 //! QEMU TCG reference implementation of the machine execution contract.
 //!
-//! One RV64 CPU runs with one simulation nanosecond per instruction. A small
-//! QEMU patch caps its native instruction budget and returns when that budget
+//! One RV64 CPU prices each instruction with the supplied execution factor. A small
+//! QEMU patch caps its native work budget and returns when that budget
 //! expires, the CPU becomes idle, or the guest shuts down. Idle time advances
 //! only when the simulation driver advances the injected clock.
 //! There are no per-instruction host round trips or guest-specific yield calls.
@@ -17,22 +17,28 @@
 //! Restore requires the caller to provide a compatible patched QEMU executable.
 //! This first implementation has no attached disk or network and supports one
 //! CPU only. It uses software emulation on macOS and Linux.
+//!
+//! Shutdown is offered as `shutdown\n` on the dedicated standard virtio-serial
+//! port named `seedbox-lifecycle`. The device retains one request through early
+//! boot and snapshots, with synchronous queue kicks at guest MMIO instructions.
+//! Guest userspace owns cleanup and Linux poweroff policy; a boot input without
+//! a cooperating receiver can ignore the request and continue running.
 
-use super::{ExitReason, Machine, StopReason, Timestamp};
-use crate::clock::Clock;
-use seedbox_engine_core::rng::Rng;
+mod factory;
+use super::{ExitReason, Machine, RunContext, StopReason, Timestamp};
+pub use factory::Factory;
 use serde_json::Value;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 mod qemu;
 use qemu::Process;
 
 /// Owned boot inputs, independent of their original files.
 #[derive(Clone, Debug)]
-pub enum Boot {
+pub(crate) enum Boot {
     /// Flat machine code loaded at the start of RAM, with no firmware.
+    #[cfg(test)]
     Program(Vec<u8>),
     /// A Linux kernel, initramfs, and OpenSBI firmware for QEMU's RV64 virt board.
     Linux {
@@ -45,7 +51,7 @@ pub enum Boot {
 
 /// Complete initial configuration of this diskless, single-CPU machine.
 #[derive(Clone, Debug)]
-pub struct Manifest {
+pub(crate) struct Manifest {
     pub boot: Boot,
     pub memory_mib: u32,
 }
@@ -58,7 +64,12 @@ pub struct Snapshot {
     state: State,
     image: Option<Vec<u8>>,
     boot_seed: u64,
-    boot_rng: Rng,
+    pending_boots: u64,
+    pending_at: Option<Timestamp>,
+    shutdown_requested: bool,
+    writes: Vec<crate::pv::transport::GuestWrite>,
+    input: Vec<u8>,
+    guest: crate::pv::bridge::GuestBridge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,14 +82,18 @@ enum State {
 
 /// A QEMU process and its accepted simulation state.
 pub struct TcgMachine {
-    clock: Arc<dyn Clock + Send + Sync>,
     manifest: Manifest,
     reached: Timestamp,
     state: State,
     process: Option<Process>,
     executable: PathBuf,
     boot_seed: u64,
-    boot_rng: Rng,
+    pending_boots: u64,
+    pending_at: Option<Timestamp>,
+    shutdown_requested: bool,
+    writes: Vec<crate::pv::transport::GuestWrite>,
+    input: Vec<u8>,
+    guest: crate::pv::bridge::GuestBridge,
     console: Vec<u8>,
 }
 
@@ -104,19 +119,63 @@ impl From<serde_json::Error> for Error {
 }
 
 impl TcgMachine {
-    /// Start stopped, using the project's patched qemu-system-riscv64 binary.
-    pub fn new(
+    /// Prepare a stopped machine using the project's patched QEMU binary.
+    /// Boot initialization occurs in the first run, consuming eight bytes from
+    /// its context RNG in little-endian order without executing instructions.
+    /// Each pending reboot consumes another eight bytes on the next run.
+    pub(crate) fn new(
         qemu: &Path,
-        manifest: Manifest,
-        clock: Arc<dyn Clock + Send + Sync>,
+        firmware: Vec<u8>,
+        bootstrap: &crate::application::GuestBootstrap,
+        definition: crate::definition::MachineDefinition,
     ) -> Result<Self, Error> {
-        let reached = Timestamp::from_nanos(clock.now());
-        if reached.as_nanos() > i64::MAX as u64 {
-            return Err(Error("clock exceeds QEMU's time range".into()));
+        const MIB: u64 = 1024 * 1024;
+        let memory = definition.resources.memory_bytes;
+        if memory == 0 || memory % MIB != 0 || memory / MIB > u64::from(u32::MAX) {
+            return Err(Error(
+                "TCG guest memory must be a nonzero whole number of MiB representable in u32"
+                    .into(),
+            ));
         }
+        if bootstrap.kernel.image.is_empty() || firmware.is_empty() {
+            return Err(Error("TCG kernel and firmware must be nonempty".into()));
+        }
+        // Linux 6.12 RISC-V COMMAND_LINE_SIZE includes its trailing NUL.
+        if bootstrap.kernel.command_line.contains('\0')
+            || bootstrap.kernel.command_line.len() >= 1024
+        {
+            return Err(Error(
+                "TCG kernel command line must contain no NUL and fit in 1023 bytes".into(),
+            ));
+        }
+        // TCG needs no application instrumentation. Packaging borrows the
+        // immutable prepared input; PV may derive its own private preparation.
+        let initramfs = crate::application::boot_archive(&definition.application, bootstrap)
+            .map_err(|error| Error(format!("TCG application preparation: {error}")))?;
+        Self::from_manifest(
+            qemu,
+            Manifest {
+                memory_mib: (memory / MIB) as u32,
+                boot: Boot::Linux {
+                    kernel: bootstrap.kernel.image.clone(),
+                    initramfs,
+                    firmware,
+                    command_line: bootstrap.kernel.command_line.clone(),
+                },
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_raw(qemu: &Path, manifest: Manifest) -> Result<Self, Error> {
+        Self::from_manifest(qemu, manifest)
+    }
+
+    fn from_manifest(qemu: &Path, manifest: Manifest) -> Result<Self, Error> {
         if manifest.memory_mib == 0 {
             return Err(Error("guest memory must be nonzero".into()));
         }
+        #[cfg(test)]
         if let Boot::Program(program) = &manifest.boot {
             if program.is_empty()
                 || program.len() as u64 > u64::from(manifest.memory_mib) * 1024 * 1024
@@ -126,45 +185,134 @@ impl TcgMachine {
                 ));
             }
         }
-        let mut process = Process::start(qemu, &manifest, None, 0)?;
-        process.advance(reached)?;
         Ok(Self {
-            clock,
             manifest,
-            reached,
+            reached: Timestamp::from_nanos(0),
             state: State::Ready,
-            process: Some(process),
+            process: None,
             executable: qemu.to_owned(),
             boot_seed: 0,
-            boot_rng: Rng::new(0, "tcg/reboot-entropy"),
+            pending_boots: 1,
+            pending_at: None,
+            shutdown_requested: false,
+            writes: Default::default(),
+            input: Vec::new(),
+            guest: Default::default(),
             console: Vec::new(),
         })
     }
 
-    /// Reconstruct a snapshot without the source machine or its temporary files.
-    /// The clock belongs to the caller's environment and is supplied again;
-    /// restoring machine state does not rewind that clock.
-    pub fn from_snapshot(
-        qemu: &Path,
-        snapshot: &Snapshot,
-        clock: Arc<dyn Clock + Send + Sync>,
-    ) -> Result<Self, Error> {
+    /// Reconstruct internal machine state without restoring driver dependencies.
+    pub fn from_snapshot(qemu: &Path, snapshot: &Snapshot) -> Result<Self, Error> {
         let process = snapshot
             .image
             .as_deref()
             .map(|image| Process::start(qemu, &snapshot.manifest, Some(image), snapshot.boot_seed))
             .transpose()?;
         Ok(Self {
-            clock,
             manifest: snapshot.manifest.clone(),
             reached: snapshot.reached,
             state: snapshot.state,
             process,
             executable: qemu.to_owned(),
             boot_seed: snapshot.boot_seed,
-            boot_rng: snapshot.boot_rng.clone(),
+            pending_boots: snapshot.pending_boots,
+            pending_at: snapshot.pending_at,
+            shutdown_requested: snapshot.shutdown_requested,
+            writes: snapshot.writes.clone(),
+            input: snapshot.input.clone(),
+            guest: snapshot.guest.clone(),
             console: Vec::new(),
         })
+    }
+
+    fn request_shutdown(&mut self) -> Result<(), Error> {
+        match self.state {
+            State::Invalid => Err(Error("cannot shut down an invalid machine".into())),
+            State::Exited(_) if self.pending_boots == 0 => Ok(()),
+            _ => {
+                if !self.shutdown_requested {
+                    self.shutdown_requested = true;
+                    self.input.extend_from_slice(b"shutdown\n");
+                }
+                Ok(())
+            }
+        }
+    }
+    /// Destroy the process. This diskless machine retains no guest RAM after
+    /// crash; previously captured snapshots remain independent.
+    fn request_crash(&mut self) -> Result<(), Error> {
+        if self.state == State::Invalid {
+            return Err(Error("crash requires a valid machine".into()));
+        }
+        if matches!(self.state, State::Exited(_)) && self.pending_boots == 0 {
+            self.guest.reset();
+            self.input.clear();
+            self.writes = Default::default();
+            self.shutdown_requested = false;
+            return Ok(());
+        }
+        self.state = State::Invalid;
+        if let Some(mut process) = self.process.take() {
+            self.console.extend(process.console()?);
+            process.terminate()?;
+        }
+        self.guest.reset();
+        self.input.clear();
+        self.writes = Default::default();
+        self.state = State::Exited(ExitReason::Crashed);
+        self.pending_boots = 0;
+        self.pending_at = None;
+        self.shutdown_requested = false;
+        Ok(())
+    }
+    /// Defer a diskless reset until the next run. Each recorded reset draws its
+    /// own boot seed from that run's caller-owned RNG before any guest work.
+    fn request_reboot(&mut self, at: Timestamp) -> Result<(), Error> {
+        if self.state == State::Invalid {
+            return Err(Error("cannot reboot an invalid machine".into()));
+        }
+        if at < self.reached
+            || self.pending_at.is_some_and(|previous| at < previous)
+            || at.as_nanos() > i64::MAX as u64
+        {
+            return Err(Error(
+                "reboot precedes machine position or exceeds QEMU's time range".into(),
+            ));
+        }
+        self.pending_boots = self
+            .pending_boots
+            .checked_add(1)
+            .ok_or_else(|| Error("pending reboot count exhausted".into()))?;
+        self.pending_at = Some(at);
+        self.shutdown_requested = false;
+        self.guest.reset();
+        self.input.clear();
+        self.writes = Default::default();
+        Ok(())
+    }
+    fn initialize(&mut self, context: &mut RunContext<'_, ()>, at: Timestamp) -> Result<(), Error> {
+        self.state = State::Invalid;
+        if let Some(mut process) = self.process.take() {
+            self.console.extend(process.console()?);
+            process.terminate()?;
+        }
+        for _ in 0..self.pending_boots {
+            let mut bytes = [0; 8];
+            context.rng.fill_bytes(&mut bytes);
+            self.boot_seed = u64::from_le_bytes(bytes);
+            let mut process =
+                Process::start(&self.executable, &self.manifest, None, self.boot_seed)?;
+            process.advance(at)?;
+            if let Some(mut previous) = self.process.replace(process) {
+                previous.terminate()?;
+            }
+        }
+        self.reached = at;
+        self.pending_boots = 0;
+        self.pending_at = None;
+        self.state = State::Ready;
+        Ok(())
     }
 
     /// Read the serial output produced by this instance since creation/restore.
@@ -183,9 +331,13 @@ impl TcgMachine {
             .ok_or_else(|| Error("machine has no execution process".into()))
     }
 
-    fn execute(&mut self, upto: Timestamp) -> Result<(), Error> {
+    fn execute(
+        &mut self,
+        upto: Timestamp,
+        execution: crate::execution::ExecutionConfig,
+    ) -> Result<(), Error> {
         let start = self.reached;
-        let result = self.process()?.execute(start, upto)?;
+        let result = self.process()?.execute(start, upto, execution)?;
         let reached = timestamp(&result, "time")?;
         if reached < start || reached > upto {
             return Err(Error(format!(
@@ -209,6 +361,17 @@ impl TcgMachine {
             Some("shutdown") => State::Exited(ExitReason::Shutdown),
             _ => return Err(Error(format!("unexpected QEMU stop: {result}"))),
         };
+        let writes = self.process()?.drain_guest()?;
+        if writes
+            .iter()
+            .any(|write| write.time() < start.as_nanos() || write.time() > reached.as_nanos())
+            || writes
+                .windows(2)
+                .any(|pair| pair[0].time() > pair[1].time())
+        {
+            return Err(Error("QEMU guest write crossed execution interval".into()));
+        }
+        self.writes.extend(writes);
         self.reached = reached;
         self.state = state;
         Ok(())
@@ -227,15 +390,73 @@ impl Machine for TcgMachine {
     type Error = Error;
     type Snapshot = Snapshot;
 
-    fn run(&mut self, _: &mut (), upto: Timestamp) -> Result<StopReason, Error> {
-        if matches!(self.state, State::Exited(_) | State::Invalid) {
-            return Err(Error("machine is exited or invalid".into()));
+    fn run(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        upto: Timestamp,
+    ) -> Result<StopReason, Error> {
+        if self.state == State::Invalid {
+            return Err(Error("machine is invalid".into()));
         }
-        let now = Timestamp::from_nanos(self.clock.now());
-        if upto < self.reached || upto < now || upto.as_nanos() > i64::MAX as u64 {
+        let now = Timestamp::from_nanos(context.clock.now());
+        if upto < self.reached
+            || upto < now
+            || self.pending_at.is_some_and(|at| upto < at)
+            || upto.as_nanos() > i64::MAX as u64
+        {
             return Err(Error(
                 "execution boundary is backwards or exceeds QEMU's time range".into(),
             ));
+        }
+        let mut crashed_this_run = false;
+        let accepted = (|| -> Result<(), Error> {
+            while let Some(input) = context.inbox.front() {
+                match &input.payload {
+                    crate::pv::Request::Crash => {
+                        crashed_this_run |=
+                            !matches!(self.state, State::Exited(_)) || self.pending_boots > 0;
+                        self.request_crash()?;
+                    }
+                    crate::pv::Request::Reboot => self.request_reboot(now.max(self.reached))?,
+                    crate::pv::Request::Shutdown => self.request_shutdown()?,
+                    request @ (crate::pv::Request::Application { .. }
+                    | crate::pv::Request::SimulationReply { .. }) => {
+                        if !matches!(self.state, State::Exited(_)) || self.pending_boots > 0 {
+                            self.input
+                                .extend(self.guest.request(request).map_err(Error)?);
+                        }
+                    }
+                }
+                context.inbox.take();
+            }
+            Ok(())
+        })();
+        if let Err(error) = accepted {
+            self.state = State::Invalid;
+            drop(self.process.take());
+            return Err(error);
+        }
+        if self.pending_boots > 0 {
+            let at = now
+                .max(self.reached)
+                .max(self.pending_at.unwrap_or(self.reached));
+            if let Err(error) = self.initialize(context, at) {
+                self.state = State::Invalid;
+                drop(self.process.take());
+                return Err(error);
+            }
+        }
+        if let State::Exited(reason) = self.state {
+            self.reached = now.max(self.reached);
+            if upto > self.reached && !crashed_this_run {
+                return Err(Error(
+                    "exited machine requires a zero-budget run or Reboot".into(),
+                ));
+            }
+            return Ok(StopReason::Exited {
+                reached: self.reached,
+                reason,
+            });
         }
         if now > self.reached {
             if let Err(error) = self.process()?.advance(now) {
@@ -250,14 +471,44 @@ impl Machine for TcgMachine {
                 self.state = State::Ready;
             }
         }
+        if !self.input.is_empty() {
+            let input = self.input.clone();
+            match self.process()?.input(&input) {
+                Ok(runnable) => {
+                    self.input.clear();
+                    if let Err(error) = self.guest.input_delivered() {
+                        self.state = State::Invalid;
+                        drop(self.process.take());
+                        return Err(Error(error));
+                    }
+                    if runnable {
+                        self.state = State::Ready;
+                    }
+                }
+                Err(error) => {
+                    self.state = State::Invalid;
+                    drop(self.process.take());
+                    return Err(error);
+                }
+            }
+        }
         if self.reached < upto && self.state == State::Ready {
-            if let Err(error) = self.execute(upto) {
+            if let Err(error) = self.execute(upto, context.execution) {
                 self.state = State::Invalid;
                 // A transport failure may leave QEMU executing. Reap it before
                 // returning so the failed machine cannot keep producing effects.
                 drop(self.process.take());
                 return Err(error);
             }
+        }
+        let observed = self
+            .guest
+            .observe_ordered(context, std::mem::take(&mut self.writes))
+            .map_err(Error);
+        if let Err(error) = observed {
+            self.state = State::Invalid;
+            drop(self.process.take());
+            return Err(error);
         }
         Ok(match self.state {
             State::Ready => StopReason::BoundaryReached,
@@ -273,50 +524,6 @@ impl Machine for TcgMachine {
         })
     }
 
-    /// Destroy the process. This diskless machine retains no guest RAM after
-    /// crash; previously captured snapshots remain independent.
-    fn crash(&mut self) -> Result<(), Error> {
-        if matches!(self.state, State::Exited(_) | State::Invalid) {
-            return Err(Error(
-                "crash requires a valid machine that has not exited".into(),
-            ));
-        }
-        self.state = State::Invalid;
-        if let Some(mut process) = self.process.take() {
-            self.console.extend(process.console()?);
-            process.terminate()?;
-        }
-        self.state = State::Exited(ExitReason::Crashed);
-        Ok(())
-    }
-
-    /// This diskless reset destroys RAM/devices. Each reboot draws a fresh
-    /// deterministic QEMU entropy seed from a snapshot-owned boot stream.
-    fn reboot(&mut self, at: Timestamp) -> Result<(), Error> {
-        if self.state == State::Invalid {
-            return Err(Error("cannot reboot an invalid machine".into()));
-        }
-        if at.as_nanos() != self.clock.now() || at < self.reached || at.as_nanos() > i64::MAX as u64
-        {
-            return Err(Error(
-                "reboot requires the current simulation barrier within QEMU's time range".into(),
-            ));
-        }
-        self.state = State::Invalid;
-        if let Some(mut process) = self.process.take() {
-            self.console.extend(process.console()?);
-            process.terminate()?;
-        }
-        let boot_seed = self.boot_rng.next();
-        let mut process = Process::start(&self.executable, &self.manifest, None, boot_seed)?;
-        process.advance(at)?;
-        self.process = Some(process);
-        self.boot_seed = boot_seed;
-        self.reached = at;
-        self.state = State::Ready;
-        Ok(())
-    }
-
     fn snapshot(&mut self) -> Result<Snapshot, Error> {
         if self.state == State::Invalid {
             return Err(Error("cannot snapshot an invalid machine".into()));
@@ -328,7 +535,12 @@ impl Machine for TcgMachine {
             state: self.state,
             image,
             boot_seed: self.boot_seed,
-            boot_rng: self.boot_rng.clone(),
+            pending_boots: self.pending_boots,
+            pending_at: self.pending_at,
+            shutdown_requested: self.shutdown_requested,
+            writes: self.writes.clone(),
+            input: self.input.clone(),
+            guest: self.guest.clone(),
         })
     }
 }
@@ -341,3 +553,9 @@ mod lifecycle_tests;
 
 #[cfg(test)]
 mod elapsed_tests;
+
+#[cfg(test)]
+mod shutdown_tests;
+
+#[cfg(test)]
+mod execution_tests;

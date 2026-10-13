@@ -6,19 +6,28 @@
 
 use crate::{
     clock::{Clock, SimulationClock},
-    machine::{ExitReason, Machine, StopReason, Timestamp},
+    definition::MachineDefinition,
+    execution::ExecutionConfig,
+    machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
+    pv::{Inbox, Input, Outbox, Request, Response},
+    rng::{RngStream, SeededRng},
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
-    panic::{catch_unwind, AssertUnwindSafe},
-    sync::{mpsc, Arc},
+    num::NonZeroU32,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
+mod control;
 mod playback;
 use playback::Playback;
 pub use playback::{PlaybackRate, PlaybackStatus};
+
+#[cfg(test)]
+use crate::pv::Output;
 
 mod workers;
 use workers::Workers;
@@ -26,6 +35,15 @@ use workers::Workers;
 /// An insertion-ordered machine identity within one driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MachineId(usize);
+
+/// One committed response, associated with the machine boot that emitted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineResponse {
+    pub machine: MachineId,
+    pub boot: u64,
+    pub at: Timestamp,
+    pub payload: Response,
+}
 
 /// A committed simulation position. Zero-time action transitions advance the
 /// boundary index without completing a quantum. Repeated observations and waits
@@ -39,9 +57,32 @@ pub struct Position {
 
 struct Entry<M> {
     machine: Option<M>,
+    rng: Option<SeededRng>,
+    execution: ExecutionConfig,
     reached: Timestamp,
     stopped: StopReason,
     paused: bool,
+    inbox: VecDeque<Input>,
+    staged: Vec<MachineResponse>,
+    boot: u64,
+}
+
+#[derive(Clone, Copy)]
+enum DriverEvent {
+    Wake(MachineId),
+    Pause(MachineId),
+    Resume(MachineId),
+    SetExecution {
+        machine: MachineId,
+        config: ExecutionConfig,
+    },
+}
+
+#[derive(Clone)]
+enum Scheduled {
+    Driver(DriverEvent),
+    Control(control::Event),
+    Input { id: MachineId, input: Input },
 }
 
 impl<M> Entry<M> {
@@ -71,8 +112,35 @@ pub enum Action {
     /// zero-budget run adopts elapsed time and delivers overdue timers without
     /// replaying paused CPU work. Resuming an active machine is a no-op.
     Resume(MachineId),
+    /// Set the execution configuration at this action's barrier, in FIFO order.
+    /// Applies while active, paused or exited and survives crash and reboot.
+    /// Global playback pause still withholds timeline admission.
+    /// The setting does not execute or wake the machine, change its pause state,
+    /// adopt time or shift timers. Subsequent calls receive this configuration;
+    /// already charged partial work retains its original cost. The default
+    /// configuration restores nominal execution cost.
+    SetExecution {
+        /// Machine whose subsequent execution receives the configuration.
+        machine: MachineId,
+        /// Validated execution configuration owned by the driver.
+        config: ExecutionConfig,
+    },
     /// Crash the machine without graceful shutdown, including while paused.
     Crash(MachineId),
+    /// Request reset of a live, exited, or crashed machine at this
+    /// barrier, clearing its driver pause and old blocked/timer state. Reboot
+    /// executes no guest work and preserves this identity and all queued actions;
+    /// later actions target the new boot. Repeated actions perform separate
+    /// resets in distinct zero-budget admission runs. Failure poisons the driver
+    /// without promising rollback.
+    Reboot(MachineId),
+    /// Latch a graceful shutdown request for the current boot. Repeats and
+    /// already-exited machines retain their exit state. All machines receive a
+    /// zero-budget admission run, including while paused; this may deliver the
+    /// request and refresh scheduling without executing guest instructions.
+    /// Paused machines remain paused until resume.
+    /// Subsequent runs drive graceful exit. Crash and reboot discard the request.
+    Shutdown(MachineId),
 }
 
 /// Owns simulation scheduling and shared time.
@@ -85,24 +153,43 @@ pub enum Action {
 /// The positive quantum is fixed for the driver's lifetime. Quantum boundaries
 /// are anchored at the initial timestamp; intermediate barriers never shift them.
 /// The caller queues actions before stepping; actions at one timestamp execute
-/// in insertion order, before timer wakeups. Exited machines ignore later actions.
-/// Paused machines remain unfinished, with no run or timer delivery until a
-/// resume action adopts the current shared time. Pausing never freezes the clock
-/// or shifts timer deadlines. Wake actions leave input retained while paused;
+/// in insertion order, before timer wakeups. Execution settings apply in every
+/// machine state and survive lifecycle changes without executing the machine.
+/// Exited machines ignore ordinary wake/pause/resume actions; queued lifecycle
+/// requests still receive zero-budget admission, and reboot admits a fresh boot.
+/// Paused machines remain unfinished and receive no positive execution budget.
+/// Due requests still receive zero-budget admission runs, which adopt shared
+/// time and make due timers eligible without executing program instructions.
+/// Pausing never freezes the clock or shifts timer deadlines. Wake actions leave input retained while paused;
 /// crash actions still terminate paused machines.
-/// Machine-produced communication is not routed by this driver yet.
+/// Guest simulation-control calls are interpreted after their full round commits.
+/// Their effects and replies join the same ordered timeline at that barrier;
+/// draining responses only observes them. Accepted control work survives caller
+/// loss. Calls generated together are queued before their generated effects;
+/// dependent operations must await acknowledgment rather than assume that a
+/// concurrent Pause/Resume sequence succeeds. Oracle completion publishes the full response batch before stopping
+/// further admission.
 pub struct Driver<M: Machine> {
     clock: Arc<SimulationClock>,
+    rng: Box<dyn RngStream + Send>,
     workers: Workers<M::Context>,
     quantum_ns: u64,
     quantum_end: Timestamp,
     machines: Vec<Entry<M>>,
-    actions: BTreeMap<Timestamp, VecDeque<Action>>,
+    events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
+    committed_outputs: Vec<MachineResponse>,
     boundary_index: u64,
     completed_quanta: u64,
     quantum_committed: bool,
     playback: Playback,
     failed: bool,
+    oracle: MachineId,
+    finished: Option<(Timestamp, ExitReason)>,
+    oracle_stops: BTreeSet<(u64, NonZeroU32)>,
+    control: control::Control,
+    trigger_marker: Option<Timestamp>,
+    definitions: Vec<MachineDefinition>,
+    factory: Box<dyn FnMut(&MachineDefinition) -> Result<M, M::Error> + Send>,
 }
 
 impl<M> Driver<M>
@@ -111,11 +198,16 @@ where
     M::Context: 'static,
     M::Error: Send + 'static,
 {
-    /// Construct the initial ordered set of machines using the private clock.
+    /// Construct machines and driver-owned simulation dependencies.
     ///
-    /// The factory runs once at the initial barrier and must return newly
-    /// constructed machines at `start`. Its vector order breaks scheduling ties.
-    /// This keeps clock injection in construction without exposing a clock getter.
+    /// The factory constructs the required oracle first, followed by the other
+    /// definitions in list order. The driver retains the factory and definitions.
+    /// The factory must return newly configured machines without executing them. This order
+    /// breaks scheduling ties and assigns
+    /// independent machine RNG streams by drawing one little-endian u64 seed
+    /// from the simulation RNG for each admitted machine. Failed additions draw
+    /// no seed. Only run calls borrow the clock and the machine's continuing RNG.
+    /// Machine-only snapshots do not capture either RNG cursor.
     ///
     /// `quantum` is a positive duration representable in u64 nanoseconds; its
     /// first boundary must fit after `start`. `workers` must be nonzero. Invalid
@@ -131,8 +223,11 @@ where
         start: Timestamp,
         quantum: Duration,
         workers: usize,
+        rng: impl RngStream + Send + 'static,
         context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
-        machines: impl FnOnce(Arc<dyn Clock + Send + Sync>) -> Result<Vec<M>, M::Error>,
+        oracle: MachineDefinition,
+        machines: Vec<MachineDefinition>,
+        mut factory: impl FnMut(&MachineDefinition) -> Result<M, M::Error> + Send + 'static,
     ) -> Result<Self, Error<M::Error>> {
         let quantum_ns = u64::try_from(quantum.as_nanos())
             .ok()
@@ -149,27 +244,53 @@ where
         }
         let workers = Workers::new(workers, context)?;
         let clock = Arc::new(SimulationClock::new(start.as_nanos()));
-        let machines = machines(clock.clone()).map_err(Error::Construction)?;
+        let definitions: Vec<_> = std::iter::once(oracle).chain(machines).collect();
+        let machines = definitions
+            .iter()
+            .map(&mut factory)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Error::Construction)?;
+        let mut rng: Box<dyn RngStream + Send> = Box::new(rng);
+        let mut draw_seed = || {
+            let mut bytes = [0; 8];
+            rng.fill_bytes(&mut bytes);
+            u64::from_le_bytes(bytes)
+        };
+        let machines = machines
+            .into_iter()
+            .map(|machine| Entry {
+                machine: Some(machine),
+                rng: Some(SeededRng::new(draw_seed())),
+                execution: ExecutionConfig::default(),
+                reached: start,
+                stopped: StopReason::BoundaryReached,
+                paused: false,
+                inbox: VecDeque::new(),
+                staged: Vec::new(),
+                boot: 0,
+            })
+            .collect();
         Ok(Self {
             clock,
             workers,
             quantum_ns,
             quantum_end,
-            machines: machines
-                .into_iter()
-                .map(|machine| Entry {
-                    machine: Some(machine),
-                    reached: start,
-                    stopped: StopReason::BoundaryReached,
-                    paused: false,
-                })
-                .collect(),
-            actions: BTreeMap::new(),
+            machines,
+            rng,
+            events: BTreeMap::new(),
+            committed_outputs: Vec::new(),
             boundary_index: 0,
             completed_quanta: 0,
             quantum_committed: false,
             playback: Playback::default(),
             failed: false,
+            oracle: MachineId(0),
+            finished: None,
+            oracle_stops: BTreeSet::new(),
+            control: control::Control::new(&definitions, start),
+            trigger_marker: None,
+            definitions,
+            factory: Box::new(factory),
         })
     }
 
@@ -209,10 +330,44 @@ where
                 requested: at,
             });
         }
-        let (Action::Wake(id) | Action::Pause(id) | Action::Resume(id) | Action::Crash(id)) =
-            action;
+        let (Action::Wake(id)
+        | Action::Pause(id)
+        | Action::Resume(id)
+        | Action::Crash(id)
+        | Action::Reboot(id)
+        | Action::Shutdown(id)
+        | Action::SetExecution { machine: id, .. }) = action;
         self.entry(id)?;
-        self.actions.entry(at).or_default().push_back(action);
+        let scheduled = match action {
+            Action::Wake(id) => Scheduled::Driver(DriverEvent::Wake(id)),
+            Action::Pause(id) => Scheduled::Driver(DriverEvent::Pause(id)),
+            Action::Resume(id) => Scheduled::Driver(DriverEvent::Resume(id)),
+            Action::SetExecution { machine, config } => {
+                Scheduled::Driver(DriverEvent::SetExecution { machine, config })
+            }
+            Action::Crash(id) => Scheduled::Input {
+                id,
+                input: Input {
+                    at,
+                    payload: Request::Crash,
+                },
+            },
+            Action::Reboot(id) => Scheduled::Input {
+                id,
+                input: Input {
+                    at,
+                    payload: Request::Reboot,
+                },
+            },
+            Action::Shutdown(id) => Scheduled::Input {
+                id,
+                input: Input {
+                    at,
+                    payload: Request::Shutdown,
+                },
+            },
+        };
+        self.events.entry(at).or_default().push_back(scheduled);
         Ok(())
     }
 
@@ -280,9 +435,9 @@ where
     /// - [`StepOutcome::Blocked`]: unfinished machines remain, but no runnable
     ///   work, timer, or queued event can advance them. Wait for external input
     ///   or a lifecycle change; do not busy-poll or infer that the test passed.
-    /// - [`StepOutcome::Finished`]: every machine has exited and no scheduled
-    ///   work remains. Stop driving and evaluate the simulation's result.
-    ///   Completion alone does not establish whether the test passed or failed.
+    /// - [`StepOutcome::Finished`]: the oracle application or machine terminated. Its reason is retained
+    ///   permanently after publishing the full round's responses. Other machines
+    ///   and scheduled work receive no further execution or admission.
     ///
     /// With `upto` equal to the current time, the driver may apply events due
     /// now but must not advance execution or time. It may return the same
@@ -316,13 +471,13 @@ where
                     requested: upto,
                 });
             }
-            if self.playback.stopped {
-                return Ok(StepOutcome::Stopped { at: self.now() });
-            }
             if matches!(self.outcome(), StepOutcome::Finished { .. }) {
                 self.playback.finish();
                 self.playback.before_next = false;
                 return Ok(self.outcome());
+            }
+            if self.playback.stopped {
+                return Ok(StepOutcome::Stopped { at: self.now() });
             }
             let position = self.position();
             if let Some(delay) = self.playback.delay(position, host_now) {
@@ -348,6 +503,9 @@ where
         })();
         if result.is_err() {
             // All submitted synchronous calls have finished before poisoning.
+            for entry in &mut self.machines {
+                entry.staged.clear();
+            }
             self.failed = true;
         }
         result
@@ -373,6 +531,151 @@ where
                 .ok_or(Error::PositionOverflow)?;
             self.quantum_committed = true;
         }
+        let mut outputs = Vec::new();
+        for (index, entry) in self.machines.iter_mut().enumerate() {
+            outputs.extend(entry.staged.drain(..).map(|output| {
+                debug_assert_eq!(output.machine, MachineId(index));
+                output
+            }));
+        }
+        // Stable sorting preserves each machine's emission order at one time.
+        outputs.sort_by_key(|output| (output.at, output.machine));
+        let mut terminal = None;
+        for output in &outputs {
+            if output.machine != self.oracle {
+                continue;
+            }
+            match output.payload {
+                Response::ApplicationOutcome { code } => {
+                    terminal.get_or_insert(ExitReason::ProgramExit {
+                        code: i32::from(code),
+                    });
+                }
+                Response::CommandAcknowledged { id, result } => {
+                    if self.oracle_stops.remove(&(output.boot, id))
+                        && result == crate::pv::CommandResult::Completed
+                    {
+                        terminal.get_or_insert(ExitReason::Shutdown);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.committed_outputs.extend(outputs.iter().cloned());
+        let mut plans = vec![];
+        let mut calls = vec![];
+        for output in &outputs {
+            plans.extend(
+                self.control
+                    .observe(output, self.now())
+                    .map_err(Error::Control)?,
+            );
+            if let Response::SimulationControl { id, payload } = &output.payload {
+                calls.push(control::Event::Call {
+                    source: output.machine,
+                    id: *id,
+                    observed: output.at.as_nanos(),
+                    payload: payload.clone(),
+                });
+            }
+        }
+        for index in 0..self.machines.len() {
+            plans.extend(
+                self.control
+                    .terminal(MachineId(index), self.machines[index].stopped, self.now())
+                    .map_err(Error::Control)?,
+            );
+        }
+        if self.finished.is_none() {
+            let reason = terminal.or_else(|| match self.machines[self.oracle.0].stopped {
+                StopReason::Exited { reason, .. } => Some(reason),
+                _ => None,
+            });
+            if let Some(reason) = reason {
+                self.finished = Some((self.now(), reason));
+            }
+        }
+        if self.finished.is_some() {
+            self.control.service.cut_off_triggers(self.now().as_nanos());
+        } else {
+            for call in calls {
+                self.events
+                    .entry(self.now())
+                    .or_default()
+                    .push_back(Scheduled::Control(call));
+            }
+            self.control_plans(plans)?;
+            let now = self.now().as_nanos();
+            let plans = self
+                .control
+                .invoke_plans(|service, view| service.trigger_effects(view, now))
+                .map_err(Error::Control)?;
+            self.control_plans(plans)?;
+            self.sync_trigger_marker();
+        }
+        Ok(())
+    }
+
+    fn sync_trigger_marker(&mut self) {
+        let next = self
+            .control
+            .service
+            .trigger_boundary()
+            .map(Timestamp::from_nanos);
+        if next == self.trigger_marker {
+            return;
+        }
+        // Only these internally owned markers are retired. External FIFO
+        // actions and requests at the same timestamp retain their exact order.
+        for events in self.events.values_mut() {
+            events.retain(|event| {
+                !matches!(
+                    event,
+                    Scheduled::Control(
+                        control::Event::TriggerBoundary | control::Event::TriggerFinalize
+                    )
+                )
+            });
+        }
+        self.events.retain(|_, events| !events.is_empty());
+        self.trigger_marker = next;
+        if let Some(at) = next {
+            self.events
+                .entry(at)
+                .or_default()
+                .push_back(Scheduled::Control(control::Event::TriggerBoundary));
+        }
+    }
+
+    fn control_plans(
+        &mut self,
+        plans: Vec<crate::oracle::service::Plan>,
+    ) -> Result<(), Error<M::Error>> {
+        use crate::oracle::service::Plan;
+        for plan in plans {
+            if let Plan::Settled(settlement) = plan {
+                for events in self.events.values_mut() {
+                    events.retain(|event| !matches!(event, Scheduled::Control(control::Event::Plan(Plan::Deadline { fault, .. })) if *fault == settlement.fault));
+                }
+                self.events.retain(|_, events| !events.is_empty());
+                // Immutable receipt ownership transferred in invoke_plans.
+                continue;
+            }
+            let at = match &plan {
+                Plan::Effect { at, .. }
+                | Plan::Wake { at, .. }
+                | Plan::Deadline { at, .. }
+                | Plan::Reply { at, .. } => Timestamp::from_nanos(*at),
+                Plan::Settled(_) => unreachable!(),
+            };
+            if at < self.now() {
+                return Err(Error::Control("control plan scheduled in the past".into()));
+            }
+            self.events
+                .entry(at)
+                .or_default()
+                .push_back(Scheduled::Control(control::Event::Plan(plan)));
+        }
         Ok(())
     }
 
@@ -387,7 +690,7 @@ where
                 action,
             });
         }
-        if upto == self.now() || self.is_quiescent() {
+        if self.finished.is_some() || upto == self.now() || self.is_quiescent() {
             return Ok(self.outcome());
         }
 
@@ -412,7 +715,7 @@ where
                 StopReason::Blocked { deadline, .. } => deadline,
                 _ => None,
             })
-            .chain(self.actions.first_key_value().map(|(&at, _)| at))
+            .chain(self.events.first_key_value().map(|(&at, _)| at))
             .fold(upto.min(self.quantum_end), Timestamp::min);
 
         let initial = self.now();
@@ -467,16 +770,65 @@ where
             return Ok(());
         }
         let now = self.now();
+        let offered_apps: Vec<_> = ids
+            .iter()
+            .flat_map(|&machine| {
+                self.machines[machine.0]
+                    .inbox
+                    .iter()
+                    .filter_map(move |input| match input.payload {
+                        Request::Application { id, .. } => Some((machine, id, input.at)),
+                        _ => None,
+                    })
+            })
+            .collect();
+        let offered_stops: Vec<_> = if ids.contains(&self.oracle) {
+            self.machines[self.oracle.0]
+                .inbox
+                .iter()
+                .filter_map(|input| {
+                    if let Request::Application {
+                        id,
+                        command: crate::pv::ApplicationCommand::Stop,
+                    } = input.payload
+                    {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let (send, receive) = mpsc::channel();
         let mut submission_error = None;
         for &id in ids {
-            let mut machine = self.machines[id.0].machine.take().expect("stopped machine");
+            let entry = &mut self.machines[id.0];
+            let mut machine = entry.machine.take().expect("stopped machine");
+            let mut rng = entry.rng.take().expect("stopped machine RNG");
+            let execution = entry.execution;
+            let mut inbox = std::mem::take(&mut entry.inbox);
+            let mut outputs = Vec::new();
+            let clock = self.clock.clone();
             let result = send.clone();
             if let Err(error) = self.workers.submit(id.0, move |context| {
-                let stopped = catch_unwind(AssertUnwindSafe(|| machine.run(context, upto)))
-                    .map_err(|_| Error::Panicked { id })
-                    .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
-                let _ = result.send((id, machine, stopped));
+                let stopped = catch_unwind(AssertUnwindSafe(|| {
+                    machine.run(
+                        &mut RunContext {
+                            worker: context,
+                            clock: clock.as_ref(),
+                            rng: &mut rng,
+                            execution,
+                            inbox: Inbox::new(&mut inbox, now),
+                            outbox: Outbox::new(&mut outputs, now, upto),
+                        },
+                        upto,
+                    )
+                }))
+                .map_err(|_| Error::Panicked { id })
+                .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
+                let _ = result.send((id, machine, rng, inbox, outputs, stopped));
             }) {
                 submission_error = Some(error);
                 break;
@@ -486,17 +838,19 @@ where
         // All submitted jobs must finish before changing the clock or returning.
         // Results are ordered by identity, never by worker completion time.
         let mut reports: Vec<_> = receive.into_iter().collect();
-        reports.sort_by_key(|(id, _, _)| *id);
+        reports.sort_by_key(|(id, _, _, _, _, _)| *id);
         let mut stops = Vec::with_capacity(reports.len());
-        for (id, machine, stopped) in reports {
+        for (id, machine, rng, inbox, outputs, stopped) in reports {
             self.machines[id.0].machine = Some(machine);
-            stops.push((id, stopped));
+            self.machines[id.0].rng = Some(rng);
+            self.machines[id.0].inbox = inbox;
+            stops.push((id, outputs, stopped));
         }
         if let Some(error) = submission_error {
             return Err(error);
         }
         let mut accepted = Vec::with_capacity(stops.len());
-        for (id, result) in stops {
+        for (id, outputs, result) in stops {
             let stopped = result?;
             let reached = match stopped {
                 StopReason::BoundaryReached => upto,
@@ -508,79 +862,412 @@ where
                 }
                 StopReason::Exited { reached, .. } => reached,
             };
-            if reached < self.machines[id.0].reached || reached > upto {
+            if reached < self.machines[id.0].reached.max(now) || reached > upto {
                 return Err(Error::InvalidStop { id, stopped });
             }
-            accepted.push((id, reached, stopped));
+            if let Some(output) = outputs.iter().find(|output| output.at > reached) {
+                return Err(Error::InvalidOutput {
+                    id,
+                    at: output.at,
+                    reached,
+                });
+            }
+            accepted.push((id, reached, stopped, outputs));
         }
-        for (id, reached, stopped) in accepted {
+        for &(id, command, at) in &offered_apps {
+            if !self.machines[id.0].inbox.iter().any(|input| matches!(input.payload, Request::Application { id: pending, .. } if pending == command)) {
+                self.control.accepted(id, self.machines[id.0].boot, command, at, upto).map_err(Error::Control)?;
+            }
+        }
+        for (id, reached, stopped, outputs) in accepted {
             let entry = &mut self.machines[id.0];
+            if id == self.oracle {
+                for &command in &offered_stops {
+                    let unconsumed = entry.inbox.iter().any(|input| matches!(input.payload,
+                        Request::Application { id, command: crate::pv::ApplicationCommand::Stop } if id == command));
+                    if !unconsumed {
+                        self.oracle_stops.insert((entry.boot, command));
+                    }
+                }
+            }
             entry.reached = reached;
             entry.stopped = stopped;
+            entry
+                .staged
+                .extend(outputs.into_iter().map(|output| MachineResponse {
+                    machine: id,
+                    boot: entry.boot,
+                    at: output.at,
+                    payload: output.payload,
+                }));
+            if matches!(stopped, StopReason::Exited { .. }) {
+                // Only admitted work belongs to this ended boot. Future
+                // requests remain ordered in the driver timeline.
+                entry.inbox.clear();
+            }
         }
         Ok(())
     }
 
     fn apply_due(&mut self, host_now: Instant) -> Result<Option<Action>, Error<M::Error>> {
+        if self.finished.is_some() {
+            return Ok(None);
+        }
         let now = self.now();
         let mut waking = Vec::new();
-        // Keep the front action until its effect is admitted. Same-time actions
-        // retain their order, even across a pre-effect stop and zero-time calls.
-        while let Some(action) = self
-            .actions
+        // Keep the front event until its effect is admitted, including across
+        // a pre-crash stop. Driver controls and requests share one FIFO timeline.
+        while let Some(scheduled) = self
+            .events
             .get(&now)
-            .and_then(|actions| actions.front())
-            .copied()
+            .and_then(|events| events.front())
+            .cloned()
         {
-            let (Action::Wake(id) | Action::Pause(id) | Action::Resume(id) | Action::Crash(id)) =
-                action;
-            // A held occurrence was already intercepted. Rearming resumes it
-            // and targets the next actual crash, including at this timestamp.
-            let was_held = self.playback.held.take().is_some();
-            let exited = matches!(self.machines[id.0].stopped, StopReason::Exited { .. });
-            if self.playback.before_next
-                && !was_held
-                && !exited
-                && matches!(action, Action::Crash(_))
-            {
-                let position = self.position();
-                self.playback.hold(action, position, host_now);
-                return Ok(Some(action));
-            }
-            let actions = self.actions.get_mut(&now).expect("due actions");
-            actions.pop_front();
-            if actions.is_empty() {
-                self.actions.remove(&now);
-            }
-            let entry = &mut self.machines[id.0];
-            if !matches!(entry.stopped, StopReason::Exited { .. }) {
-                match action {
-                    Action::Wake(_) if !entry.paused => self.run_batch(&[id], now)?,
-                    Action::Pause(_) => entry.paused = true,
-                    Action::Resume(_) if entry.paused => {
-                        entry.paused = false;
-                        // Adoption services elapsed timers/input at this barrier;
-                        // the zero budget executes no paused CPU work.
-                        self.run_batch(&[id], now)?;
-                    }
-                    Action::Wake(_) | Action::Resume(_) => {}
-                    Action::Crash(_) => {
-                        entry.paused = false;
-                        entry
-                            .machine
-                            .as_mut()
-                            .expect("stopped machine")
-                            .crash()
-                            .map_err(|source| Error::Machine { id, source })?;
-                        entry.reached = now;
-                        entry.stopped = StopReason::Exited {
-                            reached: now,
-                            reason: ExitReason::Crashed,
-                        };
-                    }
+            let crash = match &scheduled {
+                Scheduled::Input {
+                    id,
+                    input:
+                        Input {
+                            payload: Request::Crash,
+                            ..
+                        },
+                } => Some(*id),
+                Scheduled::Control(control::Event::Plan(
+                    crate::oracle::service::Plan::Effect {
+                        target,
+                        boot,
+                        effect: crate::oracle::service::Effect::Crash,
+                        ..
+                    },
+                )) => {
+                    let id = self
+                        .control
+                        .target(target)
+                        .map_err(|e| Error::Control(e.message))?;
+                    (self.machines[id.0].boot == *boot).then_some(id)
+                }
+                _ => None,
+            };
+            if let Some(id) = crash {
+                // The held cursor names this exact queued request. The public
+                // Action is only its playback/status descriptor, not a driver event.
+                let was_held = self.playback.held.take().is_some();
+                if self.playback.before_next
+                    && !was_held
+                    && !matches!(self.machines[id.0].stopped, StopReason::Exited { .. })
+                {
+                    let action = Action::Crash(id);
+                    self.playback.hold(action, self.position(), host_now);
+                    return Ok(Some(action));
                 }
             }
+            let events = self.events.get_mut(&now).expect("due events");
+            events.pop_front();
+            if events.is_empty() {
+                self.events.remove(&now);
+            }
+            let mut service_effect = None;
+            let mut service_origin = None;
+            let mut accepted_fault = None;
+            let scheduled = match scheduled {
+                Scheduled::Control(event) => {
+                    use crate::oracle::service::{Effect, Plan};
+                    match event {
+                        control::Event::Call {
+                            source,
+                            id,
+                            observed,
+                            payload,
+                        } => {
+                            let plans = self
+                                .control
+                                .invoke_plans(|service, view| {
+                                    service.admit(
+                                        view,
+                                        control::Control::source(source),
+                                        id,
+                                        observed,
+                                        now.as_nanos(),
+                                        &payload,
+                                    )
+                                })
+                                .map_err(Error::Control)?;
+                            self.control_plans(plans)?;
+                            self.commit_boundary()?;
+                            continue;
+                        }
+                        control::Event::TriggerBoundary => {
+                            self.events
+                                .entry(now)
+                                .or_default()
+                                .push_back(Scheduled::Control(control::Event::TriggerFinalize));
+                            continue;
+                        }
+                        control::Event::TriggerFinalize => {
+                            self.control.service.expire_triggers(now.as_nanos());
+                            self.sync_trigger_marker();
+                            continue;
+                        }
+                        control::Event::Plan(Plan::Wake { token, .. }) => {
+                            let plan = self
+                                .control
+                                .service
+                                .wake(token, now.as_nanos())
+                                .map_err(|e| Error::Control(e.message))?;
+                            self.control_plans(vec![plan])?;
+                            continue;
+                        }
+                        control::Event::Plan(Plan::Deadline { fault, .. }) => {
+                            if let Err(failure) =
+                                self.control.service.deadline(fault, now.as_nanos())
+                            {
+                                self.control.settlements.extend(failure.settlements);
+                                return Err(Error::Control(failure.message));
+                            }
+                            continue;
+                        }
+                        control::Event::Plan(Plan::Reply {
+                            source,
+                            id,
+                            payload,
+                            ..
+                        }) => {
+                            let target =
+                                self.control.reply_target(&source).map_err(Error::Control)?;
+                            Scheduled::Input {
+                                id: target,
+                                input: Input {
+                                    at: now,
+                                    payload: Request::SimulationReply { id, payload },
+                                },
+                            }
+                        }
+                        control::Event::Plan(Plan::Effect {
+                            fault,
+                            target,
+                            boot,
+                            effect,
+                            command,
+                            ..
+                        }) => {
+                            accepted_fault = Some(fault);
+                            let id = self
+                                .control
+                                .target(&target)
+                                .map_err(|e| Error::Control(e.message))?;
+                            let check = self
+                                .control
+                                .invoke(|service, view| service.dispatch_check(view, fault))
+                                .map_err(Error::Control)?;
+                            match check {
+                                None => continue,
+                                Some(Err(reason)) => {
+                                    let plans = self
+                                        .control
+                                        .invoke_plans(|service, _| {
+                                            service.rejected(
+                                                fault,
+                                                now.as_nanos(),
+                                                now.as_nanos(),
+                                                reason,
+                                            )
+                                        })
+                                        .map_err(Error::Control)?;
+                                    self.control_plans(plans)?;
+                                    continue;
+                                }
+                                Some(Ok(())) => {}
+                            }
+                            debug_assert_eq!(self.machines[id.0].boot, boot);
+                            if !matches!(effect, Effect::Process(_)) {
+                                service_effect = Some(fault);
+                            }
+                            match effect {
+                                Effect::Pause => Scheduled::Driver(DriverEvent::Pause(id)),
+                                Effect::Resume => Scheduled::Driver(DriverEvent::Resume(id)),
+                                Effect::Execution(config) => {
+                                    Scheduled::Driver(DriverEvent::SetExecution {
+                                        machine: id,
+                                        config,
+                                    })
+                                }
+                                Effect::Crash => Scheduled::Input {
+                                    id,
+                                    input: Input {
+                                        at: now,
+                                        payload: Request::Crash,
+                                    },
+                                },
+                                Effect::Reboot => Scheduled::Input {
+                                    id,
+                                    input: Input {
+                                        at: now,
+                                        payload: Request::Reboot,
+                                    },
+                                },
+                                Effect::Process(action) => {
+                                    service_origin =
+                                        Some(crate::oracle::observation::Origin::Service { fault });
+                                    Scheduled::Input {
+                                        id,
+                                        input: Input {
+                                            at: now,
+                                            payload: Request::Application {
+                                                id: command.ok_or_else(|| {
+                                                    Error::Control(
+                                                        "process plan lacks command".into(),
+                                                    )
+                                                })?,
+                                                command: action,
+                                            },
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                        control::Event::Plan(Plan::Settled(_)) => {
+                            // Receipts transfer in invoke_plans and are consumed
+                            // by control_plans; they are never executable work.
+                            return Err(Error::Control(
+                                "settlement entered execution queue".into(),
+                            ));
+                        }
+                    }
+                }
+                scheduled => scheduled,
+            };
+            let mut confirmed_transition = None;
+            let mechanical = (|| -> Result<(), Error<M::Error>> {
+                match scheduled {
+                    Scheduled::Control(_) => unreachable!(),
+                    Scheduled::Input { id, input } => {
+                        if let Request::Application {
+                            id: command,
+                            command: action,
+                        } = input.payload
+                        {
+                            let origin = service_origin
+                                .unwrap_or(crate::oracle::observation::Origin::External);
+                            if service_origin.is_none() {
+                                self.control
+                                    .retire_external(id, command)
+                                    .map_err(Error::Control)?;
+                            }
+                            if !matches!(self.machines[id.0].stopped, StopReason::Exited { .. }) {
+                                self.control
+                                    .offered(id, command, action, origin)
+                                    .map_err(Error::Control)?;
+                            }
+                        }
+                        use crate::oracle::observation::Transition;
+                        let transition = match input.payload {
+                            Request::Crash => Some(Transition::Crash),
+                            Request::Reboot => Some(Transition::Reboot {
+                                new_boot: self.machines[id.0]
+                                    .boot
+                                    .checked_add(1)
+                                    .ok_or(Error::BootOverflow { id })?,
+                            }),
+                            _ => None,
+                        };
+                        confirmed_transition = transition.map(|transition| (id, transition));
+                        let entry = &mut self.machines[id.0];
+                        match &input.payload {
+                            Request::Reboot | Request::Crash => {
+                                if id == self.oracle {
+                                    self.oracle_stops.clear();
+                                }
+                                entry.inbox.clear();
+                                entry.paused = false;
+                            }
+                            Request::Application { .. } | Request::SimulationReply { .. }
+                                if matches!(entry.stopped, StopReason::Exited { .. }) =>
+                            {
+                                return Ok(());
+                            }
+                            Request::Application { .. }
+                            | Request::SimulationReply { .. }
+                            | Request::Shutdown => {}
+                        }
+                        if matches!(input.payload, Request::Reboot) {
+                            entry.boot = entry
+                                .boot
+                                .checked_add(1)
+                                .ok_or(Error::BootOverflow { id })?;
+                        }
+                        entry.inbox.push_back(input);
+                        self.run_batch(&[id], now)?;
+                    }
+                    Scheduled::Driver(event) => {
+                        let (DriverEvent::Wake(id)
+                        | DriverEvent::Pause(id)
+                        | DriverEvent::Resume(id)
+                        | DriverEvent::SetExecution { machine: id, .. }) = event;
+                        use crate::oracle::observation::Transition;
+                        let entry = &self.machines[id.0];
+                        let transition = match event {
+                            DriverEvent::SetExecution { config, .. } => {
+                                Some(Transition::Execution(config))
+                            }
+                            DriverEvent::Pause(_)
+                                if !entry.paused
+                                    && !matches!(entry.stopped, StopReason::Exited { .. }) =>
+                            {
+                                Some(Transition::Pause)
+                            }
+                            DriverEvent::Resume(_) if entry.paused => Some(Transition::Resume),
+                            _ => None,
+                        };
+                        confirmed_transition = transition.map(|transition| (id, transition));
+                        let entry = &mut self.machines[id.0];
+                        match event {
+                            DriverEvent::SetExecution { config, .. } => entry.execution = config,
+                            _ if matches!(entry.stopped, StopReason::Exited { .. }) => {}
+                            DriverEvent::Wake(_) if !entry.paused => self.run_batch(&[id], now)?,
+                            DriverEvent::Pause(_) => entry.paused = true,
+                            DriverEvent::Resume(_) if entry.paused => {
+                                entry.paused = false;
+                                self.run_batch(&[id], now)?;
+                            }
+                            DriverEvent::Wake(_) | DriverEvent::Resume(_) => {}
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = mechanical {
+                if let Some(fault) = accepted_fault {
+                    let failure = self.control.service.execution_failed(
+                        fault,
+                        None,
+                        now.as_nanos(),
+                        "machine effect failed; execution state is uncertain".into(),
+                    );
+                    self.control.settlements.extend(failure.settlements);
+                }
+                self.control.uncertain_failure();
+                return Err(error);
+            }
+            if let Some((id, transition)) = confirmed_transition {
+                let plans = self
+                    .control
+                    .admission(id, now, transition)
+                    .map_err(Error::Control)?;
+                self.control_plans(plans)?;
+            }
+            if let Some(fault) = service_effect {
+                let plans = self
+                    .control
+                    .invoke_plans(|service, _| {
+                        service.applied(fault, now.as_nanos(), now.as_nanos())
+                    })
+                    .map_err(Error::Control)?;
+                self.control_plans(plans)?;
+            }
             self.commit_boundary()?;
+            if self.finished.is_some() {
+                return Ok(None);
+            }
         }
         for index in 0..self.machines.len() {
             let stopped = self.machines[index].stopped;
@@ -611,21 +1298,18 @@ where
     }
 
     fn is_quiescent(&self) -> bool {
-        self.next().is_none() && self.actions.is_empty()
+        self.next().is_none() && self.events.is_empty()
     }
 
     fn outcome(&self) -> StepOutcome {
+        if let Some((at, reason)) = self.finished {
+            return StepOutcome::Finished { at, reason };
+        }
         let at = self.now();
-        if !self.is_quiescent() {
-            StepOutcome::BarrierReached { at }
-        } else if self
-            .machines
-            .iter()
-            .all(|entry| matches!(entry.stopped, StopReason::Exited { .. }))
-        {
-            StepOutcome::Finished { at }
-        } else {
+        if self.is_quiescent() {
             StepOutcome::Blocked { at }
+        } else {
+            StepOutcome::BarrierReached { at }
         }
     }
 
@@ -690,8 +1374,8 @@ where
     }
 
     /// Run at a positive rate until just before the next queued `Action::Crash`.
-    /// Ordinary wakeups, pause/resume actions, and crashes of already exited
-    /// machines do not consume the arm. Rearming while held resumes the held
+    /// Ordinary wakeups, pause/resume/reboot/shutdown actions, and crashes of already
+    /// exited machines do not consume the arm. Rearming while held resumes the held
     /// occurrence and stops before the next effective crash, including at the
     /// same timestamp. The arm is consumed once, even at the current time. The
     /// action and all following same-time actions remain pending until playback
@@ -719,7 +1403,9 @@ where
     }
 
     fn check_running(&self) -> Result<(), Error<M::Error>> {
-        if self.driver.playback.stopped {
+        if self.driver.finished.is_some() {
+            Err(Error::Completed)
+        } else if self.driver.playback.stopped {
             Err(Error::Stopped)
         } else {
             Ok(())
@@ -763,8 +1449,9 @@ where
     }
 
     /// Observe whether the driver is withholding this machine's execution.
-    /// This is separate from its last `StopReason`: paused machines retain their
-    /// last accepted state and execution time until resume. Exited machines are
+    /// This is separate from its last `StopReason`: paused machines receive no
+    /// positive execution budget, but due requests can update their state and
+    /// adopt time through zero-budget runs. Exited machines are
     /// never logically paused. Pause/resume changes use queued `Action`s and
     /// take effect in insertion order when the next step admits their barrier.
     pub fn paused(&self, id: MachineId) -> Result<bool, Error<M::Error>> {
@@ -776,26 +1463,39 @@ where
     /// all earlier additions; removal and identity reuse are not supported.
     pub fn add(
         &mut self,
-        machine: impl FnOnce(Arc<dyn Clock + Send + Sync>) -> Result<M, M::Error>,
+        machine: impl FnOnce() -> Result<M, M::Error>,
     ) -> Result<MachineId, Error<M::Error>> {
         self.check_mutation()?;
-        let machine = machine(self.driver.clock.clone()).map_err(Error::Construction)?;
+        let machine = machine().map_err(Error::Construction)?;
+        let mut bytes = [0; 8];
+        self.driver.rng.fill_bytes(&mut bytes);
+        let rng = SeededRng::new(u64::from_le_bytes(bytes));
         let id = MachineId(self.driver.machines.len());
         self.driver.machines.push(Entry {
             machine: Some(machine),
+            rng: Some(rng),
+            execution: ExecutionConfig::default(),
             reached: self.driver.now(),
             stopped: StopReason::BoundaryReached,
             paused: false,
+            inbox: VecDeque::new(),
+            staged: Vec::new(),
+            boot: 0,
         });
+        self.driver.control.add_unnamed(self.driver.now());
         Ok(id)
     }
 
     /// Capture one machine without changing its scheduling state or running it,
     /// including while paused. Reconstructing a whole simulation also requires
     /// its environment and driver-owned scheduling/lifecycle state, including
-    /// the pause flag observed through `paused`.
+    /// each machine's execution configuration and pause flag observed through
+    /// `paused`, global RNG cursor, and the independently continuing RNG cursor
+    /// of every machine.
     pub fn snapshot(&mut self, id: MachineId) -> Result<M::Snapshot, Error<M::Error>> {
-        self.check_mutation()?;
+        if self.driver.finished.is_none() {
+            self.check_mutation()?;
+        }
         self.driver.entry(id)?;
         self.driver.machines[id.0]
             .machine
@@ -811,6 +1511,59 @@ where
         self.check_mutation()?;
         self.driver.schedule(at, action)
     }
+    /// Queue a request in the same admission order as scheduled actions.
+    /// Admission occurs in a subsequent `step`; enqueueing executes no work
+    /// and does not imply success or a guest acknowledgment. Its boot is
+    /// determined when it becomes due. Application IDs must not be reused
+    /// within that admitted boot. Ordinary requests for an exited boot are
+    /// discarded; Reboot starts a new boot. Zero-budget runs service due
+    /// requests even while machine execution is paused.
+    pub fn schedule_request(
+        &mut self,
+        at: Timestamp,
+        id: MachineId,
+        request: Request,
+    ) -> Result<(), Error<M::Error>> {
+        self.check_mutation()?;
+        self.driver.check_valid()?;
+        if at < self.driver.now() {
+            return Err(Error::PastTime {
+                now: self.driver.now(),
+                requested: at,
+            });
+        }
+        self.driver.entry(id)?;
+        if let Request::Application { id: command, .. } = request {
+            self.driver
+                .control
+                .reserve_external(id, command)
+                .map_err(Error::Control)?;
+        }
+        self.driver
+            .events
+            .entry(at)
+            .or_default()
+            .push_back(Scheduled::Input {
+                id,
+                input: Input {
+                    at,
+                    payload: request,
+                },
+            });
+        Ok(())
+    }
+
+    /// Transfer committed responses once, preserving commit/publication order.
+    /// Within each commit, responses sort by timestamp, machine identity, and
+    /// per-machine emission order. Separate commits are not globally resorted.
+    /// Boot association is fixed at emission, including across reboots.
+    /// Simulation-control messages belong to driver-owned handling. Calls in the
+    /// final oracle batch remain observable but are not admitted after terminal
+    /// cutoff. Draining never transfers dispatch or reply responsibility, and
+    /// observers must not redispatch these messages.
+    pub fn drain_responses(&mut self) -> Vec<MachineResponse> {
+        std::mem::take(&mut self.driver.committed_outputs)
+    }
 }
 
 /// Driver setup, execution, or contract failure.
@@ -818,6 +1571,8 @@ where
 pub enum Error<E> {
     /// A machine factory failed before its machines were admitted.
     Construction(E),
+    /// Simulation-control policy or correlation failed.
+    Control(String),
     /// Quantum must be positive and representable in u64 nanoseconds.
     InvalidQuantum,
     /// At least one execution worker is required.
@@ -830,7 +1585,7 @@ pub enum Error<E> {
     StepPending,
     /// A pre-action arm requires a positive playback rate.
     InvalidRate,
-    /// Every machine has exited and no queued work remains.
+    /// Oracle termination was committed; further scheduling is prohibited.
     Completed,
     /// A permanent stop prohibits execution and scheduling changes.
     Stopped,
@@ -857,6 +1612,9 @@ pub enum Error<E> {
         requested: Timestamp,
     },
     UnknownMachine(MachineId),
+    BootOverflow {
+        id: MachineId,
+    },
     Machine {
         id: MachineId,
         source: E,
@@ -865,6 +1623,13 @@ pub enum Error<E> {
         id: MachineId,
         stopped: StopReason,
     },
+    /// A machine emitted beyond the stop it returned. The driver discards the
+    /// failed batch's staged outputs and prohibits further execution.
+    InvalidOutput {
+        id: MachineId,
+        at: Timestamp,
+        reached: Timestamp,
+    },
     /// A previous step failed; further execution is prohibited.
     Failed,
 }
@@ -872,6 +1637,7 @@ pub enum Error<E> {
 impl<E: fmt::Display> fmt::Display for Error<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Control(message) => write!(f, "simulation control: {message}"),
             Self::InvalidQuantum => {
                 f.write_str("quantum must be positive and fit in u64 nanoseconds")
             }
@@ -896,11 +1662,19 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                 requested.as_nanos(),
                 now.as_nanos()
             ),
+            Self::BootOverflow { id } => write!(f, "machine {id:?} boot generation overflow"),
             Self::UnknownMachine(id) => write!(f, "unknown machine {}", id.0),
             Self::Machine { id, source } => write!(f, "machine {}: {source}", id.0),
             Self::InvalidStop { id, stopped } => {
                 write!(f, "machine {} returned an invalid stop: {stopped:?}", id.0)
             }
+            Self::InvalidOutput { id, at, reached } => write!(
+                f,
+                "machine {} emitted output at {} beyond returned stop {}",
+                id.0,
+                at.as_nanos(),
+                reached.as_nanos()
+            ),
             Self::Failed => f.write_str("driver cannot execute after a failed step"),
         }
     }
@@ -934,9 +1708,29 @@ pub enum StepOutcome {
     BarrierReached { at: Timestamp },
     /// Unfinished machines can make no progress without new external input.
     Blocked { at: Timestamp },
-    /// Every machine has exited and no scheduled work remains.
-    Finished { at: Timestamp },
+    /// Oracle termination was committed: its main application produced an
+    /// outcome or a successful Stop acknowledgment, or its machine exited.
+    /// An application outcome reports ProgramExit while its guest may remain alive. A confirmed
+    /// application Stop reports Shutdown without claiming that its machine exited.
+    /// Other machines and queued work remain stopped. This result is permanent;
+    /// committed responses remain available through the barrier.
+    Finished { at: Timestamp, reason: ExitReason },
 }
 
 #[cfg(test)]
+mod queue_tests;
+#[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod execution_tests;
+
+#[cfg(test)]
+pub(crate) mod fixture;
+
+#[cfg(test)]
+mod control_failure_tests;
+#[cfg(test)]
+mod control_timer_tests;
+#[cfg(test)]
+mod oracle_correlation_tests;

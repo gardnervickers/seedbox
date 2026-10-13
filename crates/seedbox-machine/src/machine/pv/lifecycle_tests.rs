@@ -1,4 +1,8 @@
 use super::*;
+use crate::clock::Clock;
+use std::sync::Arc;
+type PVMachine = crate::machine::test_environment::Environment<super::PVMachine>;
+use crate::rng::{RngStreamExt, SeededRng};
 
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
@@ -32,7 +36,7 @@ fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() 
         Path::new(&executable),
         kernel,
         b"initrd".to_vec(),
-        7,
+        SeededRng::new(7),
         clock.clone(),
     )
     .unwrap();
@@ -44,11 +48,12 @@ fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() 
         }
     );
     let snapshot = machine.snapshot().unwrap();
+    let saved_rng = machine.rng.clone();
     clock.set(3);
-    machine.reboot(at(3)).unwrap();
+    machine.request(crate::pv::Request::Reboot).unwrap();
     assert_eq!(clock.now(), 3);
     assert_eq!(machine.reached, 3);
-    assert!(machine.state == State::Ready);
+    assert_eq!(machine.pending_boots, 0);
     assert_eq!(
         machine.run(&mut (), at(3)).unwrap(),
         StopReason::BoundaryReached
@@ -64,10 +69,13 @@ fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() 
     let branch_clock = Arc::new(crate::clock::SimulationClock::new(3));
     let mut branch =
         PVMachine::from_snapshot(Path::new(&executable), &snapshot, branch_clock).unwrap();
-    branch.reboot(at(3)).unwrap();
+    branch.rng = saved_rng;
+    branch.request(crate::pv::Request::Reboot).unwrap();
+    branch.run(&mut (), at(3)).unwrap();
     assert_eq!(branch.seed, seed);
-    branch.crash().unwrap();
-    branch.reboot(at(3)).unwrap();
+    branch.request(crate::pv::Request::Crash).unwrap();
+    branch.request(crate::pv::Request::Reboot).unwrap();
+    branch.run(&mut (), at(3)).unwrap();
     assert_ne!(branch.seed, seed);
     clock.set(8);
     assert!(matches!(
@@ -78,9 +86,285 @@ fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() 
         }
     ));
     clock.set(9);
-    machine.reboot(at(9)).unwrap();
+    machine.request(crate::pv::Request::Reboot).unwrap();
     assert_eq!(
         machine.run(&mut (), at(9)).unwrap(),
         StopReason::BoundaryReached
     );
+}
+
+#[path = "../../../tests/support/pv_guest.rs"]
+mod guest;
+
+fn finish(machine: &mut PVMachine, clock: &crate::clock::SimulationClock) {
+    let started = std::time::Instant::now();
+    loop {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "guest did not shut down: {}",
+            String::from_utf8_lossy(&machine.console)
+        );
+        let upto = clock.now() + 1_000_000;
+        match machine.run(&mut (), at(upto)).unwrap() {
+            StopReason::Exited {
+                reason: ExitReason::Shutdown,
+                ..
+            } => break,
+            StopReason::BoundaryReached => clock.set(upto),
+            StopReason::Blocked {
+                deadline: Some(deadline),
+                ..
+            } => clock.set(deadline.as_nanos()),
+            stop => panic!(
+                "shutdown stalled {stop:?}: {}",
+                String::from_utf8_lossy(&machine.console)
+            ),
+        }
+    }
+    let output = String::from_utf8_lossy(&machine.console);
+    for marker in [
+        "PV_SHUTDOWN_REQUESTED",
+        "PV_CHILD_CLEANED",
+        "PV_SHUTDOWN_COMPLETE",
+    ] {
+        assert_eq!(output.matches(marker).count(), 1, "{output}");
+    }
+}
+
+#[test]
+#[ignore = "requires signed SEEDBOX_PV_WORKER, SEEDBOX_PV_KERNEL, SEEDBOX_PV_CLANG and SEEDBOX_PV_LD"]
+fn zero_budget_shutdown_snapshots_preserve_request_once() {
+    let executable = guest::input("SEEDBOX_PV_WORKER");
+    let kernel = fs::read(guest::input("SEEDBOX_PV_KERNEL")).unwrap();
+    let clock = Arc::new(crate::clock::SimulationClock::new(0));
+    let mut machine = PVMachine::new(
+        &executable,
+        kernel,
+        guest::initrd(),
+        SeededRng::new(7),
+        clock.clone(),
+    )
+    .unwrap();
+    let mut expected = SeededRng::new(7);
+    let seed = expected.next_u64();
+    assert_eq!(machine.seed, seed);
+    assert_eq!(
+        serde_json::to_vec(&machine.rng).unwrap(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+    let rng = serde_json::to_vec(&machine.rng).unwrap();
+    machine.request(crate::pv::Request::Shutdown).unwrap();
+    machine.request(crate::pv::Request::Shutdown).unwrap();
+    assert_eq!(machine.reached, 0);
+    assert!(machine.console.is_empty());
+    assert_eq!(serde_json::to_vec(&machine.rng).unwrap(), rng);
+    let pending = machine.snapshot().unwrap();
+    // Adoption and queuing with no instruction budget: no Linux boot or cleanup
+    // has run, and the request is now also owned by stopped device state.
+    clock.set(50);
+    assert_eq!(
+        machine.run(&mut (), at(50)).unwrap(),
+        StopReason::BoundaryReached
+    );
+    assert!(machine.console.is_empty());
+    let queued = machine.snapshot().unwrap();
+    drop(machine);
+    for snapshot in [pending, queued] {
+        let branch_clock = Arc::new(crate::clock::SimulationClock::new(50));
+        let mut branch =
+            PVMachine::from_snapshot(&executable, &snapshot, branch_clock.clone()).unwrap();
+        assert_eq!(branch.seed, seed);
+        branch.rng = serde_json::from_slice(&rng).unwrap();
+        branch.request(crate::pv::Request::Shutdown).unwrap();
+        finish(&mut branch, &branch_clock);
+        branch.request(crate::pv::Request::Shutdown).unwrap();
+        // Hard lifecycle reset discards the old latch/device backlog. If it
+        // leaked into this boot, Linux would power off instead of waiting.
+        branch_clock.set(branch.reached);
+        let output_start = branch.console.len();
+        branch.request(crate::pv::Request::Reboot).unwrap();
+        assert!(!branch.shutdown);
+        let reboot_started = std::time::Instant::now();
+        loop {
+            assert!(reboot_started.elapsed() < std::time::Duration::from_secs(60));
+            let upto = branch_clock.now() + 1_000_000;
+            match branch.run(&mut (), at(upto)).unwrap() {
+                StopReason::BoundaryReached => branch_clock.set(upto),
+                StopReason::Blocked {
+                    reached,
+                    deadline: None,
+                } => {
+                    assert!(reached.as_nanos() >= 50);
+                    break;
+                }
+                StopReason::Blocked {
+                    deadline: Some(deadline),
+                    ..
+                } => branch_clock.set(deadline.as_nanos()),
+                other => panic!("reboot replayed shutdown: {other:?}"),
+            }
+            let output = String::from_utf8_lossy(&branch.console[output_start..]);
+            assert!(!output.contains("PV_SHUTDOWN_REQUESTED"), "{output}");
+            if output.contains("PV_LIFECYCLE_READY") {
+                break;
+            }
+        }
+        branch.request(crate::pv::Request::Crash).unwrap();
+        assert!(!branch.shutdown);
+        branch.request(crate::pv::Request::Shutdown).unwrap();
+        assert!(!branch.shutdown);
+    }
+}
+
+#[test]
+#[ignore = "requires signed HVF worker and SEEDBOX_PV_KERNEL, SEEDBOX_PV_CLANG, SEEDBOX_PV_LD"]
+fn live_linux_ring_dma_snapshot_preserves_shutdown_at_newer_clock() {
+    let executable = guest::input("SEEDBOX_PV_WORKER");
+    let kernel = fs::read(guest::input("SEEDBOX_PV_KERNEL")).unwrap();
+    let clock = Arc::new(crate::clock::SimulationClock::new(0));
+    let mut machine = PVMachine::new(
+        &executable,
+        kernel,
+        guest::initrd(),
+        SeededRng::new(11),
+        clock.clone(),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    while !String::from_utf8_lossy(&machine.console).contains("PV_LIFECYCLE_READY") {
+        assert!(started.elapsed() < std::time::Duration::from_secs(60));
+        let upto = clock.now() + 1_000_000;
+        match machine.run(&mut (), at(upto)).unwrap() {
+            StopReason::BoundaryReached => clock.set(upto),
+            StopReason::Blocked {
+                deadline: Some(deadline),
+                ..
+            } => clock.set(deadline.as_nanos()),
+            StopReason::Blocked {
+                reached,
+                deadline: None,
+            } => {
+                clock.set(reached.as_nanos());
+                assert!(String::from_utf8_lossy(&machine.console).contains("PV_LIFECYCLE_READY"));
+            }
+            other => panic!("unexpected boot stop {other:?}"),
+        }
+    }
+    machine.request(crate::pv::Request::Shutdown).unwrap();
+    let pending = machine.snapshot().unwrap();
+    let output = machine.console.clone();
+    let now = clock.now();
+    machine.run(&mut (), at(now)).unwrap();
+    assert_eq!(machine.console, output);
+    let delivered = machine.snapshot().unwrap();
+    drop(machine);
+    for snapshot in [pending, delivered] {
+        let branch_clock = Arc::new(crate::clock::SimulationClock::new(now + 50_000_000));
+        let mut branch =
+            PVMachine::from_snapshot(&executable, &snapshot, branch_clock.clone()).unwrap();
+        branch.request(crate::pv::Request::Shutdown).unwrap();
+        finish(&mut branch, &branch_clock);
+    }
+}
+
+#[test]
+#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+fn queued_boots_use_caller_entropy_and_machine_only_snapshots() {
+    use crate::machine::test_environment::run_requests;
+    use crate::pv::Request;
+    #[derive(Clone)]
+    struct Bytes(u8);
+    impl crate::rng::RngStream for Bytes {
+        fn fill_bytes(&mut self, bytes: &mut [u8]) {
+            for byte in bytes {
+                *byte = self.0;
+                self.0 += 1;
+            }
+        }
+    }
+    let executable = guest::input("SEEDBOX_PV_WORKER");
+    let code = super::tests::kernel(&[
+        0xd2a1_4021,
+        0xd280_0060,
+        0xf900_1020,
+        0xd280_0100,
+        0xf2b0_8000,
+        0xd400_0002,
+    ]);
+    let mut machine =
+        super::PVMachine::from_boot_inputs(&executable, code, b"initrd".to_vec()).unwrap();
+    let clock = crate::clock::SimulationClock::new(0);
+    let mut rng = Bytes(0);
+    machine.snapshot().unwrap();
+    assert_eq!(rng.0, 0, "snapshot must not draw caller entropy");
+    run_requests(&mut machine, &clock, &mut rng, [], at(0)).unwrap();
+    assert_eq!(rng.0, 8);
+    let saved = machine.snapshot().unwrap();
+    let mut branch_rng = rng.clone();
+    run_requests(
+        &mut machine,
+        &clock,
+        &mut rng,
+        [Request::Reboot, Request::Reboot, Request::Shutdown],
+        at(0),
+    )
+    .unwrap();
+    assert_eq!(
+        rng.0, 24,
+        "each ordered reboot draws one seed, without instructions"
+    );
+    assert_eq!(
+        machine.seed,
+        u64::from_le_bytes([16, 17, 18, 19, 20, 21, 22, 23])
+    );
+    let mut branch = super::PVMachine::from_snapshot(&executable, &saved).unwrap();
+    run_requests(
+        &mut branch,
+        &clock,
+        &mut branch_rng,
+        [Request::Reboot, Request::Reboot, Request::Shutdown],
+        at(0),
+    )
+    .unwrap();
+    assert_eq!(branch.seed, machine.seed);
+    assert_eq!(branch_rng.0, rng.0);
+    let before_crash = branch_rng.0;
+    assert!(matches!(
+        run_requests(
+            &mut branch,
+            &clock,
+            &mut branch_rng,
+            [Request::Crash],
+            at(0)
+        )
+        .unwrap(),
+        StopReason::Exited {
+            reason: ExitReason::Crashed,
+            ..
+        }
+    ));
+    assert_eq!(
+        branch_rng.0, before_crash,
+        "crash accepts at zero budget without a seed draw"
+    );
+    branch.snapshot().unwrap();
+    run_requests(
+        &mut branch,
+        &clock,
+        &mut branch_rng,
+        [Request::Reboot],
+        at(0),
+    )
+    .unwrap();
+    assert_eq!(branch_rng.0, 32, "reboot revives an exited machine");
+}
+
+#[test]
+#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+fn standalone_fifo_consumes_exited_requests_and_zero_budget_lifecycle() {
+    let executable = guest::input("SEEDBOX_PV_WORKER");
+    let code = super::tests::kernel(&[0xd2a1_4021, 0xd280_0060, 0xf900_1020, 0x1400_0000]);
+    let machine =
+        super::PVMachine::from_boot_inputs(&executable, code, b"initrd".to_vec()).unwrap();
+    crate::machine::test_environment::check_lifecycle_fifo(machine);
 }

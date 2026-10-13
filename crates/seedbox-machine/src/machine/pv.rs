@@ -1,32 +1,28 @@
-//! Native arm64 PV machine, isolated in an owned worker process.
+//! Native ARM64 PV guest in a private, isolated worker process.
 //!
-//! The diskless, single-vCPU fixture personality supports PV Linux Images and
-//! initramfs inputs on macOS/HVF and Linux/arm64 KVM. Compute between guest PV
-//! rendezvous costs no simulated time. Idle returns to the driver, which owns
-//! shared time and timer wakeups. Host interruptions are never time boundaries.
-//! Crash destroys RAM and the worker; no disk is attached. Snapshot bytes own
-//! boot inputs and complete stopped CPU, RAM, device, timer and lifecycle state.
-
-use super::{ExitReason, Machine, StopReason, Timestamp};
-use crate::clock::Clock;
-use seedbox_arm64::{
-    application::worker::{
-        write_message, Answer, Boot, Checkpoint, Identity, Operation, OwnedWorker,
-    },
-    boot::{BootSpec, DEFAULT_COMMAND_LINE},
-    disk::DiskFaultModel,
-    machine::MachineStop,
-};
-use seedbox_engine_core::rng::Rng;
+//! A diskless Linux Image and initramfs run on macOS/HVF or Linux/arm64 KVM.
+//! Guest PV rendezvous define accepted time; host interruptions are invisible.
+//! The Driver owns idle advancement. A standard virtio-console port named
+//! `seedbox-lifecycle` carries `shutdown\n` to a cooperating guest supervisor.
+//! The request itself executes no guest work. Cleanup and PSCI poweroff require
+//! later run calls; an uncooperative guest can remain blocked until crashed.
+//! Snapshot bytes own boot inputs and all stopped worker/device state. Native
+//! architectural snapshot support currently requires macOS/HVF.
+mod boot;
+mod client;
+mod factory;
+mod protocol;
+use super::{ExitReason, Machine, RunContext, StopReason, Timestamp};
+use client::Worker;
+pub use factory::Factory;
+use protocol::{Request, Response, Stop};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 use tempfile::TempDir;
-
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]
 enum State {
     Ready,
@@ -35,257 +31,365 @@ enum State {
     Crashed,
     Invalid,
 }
-
 #[derive(Serialize, Deserialize)]
 struct Capture {
+    command_line: String,
     seed: u64,
     reached: u64,
     state: State,
-    checkpoint: Option<Checkpoint>,
-    boot_rng: Rng,
+    live: bool,
+    shutdown: bool,
+    pending_boots: u64,
+    pending_at: Option<u64>,
+    writes: Vec<crate::pv::transport::GuestWrite>,
+    input: Vec<u8>,
+    guest: crate::pv::bridge::GuestBridge,
+}
+/// An owned capture of internal machine state, including pending resets.
+/// It contains no live worker, mapping or hypervisor handles.
+#[derive(Clone)]
+pub struct Snapshot {
+    // The public contract captures state; reconstruction currently remains
+    // private to backend validation rather than adding a second constructor.
+    #[cfg_attr(not(test), allow(dead_code))]
+    bytes: Vec<u8>,
 }
 
-/// A real PV guest implementing the shared machine contract.
-/// Only construction is backend-specific; execution and lifecycle use Machine.
+/// A single native PV guest. Construction is its only backend-specific API.
 pub struct PVMachine {
-    clock: Arc<dyn Clock + Send + Sync>,
     kernel: Vec<u8>,
     initrd: Vec<u8>,
+    command_line: String,
     seed: u64,
     reached: u64,
     state: State,
-    worker: Option<OwnedWorker>,
+    worker: Option<Worker>,
     directory: TempDir,
     console: Vec<u8>,
     executable: PathBuf,
-    boot_rng: Rng,
+    shutdown: bool,
+    pending_boots: u64,
+    pending_at: Option<u64>,
+    writes: Vec<crate::pv::transport::GuestWrite>,
+    input: Vec<u8>,
+    guest: crate::pv::bridge::GuestBridge,
 }
+#[cfg(test)]
+const TEST_COMMAND_LINE: &str = "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4";
 
 impl PVMachine {
-    /// Create a stopped diskless ARM PV guest with owned boot inputs.
-    /// `executable` is a compatible seedbox-arm64 or integrated seedbox worker;
-    /// on macOS it must carry the Hypervisor entitlement. The clock is supplied
-    /// by Driver's construction factory. Guest RAM is 128 MiB.
-    pub fn new(
+    /// Prepare a stopped machine from a workload and separately supplied boot assets.
+    /// Unsupported resource requests are rejected before execution.
+    /// The first run initializes boot using its clock and eight RNG bytes in
+    /// little-endian order. Each pending reboot draws another eight bytes.
+    pub(crate) fn new(
+        executable: &Path,
+        bootstrap: &crate::application::GuestBootstrap,
+        definition: crate::definition::MachineDefinition,
+    ) -> Result<Self, std::io::Error> {
+        if definition.resources.memory_bytes != boot::RAM_BYTES as u64 {
+            return Err(std::io::Error::other(
+                "PV currently supports exactly 128 MiB RAM",
+            ));
+        }
+        // Preparation may derive a private application copy before packaging;
+        // the original prepared workload is never mutated by the backend.
+        let initrd = crate::application::boot_archive(&definition.application, bootstrap)
+            .map_err(std::io::Error::other)?;
+        Self::construct(
+            executable,
+            bootstrap.kernel.image.clone(),
+            initrd,
+            bootstrap.kernel.command_line.clone(),
+        )
+        .map_err(std::io::Error::other)
+    }
+    #[cfg(test)]
+    pub(super) fn from_boot_inputs(
         executable: &Path,
         kernel: Vec<u8>,
         initrd: Vec<u8>,
-        seed: u64,
-        clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<Self, std::io::Error> {
-        Self::construct(executable, kernel, initrd, seed, clock).map_err(std::io::Error::other)
+        Self::construct(executable, kernel, initrd, TEST_COMMAND_LINE.into())
+            .map_err(std::io::Error::other)
     }
-
     fn construct(
         executable: &Path,
         kernel: Vec<u8>,
         initrd: Vec<u8>,
-        seed: u64,
-        clock: Arc<dyn Clock + Send + Sync>,
+        command_line: String,
     ) -> Result<Self, String> {
-        let reached = clock.now();
-        if reached == u64::MAX {
-            return Err("PV initial timestamp exceeds finite time range".into());
-        }
-        BootSpec::for_application(&kernel, &initrd, seed, 128 << 20, DEFAULT_COMMAND_LINE)?
-            .validate()?;
+        boot::arguments(&command_line)?;
+        boot::layout(&kernel, &initrd)?;
         let directory = tempfile::tempdir().map_err(|e| format!("PV boot directory: {e}"))?;
-        let kernel_path = directory.path().join("kernel");
-        let initrd_path = directory.path().join("initrd");
-        fs::write(&kernel_path, &kernel).map_err(|e| format!("PV kernel input: {e}"))?;
-        fs::write(&initrd_path, &initrd).map_err(|e| format!("PV initrd input: {e}"))?;
-        let mut worker = OwnedWorker::spawn(
-            executable,
-            Identity {
-                name: "pv".into(),
-                generation: 0,
-                incarnation: 0,
-            },
-        )?;
-        worker.call(Operation::BootFixture(Boot {
-            kernel: kernel_path,
-            initrd: initrd_path,
-            seed,
-            memory_bytes: 128 << 20,
-            command_line: DEFAULT_COMMAND_LINE.into(),
-            mac: [0; 6],
-            disk_image: None,
-            disk_sectors: None,
-            disk_fault_model: DiskFaultModel {
-                sector_bytes: 512,
-                survival_probability: 0.0,
-            },
-            timer_policy: None,
-        }))?;
-        if reached != 0 {
-            worker.call(Operation::ResumeAt(reached))?;
-        }
+        fs::write(directory.path().join("kernel"), &kernel)
+            .map_err(|e| format!("PV kernel input: {e}"))?;
+        fs::write(directory.path().join("initrd"), &initrd)
+            .map_err(|e| format!("PV initrd input: {e}"))?;
         Ok(Self {
-            clock,
             kernel,
             initrd,
-            seed,
-            reached,
+            command_line,
+            seed: 0,
+            reached: 0,
             state: State::Ready,
-            worker: Some(worker),
+            worker: None,
             directory,
             console: Vec::new(),
             executable: executable.to_owned(),
-            boot_rng: Rng::new(seed, "pv/reboot-entropy"),
+            pending_boots: 1,
+            pending_at: None,
+            writes: Default::default(),
+            input: Vec::new(),
+            guest: Default::default(),
+            shutdown: false,
         })
     }
-
-    fn worker(&mut self) -> Result<&mut OwnedWorker, String> {
-        self.worker
-            .as_mut()
-            .ok_or_else(|| "PV worker is unavailable".into())
+    fn boot(&mut self, seed: u64, now: u64) -> Result<(), String> {
+        let mut worker = Worker::spawn(&self.executable)?;
+        if !matches!(
+            worker.call(Request::Boot {
+                kernel: self.directory.path().join("kernel"),
+                initrd: self.directory.path().join("initrd"),
+                seed,
+                now,
+                command_line: self.command_line.clone(),
+            })?,
+            Response::Ready
+        ) {
+            return Err("PV worker did not acknowledge boot".into());
+        }
+        self.worker = Some(worker);
+        self.seed = seed;
+        Ok(())
     }
-
-    fn execute(&mut self, upto: u64) -> Result<StopReason, String> {
-        let now = self.clock.now();
-        if now > self.reached {
-            // Adopt elapsed simulation time without running the vCPU. The
-            // worker coalesces expired timers at this time, rather than running
-            // guest work or publishing effects at their former deadlines.
-            self.worker()?.call(Operation::ResumeAt(now))?;
-            self.reached = now;
-            if matches!(self.state, State::Blocked(Some(deadline)) if deadline <= now) {
-                self.state = State::Ready;
+    fn request_shutdown(&mut self) -> Result<(), std::io::Error> {
+        if self.state == State::Invalid {
+            return Err(std::io::Error::other("cannot shut down invalid PV machine"));
+        }
+        if (self.pending_boots > 0 || !matches!(self.state, State::Exited | State::Crashed))
+            && !self.shutdown
+        {
+            self.shutdown = true;
+            self.input.extend_from_slice(b"shutdown\n");
+        }
+        Ok(())
+    }
+    fn request_crash(&mut self) -> Result<(), std::io::Error> {
+        if self.state == State::Invalid {
+            return Err(std::io::Error::other("PV crash requires valid machine"));
+        }
+        if matches!(self.state, State::Exited | State::Crashed) && self.pending_boots == 0 {
+            self.guest.reset();
+            self.input.clear();
+            self.writes.clear();
+            self.shutdown = false;
+            return Ok(());
+        }
+        self.state = State::Invalid;
+        self.shutdown = false;
+        if let Some(mut worker) = self.worker.take() {
+            worker.terminate().map_err(std::io::Error::other)?;
+        }
+        self.guest.reset();
+        self.input.clear();
+        self.writes.clear();
+        self.state = State::Crashed;
+        self.pending_boots = 0;
+        self.pending_at = None;
+        Ok(())
+    }
+    fn request_reboot(&mut self, at: Timestamp) -> Result<(), std::io::Error> {
+        let at = at.as_nanos();
+        if self.state == State::Invalid
+            || at < self.reached
+            || self.pending_at.is_some_and(|previous| at < previous)
+            || at == u64::MAX
+        {
+            return Err(std::io::Error::other(
+                "PV reboot requires valid finite barrier at or after machine position",
+            ));
+        }
+        self.pending_boots = self
+            .pending_boots
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("PV pending reboot count exhausted"))?;
+        self.pending_at = Some(at);
+        self.shutdown = false;
+        self.guest.reset();
+        self.input.clear();
+        self.writes.clear();
+        Ok(())
+    }
+    fn initialize(&mut self, context: &mut RunContext<'_, ()>, at: u64) -> Result<(), String> {
+        self.state = State::Invalid;
+        if let Some(mut worker) = self.worker.take() {
+            worker.terminate()?;
+        }
+        for _ in 0..self.pending_boots {
+            let mut bytes = [0; 8];
+            context.rng.fill_bytes(&mut bytes);
+            if let Some(mut worker) = self.worker.take() {
+                worker.terminate()?;
+            }
+            self.boot(u64::from_le_bytes(bytes), at)?;
+        }
+        self.reached = at;
+        self.pending_boots = 0;
+        self.pending_at = None;
+        self.state = State::Ready;
+        Ok(())
+    }
+    fn worker(&mut self) -> Result<&mut Worker, String> {
+        self.worker.as_mut().ok_or("PV worker unavailable".into())
+    }
+    fn execute(&mut self, now: u64, upto: u64, syscall_cost_ns: u64) -> Result<StopReason, String> {
+        let now = now.max(self.reached);
+        let shutdown = false;
+        let input = self.input.clone();
+        let Response::Stopped { time, stop, writes } = self.worker()?.call(Request::Run {
+            now,
+            upto,
+            syscall_cost_ns,
+            shutdown,
+            lifecycle: input,
+        })?
+        else {
+            return Err("PV worker returned unexpected run response".into());
+        };
+        if time < now || time < self.reached || time > upto {
+            return Err("PV worker crossed execution interval".into());
+        }
+        if writes
+            .iter()
+            .any(|write| write.time() < now || write.time() > time)
+            || writes
+                .windows(2)
+                .any(|pair| pair[0].time() > pair[1].time())
+        {
+            return Err("PV guest write crossed execution interval".into());
+        }
+        self.input.clear();
+        self.guest.input_delivered()?;
+        self.reached = time;
+        for write in &writes {
+            if let crate::pv::transport::GuestWrite::Console(write) = write {
+                self.console.extend_from_slice(&write.bytes);
             }
         }
-        if let State::Blocked(deadline) = self.state {
-            return Ok(StopReason::Blocked {
-                reached: Timestamp::from_nanos(self.reached),
-                deadline: deadline.map(Timestamp::from_nanos),
-            });
-        }
-        if self.reached == upto {
-            return Ok(StopReason::BoundaryReached);
-        }
-        let answer = self
-            .worker()?
-            .call(Operation::AdvanceUntilIdle { hard_limit: upto })?;
-        let Answer::Advanced {
-            stop,
-            time_ns,
-            console,
-            events,
-            ..
-        } = answer
-        else {
-            return Err("PV worker returned an unexpected execution answer".into());
-        };
-        if !events.is_empty() || time_ns < self.reached || time_ns > upto {
-            return Err("PV fixture returned unsupported effects or crossed its boundary".into());
-        }
-        self.console.extend(console);
-        self.reached = time_ns;
+        self.writes.extend(writes);
         match stop {
-            MachineStop::Horizon { .. } if time_ns == upto => {
+            Stop::Horizon if time == upto => {
                 self.state = State::Ready;
                 Ok(StopReason::BoundaryReached)
             }
-            MachineStop::Blocked { deadline, .. } => {
+            Stop::Blocked(deadline) => {
+                if deadline.is_some_and(|d| d <= time) {
+                    return Err("PV worker blocked with expired deadline".into());
+                }
                 self.state = State::Blocked(deadline);
                 Ok(StopReason::Blocked {
-                    reached: Timestamp::from_nanos(time_ns),
+                    reached: Timestamp::from_nanos(time),
                     deadline: deadline.map(Timestamp::from_nanos),
                 })
             }
-            MachineStop::PoweredOff => {
+            Stop::PoweredOff => {
                 self.state = State::Exited;
                 drop(self.worker.take());
                 Ok(StopReason::Exited {
-                    reached: Timestamp::from_nanos(time_ns),
+                    reached: Timestamp::from_nanos(time),
                     reason: ExitReason::Shutdown,
                 })
             }
-            _ => Err("PV fixture returned an unsupported stop".into()),
+            _ => Err("PV worker returned invalid stop".into()),
         }
     }
-
-    fn capture(&mut self) -> Result<Vec<u8>, String> {
+    fn capture(&mut self) -> Result<Snapshot, String> {
         if self.state == State::Invalid {
-            return Err("cannot snapshot an invalid PV machine".into());
+            return Err("cannot snapshot invalid PV machine".into());
         }
-        let (checkpoint, image) = if self.worker.is_some() {
+        let live = self.worker.is_some();
+        let image = if live {
             let file = tempfile::Builder::new()
                 .prefix("snapshot-")
                 .tempfile_in(self.directory.path())
                 .map_err(|e| format!("PV snapshot path: {e}"))?;
             let artifact = file.path().to_owned();
-            // The protocol creates the artifact exclusively.
             drop(file);
-            let answer = self.worker()?.call(Operation::Snapshot {
-                artifact: artifact.clone(),
-            })?;
-            let checkpoint = match answer {
-                Answer::Snapshot(checkpoint) => checkpoint,
-                Answer::SnapshotFailed(error) => return Err(error),
-                _ => return Err("unexpected PV snapshot answer".into()),
-            };
-            let image = fs::read(&artifact).map_err(|e| format!("PV snapshot image: {e}"));
+            if !matches!(
+                self.worker()?.call(Request::Capture(artifact.clone()))?,
+                Response::Captured
+            ) {
+                return Err("PV unexpected snapshot response".into());
+            }
+            let bytes = fs::read(&artifact).map_err(|e| format!("PV snapshot image: {e}"));
             let _ = fs::remove_file(artifact);
-            (Some(checkpoint), Some(image?))
+            bytes?
         } else {
-            (None, None)
+            Vec::new()
         };
         let mut bytes = Vec::new();
-        write_message(
+        protocol::send(
             &mut bytes,
             &Capture {
+                command_line: self.command_line.clone(),
                 seed: self.seed,
                 reached: self.reached,
                 state: self.state,
-                checkpoint,
-                boot_rng: self.boot_rng.clone(),
+                live,
+                shutdown: self.shutdown,
+                pending_boots: self.pending_boots,
+                pending_at: self.pending_at,
+                writes: self.writes.clone(),
+                input: self.input.clone(),
+                guest: self.guest.clone(),
             },
         )?;
-        for blob in [
-            &self.kernel[..],
-            &self.initrd[..],
-            image.as_deref().unwrap_or_default(),
-        ] {
+        for blob in [&self.kernel[..], &self.initrd[..], &image[..]] {
             bytes
                 .write_all(&(blob.len() as u64).to_le_bytes())
-                .map_err(|e| format!("PV snapshot length: {e}"))?;
-            bytes
-                .write_all(blob)
-                .map_err(|e| format!("PV snapshot data: {e}"))?;
+                .and_then(|_| bytes.write_all(blob))
+                .map_err(|e| format!("PV snapshot bytes: {e}"))?;
         }
-        Ok(bytes)
+        Ok(Snapshot { bytes })
     }
-
     #[cfg(test)]
-    fn from_snapshot(
-        executable: &Path,
-        bytes: &[u8],
-        clock: Arc<dyn Clock + Send + Sync>,
-    ) -> Result<Self, String> {
-        let mut input = bytes;
-        let capture: Capture = seedbox_arm64::application::worker::read_message(&mut input)?
-            .ok_or("missing PV snapshot header")?;
+    pub(super) fn from_snapshot(executable: &Path, snapshot: &Snapshot) -> Result<Self, String> {
+        let mut input = &snapshot.bytes[..];
+        let capture: Capture =
+            protocol::receive(&mut input)?.ok_or("PV snapshot header missing")?;
         let kernel = read_blob(&mut input)?;
         let initrd = read_blob(&mut input)?;
         let image = read_blob(&mut input)?;
         if !input.is_empty() {
-            return Err("trailing PV snapshot bytes".into());
+            return Err("PV snapshot trailing bytes".into());
         }
-        let mut machine = Self::construct(executable, kernel, initrd, capture.seed, clock)?;
-        if let Some(mut checkpoint) = capture.checkpoint {
-            checkpoint.artifact = machine.directory.path().join("restore");
-            fs::write(&checkpoint.artifact, image).map_err(|e| format!("PV restore image: {e}"))?;
-            machine.worker()?.call(Operation::Restore(checkpoint))?;
+        let mut machine = Self::construct(executable, kernel, initrd, capture.command_line)?;
+        if capture.live {
+            machine.boot(capture.seed, capture.reached)?;
+            let path = machine.directory.path().join("restore");
+            fs::write(&path, image).map_err(|e| format!("PV restore image: {e}"))?;
+            if !matches!(
+                machine.worker()?.call(Request::Restore(path))?,
+                Response::Ready
+            ) {
+                return Err("PV unexpected restore response".into());
+            }
         } else {
             drop(machine.worker.take());
         }
+        machine.input = capture.input;
+        machine.guest = capture.guest;
+        machine.writes = capture.writes;
         machine.reached = capture.reached;
         machine.state = capture.state;
-        machine.boot_rng = capture.boot_rng;
+        machine.shutdown = capture.shutdown;
+        machine.seed = capture.seed;
+        machine.pending_boots = capture.pending_boots;
+        machine.pending_at = capture.pending_at;
         Ok(machine)
     }
 }
-
 #[cfg(test)]
 fn read_blob(input: &mut &[u8]) -> Result<Vec<u8>, String> {
     let mut length = [0; 8];
@@ -294,90 +398,120 @@ fn read_blob(input: &mut &[u8]) -> Result<Vec<u8>, String> {
     let length =
         usize::try_from(u64::from_le_bytes(length)).map_err(|_| "PV snapshot length overflow")?;
     if length > input.len() {
-        return Err("truncated PV snapshot data".into());
+        return Err("PV snapshot truncated".into());
     }
-    let bytes = input[..length].to_vec();
+    let blob = input[..length].to_vec();
     *input = &input[length..];
-    Ok(bytes)
+    Ok(blob)
+}
+// The nominal PV progress charge is independent of the caller's execution rate.
+// Price each complete work unit once; the guest preserves any partial charge.
+fn priced_syscall_ns(factor_permille: u32) -> u64 {
+    (1000u128 * u128::from(factor_permille)).div_ceil(1000) as u64
 }
 
 impl Machine for PVMachine {
     type Context = ();
     type Error = std::io::Error;
-    type Snapshot = Vec<u8>;
-
-    fn run(&mut self, _: &mut (), upto: Timestamp) -> Result<StopReason, std::io::Error> {
-        if matches!(self.state, State::Exited | State::Crashed | State::Invalid) {
-            return Err(std::io::Error::other("PV machine is exited or invalid"));
+    type Snapshot = Snapshot;
+    fn run(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        upto: Timestamp,
+    ) -> Result<StopReason, Self::Error> {
+        if self.state == State::Invalid {
+            return Err(std::io::Error::other("PV machine invalid"));
         }
         let upto = upto.as_nanos();
-        if upto < self.reached || upto < self.clock.now() || upto == u64::MAX {
+        let now = context.clock.now();
+        if upto < self.reached
+            || upto < now
+            || self.pending_at.is_some_and(|at| upto < at)
+            || upto == u64::MAX
+        {
             return Err(std::io::Error::other(
-                "PV execution boundary is backwards or exceeds finite time range",
+                "PV execution interval backwards or infinite",
             ));
         }
-        match self.execute(upto) {
-            Ok(reason) => Ok(reason),
-            Err(error) => {
+        let mut invalidates = true;
+        let mut crashed_this_run = false;
+        let result: Result<StopReason, String> = (|| {
+            while let Some(input) = context.inbox.front() {
+                match &input.payload {
+                    crate::pv::Request::Crash => {
+                        crashed_this_run |= !matches!(self.state, State::Exited | State::Crashed)
+                            || self.pending_boots > 0;
+                        self.request_crash().map_err(|e| e.to_string())?;
+                    }
+                    crate::pv::Request::Reboot => self
+                        .request_reboot(Timestamp::from_nanos(now.max(self.reached)))
+                        .map_err(|e| e.to_string())?,
+                    crate::pv::Request::Shutdown => {
+                        self.request_shutdown().map_err(|e| e.to_string())?
+                    }
+                    request @ (crate::pv::Request::Application { .. }
+                    | crate::pv::Request::SimulationReply { .. }) => {
+                        if !matches!(self.state, State::Exited | State::Crashed)
+                            || self.pending_boots > 0
+                        {
+                            self.input.extend(self.guest.request(request)?);
+                        }
+                    }
+                }
+                context.inbox.take();
+            }
+            if self.pending_boots > 0 {
+                let at = now
+                    .max(self.reached)
+                    .max(self.pending_at.unwrap_or(self.reached));
+                self.initialize(context, at)?;
+            }
+            if matches!(self.state, State::Exited | State::Crashed) {
+                self.reached = now.max(self.reached);
+                if upto > self.reached && !crashed_this_run {
+                    invalidates = false;
+                    return Err("PV exited machine requires a zero-budget run or Reboot".into());
+                }
+                return Ok(StopReason::Exited {
+                    reached: Timestamp::from_nanos(self.reached),
+                    reason: match self.state {
+                        State::Crashed => ExitReason::Crashed,
+                        _ => ExitReason::Shutdown,
+                    },
+                });
+            }
+            let syscall_cost_ns = priced_syscall_ns(context.execution.factor_permille());
+            let stopped = self.execute(now, upto, syscall_cost_ns)?;
+            self.guest
+                .observe_ordered(context, std::mem::take(&mut self.writes))?;
+            Ok(stopped)
+        })();
+        result.map_err(|error| {
+            if invalidates {
                 self.state = State::Invalid;
                 drop(self.worker.take());
-                Err(std::io::Error::other(error))
             }
-        }
+            std::io::Error::other(error)
+        })
     }
 
-    fn crash(&mut self) -> Result<(), std::io::Error> {
-        if matches!(self.state, State::Exited | State::Crashed | State::Invalid) {
-            return Err(std::io::Error::other(
-                "PV crash requires a valid live machine",
-            ));
-        }
-        self.state = State::Invalid;
-        if let Some(mut worker) = self.worker.take() {
-            worker.terminate().map_err(std::io::Error::other)?;
-        }
-        self.state = State::Crashed;
-        Ok(())
-    }
-
-    fn snapshot(&mut self) -> Result<Vec<u8>, std::io::Error> {
+    fn snapshot(&mut self) -> Result<Snapshot, Self::Error> {
         self.capture().map_err(std::io::Error::other)
     }
-
-    /// This diskless reset discards RAM/devices. Boot entropy is a fresh draw
-    /// from the machine's deterministic stream, which snapshots preserve.
-    fn reboot(&mut self, at: Timestamp) -> Result<(), std::io::Error> {
-        let at = at.as_nanos();
-        if self.state == State::Invalid {
-            return Err(std::io::Error::other("cannot reboot an invalid PV machine"));
-        }
-        if at != self.clock.now() || at < self.reached || at == u64::MAX {
-            return Err(std::io::Error::other(
-                "PV reboot requires the current finite simulation barrier",
-            ));
-        }
-        self.state = State::Invalid;
-        if let Some(mut worker) = self.worker.take() {
-            worker.terminate().map_err(std::io::Error::other)?;
-        }
-        let seed = self.boot_rng.next();
-        let mut replacement = Self::construct(
-            &self.executable,
-            self.kernel.clone(),
-            self.initrd.clone(),
-            seed,
-            self.clock.clone(),
-        )
-        .map_err(std::io::Error::other)?;
-        replacement.boot_rng = self.boot_rng.clone();
-        replacement.console = std::mem::take(&mut self.console);
-        *self = replacement;
-        Ok(())
-    }
 }
-
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
-mod lifecycle_tests;
+mod execution_tests;
+
+#[cfg(test)]
+mod console_tests;
+
+#[cfg(test)]
+mod program_exit_tests;
+
+#[cfg(test)]
+mod progress_tests;

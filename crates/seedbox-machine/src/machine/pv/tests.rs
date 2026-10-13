@@ -1,11 +1,15 @@
 use super::*;
+use crate::clock::Clock;
+use std::sync::Arc;
+type PVMachine = crate::machine::test_environment::Environment<super::PVMachine>;
 use crate::driver::{Action, Driver, StepOutcome};
+use crate::rng::SeededRng;
 
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
 
-fn kernel(words: &[u32]) -> Vec<u8> {
+pub(super) fn kernel(words: &[u32]) -> Vec<u8> {
     let mut bytes = vec![0; 64 + words.len() * 4];
     bytes[..4].copy_from_slice(&0x1400_0010u32.to_le_bytes()); // B +64, skip Image header.
     bytes[16..24].copy_from_slice(&4096u64.to_le_bytes());
@@ -33,32 +37,41 @@ fn timed_guest() -> Vec<u8> {
 #[test]
 fn invalid_inputs_fail_before_spawning_worker() {
     let clock = Arc::new(crate::clock::SimulationClock::new(0));
-    let error = PVMachine::new(Path::new("/no-worker"), vec![], vec![], 1, clock)
-        .err()
-        .unwrap();
+    let error = PVMachine::new(
+        Path::new("/no-worker"),
+        vec![],
+        vec![],
+        SeededRng::new(1),
+        clock,
+    )
+    .err()
+    .unwrap();
     assert!(!error.to_string().contains("machine worker"));
 }
 
-// Invoke explicitly with SEEDBOX_PV_WORKER set to a signed, current ARM worker.
+// Invoke explicitly with SEEDBOX_PV_WORKER set to a signed seedbox-pv-worker binary.
 // Default portable tests do not open HVF/KVM.
 #[test]
 #[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
 fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let executable = Path::new(&executable);
-    let mut driver = Driver::new(
+    let mut driver = crate::driver::fixture::driver(
         at(0),
         std::time::Duration::from_millis(1),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> =
+                Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
             (0..2)
                 .map(|_| {
-                    PVMachine::new(
+                    PVMachine::configured(
                         executable,
                         timed_guest(),
                         b"initrd".to_vec(),
-                        7,
+                        SeededRng::new(7),
                         clock.clone(),
                     )
                 })
@@ -97,18 +110,23 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
     );
     assert_eq!(
         driver.step(at(10)).unwrap(),
-        StepOutcome::Finished { at: at(5) }
+        StepOutcome::Finished { at: at(5), reason: ExitReason::Shutdown }
     );
     drop(driver);
     // The checkpoint survives the workers and temporary boot/checkpoint files.
-    let mut restored = Driver::new(
+    let mut restored = crate::driver::fixture::driver(
         at(0),
         std::time::Duration::from_millis(1),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
-            Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
-                .map_err(std::io::Error::other)?])
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> =
+                Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
+            Ok(vec![
+                PVMachine::from_snapshot(executable, &snapshot, clock)
+                    .map_err(std::io::Error::other)?,
+            ])
         },
     )
     .unwrap();
@@ -122,16 +140,21 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
     );
     assert_eq!(
         restored.step(at(10)).unwrap(),
-        StepOutcome::Finished { at: at(5) }
+        StepOutcome::Finished { at: at(5), reason: ExitReason::Shutdown }
     );
-    let mut second = Driver::new(
+    let mut second = crate::driver::fixture::driver(
         at(0),
         std::time::Duration::from_millis(1),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
-            Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
-                .map_err(std::io::Error::other)?])
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> =
+                Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
+            Ok(vec![
+                PVMachine::from_snapshot(executable, &snapshot, clock)
+                    .map_err(std::io::Error::other)?,
+            ])
         },
     )
     .unwrap();
@@ -145,7 +168,7 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
     );
     assert_eq!(
         second.step(at(10)).unwrap(),
-        StepOutcome::Finished { at: at(5) }
+        StepOutcome::Finished { at: at(5), reason: ExitReason::Shutdown }
     );
 }
 
@@ -159,7 +182,7 @@ fn native_indefinite_idle_and_capture_failure_keep_valid_machine() {
         Path::new(&executable),
         code,
         b"initrd".to_vec(),
-        7,
+        SeededRng::new(7),
         clock.clone(),
     )
     .unwrap();
@@ -172,14 +195,13 @@ fn native_indefinite_idle_and_capture_failure_keep_valid_machine() {
     );
     assert_eq!(clock.now(), 37);
     let existing = machine.directory.path().join("kernel");
-    assert!(matches!(
+    assert!(
         machine
             .worker()
             .unwrap()
-            .call(Operation::Snapshot { artifact: existing })
-            .unwrap(),
-        Answer::SnapshotFailed(_)
-    ));
+            .call(Request::Capture(existing))
+            .is_err()
+    );
     let snapshot = machine.snapshot().unwrap();
     assert_eq!(
         machine.run(&mut (), at(100)).unwrap(),
@@ -188,8 +210,11 @@ fn native_indefinite_idle_and_capture_failure_keep_valid_machine() {
             deadline: None
         }
     );
-    machine.crash().unwrap();
-    assert!(machine.run(&mut (), at(100)).is_err());
+    machine.request(crate::pv::Request::Crash).unwrap();
+    assert!(
+        matches!(machine.run(&mut (), at(100)).unwrap(), StopReason::Exited { reached, reason: ExitReason::Crashed } if reached == at(100))
+    );
+    assert!(machine.run(&mut (), at(101)).is_err());
     assert!(machine.snapshot().is_ok());
     drop(machine);
     let mut branch = PVMachine::from_snapshot(Path::new(&executable), &snapshot, clock).unwrap();
@@ -287,17 +312,20 @@ fn native_linux_boot_and_program_poweroff_use_the_driver() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let kernel_path = std::env::var_os("SEEDBOX_PV_KERNEL").expect("set SEEDBOX_PV_KERNEL");
     let kernel = fs::read(kernel_path).unwrap();
-    let mut driver = Driver::new(
+    let mut driver = crate::driver::fixture::driver(
         at(0),
         std::time::Duration::from_millis(1),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
-            Ok(vec![PVMachine::new(
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> =
+                Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
+            Ok(vec![PVMachine::configured(
                 Path::new(&executable),
                 kernel,
                 linux_initrd(),
-                7,
+                SeededRng::new(7),
                 clock,
             )?])
         },
@@ -337,17 +365,20 @@ fn native_horizon_is_accepted_before_following_poweroff() {
         0xf2b0_8000,
         0xd400_0002, // PSCI power off.
     ]);
-    let mut driver = Driver::new(
+    let mut driver = crate::driver::fixture::driver(
         at(0),
         std::time::Duration::from_millis(1),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
-            Ok(vec![PVMachine::new(
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> =
+                Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
+            Ok(vec![PVMachine::configured(
                 executable,
                 code,
                 b"initrd".to_vec(),
-                1,
+                SeededRng::new(1),
                 clock,
             )?])
         },
@@ -366,23 +397,28 @@ fn native_horizon_is_accepted_before_following_poweroff() {
         .unwrap();
     assert_eq!(
         driver.step(at(50)).unwrap(),
-        StepOutcome::Finished { at: at(40) }
+        StepOutcome::Finished { at: at(40), reason: ExitReason::Shutdown }
     );
     drop(driver);
-    let mut branch = Driver::new(
+    let mut branch = crate::driver::fixture::driver(
         at(40),
         std::time::Duration::from_millis(1),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
-            Ok(vec![PVMachine::from_snapshot(executable, &snapshot, clock)
-                .map_err(std::io::Error::other)?])
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> =
+                Arc::new(crate::clock::SimulationClock::new((at(40)).as_nanos()));
+            Ok(vec![
+                PVMachine::from_snapshot(executable, &snapshot, clock)
+                    .map_err(std::io::Error::other)?,
+            ])
         },
     )
     .unwrap();
     assert_eq!(
         branch.step(at(50)).unwrap(),
-        StepOutcome::Finished { at: at(40) }
+        StepOutcome::Finished { at: at(40), reason: ExitReason::Shutdown }
     );
 }
 
@@ -401,8 +437,14 @@ fn native_runnable_gap_adopts_time_without_executing_guest_work() {
         0xf2b0_8000, // MOVK X0, #0x8400, LSL #16 (PSCI SYSTEM_OFF).
         0xd400_0002, // HVC #0.
     ]);
-    let mut machine =
-        PVMachine::new(executable, code, b"initrd".to_vec(), 7, clock.clone()).unwrap();
+    let mut machine = PVMachine::new(
+        executable,
+        code,
+        b"initrd".to_vec(),
+        SeededRng::new(7),
+        clock.clone(),
+    )
+    .unwrap();
     assert_eq!(
         machine.run(&mut (), at(10)).unwrap(),
         StopReason::BoundaryReached
@@ -451,7 +493,7 @@ fn native_overdue_timer_is_delivered_at_adopted_time_after_a_gap() {
         executable,
         timed_guest(),
         b"initrd".to_vec(),
-        7,
+        SeededRng::new(7),
         clock.clone(),
     )
     .unwrap();
@@ -512,7 +554,7 @@ fn native_time_adoption_does_not_wake_indefinitely_blocked_work() {
         Path::new(&executable),
         code,
         b"initrd".to_vec(),
-        7,
+        SeededRng::new(7),
         clock.clone(),
     )
     .unwrap();
@@ -538,4 +580,137 @@ fn native_time_adoption_does_not_wake_indefinitely_blocked_work() {
             deadline: None,
         }
     );
+}
+
+#[test]
+#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+fn native_repeated_run_keeps_execution_position_when_shared_clock_lags() {
+    let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
+    let clock = Arc::new(crate::clock::SimulationClock::new(0));
+    let code = kernel(&[
+        0xd2a1_4021, // MOV X1, #0x0a010000 (PV event page).
+        0xd280_0060, // MOV X0, #3 (ABI).
+        0xf900_1020, // STR X0, [X1,#32] (ready).
+        0xf900_0c20, // STR X0, [X1,#24] (yield to published bound).
+        0xd280_0100, // MOV X0, #8.
+        0xf2b0_8000, // MOVK X0, #0x8400, LSL #16 (PSCI SYSTEM_OFF).
+        0xd400_0002, // HVC #0.
+    ]);
+    let mut machine = PVMachine::new(
+        Path::new(&executable),
+        code,
+        b"initrd".to_vec(),
+        SeededRng::new(7),
+        clock.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        machine.run(&mut (), at(10)).unwrap(),
+        StopReason::BoundaryReached
+    );
+    assert_eq!(clock.now(), 0);
+    assert_eq!(
+        machine.run(&mut (), at(20)).unwrap(),
+        StopReason::Exited {
+            reached: at(10),
+            reason: ExitReason::Shutdown
+        }
+    );
+    assert_eq!(clock.now(), 0);
+}
+
+#[test]
+fn deferred_startup_failure_is_a_run_error_and_invalidates_the_machine() {
+    let mut machine = super::PVMachine::from_boot_inputs(
+        Path::new("/missing/pv-worker"),
+        kernel(&[0x1400_0000]),
+        b"initrd".to_vec(),
+    )
+    .unwrap();
+    let clock = crate::clock::SimulationClock::new(0);
+    let mut rng = SeededRng::new(9);
+    let mut expected = rng.clone();
+    use crate::rng::RngStream;
+    expected.fill_bytes(&mut [0; 8]);
+    assert!(machine.snapshot().is_ok());
+    let error = machine
+        .run(
+            &mut RunContext {
+                execution: Default::default(),
+                worker: &mut (),
+                clock: &clock,
+                rng: &mut rng,
+                inbox: crate::pv::Inbox::new(
+                    &mut Default::default(),
+                    Timestamp::from_nanos(crate::clock::Clock::now(&clock)),
+                ),
+                outbox: crate::pv::Outbox::new(
+                    &mut Vec::new(),
+                    Timestamp::from_nanos(crate::clock::Clock::now(&clock)),
+                    at(0),
+                ),
+            },
+            at(0),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("/missing/pv-worker"));
+    assert!(machine.snapshot().is_err());
+    assert!(
+        machine
+            .run(
+                &mut RunContext {
+                    execution: Default::default(),
+                    worker: &mut (),
+                    clock: &clock,
+                    rng: &mut rng,
+                    inbox: crate::pv::Inbox::new(
+                        &mut Default::default(),
+                        Timestamp::from_nanos(crate::clock::Clock::now(&clock))
+                    ),
+                    outbox: crate::pv::Outbox::new(
+                        &mut Vec::new(),
+                        Timestamp::from_nanos(crate::clock::Clock::now(&clock)),
+                        at(1)
+                    ),
+                },
+                at(1)
+            )
+            .is_err()
+    );
+    let mut got = [0; 8];
+    let mut want = [0; 8];
+    rng.fill_bytes(&mut got);
+    expected.fill_bytes(&mut want);
+    assert_eq!(got, want);
+}
+
+#[test]
+fn complete_kernel_arguments_survive_uninitialized_snapshot() {
+    let arguments = "rdinit=/custom caller=a caller=b";
+    let mut machine = super::PVMachine::construct(
+        Path::new("/not-spawned"),
+        timed_guest(),
+        b"initrd".to_vec(),
+        arguments.into(),
+    )
+    .unwrap();
+    let snapshot = machine.capture().unwrap();
+    let restored = super::PVMachine::from_snapshot(Path::new("/not-spawned"), &snapshot).unwrap();
+    assert_eq!(restored.command_line, arguments);
+    assert!(
+        super::PVMachine::construct(
+            Path::new("/not-spawned"),
+            timed_guest(),
+            b"initrd".to_vec(),
+            "bad\0argument".into()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn kernel_argument_byte_limit_prevents_silent_linux_truncation() {
+    assert!(super::boot::arguments(&"x".repeat(2047)).is_ok());
+    assert!(super::boot::arguments(&"x".repeat(2048)).is_err());
+    assert!(super::boot::arguments(&"é".repeat(1024)).is_err());
 }

@@ -1,4 +1,8 @@
 use super::*;
+use crate::clock::Clock;
+use crate::rng::SeededRng;
+use std::sync::Arc;
+type TcgMachine = crate::machine::test_environment::Environment<super::TcgMachine>;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 struct TestClock(AtomicU64);
@@ -17,6 +21,7 @@ fn start(words: &[u32], clock: Arc<TestClock>) -> TcgMachine {
             boot: Boot::Program(words.iter().flat_map(|w| w.to_le_bytes()).collect()),
             memory_mib: 16,
         },
+        SeededRng::new(0),
         clock,
     )
     .unwrap()
@@ -194,15 +199,18 @@ fn repeated_capture_preserves_stopped_reason_timer_and_next_execution() {
 #[test]
 fn driver_resumes_a_runnable_guest_without_replaying_paused_instructions() {
     use crate::driver::{Action, Driver, StepOutcome};
-    let mut driver = Driver::new(
+    let mut driver = crate::driver::fixture::driver(
         at(0),
         std::time::Duration::from_nanos(10_000),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> =
+                Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
             (0..2)
                 .map(|_| {
-                    TcgMachine::new(
+                    TcgMachine::configured(
                         Path::new("qemu-system-riscv64"),
                         Manifest {
                             boot: Boot::Program(
@@ -213,6 +221,7 @@ fn driver_resumes_a_runnable_guest_without_replaying_paused_instructions() {
                             ),
                             memory_mib: 16,
                         },
+                        SeededRng::new(0),
                         clock.clone(),
                     )
                 })
@@ -280,16 +289,19 @@ fn driver_resume_delivers_overdue_timer_before_post_resume_instructions() {
         ],
         vec![0x0000_006f], // Second machine remains runnable during the pause.
     ];
-    let mut driver = Driver::new(
+    let mut driver = crate::driver::fixture::driver(
         at(0),
         std::time::Duration::from_nanos(10_000),
         2,
+        crate::rng::SeededRng::new(0),
         || Ok(()),
-        |clock| {
+        || {
+            let clock: Arc<dyn Clock + Send + Sync> =
+                Arc::new(crate::clock::SimulationClock::new((at(0)).as_nanos()));
             programs
                 .iter()
                 .map(|words| {
-                    TcgMachine::new(
+                    TcgMachine::configured(
                         Path::new("qemu-system-riscv64"),
                         Manifest {
                             boot: Boot::Program(
@@ -297,6 +309,7 @@ fn driver_resume_delivers_overdue_timer_before_post_resume_instructions() {
                             ),
                             memory_mib: 16,
                         },
+                        SeededRng::new(0),
                         clock.clone(),
                     )
                 })
