@@ -9,8 +9,6 @@ include!("support/diff_fixture.rs");
 fn arm_fixture() -> sb::record::RunRecord {
     let mut record = fixture();
     record.identity.inputs.profile.backend = sb::execution::Backend::Hvf;
-    let parameters = &mut record.identity.inputs.profile.semantic_parameters;
-    parameters.engine = Some(sb::engine::arm_descriptor());
     record
 }
 
@@ -30,7 +28,7 @@ fn arm_report_error(record: &mut sb::record::RunRecord, report: &Value) -> Strin
 }
 
 #[test]
-fn native_hvf_reports_require_the_arm_descriptor_and_matching_header() {
+fn native_hvf_reports_require_a_matching_header() {
     let dir = tempfile::tempdir().unwrap();
     let report = arm_report();
     write_fixture(
@@ -52,49 +50,11 @@ fn native_hvf_reports_require_the_arm_descriptor_and_matching_header() {
         Status::Match
     );
 
+    // The backend, not recorded engine metadata, selects the report format.
     let mut record = arm_fixture();
     record.identity.inputs.profile.backend = sb::execution::Backend::Kvm;
     let error = arm_report_error(&mut record, &report);
-    assert!(
-        error.contains("HVF backend and ARM executable descriptor disagree"),
-        "{error}"
-    );
-
-    let mut record = arm_fixture();
-    record.identity.inputs.profile.semantic_parameters =
-        sb::execution::SemanticParameters::new(512);
-    let error = arm_report_error(&mut record, &report);
-    assert!(
-        error.contains("HVF backend and ARM executable descriptor disagree"),
-        "{error}"
-    );
-
-    // Descriptive clock capability metadata does not gate report decoding.
-    let mut descriptive = arm_fixture();
-    if let Some(engine) = &mut descriptive
-        .identity
-        .inputs
-        .profile
-        .semantic_parameters
-        .engine
-    {
-        engine.engine_timebase = "future-capabilities".into();
-    }
-    write_fixture(
-        &dir.path().join("descriptive"),
-        &mut descriptive,
-        Some(&report),
-        None,
-    );
-    assert_eq!(
-        diff(
-            &dir.path().join("descriptive"),
-            &dir.path().join("descriptive")
-        )
-        .unwrap()
-        .status,
-        Status::Match
-    );
+    assert!(error.contains("unsupported VMM report version"), "{error}");
 
     let mut wrong_version = report.clone();
     wrong_version["report_version"] = 1.into();
@@ -417,7 +377,6 @@ fn identity_lists_semantics_and_ignores_attempt_and_performance() {
     );
     b.identity.seed = 2;
     b.identity.inputs.kernel = ContentDigest::of(b"kernel");
-    b.identity.inputs.profile.engine = ContentDigest::of(b"engine");
     b.identity.inputs.profile.semantic_parameters.memory_mb = 1024;
     write_fixture(&dir.path().join("b"), &mut b, None, None);
     let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
@@ -430,7 +389,6 @@ fn identity_lists_semantics_and_ignores_attempt_and_performance() {
         paths,
         [
             "/inputs/kernel",
-            "/inputs/profile/engine",
             "/inputs/profile/semantic_parameters/memory_mb",
             "/seed"
         ]

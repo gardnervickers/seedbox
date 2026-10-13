@@ -43,6 +43,7 @@ impl PreparationBackend for Preparer {
 
 struct Backend {
     profile: ExecutionProfile,
+    engine: Option<EngineDescriptor>,
     performance: BTreeMap<String, String>,
     extra_logs: BTreeMap<String, Vec<u8>>,
     report: ExecutionReport,
@@ -53,6 +54,9 @@ struct Backend {
 impl ExecutionBackend for Backend {
     fn profile(&self) -> ExecutionProfile {
         self.profile.clone()
+    }
+    fn engine(&self) -> Option<EngineDescriptor> {
+        self.engine.clone()
     }
     fn performance_parameters(&self) -> BTreeMap<String, String> {
         self.performance.clone()
@@ -124,14 +128,12 @@ impl Fixture {
         let simulation = config::load(&source, &BTreeMap::new()).unwrap();
         let store = ContentStore::new(directory.path().join("store"));
         let kernel = store.put(b"fixture kernel").unwrap();
-        let engine = store.put(b"fixture engine").unwrap();
         let guest = store.put(b"fixture guest").unwrap();
         let manifest = store.put(b"fixture manifest").unwrap();
         let config = store.put(b"fixture image config").unwrap();
         let layer = store.put(b"fixture layer").unwrap();
         let profile = ExecutionProfile {
             backend: execution::Backend::Other("test-only".into()),
-            engine,
             witness_mode: WitnessMode::Exits,
             semantic_parameters: SemanticParameters::new(512),
         };
@@ -163,6 +165,9 @@ impl Fixture {
         };
         let backend = Backend {
             profile,
+            engine: Some(seedbox_application::engine::kvm_descriptor(Some(
+                "fixture-revision".into(),
+            ))),
             performance: BTreeMap::from([("SEEDBOX_WATCHDOG_MS".into(), "20".into())]),
             extra_logs: BTreeMap::new(),
             report: ExecutionReport {
@@ -753,72 +758,33 @@ fn performance_changes_are_recorded_without_changing_identity_or_bypassing_compa
 }
 
 #[test]
-fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witness() {
+fn replay_runs_the_current_engine_and_records_its_build() {
     let mut fixture = Fixture::new();
     let first = fixture.run();
-    let engine = ContentStore::new(fixture.directory.path().join("store"))
-        .put(b"new engine")
-        .unwrap();
-    fixture.backend.profile.engine = engine.clone();
-    fixture.backend.profile.semantic_parameters.engine =
-        Some(seedbox_application::engine::kvm_descriptor(
-            seedbox_application::engine::ExecutableKind::InternalWorker,
-            "0.2.0-replacement".into(),
-        ));
-    assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
-    let options = ReplayOptions {
-        allow_engine_change: true,
-        ..Default::default()
-    };
-    let replay = fixture
-        .orchestrator
-        .replay_with_options(&first.directory, &fixture.backend, options.clone())
-        .unwrap();
-    assert!(replay.record.allow_engine_change);
-    assert_ne!(replay.record.run_id, first.record.run_id);
-    assert_eq!(replay.record.identity.inputs.profile.engine, engine);
     assert_eq!(
-        replay.record.identity.inputs.profile,
-        fixture.backend.profile
+        first.record.engine.as_ref().unwrap().revision.as_deref(),
+        Some("fixture-revision")
+    );
+    // A new build replays the same identity and records itself as provenance.
+    fixture.backend.engine = Some(seedbox_application::engine::kvm_descriptor(Some(
+        "another-revision-dirty".into(),
+    )));
+    let replay = fixture.replay(&first);
+    assert_eq!(replay.record.run_id, first.record.run_id);
+    assert_eq!(
+        replay.record.engine.as_ref().unwrap().revision.as_deref(),
+        Some("another-revision-dirty")
     );
     assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
-    // Switching back removes stale combined-worker dispatch metadata.
-    let combined_run = replay.directory;
-    fixture.backend.profile.semantic_parameters.engine = None;
-    let standalone_replay = fixture
-        .orchestrator
-        .replay_with_options(&combined_run, &fixture.backend, options.clone())
-        .unwrap();
-    assert_eq!(
-        standalone_replay.record.identity.inputs.profile,
-        fixture.backend.profile
-    );
-    assert_eq!(
-        standalone_replay.record.replay.unwrap().status,
-        ReplayStatus::Match
-    );
+    // Results still decide: a changed witness is a mismatch, whatever the build.
     fixture.backend.report.witness = Some(ContentDigest::of(b"regression"));
     assert_eq!(
-        fixture
-            .orchestrator
-            .replay_with_options(&first.directory, &fixture.backend, options.clone())
-            .unwrap()
-            .record
-            .replay
-            .unwrap()
-            .status,
+        fixture.replay(&first).record.replay.unwrap().status,
         ReplayStatus::Mismatch
     );
+    // Semantic settings still have to match.
     fixture.backend.profile.semantic_parameters.memory_mb = 1024;
-    assert_eq!(
-        fixture
-            .orchestrator
-            .replay_with_options(&first.directory, &fixture.backend, options)
-            .unwrap()
-            .record
-            .outcome,
-        Outcome::Error
-    );
+    assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
 }
 
 #[test]
@@ -1264,23 +1230,17 @@ fn actual_vmm_admission_rejects_an_invalid_retained_profile_before_execution() {
     fixture.preparer.inputs.profile = fixture.backend.profile.clone();
     let original = fixture.run();
     let manifest = fs::read(original.directory.join("manifest.json")).unwrap();
-    let engine = fixture.directory.path().join("retained-engine");
-    fs::write(&engine, b"fixture engine").unwrap();
-    let store = ContentStore::new(fixture.directory.path().join("store"));
+    let engine = Engine {
+        executable: fixture.directory.path().join("seedbox"),
+        revision: None,
+    };
     let executor =
-        seedbox_application::vmm::VmmExecutor::new(&engine, &store, 512, WitnessMode::Exits)
+        seedbox_application::vmm::VmmExecutor::new(engine.clone(), 512, WitnessMode::Exits)
             .unwrap();
-    for allow_engine_change in [false, true] {
+    {
         let rejected = fixture
             .orchestrator
-            .replay_with_options(
-                &original.directory,
-                &executor,
-                ReplayOptions {
-                    allow_engine_change,
-                    ..Default::default()
-                },
-            )
+            .replay_with_options(&original.directory, &executor, ReplayOptions::default())
             .unwrap();
         assert_eq!(rejected.record.outcome, Outcome::Error);
         assert_eq!(
@@ -2093,10 +2053,11 @@ fn checkpoint_identity_replays_retained_semantics() {
 fn kvm_executor_profile_records_only_its_settings_and_replays() {
     use seedbox_application::vmm::VmmExecutor;
     let mut f = Fixture::new();
-    let store = ContentStore::new(f.directory.path().join("store"));
-    let engine = f.directory.path().join("engine");
-    fs::write(&engine, b"fixture engine").unwrap();
-    let executor = VmmExecutor::new(&engine, &store, 1024, WitnessMode::Exits).unwrap();
+    let engine = Engine {
+        executable: f.directory.path().join("seedbox"),
+        revision: None,
+    };
+    let executor = VmmExecutor::new(engine.clone(), 1024, WitnessMode::Exits).unwrap();
     assert_eq!(
         executor.profile().semantic_parameters,
         SemanticParameters::new(1024)
@@ -2141,17 +2102,10 @@ fn replay_refuses_settings_drift_before_execution() {
         let run = f.run();
         f.backend.profile.semantic_parameters = SemanticParameters::new(512);
         requested(&mut f.backend.profile.semantic_parameters);
-        for allow_engine_change in [false, true] {
+        {
             let error = f
                 .orchestrator
-                .replay_with_options(
-                    &run.directory,
-                    &f.backend,
-                    ReplayOptions {
-                        allow_engine_change,
-                        ..Default::default()
-                    },
-                )
+                .replay_with_options(&run.directory, &f.backend, ReplayOptions::default())
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "{error}");
@@ -2170,10 +2124,11 @@ fn replay_refuses_settings_drift_before_execution() {
 fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
     use seedbox_application::{engine_adapter::recorded_page_timer, vmm::VmmExecutor};
     let mut f = Fixture::new();
-    let store = ContentStore::new(f.directory.path().join("store"));
-    let engine = f.directory.path().join("engine");
-    fs::write(&engine, b"fixture engine").unwrap();
-    let executor = VmmExecutor::new(&engine, &store, 1024, WitnessMode::Exits).unwrap();
+    let engine = Engine {
+        executable: f.directory.path().join("seedbox"),
+        revision: None,
+    };
+    let executor = VmmExecutor::new(engine.clone(), 1024, WitnessMode::Exits).unwrap();
     f.backend.profile = executor.profile();
     f.preparer.inputs.profile = executor.profile();
     let before = f.run();
@@ -2220,10 +2175,11 @@ fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
 fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
     use seedbox_application::vmm::VmmExecutor;
     let mut f = Fixture::new();
-    let store = ContentStore::new(f.directory.path().join("store"));
-    let engine = f.directory.path().join("engine");
-    fs::write(&engine, b"fixture engine").unwrap();
-    let off = VmmExecutor::new(&engine, &store, 1024, WitnessMode::Exits).unwrap();
+    let engine = Engine {
+        executable: f.directory.path().join("seedbox"),
+        revision: None,
+    };
+    let off = VmmExecutor::new(engine.clone(), 1024, WitnessMode::Exits).unwrap();
     assert_eq!(off.profile(), off.clone().with_deferred_tx(false).profile());
     let on = off.clone().with_deferred_tx(true);
     assert!(on.profile().semantic_parameters.deferred_tx);
@@ -2243,17 +2199,10 @@ fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
         let enabled =
             seedbox_application::engine_adapter::recorded_deferred_tx(&recorded.profile()).unwrap();
         f.backend.profile = off.clone().with_deferred_tx(!enabled).profile();
-        for allow_engine_change in [false, true] {
+        {
             let error = f
                 .orchestrator
-                .replay_with_options(
-                    &run.directory,
-                    &f.backend,
-                    ReplayOptions {
-                        allow_engine_change,
-                        ..Default::default()
-                    },
-                )
+                .replay_with_options(&run.directory, &f.backend, ReplayOptions::default())
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("--deferred-tx"));
@@ -2300,14 +2249,12 @@ fn only_the_backend_runtime_inputs_are_copied_into_an_attempt() {
             self.0.backend.performance_parameters()
         }
         fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
-            vec![&inputs.profile.engine, &inputs.kernel]
+            vec![&inputs.kernel]
         }
         fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
             let inputs = &self.0.preparer.inputs;
             assert_eq!(request.artifacts.keys().collect::<Vec<_>>(), {
-                let mut keys = vec![&inputs.profile.engine, &inputs.kernel];
-                keys.sort();
-                keys
+                vec![&inputs.kernel]
             });
             self.0.backend.execute(request)
         }
@@ -2325,7 +2272,7 @@ fn only_the_backend_runtime_inputs_are_copied_into_an_attempt() {
     assert_eq!(run.record.outcome, Outcome::Pass);
     assert_eq!(
         fs::read_dir(run.directory.join("inputs")).unwrap().count(),
-        2
+        1
     );
 }
 

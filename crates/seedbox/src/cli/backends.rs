@@ -37,6 +37,9 @@ impl ExecutionBackend for Executor {
     fn performance_parameters(&self) -> BTreeMap<String, String> {
         self.backend().performance_parameters()
     }
+    fn engine(&self) -> Option<seedbox_application::execution::EngineDescriptor> {
+        self.backend().engine()
+    }
     fn preflight(&self, out: Option<&Path>) -> Result<()> {
         self.backend().preflight(out)
     }
@@ -110,7 +113,7 @@ impl PreparationBackend for Preparer {
                 docker: self.inputs.docker.clone(),
                 cancellation: context.cancellation.clone(),
                 progress: preparation_progress,
-                export_cache: Some(self.inputs.profile.engine.clone()),
+                export_cache: true,
             },
         )
     }

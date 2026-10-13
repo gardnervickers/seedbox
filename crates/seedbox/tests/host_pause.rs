@@ -15,9 +15,7 @@ use std::{
 
 fn cli(binary: &Path, state: &Path) -> Command {
     let mut command = Command::new(binary);
-    command
-        .env_remove("SEEDBOX_VMM")
-        .env("SEEDBOX_STATE", state);
+    command.env("SEEDBOX_STATE", state);
     command
 }
 

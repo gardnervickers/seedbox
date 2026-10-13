@@ -53,7 +53,7 @@ fn bundle(path: &Path) {
         identity,
         attempt: "/never/follow/archived/host/path".into(),
         performance_parameters: BTreeMap::new(),
-        allow_engine_change: false,
+        engine: None,
         log_policy: Default::default(),
         omitted_logs: BTreeMap::from([(
             "vmm.stderr".into(),
@@ -376,7 +376,6 @@ fn resolved_request(id: &str) -> SubmitRequest {
         guests: std::collections::BTreeMap::from([("oracle".into(), binary.clone())]),
         profile: ExecutionProfile {
             backend: Backend::Other("catalogue-test".into()),
-            engine: binary,
             witness_mode: WitnessMode::Exits,
             semantic_parameters: SemanticParameters::new(1024),
         },

@@ -40,7 +40,6 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
         ]),
         profile: ExecutionProfile {
             backend: Backend::Kvm,
-            engine: hash.clone(),
             witness_mode: WitnessMode::FullState,
             semantic_parameters: SemanticParameters::new(512),
         },
@@ -141,8 +140,6 @@ fn initial_arm_launch_uses_numeric_cap_and_network_bound() {
         assert!(world_json(base).unwrap().get("launch_skew_ns").is_none());
         let mut prepared = base.prepared.clone();
         prepared.profile.backend = Backend::Hvf;
-        prepared.profile.semantic_parameters.engine =
-            Some(seedbox_application::engine::arm_descriptor());
         let request = ExecutionRequest {
             program: &[],
             intervention_history: None,
@@ -300,7 +297,6 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         let parent = checkpoint_protocol::parent_identity(
             &typed(&checkpoint_world),
             request.seed,
-            prepared.profile.engine.hex(),
             false,
             false,
             |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
@@ -1752,12 +1748,12 @@ fn committed_trigger_reports_correlate_arms_effects_cancellation_and_cutoff() {
 
 #[test]
 fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
-    use seedbox_application::store::ContentStore;
     let dir = tempfile::tempdir().unwrap();
-    let engine = dir.path().join("engine");
-    std::fs::write(&engine, b"engine").unwrap();
-    let store = ContentStore::new(dir.path().join("objects"));
-    let executor = vmm::VmmExecutor::new(&engine, &store, 512, WitnessMode::Exits).unwrap();
+    let engine = Engine {
+        executable: dir.path().join("seedbox"),
+        revision: None,
+    };
+    let executor = vmm::VmmExecutor::new(engine, 512, WitnessMode::Exits).unwrap();
     let original = executor.profile();
     assert!(!original.semantic_parameters.torn_writes);
     assert_eq!(original.semantic_parameters.memory_mb, 512);
@@ -1911,7 +1907,6 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
             let engine_parent = checkpoint_protocol::parent_identity(
                 &typed(&world),
                 base.seed,
-                prepared.profile.engine.hex(),
                 deferred_tx,
                 page_timer,
                 |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
@@ -2015,19 +2010,13 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             cfg["checkpoint"]["parent_identity"],
             ordinary["checkpoint"]["parent_identity"]
         );
-        let parent = checkpoint_protocol::parent_identity(
-            &typed(&cfg),
-            base.seed,
-            inputs.profile.engine.hex(),
-            false,
-            false,
-            |path| {
+        let parent =
+            checkpoint_protocol::parent_identity(&typed(&cfg), base.seed, false, false, |path| {
                 Ok(ContentDigest::of(&std::fs::read(path).unwrap())
                     .hex()
                     .to_owned())
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(cfg["checkpoint"]["parent_identity"], parent);
         let mut deferred_worlds = Vec::new();
         {
@@ -2048,7 +2037,6 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             let deferred_parent = checkpoint_protocol::parent_identity(
                 &typed(&deferred_world),
                 base.seed,
-                inputs.profile.engine.hex(),
                 true,
                 false,
                 |path| {
@@ -2111,20 +2099,6 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             moved["checkpoint"]["branch_identity"],
             cfg["checkpoint"]["branch_identity"]
         );
-        inputs.profile.engine = ContentDigest::of(b"another engine");
-        let changed = world_json(&ExecutionRequest {
-            program: &[],
-            intervention_history: None,
-            start_paused: false,
-            resume_checkpoint: None,
-            replay_interventions: None,
-            observations: None,
-            prepared: &inputs,
-            artifacts: &artifacts,
-            ..*base
-        })
-        .unwrap();
-        assert_ne!(changed["checkpoint"]["parent_identity"], parent);
     });
 }
 
@@ -2307,10 +2281,8 @@ fn machine_memory_crosses_worker_config_and_binds_checkpoint_identity() {
             512
         );
         let identity = |world: &WorldConfig| {
-            checkpoint_protocol::parent_identity(world, 1, "engine", false, false, |_| {
-                Ok("content".into())
-            })
-            .unwrap()
+            checkpoint_protocol::parent_identity(world, 1, false, false, |_| Ok("content".into()))
+                .unwrap()
         };
         assert_ne!(identity(&world), identity(&original));
         prepared.machine_memory_mb.insert("missing".into(), 256);

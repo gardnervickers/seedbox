@@ -1,5 +1,5 @@
 //! Synthetic readiness tests; no KVM activity.
-use seedbox_application::{admission::*, execution::*, store::ContentDigest};
+use seedbox_application::{admission::*, execution::*};
 
 fn observed() -> CoreObservation {
     let p = required_policy();
@@ -24,7 +24,6 @@ fn observed() -> CoreObservation {
 fn profile() -> ExecutionProfile {
     ExecutionProfile {
         backend: Backend::Kvm,
-        engine: ContentDigest::of(b"any engine"),
         witness_mode: WitnessMode::Exits,
         semantic_parameters: SemanticParameters::new(512),
     }

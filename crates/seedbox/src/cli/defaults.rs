@@ -1,5 +1,5 @@
 //! Portable CLI path resolution; complete builds keep guest inputs beside the executable.
-use seedbox_application::{Error, Result};
+use seedbox_application::{execution::Engine, Error, Result};
 use std::{
     env,
     path::{Path, PathBuf},
@@ -28,17 +28,35 @@ pub fn compose_file(path: &Path) -> Result<PathBuf> {
         })
 }
 
-/// The VMM is linked into this executable. An explicit path selects the legacy
-/// standalone worker contract for development and historical runs.
-pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return existing("--vmm", path);
-    }
-    env::current_exe().map_err(|error| {
+/// The running executable is the engine of every run and replay. Its source
+/// revision is recorded as provenance only.
+pub fn engine() -> Result<Engine> {
+    let executable = env::current_exe().map_err(|error| {
         Error::Setup(format!(
-            "cannot locate the built-in VMM executable: {error}; reinstall seedbox or pass --vmm"
+            "cannot locate the seedbox executable: {error}; reinstall seedbox"
         ))
+    })?;
+    Ok(Engine {
+        executable,
+        revision: build_revision(),
     })
+}
+
+/// Builds with uncommitted changes still run; say that their recorded
+/// revision does not identify the exact source.
+pub fn warn_dirty_build() {
+    if let Some(revision) = build_revision().filter(|r| r.ends_with("-dirty")) {
+        eprintln!(
+            "warning: seedbox was built with uncommitted changes ({revision}); runs record this revision, which does not identify their exact source"
+        );
+    }
+}
+
+/// The Git revision this executable was built from, `-dirty` with uncommitted
+/// changes; `None` when the build had no Git metadata (build-runtime.rs).
+pub fn build_revision() -> Option<String> {
+    let revision = env!("SEEDBOX_BUILD_REVISION");
+    (!revision.is_empty()).then(|| revision.to_owned())
 }
 
 /// An explicitly named input, checked before any slow preparation starts.
@@ -89,8 +107,6 @@ mod tests {
 
     #[test]
     fn explicit_inputs_are_checked_without_search() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        assert_eq!(engine(Some(file.path().into())).unwrap(), file.path());
         assert_eq!(
             existing("--kernel", "/nonexistent/kernel".into())
                 .unwrap_err()
@@ -99,7 +115,9 @@ mod tests {
         );
     }
     #[test]
-    fn engine_defaults_to_current_executable() {
-        assert_eq!(engine(None).unwrap(), env::current_exe().unwrap());
+    fn engine_is_the_current_executable_and_its_build() {
+        let engine = engine().unwrap();
+        assert_eq!(engine.executable, env::current_exe().unwrap());
+        assert_eq!(engine.revision, build_revision());
     }
 }

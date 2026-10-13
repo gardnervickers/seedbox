@@ -366,7 +366,7 @@ fn runtime_project() -> (tempfile::TempDir, Vec<String>) {
         "--output".to_owned(),
         "prepared.json".to_owned(),
     ];
-    for flag in ["kernel", "vmm", "guest-init"] {
+    for flag in ["kernel", "guest-init"] {
         let path = directory.path().join(flag);
         fs::write(&path, b"").unwrap();
         args.extend([format!("--{flag}"), path.to_str().unwrap().to_owned()]);
@@ -396,13 +396,13 @@ fn run_without_a_kernel_lists_where_it_looked() {
 #[test]
 fn explicit_inputs_must_exist() {
     let (directory, mut args) = runtime_project();
-    let vmm = args.iter().position(|arg| arg == "--vmm").unwrap();
-    args[vmm + 1] = "/nonexistent/seedbox-vmm".into();
+    let init = args.iter().position(|arg| arg == "--guest-init").unwrap();
+    args[init + 1] = "/nonexistent/compose-init".into();
     let args: Vec<_> = args.iter().map(String::as_str).collect();
     let output = seedbox(&args, directory.path());
     assert_eq!(
         stderr(&output),
-        "error: --vmm /nonexistent/seedbox-vmm: not found\n"
+        "error: --guest-init /nonexistent/compose-init: not found\n"
     );
 }
 
@@ -599,10 +599,11 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("Linux KVM host"));
-    for flag in ["--kernel", "--vmm", "--json"] {
+    for flag in ["--kernel", "--json"] {
         assert!(text.contains(flag), "{text}");
     }
     for flag in [
+        "--vmm",
         "--cpu",
         "--state",
         "--builder",
@@ -617,21 +618,18 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     assert_eq!(invalid_timebase.status.code(), Some(2));
     assert!(stderr(&invalid_timebase).contains("--timebase"));
     for json in [false, true] {
-        let mut args = vec!["doctor", "--vmm", "missing"];
+        let mut args = vec!["doctor", "--kernel", "missing"];
         if json {
             args.push("--json");
         }
         let output = seedbox(&args, root);
         assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), "error: --vmm missing: not found\n");
+        assert_eq!(stderr(&output), "error: --kernel missing: not found\n");
         assert!(output.stdout.is_empty());
     }
-    fs::write(root.join("engine"), b"unsupported engine").unwrap();
-    let missing_kernel = seedbox(&["doctor", "--vmm", "engine", "--kernel", "missing"], root);
-    assert_eq!(
-        stderr(&missing_kernel),
-        "error: --kernel missing: not found\n"
-    );
+    let vmm = seedbox(&["doctor", "--vmm", "engine"], root);
+    assert_eq!(vmm.status.code(), Some(2));
+    assert!(stderr(&vmm).contains("--vmm"));
     assert!(!root.join(".seedbox").exists());
 }
 
@@ -702,39 +700,6 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
         assert!(!root.join("unwanted-state").exists());
         assert!(!root.join(".seedbox").exists());
         assert!(!root.join("output").exists());
-    }
-    let output = seedbox(&["doctor", "--vmm", "engine", "--kernel", "kernel"], root);
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), "error: --vmm engine: not found\n");
-    assert!(!marker.exists());
-    assert!(output.stdout.is_empty());
-}
-
-#[cfg(not(target_os = "linux"))]
-#[test]
-fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("engine"), b"dev engine").unwrap();
-    fs::write(dir.path().join("kernel"), b"dev kernel").unwrap();
-    for json in [false, true] {
-        let mut args = vec!["doctor", "--vmm", "engine", "--kernel", "kernel"];
-        if json {
-            args.push("--json");
-        }
-        let output = seedbox(&args, dir.path());
-        assert_eq!(output.status.code(), Some(2));
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        assert_eq!(
-            stderr(&output),
-            "error: host admission requires Linux x86_64 KVM; use an admitted host\n"
-        );
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        assert_eq!(
-            stderr(&output),
-            "error: --vmm requires Linux KVM; use the built-in Mac engine\n"
-        );
-        assert!(output.stdout.is_empty());
-        assert!(!dir.path().join(".seedbox").exists());
     }
 }
 

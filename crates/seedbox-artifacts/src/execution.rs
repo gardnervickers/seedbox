@@ -1,5 +1,5 @@
 //! Retained execution inputs and outcomes; no machine execution dependencies.
-use crate::{engine::ExecutableKind, image::Launch, store::ContentDigest};
+use crate::{image::Launch, store::ContentDigest};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -12,8 +12,6 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct ExecutionProfile {
     pub backend: Backend,
-    /// Actual runner/VMM binary bytes, not just a version string.
-    pub engine: ContentDigest,
     pub witness_mode: WitnessMode,
     /// Settings that change results, hashed into the run identity.
     /// Schedule controls live in Simulation.
@@ -51,9 +49,6 @@ pub struct SemanticParameters {
     pub torn_writes: bool,
     /// Runtime checkpoint and the branch seed after it.
     pub checkpoint: Option<Checkpoint>,
-    /// Launch contract of the retained executable. `None` is a standalone
-    /// engine that takes the plain argv contract.
-    pub engine: Option<EngineDescriptor>,
     /// Inputs of the HVF backend only.
     pub hvf: Option<HvfParameters>,
 }
@@ -69,20 +64,11 @@ impl SemanticParameters {
             deferred_tx: false,
             torn_writes: false,
             checkpoint: None,
-            engine: None,
             hvf: None,
         }
     }
 
-    /// The executable contract that launches the retained engine.
-    pub fn launch(&self) -> ExecutableKind {
-        self.engine
-            .as_ref()
-            .map_or(ExecutableKind::Standalone, |engine| engine.kind)
-    }
-
-    /// Names of the settings that differ, ignoring the executable descriptor,
-    /// which a replacement engine may change.
+    /// Names of the settings that differ.
     pub fn differences(&self, other: &Self) -> Vec<&'static str> {
         let Self {
             guest_abi,
@@ -92,7 +78,6 @@ impl SemanticParameters {
             deferred_tx,
             torn_writes,
             checkpoint,
-            engine: _,
             hvf,
         } = self;
         [
@@ -144,20 +129,16 @@ pub struct Checkpoint {
     pub branch_seed: u64,
 }
 
-/// The retained executable's launch contract plus descriptive build metadata.
-/// `kind` and `owner_pipe` describe the launch protocol; build metadata is informational.
+/// Which engine build executed a run. Provenance only: nothing gates or
+/// compares on it, and replay always uses the current engine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineDescriptor {
-    pub kind: ExecutableKind,
-    /// The executable accepts `--owner-pipe` after its private contract. EOF on
-    /// stdin then terminates its process group if the owning server disappears.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub owner_pipe: bool,
-    /// Supports the private nonblocking observation socket launch argument.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub live_observations: bool,
     pub simulator_version: String,
+    /// Source revision the engine was built from, `-dirty` when the checkout
+    /// had uncommitted changes; absent when the build had no Git metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     pub host_os: String,
     pub host_arch: String,
     pub guest_arch: String,
@@ -231,8 +212,7 @@ impl PreparedInputs {
     }
 
     pub fn digests(&self) -> impl Iterator<Item = &ContentDigest> {
-        [&self.kernel, &self.profile.engine]
-            .into_iter()
+        std::iter::once(&self.kernel)
             .chain(self.auxiliary.values())
             .chain(self.guests.values())
             .chain(self.images.values().flat_map(|image| {

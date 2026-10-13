@@ -408,7 +408,6 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
         provenance: Default::default(),
         profile: ExecutionProfile {
             backend: seedbox_application::execution::Backend::Other("test".into()),
-            engine: digest.clone(),
             witness_mode: seedbox_application::execution::WitnessMode::Exits,
             semantic_parameters: SemanticParameters::new(512),
         },

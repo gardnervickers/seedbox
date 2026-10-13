@@ -30,11 +30,11 @@ impl BackendProvider for NativeBackends {
     fn project(
         &self,
         configuration: &Simulation,
-        store: &ContentStore,
+        _store: &ContentStore,
         cancellation: &CancellationToken,
     ) -> Result<Backends> {
         super::validate_machine(configuration)?;
-        let (preparation, execution) = self.0.backends(store, configuration, cancellation)?;
+        let (preparation, execution) = self.0.backends(configuration, cancellation)?;
         Ok(Backends {
             preparation: Box::new(preparation),
             execution: Box::new(execution),
@@ -44,31 +44,27 @@ impl BackendProvider for NativeBackends {
     fn retained(
         &self,
         inputs: &PreparedInputs,
-        store: &ContentStore,
+        _store: &ContentStore,
     ) -> Result<Box<dyn ExecutionBackend>> {
-        let scratch = tempfile::tempdir()?;
-        let engine = store.materialize(&inputs.profile.engine, scratch.path())?;
+        // Resolved inputs run on this server's own engine.
+        let engine = super::defaults::engine()?;
         let executor = if inputs.profile.backend == Backend::Hvf {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
-                Executor::Mac(seedbox_application::mac::MacExecutor::from_retained(
-                    &engine,
-                    store,
+                Executor::Mac(seedbox_application::mac::MacExecutor::for_profile(
+                    engine,
                     inputs.profile.clone(),
-                )?)
+                ))
             }
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             {
+                let _ = engine;
                 return Err(Error::Setup(
                     "retained HVF inputs require an Apple Silicon Mac".into(),
                 ));
             }
         } else {
-            Executor::Linux(VmmExecutor::from_retained(
-                &engine,
-                store,
-                inputs.profile.clone(),
-            )?)
+            Executor::Linux(VmmExecutor::for_profile(engine, inputs.profile.clone())?)
         };
         Ok(Box::new(executor))
     }
@@ -146,6 +142,7 @@ fn serve_inner(
 ) -> Result<u8> {
     let root = state_directory(state)?;
     prepare_directory(&root)?;
+    super::defaults::warn_dirty_build();
     use std::os::fd::AsRawFd;
     let lock = fs::OpenOptions::new()
         .read(true)

@@ -98,7 +98,7 @@ def select_build(environment, directory):
     directory = Path(directory)
     if not directory.is_absolute() or not all((directory / name).is_file() for name in ("seedbox", "kernel", "runtime.tar.gz")):
         raise ValueError("complete build did not return its executable and guest inputs")
-    for key in ("SEEDBOX_ASSET_DIR", "SEEDBOX_BUILD_HELPERS", "SEEDBOX_GUEST_INIT", "SEEDBOX_MKE2FS", "SEEDBOX_VMM"):
+    for key in ("SEEDBOX_ASSET_DIR", "SEEDBOX_BUILD_HELPERS", "SEEDBOX_GUEST_INIT", "SEEDBOX_MKE2FS"):
         environment.pop(key, None)
     environment["SEEDBOX_TEST_CLI"] = str(directory / "seedbox")
     environment["SEEDBOX_KERNEL"] = str(directory / "kernel")
