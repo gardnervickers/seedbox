@@ -34,11 +34,15 @@ another client can control the same simulation without implementing that policy.
 Application logs contain application output. Events describe simulator activity.
 Both use bounded in-memory buffers: 64 MiB shared for application logs and 16 MiB
 for events, including completed and imported simulations. Eviction is visible as
-delivery gaps. Workers publish at most 64 output chunks of up to 2 KiB per
-machine per round and count the rest as a machine gap, which depends only on
-execution; live datagrams the server cannot keep up with become source gaps,
-which differ between runs. `diagnostics ID` exposes completed raw console/management streams,
-chunk indexes and worker output separately, by exact retained name and digest.
+delivery gaps. Each round, a worker publishes at most 8192 records and 4 MiB of
+output per machine and counts the rest as a machine gap, which depends only on
+execution. Between rounds the worker waits for the server to accept each log and
+event datagram, which delays only wall time. If the server accepts none for two
+seconds, the worker stops waiting until it accepts one again; datagrams lost
+meanwhile become source gaps, which differ between runs. Frame batches for
+visualization never wait. `diagnostics ID` exposes completed raw
+console/management streams, chunk indexes and worker output separately, by exact
+retained name and digest.
 
 ## Definitions and execution state
 
