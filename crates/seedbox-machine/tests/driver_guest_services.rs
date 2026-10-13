@@ -477,15 +477,19 @@ where
         );
         assert_eq!(session.output(id, 1, Stream::Stderr), b"\xff\0z");
     }
-    assert!(!session
-        .events
-        .iter()
-        .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. })));
-    assert!(session
-        .driver
-        .with_barrier(|b| Ok(b.drain_responses()))
-        .unwrap()
-        .is_empty());
+    assert!(
+        !session
+            .events
+            .iter()
+            .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. }))
+    );
+    assert!(
+        session
+            .driver
+            .with_barrier(|b| Ok(b.drain_responses()))
+            .unwrap()
+            .is_empty()
+    );
     // Each ordinary machine emits one control call from each boot. Driver
     // interprets and replies automatically; emitted calls stay drainable.
     for &machine in &session.ids {
@@ -547,7 +551,9 @@ fn tcg(workers: usize) -> Vec<MachineResponse> {
 #[test]
 #[ignore = "requires patched QEMU and SEEDBOX_TCG_SERVICE_INITRD static guest fixtures"]
 fn tcg_driver_queues_boot_tags_and_worker_count_match() {
-    assert_eq!(tcg(1), tcg(2));
+    let serial = tcg(1);
+    assert_eq!(serial, tcg(2));
+    assert_eq!(serial, tcg(4));
 }
 #[cfg(seedbox_pv)]
 fn pv(workers: usize) -> Vec<MachineResponse> {
@@ -577,12 +583,25 @@ fn automatic_rpc_scenario<M>(
     workers: usize,
     mut base: machine_crate::definition::MachineDefinition,
     application: Vec<u8>,
-    mut construct: impl FnMut(&machine_crate::definition::MachineDefinition) -> M + Send + 'static,
+    construct: impl FnMut(&machine_crate::definition::MachineDefinition) -> M + Send + 'static,
 ) -> (Vec<StepOutcome>, Vec<MachineResponse>)
 where
     M: Machine<Context = ()> + Send + 'static,
     M::Error: Debug + Send + 'static,
 {
+    install_application(&mut base, &application);
+    let mut oracle_definition = base.clone();
+    oracle_definition.name = "oracle".into();
+    oracle_definition.application.launch.argv = vec!["/application".into(), "oracle".into()];
+    base.name = "peer".into();
+    base.application.launch.argv = vec!["/application".into(), "peer".into()];
+    automatic_rpc_driver(workers, oracle_definition, base, construct)
+}
+
+fn install_application(
+    base: &mut machine_crate::definition::MachineDefinition,
+    application: &[u8],
+) {
     let mut tar = tar::Builder::new(Vec::new());
     let mut header = tar::Header::new_gnu();
     header.set_size(application.len() as u64);
@@ -595,11 +614,18 @@ where
         .unwrap();
     base.application.filesystem =
         machine_crate::definition::FilesystemArchive::new(tar.into_inner().unwrap()).unwrap();
-    let mut oracle_definition = base.clone();
-    oracle_definition.name = "oracle".into();
-    oracle_definition.application.launch.argv = vec!["/application".into(), "oracle".into()];
-    base.name = "peer".into();
-    base.application.launch.argv = vec!["/application".into(), "peer".into()];
+}
+
+fn automatic_rpc_driver<M>(
+    workers: usize,
+    oracle_definition: machine_crate::definition::MachineDefinition,
+    base: machine_crate::definition::MachineDefinition,
+    mut construct: impl FnMut(&machine_crate::definition::MachineDefinition) -> M + Send + 'static,
+) -> (Vec<StepOutcome>, Vec<MachineResponse>)
+where
+    M: Machine<Context = ()> + Send + 'static,
+    M::Error: Debug + Send + 'static,
+{
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
@@ -815,7 +841,9 @@ fn tcg_driver_guest_receives_automatic_replies_and_real_peer_effects() {
             move |definition| backend.create(&definition).unwrap(),
         )
     };
-    assert_eq!(run(1), run(2));
+    let serial = run(1);
+    assert_eq!(serial, run(2));
+    assert_eq!(serial, run(4));
 }
 
 #[cfg(seedbox_pv)]
@@ -840,4 +868,99 @@ fn pv_driver_guest_receives_automatic_replies_and_real_peer_effects() {
         )
     };
     assert_eq!(run(1), run(2));
+}
+
+#[test]
+#[ignore = "requires native TCG owned kernel/helper and driver-control application"]
+fn tcg_native_repeat_run_has_identical_trace() {
+    for workers in [1, 2, 4] {
+        assert_eq!(tcg(workers), tcg(workers), "workers={workers}");
+    }
+}
+
+fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
+    let mut oracle = prepared::definition(
+        fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
+        256 << 20,
+    );
+    install_application(
+        &mut oracle,
+        &fs::read(input("SEEDBOX_TCG_DRIVER_CONTROL_APPLICATION")).unwrap(),
+    );
+    oracle.application.launch.argv = vec!["/application".into(), "epoch".into()];
+    let mut backend = machine_crate::machine::tcg::Factory::new(
+        &input("SEEDBOX_TCG_QEMU"),
+        &input("SEEDBOX_TCG_ASSETS"),
+    )
+    .unwrap();
+    let driver = Driver::new(
+        at(0),
+        Duration::from_nanos(QUANTUM),
+        workers,
+        FixtureRng(9),
+        || Ok(()),
+        oracle,
+        vec![],
+        move |definition| backend.create(definition),
+    )
+    .unwrap();
+    let mut session = Session {
+        driver,
+        ids: vec![],
+        events: vec![],
+        started: Instant::now(),
+    };
+    loop {
+        let upto = at(session.now().as_nanos() + QUANTUM);
+        let result = session.driver.step(upto).unwrap();
+        session.drain();
+        if let StepOutcome::Finished { reason, .. } = result {
+            assert_eq!(reason, ExitReason::ProgramExit { code: 0 });
+            break;
+        }
+        assert!(session.started.elapsed() < Duration::from_secs(180));
+    }
+    session.events
+}
+
+#[test]
+#[ignore = "requires native TCG owned kernel/helper and driver-control application"]
+fn tcg_native_boot_realtime_observes_fixed_2000_epoch() {
+    let serial = boot_epoch(1);
+    assert_eq!(serial, boot_epoch(2));
+    assert_eq!(serial, boot_epoch(4));
+    let output: Vec<_> = serial
+        .iter()
+        .filter_map(|event| match &event.payload {
+            Response::ApplicationOutput {
+                stream: Stream::Stdout,
+                bytes,
+            } => Some(bytes.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect();
+    let output = std::str::from_utf8(&output).unwrap();
+    let clocks: Vec<u64> = output
+        .strip_prefix("CLOCKS ")
+        .unwrap()
+        .trim()
+        .split(' ')
+        .map(|n| n.parse().unwrap())
+        .collect();
+    assert_eq!(clocks.len(), 4);
+    assert!(clocks[0] <= clocks[3]);
+    assert!(clocks[0] <= clocks[2] && clocks[2] <= clocks[3]);
+    // Observation of today's QEMU goldfish RTC, not a definition-level epoch
+    // contract. TCG hard-codes 2000-01-01; no host wall clock is consulted.
+    // Linux hctosys initializes REALTIME from the RTC's whole seconds during
+    // boot, after MONOTONIC has already advanced. Consequently the offset is
+    // not precisely epoch: REALTIME - epoch lags MONOTONIC by boot work.
+    let epoch = 946_684_800_000_000_000;
+    assert!(clocks[1] > epoch);
+    assert!(clocks[1] - epoch < clocks[0]);
+    for clock in clocks {
+        assert_eq!(clock % 100, 0, "current 10 MHz time CSR resolution");
+    }
 }

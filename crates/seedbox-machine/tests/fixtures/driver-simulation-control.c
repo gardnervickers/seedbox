@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 static void fail(const char *phase) {
@@ -132,6 +133,19 @@ static struct value call(int fd, unsigned id, const char *operation, int now) {
 }
 int main(int argc, char **argv) {
     if (argc != 2) fail("role");
+    if (!strcmp(argv[1], "epoch")) {
+        struct timespec monotonic, realtime, raw, after;
+        if (clock_gettime(CLOCK_MONOTONIC, &monotonic) ||
+            clock_gettime(CLOCK_REALTIME, &realtime) ||
+            clock_gettime(CLOCK_MONOTONIC_RAW, &raw) ||
+            clock_gettime(CLOCK_MONOTONIC, &after)) fail("clock read");
+        printf("CLOCKS %llu %llu %llu %llu\n",
+            (unsigned long long)monotonic.tv_sec * 1000000000 + monotonic.tv_nsec,
+            (unsigned long long)realtime.tv_sec * 1000000000 + realtime.tv_nsec,
+            (unsigned long long)raw.tv_sec * 1000000000 + raw.tv_nsec,
+            (unsigned long long)after.tv_sec * 1000000000 + after.tv_nsec);
+        return 0;
+    }
     if (!strcmp(argv[1], "peer")) {
         marker("PEER_RUNNING\n");
         for (;;) pause();
