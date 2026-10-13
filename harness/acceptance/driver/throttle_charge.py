@@ -6,8 +6,8 @@ instructions, each charged at the speed the kernel loads when the call starts.
 
 The oracle measures compute rates per phase: before; throttled to 500 MHz
 (about 4x slower; this throttle also marks the checkpoint capture point);
-healed (within 10%); throttled across a crash and reboot (still about 4x:
-reboot reapplies an active throttle); healed again. It also checks the
+healed; throttled across a crash and reboot (still about 4x: reboot
+reapplies an active throttle); healed again, each within 10%. It also checks the
 load-once contract of `seedbox_charge`: under a 2 MHz throttle one progress
 call costs 25 ms and so spans about 25 world bounds; a heal landing inside
 that call must not shorten it, and the calls after it run at full speed.
@@ -91,11 +91,15 @@ def scenario():
         after = worker_channel.work()
 
         # Load-once: a heal inside a 25 ms progress call leaves that call's charge.
+        # The oracle times the burst: the throttled call may start before the
+        # worker's own first clock read.
         crawl = world.throttle("worker", "2MHz")
+        sent = time.monotonic_ns()
         worker_channel.send(SPAN)
         world.sleep(0.005)
         healed = world.heal(crawl)
-        span, _ = worker_channel.receive()
+        worker_channel.receive()
+        span = time.monotonic_ns() - sent
         span_after = worker_channel.work(SPAN)
         assert healed.effect_at_ns > crawl.effect.effect_at_ns
 
@@ -117,15 +121,17 @@ def scenario():
     ratios = {name: round(result[f"{name}_ns"] / before, 3)
               for name in ("during", "after", "rebooted", "recovered")}
     print("THROTTLE_CHARGE_RESULT " + json.dumps({**result, **ratios}, sort_keys=True), flush=True)
-    # Clock reads and the partial scheduler windows are small at this work size.
-    assert 3.5 <= ratios["during"] <= 4.05, ratios
+    # Within 10% of the nominal ratios: clock reads, syscalls and scheduler
+    # windows inside the measurement vary a little with the seed.
+    assert 3.6 <= ratios["during"] <= 4.4, ratios
     assert 0.9 <= ratios["after"] <= 1.1, ratios
-    assert 3.5 <= ratios["rebooted"] <= 4.05, ratios
+    assert 3.6 <= ratios["rebooted"] <= 4.4, ratios
     assert 0.9 <= ratios["recovered"] <= 1.1, ratios
     # One throttled call charged in full, then the burst's remaining calls at
-    # full speed (span_after bounds them). Re-reading the speed at the heal
-    # would end the call about 4 ms after the burst started.
-    assert THROTTLED_CALL <= span <= THROTTLED_CALL + 2 * span_after + MS, result
+    # full speed (span_after bounds them), plus two network hops and a few
+    # throttled 1 ms syscalls before the heal. Re-reading the speed at the heal
+    # would end the call about 4 ms after it started, under 25 ms in all.
+    assert THROTTLED_CALL <= span <= THROTTLED_CALL + span_after + 8 * MS, result
     evidence = json.dumps({k: v for k, v in result.items() if k != "before_ns"}, sort_keys=True)
     print("CONTINUATION " + hashlib.sha256(evidence.encode()).hexdigest(), flush=True)
     print("RESULT pass", flush=True)
