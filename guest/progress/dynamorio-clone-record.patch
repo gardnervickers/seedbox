@@ -1,0 +1,67 @@
+diff --git a/core/unix/signal.c b/core/unix/signal.c
+index 44a47dc..75cf9ad 100644
+--- a/core/unix/signal.c
++++ b/core/unix/signal.c
+@@ -927,8 +927,8 @@ set_clone_record_fields(void *record, reg_t app_thread_xsp, app_pc continuation_
+  *
+  * CAUTION: don't use a lot of stack in this routine as it gets invoked on the
+  *          dstack from new_thread_setup - this is because this routine assumes
+- *          no more than a page of dstack for X86 and 2 pages of dstack for
+- *          AArch64 have been used so far since the clone system call was done.
++ *          less than a page of dstack below the clone record has been used so far
++ *          since the clone system call was done.
+  */
+ void *
+ get_clone_record(reg_t xsp)
+@@ -939,42 +939,20 @@ get_clone_record(reg_t xsp)
+     /* xsp should be in a dstack, i.e., dynamorio heap.  */
+     ASSERT(is_dynamo_address((app_pc)xsp));
+ 
+-    /* The stack usage when this is called on most platforms is less than one page so we
+-     * can straightforwardly find the clone record by forward aligning xsp.
+-     *
+-     * However when this function is called by new_thread_setup() on AArch64 the stack
+-     * usage is > 4K:
+-     *     (size of the clone record +
+-     *      stack used by new_thread_start (only for setting up priv_mcontext_t) +
+-     *      stack used by new_thread_setup before calling get_clone_record())
+-     * so if we have 4k pages we need to account for the extra page we are using by
+-     * adding PAGE_SIZE to dstack_base.
+-     *
+-     * When this function is called by client_thread_run() there is no priv_mcontext_t on
+-     * the stack so we don't have to make this adjustment.
+-     *
+-     * The current usage is about 800 bytes (X86) or 4400 bytes (AArch64) for
+-     * clone_record + sizeof(priv_mcontext_t) + few words in new_thread_setup
+-     * before get_clone_record() is called.
++    /* The clone record is at the top of the dstack, whose base is page-aligned, and
++     * xsp is below the record by less than a page: by the priv_mcontext_t that
++     * new_thread_start pushes, about 2.5K on AArch64, plus a few words.  So forward
++     * aligning the record's end finds the base.  AArch64 used to forward align xsp
++     * itself and, when that missed by a page, chose between pages by reading a record's
++     * dstack at the lower guess; that memory is unused stack, and a stale record that
++     * an earlier thread left there could match and make this thread use it.
+      */
+     const size_t page_size = PAGE_SIZE;
+-    dstack_base = (byte *)ALIGN_FORWARD(xsp, page_size);
+-
++    dstack_base = (byte *)ALIGN_FORWARD(xsp + sizeof(clone_record_t), page_size);
+     record = (clone_record_t *)(dstack_base - sizeof(clone_record_t));
+-#ifdef AARCH64
+-    if (sizeof(clone_record_t) + sizeof(priv_mcontext_t) > page_size &&
+-        dstack_base != record->dstack) {
+-        /* Looks like there is a priv_mcontext_t on the stack so we need to skip forward
+-         * another page.
+-         */
+-        dstack_base += page_size;
+-        record = (clone_record_t *)(dstack_base - sizeof(clone_record_t));
+-    }
+-#endif
+ 
+     /* dstack_base and the dstack in the clone record should be the same.
+-     * This verifies the assumptions we have made above about the stack useage fitting
+-     * into 1 or 2 pages.
++     * This verifies the assumption we have made above about the stack usage.
+      */
+     ASSERT(dstack_base == record->dstack);
+ #ifdef MACOS

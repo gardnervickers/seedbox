@@ -118,7 +118,15 @@ write protection and self-modifying-code sandboxing. In the observed Kafka
 startup, that mode grew a broker's memory to about 2 GB and it was killed;
 with application-driven invalidation, it used about 250 MB and kept starting.
 
-Each `IC IVAU` flush stops all threads, so a JVM creating a process races it.
+A flush stops all threads. JITs invalidate a range one cache line at a time,
+so a translator patch joins each thread's consecutive lines into one pending
+range and flushes it at that thread's next `DSB`, which architecturally
+completes the invalidations, or at its next other entry to the translator. A
+JVM startup otherwise stopped all threads about 19,000 times. While the
+flushing thread waits for another thread's flush, it must not be redirected:
+that abandoned its own flush, and before a syscall it skipped the syscall.
+
+Flushes still race a JVM creating a process.
 Translator patches keep a thread that is forking in place (redirecting it skipped
 the `fork`), count a thread waiting in `vfork` as stopped (it cannot take the
 suspend signal until its child execs, which may wait for the flush), and requeue

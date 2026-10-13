@@ -50,6 +50,13 @@ pkgs.stdenv.mkDerivation {
     # fragment to unlink, or a thread looping through indirect branches never
     # receives it.
     ../guest/progress/dynamorio-ibl-hit-signals.patch
+    # Each IC IVAU flush stops every thread, and JITs invalidate a range one
+    # line at a time, so a thread's consecutive lines are flushed together at
+    # its next DSB, which architecturally completes them.
+    ../guest/progress/dynamorio-icache-batch.patch
+    # A new thread found its clone record by reading unused stack, where a
+    # record an earlier thread left could match; it then hung on a garbage lock.
+    ../guest/progress/dynamorio-clone-record.patch
   ] else [
     # The same translator syscall mark, in rbx.
     ../guest/progress/dynamorio-x86-translator-syscalls.patch
