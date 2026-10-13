@@ -453,6 +453,35 @@ Code: [definition types](../crates/seedbox-spec/src/definition.rs),
 [image preparation](../crates/seedbox-application/src/oci.rs),
 [server](../crates/seedbox-server/src/).
 
+## Owned cache objects
+
+Checkpoint capture, bundle import and edited launch records create *owned* cache
+objects; an object the cache already holds stays an ordinary input, and an
+ordinary put of an owned object's bytes makes it one. The session's `owned/`
+ledger holds an empty marker per owned object, made durable before the object is
+named. One store lock orders naming, adoption and removal, so an object an
+ordinary put returned is never reclaimed.
+
+After `delete` and checkpoint deletion, the server removes every owned object
+that no remaining resource names: submitted and resolved specs, undeleted
+imported checkpoints, retained input files, and checkpoints exported from a
+source that still exists (a fetched branch definition stays submittable). Roots
+over-approximate: any digest-shaped string counts. Reclamation holds the evidence
+lock, which imports, exports and deletes share, and then the reference lock for
+writing. Checkpoint export and the resolved-input commit in execution hold it for
+reading from their owned puts until the export registry or the resource and
+retained inputs name the objects. A client that submits a definition after every
+resource naming its objects was deleted gets a missing-asset error.
+
+Graceful shutdown reclaims once more; objects still referenced then stay as
+ordinary cache content for saved definitions. Startup removes the objects listed
+in an abandoned session's ledger, because no resource survives a crash. Objects
+from earlier versions or lost markers are never pruned automatically.
+
+Code: [content store](../crates/seedbox-artifacts/src/store.rs),
+[reclamation](../crates/seedbox-server/src/execution/content.rs),
+[session ledger](../crates/seedbox/src/cli/daemon.rs).
+
 ## Development checks
 
 Run from the checkout root:
@@ -518,8 +547,8 @@ end blocks. Manifest metadata is bounded (16 MiB); large assets and diagnostic
 payloads use bounded buffers and disk spools. Transfers are not resumable or
 idempotent. After a full upload, disconnect/cancellation cannot guarantee that
 import was not accepted; clients never automatically retry it. Failed validation
-publishes no resource, but verified cache objects may remain after publication
-failure. This is not cache pruning.
+publishes no resource; the binaries it owned are reclaimed with the next deletion
+or at shutdown.
 
 Logs and events preserve their independent aggregate/per-machine sequences,
 source unavailability and delivery gaps. Restoration uses the shared 64 MiB log

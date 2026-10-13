@@ -285,7 +285,8 @@ pub fn capture_start(
                     ));
                 }
                 let name = format!("state-{}", assets.len() + 1);
-                assets.insert(name.clone(), asset(&store.put_file(&path)?));
+                // Captured state belongs to the resources that reference it.
+                assets.insert(name.clone(), asset(&store.put_file_owned(&path)?));
                 values.insert(key.into(), format!("asset:{name}").into());
                 for value in values.values_mut() {
                     visit(value, owned, store, assets)?;
@@ -507,7 +508,8 @@ fn resolved_boot(
     // newc permits final zero padding; retaining it preserves byte identity for unchanged recipes.
     std::io::copy(&mut input, &mut output)?;
     output.rewind()?;
-    store.put_reader(output)
+    // An edited launch record makes a new archive that only its resources use.
+    store.put_reader_owned(output)
 }
 fn launch_configs(bytes: &[u8]) -> Result<&[u8]> {
     let fail = || Error::Integrity("invalid retained launch record".into());
