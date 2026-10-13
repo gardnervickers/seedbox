@@ -7,6 +7,9 @@
 #[cfg(target_arch = "aarch64")]
 #[path = "aarch64.rs"]
 mod arch;
+#[cfg(target_arch = "x86_64")]
+#[path = "x86_64.rs"]
+mod arch;
 mod console;
 mod memory;
 use super::{
@@ -34,7 +37,7 @@ const LAST: usize = 8;
 const BOUND: usize = 16;
 const VERSION: usize = 24;
 const IRQ_DEFERRED: usize = 32;
-const EXCLUSIVE_EPOCH: usize = 40;
+// Word 40 is the ARM exclusive-reservation epoch (see aarch64.rs).
 const SYSCALL_COST: usize = 48;
 const EVENT_MMIO: u64 = 0x0a01_0000;
 const EVENT_END: u64 = EVENT_MMIO + PAGE_BYTES as u64 - 1;
@@ -183,6 +186,7 @@ impl<B: Backend> Machine<B> {
             return Ok(Stop::Horizon);
         }
         self.state.idle = false;
+        self.prepare()?;
         loop {
             let exit = self.native.enter()?;
             // Host preemption/cancellation is invisible to simulated state.
@@ -284,6 +288,8 @@ impl<B: Backend> Machine<B> {
                 self.state.idle = true;
                 return Ok(Stop::Blocked(self.state.deadline));
             }
+            // Host interruptions re-enter above without preparing anything new.
+            self.prepare()?;
         }
     }
     fn capture(&mut self, path: &Path) -> Result<()> {

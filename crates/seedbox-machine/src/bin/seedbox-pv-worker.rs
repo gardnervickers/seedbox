@@ -4,13 +4,13 @@ pub(crate) mod transport;
 mod pv {
     pub(crate) use crate::transport;
 }
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
+#[cfg(seedbox_pv)]
 #[path = "../machine/pv/boot.rs"]
 mod boot;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
+#[cfg(seedbox_pv)]
 #[path = "../machine/pv/protocol.rs"]
 mod protocol;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
+#[cfg(seedbox_pv)]
 #[path = "../machine/pv/worker/mod.rs"]
 mod worker;
 fn main() {
@@ -18,14 +18,14 @@ fn main() {
         eprintln!("private seedbox PV worker requires its protocol launch");
         std::process::exit(2);
     }
-    #[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
+    #[cfg(seedbox_pv)]
     if let Err(error) = worker::serve() {
         eprintln!("{error}");
         std::process::exit(2);
     }
-    #[cfg(not(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux"))))]
+    #[cfg(not(seedbox_pv))]
     {
-        eprintln!("PV worker requires arm64 macOS/HVF or Linux/KVM");
+        eprintln!("PV worker requires arm64 macOS/HVF or arm64/x86-64 Linux/KVM");
         std::process::exit(2);
     }
 }

@@ -1,13 +1,15 @@
-//! Native ARM64 PV guest in a private, isolated worker process.
+//! Native PV guest in a private, isolated worker process.
 //!
-//! A diskless Linux Image and initramfs run on macOS/HVF or Linux/arm64 KVM.
+//! A diskless Linux kernel and initramfs for the host architecture run on
+//! macOS/HVF or Linux/KVM (ARM64), or Linux/KVM (x86-64).
 //! Guest PV rendezvous define accepted time; host interruptions are invisible.
 //! The Driver owns idle advancement. A standard virtio-console port named
 //! `seedbox-lifecycle` carries `shutdown\n` to a cooperating guest supervisor.
-//! The request itself executes no guest work. Cleanup and PSCI poweroff require
+//! The request itself executes no guest work. Cleanup and guest power-off require
 //! later run calls; an uncooperative guest can remain blocked until crashed.
 //! Snapshot bytes own boot inputs and all stopped worker/device state. Native
-//! architectural snapshot support currently requires macOS/HVF.
+//! architectural snapshot support currently requires macOS/HVF or x86-64 KVM;
+//! Linux ARM64 KVM snapshots are unsupported.
 mod boot;
 mod client;
 mod factory;
@@ -74,8 +76,10 @@ pub struct PVMachine {
     input: Vec<u8>,
     guest: crate::pv::bridge::GuestBridge,
 }
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
 const TEST_COMMAND_LINE: &str = "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4";
+#[cfg(all(test, target_arch = "x86_64"))]
+const TEST_COMMAND_LINE: &str = "console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit=/init nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4";
 
 impl PVMachine {
     /// Prepare a stopped machine from a workload and separately supplied boot assets.
@@ -501,6 +505,8 @@ impl Machine for PVMachine {
 }
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod test_image;
 #[cfg(test)]
 mod tests;
 

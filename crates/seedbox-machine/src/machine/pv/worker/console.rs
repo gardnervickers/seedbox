@@ -1,10 +1,10 @@
 //! Modern virtio MMIO console: a single named lifecycle port, no application
 //! control personality. Split rings are checked in full before every DMA.
+use super::boot::RAM_BASE as BASE;
 use super::Result;
 use crate::pv::transport::LifecycleOutput;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-const BASE: u64 = 0x4000_0000;
 const PORT: &[u8] = b"seedbox-lifecycle";
 const MAX_PORTS: u64 = 0x104;
 const EMERGENCY_WRITE: u64 = 0x108;

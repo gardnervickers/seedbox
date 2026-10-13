@@ -120,7 +120,7 @@ impl Environment<super::tcg::TcgMachine> {
         })
     }
 }
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 impl<R: RngStream> Environment<super::pv::PVMachine, R> {
     pub fn new(
         executable: &Path,
@@ -150,7 +150,7 @@ impl<R: RngStream> Environment<super::pv::PVMachine, R> {
         })
     }
 }
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 impl Environment<super::pv::PVMachine> {
     pub fn from_snapshot(
         executable: &Path,

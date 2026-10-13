@@ -9,29 +9,17 @@ fn at(n: u64) -> Timestamp {
 }
 
 #[test]
-#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let clock = Arc::new(crate::clock::SimulationClock::new(0));
-    // ARM Image: PV handshake, five-nanosecond sleep, then PSCI SYSTEM_OFF.
-    let words: [u32; 11] = [
-        0xd2a1_4021,
-        0xd280_0060,
-        0xf900_1020,
-        0xd2a1_4002, // MOV X2, #0x0a000000: shared PV time page.
-        0xf940_0040, // LDR X0, [X2]: current boot time.
-        0x9100_1400, // ADD X0, X0, #5: absolute sleep deadline.
-        0xf900_0020,
-        0xf900_0820,
-        0xd280_0100,
-        0xf2b0_8000,
-        0xd400_0002,
-    ];
-    let mut kernel = vec![0; 64];
-    kernel[..4].copy_from_slice(&0x1400_0010u32.to_le_bytes()); // Branch over Image header.
-    kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
-    kernel[56..60].copy_from_slice(b"ARM\x64");
-    kernel.extend(words.iter().flat_map(|word| word.to_le_bytes()));
+    // PV handshake, five-nanosecond sleep, then power off.
+    let kernel = super::test_image::program(&[
+        super::test_image::Op::Ready,
+        super::test_image::Op::TimerAfterNow(5),
+        super::test_image::Op::Idle,
+        super::test_image::Op::PowerOff,
+    ]);
     let mut machine = PVMachine::new(
         Path::new(&executable),
         kernel,
@@ -268,7 +256,7 @@ fn live_linux_ring_dma_snapshot_preserves_shutdown_at_newer_clock() {
 }
 
 #[test]
-#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn queued_boots_use_caller_entropy_and_machine_only_snapshots() {
     use crate::machine::test_environment::run_requests;
     use crate::pv::Request;
@@ -283,14 +271,8 @@ fn queued_boots_use_caller_entropy_and_machine_only_snapshots() {
         }
     }
     let executable = guest::input("SEEDBOX_PV_WORKER");
-    let code = super::tests::kernel(&[
-        0xd2a1_4021,
-        0xd280_0060,
-        0xf900_1020,
-        0xd280_0100,
-        0xf2b0_8000,
-        0xd400_0002,
-    ]);
+    use super::test_image::{program, Op};
+    let code = program(&[Op::Ready, Op::PowerOff]);
     let mut machine =
         super::PVMachine::from_boot_inputs(&executable, code, b"initrd".to_vec()).unwrap();
     let clock = crate::clock::SimulationClock::new(0);
@@ -360,10 +342,11 @@ fn queued_boots_use_caller_entropy_and_machine_only_snapshots() {
 }
 
 #[test]
-#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn standalone_fifo_consumes_exited_requests_and_zero_budget_lifecycle() {
     let executable = guest::input("SEEDBOX_PV_WORKER");
-    let code = super::tests::kernel(&[0xd2a1_4021, 0xd280_0060, 0xf900_1020, 0x1400_0000]);
+    use super::test_image::{program, Op};
+    let code = program(&[Op::Ready, Op::Spin]);
     let machine =
         super::PVMachine::from_boot_inputs(&executable, code, b"initrd".to_vec()).unwrap();
     crate::machine::test_environment::check_lifecycle_fifo(machine);

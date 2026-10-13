@@ -19,6 +19,6 @@ hex.workspace = true
 [build-dependencies]
 cc = "1"
 
-[target.'cfg(all(target_arch = "aarch64", target_os = "linux"))'.dependencies]
+[target.'cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), target_os = "linux"))'.dependencies]
 kvm-bindings = "0.14"
 kvm-ioctls = "0.24"

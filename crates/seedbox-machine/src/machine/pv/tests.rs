@@ -9,29 +9,10 @@ fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
 
-pub(super) fn kernel(words: &[u32]) -> Vec<u8> {
-    let mut bytes = vec![0; 64 + words.len() * 4];
-    bytes[..4].copy_from_slice(&0x1400_0010u32.to_le_bytes()); // B +64, skip Image header.
-    bytes[16..24].copy_from_slice(&4096u64.to_le_bytes());
-    bytes[56..60].copy_from_slice(b"ARM\x64");
-    for (index, word) in words.iter().enumerate() {
-        bytes[64 + index * 4..68 + index * 4].copy_from_slice(&word.to_le_bytes());
-    }
-    bytes
-}
+use super::test_image::{program, Op};
 
 fn timed_guest() -> Vec<u8> {
-    kernel(&[
-        0xd2a1_4021, // MOV X1, #0x0a010000 (PV event).
-        0xd280_0060, // MOV X0, #3 (ABI).
-        0xf900_1020, // STR X0, [X1,#32] (ready).
-        0xd280_00a0, // MOV X0, #5.
-        0xf900_0020, // STR X0, [X1] (arm timer).
-        0xf900_0820, // STR X0, [X1,#16] (idle).
-        0xd280_0100, // MOV X0, #8.
-        0xf2b0_8000, // MOVK X0, #0x8400, LSL #16 (PSCI SYSTEM_OFF).
-        0xd400_0002, // HVC #0.
-    ])
+    program(&[Op::Ready, Op::Timer(5), Op::Idle, Op::PowerOff])
 }
 
 #[test]
@@ -52,7 +33,7 @@ fn invalid_inputs_fail_before_spawning_worker() {
 // Invoke explicitly with SEEDBOX_PV_WORKER set to a signed seedbox-pv-worker binary.
 // Default portable tests do not open HVF/KVM.
 #[test]
-#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let executable = Path::new(&executable);
@@ -178,11 +159,11 @@ fn native_driver_isolates_two_guests_and_restores_independent_snapshots() {
 }
 
 #[test]
-#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn native_indefinite_idle_and_capture_failure_keep_valid_machine() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let clock = Arc::new(crate::clock::SimulationClock::new(37));
-    let code = kernel(&[0xd2a1_4021, 0xd280_0060, 0xf900_1020, 0xf900_0820]);
+    let code = program(&[Op::Ready, Op::Idle]);
     let mut machine = PVMachine::new(
         Path::new(&executable),
         code,
@@ -230,87 +211,8 @@ fn native_indefinite_idle_and_capture_failure_keep_valid_machine() {
     );
 }
 
-fn linux_initrd() -> Vec<u8> {
-    let message = b"PV_LINUX_PASS\n";
-    let words: [u32; 15] = [
-        0xd280_0020, // MOV X0,#1 (stdout).
-        0x1000_01c1, // ADR X1,+56 (message).
-        0xd280_0002 | ((message.len() as u32) << 5),
-        0xd280_0808, // MOV X8,#64 (__NR_write).
-        0xd400_0001, // SVC #0.
-        0xd29b_d5a0, // MOV X0,#0xdead.
-        0xf2bf_dc20, // MOVK X0,#0xfee1,LSL #16.
-        0xd283_2d21, // MOV X1,#0x1969.
-        0xf2a5_0241, // MOVK X1,#0x2812,LSL #16.
-        0xd29f_db82, // MOV X2,#0xfedc.
-        0xf2a8_6422, // MOVK X2,#0x4321,LSL #16 (POWER_OFF).
-        0xd280_0003, // MOV X3,#0.
-        0xd280_11c8, // MOV X8,#142 (__NR_reboot).
-        0xd400_0001, // SVC #0.
-        0x1400_0000, // B . if reboot unexpectedly returns.
-    ];
-    let mut elf = vec![0; 120];
-    elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
-    elf[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC.
-    elf[18..20].copy_from_slice(&183u16.to_le_bytes()); // EM_AARCH64.
-    elf[20..24].copy_from_slice(&1u32.to_le_bytes());
-    elf[24..32].copy_from_slice(&0x400078u64.to_le_bytes());
-    elf[32..40].copy_from_slice(&64u64.to_le_bytes());
-    elf[52..54].copy_from_slice(&64u16.to_le_bytes());
-    elf[54..56].copy_from_slice(&56u16.to_le_bytes());
-    elf[56..58].copy_from_slice(&1u16.to_le_bytes());
-    elf[64..68].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD.
-    elf[68..72].copy_from_slice(&5u32.to_le_bytes()); // Read/execute.
-    elf[80..88].copy_from_slice(&0x400000u64.to_le_bytes());
-    elf[88..96].copy_from_slice(&0x400000u64.to_le_bytes());
-    let length = (elf.len() + words.len() * 4 + message.len()) as u64;
-    elf[96..104].copy_from_slice(&length.to_le_bytes());
-    elf[104..112].copy_from_slice(&length.to_le_bytes());
-    elf[112..120].copy_from_slice(&4096u64.to_le_bytes());
-    for word in words {
-        elf.extend_from_slice(&word.to_le_bytes());
-    }
-    elf.extend_from_slice(message);
-    let mut archive = Vec::new();
-    for (name, mode, data, major, minor) in [
-        ("dev", 0o040755, &[][..], 0, 0),
-        ("dev/console", 0o020600, &[][..], 5, 1),
-        ("init", 0o100755, &elf[..], 0, 0),
-        ("TRAILER!!!", 0, &[][..], 0, 0),
-    ] {
-        archive.extend_from_slice(b"070701");
-        for field in [
-            1,
-            mode,
-            0,
-            0,
-            1,
-            0,
-            data.len(),
-            0,
-            0,
-            major,
-            minor,
-            name.len() + 1,
-            0,
-        ] {
-            archive.extend_from_slice(format!("{field:08x}").as_bytes());
-        }
-        archive.extend_from_slice(name.as_bytes());
-        archive.push(0);
-        while archive.len() % 4 != 0 {
-            archive.push(0);
-        }
-        archive.extend_from_slice(data);
-        while archive.len() % 4 != 0 {
-            archive.push(0);
-        }
-    }
-    archive
-}
-
 #[test]
-#[ignore = "requires an arm64 hypervisor, SEEDBOX_PV_WORKER and SEEDBOX_PV_KERNEL"]
+#[ignore = "requires a native PV hypervisor, SEEDBOX_PV_WORKER and SEEDBOX_PV_KERNEL"]
 fn native_linux_boot_and_program_poweroff_use_the_driver() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let kernel_path = std::env::var_os("SEEDBOX_PV_KERNEL").expect("set SEEDBOX_PV_KERNEL");
@@ -327,7 +229,7 @@ fn native_linux_boot_and_program_poweroff_use_the_driver() {
             Ok(vec![PVMachine::configured(
                 Path::new(&executable),
                 kernel,
-                linux_initrd(),
+                super::test_image::linux_initrd(),
                 SeededRng::new(7),
                 clock,
             )?])
@@ -355,19 +257,11 @@ fn native_linux_boot_and_program_poweroff_use_the_driver() {
 }
 
 #[test]
-#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn native_horizon_is_accepted_before_following_poweroff() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let executable = Path::new(&executable);
-    let code = kernel(&[
-        0xd2a1_4021,
-        0xd280_0060,
-        0xf900_1020, // Ready handshake.
-        0xf900_0c20, // STR X0,[X1,#24] (yield to published bound).
-        0xd280_0100,
-        0xf2b0_8000,
-        0xd400_0002, // PSCI power off.
-    ]);
+    let code = program(&[Op::Ready, Op::Yield, Op::PowerOff]);
     let mut driver = crate::driver::fixture::driver(
         at(0),
         std::time::Duration::from_millis(1),
@@ -430,20 +324,12 @@ fn native_horizon_is_accepted_before_following_poweroff() {
 }
 
 #[test]
-#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn native_runnable_gap_adopts_time_without_executing_guest_work() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let executable = Path::new(&executable);
     let clock = Arc::new(crate::clock::SimulationClock::new(0));
-    let code = kernel(&[
-        0xd2a1_4021, // MOV X1, #0x0a010000 (PV event page).
-        0xd280_0060, // MOV X0, #3 (ABI).
-        0xf900_1020, // STR X0, [X1,#32] (ready).
-        0xf900_0c20, // STR X0, [X1,#24] (yield to published bound).
-        0xd280_0100, // MOV X0, #8.
-        0xf2b0_8000, // MOVK X0, #0x8400, LSL #16 (PSCI SYSTEM_OFF).
-        0xd400_0002, // HVC #0.
-    ]);
+    let code = program(&[Op::Ready, Op::Yield, Op::PowerOff]);
     let mut machine = PVMachine::new(
         executable,
         code,
@@ -491,7 +377,7 @@ fn native_runnable_gap_adopts_time_without_executing_guest_work() {
 }
 
 #[test]
-#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn native_overdue_timer_is_delivered_at_adopted_time_after_a_gap() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let executable = Path::new(&executable);
@@ -544,19 +430,12 @@ fn native_overdue_timer_is_delivered_at_adopted_time_after_a_gap() {
 }
 
 #[test]
-#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn native_time_adoption_does_not_wake_indefinitely_blocked_work() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let clock = Arc::new(crate::clock::SimulationClock::new(0));
-    let code = kernel(&[
-        0xd2a1_4021, // MOV X1, #0x0a010000 (PV event page).
-        0xd280_0060, // MOV X0, #3 (ABI).
-        0xf900_1020, // STR X0, [X1,#32] (ready).
-        0xf900_0820, // STR X0, [X1,#16] (idle, with no timer armed).
-        0xd280_0100, // MOV X0, #8.
-        0xf2b0_8000, // MOVK X0, #0x8400, LSL #16 (PSCI SYSTEM_OFF).
-        0xd400_0002, // HVC #0: must remain unexecuted without a wakeup.
-    ]);
+    // Idle with no timer armed; the power-off must remain unexecuted.
+    let code = program(&[Op::Ready, Op::Idle, Op::PowerOff]);
     let mut machine = PVMachine::new(
         Path::new(&executable),
         code,
@@ -590,19 +469,11 @@ fn native_time_adoption_does_not_wake_indefinitely_blocked_work() {
 }
 
 #[test]
-#[ignore = "requires an arm64 hypervisor and SEEDBOX_PV_WORKER"]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn native_repeated_run_keeps_execution_position_when_shared_clock_lags() {
     let executable = std::env::var_os("SEEDBOX_PV_WORKER").expect("set SEEDBOX_PV_WORKER");
     let clock = Arc::new(crate::clock::SimulationClock::new(0));
-    let code = kernel(&[
-        0xd2a1_4021, // MOV X1, #0x0a010000 (PV event page).
-        0xd280_0060, // MOV X0, #3 (ABI).
-        0xf900_1020, // STR X0, [X1,#32] (ready).
-        0xf900_0c20, // STR X0, [X1,#24] (yield to published bound).
-        0xd280_0100, // MOV X0, #8.
-        0xf2b0_8000, // MOVK X0, #0x8400, LSL #16 (PSCI SYSTEM_OFF).
-        0xd400_0002, // HVC #0.
-    ]);
+    let code = program(&[Op::Ready, Op::Yield, Op::PowerOff]);
     let mut machine = PVMachine::new(
         Path::new(&executable),
         code,
@@ -630,7 +501,7 @@ fn native_repeated_run_keeps_execution_position_when_shared_clock_lags() {
 fn deferred_startup_failure_is_a_run_error_and_invalidates_the_machine() {
     let mut machine = super::PVMachine::from_boot_inputs(
         Path::new("/missing/pv-worker"),
-        kernel(&[0x1400_0000]),
+        program(&[Op::Spin]),
         b"initrd".to_vec(),
     )
     .unwrap();

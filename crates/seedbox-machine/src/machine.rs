@@ -36,7 +36,7 @@ pub mod tcg;
 
 #[cfg(unix)]
 mod assets;
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(seedbox_pv)]
 pub mod pv;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

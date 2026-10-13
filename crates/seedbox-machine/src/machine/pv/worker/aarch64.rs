@@ -7,11 +7,13 @@ mod tree;
 use super::{
     boot,
     memory::{self, Memory},
-    Effect, Machine, Result, EXCLUSIVE_EPOCH,
+    Effect, Machine, Result,
 };
 pub(super) use backend::{Architecture, Backend, Exit, Native};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+/// Guest-advanced exclusive-reservation epoch in the shared PV page.
+const EXCLUSIVE_EPOCH: usize = 40;
 pub(super) const TIMER: u32 = 40;
 const UART: u32 = 33;
 const CONSOLE: u32 = 42;
@@ -115,6 +117,10 @@ impl<B: Backend> Machine<B> {
         self.state.devices.deferred.remove(&number);
         self.native.irq(number, true)?;
         self.state.devices.asserted.insert(number);
+        Ok(())
+    }
+    /// ARM asserts lines at rendezvous; nothing is injected at guest entry.
+    pub(super) fn prepare(&mut self) -> Result<()> {
         Ok(())
     }
     pub(super) fn lower(&mut self, number: u32) -> Result<()> {
@@ -250,7 +256,7 @@ impl<B: Backend> Machine<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{State, Stop, EXCLUSIVE_EPOCH, IRQ_DEFERRED, LAST, NOW, SYSCALL_COST};
+    use super::super::{State, Stop, IRQ_DEFERRED, LAST, NOW, SYSCALL_COST};
     use super::*;
     use std::{
         collections::{BTreeMap, VecDeque},
