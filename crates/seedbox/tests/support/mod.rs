@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Run one CLI command, keeping its stdout and stderr in separate report files.
+/// Returns stdout only: `--json` documents and status lines never include
+/// stderr diagnostics such as the dirty-build warning.
 pub fn invoke(
     cli: &Path,
     directory: &Path,
@@ -16,34 +19,41 @@ pub fn invoke(
     args: &[&str],
 ) -> Result<String, String> {
     let logfile = directory.join(format!("{name}.log"));
+    let errfile = directory.join(format!("{name}.stderr.log"));
     let log = fs::File::create(&logfile).map_err(|error| error.to_string())?;
+    let err = fs::File::create(&errfile).map_err(|error| error.to_string())?;
     eprintln!("application: {} / {name}", directory.display());
     let mut command = Command::new(cli);
     command
         .args(args)
         .env("SEEDBOX_STATE", state)
-        .stdout(log.try_clone().map_err(|error| error.to_string())?)
-        .stderr(log);
+        .stdout(log)
+        .stderr(err);
     let status = command
         .status()
         .map_err(|error| format!("{}: {error}", cli.display()))?;
     if !status.success() {
-        // CI keeps only the console, so show the end of the failing log there.
-        let text = fs::read(&logfile).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-        if let Ok(text) = &text {
+        // CI keeps only the console, so show the end of the failing logs there.
+        for file in [&logfile, &errfile] {
+            let Ok(bytes) = fs::read(file) else { continue };
+            let text = String::from_utf8_lossy(&bytes);
             let lines: Vec<_> = text.lines().collect();
             let tail = &lines[lines.len().saturating_sub(80)..];
             eprintln!(
                 "--- {name} failed; last {} lines of {}:",
                 tail.len(),
-                logfile.display()
+                file.display()
             );
             for line in tail {
                 eprintln!("{line}");
             }
             eprintln!("--- end of {name}");
         }
-        return Err(format!("{name}: {status}; see {}", logfile.display()));
+        return Err(format!(
+            "{name}: {status}; see {} and {}",
+            logfile.display(),
+            errfile.display()
+        ));
     }
     Ok(
         String::from_utf8_lossy(&fs::read(&logfile).map_err(|error| error.to_string())?)
