@@ -35,7 +35,7 @@
 //! workload cannot produce, so it forbids what serializability does;
 //! PostgreSQL's REPEATABLE READ is snapshot isolation and is checked as such.
 //!
-//! This is a faithful port of the original `list_append.py`, including its
+//! This is a faithful port of the earlier Python checker, including its
 //! deterministic search order (identifiers sort by their Python `repr`), so it
 //! reports the same anomalies, cycles and counts; Jepsen's Elle remains the
 //! reference (see the `elle-cross-check` command).
