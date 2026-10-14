@@ -14,8 +14,8 @@ pub(crate) struct SeededRng {
     bytes: [u8; 32],
     position: u8,
 }
-/// Independent byte streams derived from one machine seed. The format tag
-/// separates them: no domain's bytes predict another's.
+/// Domain-separated byte streams derived from one machine seed. Each stream
+/// has its own cursor; consuming one does not advance another.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Domain {
     /// The machine's own stream (boot and guest entropy).
