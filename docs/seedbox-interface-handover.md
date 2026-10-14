@@ -159,6 +159,11 @@ API still needs review before merge.
   completion.
 - Shared guest framing/helper, binary logs, application restart and graceful
   shutdown on PV and TCG; snapshot continuation for accepted guest work.
+- Guest terminal paths on real kernels: reboot and kernel panic end as
+  `Exited{Crashed}`, halt and power-off as `Exited{Shutdown}`, on TCG and x86
+  PV, with terminal snapshots and Reboot (`src/machine/kernel_terminal_tests.rs`).
+  ARM PV has cross-built kernel/backend evidence and scripted worker units run
+  under user-mode emulation only; it has no native evidence.
 - Automatic control dispatch for Now/Sleep, process and machine controls,
   throttle/heal and streaming triggers. Native tests cover real control RPCs
   and worker-count determinism; positive Sleep/trigger dispatch have portable

@@ -40,6 +40,8 @@ mod driver_sleep_trigger_tests;
 #[cfg(all(test, unix))]
 mod guest_service_snapshot_tests;
 #[cfg(all(test, unix))]
+mod kernel_terminal_tests;
+#[cfg(all(test, unix))]
 mod prepared_application_tests;
 #[cfg(all(test, unix))]
 mod prepared_fixture;

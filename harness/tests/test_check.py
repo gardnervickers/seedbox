@@ -41,6 +41,9 @@ class SelectionTests(unittest.TestCase):
         self.assertTrue(any("SEEDBOX_TCG_CLOCK_APPLICATION" in reason for reason in missing))
         self.assertTrue(any("SEEDBOX_PV_CLOCK_APPLICATION" in reason for reason in
                             self.linux("machine-pv-x86", {"kvm": ""})))
+        self.assertTrue(any("SEEDBOX_TCG_TERMINAL_APPLICATION" in reason for reason in missing))
+        self.assertTrue(any("SEEDBOX_PV_TERMINAL_APPLICATION" in reason for reason in
+                            self.linux("machine-pv-x86", {"kvm": ""})))
         self.assertFalse(any("/dev/kvm" in reason for reason in missing))
         self.assertIn("requires Linux x86-64", self.linux("machine-tcg", {}, machine="aarch64"))
         self.assertTrue(any("/dev/kvm" in reason for reason in
@@ -51,12 +54,17 @@ class SelectionTests(unittest.TestCase):
             executable.chmod(0o755)
             inputs = {f"SEEDBOX_TCG_{key}": str(executable) for key in (
                 "QEMU", "FIRMWARE", "KERNEL", "INIT", "SERVICE_INITRD", "CONTROL_INITRD",
-                "DRIVER_CONTROL_APPLICATION", "PREPARED_FIXTURE", "CLOCK_APPLICATION")}
+                "DRIVER_CONTROL_APPLICATION", "PREPARED_FIXTURE", "CLOCK_APPLICATION",
+                "TERMINAL_APPLICATION")}
             inputs["SEEDBOX_TCG_ASSETS"] = directory
             self.assertEqual(self.linux("machine-tcg", {"kvm": "denied"}, inputs=inputs), [])
-            del inputs["SEEDBOX_TCG_CLOCK_APPLICATION"]
+            clock = inputs.pop("SEEDBOX_TCG_CLOCK_APPLICATION")
             self.assertEqual(self.linux("machine-tcg", {"kvm": "denied"}, inputs=inputs),
                              ["set SEEDBOX_TCG_CLOCK_APPLICATION to an existing file"])
+            inputs["SEEDBOX_TCG_CLOCK_APPLICATION"] = clock
+            del inputs["SEEDBOX_TCG_TERMINAL_APPLICATION"]
+            self.assertEqual(self.linux("machine-tcg", {"kvm": "denied"}, inputs=inputs),
+                             ["set SEEDBOX_TCG_TERMINAL_APPLICATION to an existing file"])
 
     def test_missing_tcg_list_exits_two_without_probing_kvm_or_building(self):
         with patch.object(check.platform, "system", return_value="Linux"), \
