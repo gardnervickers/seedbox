@@ -742,13 +742,15 @@ fn galera_node(name: &str, flush: u8) -> Machine {
 fn galera() -> Vec<Scenario> {
     const FAULT: &[&str] = &["--fault-at", "20", "--duration", "60"];
     // (name, comment, innodb_flush_log_at_trx_commit, oracle arguments)
-    let specs: [(&str, &str, u8, Vec<&str>); 9] = [
+    let specs: [(&str, &str, u8, Vec<&str>); 10] = [
         ("galera-healthy-append", "MDEV-38977 (Jepsen, MariaDB Galera Cluster 12.1.2): with no faults, list-append on all\nthree nodes commits lost updates (P4) and G-single, which snapshot isolation forbids:\nGalera certifies write sets by key but has no first-committer-wins over reads.",
          0, vec![]),
         ("galera-pause-append", "MDEV-38977 as Jepsen first saw it, with process pauses: galera-healthy-append while a\nrandom node's processes are paused for 5 s, then 5 s of quiet, from 10 s on.",
          0, vec!["--fault", "pause", "--fault-at", "10"]),
-        ("galera-single-node-append", "Control for galera-healthy-append: every client on n1. MariaDB 12's InnoDB\nREPEATABLE READ (innodb_snapshot_isolation=ON) rejects lost updates on one node.",
-         0, vec!["--client-nodes", "n1"]),
+        ("galera-healthy-append-ser", "galera-healthy-append at SERIALIZABLE, whose locking reads the applier of a remote\nwrite set brute-force aborts: an acknowledged transaction can lose its own appends\n(rolled back mid-transaction while its later statements and COMMIT succeed), and\nG-single and internal anomalies follow (MDEV-38977's shape).",
+         0, vec!["--isolation", "serializable"]),
+        ("galera-single-node-append", "Control for galera-healthy-append-ser: every client on n1, SERIALIZABLE. With no\nremote write sets to apply there is nothing to brute-force abort a local transaction.",
+         0, vec!["--client-nodes", "n1", "--isolation", "serializable"]),
         ("galera-stale-read", "MDEV-38999: write on n1, read on n2, no faults. A transaction on n2 that begins after\nan append on n1 was acknowledged does not observe it (a real-time stale read):\nreplication is not synchronous with the acknowledgement.",
          0, vec!["--client-nodes", "n1,n2", "--read-only", "n2"]),
         ("galera-stale-read-sync-wait", "Control for galera-stale-read: wsrep_sync_wait=1 makes every read on n2 wait until\nn2 has applied everything certified before it, so no read is stale.",
