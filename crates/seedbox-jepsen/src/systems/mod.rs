@@ -3,6 +3,7 @@ pub mod etcd;
 pub mod etcd_client;
 pub mod etcd_gateway;
 pub mod kafka;
+pub mod mysql;
 pub mod nats;
 pub mod nats_proto;
 pub mod pg_proto;

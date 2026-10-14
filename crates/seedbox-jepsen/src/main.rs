@@ -35,12 +35,14 @@ enum Command {
     },
     /// Run the Kafka queue oracle (guest).
     Kafka(systems::kafka::Args),
+    /// Run the MySQL list-append, non-repeatable-read or MAV oracle (guest).
+    Mysql(systems::mysql::Args),
     /// Re-run a system's checker on a saved oracle log and print the result as JSON.
     Check {
         #[arg(value_enum)]
         system: System,
         log: PathBuf,
-        /// PostgreSQL: the consistency model.
+        /// PostgreSQL and MySQL list-append: the consistency model.
         #[arg(long, default_value = "serializable")]
         model: String,
         /// Kafka: the workload, txn or produce.
@@ -111,6 +113,8 @@ enum System {
     Postgres,
     /// A Kafka oracle log.
     Kafka,
+    /// A MySQL oracle log (its workload comes from the log).
+    Mysql,
 }
 
 fn main() -> ExitCode {
@@ -121,6 +125,7 @@ fn main() -> ExitCode {
         Command::Postgres(args) => systems::postgres::run(args),
         Command::PgProbe { host, at } => systems::postgres::probe(&host, &at),
         Command::Kafka(args) => systems::kafka::run(args),
+        Command::Mysql(args) => systems::mysql::run(args),
         Command::Check {
             system,
             log,
@@ -189,6 +194,10 @@ fn check(system: System, log: &std::path::Path, model: &str, workload: &str) -> 
         System::Etcd => systems::etcd::recheck(&text),
         System::Kafka => systems::kafka::recheck(&text, workload),
         System::Postgres => match systems::postgres::recheck(&text, model) {
+            Ok(result) => result,
+            Err(error) => return fail(&error),
+        },
+        System::Mysql => match systems::mysql::recheck(&text, model) {
             Ok(result) => result,
             Err(error) => return fail(&error),
         },

@@ -601,6 +601,122 @@ fn kafka() -> Vec<Scenario> {
         .collect()
 }
 
+// ------------------------------------------------------------ MySQL
+
+const MYSQL: [(&str, &str); 2] = [
+    ("8.0.34", "docker.io/library/mysql:8.0.34@sha256:3c362d5eed04f271a2ebad41f45fed5ed86e934da533a079bcbd2b3a4ff372e8"),
+    ("8.4.6", "docker.io/library/mysql:8.4.6@sha256:6752fee1ed70df146fe22d5d1656deee79463f780a24cb7e67c807f2f07d7dc5"),
+];
+
+/// One MySQL server: the official entrypoint under mysqlmon.sh, its data
+/// directory on a volume, root with an empty password, and `extra` options.
+fn mysql_server(version: &str, extra: &[&str]) -> Machine {
+    let mut command = strings(&[
+        "mysqld",
+        // initialize needs an empty directory; the volume's root is not one.
+        "--datadir=/var/lib/mysql/data",
+        "--innodb-buffer-pool-size=128M",
+        "--max-connections=64",
+        "--performance-schema=OFF",
+        // Liveness only: a lock wait fails (a definite abort) before the client's 10 s timeout.
+        "--innodb-lock-wait-timeout=5",
+    ]);
+    command.extend(strings(extra));
+    Machine::image(lookup(&MYSQL, version))
+        .memory(1024)
+        .comment(
+            "mysqlmon.sh runs the official entrypoint and reports guest memory and the data size.",
+        )
+        .entrypoint(&["bash", "/mysqlmon.sh"])
+        .command(command)
+        .file("mysqlmon.sh", "/mysqlmon.sh")
+        .env("MYSQL_ALLOW_EMPTY_PASSWORD", "yes")
+        .data("/var/lib/mysql")
+}
+
+#[allow(clippy::type_complexity)]
+fn mysql() -> Vec<Scenario> {
+    const SINGLE: &[&str] = &["--skip-log-bin"];
+    // (name, comment, version, oracle arguments, server options)
+    let specs: [(&str, &str, &str, &[&str], &[&str]); 11] = [
+        ("mysql-rr-append", "MySQL 8.0.34 REPEATABLE READ is not Adya's repeatable read (Jepsen, 2023-12-19):\non one healthy node, list-append commits G-single, G2-item and lost updates (P4), and\nreads after a transaction's own write see other transactions' commits (internal).",
+         "8.0.34", &["--workload", "append", "--isolation", "repeatable-read"], SINGLE),
+        ("mysql-ser-append", "Negative control for mysql-rr-append: SERIALIZABLE must commit no anomaly.",
+         "8.0.34", &["--workload", "append", "--isolation", "serializable"], SINGLE),
+        ("mysql-rc-append", "Control for mysql-rr-append: READ COMMITTED (PL-2) must show no G0 or G1;\nG-single, G2-item, lost updates and non-repeatable reads are allowed.",
+         "8.0.34", &["--workload", "append", "--isolation", "read-committed"], SINGLE),
+        ("mysql846-rr-append", "mysql-rr-append on MySQL 8.4.6: the behaviour is by design, so RR anomalies remain.",
+         "8.4.6", &["--workload", "append", "--isolation", "repeatable-read"], SINGLE),
+        ("mysql-rr-nrr", "MySQL 8.0.34 REPEATABLE READ non-repeatable reads (Jepsen): a transaction reads a\nrow's name, updates its gender, and reads the name again, which then shows a concurrent\nrename, delete or re-insert, because InnoDB DML reads the latest committed row.",
+         "8.0.34", &["--workload", "nrr", "--isolation", "repeatable-read"], SINGLE),
+        ("mysql-ser-nrr", "Negative control for mysql-rr-nrr: SERIALIZABLE reads lock, so the name never changes.",
+         "8.0.34", &["--workload", "nrr", "--isolation", "serializable"], SINGLE),
+        ("mysql-rr-mav", "MySQL 8.0.34 REPEATABLE READ violates monotonic atomic view (Jepsen): a reader that\nupdates row 1 sees a writer's increment of row 1 but then reads row 0 without it.",
+         "8.0.34", &["--workload", "mav", "--isolation", "repeatable-read"], SINGLE),
+        ("mysql-ser-mav", "Negative control for mysql-rr-mav: SERIALIZABLE views stay monotonic.",
+         "8.0.34", &["--workload", "mav", "--isolation", "serializable"], SINGLE),
+        ("mysql-crash-flush0", "MySQL 8.0.34 with innodb_flush_log_at_trx_commit=0 acknowledges commits it has\nnot written: power-fail the node at 20 s and reboot it, and acknowledged appends\nare missing from the final read. SERIALIZABLE, so only durability can fail.",
+         "8.0.34", &["--workload", "append", "--isolation", "serializable", "--duration", "45", "--crash-at", "20"],
+         &["--skip-log-bin", "--innodb-flush-log-at-trx-commit=0"]),
+        ("mysql-crash-flush1", "Negative control for mysql-crash-flush0: the default innodb_flush_log_at_trx_commit=1\nkeeps every acknowledged append through the same power failure.",
+         "8.0.34", &["--workload", "append", "--isolation", "serializable", "--duration", "45", "--crash-at", "20"],
+         &["--skip-log-bin", "--innodb-flush-log-at-trx-commit=1"]),
+        ("mysql-crash-flush2", "mysql-crash-flush0 with innodb_flush_log_at_trx_commit=2: commits reach the OS but\nare synced once a second, so a power failure (not a process crash) loses them too.",
+         "8.0.34", &["--workload", "append", "--isolation", "serializable", "--duration", "45", "--crash-at", "20"],
+         &["--skip-log-bin", "--innodb-flush-log-at-trx-commit=2"]),
+    ];
+    let mut out: Vec<Scenario> = specs
+        .iter()
+        .map(|(name, comment, version, oracle, server)| {
+            let mut args = strings(&["mysql"]);
+            args.extend(strings(oracle));
+            args.extend(strings(&["--label", &format!("{version}/{name}")]));
+            Scenario {
+                name: name.to_string(),
+                comment: comment.to_string(),
+                generated: format!("MySQL {version}, {}", oracle.join(" ")),
+                machines: vec![("mysql".into(), mysql_server(version, server))],
+                oracle: Machine::program(&args),
+                latency: "1ms".into(),
+            }
+        })
+        .collect();
+    for (name, preserve, comment) in [
+        ("mysql-replica-order", "OFF", "Jepsen's RDS finding on local binlog replication: with\nreplica_preserve_commit_order=OFF (RDS's default), multi-threaded replicas commit out\nof the primary's order, so SERIALIZABLE read-only transactions on replicas observe\nG-single and G2-item."),
+        ("mysql-replica-order-on", "ON", "Negative control for mysql-replica-order: replica_preserve_commit_order=ON\n(the community default since 8.0.27) applies in the primary's commit order."),
+    ] {
+        let gtid = ["--gtid-mode=ON", "--enforce-gtid-consistency=ON"];
+        let mut primary = vec!["--server-id=1", "--binlog-transaction-dependency-tracking=WRITESET"];
+        primary.extend(gtid);
+        let replica = |id: &'static str| -> Vec<String> {
+            let mut options = strings(&[id, "--skip-log-bin", "--replica-parallel-workers=4",
+                "--replica-parallel-type=LOGICAL_CLOCK"]);
+            options.push(format!("--replica-preserve-commit-order={preserve}"));
+            options.extend(strings(&gtid));
+            options
+        };
+        let r1 = replica("--server-id=2");
+        let r2 = replica("--server-id=3");
+        let args = strings(&[
+            "mysql", "--workload", "append", "--isolation", "serializable",
+            "--replica", "r1", "--replica", "r2", "--label", &format!("8.0.34/{name}"),
+        ]);
+        out.push(Scenario {
+            name: name.into(),
+            comment: comment.into(),
+            generated: format!("MySQL 8.0.34, primary and two replicas, replica_preserve_commit_order={preserve}"),
+            machines: vec![
+                ("mysql".into(), mysql_server("8.0.34", &primary)),
+                ("r1".into(), mysql_server("8.0.34", &r1.iter().map(String::as_str).collect::<Vec<_>>())),
+                ("r2".into(), mysql_server("8.0.34", &r2.iter().map(String::as_str).collect::<Vec<_>>())),
+            ],
+            oracle: Machine::program(&args),
+            latency: "1ms".into(),
+        });
+    }
+    out
+}
+
 /// Every committed scenario, as (path under `harness/jepsen`, contents).
 pub fn all() -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -609,6 +725,7 @@ pub fn all() -> Vec<(String, String)> {
         ("etcd", etcd()),
         ("postgres", postgres()),
         ("kafka", kafka()),
+        ("mysql", mysql()),
     ] {
         for scenario in scenarios {
             out.push((
