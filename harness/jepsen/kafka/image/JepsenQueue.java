@@ -481,19 +481,35 @@ public final class JepsenQueue {
         }
     }
 
+    /**
+     * Read every partition from offset 0 at read_committed. The read is complete when the
+     * consumer reached the last stable offset of every partition and that offset equals the
+     * high watermark, so no transaction is still open: an open transaction holds the last
+     * stable offset until it ends or the coordinator times it out (transaction.timeout.ms).
+     */
     static void finalRead() {
         List<TopicPartition> tps = partitions();
         Map<String, List<Object>> logs = new TreeMap<>();
         for (TopicPartition tp : tps) logs.put(String.valueOf(tp.partition()), new ArrayList<>());
-        long deadline = System.nanoTime() + 120_000_000_000L;
+        long deadline = System.nanoTime() + (txnTimeoutMs + 120_000L) * 1_000_000L;
         String complete = "timeout";
-        Map<TopicPartition, Long> end = null;
+        Map<TopicPartition, Long> end = null, hw = null;
+        Properties uncommitted = consumerConfig(false);
+        uncommitted.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_uncommitted");
         while (System.nanoTime() < deadline) {
-            try (KafkaConsumer<Long, Long> c = new KafkaConsumer<>(consumerConfig(false))) {
+            try (KafkaConsumer<Long, Long> c = new KafkaConsumer<>(consumerConfig(false));
+                 KafkaConsumer<Long, Long> u = new KafkaConsumer<>(uncommitted)) {
                 c.assign(tps);
                 c.seekToBeginning(tps);
                 for (List<Object> l : logs.values()) l.clear();
                 end = c.endOffsets(tps, Duration.ofSeconds(10));
+                hw = u.endOffsets(tps, Duration.ofSeconds(10));
+                if (!end.equals(hw)) {
+                    complete = "open-transactions";
+                    emit(obj("type", "final-retry", "reason", complete, "lso", offsets(end), "hw", offsets(hw)));
+                    sleep(5000);
+                    continue;
+                }
                 Map<TopicPartition, Long> positions = new HashMap<>();
                 long attemptEnd = System.nanoTime() + 60_000_000_000L;
                 while (System.nanoTime() < attemptEnd) {
@@ -509,9 +525,10 @@ public final class JepsenQueue {
                 }
                 boolean done = true;
                 for (TopicPartition tp : tps) if (positions.getOrDefault(tp, -1L) < end.get(tp)) done = false;
-                // The last stable offset must not move: a later read would see more.
+                // Neither offset may have moved meanwhile: a later read would see more.
                 Map<TopicPartition, Long> again = c.endOffsets(tps, Duration.ofSeconds(10));
-                if (done && again.equals(end)) { complete = "complete"; break; }
+                Map<TopicPartition, Long> hwAgain = u.endOffsets(tps, Duration.ofSeconds(10));
+                if (done && again.equals(end) && hwAgain.equals(hw)) { complete = "complete"; break; }
                 complete = done ? "end-moved" : "incomplete";
                 emit(obj("type", "final-retry", "reason", complete));
             } catch (RuntimeException e) {
@@ -519,9 +536,13 @@ public final class JepsenQueue {
                 sleep(1000);
             }
         }
-        Map<String, Object> ends = new TreeMap<>();
-        if (end != null) for (Map.Entry<TopicPartition, Long> e : end.entrySet()) ends.put(String.valueOf(e.getKey().partition()), e.getValue());
-        emit(obj("type", "final", "status", complete, "logs", logs, "end-offsets", ends));
+        emit(obj("type", "final", "status", complete, "logs", logs, "end-offsets", offsets(end), "hw", offsets(hw)));
+    }
+
+    static Map<String, Object> offsets(Map<TopicPartition, Long> m) {
+        Map<String, Object> out = new TreeMap<>();
+        if (m != null) for (Map.Entry<TopicPartition, Long> e : m.entrySet()) out.put(String.valueOf(e.getKey().partition()), e.getValue());
+        return out;
     }
 
     // ---------------------------------------------------------------- main
