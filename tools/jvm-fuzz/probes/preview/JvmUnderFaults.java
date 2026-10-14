@@ -36,6 +36,12 @@ public final class JvmUnderFaults {
         }
     }
 
+    /** A kill that fails with ESRCH races the process reaper: the child has exited and been
+     *  reaped while isAlive() still reports it until the reaper records the exit. */
+    static boolean stillRunning(Process p) throws InterruptedException {
+        return !p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
     public static void main(String[] args) throws Exception {
         Fz.init("JvmUnderFaults", args);
         String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
@@ -85,13 +91,13 @@ public final class JvmUnderFaults {
             List<Process> paused = new ArrayList<>();
             for (int c = 0; c < n; c++) {
                 if ((who < 0 || who == c) && ps[c].isAlive()) {
-                    if (!kill(ps[c].pid(), sig) && ps[c].isAlive()) failed++;
+                    if (!kill(ps[c].pid(), sig) && stillRunning(ps[c])) failed++;
                     paused.add(ps[c]);
                 }
             }
             Thread.sleep(50);
             for (Process p : paused) {
-                if (!kill(p.pid(), SIGCONT) && p.isAlive()) failed++;
+                if (!kill(p.pid(), SIGCONT) && stillRunning(p)) failed++;
             }
             pauses++;
         }
