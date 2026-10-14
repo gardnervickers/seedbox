@@ -29,7 +29,9 @@ use std::{
 const QUANTUM: u64 = 10_000_000;
 /// Simulated bound for one boot to reach its terminal request and stop.
 const BOOT_LIMIT: u64 = 60_000_000_000;
-/// Host diagnostic only: a hung backend fails here instead of blocking forever.
+/// Host diagnostic only, checked between synchronous calls: it reports a run
+/// that never ends its boot, but cannot interrupt a call that never returns
+/// (the test process's own execution bound diagnoses that).
 const HOST_LIMIT: Duration = Duration::from_secs(600);
 
 fn at(n: u64) -> Timestamp {
@@ -130,6 +132,18 @@ fn step<M: Machine<Context = ()>>(
         upto,
     )?;
     assert!(inbox.is_empty(), "every due request is accepted");
+    let reached = match stop {
+        StopReason::BoundaryReached => upto,
+        StopReason::Blocked { reached, .. } | StopReason::Exited { reached, .. } => reached,
+    };
+    assert!(
+        now <= reached && reached <= upto,
+        "{stop:?} within [{now:?}, {upto:?}]"
+    );
+    assert!(
+        staged.iter().all(|output| output.at <= reached),
+        "no output beyond the accepted boundary"
+    );
     Ok((stop, staged))
 }
 
@@ -219,7 +233,10 @@ fn check_boot(path: &Path, reason: ExitReason, outputs: &[Output]) {
     );
 }
 
-/// Direct Machine contract for one terminal path on one backend.
+/// Direct Machine contract for one terminal path on one backend. Only valid
+/// calls reach the original and its continuation copy; the refused call goes
+/// to a disposable copy, because `Err` promises no resumable state. RNG use is
+/// compared, not sized: how much a boot draws, and when, is backend-specific.
 fn terminal_contract<M, R>(path: &Path, mut machine: M, restore: R)
 where
     M: Machine<Context = ()>,
@@ -230,7 +247,7 @@ where
     let mut rng = CountingRng(SeededRng::new(41), 0);
     let (exit, reason, outputs) = until_exit(&mut machine, &clock, &mut rng);
     check_boot(path, reason, &outputs);
-    assert_eq!(rng.1, 8, "one boot draws one seed");
+    let drawn = rng.1;
     let exited = |reached| StopReason::Exited { reached, reason };
 
     // Zero-budget observations keep the reason, execute nothing and draw nothing.
@@ -240,36 +257,44 @@ where
     clock.set(later.as_nanos());
     let (stop, staged) = step(&mut machine, &clock, &mut rng, Vec::new(), later).unwrap();
     assert_eq!((stop, staged.len()), (exited(later), 0));
-    // Positive budget needs a live machine; the exited state survives refusal.
-    assert!(step(
-        &mut machine,
-        &clock,
-        &mut rng,
-        Vec::new(),
-        at(later.as_nanos() + 1)
-    )
-    .is_err());
-    assert_eq!(rng.1, 8);
 
     // The terminal state is self-contained: a restored copy reports it too.
     let saved = machine.snapshot().unwrap();
+    assert_eq!(rng.1, drawn, "exited observations and capture draw nothing");
     let mut restored = restore(&saved);
     let mut restored_rng = rng.clone();
     let (stop, staged) = step(&mut restored, &clock, &mut restored_rng, Vec::new(), later).unwrap();
     assert_eq!((stop, staged.len()), (exited(later), 0));
+    assert_eq!(restored_rng.1, drawn);
 
-    // Reboot starts a fresh boot in a zero-budget admission run, on the
-    // original and on the restored machine alike, with identical results.
+    // Positive budget needs a live machine. Check the refusal on a disposable
+    // restored copy with its own RNG, then discard both.
+    {
+        let mut disposable = restore(&saved);
+        let mut disposable_rng = rng.clone();
+        let upto = at(later.as_nanos() + 1);
+        let refused = step(
+            &mut disposable,
+            &clock,
+            &mut disposable_rng,
+            Vec::new(),
+            upto,
+        );
+        assert!(refused.is_err(), "positive budget after exit is refused");
+    }
+
+    // Reboot starts a fresh boot, on the original and on the restored machine
+    // alike, with identical outputs, stops and RNG consumption.
     let mut boots = Vec::new();
     for (machine, rng) in [(&mut machine, &mut rng), (&mut restored, &mut restored_rng)] {
         clock.set(later.as_nanos());
         let (stop, staged) = step(machine, &clock, rng, vec![Request::Reboot], later).unwrap();
         assert_eq!((stop, staged.len()), (StopReason::BoundaryReached, 0));
-        assert_eq!(rng.1, 16, "the reboot draws one fresh seed");
         let (second, reason, outputs) = until_exit(machine, &clock, rng);
         assert!(second > later);
         check_boot(path, reason, &outputs);
-        boots.push((second, outputs));
+        assert!(rng.1 > drawn, "the new boot draws fresh entropy");
+        boots.push((second, outputs, rng.1));
     }
     assert!(
         boots[0] == boots[1],
@@ -364,8 +389,8 @@ fn key(text: &str) -> InputKey {
 
 /// Driver view of a guest panic: a live idle oracle and a target whose kernel
 /// panics. Returns committed events plus the target's stop at each barrier.
-/// Host Crash then Reboot restart the self-exited target (Driver policy
-/// requires the crash) after an in-place snapshot of its exited state.
+/// The confirmed self-crash makes the target down, so a host Reboot restarts
+/// it directly after an in-place snapshot of its exited state.
 fn driver_panic<M>(
     binary: Vec<u8>,
     memory: u64,
@@ -446,11 +471,6 @@ where
             b.snapshot(target)?;
             b.schedule(
                 at(now.as_nanos() + QUANTUM),
-                key("crash"),
-                Action::Crash(Target::Machine(target)),
-            )?;
-            b.schedule(
-                at(now.as_nanos() + 3 * QUANTUM),
                 key("reboot"),
                 Action::Reboot(Target::Machine(target)),
             )
