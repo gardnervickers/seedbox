@@ -10,6 +10,11 @@
 //! check needs no dependency graph: a read is stale when it lacks any value
 //! that an earlier-acknowledged transaction appended.
 //!
+//! An acknowledged append that no later read ever shows (one lost outright,
+//! say by a crash) would make every later read of its key look stale, so the
+//! caller names such values in `lost` and they are not required: losing a
+//! write is a durability failure, reported on its own.
+//!
 //! One item per stale read (reader and key), with the missing values, the
 //! writer acknowledged earliest among them, and the lag between that
 //! acknowledgement and the reader's invocation.
@@ -20,15 +25,21 @@ use wgl::OpOutcome;
 
 /// Stale reads in `ops`, ordered by reader then key; `reader` selects
 /// which committed transactions count as readers (all of them, say, or
-/// every one but a final read).
-pub fn stale_reads(ops: &[TxnOp], reader: impl Fn(&TxnOp) -> bool) -> Vec<Value> {
+/// every one but a final read), and `lost` the appends to leave out.
+pub fn stale_reads(
+    ops: &[TxnOp],
+    reader: impl Fn(&TxnOp) -> bool,
+    lost: impl Fn(&Atom, i64) -> bool,
+) -> Vec<Value> {
     // Per key, every acknowledged append: (acknowledged at, value, writer).
     let mut acked: BTreeMap<&Atom, Vec<(u64, i64, usize)>> = BTreeMap::new();
     for (index, op) in ops.iter().enumerate() {
         if let OpOutcome::Completed { at, ret } = &op.outcome {
             for mop in ret {
                 if let Mop::Append(k, v) = mop {
-                    acked.entry(k).or_default().push((*at, *v, index));
+                    if !lost(k, *v) {
+                        acked.entry(k).or_default().push((*at, *v, index));
+                    }
                 }
             }
         }
@@ -113,13 +124,21 @@ mod tests {
             ),
             elle::txn(6, "info", vec![Mop::Append(1.into(), 3)], None, 0, 1, None).unwrap(),
         ];
-        let stale = stale_reads(&ops, |_| true);
+        let stale = stale_reads(&ops, |_| true, |_, _| false);
         let found: Vec<(Value, Value)> = stale
             .iter()
             .map(|s| (s["reader"].clone(), s["missing"].clone()))
             .collect();
         assert_eq!(found, [(json!(2), json!([1])), (json!(5), json!([2]))]);
         assert_eq!(stale[1]["writer"], 4);
-        assert_eq!(stale_reads(&ops, |op| op.op.id != Atom::Int(2)).len(), 1);
+        assert_eq!(
+            stale_reads(&ops, |op| op.op.id != Atom::Int(2), |_, _| false).len(),
+            1
+        );
+        // A lost append is not required of later reads.
+        assert_eq!(
+            stale_reads(&ops, |_| true, |k, v| *k == Atom::Int(1) && v == 2).len(),
+            1
+        );
     }
 }

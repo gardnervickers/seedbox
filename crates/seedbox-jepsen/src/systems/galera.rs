@@ -33,7 +33,7 @@ use mysql::prelude::Queryable;
 use mysql::Conn;
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     io::{BufRead, BufReader, Write},
     net::TcpStream,
     sync::{Arc, Mutex},
@@ -671,9 +671,8 @@ pub fn durability(
 ) -> (Vec<Value>, Vec<(String, Option<Vec<Value>>)>) {
     let is_final =
         |t: &TxnOp| matches!(&t.op.process, Some(Atom::Str(p)) if p.starts_with("final"));
-    let stale = realtime::stale_reads(txns, |t| !is_final(t));
     let clients: Vec<TxnOp> = txns.iter().filter(|t| !is_final(t)).cloned().collect();
-    let lost = finals
+    let lost: Vec<(String, Option<Vec<Value>>)> = finals
         .iter()
         .map(|(node, f)| {
             (
@@ -682,6 +681,17 @@ pub fn durability(
             )
         })
         .collect();
+    // An append missing from some node's final read is lost, not merely late.
+    let gone: HashSet<(Value, i64)> = lost
+        .iter()
+        .flat_map(|(_, l)| l.iter().flatten())
+        .filter_map(|l| Some((l["key"].clone(), l["value"].as_i64()?)))
+        .collect();
+    let stale = realtime::stale_reads(
+        txns,
+        |t| !is_final(t),
+        |k, v| gone.contains(&(k.to_json(), v)),
+    );
     (stale, lost)
 }
 
