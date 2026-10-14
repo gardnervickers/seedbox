@@ -516,7 +516,7 @@ struct RuntimeInputs {
 #[derive(Args, Clone, Copy, Debug, Default)]
 #[command(next_help_heading = "Performance (never changes results)")]
 struct Performance {
-    /// Machine threads per simulation [default: one per machine, at most the host's available parallelism].
+    /// Machine threads per simulation; raise it when a run's machines could use spare cores, as when memory limits how many simulations run at once [default: 1].
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=seedbox_engine_protocol::launch::MAX_MACHINE_WORKERS as u64))]
     machine_workers: Option<u64>,
     /// Host CPU milliseconds a Linux KVM run may go without an exit before the PV watchdog reports where it is [default: 20].

@@ -43,23 +43,8 @@ pub(crate) const MACHINE_WORKERS_PARAMETER: &str = "SEEDBOX_MACHINE_WORKERS";
 pub(crate) struct LaunchPerformance {
     /// x86 worker settings; the ARM world has no watchdog.
     pub(crate) performance: Performance,
-    /// Explicit machine threads; absent means [`default_machine_workers`].
-    pub(crate) machine_workers: Option<usize>,
-}
-
-impl LaunchPerformance {
-    /// Machine threads for a world of `machines` machines.
-    pub(crate) fn machine_workers(&self, machines: usize) -> usize {
-        self.machine_workers
-            .unwrap_or_else(|| default_machine_workers(machines))
-    }
-}
-
-/// Machine threads when the server sets none: one per machine, at most the
-/// host's available parallelism.
-pub(crate) fn default_machine_workers(machines: usize) -> usize {
-    let host = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    machines.min(host).clamp(1, MAX_MACHINE_WORKERS)
+    /// Machine threads; unset, every machine runs on the coordinating thread.
+    pub(crate) machine_workers: usize,
 }
 
 /// Record an explicit machine thread count among an executor's performance parameters.
@@ -83,7 +68,7 @@ pub(crate) fn launch_performance(
 ) -> Result<LaunchPerformance> {
     let mut launch = LaunchPerformance {
         performance: Performance::default(),
-        machine_workers: None,
+        machine_workers: 1,
     };
     for (key, value) in parameters {
         let invalid = || Error::Integrity(format!("invalid performance parameter {key}={value}"));
@@ -96,13 +81,11 @@ pub(crate) fn launch_performance(
                     .ok_or_else(invalid)?
             }
             MACHINE_WORKERS_PARAMETER => {
-                launch.machine_workers = Some(
-                    value
-                        .parse()
-                        .ok()
-                        .filter(|n| (1..=MAX_MACHINE_WORKERS).contains(n))
-                        .ok_or_else(invalid)?,
-                )
+                launch.machine_workers = value
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=MAX_MACHINE_WORKERS).contains(n))
+                    .ok_or_else(invalid)?
             }
             _ => return Err(invalid()),
         }
@@ -158,7 +141,7 @@ impl WorkerLaunch {
         let console_limit = 1024 * 1024 * 1024 / streams;
         let digest = request.prepared.profile.witness_mode == WitnessMode::FullState;
         let performance = launch_performance(request.performance_parameters)?;
-        let machine_workers = performance.machine_workers(request.prepared.guests.len());
+        let machine_workers = performance.machine_workers;
         if kind == ExecutableKind::ArmWorld {
             if request.start_paused {
                 command.arg("--start-paused");
@@ -566,8 +549,8 @@ mod tests {
                 )]),
             };
             let original = serde_json::to_vec(&prepared.profile).unwrap();
-            // Unset, every machine gets a thread while the host has one.
-            let default_workers = default_machine_workers(2).to_string();
+            // Unset, every machine runs on the coordinating thread.
+            let default_workers = "1";
             let launch = WorkerLaunch::prepare(&request, &engine, kind).unwrap();
             let args: Vec<_> = launch
                 .command
@@ -608,7 +591,7 @@ mod tests {
                     "--console-limit",
                     "268435456",
                     "--machine-workers",
-                    &default_workers,
+                    default_workers,
                     "--digest",
                 ];
                 assert_eq!(&args[dispatch.len()..], expected);
@@ -631,7 +614,7 @@ mod tests {
                 expected.log_chunk_limit = Some(65536);
                 expected.stream_console = true;
                 expected.performance.watchdog_ms = 50;
-                expected.machine_workers = default_machine_workers(2);
+                expected.machine_workers = 1;
                 assert_eq!(worker, expected);
             }
             assert_eq!(serde_json::to_vec(&prepared.profile).unwrap(), original);
@@ -678,15 +661,14 @@ mod tests {
         };
         let defaults = decode(&[]).unwrap();
         assert_eq!(defaults.performance, Performance::default());
-        assert_eq!(defaults.machine_workers, None);
-        assert_eq!(defaults.machine_workers(3), default_machine_workers(3));
+        assert_eq!(defaults.machine_workers, 1);
         let set = decode(&[
             ("SEEDBOX_WATCHDOG_MS", "50"),
             ("SEEDBOX_MACHINE_WORKERS", "64"),
         ])
         .unwrap();
         assert_eq!(set.performance, Performance { watchdog_ms: 50 });
-        assert_eq!(set.machine_workers(3), 64);
+        assert_eq!(set.machine_workers, 64);
         for bad in [
             ("SEEDBOX_WATCHDOG_MS", "0"),
             ("SEEDBOX_WATCHDOG_MS", "fast"),
@@ -697,18 +679,6 @@ mod tests {
         ] {
             assert!(decode(&[bad]).is_err(), "{bad:?}");
         }
-    }
-
-    #[test]
-    fn default_machine_workers_follow_machines_and_host_parallelism() {
-        let host = std::thread::available_parallelism().unwrap().get();
-        assert_eq!(default_machine_workers(0), 1);
-        assert_eq!(default_machine_workers(1), 1);
-        assert_eq!(default_machine_workers(2), host.min(2));
-        assert_eq!(
-            default_machine_workers(10_000),
-            host.min(MAX_MACHINE_WORKERS)
-        );
     }
 
     fn worker(output: &std::path::Path, script: &str) -> RunningWorker {

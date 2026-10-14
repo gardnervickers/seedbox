@@ -8,8 +8,8 @@
 //! The last oracles cross a server session: runs exported from the first
 //! session are imported into a second server with a fresh state directory,
 //! where fresh resolutions must match them and imported checkpoints must branch.
-//! The first session uses the server's default machine worker pool and the
-//! second runs every machine on one thread. A separate test runs references on
+//! The first session runs with 3 machine workers and the second at the
+//! server default, one thread. A separate test runs references on
 //! one thread, then reruns, replays and branches them with 2, 3 and 8 workers.
 #![cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
@@ -78,7 +78,7 @@ fn whole_run_determinism_oracles() {
         .tempdir_in("/tmp")
         .unwrap();
     let state = directory.path().join("state");
-    let mut server = Some(Server::start(Path::new(&cli), &state, None));
+    let mut server = Some(Server::start(Path::new(&cli), &state, Some(3)));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -133,9 +133,9 @@ fn whole_run_determinism_oracles() {
             }
         };
         drop(server.take());
-        // Every machine on one thread, against the first session's default pool.
+        // The server default, one thread, against the first session's pool of 3.
         let second = directory.path().join("state2");
-        server = Some(Server::start(Path::new(&cli), &second, Some(1)));
+        server = Some(Server::start(Path::new(&cli), &second, None));
         let fresh = Oracles::new(PathBuf::from(&cli), &second).await;
         for (name, result) in [
             (
@@ -486,20 +486,10 @@ impl Oracles {
     /// fast followers, and a run paused twice with stalled and disconnecting
     /// subscribers, must both reproduce the unobserved unlimited baseline.
     async fn perf_settings(&self, baseline: &SimulationId) -> Outcome {
-        // The server default: one machine thread per machine, at most the host's.
-        let machines = self
-            .client
-            .world(baseline)
-            .await
-            .map_err(err)?
-            .machines
-            .len();
-        let host = std::thread::available_parallelism().map_or(1, |n| n.get());
+        // This session's server runs every simulation on 3 machine threads.
         let used = self.machine_workers(baseline).await?;
-        if used != machines.min(host) as u64 {
-            return Err(format!(
-                "{baseline}: {used} machine workers for {machines} machines on {host} host threads"
-            ));
+        if used != 3 {
+            return Err(format!("{baseline}: {used} machine workers, not 3"));
         }
         // Slow playback for the first simulated seconds, with fast followers.
         let slow = self.submit(&self.document, true).await?;
@@ -1275,7 +1265,9 @@ impl Oracles {
                 .await
                 .map_err(|e| format!("{bundle} vs a fresh run of {}: {e}", project.display()))?;
             if self.machine_workers(&fresh).await? != 1 {
-                return Err(format!("{fresh}: did not run on one machine thread"));
+                return Err(format!(
+                    "{fresh}: the default did not run on one machine thread"
+                ));
             }
         }
         Ok(())

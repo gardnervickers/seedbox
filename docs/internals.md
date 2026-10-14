@@ -318,9 +318,10 @@ and machine-local sequence before routing them. A failure prevents the round
 from committing. Worker completion order must not change results. An idle
 machine must advance to its assigned wake time before delivering inputs.
 
-The server sizes the pool (`seedbox serve --machine-workers`); by default each
-simulation gets one thread per machine, at most the host's available parallelism,
-and one worker runs every machine on the coordinating thread. An explicit count
+The server sizes the pool (`seedbox serve --machine-workers`). By default one
+worker runs every machine on the coordinating thread: concurrent seeds use host
+cores better. A larger pool helps a run whose machines could use spare cores, as
+when memory limits how many simulations run at once. An explicit count
 is recorded among a run's performance parameters, and the engine report's
 scheduler evidence states the count used. Neither is part of identity, witness or
 comparison, so a replay may use a different count and must still match.

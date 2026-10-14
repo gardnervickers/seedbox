@@ -92,9 +92,7 @@ fn server_performance_settings_are_bounded_usage_errors_before_state() {
         .map(|(_, section)| section)
         .unwrap_or_else(|| panic!("{help}"));
     assert!(
-        performance.contains("--machine-workers <N>")
-            && performance
-                .contains("[default: one per machine, at most the host's available parallelism]"),
+        performance.contains("--machine-workers <N>") && performance.contains("[default: 1]"),
         "{help}"
     );
     let state = directory.path().join("state");
