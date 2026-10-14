@@ -89,6 +89,7 @@ pub fn build_oracle(root: &Path, arch: &str, engine: Option<&str>) -> Result<Pat
         "crates/seedbox-control/Cargo.toml",
         "crates/seedbox-engine-core/build.rs",
         "crates/seedbox-jepsen/oracle.Dockerfile",
+        "crates/seedbox-jepsen/build.rs",
     ] {
         let target = context.join(file);
         fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -110,11 +111,18 @@ pub fn build_oracle(root: &Path, arch: &str, engine: Option<&str>) -> Result<Pat
         })
         .collect();
     fs::write(context.join("Cargo.toml"), manifest).map_err(|e| e.to_string())?;
-    let platform = match arch {
-        "arm64" => "linux/arm64",
-        "amd64" => "linux/amd64",
+    let (platform, triple) = match arch {
+        "arm64" => ("linux/arm64", "aarch64-linux"),
+        "amd64" => ("linux/amd64", "x86_64-linux"),
         other => return Err(format!("--arch {other}: expected arm64 or amd64")),
     };
+    // TigerBeetle's static C client, linked by build.rs.
+    let library = tb_client_lib(&root, triple)?;
+    let target = context
+        .join("crates/seedbox-jepsen/target/native/tb_client")
+        .join(triple);
+    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    fs::copy(&library, target.join("libtb_client.a")).map_err(|e| e.to_string())?;
     let output = root.join(format!("build/jepsen/{arch}"));
     fs::create_dir_all(&output).map_err(|e| e.to_string())?;
     run(docker(engine)
@@ -131,6 +139,50 @@ pub fn build_oracle(root: &Path, arch: &str, engine: Option<&str>) -> Result<Pat
         ));
     }
     Ok(output)
+}
+
+// ------------------------------------------------------------ TigerBeetle's C client
+
+/// TigerBeetle publishes its C client library, per release and platform, in
+/// its Go client module; this is the module zip of release 0.16.11 from the Go
+/// module proxy (sum.golang.org: `h1:qGr/UnF/Nslc023/otpGmaX9J0kzkTRGH6uIg/A3IyU=`).
+const TB_GO_ZIP_URL: &str =
+    "https://proxy.golang.org/github.com/tigerbeetle/tigerbeetle-go/@v/v0.16.11.zip";
+const TB_GO_ZIP_SHA256: &str = "8ab91392411635c017ca54b7bb94e20213041cb5136cd6534c2f7c2277dbe29b";
+const TB_GO_PREFIX: &str = "github.com/tigerbeetle/tigerbeetle-go@v0.16.11/pkg/native";
+
+/// The platforms `fetch-tb-client` prepares: the guests' and this Mac's.
+pub const TB_CLIENT_TRIPLES: [&str; 3] = ["aarch64-linux", "x86_64-linux", "aarch64-macos"];
+
+/// `libtb_client.a` for `triple` (`aarch64-linux`, ...) under
+/// `crates/seedbox-jepsen/target/native/tb_client/TRIPLE/`, where `build.rs`
+/// looks for it, fetched and verified once.
+pub fn tb_client_lib(root: &Path, triple: &str) -> Result<PathBuf, String> {
+    let native = root.join("crates/seedbox-jepsen/target/native/tb_client");
+    let library = native.join(triple).join("libtb_client.a");
+    if library.is_file() {
+        return Ok(library);
+    }
+    fs::create_dir_all(library.parent().unwrap()).map_err(|e| e.to_string())?;
+    let zip = native.join("tigerbeetle-go-v0.16.11.zip");
+    if !zip.is_file() || sha256(&zip)? != TB_GO_ZIP_SHA256 {
+        run(Command::new("curl")
+            .args(["-sSfL", "-o"])
+            .arg(&zip)
+            .arg(TB_GO_ZIP_URL))?;
+    }
+    if sha256(&zip)? != TB_GO_ZIP_SHA256 {
+        return Err(format!("{}: unexpected SHA-256", zip.display()));
+    }
+    let bytes = run(Command::new("unzip")
+        .arg("-p")
+        .arg(&zip)
+        .arg(format!("{TB_GO_PREFIX}/{triple}/libtb_client.a")))?;
+    if bytes.is_empty() {
+        return Err(format!("{triple}: no libtb_client.a in the module"));
+    }
+    fs::write(&library, bytes).map_err(|e| e.to_string())?;
+    Ok(library)
 }
 
 // ------------------------------------------------------------ Elle cross-check

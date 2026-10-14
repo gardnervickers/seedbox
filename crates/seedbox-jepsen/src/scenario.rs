@@ -806,6 +806,174 @@ fn galera() -> Vec<Scenario> {
         .collect()
 }
 
+// ------------------------------------------------------------ TigerBeetle
+
+/// One TigerBeetle replica: the pinned official image plus this crate's binary
+/// (`image/tigerbeetle-VERSION.Dockerfile`), whose `tb-node` agent formats and
+/// runs it. The data file lives on a ramfs: a Seedbox volume holds 1 GiB and a
+/// data file is at least 1.06 GiB (its write-ahead log alone is 1 GiB); on ramfs,
+/// which has no `fallocate`, TigerBeetle leaves it sparse, so memory holds only
+/// what it writes. `--development` (smaller caches, so a replica runs in under
+/// 1 GiB), a 256 KiB request limit (2,046 transfers per request) and the
+/// production request queue apply to every replica. `probe` also checks O_DIRECT and io_uring on a volume at /data.
+fn tb_replica(version: &str, index: usize, replicas: usize, memory: u32, probe: bool) -> Machine {
+    let peers = nodes("n", replicas).join(",");
+    let mut entrypoint = vec![
+        "/jepsen/seedbox-jepsen".to_string(),
+        "tb-node".into(),
+        "--replica".into(),
+        index.to_string(),
+        "--peers".into(),
+        peers,
+        "--ramfs".into(),
+        "/var/lib/tigerbeetle".into(),
+        "--data".into(),
+        format!("/var/lib/tigerbeetle/0_{index}.tigerbeetle"),
+        "--format-arg=--development".into(),
+        "--start-arg=--development".into(),
+        "--start-arg=--experimental".into(),
+        "--start-arg=--limit-request=256KiB".into(),
+        // --development queues no requests beyond the 8-prepare pipeline, and a
+        // replica then keeps only 8 clients connected: a 9th client's requests
+        // wait forever. Allow the production queue.
+        "--start-arg=--limit-pipeline-requests=56".into(),
+    ];
+    let mut m = Machine::build(
+        ROOT,
+        Some(&format!(
+            "harness/jepsen/tigerbeetle/image/tigerbeetle-{version}.Dockerfile"
+        )),
+    )
+    .memory(memory);
+    if probe {
+        entrypoint.extend(["--probe".to_string(), "/data".into()]);
+        m = m.data("/data");
+    }
+    m.entrypoint = Some(entrypoint);
+    m
+}
+
+struct TbSpec {
+    name: &'static str,
+    comment: &'static str,
+    version: &'static str,
+    replicas: usize,
+    memory: u32,
+    oracle_memory: u32,
+    args: &'static [&'static str],
+    probe: bool,
+}
+
+fn tigerbeetle() -> Vec<Scenario> {
+    // tigerbeetle#2544 needs an index level of two or more tables, which takes
+    // more than 262,080 entries (32 compaction ops x 8,190 per batch): preload
+    // 300,000 lean transfers in a single ledger, then query.
+    const QUERY: &[&str] = &[
+        "--workload",
+        "query",
+        "--preload",
+        "300000",
+        "--preload-batch",
+        "2000",
+        "--query-fraction",
+        "1.0",
+        "--duration",
+        "30",
+        "--clients",
+        "4",
+        "--ledgers",
+        "1",
+        "--codes",
+        "1000",
+        "--lean",
+        "--accounts",
+        "2000",
+        "--final-filters",
+        "500",
+    ];
+    const REFORMAT: &[&str] = &[
+        "--workload",
+        "reformat",
+        "--duration",
+        "40",
+        "--clients",
+        "2",
+        "--batch",
+        "8",
+        "--think-ms",
+        "40",
+        "--query-fraction",
+        "0",
+        "--cut-at",
+        "3",
+        "--cut-for",
+        "3",
+        "--alone-for",
+        "15",
+        "--timeout",
+        "10",
+    ];
+    let specs = [
+        TbSpec { name: "tb-smoke", comment: "Smoke test: a healthy 3-replica TigerBeetle 0.16.11 cluster, a short mixed\nworkload, and an O_DIRECT/io_uring probe on n1's volume.",
+            version: "0.16.11", replicas: 3, memory: 3072, oracle_memory: 512,
+            args: &["--workload", "query", "--duration", "20", "--clients", "4"], probe: true },
+        TbSpec { name: "tb-2544-query", comment: "tigerbeetle#2544 (Jepsen 3.6, missing query results): a healthy 3-replica 0.16.11\ncluster with 300,000 transfers; query_transfers and get_account_transfers that\nfilter on two fields omit results, because the zig-zag merge join ends a scan\nearly once a probe skips past an index table.",
+            version: "0.16.11", replicas: 3, memory: 3072, oracle_memory: 1024, args: QUERY, probe: false },
+        TbSpec { name: "tb-2544-query-fixed", comment: "Negative control for tb-2544-query: 0.16.17 carries the fix.",
+            version: "0.16.17", replicas: 3, memory: 3072, oracle_memory: 1024, args: QUERY, probe: false },
+        TbSpec { name: "tb-2767-reformat", comment: "tigerbeetle#2767 (Jepsen 3.12): cut one replica off while transfers commit on the\nother two, kill both, reformat one with `tigerbeetle format` and let it rejoin with\nthe cut-off replica before the other returns. Acknowledged transfers are lost.",
+            version: "0.16.11", replicas: 3, memory: 3072, oracle_memory: 512, args: REFORMAT, probe: false },
+        TbSpec { name: "tb-2767-recover-fixed", comment: "Negative control for tb-2767-reformat on 0.16.43, whose `tigerbeetle recover`\nreplaces the data file safely: it waits for a quorum before the replica rejoins.",
+            version: "0.16.43", replicas: 3, memory: 3072, oracle_memory: 512, args: &[], probe: false },
+        TbSpec { name: "tb-206-timeout", comment: "tigerbeetle#206 (Jepsen 3.1): with every replica killed, a create_transfers request\nneither fails nor times out; the client retries until the replicas return, and\nthen it commits.",
+            version: "0.16.11", replicas: 3, memory: 2560, oracle_memory: 512,
+            args: &["--workload", "timeout", "--hold", "60", "--accounts", "4"], probe: false },
+        TbSpec { name: "tb-206-timeout-0-16-43", comment: "tb-206-timeout on 0.16.43: tigerbeetle#206 is a design decision, still open, so the\nrequest still neither fails nor times out.",
+            version: "0.16.43", replicas: 3, memory: 2560, oracle_memory: 512,
+            args: &["--workload", "timeout", "--hold", "60", "--accounts", "4"], probe: false },
+        TbSpec { name: "tb-2484-sessions", comment: "tigerbeetle#2484 (Jepsen 3.3): 64 client sessions, then five more, each registered\nafter closing the newest; each evicts the oldest live session, and the 0.16.11 client\npanics on eviction and takes its process down.",
+            version: "0.16.11", replicas: 3, memory: 2560, oracle_memory: 3072,
+            args: &["--workload", "sessions", "--sessions", "64", "--evictions", "5", "--accounts", "4"], probe: false },
+    ];
+    specs
+        .into_iter()
+        .map(|spec| {
+            let mut args = strings(&["tigerbeetle"]);
+            let oracle_args: Vec<&str> = if spec.name == "tb-2767-recover-fixed" {
+                let mut a = REFORMAT.to_vec();
+                a.extend(["--replace", "recover"]);
+                a
+            } else {
+                spec.args.to_vec()
+            };
+            args.extend(strings(&oracle_args));
+            args.extend(["--nodes".into(), nodes("n", spec.replicas).join(",")]);
+            args.extend(["--label".into(), format!("{}/{}", spec.version, spec.name)]);
+            Scenario {
+                name: spec.name.into(),
+                comment: spec.comment.into(),
+                generated: format!("TigerBeetle {}, {} replicas", spec.version, spec.replicas),
+                machines: (0..spec.replicas)
+                    .map(|i| {
+                        (
+                            format!("n{}", i + 1),
+                            tb_replica(
+                                spec.version,
+                                i,
+                                spec.replicas,
+                                spec.memory,
+                                spec.probe && i == 0,
+                            ),
+                        )
+                    })
+                    .collect(),
+                oracle: Machine::program(&args).memory(spec.oracle_memory),
+                latency: "1ms".into(),
+            }
+        })
+        .collect()
+}
+
 /// Every committed scenario, as (path under `harness/jepsen`, contents).
 pub fn all() -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -816,6 +984,7 @@ pub fn all() -> Vec<(String, String)> {
         ("kafka", kafka()),
         ("mysql", mysql()),
         ("galera", galera()),
+        ("tigerbeetle", tigerbeetle()),
     ] {
         for scenario in scenarios {
             out.push((

@@ -39,6 +39,19 @@ enum Command {
     Mysql(systems::mysql::Args),
     /// Run the MariaDB Galera Cluster list-append oracle (guest).
     Galera(systems::galera::Args),
+    /// Run the TigerBeetle oracle (guest).
+    Tigerbeetle(systems::tigerbeetle::Args),
+    /// Run a TigerBeetle replica's node agent (guest).
+    TbNode(systems::tigerbeetle_node::Args),
+    /// Serve one TigerBeetle client session over stdin and stdout (the oracle's child).
+    TbWorker(systems::tigerbeetle::WorkerArgs),
+    /// Check O_DIRECT, io_uring and fallocate in a directory (guest diagnostic).
+    IoProbe { dir: PathBuf },
+    /// Fetch the pinned TigerBeetle C client library for this host and the guests.
+    FetchTbClient {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// Re-run a system's checker on a saved oracle log and print the result as JSON.
     Check {
         #[arg(value_enum)]
@@ -131,6 +144,24 @@ fn main() -> ExitCode {
         Command::Kafka(args) => systems::kafka::run(args),
         Command::Mysql(args) => systems::mysql::run(args),
         Command::Galera(args) => systems::galera::run(args),
+        Command::Tigerbeetle(args) => systems::tigerbeetle::run(args),
+        Command::TbNode(args) => systems::tigerbeetle_node::run(args),
+        Command::TbWorker(args) => systems::tigerbeetle::worker(args),
+        Command::IoProbe { dir } => {
+            println!("{}", systems::tigerbeetle_node::probe(&dir));
+            0
+        }
+        Command::FetchTbClient { root } => {
+            let root = root.unwrap_or_else(tools::default_root);
+            let mut code = 0;
+            for triple in tools::TB_CLIENT_TRIPLES {
+                match tools::tb_client_lib(&root, triple) {
+                    Ok(path) => println!("FETCHED: {}", path.display()),
+                    Err(error) => code = fail(&error),
+                }
+            }
+            code
+        }
         Command::Check {
             system,
             log,

@@ -30,3 +30,7 @@ wgl = { git = "ssh://git@github.com/lbradstreet/wgl-checker.git", rev = "94231b4
 [profile.release]
 # The guest binary is copied into every simulation; keep symbols, drop debug info.
 strip = "debuginfo"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The I/O probe: O_DIRECT through io_uring, as TigerBeetle's storage does it.
+io-uring = "0.7"
