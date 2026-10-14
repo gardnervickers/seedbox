@@ -44,6 +44,15 @@ class TxnChecks(unittest.TestCase):
         self.assertEqual((result["lost"], result["torn"]), (1, 1))
         self.assertEqual(details["lost"][0]["lost"], [(0, 10)])
 
+    def test_writes_beyond_the_last_stable_offset_are_unseen(self):
+        # An open transaction at offset 1 holds the LSO: the later committed write is unseen.
+        events = [op(0, "ok", [["send", 0, [0, 10]]]), op(1, "info", [["send", 0, [1, 11]]]),
+                  op(2, "ok", [["send", 0, [2, 12]]]),
+                  dict(final({0: [(0, 10)]}), **{"end-offsets": {"0": 1}})]
+        result, details, violation = kj.check(events, "txn")
+        self.assertFalse(violation)
+        self.assertEqual((result["lost"], result["unseen"]), (0, 1))
+
     def test_info_may_go_either_way(self):
         events = [op(0, "info", [["send", 0, [0, 10]]]), op(1, "info", [["send", 0, 11]]),
                   final({0: [(0, 10)]})]

@@ -297,7 +297,11 @@ def check(events, workload):
         if have is not None and have != v:
             inconsistent.append({"key": k, "offset": o, "value": v, "final": have, "where": where})
 
-    lost, aborted_read, torn, aborted_poll, committed_fail = [], [], [], [], []
+    lost, aborted_read, torn, aborted_poll, committed_fail, unseen = [], [], [], [], [], []
+    lso = {int(k): int(v) for k, v in ((final or {}).get("end-offsets") or {}).items()}
+
+    def beyond(k, o):
+        return o is not None and k in lso and int(o) >= lso[k]
     ops = []  # completions of transactions
     stats = collections.Counter()
     txns = []
@@ -310,7 +314,9 @@ def check(events, workload):
             stats[e["type"]] += 1
             if e["type"] == "ok":
                 observe(k, e.get("offset"), v, "ack")
-                if (k, v) not in position:
+                if (k, v) not in position and beyond(k, e.get("offset")):
+                    unseen.append({"unseen": [(k, v)], "offset": e.get("offset")})
+                elif (k, v) not in position:
                     lost.append({"key": k, "value": v, "offset": e.get("offset"), "t": e.get("t")})
             elif (k, v) in position:
                 stats["info-visible"] += 1
@@ -349,6 +355,12 @@ def check(events, workload):
                         committed_fail.append(e["op"])
             elif e["type"] == "ok" and complete:
                 gone = [(k, v) for k, v in sends if (k, v) not in position]
+                # A write at or above the partition's last stable offset is unseen, not lost:
+                # an open transaction below it hides it from read_committed readers.
+                hidden = [(k, v) for k, o, v in attempted if (k, v) not in position and beyond(k, o)]
+                if hidden:
+                    unseen.append({"op": e["op"], "txid": e.get("txid"), "unseen": hidden})
+                    gone = [kv for kv in gone if kv not in hidden]
                 if gone:
                     lost.append({"op": e["op"], "txid": e.get("txid"), "lost": gone, "visible": visible})
                     if visible:
@@ -375,10 +387,11 @@ def check(events, workload):
         records=sum(len(p) for p in logs.values()),
         ops=dict(stats),
         lost=len(lost), aborted_read=len(aborted_read), aborted_poll=len(aborted_poll), torn=len(torn),
-        committed_fail=len(committed_fail), duplicates=len(duplicates), inconsistent=len(inconsistent),
+        committed_fail=len(committed_fail), unseen=sum(len(u["unseen"]) for u in unseen),
+        duplicates=len(duplicates), inconsistent=len(inconsistent),
         nonmonotonic=len(nonmonotonic), elle=cycles,
     )
-    details = dict(lost=lost[:50], aborted_read=aborted_read[:50], aborted_poll=aborted_poll[:50], torn=torn[:50],
+    details = dict(lost=lost[:50], unseen=unseen[:50], aborted_read=aborted_read[:50], aborted_poll=aborted_poll[:50], torn=torn[:50],
                    duplicates=duplicates[:50], inconsistent=inconsistent[:50], nonmonotonic=nonmonotonic[:50])
     violation = any(result[k] for k in ("lost", "aborted_read", "aborted_poll", "torn", "duplicates",
                                         "inconsistent", "nonmonotonic"))
@@ -386,7 +399,7 @@ def check(events, workload):
 
 
 def summarize(result, faults):
-    return (f"{result['lost']} lost, {result['aborted_read']} aborted reads ({result['aborted_poll']} in polls), "
+    return (f"{result['lost']} lost, {result['unseen']} unseen, {result['aborted_read']} aborted reads ({result['aborted_poll']} in polls), "
             f"{result['torn']} torn, {result['duplicates']} duplicates, {result['inconsistent']} inconsistent offsets; "
             f"ops {json.dumps(result['ops'], sort_keys=True)}; elle {json.dumps(result['elle'], sort_keys=True)}; "
             f"{result['records']} records; {faults} faults")
@@ -465,12 +478,15 @@ def main():
     evidence("check", **result)
     evidence("details", **details)
     summary = summarize(result, faults)
-    if result["final"] != "complete":
-        print("VERDICT inconclusive: final read " + str(result["final"]) + "; " + summary, flush=True)
-        return 3
     if violation:
         print("VERDICT violation: " + summary, flush=True)
         return 1
+    if result["final"] != "complete":
+        print("VERDICT inconclusive: final read " + str(result["final"]) + "; " + summary, flush=True)
+        return 3
+    if result["unseen"]:
+        print("VERDICT inconclusive: committed writes beyond an open transaction; " + summary, flush=True)
+        return 3
     if args.nemesis != "none" and not faults:
         print("VERDICT inconclusive: no fault was applied; " + summary, flush=True)
         return 3
