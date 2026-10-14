@@ -47,8 +47,12 @@ component, are classified as in Adya's thesis:
 * ``G2-item``: two or more rw edges (item anti-dependencies; this workload
   has no predicates).
 
-Under serializability every anomaly is a violation. Snapshot isolation allows
-G2-item only, and read committed allows G-single and G2-item as well.
+The models follow Adya and Elle. Under serializability every anomaly is a
+violation. Snapshot isolation allows G2-item only, and read committed allows
+G-single and G2-item as well. Adya's repeatable read (PL-2.99) allows only
+predicate G2, which this workload cannot produce, so on these histories it
+forbids everything serializability does; PostgreSQL's REPEATABLE READ is
+snapshot isolation and is checked as such.
 """
 import collections
 import itertools
@@ -57,7 +61,7 @@ CYCLE_TYPES = ("G0", "G1c", "G-single", "G2-item")
 ALLOWED = {
     "serializable": set(),
     "snapshot-isolation": {"G2-item"},
-    "repeatable-read": {"G2-item"},
+    "repeatable-read": set(),
     "read-committed": {"G-single", "G2-item"},
 }
 # How many example edges each cycle search starts from, per component.
