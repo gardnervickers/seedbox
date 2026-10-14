@@ -14,6 +14,8 @@
 #      "safe_to_bootstrap"}, and read one command line: `bootstrap` or `join`.
 #   3. Start mariadbd: `bootstrap` sets safe_to_bootstrap and adds
 #      --wsrep-new-cluster; both pass the recovered --wsrep-start-position.
+#      When mariadbd fails (a joiner's state transfer can), start it again as a
+#      joiner after 5 s.
 # Lines starting with GALMON go to stderr: the boot steps, and every 10 s guest
 # memory, the process count and the data size.
 set -u
@@ -101,10 +103,22 @@ start=()
 if [ -n "$uuid" ] && [ "$seqno" -ge 0 ]; then
   start=("--wsrep-start-position=$uuid:$seqno")
 fi
+new=()
 if [ "$command" = bootstrap ]; then
   if [ -f "$datadir/grastate.dat" ]; then
     sed -i 's/^safe_to_bootstrap: 0/safe_to_bootstrap: 1/' "$datadir/grastate.dat"
   fi
-  exec mariadbd --user=mysql "$@" "${start[@]}" --wsrep-new-cluster
+  new=(--wsrep-new-cluster)
 fi
-exec mariadbd --user=mysql "$@" "${start[@]}"
+# Like systemd's Restart=on-abort: a joiner whose state transfer fails (a donor
+# that cannot take FLUSH TABLES WITH READ LOCK under load, say) aborts, so start
+# it again, joining; a bootstrapped node that dies rejoins the cluster it formed.
+while true; do
+  mariadbd --user=mysql "$@" "${start[@]}" "${new[@]}"
+  code=$?
+  log "mariadbd exited $code"
+  [ "$code" -eq 0 ] && exit 0
+  new=()
+  start=()
+  sleep 5
+done
