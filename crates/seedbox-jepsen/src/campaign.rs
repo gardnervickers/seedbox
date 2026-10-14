@@ -296,6 +296,9 @@ fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args) -> Value {
     );
     let files = split_logs(&dir).unwrap_or_default();
     row["log_files"] = json!(files.len());
+    // The server evicts the oldest log history beyond its shared budget and says
+    // so with gap records; such a run's history is incomplete for offline checks.
+    row["log_gaps"] = json!(files.iter().any(|f| f.starts_with('(')));
     let verdict = oracle_verdict(&dir);
     let exited = document["status"]["termination"]["reason"] == "oracleExited";
     let hit = exited && document["status"]["oracleExitCode"] == 1;
@@ -402,7 +405,7 @@ fn ensure_server(cli: &Cli, args: &Args) -> Result<(), String> {
 
 /// Per-scenario totals: runs, hits, replays and MATCHes.
 pub fn summary(rows: &[Value]) -> String {
-    let mut by: BTreeMap<String, [usize; 7]> = BTreeMap::new();
+    let mut by: BTreeMap<String, [usize; 8]> = BTreeMap::new();
     for row in rows {
         let name = Path::new(row["scenario"].as_str().unwrap_or(""))
             .file_stem()
@@ -413,6 +416,7 @@ pub fn summary(rows: &[Value]) -> String {
         entry[1] += usize::from(row["hit"] == true);
         entry[2] += usize::from(row["oracle_exit"] == 3);
         entry[6] += usize::from(!row["error"].is_null());
+        entry[7] += usize::from(row["log_gaps"] == true);
         if !row["replay"].is_null() {
             entry[3] += 1;
             entry[4] += usize::from(row["replay"]["status"] == "MATCH");
@@ -424,13 +428,13 @@ pub fn summary(rows: &[Value]) -> String {
         }
     }
     let mut lines = vec![
-        "| Scenario | Seeds | Hits | Inconclusive | Errors | Replays | MATCH | Logs identical |"
+        "| Scenario | Seeds | Hits | Inconclusive | Errors | Replays | MATCH | Logs identical | Log gaps |"
             .to_string(),
-        "| --- | --- | --- | --- | --- | --- | --- | --- |".to_string(),
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |".to_string(),
     ];
-    for (name, [runs, hits, inconclusive, replays, matched, identical, errors]) in by {
+    for (name, [runs, hits, inconclusive, replays, matched, identical, errors, gaps]) in by {
         lines.push(format!(
-            "| {name} | {runs} | {hits} | {inconclusive} | {errors} | {replays} | {matched} | {identical} |"
+            "| {name} | {runs} | {hits} | {inconclusive} | {errors} | {replays} | {matched} | {identical} | {gaps} |"
         ));
     }
     lines.push(String::new());
