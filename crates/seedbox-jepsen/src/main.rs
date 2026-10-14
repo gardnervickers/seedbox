@@ -37,12 +37,14 @@ enum Command {
     Kafka(systems::kafka::Args),
     /// Run the MySQL list-append, non-repeatable-read or MAV oracle (guest).
     Mysql(systems::mysql::Args),
+    /// Run the MariaDB Galera Cluster list-append oracle (guest).
+    Galera(systems::galera::Args),
     /// Re-run a system's checker on a saved oracle log and print the result as JSON.
     Check {
         #[arg(value_enum)]
         system: System,
         log: PathBuf,
-        /// PostgreSQL and MySQL list-append: the consistency model.
+        /// PostgreSQL, MySQL and Galera list-append: the consistency model.
         #[arg(long, default_value = "serializable")]
         model: String,
         /// Kafka: the workload, txn or produce.
@@ -115,6 +117,8 @@ enum System {
     Kafka,
     /// A MySQL oracle log (its workload comes from the log).
     Mysql,
+    /// A Galera oracle log (stale reads and per-node loss as well).
+    Galera,
 }
 
 fn main() -> ExitCode {
@@ -126,6 +130,7 @@ fn main() -> ExitCode {
         Command::PgProbe { host, at } => systems::postgres::probe(&host, &at),
         Command::Kafka(args) => systems::kafka::run(args),
         Command::Mysql(args) => systems::mysql::run(args),
+        Command::Galera(args) => systems::galera::run(args),
         Command::Check {
             system,
             log,
@@ -198,6 +203,10 @@ fn check(system: System, log: &std::path::Path, model: &str, workload: &str) -> 
             Err(error) => return fail(&error),
         },
         System::Mysql => match systems::mysql::recheck(&text, model) {
+            Ok(result) => result,
+            Err(error) => return fail(&error),
+        },
+        System::Galera => match systems::galera::recheck(&text, model) {
             Ok(result) => result,
             Err(error) => return fail(&error),
         },

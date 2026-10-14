@@ -715,6 +715,79 @@ fn mysql() -> Vec<Scenario> {
     out
 }
 
+// ------------------------------------------------------------ MariaDB Galera
+
+/// One Galera node: the pinned MariaDB 12.1.2 image, slimmed
+/// (`image/mariadb-12.1.2.Dockerfile`), under galera-node.sh with the shared
+/// galera.cnf, its data directory on a volume, and `flush` as
+/// innodb_flush_log_at_trx_commit.
+fn galera_node(name: &str, flush: u8) -> Machine {
+    Machine::build("image", Some("mariadb-12.1.2.Dockerfile"))
+        // The root filesystem (about 200 MB) lives in guest RAM next to mariadbd.
+        .memory(1280)
+        .comment("galera-node.sh recovers the node's position and waits for the oracle to say bootstrap or join.")
+        .entrypoint(&["bash", "/galera-node.sh"])
+        .command(vec![
+            format!("--wsrep-node-address={name}"),
+            format!("--wsrep-node-name={name}"),
+            format!("--innodb-flush-log-at-trx-commit={flush}"),
+        ])
+        .env("GALERA_NODE", name)
+        .file("galera-node.sh", "/galera-node.sh")
+        .file("galera.cnf", "/etc/mysql/mariadb.conf.d/99-jepsen-galera.cnf")
+        .data("/var/lib/mysql")
+}
+
+#[allow(clippy::type_complexity)]
+fn galera() -> Vec<Scenario> {
+    const FAULT: &[&str] = &["--fault-at", "20", "--duration", "60"];
+    // (name, comment, innodb_flush_log_at_trx_commit, oracle arguments)
+    let specs: [(&str, &str, u8, Vec<&str>); 9] = [
+        ("galera-healthy-append", "MDEV-38977 (Jepsen, MariaDB Galera Cluster 12.1.2): with no faults, list-append on all\nthree nodes commits lost updates (P4) and G-single, which snapshot isolation forbids:\nGalera certifies write sets by key but has no first-committer-wins over reads.",
+         0, vec![]),
+        ("galera-pause-append", "MDEV-38977 as Jepsen first saw it, with process pauses: galera-healthy-append while a\nrandom node's processes are paused for 5 s, then 5 s of quiet, from 10 s on.",
+         0, vec!["--fault", "pause", "--fault-at", "10"]),
+        ("galera-single-node-append", "Control for galera-healthy-append: every client on n1. MariaDB 12's InnoDB\nREPEATABLE READ (innodb_snapshot_isolation=ON) rejects lost updates on one node.",
+         0, vec!["--client-nodes", "n1"]),
+        ("galera-stale-read", "MDEV-38999: write on n1, read on n2, no faults. A transaction on n2 that begins after\nan append on n1 was acknowledged does not observe it (a real-time stale read):\nreplication is not synchronous with the acknowledgement.",
+         0, vec!["--client-nodes", "n1,n2", "--read-only", "n2"]),
+        ("galera-stale-read-sync-wait", "Control for galera-stale-read: wsrep_sync_wait=1 makes every read on n2 wait until\nn2 has applied everything certified before it, so no read is stale.",
+         0, vec!["--client-nodes", "n1,n2", "--read-only", "n2", "--sync-wait", "1"]),
+        ("galera-crash-all-flush0", "MDEV-38974: power-fail all three nodes together at 20 s with\ninnodb_flush_log_at_trx_commit=0 (MariaDB's recommendation for Galera), reboot them, and\nbootstrap from the most advanced node: acknowledged appends are lost on every node.",
+         0, [&["--fault", "crash"][..], FAULT].concat()),
+        ("galera-crash-all-flush1", "galera-crash-all-flush0 with innodb_flush_log_at_trx_commit=1: every commit is synced,\nso far fewer (Jepsen: not zero) acknowledged appends are lost.",
+         1, [&["--fault", "crash"][..], FAULT].concat()),
+        ("galera-kill-all", "MDEV-38974 as Jepsen ran it: kill every node's processes together at 20 s with\ninnodb_flush_log_at_trx_commit=0, restart them and bootstrap from the most advanced node.\nThe page cache survives, but InnoDB's unflushed log buffer does not.",
+         0, [&["--fault", "kill"][..], FAULT].concat()),
+        ("galera-kill-all-flush1", "galera-kill-all with innodb_flush_log_at_trx_commit=1.",
+         1, [&["--fault", "kill"][..], FAULT].concat()),
+    ];
+    let names = nodes("n", 3);
+    specs
+        .iter()
+        .map(|(name, comment, flush, oracle)| {
+            let mut args = strings(&["galera"]);
+            args.extend(strings(oracle));
+            args.extend(strings(&["--label", &format!("12.1.2/{name}")]));
+            Scenario {
+                name: name.to_string(),
+                comment: comment.to_string(),
+                generated: format!(
+                    "MariaDB 12.1.2, Galera 26.4.24, three nodes, innodb_flush_log_at_trx_commit={flush}{}{}",
+                    if oracle.is_empty() { "" } else { ", " },
+                    oracle.join(" ")
+                ),
+                machines: names
+                    .iter()
+                    .map(|n| (n.clone(), galera_node(n, *flush)))
+                    .collect(),
+                oracle: Machine::program(&args),
+                latency: "1ms".into(),
+            }
+        })
+        .collect()
+}
+
 /// Every committed scenario, as (path under `harness/jepsen`, contents).
 pub fn all() -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -724,6 +797,7 @@ pub fn all() -> Vec<(String, String)> {
         ("postgres", postgres()),
         ("kafka", kafka()),
         ("mysql", mysql()),
+        ("galera", galera()),
     ] {
         for scenario in scenarios {
             out.push((
@@ -747,7 +821,7 @@ mod tests {
     #[test]
     fn scenarios_render_valid_yaml_with_the_oracle_binary() {
         let all = all();
-        assert!(all.len() >= 33);
+        assert!(all.len() >= 41);
         let mut names = std::collections::BTreeSet::new();
         for (path, text) in &all {
             assert!(

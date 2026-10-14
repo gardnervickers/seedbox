@@ -133,7 +133,7 @@ pub enum Isolation {
 }
 
 impl Isolation {
-    fn sql(self) -> &'static str {
+    pub(crate) fn sql(self) -> &'static str {
         match self {
             Self::Serializable => "SERIALIZABLE",
             Self::RepeatableRead => "REPEATABLE READ",
@@ -141,7 +141,7 @@ impl Isolation {
             Self::ReadUncommitted => "READ UNCOMMITTED",
         }
     }
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Serializable => "serializable",
             Self::RepeatableRead => "repeatable-read",
@@ -161,7 +161,7 @@ impl Isolation {
 // ------------------------------------------------------------ connections
 
 #[derive(Debug, Clone)]
-enum SqlError {
+pub(crate) enum SqlError {
     /// The server rejected the statement (its error code).
     Server(u16, String),
     /// The homebrew upsert's insert and both updates all missed.
@@ -189,12 +189,12 @@ impl std::fmt::Display for SqlError {
     }
 }
 
-type Sql<T> = std::result::Result<T, SqlError>;
+pub(crate) type Sql<T> = std::result::Result<T, SqlError>;
 
 /// MySQL's error code for a duplicate key.
 const DUPLICATE: u16 = 1062;
 
-fn connect(host: &str, port: u16, db: Option<&str>, timeout: f64) -> Sql<Conn> {
+pub(crate) fn connect(host: &str, port: u16, db: Option<&str>, timeout: f64) -> Sql<Conn> {
     let timeout = Duration::from_secs_f64(timeout);
     let opts = OptsBuilder::new()
         .ip_or_hostname(Some(host))
@@ -209,11 +209,11 @@ fn connect(host: &str, port: u16, db: Option<&str>, timeout: f64) -> Sql<Conn> {
 }
 
 /// The first column of the first row; `None` for no row or NULL.
-fn scalar<T: mysql::prelude::FromValue>(conn: &mut Conn, sql: &str) -> Sql<Option<T>> {
+pub(crate) fn scalar<T: mysql::prelude::FromValue>(conn: &mut Conn, sql: &str) -> Sql<Option<T>> {
     Ok(conn.query_first::<Option<T>, _>(sql)?.flatten())
 }
 
-fn pause_ms(rng: &mut Rng, max: u64) {
+pub(crate) fn pause_ms(rng: &mut Rng, max: u64) {
     if max > 0 {
         kit::pause(rng.below(max) as f64 / 1000.0);
     }
@@ -233,8 +233,20 @@ fn parse(text: Option<String>) -> Vec<i64> {
 }
 
 fn append(conn: &mut Conn, args: &Args, k: i64, v: i64, txn: bool) -> Sql<()> {
-    let t = table(k, args.tables);
-    if args.on_duplicate {
+    append_value(conn, args.tables, args.on_duplicate, k, v, txn)
+}
+
+/// Jepsen's homebrew upsert (or `on_duplicate`), over `tables` tables.
+pub(crate) fn append_value(
+    conn: &mut Conn,
+    tables: i64,
+    on_duplicate: bool,
+    k: i64,
+    v: i64,
+    txn: bool,
+) -> Sql<()> {
+    let t = table(k, tables);
+    if on_duplicate {
         conn.query_drop(format!(
             "INSERT INTO {t} AS t (id, sk, val) VALUES ({k}, {k}, '{v}') \
              ON DUPLICATE KEY UPDATE val = CONCAT(t.val, ',', '{v}')"
@@ -274,13 +286,17 @@ fn append(conn: &mut Conn, args: &Args, k: i64, v: i64, txn: bool) -> Sql<()> {
 }
 
 fn read_key(conn: &mut Conn, args: &Args, k: i64) -> Sql<Vec<i64>> {
+    read_value(conn, args.tables, k)
+}
+
+pub(crate) fn read_value(conn: &mut Conn, tables: i64, k: i64) -> Sql<Vec<i64>> {
     Ok(parse(scalar::<String>(
         conn,
-        &format!("SELECT val FROM {} WHERE id = {k}", table(k, args.tables)),
+        &format!("SELECT val FROM {} WHERE id = {k}", table(k, tables)),
     )?))
 }
 
-enum Outcome<T> {
+pub(crate) enum Outcome<T> {
     Ok(T),
     /// A definite abort, and whether the connection must be replaced.
     Fail(String, bool),
@@ -288,7 +304,7 @@ enum Outcome<T> {
 
 /// Run `body` as one transaction (or in autocommit mode when `txn` is
 /// false), rolling back after a server error.
-fn transact<T>(
+pub(crate) fn transact<T>(
     conn: &mut Conn,
     txn: bool,
     body: impl FnOnce(&mut Conn) -> Sql<T>,
@@ -677,7 +693,7 @@ pub fn lost_appends(txns: &[TxnOp], final_read: &[Mop]) -> Vec<Value> {
 
 // ------------------------------------------------------------ setup
 
-fn wait_ready(host: &str, port: u16, deadline: Instant) -> Result<Conn, String> {
+pub(crate) fn wait_ready(host: &str, port: u16, deadline: Instant) -> Result<Conn, String> {
     loop {
         let attempt = connect(host, port, None, 10.0).and_then(|mut conn| {
             conn.query_drop("SELECT 1")?;
