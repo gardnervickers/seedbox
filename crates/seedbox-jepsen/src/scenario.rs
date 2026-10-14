@@ -765,11 +765,11 @@ fn galera() -> Vec<Scenario> {
          0, [&["--fault", "crash"][..], FAULT].concat()),
         ("galera-crash-all-flush1", "galera-crash-all-flush0 with innodb_flush_log_at_trx_commit=1: every commit is synced,\nso far fewer (Jepsen: not zero) acknowledged appends are lost.",
          1, [&["--fault", "crash"][..], FAULT].concat()),
-        ("galera-kill-all", "MDEV-38974 as Jepsen ran it: kill every node's processes together at 20 s with\ninnodb_flush_log_at_trx_commit=0, restart them and bootstrap from the most advanced node.\nThe page cache survives a kill, and with MariaDB 12's default memory-mapped redo log\n(innodb_log_file_mmap=ON) so does every redo record written; see galera-kill-all-nommap.",
+        ("galera-kill-all", "MDEV-38974 as Jepsen ran it: kill every node's processes together at 20 s with\ninnodb_flush_log_at_trx_commit=0, restart them and bootstrap from the most advanced node.\nThe page cache survives a kill, but commits acknowledged in the last few tens of\nmilliseconds are not yet in it.",
          0, [&["--fault", "kill"][..], FAULT].concat()),
         ("galera-kill-all-flush1", "galera-kill-all with innodb_flush_log_at_trx_commit=1.",
          1, [&["--fault", "kill"][..], FAULT].concat()),
-        ("galera-kill-all-nommap", "galera-kill-all with innodb_log_file_mmap=OFF. MariaDB 12 memory-maps the redo log by\ndefault on Linux, so redo records are in the page cache as soon as they are written and a\nprocess kill loses nothing; with the log written from a private buffer once a second, the\nkill loses the acknowledged commits still in that buffer, as Jepsen saw.",
+        ("galera-kill-all-nommap", "galera-kill-all with innodb_log_file_mmap=OFF (MariaDB 12 memory-maps the redo log by\ndefault on Linux), to see whether the mapping changes what a process kill loses.",
          0, [&["--fault", "kill"][..], FAULT].concat()),
     ];
     let names = nodes("n", 3);
