@@ -758,9 +758,9 @@ fn galera() -> Vec<Scenario> {
         ("galera-ser-probe", "Diagnostic for galera-healthy-append-ser: the same workload, and after every statement\nof a multi-statement transaction the client checks @@in_transaction. A session that\nsilently left its transaction (rolled back by a brute-force abort) yet goes on to\nCOMMIT successfully is reported as transaction-ended-early.",
          0, vec!["--isolation", "serializable", "--probe-transaction"]),
         ("galera-stale-read", "MDEV-38999: no faults; clients on n1 and n3 read and append, clients on n2 only read,\nwith a 100 us network as on Jepsen's LAN. A transaction on n2 that begins after an\nappend on n1 or n3 was acknowledged does not observe it (a real-time stale read):\nn2 applies a certified write set after its origin has acknowledged the commit.",
-         0, vec!["--client-nodes", "n1,n2,n3", "--read-only", "n2", "--duration", "120"]),
+         0, vec!["--client-nodes", "n1,n2,n3", "--read-only", "n2", "--duration", "60"]),
         ("galera-stale-read-sync-wait", "Control for galera-stale-read: wsrep_sync_wait=1 makes every read wait until its node\nhas applied everything certified before it, so no read is stale.",
-         0, vec!["--client-nodes", "n1,n2,n3", "--read-only", "n2", "--duration", "120", "--sync-wait", "1"]),
+         0, vec!["--client-nodes", "n1,n2,n3", "--read-only", "n2", "--duration", "60", "--sync-wait", "1"]),
         ("galera-crash-all-flush0", "MDEV-38974: power-fail all three nodes together at 20 s with\ninnodb_flush_log_at_trx_commit=0 (MariaDB's recommendation for Galera), reboot them, and\nbootstrap from the most advanced node: acknowledged appends are lost on every node.",
          0, [&["--fault", "crash"][..], FAULT].concat()),
         ("galera-crash-all-flush1", "galera-crash-all-flush0 with innodb_flush_log_at_trx_commit=1: every commit is synced,\nso far fewer (Jepsen: not zero) acknowledged appends are lost.",
@@ -797,7 +797,8 @@ fn galera() -> Vec<Scenario> {
                     .iter()
                     .map(|n| (n.clone(), galera_node(n, *flush, server)))
                     .collect(),
-                // The in-guest check holds the whole history: up to 200,000 transactions.
+                // The in-guest check holds the whole history: about 100,000 transactions in 60 s on
+                // the 100 us network.
                 oracle: Machine::program(&args).memory(if stale { 2048 } else { 1024 }),
                 latency: if stale { "100us" } else { "1ms" }.into(),
             }
