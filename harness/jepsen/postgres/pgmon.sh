@@ -7,7 +7,7 @@ df -k / /dev/shm 2>&1 | sed 's/^/PGMON df /' >&2
   while sleep 5; do
     mem=$(awk '/^(MemTotal|MemAvailable|Shmem|Cached|Committed_AS):/ {printf "%s%s ", $1, $2}' /proc/meminfo)
     procs=$(ls -d /proc/[0-9]* | wc -l)
-    wal=$(du -sk /var/lib/postgresql/data/pg_wal 2>/dev/null | cut -f1)
+    wal=$(du -sk "${PGDATA:-/var/lib/postgresql/data}/pg_wal" 2>/dev/null | cut -f1)
     echo "PGMON t=$(cut -d' ' -f1 /proc/uptime) procs=$procs wal_kb=${wal:-0} $mem" >&2
   done
 ) &

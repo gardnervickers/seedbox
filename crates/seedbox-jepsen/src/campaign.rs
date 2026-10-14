@@ -245,7 +245,7 @@ fn oracle_verdict(dir: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args, wall: f64) -> Value {
+fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args) -> Value {
     let dir = out.join("runs").join(&job.label);
     let _ = fs::create_dir_all(&dir);
     let _ = fs::copy(&job.scenario, dir.join("scenario.yaml"));
@@ -293,7 +293,16 @@ fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args, wall: f64) -> Value {
     let files = split_logs(&dir).unwrap_or_default();
     row["log_files"] = json!(files.len());
     let verdict = oracle_verdict(&dir);
-    let hit = document["status"]["oracleExitCode"] == 1;
+    let exited = document["status"]["termination"]["reason"] == "oracleExited";
+    let hit = exited && document["status"]["oracleExitCode"] == 1;
+    if !exited {
+        row["error"] = document["status"]["termination"].clone();
+        cli.run(
+            &["diagnostics", &id],
+            &dir.join("diagnostics.txt"),
+            &dir.join("diagnostics.stderr"),
+        );
+    }
     row["hit"] = hit.into();
     row["verdict"] = verdict.chars().take(300).collect::<String>().into();
     if job.replay || (hit && args.replay_hits) {
@@ -347,7 +356,6 @@ fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args, wall: f64) -> Value {
         cli.quiet(&["delete", "simulation", &id]);
         row["deleted"] = true.into();
     }
-    let _ = wall;
     let _ = fs::write(
         dir.join("row.json"),
         serde_json::to_string_pretty(&row).unwrap_or_default(),
@@ -384,7 +392,7 @@ fn ensure_server(cli: &Cli, args: &Args) -> Result<(), String> {
 
 /// Per-scenario totals: runs, hits, replays and MATCHes.
 pub fn summary(rows: &[Value]) -> String {
-    let mut by: BTreeMap<String, [usize; 6]> = BTreeMap::new();
+    let mut by: BTreeMap<String, [usize; 7]> = BTreeMap::new();
     for row in rows {
         let name = Path::new(row["scenario"].as_str().unwrap_or(""))
             .file_stem()
@@ -393,7 +401,8 @@ pub fn summary(rows: &[Value]) -> String {
         let entry = by.entry(name).or_default();
         entry[0] += 1;
         entry[1] += usize::from(row["hit"] == true);
-        entry[2] += usize::from(row["oracle_exit"] == 3 || row["oracle_exit"].is_null());
+        entry[2] += usize::from(row["oracle_exit"] == 3);
+        entry[6] += usize::from(!row["error"].is_null());
         if !row["replay"].is_null() {
             entry[3] += 1;
             entry[4] += usize::from(row["replay"]["status"] == "MATCH");
@@ -405,12 +414,13 @@ pub fn summary(rows: &[Value]) -> String {
         }
     }
     let mut lines = vec![
-        "| Scenario | Seeds | Hits | Inconclusive | Replays | MATCH | Logs identical |".to_string(),
-        "| --- | --- | --- | --- | --- | --- | --- |".to_string(),
+        "| Scenario | Seeds | Hits | Inconclusive | Errors | Replays | MATCH | Logs identical |"
+            .to_string(),
+        "| --- | --- | --- | --- | --- | --- | --- | --- |".to_string(),
     ];
-    for (name, [runs, hits, inconclusive, replays, matched, identical]) in by {
+    for (name, [runs, hits, inconclusive, replays, matched, identical, errors]) in by {
         lines.push(format!(
-            "| {name} | {runs} | {hits} | {inconclusive} | {replays} | {matched} | {identical} |"
+            "| {name} | {runs} | {hits} | {inconclusive} | {errors} | {replays} | {matched} | {identical} |"
         ));
     }
     lines.push(String::new());
@@ -494,7 +504,7 @@ pub fn run(args: Args) -> u8 {
                     continue;
                 }
                 eprintln!("campaign: start {}", job.label);
-                let row = execute(cli, &job, &args.out, args, 0.0);
+                let row = execute(cli, &job, &args.out, args);
                 eprintln!(
                     "campaign: done {} id {} oracle {} replay {} {}",
                     job.label,

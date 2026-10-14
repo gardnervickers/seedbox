@@ -58,9 +58,6 @@ enum Command {
         /// Repository root [default: this crate's checkout].
         #[arg(long)]
         root: Option<PathBuf>,
-        /// Guest architecture whose oracle binary the scenarios run.
-        #[arg(long, default_value = "arm64")]
-        arch: String,
         /// Fail when a committed scenario differs instead of writing it.
         #[arg(long)]
         check: bool,
@@ -131,9 +128,7 @@ fn main() -> ExitCode {
             workload,
         } => check(system, &log, &model, &workload),
         Command::Edn { log, output } => edn(&log, output.as_deref()),
-        Command::Gen { root, arch, check } => {
-            generate(root.unwrap_or_else(tools::default_root), &arch, check)
-        }
+        Command::Gen { root, check } => generate(root.unwrap_or_else(tools::default_root), check),
         Command::BuildOracle { root, arch, engine } => {
             match tools::build_oracle(
                 &root.unwrap_or_else(tools::default_root),
@@ -225,9 +220,9 @@ fn edn(log: &std::path::Path, output: Option<&std::path::Path>) -> u8 {
     }
 }
 
-fn generate(root: PathBuf, arch: &str, check: bool) -> u8 {
+fn generate(root: PathBuf, check: bool) -> u8 {
     let mut stale = Vec::new();
-    for (path, text) in scenario::all(arch) {
+    for (path, text) in scenario::all() {
         let target = root.join("harness/jepsen").join(&path);
         if check {
             if fs::read_to_string(&target).ok().as_deref() != Some(text.as_str()) {

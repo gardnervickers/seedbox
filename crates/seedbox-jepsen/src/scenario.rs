@@ -6,15 +6,12 @@
 use serde_json::Value;
 use std::fmt::Write as _;
 
-/// The oracle and client base image; the static binary needs nothing from it.
-pub const BASE: &str =
-    "docker.io/library/busybox:1.37.0-musl@sha256:5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092";
 /// Where the oracle binary lands in a guest.
 pub const BINARY: &str = "/jepsen/seedbox-jepsen";
-/// The built binary, relative to a scenario file in `harness/jepsen/<system>/`.
-pub fn binary_source(arch: &str) -> String {
-    format!("../../../build/jepsen/{arch}/seedbox-jepsen")
-}
+/// The repository root, relative to a scenario file in `harness/jepsen/<system>/`.
+pub const ROOT: &str = "../../..";
+/// The image with the binary `seedbox-jepsen build-oracle` writes.
+pub const DOCKERFILE: &str = "crates/seedbox-jepsen/guest.Dockerfile";
 
 /// One machine of a project.
 #[derive(Clone, Debug, Default)]
@@ -47,13 +44,12 @@ impl Machine {
     }
 
     /// This crate's binary running `args` (a subcommand and its flags).
-    pub fn program(arch: &str, args: &[String]) -> Self {
+    pub fn program(args: &[String]) -> Self {
         let mut entrypoint = vec![BINARY.to_string()];
         entrypoint.extend(args.iter().cloned());
         Self {
-            image: Some(BASE.into()),
+            build: Some((ROOT.into(), Some(DOCKERFILE.into()))),
             entrypoint: Some(entrypoint),
-            files: vec![(binary_source(arch), BINARY.into())],
             memory_mib: Some(256),
             ..Self::default()
         }
@@ -226,7 +222,7 @@ fn lookup(table: &[(&str, &'static str)], key: &str) -> &'static str {
 }
 
 #[allow(clippy::type_complexity)]
-fn nats(arch: &str) -> Vec<Scenario> {
+fn nats() -> Vec<Scenario> {
     // (name, comment, version, config, oracle arguments, server memory)
     let specs: [(&str, &str, &str, &str, &[&str], u32); 10] = [
         ("nats-healthy", "Baseline: the NATS JetStream queue workload with no faults keeps every\nacknowledged message on every server.",
@@ -273,7 +269,7 @@ fn nats(arch: &str) -> Vec<Scenario> {
                 comment: comment.to_string(),
                 generated: format!("NATS {version}, nats-{config}.conf"),
                 machines,
-                oracle: Machine::program(arch, &args),
+                oracle: Machine::program(&args),
                 latency: "1ms".into(),
             }
         })
@@ -284,7 +280,7 @@ fn nats(arch: &str) -> Vec<Scenario> {
 
 const ETCD_352: &str = "quay.io/coreos/etcd:v3.5.2@sha256:70fe70b6cdaea99fa9e99d3a16483954eb084c3b32a2475abea4e709a793636c";
 
-fn etcd(arch: &str) -> Vec<Scenario> {
+fn etcd() -> Vec<Scenario> {
     // (name, comment, mode, guard, 3.5.2)
     let specs: [(&str, &str, &str, &str, bool); 10] = [
         ("etcd-healthy", "Baseline: the lock-set workload with no faults.", "none", "none", false),
@@ -346,7 +342,7 @@ fn etcd(arch: &str) -> Vec<Scenario> {
                     "--guard".into(),
                     guard.to_string(),
                 ];
-                machines.push((client, Machine::program(arch, &args)));
+                machines.push((client, Machine::program(&args)));
             }
             let args = strings(&[
                 "etcd",
@@ -365,7 +361,7 @@ fn etcd(arch: &str) -> Vec<Scenario> {
                     if *v352 { "3.5.2" } else { "3.4.3" }
                 ),
                 machines,
-                oracle: Machine::program(arch, &args),
+                oracle: Machine::program(&args),
                 latency: "1ms".into(),
             }
         })
@@ -395,7 +391,7 @@ fn pg_server(version: &str, pgmon: &str, extra: &[&str]) -> Machine {
         .data("/var/lib/postgresql/data")
 }
 
-fn postgres(arch: &str) -> Vec<Scenario> {
+fn postgres() -> Vec<Scenario> {
     let specs: [(&str, &str, &str, &str, u32); 5] = [
         ("pg123-serializable", "PostgreSQL 12.3 SERIALIZABLE allows G2-item (Jepsen, 2020-06-12): SSI misses an\nrw-conflict on a freshly inserted row that a third transaction is updating, so\nanti-dependency cycles commit. Fixed by 5940ffb in 12.4.", "12.3", "serializable", 60),
         ("pg124-serializable", "Negative control for pg123-serializable: 12.4 carries 5940ffb, so the same\nworkload must commit no dependency cycle.", "12.4", "serializable", 60),
@@ -422,18 +418,17 @@ fn postgres(arch: &str) -> Vec<Scenario> {
                 comment: comment.to_string(),
                 generated: format!("PostgreSQL {version}, {isolation}"),
                 machines: vec![("pg".into(), pg_server(version, "pgmon.sh", &[]))],
-                oracle: Machine::program(arch, &args),
+                oracle: Machine::program(&args),
                 latency: "1ms".into(),
             }
         })
         .collect()
 }
 
-fn postgres_stall(arch: &str) -> Scenario {
-    let probe = Machine::program(
-        arch,
-        &strings(&["pg-probe", "--at", "13", "--at", "16", "--at", "19"]),
-    );
+fn postgres_stall() -> Scenario {
+    let probe = Machine::program(&strings(&[
+        "pg-probe", "--at", "13", "--at", "16", "--at", "19",
+    ]));
     let args = strings(&[
         "postgres",
         "--isolation",
@@ -457,7 +452,7 @@ fn postgres_stall(arch: &str) -> Scenario {
             ("pg".into(), pg_server("12.3", "../pgmon.sh", &["-c", "log_lock_waits=on"])),
             ("probe".into(), probe),
         ],
-        oracle: Machine::program(arch, &args),
+        oracle: Machine::program(&args),
         latency: "1ms".into(),
     };
     // One directory deeper than the other PostgreSQL scenarios.
@@ -467,9 +462,9 @@ fn postgres_stall(arch: &str) -> Scenario {
         .map(|(_, m)| m)
         .chain([&mut scenario.oracle])
     {
-        for (source, _) in &mut m.files {
-            if source.starts_with("../../../build/") {
-                source.insert_str(0, "../");
+        if let Some((context, _)) = &mut m.build {
+            if context == ROOT {
+                context.insert_str(0, "../");
             }
         }
     }
@@ -492,7 +487,7 @@ struct KafkaSpec {
     txn_timeout: u32,
 }
 
-fn kafka(arch: &str) -> Vec<Scenario> {
+fn kafka() -> Vec<Scenario> {
     let e2e = "KAFKA-17754 (a delayed EndTxn decides a later transaction): when the client prints\n\
                its marker just before commitTransaction/abortTransaction, cut c1 off from the brokers\n\
                for 3.5-5.5 s. The client times out the EndTxn, retries it on a new connection after\n\
@@ -588,7 +583,7 @@ fn kafka(arch: &str) -> Vec<Scenario> {
                     spec.version, spec.brokers, spec.workload, spec.nemesis
                 ),
                 machines,
-                oracle: Machine::program(arch, &args),
+                oracle: Machine::program(&args),
                 latency: "1ms".into(),
             }
         })
@@ -596,13 +591,13 @@ fn kafka(arch: &str) -> Vec<Scenario> {
 }
 
 /// Every committed scenario, as (path under `harness/jepsen`, contents).
-pub fn all(arch: &str) -> Vec<(String, String)> {
+pub fn all() -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (system, scenarios) in [
-        ("nats", nats(arch)),
-        ("etcd", etcd(arch)),
-        ("postgres", postgres(arch)),
-        ("kafka", kafka(arch)),
+        ("nats", nats()),
+        ("etcd", etcd()),
+        ("postgres", postgres()),
+        ("kafka", kafka()),
     ] {
         for scenario in scenarios {
             out.push((
@@ -611,7 +606,7 @@ pub fn all(arch: &str) -> Vec<(String, String)> {
             ));
         }
     }
-    let stall = postgres_stall(arch);
+    let stall = postgres_stall();
     out.push((
         format!("postgres/stall/{}.yaml", stall.name),
         stall.render(),
@@ -625,7 +620,7 @@ mod tests {
 
     #[test]
     fn scenarios_render_valid_yaml_with_the_oracle_binary() {
-        let all = all("arm64");
+        let all = all();
         assert!(all.len() >= 33);
         let mut names = std::collections::BTreeSet::new();
         for (path, text) in &all {

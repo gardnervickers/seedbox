@@ -244,17 +244,6 @@ pub fn elle_cross_check(
     work: &Path,
 ) -> Result<(Vec<Value>, bool), String> {
     let jar = elle_jar(&work.join("jar"))?;
-    let image_context = work.join("image");
-    fs::create_dir_all(&image_context).map_err(|e| e.to_string())?;
-    fs::copy(&jar, image_context.join("elle.jar")).map_err(|e| e.to_string())?;
-    fs::write(
-        image_context.join("Dockerfile"),
-        format!("FROM {ELLE_JDK}\nCOPY elle.jar /j/elle.jar\n"),
-    )
-    .map_err(|e| e.to_string())?;
-    run(docker(engine)
-        .args(["build", "--quiet", "-t", "seedbox-jepsen-elle:0.1.11"])
-        .arg(&image_context))?;
     let staging = work.join("h");
     let out = work.join("out");
     for dir in [&staging, &out] {
@@ -282,9 +271,11 @@ pub fn elle_cross_check(
         loaded.insert(history.label.clone(), txns);
     }
     fs::write(staging.join("models.txt"), models.join("\n") + "\n").map_err(|e| e.to_string())?;
+    // The jar travels with the histories, so no image needs building or loading.
+    fs::copy(&jar, staging.join("elle.jar")).map_err(|e| e.to_string())?;
     let script = "set -eu; mkdir -p /h /out; tar -x -C /h; \
         for model in $(cat /h/models.txt); do for f in /h/*.edn; do b=$(basename $f .edn); \
-        java -Xmx3g -jar /j/elle.jar -m list-append -c $model -v json $f > /out/$b.$model.json 2> /out/$b.$model.err || true; \
+        java -Xmx3g -jar /h/elle.jar -m list-append -c $model -v json $f > /out/$b.$model.json 2> /out/$b.$model.err || true; \
         done; done; tar -c -C /out .";
     let archive = run(Command::new("tar")
         .arg("-C")
@@ -297,7 +288,7 @@ pub fn elle_cross_check(
             "-i",
             "--cpuset-cpus",
             cpus,
-            "seedbox-jepsen-elle:0.1.11",
+            ELLE_JDK,
             "sh",
             "-c",
             script,
