@@ -190,8 +190,11 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
         backend = "TCG" if suite == "machine-tcg" else "PV"
         if backend == "PV":
             need(probe.get("kvm") == "", "/dev/kvm: " + (probe.get("kvm") or "not probed"))
+        # TODO: Re-evaluate: native fixture inputs belong in suite preflight.
+        # Otherwise missing clock fixtures pass admission and fail only after
+        # the portable build; the test cannot repair missing external inputs.
         keys = ["ASSETS", "SERVICE_INITRD", "CONTROL_INITRD",
-                "DRIVER_CONTROL_APPLICATION", "PREPARED_FIXTURE"]
+                "DRIVER_CONTROL_APPLICATION", "PREPARED_FIXTURE", "CLOCK_APPLICATION"]
         keys += ["QEMU", "FIRMWARE", "KERNEL", "INIT"] if backend == "TCG" else [
             "WORKER", "KERNEL", "INIT", "PROGRESS_RUNTIME", "PROGRESS_FIXTURE", "CLANG", "LD"]
         for suffix in keys:
