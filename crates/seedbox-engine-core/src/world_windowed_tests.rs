@@ -860,34 +860,45 @@ fn adapter_observations_are_rejected_before_effects_are_consumed() {
 
 #[test]
 fn a_failed_crash_terminates_every_worker_and_poisons_the_world() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("observer");
-    let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
-    receiver.set_nonblocking(true).unwrap();
-    let mut w = world(&["a", "b"])
-        .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
-    plan(
-        &mut w,
-        5,
-        Action::Crash {
-            machine: "a".into(),
-        },
-    );
-    w.factory.lock().unwrap().push("fail/timer".into());
-    let error = run(&mut w, 30, None).unwrap_err();
-    assert!(error.contains("timer"), "{error}");
-    assert!(w.failure.is_some());
-    let terminations = trace(&w)
-        .iter()
-        .filter(|x| x.contains(":terminate:"))
-        .count();
-    assert_eq!(terminations, 3);
-    assert!(run(&mut w, 30, None).unwrap_err().contains("terminal"));
-    let mut bytes = [0; seedbox_engine_protocol::observation::MAX_DATAGRAM_BYTES];
-    assert_eq!(
-        receiver.recv(&mut bytes).unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
-    );
+    // The crash transaction runs between rounds on the calling thread, so a
+    // pool of any size, even larger than the world, fails it the same way.
+    for workers in [0, 1, 2, 8] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observer");
+        let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let mut w = world(&["a", "b"])
+            .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
+        plan(
+            &mut w,
+            5,
+            Action::Crash {
+                machine: "a".into(),
+            },
+        );
+        w.factory.lock().unwrap().push("fail/timer".into());
+        let error = run_with(&mut w, 30, None, workers, Duration::ZERO).unwrap_err();
+        assert!(error.contains("timer"), "workers {workers}: {error}");
+        assert!(w.failure.is_some());
+        let terminations = trace(&w)
+            .iter()
+            .filter(|x| x.contains(":terminate:"))
+            .count();
+        assert_eq!(terminations, 3, "workers {workers}");
+        // A retry fails before any worker activity, whatever its pool.
+        let before = trace(&w).len();
+        for retry in [0, 2] {
+            assert!(run_with(&mut w, 30, None, retry, Duration::ZERO)
+                .unwrap_err()
+                .contains("terminal"));
+        }
+        assert_eq!(trace(&w).len(), before, "workers {workers}");
+        let mut bytes = [0; seedbox_engine_protocol::observation::MAX_DATAGRAM_BYTES];
+        assert_eq!(
+            receiver.recv(&mut bytes).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }
 
 /// The legacy receipts' world: pause, crash, resume and reboot faults, a
@@ -999,7 +1010,17 @@ fn receipt(w: &World<Mock>, outcome: &str) -> Value {
 fn worker_count_and_completion_order_never_change_a_world_with_faults_and_control() {
     for variant in 0..8u64 {
         let mut reference = None;
-        for (workers, skew) in [(0, 0), (1, 0), (2, 0), (3, 0), (3, 2_000), (2, 2_000)] {
+        // More workers than machines leave threads idle in every round.
+        for (workers, skew) in [
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (3, 0),
+            (3, 2_000),
+            (2, 2_000),
+            (8, 0),
+            (8, 2_000),
+        ] {
             let mut w = scenario(variant);
             let (outcome, evidence) =
                 run_with(&mut w, 160, Some("a"), workers, Duration::from_micros(skew)).unwrap();

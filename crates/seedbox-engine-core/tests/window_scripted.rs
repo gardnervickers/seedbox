@@ -32,6 +32,8 @@ enum Step {
     Exit,
     /// Fail the run (worker failure tests).
     Fail,
+    /// Panic inside the machine (worker failure tests).
+    Panic,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +139,7 @@ impl Script {
                 Some(Step::Fail) => {
                     return Err(format!("machine {} failed at {}", self.id, self.time))
                 }
+                Some(Step::Panic) => panic!("machine {} panicked at {}", self.id, self.time),
             }
         }
     }
@@ -723,6 +726,58 @@ fn a_failing_machine_aborts_without_committing_and_the_lowest_failure_wins() {
     }
 }
 
+/// A machine that panics on a pool thread fails its round like an error: the
+/// round is not committed, the lowest failing machine is reported whichever
+/// finishes first, and the pool shuts down instead of waiting for it.
+#[test]
+fn a_panicking_machine_fails_its_round_on_every_pool_size() {
+    for (panicking, failing, reported) in [(2, None, 2), (2, Some(1), 1), (1, Some(2), 1)] {
+        let mut scripts = vec![
+            Script::new(0, 10, vec![Step::Busy(3_000)]),
+            Script::new(1, 10, vec![Step::Busy(1_500)]),
+            Script::new(2, 10, vec![Step::Busy(1_500)]),
+            Script::new(3, 10, vec![Step::Busy(9_000)]),
+        ];
+        scripts[panicking].steps.push_back(Step::Panic);
+        if let Some(failing) = failing {
+            scripts[failing].steps.push_back(Step::Fail);
+        }
+        for workers in [1, 2, 4, 8] {
+            for reverse in [false, true] {
+                let mut world = World::new(4, params()).unwrap();
+                let mut machines = scripts.clone();
+                if reverse {
+                    machines[1].host_delay = Duration::from_millis(3);
+                }
+                let mut links = Links::new(1, 1_000, 0, 0);
+                let e = run_parallel(
+                    &mut world,
+                    &mut machines,
+                    workers,
+                    |_| Ok(()),
+                    &mut links,
+                    NoHook,
+                )
+                .unwrap_err();
+                let label = format!("panic {panicking}, fail {failing:?}, {workers} workers");
+                let Error::Machine {
+                    machine,
+                    round,
+                    message,
+                } = e
+                else {
+                    panic!("{label}: {e}")
+                };
+                assert_eq!(machine, reported, "{label}: {message}");
+                if machine == panicking {
+                    assert!(message.contains("panicked"), "{label}: {message}");
+                }
+                assert_eq!(world.rounds().len() as u64, round, "{label}");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_worker_that_cannot_start_fails_admission() {
     let mut world = World::new(2, params()).unwrap();
@@ -788,7 +843,8 @@ fn randomized_worlds_match_and_are_never_late() {
         };
         let reference = execute(&p, &scripts, seed, None, false, 20_000).unwrap();
         assert_never_late(&reference, p.early);
-        for workers in [2, 3] {
+        // 8 exceeds every world here, so some threads find no assignment.
+        for workers in [1, 2, 3, 8] {
             let w = execute(&p, &scripts, seed, Some(workers), seed % 2 == 0, 20_000).unwrap();
             assert_eq!(w, reference, "seed {seed}, {workers} workers");
         }
