@@ -198,7 +198,11 @@ arbitrary assembly `PAUSE`/`YIELD`, early decompression or the vDSO. ARM
 `cpu_relax()` uses the same bounded read. Its raw exclusive-store retry loops
 remain uncharged: host interruptions can cause those retries and must not
 advance guest time or the software reservation epoch. Application polling is
-handled by binary instrumentation.
+handled by binary instrumentation. Two kinds of application code run uncharged:
+the translator's own code, so a translator spin loop must sleep rather than
+yield (its thread-exit lock once froze guest time), and `rseq` critical
+sections, which run from an uninstrumented native copy. Preemption and signals
+arrive only at charges, so `rseq` aborts are rare in a simulation.
 
 Kernel code charges no guest time of its own, so a kernel loop that waits for
 another task to run would never see the tick that sets `need_resched` on the
