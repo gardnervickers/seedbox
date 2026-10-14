@@ -5,6 +5,7 @@
 //!   native engine shim), a serve-while-waiting loop and wire helpers.
 //! * [`nemesis`]: seeded fault schedules: pauses, partitions, kill/restart,
 //!   power loss and console-triggered partitions.
+//! * [`finalread`]: Jepsen's final-read discipline.
 //! * [`checker`]: list-append (Elle-style), queue, lock-set and Kafka checks;
 //!   linearizability through `wgl` models; EDN export for Jepsen's Elle.
 //! * [`systems`]: the NATS, etcd, PostgreSQL and Kafka oracles and clients.
@@ -13,6 +14,7 @@
 //!   the oracle build and the Elle cross-check. Not acceptance tests.
 pub mod campaign;
 pub mod checker;
+pub mod finalread;
 pub mod kit;
 pub mod nemesis;
 pub mod scenario;

@@ -17,6 +17,7 @@
 //! reproduced it) and `none`.
 use super::nats_proto::{random_id, Msg, Nats, NatsError, CLIENT_PORT, HTTP_PORT};
 use crate::checker::queue::{self, Read};
+use crate::finalread;
 use crate::kit::{self, evidence, history_line, now, verdict, Ctl, Rng};
 use crate::nemesis::{self, Pace, Sleep};
 use serde_json::{json, Map, Value};
@@ -696,41 +697,16 @@ pub fn run(args: Args) -> u8 {
 }
 
 fn final_reads(ctl: &mut Ctl, args: &Args, history: &History) -> u8 {
-    // Undo anything a failed schedule left in force.
-    ctl.heal_everything();
-    let mut healthy = wait_healthy(&NODES, 120.0, "final");
-    if !healthy {
-        // Jepsen's final generator starts every node. Every fault is healed now,
-        // so a server that refuses or cannot route connections has exited
-        // (for example, killed by the guest's OOM killer): start it again.
-        let exited: Vec<&str> = NODES.iter().copied().filter(|n| unreachable(n)).collect();
-        for node in &exited {
-            if let Err(error) = nemesis::step(ctl, "restart", &[node]) {
-                evidence("restart-failed", json!({"node": node, "error": error.0}));
-            }
-        }
-        if !exited.is_empty() {
-            healthy = wait_healthy(&NODES, 120.0, "final-after-restart");
-        }
-    }
+    let healthy = finalread::recover(
+        ctl,
+        &NODES,
+        |label| wait_healthy(&NODES, 120.0, label),
+        unreachable,
+    );
     // Let replicas converge: read once every server reports the same stream
     // state for five seconds, or after --settle seconds regardless.
-    let deadline = Instant::now() + Duration::from_secs_f64(args.settle);
-    let mut agreed_since: Option<Instant> = None;
-    let mut views = Map::new();
-    while Instant::now() < deadline {
-        views = NODES.iter().map(|n| (n.to_string(), jsz(n))).collect();
-        let distinct: BTreeSet<String> = views.values().map(|v| v["stream"].to_string()).collect();
-        if distinct.len() == 1 {
-            let since = *agreed_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= Duration::from_secs(5) {
-                break;
-            }
-        } else {
-            agreed_since = None;
-        }
-        kit::pause(1.0);
-    }
+    let (states, _) = finalread::settle(&NODES, args.settle, 5.0, jsz, |v| v["stream"].clone());
+    let views: Map<String, Value> = NODES.iter().map(|n| n.to_string()).zip(states).collect();
     evidence("jsz", json!({"healthy": healthy, "views": views}));
     let mut reads = Vec::new();
     for node in NODES {
