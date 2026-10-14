@@ -740,7 +740,9 @@ fn galera_node(name: &str, flush: u8) -> Machine {
 
 #[allow(clippy::type_complexity)]
 fn galera() -> Vec<Scenario> {
-    const FAULT: &[&str] = &["--fault-at", "20", "--duration", "60"];
+    // Recovery from a whole-cluster failure takes about 90 s of simulated time (reboot,
+    // --wsrep-recover, bootstrap, two SSTs); run on afterwards so later appends land.
+    const FAULT: &[&str] = &["--fault-at", "20", "--duration", "130"];
     // (name, comment, innodb_flush_log_at_trx_commit, oracle arguments)
     let specs: [(&str, &str, u8, Vec<&str>); 10] = [
         ("galera-healthy-append", "MDEV-38977 (Jepsen, MariaDB Galera Cluster 12.1.2): with no faults, list-append on all\nthree nodes commits lost updates (P4) and G-single, which snapshot isolation forbids:\nGalera certifies write sets by key but has no first-committer-wins over reads.",
