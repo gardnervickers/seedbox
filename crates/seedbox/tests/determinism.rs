@@ -8,6 +8,9 @@
 //! The last oracles cross a server session: runs exported from the first
 //! session are imported into a second server with a fresh state directory,
 //! where fresh resolutions must match them and imported checkpoints must branch.
+//! The first session uses the server's default machine worker pool and the
+//! second runs every machine on one thread. A separate test runs references on
+//! one thread, then reruns, replays and branches them with 2, 3 and 8 workers.
 #![cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
@@ -75,7 +78,7 @@ fn whole_run_determinism_oracles() {
         .tempdir_in("/tmp")
         .unwrap();
     let state = directory.path().join("state");
-    let mut server = Some(Server::start(Path::new(&cli), &state));
+    let mut server = Some(Server::start(Path::new(&cli), &state, None));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -130,8 +133,9 @@ fn whole_run_determinism_oracles() {
             }
         };
         drop(server.take());
+        // Every machine on one thread, against the first session's default pool.
         let second = directory.path().join("state2");
-        server = Some(Server::start(Path::new(&cli), &second));
+        server = Some(Server::start(Path::new(&cli), &second, Some(1)));
         let fresh = Oracles::new(PathBuf::from(&cli), &second).await;
         for (name, result) in [
             (
@@ -144,6 +148,63 @@ fn whole_run_determinism_oracles() {
             ),
         ] {
             match result {
+                Ok(()) => eprintln!("determinism: {name}: PASS"),
+                Err(error) => {
+                    eprintln!("determinism: {name}: FAIL: {error}");
+                    failures.push(format!("{name}: {error}"));
+                }
+            }
+        }
+        failures
+    });
+    drop(server);
+    if !failures.is_empty() {
+        let retained = directory.keep();
+        panic!(
+            "{}\nretained server state: {}",
+            failures.join("\n"),
+            retained.display()
+        );
+    }
+}
+
+/// Machine worker count is a server performance setting. References run on
+/// one thread; sessions with 2, 3 and 8 workers (more than the three
+/// machines) must reproduce every one of them exactly.
+#[test]
+fn machine_worker_count_never_changes_results() {
+    let cli = std::env::var_os("SEEDBOX_TEST_CLI")
+        .expect("harness/check.sh supplies the current release CLI");
+    let directory = tempfile::Builder::new()
+        .prefix("seedbox-workers-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let state = directory.path().join("state");
+    let mut server = Some(Server::start(Path::new(&cli), &state, Some(1)));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let failures = runtime.block_on(async {
+        let mut oracles = Oracles::new(PathBuf::from(&cli), &state).await;
+        let baseline = match oracles.baseline().await {
+            Ok(baseline) => baseline,
+            Err(error) => return vec![format!("baseline: {error}")],
+        };
+        // Exports refuse symlinked parents such as macOS /tmp.
+        let root = directory.path().canonicalize().unwrap();
+        let references = match oracles.worker_references(&baseline, &root).await {
+            Ok(references) => references,
+            Err(error) => return vec![format!("references: {error}")],
+        };
+        let mut failures = Vec::new();
+        let sessions = directory.path().join("state2");
+        for workers in [2, 3, 8] {
+            drop(server.take());
+            server = Some(Server::start(Path::new(&cli), &sessions, Some(workers)));
+            let session = Oracles::new(PathBuf::from(&cli), &sessions).await;
+            let name = format!("MachineWorkerInvariance({workers} workers)");
+            match session.worker_invariance(workers as u64, &references).await {
                 Ok(()) => eprintln!("determinism: {name}: PASS"),
                 Err(error) => {
                     eprintln!("determinism: {name}: FAIL: {error}");
@@ -425,6 +486,21 @@ impl Oracles {
     /// fast followers, and a run paused twice with stalled and disconnecting
     /// subscribers, must both reproduce the unobserved unlimited baseline.
     async fn perf_settings(&self, baseline: &SimulationId) -> Outcome {
+        // The server default: one machine thread per machine, at most the host's.
+        let machines = self
+            .client
+            .world(baseline)
+            .await
+            .map_err(err)?
+            .machines
+            .len();
+        let host = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let used = self.machine_workers(baseline).await?;
+        if used != machines.min(host) as u64 {
+            return Err(format!(
+                "{baseline}: {used} machine workers for {machines} machines on {host} host threads"
+            ));
+        }
         // Slow playback for the first simulated seconds, with fast followers.
         let slow = self.submit(&self.document, true).await?;
         self.live(&slow).await?;
@@ -1198,6 +1274,9 @@ impl Oracles {
             self.same_results(&imported, &fresh)
                 .await
                 .map_err(|e| format!("{bundle} vs a fresh run of {}: {e}", project.display()))?;
+            if self.machine_workers(&fresh).await? != 1 {
+                return Err(format!("{fresh}: did not run on one machine thread"));
+            }
         }
         Ok(())
     }
@@ -1230,6 +1309,280 @@ impl Oracles {
             }
         }
         Ok(())
+    }
+}
+
+// ---- 12. MachineWorkerInvariance ------------------------------------------------
+
+/// Single-thread reference runs carried to the worker-count sessions.
+struct WorkerReferences {
+    bundles: PathBuf,
+    /// Bundle file name, and everything its run's observers saw.
+    runs: Vec<(&'static str, Trace)>,
+    /// The checkpoint in `interactive.tar` that `branch.tar` started from.
+    checkpoint: String,
+}
+
+/// The shared definition with machines of very different speeds (so rounds
+/// finish at very different host times), seeded per-call jitter, and whole
+/// machine pause/resume, process pause/resume and crash/reboot beside the
+/// shared program's loss, throttle and heal, and the oracle's partition.
+fn lifecycle_document(document: &Value) -> Result<Value, String> {
+    let mut resource: Simulation = serde_json::from_value(document.clone()).map_err(err)?;
+    let input = |key: &str, at: u64, action: Value| ProgramInput {
+        key: key.into(),
+        at_ns: at,
+        action,
+        timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+    };
+    resource.spec.program.extend([
+        input(
+            "pause-server",
+            2 * SECOND + SECOND / 2,
+            json!({"action": "pause", "machine": "server"}),
+        ),
+        input(
+            "resume-server",
+            3 * SECOND,
+            json!({"action": "resume", "machine": "server"}),
+        ),
+        input(
+            "freeze-server",
+            3 * SECOND + SECOND / 2,
+            json!({"action": "pause_process", "machine": "server"}),
+        ),
+        input(
+            "thaw-server",
+            3 * SECOND + 4 * SECOND / 5,
+            json!({"action": "resume_process", "machine": "server"}),
+        ),
+        input(
+            "crash-worker",
+            4 * SECOND,
+            json!({"action": "crash", "machine": "worker"}),
+        ),
+        input(
+            "reboot-worker",
+            4 * SECOND + 3 * SECOND / 5,
+            json!({"action": "reboot", "machine": "worker"}),
+        ),
+    ]);
+    resource.spec.program.sort_by_key(|input| input.at_ns);
+    let mut document = serde_json::to_value(&resource).map_err(err)?;
+    for (path, cpu) in [
+        (
+            "/spec/machines/server/cpu",
+            json!({"speed": "4GHz", "jitter": "25%"}),
+        ),
+        (
+            "/spec/machines/worker/cpu",
+            json!({"speed": "250MHz", "jitter": "10%"}),
+        ),
+        ("/spec/oracle/cpu", json!({"speed": "1GHz", "jitter": "5%"})),
+    ] {
+        *document
+            .pointer_mut(path)
+            .ok_or_else(|| format!("resolved definition has no {path}"))? = cpu;
+    }
+    Ok(document)
+}
+
+impl Oracles {
+    /// In the single-thread session: the baseline, the lifecycle variant, an
+    /// interactively controlled and checkpointed lifecycle run, and a branch
+    /// from that checkpoint, each exported with everything observers saw.
+    async fn worker_references(
+        &self,
+        baseline: &SimulationId,
+        root: &Path,
+    ) -> Result<WorkerReferences, String> {
+        let bundles = root.join("worker-bundles");
+        std::fs::create_dir_all(&bundles).map_err(err)?;
+        let lifecycle = lifecycle_document(&self.document)?;
+        let varied = self.submit(&lifecycle, false).await?;
+        self.complete(&varied).await?;
+        let comparison = self.client.compare(baseline, &varied).await.map_err(err)?;
+        if comparison.status == ComparisonStatus::Match {
+            return Err(format!(
+                "{varied}: the lifecycle variant left the run unchanged"
+            ));
+        }
+        let world = self.client.world(&varied).await.map_err(err)?;
+        for action in [
+            "pause",
+            "resume",
+            "pause_process",
+            "resume_process",
+            "crash",
+            "reboot",
+        ] {
+            if !world.faults.iter().any(|f| f.action == action) {
+                return Err(format!("{varied}: no {action} applied: {:?}", world.faults));
+            }
+        }
+
+        // Live controls at host-chosen boundaries, retained for replay.
+        let interactive = self.submit(&lifecycle, true).await?;
+        self.live(&interactive).await?;
+        self.rate(&interactive, PlaybackRate::Unlimited).await?;
+        if !self.reach(&interactive, 2 * SECOND).await? {
+            return Err(format!("{interactive} ended before 2 s"));
+        }
+        self.control(
+            &interactive,
+            ControlCommand::InjectFault {
+                action: serde_json::from_value(json!({"action": "partition",
+                    "handle": "live-cut", "left": ["oracle"], "right": ["server"]}))
+                .map_err(err)?,
+            },
+        )
+        .await?;
+        if !self.reach(&interactive, 5 * SECOND).await? {
+            return Err(format!("{interactive} ended before 5 s"));
+        }
+        self.control(
+            &interactive,
+            ControlCommand::InjectFault {
+                action: serde_json::from_value(json!({"action": "heal", "handle": "live-cut"}))
+                    .map_err(err)?,
+            },
+        )
+        .await?;
+        if !self.reach(&interactive, 9 * SECOND).await? {
+            return Err(format!("{interactive} ended before 9 s"));
+        }
+        self.rate(&interactive, PlaybackRate::Paused).await?;
+        let checkpoint = self
+            .control(&interactive, ControlCommand::Checkpoint)
+            .await?
+            .request
+            .request_id;
+        self.rate(&interactive, PlaybackRate::Unlimited).await?;
+        self.complete(&interactive).await?;
+        let resource = self
+            .client
+            .checkpoint_definition(&interactive, &checkpoint)
+            .await
+            .map_err(err)?;
+        let branch = self
+            .submit(&serde_json::to_value(&resource).map_err(err)?, false)
+            .await?;
+        self.complete(&branch).await?;
+        // The branch restores the rebooted worker's later incarnation and
+        // must continue the captured run's output exactly.
+        let at = match self
+            .client
+            .checkpoint(&interactive, &checkpoint)
+            .await
+            .map_err(err)?
+            .state
+        {
+            ControlState::Acknowledged {
+                checkpoint: Some(status),
+                ..
+            } if status.state
+                == seedbox_engine_protocol::host_control::CheckpointState::Captured =>
+            {
+                status.position.simulated_time_ns
+            }
+            state => return Err(format!("{interactive}: checkpoint not captured: {state:?}")),
+        };
+        let suffix: Vec<_> = self
+            .logs(&interactive)
+            .await?
+            .into_iter()
+            .filter(|r| r.time >= at)
+            .collect();
+        let output = self.logs(&branch).await?;
+        if by_machine(&output) != by_machine(&suffix) {
+            return Err(format!(
+                "{branch} output differs from {interactive} after {at} ns:\n{}",
+                first_difference(&by_machine(&suffix), &by_machine(&output))
+            ));
+        }
+
+        // Live admission and checkpoint capture publish host-timed events
+        // that a rerun of the retained timeline does not, so the controlled
+        // run's observations are those of its single-thread rerun.
+        let document = serde_json::to_value(self.client.describe(&interactive).await.map_err(err)?)
+            .map_err(err)?;
+        let replayed = self.submit(&document, false).await?;
+        self.complete(&replayed).await?;
+        self.same_results(&interactive, &replayed)
+            .await
+            .map_err(|e| format!("single-thread replay of the controlled run: {e}"))?;
+
+        let mut runs = Vec::new();
+        for (bundle, id, observed) in [
+            ("baseline.tar", baseline, baseline),
+            ("lifecycle.tar", &varied, &varied),
+            ("interactive.tar", &interactive, &replayed),
+            ("branch.tar", &branch, &branch),
+        ] {
+            for id in [id, observed] {
+                if self.machine_workers(id).await? != 1 {
+                    return Err(format!("{id}: the reference did not run on one thread"));
+                }
+            }
+            self.export(id, &bundles.join(bundle))?;
+            runs.push((bundle, Trace::read(self, observed).await?));
+        }
+        Ok(WorkerReferences {
+            bundles,
+            runs,
+            checkpoint,
+        })
+    }
+
+    /// Machine threads the engine reported for a completed run.
+    async fn machine_workers(&self, id: &SimulationId) -> Result<u64, String> {
+        let report: Value =
+            serde_json::from_slice(&self.cli(&["diagnostics", id.as_str(), "vmm.json"])?)
+                .map_err(err)?;
+        report["scheduler"]["machine_workers"]
+            .as_u64()
+            .ok_or_else(|| format!("{id}: engine report has no machine_workers"))
+    }
+
+    /// With `workers` machine threads: rerunning each imported reference
+    /// (including its retained live controls) and branching from its imported
+    /// checkpoint must reproduce outcome, witness, full state and fault
+    /// history, and exactly the logs, events, faults and timeline that the
+    /// single-thread references produced.
+    async fn worker_invariance(&self, workers: u64, references: &WorkerReferences) -> Outcome {
+        let mut imported = BTreeMap::new();
+        for (bundle, _) in &references.runs {
+            imported.insert(*bundle, self.import(&references.bundles.join(bundle))?);
+        }
+        for (bundle, trace) in &references.runs {
+            let source = &imported[bundle];
+            let document = if *bundle == "branch.tar" {
+                let resource = self
+                    .client
+                    .checkpoint_definition(&imported["interactive.tar"], &references.checkpoint)
+                    .await
+                    .map_err(err)?;
+                serde_json::to_value(&resource).map_err(err)?
+            } else {
+                serde_json::to_value(self.client.describe(source).await.map_err(err)?)
+                    .map_err(err)?
+            };
+            let rerun = &self.submit(&document, false).await?;
+            self.complete(rerun).await?;
+            self.same_results(source, rerun)
+                .await
+                .map_err(|e| format!("{bundle}: {e}"))?;
+            trace
+                .same(&Trace::read(self, rerun).await?)
+                .map_err(|e| format!("{bundle} vs {rerun}: {e}"))?;
+            let used = self.machine_workers(rerun).await?;
+            if used != workers {
+                return Err(format!("{rerun}: ran on {used} machine workers"));
+            }
+        }
+        // The CLI's replay reruns the controlled run and compares (exit 0 is MATCH).
+        self.cli(&["replay", imported["interactive.tar"].as_str()])
+            .map(drop)
     }
 }
 
@@ -1345,6 +1698,15 @@ impl Trace {
             .collect()
     }
 
+    /// Everything observed is identical, including log record boundaries.
+    fn same(&self, other: &Self) -> Outcome {
+        self.same_prefix(other, u64::MAX)?;
+        if self.logs != other.logs {
+            return Err("log records differ in their boundaries or times".into());
+        }
+        Ok(())
+    }
+
     fn same_prefix(&self, other: &Self, before: u64) -> Outcome {
         let logs = |t: &Self| {
             by_machine(
@@ -1368,11 +1730,15 @@ impl Trace {
                 .cloned()
                 .collect()
         };
-        if events(self) != events(other) {
+        let (mine, theirs) = (events(self), events(other));
+        if mine != theirs {
+            let at = mine.iter().zip(&theirs).take_while(|(a, b)| a == b).count();
             return Err(format!(
-                "events differ: {:?} vs {:?}",
-                events(self),
-                events(other)
+                "events differ at index {at} of {} and {}: {:?} vs {:?}",
+                mine.len(),
+                theirs.len(),
+                mine.get(at),
+                theirs.get(at)
             ));
         }
         let faults = |t: &Self| -> Vec<Value> {
@@ -1415,13 +1781,18 @@ fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
-/// The fixture owns its server; `--full-state` makes comparisons include full state.
+/// The fixture owns its server; `--full-state` makes comparisons include full
+/// state. `workers` sets `--machine-workers`; None keeps the server default.
 struct Server(Child);
 impl Server {
-    fn start(binary: &Path, state: &Path) -> Self {
+    fn start(binary: &Path, state: &Path, workers: Option<usize>) -> Self {
+        let mut command = Command::new(binary);
+        command.args(["serve", "--startup-handshake", "--full-state"]);
+        if let Some(workers) = workers {
+            command.args(["--machine-workers", &workers.to_string()]);
+        }
         let mut server = Self(
-            Command::new(binary)
-                .args(["serve", "--startup-handshake", "--full-state"])
+            command
                 .env("SEEDBOX_STATE", state)
                 .stdout(Stdio::piped())
                 .spawn()
