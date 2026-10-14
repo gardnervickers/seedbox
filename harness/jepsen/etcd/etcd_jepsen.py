@@ -7,6 +7,7 @@ grants a lease (TTL 2 s by default) kept alive every TTL/3, takes etcd's lock
 element, then releases the lock. This oracle hosts the set (Jepsen keeps it in
 the test process) in a small HTTP store on port 8000, and every client step is
 reported to the store, so the store's log is one total order of the history.
+The oracle and the clients each run on a single thread.
 
 Fault modes (`--mode`; Seedbox faults, recorded as `fault` evidence):
 
@@ -14,8 +15,10 @@ Fault modes (`--mode`; Seedbox faults, recorded as `fault` evidence):
 * `pause-holder`: when the lock holder has read the set, SIGSTOP the holder's
   client process (a GC pause) for `--pause` s, longer than the TTL, then
   SIGCONT it; wait `--gap` s and repeat.
-* `pause-member`: the same trigger, but pause the etcd member the holder talks
-  to, so its keep-alives stop reaching the leader.
+* `pause-waiter-member` (etcd#11456 through a pause): when the holder has read
+  the set, pause the member of a client waiting for the lock (not the leader,
+  not the holder's member) for `--pause` s, so the waiter's lease expires while
+  its Lock RPC is pending on that member.
 * `pause-random-member`: Jepsen's nemesis: pause a random member's process for
   `--pause` s every `--pause` + `--gap` s.
 * `partition-waiter` (etcd#11456): while one client holds the lock, isolate
@@ -48,13 +51,12 @@ import argparse
 import base64
 import collections
 import http.client
-import http.server
 import json
 import os
 import random
+import selectors
 import socket
 import sys
-import threading
 import time
 
 MEMBERS = ["n1", "n2", "n3", "n4", "n5"]
@@ -82,6 +84,161 @@ def unb64(text):
     return base64.b64decode(text).decode()
 
 
+
+# ------------------------------------------------------------ the store and its event loop
+
+class Store:
+    """The protected set, the shared history and the client registry."""
+
+    def __init__(self, guard):
+        self.guard = guard
+        self.history = []
+        self.set = []
+        self.max_token = 0
+        self.hello, self.done = {}, {}
+        self.start, self.stop = False, False
+        self.holders = {}   # client -> {"key", "op", "read"}
+        self.waiting = {}   # client -> op
+        self.last_read = None  # (history index, client)
+
+    def handle(self, body):
+        kind, client = body.get("type"), body.get("client")
+        if kind == "hello":
+            self.hello[client] = body.get("member")
+            return {"start": self.start}
+        if kind == "next":
+            return {"stop": self.stop}
+        if kind == "done":
+            self.done[client] = body.get("ops")
+            return {}
+        entry = dict(body, t=now(), i=len(self.history))
+        reply = {"ok": True}
+        if kind == "read" and self.guard != "txn":
+            if not self.fence(entry):
+                reply = {"ok": False}
+            else:
+                reply["set"] = list(self.set)
+            entry["size"] = len(self.set)
+        elif kind == "write" and self.guard != "txn":
+            if self.fence(entry):
+                self.set = list(body["set"])
+            else:
+                reply = {"ok": False}
+            entry.pop("set", None)
+        entry["ok"] = reply["ok"] if kind in ("read", "write") else entry.get("ok")
+        if kind == "invoke":
+            self.waiting[client] = body.get("op")
+        elif kind == "acquired":
+            self.waiting.pop(client, None)
+            self.holders[client] = {"key": body.get("key"), "op": body.get("op"), "read": False}
+        elif kind == "read" and client in self.holders:
+            self.holders[client]["read"] = True
+            self.last_read = (entry["i"], client)
+        elif kind in ("releasing", "fail", "info") and body.get("op") == self.waiting.get(client):
+            self.waiting.pop(client, None)
+        if kind == "releasing":
+            self.holders.pop(client, None)
+        self.history.append(entry)
+        print("H " + json.dumps(entry, sort_keys=True), flush=True)
+        return reply
+
+    def fence(self, entry):
+        if self.guard != "token":
+            return True
+        token = entry.get("token")
+        if not isinstance(token, int) or token < self.max_token:
+            entry["fenced"] = True
+            return False
+        self.max_token = token
+        return True
+
+
+class Loop:
+    """A single-threaded HTTP/1.0 server for the store. The oracle runs on one
+    thread: it serves requests whenever it waits (`wait`), and control RPCs and
+    etcd queries run between waits. Clients send one short request per
+    connection and retry, so a request queued meanwhile is served late, never lost."""
+
+    def __init__(self, store, port):
+        self.store = store
+        self.selector = selectors.DefaultSelector()
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(("0.0.0.0", port))
+        self.listener.listen(128)
+        self.listener.setblocking(False)
+        self.selector.register(self.listener, selectors.EVENT_READ, None)
+        self.buffers = {}
+
+    def wait(self, predicate=None, timeout=0.0):
+        """Serve requests until `predicate()` is true or `timeout` seconds pass; return its value."""
+        deadline = time.monotonic() + timeout
+        while True:
+            value = predicate() if predicate else None
+            remaining = deadline - time.monotonic()
+            if value or remaining <= 0:
+                return value
+            for key, _ in self.selector.select(min(remaining, 0.5)):
+                if key.fileobj is self.listener:
+                    self.accept()
+                else:
+                    self.receive(key.fileobj)
+
+    def accept(self):
+        while True:
+            try:
+                connection, _ = self.listener.accept()
+            except (BlockingIOError, InterruptedError):
+                return
+            connection.setblocking(False)
+            self.buffers[connection] = (bytearray(), time.monotonic())
+            self.selector.register(connection, selectors.EVENT_READ, None)
+
+    def close(self, connection):
+        self.selector.unregister(connection)
+        self.buffers.pop(connection, None)
+        connection.close()
+
+    def receive(self, connection):
+        buffer, _ = self.buffers[connection]
+        try:
+            chunk = connection.recv(65536)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            self.close(connection)
+            return
+        if not chunk:
+            self.close(connection)
+            return
+        buffer += chunk
+        end = buffer.find(b"\r\n\r\n")
+        if end < 0:
+            return
+        headers = bytes(buffer[:end]).decode("latin-1").split("\r\n")
+        length = 0
+        for line in headers[1:]:
+            name, _, value = line.partition(":")
+            if name.strip().lower() == "content-length":
+                length = int(value.strip())
+        if len(buffer) < end + 4 + length:
+            return
+        try:
+            body = json.loads(bytes(buffer[end + 4:end + 4 + length]) or b"{}")
+            data, code = json.dumps(self.store.handle(body)).encode(), b"200 OK"
+        except (ValueError, KeyError, TypeError) as error:
+            data, code = json.dumps({"error": str(error)}).encode(), b"400 Bad Request"
+        response = (b"HTTP/1.0 " + code + b"\r\nContent-Type: application/json\r\nContent-Length: "
+                    + str(len(data)).encode() + b"\r\n\r\n" + data)
+        try:
+            connection.setblocking(True)
+            connection.settimeout(2.0)
+            connection.sendall(response)
+        except OSError:
+            pass
+        self.close(connection)
+
+
 # ------------------------------------------------------------ etcd gateway
 
 def post(member, path, body, timeout=5.0):
@@ -104,18 +261,18 @@ def status(member, timeout=2.0):
         return None
 
 
-def leader_member():
-    """The member name of the current leader, as some reachable member reports it."""
+def leader_member(timeout=0.5):
+    """The member name of the current leader, as reachable members report it."""
     ids, leader = {}, None
     for member in MEMBERS:
-        reply = status(member, 1.0)
+        reply = status(member, timeout)
         if reply:
             ids[reply["header"]["member_id"]] = member
             leader = leader or reply.get("leader")
     return ids.get(leader)
 
 
-def wait_cluster(deadline_s, label):
+def wait_cluster(loop, deadline_s, label):
     deadline = time.monotonic() + deadline_s
     while time.monotonic() < deadline:
         replies = {m: status(m) for m in MEMBERS}
@@ -124,7 +281,7 @@ def wait_cluster(deadline_s, label):
             evidence("cluster", label=label, leader=leader_member(),
                      revision=int(next(iter(replies.values()))["header"]["revision"]))
             return True
-        time.sleep(0.5)
+        loop.wait(timeout=0.5)
     evidence("cluster-unhealthy", label=label, replies={m: bool(status(m)) for m in MEMBERS})
     return False
 
@@ -141,46 +298,41 @@ def any_member(path, body, timeout=5.0):
     raise RuntimeError(f"{path}: no member answered: {last}")
 
 
-class Watch(threading.Thread):
-    """A gateway watch on [key, range_end) from `start_revision`; records events until `until(events)`."""
+class Watch:
+    """A gateway watch on [key, range_end) from `start_revision`, read on the calling thread."""
 
-    def __init__(self, member, key, range_end, start_revision, until, timeout=30.0):
-        super().__init__(daemon=True)
-        self.member, self.key, self.range_end = member, key, range_end
-        self.start_revision, self.until, self.timeout = start_revision, until, timeout
-        self.events, self.created, self.done, self.error = [], threading.Event(), threading.Event(), None
+    def __init__(self, member, key, range_end, start_revision, timeout=30.0):
+        self.events = []
+        self.connection = http.client.HTTPConnection(member, 2379, timeout=timeout)
+        request = {"key": b64(key), "range_end": b64(range_end)}
+        if start_revision is not None:
+            request["start_revision"] = str(start_revision)
+        self.connection.request("POST", "/v3/watch", json.dumps({"create_request": request}),
+                                {"Content-Type": "application/json"})
+        self.response = self.connection.getresponse()
+        self.created = False
 
-    def run(self):
-        try:
-            connection = http.client.HTTPConnection(self.member, 2379, timeout=self.timeout)
-            request = {"key": b64(self.key), "range_end": b64(self.range_end)}
-            if self.start_revision is not None:
-                request["start_revision"] = str(self.start_revision)
-            connection.request("POST", "/v3/watch", json.dumps({"create_request": request}),
-                               {"Content-Type": "application/json"})
-            response = connection.getresponse()
-            while not self.until(self.events):
-                line = response.readline()
-                if not line:
-                    raise RuntimeError("watch stream ended")
-                result = json.loads(line).get("result", {})
-                if result.get("created"):
-                    self.created.set()
-                for event in result.get("events", []):
-                    kv = event["kv"]
-                    self.events.append({"type": event.get("type", "PUT"), "key": unb64(kv["key"]),
-                                        "mod_revision": int(kv.get("mod_revision", 0)),
-                                        "create_revision": int(kv.get("create_revision", 0)),
-                                        "lease": kv.get("lease")})
-            connection.close()
-        except Exception as error:  # Reported by the caller.
-            self.error = repr(error)
-        finally:
-            self.created.set()
-            self.done.set()
+    def read_until(self, until):
+        """Read responses until `until(self)` holds; raise on a closed stream or a timeout."""
+        while not until(self):
+            line = self.response.readline()
+            if not line:
+                raise RuntimeError("watch stream ended")
+            result = json.loads(line).get("result", {})
+            self.created = self.created or bool(result.get("created"))
+            for event in result.get("events", []):
+                kv = event["kv"]
+                self.events.append({"type": event.get("type", "PUT"), "key": unb64(kv["key"]),
+                                    "mod_revision": int(kv.get("mod_revision", 0)),
+                                    "create_revision": int(kv.get("create_revision", 0)),
+                                    "lease": kv.get("lease")})
+        return self.events
+
+    def close(self):
+        self.connection.close()
 
 
-def wait_keepalives(deadline_s):
+def wait_keepalives(loop, deadline_s):
     """Wait until every member renews a lease promptly: after boot, followers can take
     seconds to forward renewals to the leader, which by itself expires 2 s leases."""
     deadline, streak = time.monotonic() + deadline_s, 0
@@ -196,7 +348,7 @@ def wait_keepalives(deadline_s):
             any_member("/v3/lease/revoke", {"ID": str(lease)})
             evidence("keepalives-ready")
             return True
-        time.sleep(0.5)
+        loop.wait(timeout=0.5)
     evidence("keepalives-not-ready")
     return False
 
@@ -205,133 +357,35 @@ def watch_revision_zero():
     """etcd#11496: watch(rev 0) streams only new events; watch(rev 1) replays all of them."""
     any_member("/v3/kv/put", {"key": b64("w/1"), "value": b64("1")})
     any_member("/v3/kv/put", {"key": b64("w/2"), "value": b64("2")})
-    seen = lambda events: any(e["key"] == "w/3" for e in events)
-    watches = {rev: Watch("n1", "w/", "w0", rev, seen) for rev in (0, 1)}
-    for watch in watches.values():
-        watch.start()
-        watch.created.wait(20)
-    any_member("/v3/kv/put", {"key": b64("w/3"), "value": b64("3")})
-    for watch in watches.values():
-        watch.done.wait(20)
-    keys = {rev: [e["key"] for e in w.events] for rev, w in watches.items()}
-    evidence("watch", rev0_keys=keys[0], rev1_keys=keys[1],
-             errors={rev: w.error for rev, w in watches.items() if w.error},
-             rev0_starts_after_current=keys[0] == ["w/3"], rev1_replays=keys[1] == ["w/1", "w/2", "w/3"])
+    keys, errors, watches = {}, {}, {}
+    try:
+        for rev in (0, 1):
+            watches[rev] = Watch("n1", "w/", "w0", rev, timeout=20)
+            watches[rev].read_until(lambda w: w.created)
+        any_member("/v3/kv/put", {"key": b64("w/3"), "value": b64("3")})
+        for rev, watch in watches.items():
+            watch.read_until(lambda w: any(e["key"] == "w/3" for e in w.events))
+    except (OSError, RuntimeError, ValueError, http.client.HTTPException) as error:
+        errors["watch"] = repr(error)
+    for rev, watch in watches.items():
+        keys[rev] = [e["key"] for e in watch.events]
+        watch.close()
+    evidence("watch", rev0_keys=keys.get(0), rev1_keys=keys.get(1), errors=errors,
+             rev0_starts_after_current=keys.get(0) == ["w/3"], rev1_replays=keys.get(1) == ["w/1", "w/2", "w/3"])
 
 
 def revision_history():
     """Every event in the cluster's history, through a watch from revision 1 up to a marker put."""
     marker = int(any_member("/v3/kv/put", {"key": b64("zz-end"), "value": b64("end")})["header"]["revision"])
     for member in MEMBERS:
-        watch = Watch(member, "\0", "\0", 1, lambda events: any(e["mod_revision"] >= marker for e in events), 60)
-        watch.start()
-        watch.done.wait(90)
-        if watch.error is None and watch.done.is_set():
-            return watch.events, marker
-        evidence("history-watch-failed", member=member, error=watch.error)
+        try:
+            watch = Watch(member, "\0", "\0", 1, timeout=60)
+            events = watch.read_until(lambda w: any(e["mod_revision"] >= marker for e in w.events))
+            watch.close()
+            return events, marker
+        except (OSError, RuntimeError, ValueError, http.client.HTTPException) as error:
+            evidence("history-watch-failed", member=member, error=repr(error))
     return None, marker
-
-
-# ------------------------------------------------------------ the store
-
-class Store:
-    """The protected set, the shared history and the client registry."""
-
-    def __init__(self, guard):
-        self.guard = guard
-        self.lock = threading.Condition()
-        self.history = []
-        self.set = []
-        self.max_token = 0
-        self.hello, self.done = {}, {}
-        self.start, self.stop = False, False
-        self.holders = {}   # client -> {"key", "op", "read"}
-        self.waiting = {}   # client -> op
-
-    def handle(self, body):
-        kind, client = body.get("type"), body.get("client")
-        with self.lock:
-            if kind == "hello":
-                self.hello[client] = body.get("member")
-                return {"start": self.start}
-            if kind == "next":
-                return {"stop": self.stop}
-            if kind == "done":
-                self.done[client] = body.get("ops")
-                self.lock.notify_all()
-                return {}
-            entry = dict(body, t=now(), i=len(self.history))
-            reply = {"ok": True}
-            if kind == "read" and self.guard != "txn":
-                if not self.fence(entry):
-                    reply = {"ok": False}
-                else:
-                    reply["set"] = list(self.set)
-                entry["size"] = len(self.set)
-            elif kind == "write" and self.guard != "txn":
-                if self.fence(entry):
-                    self.set = list(body["set"])
-                else:
-                    reply = {"ok": False}
-                entry.pop("set", None)
-            entry["ok"] = reply["ok"] if kind in ("read", "write") else entry.get("ok")
-            if kind == "invoke":
-                self.waiting[client] = body.get("op")
-            elif kind == "acquired":
-                self.waiting.pop(client, None)
-                self.holders[client] = {"key": body.get("key"), "op": body.get("op"), "read": False}
-            elif kind == "read" and client in self.holders:
-                self.holders[client]["read"] = True
-            elif kind in ("releasing", "fail", "info") and body.get("op") == self.waiting.get(client):
-                self.waiting.pop(client, None)
-            if kind == "releasing":
-                self.holders.pop(client, None)
-            self.history.append(entry)
-            print("H " + json.dumps(entry, sort_keys=True), flush=True)
-            self.lock.notify_all()
-            return reply
-
-    def fence(self, entry):
-        if self.guard != "token":
-            return True
-        token = entry.get("token")
-        if not isinstance(token, int) or token < self.max_token:
-            entry["fenced"] = True
-            return False
-        self.max_token = token
-        return True
-
-    def wait_for(self, predicate, timeout):
-        deadline = time.monotonic() + timeout
-        with self.lock:
-            while True:
-                value = predicate()
-                if value or time.monotonic() >= deadline:
-                    return value
-                self.lock.wait(min(0.5, max(0.01, deadline - time.monotonic())))
-
-
-def serve(store, port):
-    class Handler(http.server.BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.0"
-
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length) or b"{}")
-            data = json.dumps(store.handle(body)).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def log_message(self, *_):
-            pass
-
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
 
 
 # ------------------------------------------------------------ worlds
@@ -353,9 +407,6 @@ class NativeWorld:
         connection.close()
         if response.status >= 300 and response.status != 304:
             raise RuntimeError(f"engine {path}: {response.status} {text[:200]}")
-
-    def sleep(self, seconds):
-        time.sleep(seconds)
 
     def pause_process(self, target):
         self._post(f"/containers/{target}/pause")
@@ -380,54 +431,65 @@ def connect_world(args):
 
 # ------------------------------------------------------------ nemesis
 
-def holder_reading(store):
-    """A client holding the lock that has read the set and not yet released it."""
-    for client, hold in sorted(store.holders.items()):
-        if hold["read"]:
-            return client
+def holder_reading(store, since=0):
+    """A client holding the lock that read the set at history index `since` or later, still holding."""
+    if store.last_read and store.last_read[0] >= since and store.last_read[1] in store.holders:
+        return store.last_read[1]
     return None
 
 
-def pause(world, target, seconds, **context):
+def pause(world, loop, target, seconds, **context):
     world.pause_process(target)
     evidence("fault", action="pause_process", targets=[target], **context)
-    world.sleep(seconds)
+    loop.wait(timeout=seconds)
     world.resume_process(target)
     evidence("fault", action="resume_process", targets=[target])
 
 
-def nemesis(world, store, args, rng, end):
+def nemesis(world, loop, store, args, rng, end):
+    """Run the fault schedule until `end`; the store is served whenever the schedule waits."""
     count = 0
     while time.monotonic() < end:
+        window = min(10.0, max(0.1, end - time.monotonic()))
         if args.mode == "none":
-            world.sleep(max(0.0, end - time.monotonic()))
+            loop.wait(timeout=max(0.0, end - time.monotonic()))
             break
         if args.mode == "pause-random-member":
-            pause(world, rng.choice(MEMBERS), args.pause, leader=leader_member())
+            target = rng.choice(MEMBERS)
+            pause(world, loop, target, args.pause, leader=leader_member())
             count += 1
-            world.sleep(args.gap)
+            loop.wait(timeout=args.gap)
             continue
-        if args.mode in ("pause-holder", "pause-member"):
-            holder = store.wait_for(lambda: holder_reading(store), min(10.0, max(0.1, end - time.monotonic())))
+        since = len(store.history)
+        if args.mode == "pause-holder":
+            holder = loop.wait(lambda: holder_reading(store, since), window)
             if not holder:
                 continue
-            target = holder if args.mode == "pause-holder" else CLIENTS[holder]
-            pause(world, target, args.pause, holder=holder, key=store.holders.get(holder, {}).get("key"),
-                  leader=leader_member() if args.mode == "pause-member" else None)
+            pause(world, loop, holder, args.pause, holder=holder, key=store.holders.get(holder, {}).get("key"))
             count += 1
-            world.sleep(args.gap)
+            loop.wait(timeout=args.gap)
+            continue
+        leader = leader_member()
+
+        def pick():
+            holder = holder_reading(store, since)
+            if not holder or not leader:
+                return None
+            waiters = sorted(c for c in store.waiting if c != holder and CLIENTS[c] not in (leader, CLIENTS[holder]))
+            return (holder, waiters[0]) if waiters else None
+
+        if args.mode == "pause-waiter-member":
+            chosen = loop.wait(pick, window)
+            if not chosen:
+                continue
+            holder, waiter = chosen
+            pause(world, loop, CLIENTS[waiter], args.pause, holder=holder, waiter=waiter, leader=leader,
+                  waiter_op=store.waiting.get(waiter))
+            count += 1
+            loop.wait(timeout=args.gap)
             continue
         if args.mode == "partition-waiter":
-            leader = leader_member()
-
-            def pick():
-                holder = holder_reading(store)
-                if not holder or not leader:
-                    return None
-                waiters = sorted(c for c in store.waiting if c != holder and CLIENTS[c] not in (leader, CLIENTS[holder]))
-                return (holder, waiters[0]) if waiters else None
-
-            chosen = store.wait_for(pick, min(10.0, max(0.1, end - time.monotonic())))
+            chosen = loop.wait(pick, window)
             if not chosen:
                 continue
             holder, waiter = chosen
@@ -436,11 +498,11 @@ def nemesis(world, store, args, rng, end):
             handle = world.partition([isolated], others)
             evidence("fault", action="partition", targets=[[isolated], others], holder=holder, waiter=waiter,
                      leader=leader, waiter_op=store.waiting.get(waiter))
-            world.sleep(args.pause)
+            loop.wait(timeout=args.pause)
             world.heal(handle)
             evidence("fault", action="heal", targets=[[isolated], others])
             count += 1
-            world.sleep(args.gap)
+            loop.wait(timeout=args.gap)
             continue
         raise ValueError(args.mode)
     return count
@@ -532,7 +594,7 @@ def check(history, final_set, guard, lock_events):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["none", "pause-holder", "pause-member", "pause-random-member",
+    parser.add_argument("--mode", choices=["none", "pause-holder", "pause-waiter-member", "pause-random-member",
                                            "partition-waiter"], required=True)
     parser.add_argument("--guard", choices=["none", "token", "txn"], default="none")
     parser.add_argument("--duration", type=float, default=120, help="Seconds of workload.")
@@ -546,44 +608,39 @@ def main():
     evidence("start", mode=args.mode, guard=args.guard, rng_seed=rng_seed, duration=args.duration,
              pause=args.pause, gap=args.gap)
     store = Store(args.guard)
-    serve(store, args.port)
+    loop = Loop(store, args.port)
     world = connect_world(args)
-    if not wait_cluster(240, "boot"):
+    if not wait_cluster(loop, 240, "boot"):
         print("VERDICT inconclusive: cluster never became healthy", flush=True)
         return 3
-    wait_keepalives(120)
+    wait_keepalives(loop, 120)
     watch_revision_zero()
     if args.guard == "txn":
         any_member("/v3/kv/put", {"key": b64("set"), "value": b64("[]")})
-    if not store.wait_for(lambda: len(store.hello) == len(CLIENTS), 240):
+    if not loop.wait(lambda: len(store.hello) == len(CLIENTS), 240):
         evidence("clients", hello=sorted(store.hello))
         print("VERDICT inconclusive: not every client reached the store", flush=True)
         return 3
-    with store.lock:
-        store.start = True
+    store.start = True
     evidence("clients", hello=store.hello)
     end = time.monotonic() + args.duration
-    faults = nemesis(world, store, args, rng, end)
+    faults = nemesis(world, loop, store, args, rng, end)
     evidence("nemesis", faults=faults)
-    with store.lock:
-        store.stop = True
-    store.wait_for(lambda: len(store.done) == len(CLIENTS), 90)
+    store.stop = True
+    loop.wait(lambda: len(store.done) == len(CLIENTS), 90)
     evidence("clients-done", done=store.done)
     if hasattr(world, "inspect"):
         evidence("inspect", world=world.inspect())
-    wait_cluster(120, "final")
+    wait_cluster(loop, 120, "final")
     if args.guard == "txn":
         kvs = any_member("/v3/kv/range", {"key": b64("set")}).get("kvs", [])
         final_set = json.loads(unb64(kvs[0]["value"])) if kvs else []
     else:
-        with store.lock:
-            final_set = list(store.set)
+        final_set = list(store.set)
     lock_events, marker = revision_history()
     if lock_events is not None:
         evidence("lock-keys", events=[e for e in lock_events if e["key"].startswith("lock/")], revision=marker)
-    with store.lock:
-        history = list(store.history)
-    result, details, violation = check(history, final_set, args.guard, lock_events)
+    result, details, violation = check(list(store.history), final_set, args.guard, lock_events)
     result["faults"] = faults
     result["history_complete"] = lock_events is not None
     evidence("check", **result)

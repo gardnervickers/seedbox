@@ -23,10 +23,11 @@ SCENARIOS = {
         "Its lease expires, another client takes the lock, and the paused client resumes\n"
         "and writes its stale set: acknowledged updates are lost.",
         "pause-holder", "none"),
-    "etcd-lock-pause-member": (
-        "etcd locks do not give mutual exclusion: pause the etcd member the lock holder\n"
-        "talks to for 3 s, so the holder's keep-alives stop while it keeps working.",
-        "pause-member", "none"),
+    "etcd-11456-pause-waiter-member": (
+        "etcd#11456 through a process pause: when the holder has read the set, pause the\n"
+        "member of a client waiting for the lock for 3 s. The waiter's lease expires while\n"
+        "its Lock RPC is pending there, and the RPC then succeeds without its key.",
+        "pause-waiter-member", "none"),
     "etcd-lock-pause-random-member": (
         "Jepsen's lock-set nemesis: pause a random etcd member for 3 s every 5 s.",
         "pause-random-member", "none"),

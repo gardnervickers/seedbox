@@ -1,13 +1,13 @@
 """One lock-set client for etcd_jepsen.py (Jepsen's etcd 3.4.3 lock-set workload).
 
 Each client machine runs this program bound to one etcd member's JSON gateway.
-For every operation it grants a fresh lease (TTL `--ttl`), keeps it alive from
-a background thread every TTL/3, takes the lock through etcd's Lock RPC
-(`/v3/lock/lock`, the server-side `concurrency.Mutex` that Jepsen's jetcd
-client uses), then performs a read-modify-write of a set: read the set, sleep
-`--hold` seconds, write the set plus one unique element, release the lock and
-revoke the lease. Nothing in the client reacts to a lost lease, exactly like a
-lock user that trusts the lock.
+For every operation it grants a fresh lease (TTL `--ttl`) and renews it every
+TTL/3, takes the lock through etcd's Lock RPC (`/v3/lock/lock`, the
+server-side `concurrency.Mutex` that Jepsen's jetcd client uses), then performs
+a read-modify-write of a set: read the set, wait `--hold` seconds, write the
+set plus one unique element, release the lock and revoke the lease. Nothing in
+the client reacts to a lost lease, exactly like a lock user that trusts the
+lock.
 
 `--guard` selects where the set lives and how the write is protected:
 
@@ -19,17 +19,21 @@ lock user that trusts the lock.
   succeeds while this client's lock key still exists (version > 0).
 
 Every step is reported to the oracle's store (`/event`) so the oracle has one
-totally ordered history. A pause of this process (SIGSTOP of its group) freezes
-the keep-alive thread too, which is how a GC pause loses the lease.
+totally ordered history. The client is one thread: it renews the lease while
+it waits for the Lock reply and while it holds the lock, so a pause of this
+process (SIGSTOP of its group) stops renewals too, which is how a GC pause
+loses the lease.
 """
 import argparse
 import base64
 import http.client
 import json
+import select
 import socket
 import sys
-import threading
 import time
+
+ERRORS = (OSError, RuntimeError, ValueError, KeyError, http.client.HTTPException)
 
 
 def b64(text):
@@ -38,6 +42,44 @@ def b64(text):
 
 def unb64(text):
     return base64.b64decode(text).decode()
+
+
+class Lease:
+    """A lease renewed every TTL/3 from the client's only thread; a failed renewal is retried at once."""
+
+    def __init__(self, client, lease):
+        self.client, self.id = client, lease
+        self.interval = client.args.ttl / 3
+        self.due = time.monotonic() + self.interval
+        self.stats = {"ok": 0, "expired": 0, "error": 0}
+
+    def renew_if_due(self):
+        if time.monotonic() < self.due:
+            return
+        sent = time.monotonic()
+        try:
+            reply = self.client.etcd("/v3/lease/keepalive", {"ID": str(self.id)}, timeout=self.interval)
+            ttl = int(reply.get("result", {}).get("TTL", "0"))
+            self.stats["ok" if ttl > 0 else "expired"] += 1
+            self.due = sent + self.interval
+        except ERRORS:
+            self.stats["error"] += 1
+            self.due = time.monotonic() + 0.05
+
+    def wait(self, seconds, sock=None):
+        """Renew while waiting `seconds`; with `sock`, return True as soon as it is readable."""
+        deadline = time.monotonic() + seconds
+        while True:
+            self.renew_if_due()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            pause = max(0.0, min(remaining, self.due - time.monotonic()))
+            if sock is not None:
+                if select.select([sock], [], [], pause)[0]:
+                    return True
+            else:
+                time.sleep(pause)
 
 
 class Client:
@@ -61,6 +103,26 @@ class Client:
         finally:
             connection.close()
 
+    def lock(self, lease):
+        """The Lock RPC, renewing the lease while it blocks; returns the reply or raises."""
+        body = json.dumps({"name": b64("lock"), "lease": str(lease.id)}).encode()
+        sock = socket.create_connection((self.args.member, 2379), timeout=2)
+        try:
+            sock.sendall(b"POST /v3/lock/lock HTTP/1.1\r\nHost: " + self.args.member.encode()
+                         + b"\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "
+                         + str(len(body)).encode() + b"\r\n\r\n" + body)
+            if not lease.wait(self.args.lock_timeout, sock):
+                raise TimeoutError("lock timed out")
+            sock.settimeout(5)
+            response = http.client.HTTPResponse(sock)
+            response.begin()
+            data = response.read()
+            if response.status != 200:
+                raise RuntimeError(f"lock: HTTP {response.status} {data[:160]!r}")
+            return json.loads(data)
+        finally:
+            sock.close()
+
     def store(self, path, body, timeout=10.0):
         """Report to the oracle; retried because the oracle's link is never faulted."""
         deadline = time.monotonic() + 60
@@ -80,23 +142,6 @@ class Client:
 
     def event(self, **fields):
         return self.store("/event", fields)
-
-    # -------------------------------------------------- lease
-
-    def keepalive(self, lease, stop, stats):
-        """Renew every TTL/3 like clientv3; a failed renewal is retried at once."""
-        interval = self.args.ttl / 3
-        wait = interval
-        while not stop.wait(wait):
-            sent = time.monotonic()
-            try:
-                reply = self.etcd("/v3/lease/keepalive", {"ID": str(lease)}, timeout=interval)
-                ttl = int(reply.get("result", {}).get("TTL", "0"))
-                stats["ok" if ttl > 0 else "expired"] += 1
-                wait = max(0.0, interval - (time.monotonic() - sent))
-            except (OSError, RuntimeError, ValueError, http.client.HTTPException):
-                stats["error"] += 1
-                wait = 0.05
 
     # -------------------------------------------------- set access
 
@@ -126,21 +171,17 @@ class Client:
     def operation(self, number):
         element = f"{self.name}-{number}"
         try:
-            lease = int(self.etcd("/v3/lease/grant", {"TTL": self.args.ttl}, timeout=2)["ID"])
-        except (OSError, RuntimeError, ValueError, KeyError, http.client.HTTPException) as error:
+            lease = Lease(self, int(self.etcd("/v3/lease/grant", {"TTL": self.args.ttl}, timeout=2)["ID"]))
+        except ERRORS as error:
             self.event(type="fail", op=number, element=element, stage="grant", error=str(error)[:120])
             time.sleep(0.5)
             return
-        stop, stats = threading.Event(), {"ok": 0, "expired": 0, "error": 0}
-        keeper = threading.Thread(target=self.keepalive, args=(lease, stop, stats), daemon=True)
-        keeper.start()
         key = None
         try:
-            self.event(type="invoke", op=number, element=element, lease=lease)
+            self.event(type="invoke", op=number, element=element, lease=lease.id)
             try:
-                reply = self.etcd("/v3/lock/lock", {"name": b64("lock"), "lease": str(lease)},
-                                  timeout=self.args.lock_timeout)
-            except (OSError, RuntimeError, ValueError, http.client.HTTPException) as error:
+                reply = self.lock(lease)
+            except ERRORS as error:
                 self.event(type="fail", op=number, element=element, stage="lock", error=str(error)[:120])
                 return
             key = unb64(reply["key"])
@@ -149,22 +190,23 @@ class Client:
             try:
                 kvs = self.etcd("/v3/kv/range", {"key": b64(key)}, timeout=2).get("kvs", [])
                 present, create = bool(kvs), int(kvs[0]["create_revision"]) if kvs else None
-            except (OSError, RuntimeError, ValueError, http.client.HTTPException):
+            except ERRORS:
                 present, create = None, None
             token = create
-            self.event(type="acquired", op=number, element=element, key=key, lease=lease,
+            self.event(type="acquired", op=number, element=element, key=key, lease=lease.id,
                        granted_revision=granted_at, key_present=present, create_revision=create)
             if self.args.guard == "token" and token is None:
                 self.event(type="fail", op=number, element=element, stage="token", key=key)
                 return
             try:
+                lease.renew_if_due()
                 value, ok = self.read_set(token, key)
                 if not ok:
                     self.event(type="fail", op=number, element=element, stage="read-fenced", key=key)
                     return
-                time.sleep(self.args.hold)
+                lease.wait(self.args.hold)
                 ok = self.write_set(sorted(set(value) | {element}), token, key, element)
-            except (OSError, RuntimeError, ValueError, http.client.HTTPException) as error:
+            except ERRORS as error:
                 self.event(type="info", op=number, element=element, stage="rmw", key=key, error=str(error)[:120])
                 return
             if ok:
@@ -173,22 +215,20 @@ class Client:
                 self.event(type="fail", op=number, element=element, stage="write-fenced", key=key)
         finally:
             if key is not None:
-                self.event(type="releasing", op=number, key=key, keepalives=dict(stats))
+                self.event(type="releasing", op=number, key=key, keepalives=dict(lease.stats))
                 try:
                     self.etcd("/v3/lock/unlock", {"key": b64(key)}, timeout=2)
-                except (OSError, RuntimeError, ValueError, http.client.HTTPException):
+                except ERRORS:
                     pass
-            stop.set()
             try:
-                self.etcd("/v3/lease/revoke", {"ID": str(lease)}, timeout=2)
-            except (OSError, RuntimeError, ValueError, http.client.HTTPException):
+                self.etcd("/v3/lease/revoke", {"ID": str(lease.id)}, timeout=2)
+            except ERRORS:
                 pass
 
     def run(self):
         while True:
             try:
-                go = self.event(type="hello", member=self.args.member)
-                if go.get("start"):
+                if self.event(type="hello", member=self.args.member).get("start"):
                     break
             except (OSError, ValueError, http.client.HTTPException):
                 pass
@@ -212,7 +252,6 @@ def main():
     parser.add_argument("--hold", type=float, default=1.0, help="Seconds between the read and the write.")
     parser.add_argument("--lock-timeout", type=float, default=30.0)
     args = parser.parse_args()
-    socket.setdefaulttimeout(30)
     Client(args).run()
     return 0
 
