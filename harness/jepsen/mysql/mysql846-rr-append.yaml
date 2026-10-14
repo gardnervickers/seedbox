@@ -4,12 +4,14 @@ name: mysql846-rr-append
 machines:
   mysql:
     # mysqlmon.sh runs the official entrypoint and reports guest memory and the data size.
-    image: docker.io/library/mysql:8.4.6@sha256:6752fee1ed70df146fe22d5d1656deee79463f780a24cb7e67c807f2f07d7dc5
+    build:
+      context: image
+      dockerfile: mysql-8.4.6.Dockerfile
     entrypoint: ["bash", "/mysqlmon.sh"]
     command: ["mysqld", "--datadir=/var/lib/mysql/data", "--innodb-buffer-pool-size=128M", "--max-connections=64", "--performance-schema=OFF", "--innodb-lock-wait-timeout=5", "--skip-log-bin"]
     environment:
       MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
-    memoryMiB: 1024
+    memoryMiB: 1536
     files:
     - source: mysqlmon.sh
       target: /mysqlmon.sh

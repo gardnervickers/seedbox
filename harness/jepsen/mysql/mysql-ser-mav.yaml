@@ -4,12 +4,14 @@ name: mysql-ser-mav
 machines:
   mysql:
     # mysqlmon.sh runs the official entrypoint and reports guest memory and the data size.
-    image: docker.io/library/mysql:8.0.34@sha256:3c362d5eed04f271a2ebad41f45fed5ed86e934da533a079bcbd2b3a4ff372e8
+    build:
+      context: image
+      dockerfile: mysql-8.0.34.Dockerfile
     entrypoint: ["bash", "/mysqlmon.sh"]
     command: ["mysqld", "--datadir=/var/lib/mysql/data", "--innodb-buffer-pool-size=128M", "--max-connections=64", "--performance-schema=OFF", "--innodb-lock-wait-timeout=5", "--skip-log-bin"]
     environment:
       MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
-    memoryMiB: 1024
+    memoryMiB: 1536
     files:
     - source: mysqlmon.sh
       target: /mysqlmon.sh

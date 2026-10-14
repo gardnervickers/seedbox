@@ -603,13 +603,10 @@ fn kafka() -> Vec<Scenario> {
 
 // ------------------------------------------------------------ MySQL
 
-const MYSQL: [(&str, &str); 2] = [
-    ("8.0.34", "docker.io/library/mysql:8.0.34@sha256:3c362d5eed04f271a2ebad41f45fed5ed86e934da533a079bcbd2b3a4ff372e8"),
-    ("8.4.6", "docker.io/library/mysql:8.4.6@sha256:6752fee1ed70df146fe22d5d1656deee79463f780a24cb7e67c807f2f07d7dc5"),
-];
-
-/// One MySQL server: the official entrypoint under mysqlmon.sh, its data
-/// directory on a volume, root with an empty password, and `extra` options.
+/// One MySQL server: the official image without its /dev entries (see
+/// `image/mysql-VERSION.Dockerfile`, which pins it), the official entrypoint under
+/// mysqlmon.sh, its data directory on a volume, root with an empty password, and
+/// `extra` options.
 fn mysql_server(version: &str, extra: &[&str]) -> Machine {
     let mut command = strings(&[
         "mysqld",
@@ -622,8 +619,9 @@ fn mysql_server(version: &str, extra: &[&str]) -> Machine {
         "--innodb-lock-wait-timeout=5",
     ]);
     command.extend(strings(extra));
-    Machine::image(lookup(&MYSQL, version))
-        .memory(1024)
+    Machine::build("image", Some(&format!("mysql-{version}.Dockerfile")))
+        // The root filesystem (about 330 MB) lives in guest RAM next to mysqld.
+        .memory(1536)
         .comment(
             "mysqlmon.sh runs the official entrypoint and reports guest memory and the data size.",
         )
