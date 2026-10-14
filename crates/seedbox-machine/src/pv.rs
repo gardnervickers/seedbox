@@ -89,12 +89,18 @@ pub enum Request {
         /// Operation on the application's process group.
         command: ApplicationCommand,
     },
+    // TODO: Re-evaluate: a realtime step is guest kernel state (offset, timer
+    // re-evaluation, cancel-on-set); changing the injected time base would move
+    // monotonic too, so the guest must perform it. It reuses the guest-command
+    // ID space and acknowledgment rather than adding another completion path.
     /// Step the guest's CLOCK_REALTIME by a signed offset, leaving monotonic,
     /// boot and raw clocks and the machine's time base unchanged. The guest
     /// re-evaluates absolute realtime timers and cancels timers armed with
     /// cancel-on-set, as for any Linux clock step. Completion is the matching
     /// [`Response::CommandAcknowledged`]: Completed after the guest kernel has
-    /// applied the step, Rejected if it refused. Linux refuses a step that would
+    /// applied the step, Rejected if it refused. A refusal is a valid outcome
+    /// (the Driver settles it Rejected without failing); a malformed, missing
+    /// or late acknowledgment remains a fatal protocol failure. Linux refuses a step that would
     /// put CLOCK_REALTIME below CLOCK_MONOTONIC, so a negative step can be at
     /// most the boot's realtime lead over monotonic (its epoch plus the counter
     /// that elapsed before the kernel clocksource started). The ID shares the per-boot correlation space of
@@ -176,9 +182,11 @@ pub enum Response {
     /// point, distinct from accepting responsibility for an input. A failed
     /// Start produces rejection without readiness or an application outcome.
     /// Initial launch failure is a setup diagnostic and machine failure.
-    /// `StepRealtime` requests acknowledge through this same response.
+    /// `Application` and `StepRealtime` requests acknowledge through this
+    /// same response.
     CommandAcknowledged {
-        /// Correlation ID from the accepted application or clock request.
+        /// Correlation ID from the accepted `Application` or `StepRealtime`
+        /// request; both share one per-boot guest-command ID namespace.
         id: NonZeroU32,
         /// Guest-observed operation result.
         result: CommandResult,

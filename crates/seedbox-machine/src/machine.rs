@@ -52,16 +52,20 @@ mod assets;
 #[cfg(seedbox_pv)]
 pub mod pv;
 
+/// A position in nanoseconds. The boundary that carries it fixes its time
+/// domain: Driver APIs, events and host inputs use simulation time; values
+/// crossing [`Machine::run`] (its bound, clock, inputs, outputs and returned
+/// stop) use that machine's time base. One type serves both domains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(u64);
 
 impl Timestamp {
-    /// Construct a simulation timestamp in nanoseconds.
+    /// Construct a timestamp in nanoseconds of the carrying boundary's domain.
     pub const fn from_nanos(nanos: u64) -> Self {
         Self(nanos)
     }
 
-    /// Return the simulation timestamp in nanoseconds.
+    /// Return the timestamp in nanoseconds of the carrying boundary's domain.
     pub const fn as_nanos(self) -> u64 {
         self.0
     }
@@ -87,6 +91,10 @@ pub trait Machine {
     /// the first run after construction or reboot. Initialization may occur with
     /// zero execution budget, but must execute no program instructions.
     ///
+    // TODO: Re-evaluate: per-machine time bases change the meaning of every
+    // run timestamp (with Clock, Input, Output, Timestamp and StopReason docs).
+    // Drift must scale a whole machine (counters, timers, CPU) and be exact at
+    // barriers; changing only guest clocks or one backend cannot do that.
     /// # Time and execution boundaries
     ///
     /// All timestamps (the clock, `upto`, input and output times and returned
@@ -214,8 +222,13 @@ pub enum StopReason {
     Blocked {
         /// The timestamp at which the machine became blocked.
         reached: Timestamp,
-        /// The earliest timer wakeup in simulation time, strictly after `reached`.
-        /// This may be later than the requested execution boundary. External
+        /// The earliest timer wakeup, in the domain of the boundary reporting
+        /// it. As returned by [`Machine::run`], it is strictly after `reached`
+        /// in the machine's time base. A Driver projection into simulation time
+        /// (`Barrier::stopped`) may equal `reached`: the earliest simulation
+        /// nanosecond reaching a machine deadline can coincide with the one
+        /// reaching the blocked position. This may be later than the requested
+        /// execution boundary. External
         /// stimulus can wake the machine sooner. If `None`, only external
         /// stimulus can wake the machine.
         deadline: Option<Timestamp>,

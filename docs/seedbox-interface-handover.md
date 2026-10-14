@@ -281,12 +281,17 @@ objective.
    with workers 1/4; and a step below monotonic (epoch 3600 s), refused. Every
    input-free timer wake is checked never early and earliest, including one
    re-converted across a rate change; readings use a 1 ms tolerance. Restore is
-   in place only. **Pending decisions** (not implied by the epoch approval):
-   guest refusal settles Rejected without failing; skew on a Down target is
-   rejected; drift is admitted in any state; seeded draws use the shared
-   simulation RNG; a refused stacked drift draws no pN; a zero draw settles at
-   once and a zero drift holds a handle; `stopped` can report
-   `deadline == reached`. Not yet run on Apple Silicon/HVF or arm64 KVM.
+   in place only. **Policy (authorized package):** drift follows throttle
+   rules (any state, one per machine, a refused duplicate consumes its pN, a
+   zero drift holds a handle); steps follow process-command state rules
+   (paused InvalidState, exited TargetUnavailable, Down admitted then
+   Unavailable, waits for Ready, fatal 5 s deadline), and a zero step skips only
+   the guest command after those checks; a guest refusal settles Rejected
+   without failing, while malformed, missing or late acknowledgments stay fatal;
+   seeded values come from a per-target clock-fault stream derived from the
+   machine seed in its own domain; `Barrier::stopped` may report
+   `deadline == reached`. Each changed boundary carries a `TODO: Re-evaluate`
+   note. Not yet run on Apple Silicon/HVF or arm64 KVM.
 6. **Oracle-driven machine creation — implemented in the approved shape.**
    `Driver::new` accepts a separate `spawnable: Vec<MachineDefinition>` after
    `machines`; definitions remain unchanged and templating belongs to the caller.

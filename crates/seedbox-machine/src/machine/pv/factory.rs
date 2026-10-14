@@ -27,6 +27,10 @@ impl Factory {
     /// the epoch plus the machine counter (its time base). Use one epoch for
     /// all machines of a run, including spawned machines; it is part of each
     /// machine's boot inputs and snapshots, not a Driver setting.
+    // TODO: Re-evaluate: the epoch is concrete boot configuration owned with
+    // the factory's other guest inputs and retained in each machine's boot
+    // image and snapshots; neither the Driver's time mapping nor ambient state
+    // can supply it to arbitrary machines.
     pub fn new(worker: &Path, guest_assets: &Path, epoch_seconds: u32) -> io::Result<Self> {
         use super::super::assets;
         assets::executable(worker)?;
