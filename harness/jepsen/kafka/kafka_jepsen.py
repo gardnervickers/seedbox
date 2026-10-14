@@ -450,6 +450,7 @@ def main():
         faults = nemesis_jepsen(world, loop, history, args, rng, end, brokers)
     elif args.nemesis == "crash-all":
         faults = nemesis_crash_all(world, loop, history, args, rng, brokers)
+        end = time.monotonic()  # stop once the cluster has recovered
     loop.wait(timeout=max(0.0, end - time.monotonic()))
     evidence("nemesis", faults=faults)
     loop.wait(timeout=5)
