@@ -185,19 +185,28 @@ def trigger_status(world, trigger):
 
 
 def nemesis_end_partition(world, loop, history, args, rng, end, brokers):
+    from seedbox.control import FaultError
     faults = 0
     lo, hi = args.cut
     while time.monotonic() < end and faults < 60:
         window = round(max(1.0, end - time.monotonic()), 3)
         trigger = world.arm_console_partition(args.client, b"@@END ", [args.client], brokers, match_timeout=window)
         status = {"status": "armed"}
-        while status["status"] == "armed" and time.monotonic() < end + 1:
+        while status["status"] == "armed" and time.monotonic() < end:
             loop.wait(timeout=0.1)
+            status = trigger_status(world, trigger)
+        if status["status"] == "armed":
+            try:
+                world.cancel_trigger(trigger)
+            except FaultError:
+                pass  # it matched meanwhile
+            status = trigger_status(world, trigger)
+        # A matched trigger applies its partition shortly afterwards.
+        while status["status"] == "matched":
+            loop.wait(timeout=0.01)
             status = trigger_status(world, trigger)
         if status["status"] != "fired":
             evidence("trigger", status=status["status"])
-            if status["status"] == "armed":
-                world.cancel_trigger(trigger)
             break
         cut = rng.uniform(lo, hi)
         recent = history.ends[-1] if history.ends else None
