@@ -69,6 +69,31 @@ are additional ordered inputs. Replay applies those inputs through the same
 scheduler. After an edit, the unchanged prefix should reproduce; later outcomes
 may differ. Logs and events are observations, not instructions to inject again.
 
+## Isolated machine interface
+
+[`seedbox-machine`](../crates/seedbox-machine/src/lib.rs) is a separate Linux-kernel
+execution stack for tests and examples. It is not connected to the production
+CLI, server or UI. Its TCG backend runs an RV64 Linux kernel under software
+emulation; PV runs a cooperating Linux kernel on the host architecture.
+
+[`Machine`](../crates/seedbox-machine/src/machine.rs) exposes bounded, stopped
+execution and machine snapshots. Each run borrows worker resources, a clock,
+continuing entropy, execution pricing and ordered input/output queues. Requests,
+responses and stop reasons are part of this contract, not backend transport types.
+Concrete factories own boot assets and construct machines from one complete
+prepared definition; construction performs no implicit build or asset search.
+
+The Driver owns scheduling, canonical time, dependency state and control policy.
+Machines report guest termination as values and execution failures as errors.
+Guest reset ends a boot; only an explicit caller request starts another one.
+Application exit and whole-kernel termination are distinct. Machine snapshots own
+accepted guest work, but do not capture the Driver or the external environment.
+
+Networking, injected storage, whole-Driver restoration and the legacy UI/API bridge
+remain outside this stack's current scope. Guest Inspect is explicitly unsupported;
+the host event stream is not a complete world-state projection. Backend mechanics
+and Linux test inputs are described in [internals](internals.md#reference-tcg-machine).
+
 ## Code boundaries
 
 | Package | Responsibility |
@@ -82,6 +107,7 @@ may differ. Logs and events are observations, not instructions to inject again.
 | `seedbox-engine-protocol` | Private worker transport and evidence formats |
 | `seedbox-engine-core` | Shared scheduling, faults, devices, deterministic policies |
 | `seedbox-vmm`, `seedbox-arm64` | Native machine execution |
+| `seedbox-machine` | Isolated Machine/Driver contracts, TCG and PV test backends |
 
 The application library does not depend on the server or CLI. The engine core
 has no hypervisor dependency. Backend adapters perform architecture-specific

@@ -17,8 +17,9 @@ seconds, plus an oracle that ends the run. Application outcomes are distinct
 from kernel shutdown. It is separate from the production `seedbox run` backends.
 
 The driver repeatedly calls `Machine::run`. A private QMP command limits QEMU's
-native instruction budget, with one instruction mapped to one simulation
-nanosecond. QEMU stops at that budget or when the CPU becomes idle; it cannot
+native instruction budget. At nominal execution cost, one instruction costs one
+nanosecond in the machine's time base; execution pricing and the Driver's clock
+mapping determine its simulation-time cost. QEMU stops at that budget or when the CPU becomes idle; it cannot
 automatically jump forward through idle time. `Blocked` reports the next virtual
 timer deadline. The [driver](../crates/seedbox-machine/src/driver.rs)
 tracks each machine's execution position and next timer, advancing the shared
@@ -28,15 +29,20 @@ read-only clock borrowed through its run context on its next `run`, delivering d
 more instructions. Guest power-off and halt return `Exited` with `Shutdown`; a
 guest reset, including a kernel panic restart, returns `Exited` with `Crashed`
 (see `Machine::run`). Only an accepted Reboot request starts a new boot. The driver runs ready machines
-on a persistent thread pool, holding the shared clock fixed until every call in
-the batch returns. Each worker creates and retains its own host execution resources, which may be
-thread-affine. Every run separately borrows those resources, the simulation clock,
-and the machine's RNG through `RunContext`. The driver owns an injected global RNG
+on a persistent thread pool, holding the shared simulation clock and each machine's
+mapped clock view fixed until every call in the batch returns. Each worker creates
+and retains its own host execution resources, which may be thread-affine. Every
+run separately borrows those resources, its clock view and its continuing RNG
+through `RunContext`. The driver owns an injected global RNG
 and derives an independent stream for each admitted machine in insertion order.
 The machine's RNG cursor moves with it between workers; worker threads own no
-simulation randomness. Failed additions consume no global RNG bytes.
-Worker count does not change simulation results. Machine access, additions, and
-scheduled wake/pause/resume/crash/reboot actions go through barrier callbacks.
+simulation randomness. Each target's seeded clock faults use a domain-separated
+stream derived from that same seed, without consuming guest entropy or shifting
+later creation seeds. Failed additions consume no global RNG bytes.
+Worker count does not change simulation results. Machine access, additions and
+host controls go through barrier callbacks. `Barrier::schedule` enqueues a keyed
+`Action`; due inputs use the same admission and settlement policy as guest controls.
+The Driver retains only live keys, while the caller owns input history.
 
 An individually paused machine receives no positive execution budget while
 other machines advance. Due requests still receive zero-budget admission runs:
@@ -54,8 +60,9 @@ calls, including while paused or exited. Lifecycle actions map into that same
 request path. Reboot retains the machine identity and future queued work,
 clears pause and old-boot work, and performs a fresh reset in its admission run.
 Construction initializes on the first `run` using its borrowed dependencies.
-Initial boot and each admitted reboot consume eight RNG bytes; repeated reboots
-perform distinct resets. These calls execute no guest instructions. An exited
+Both current backends draw eight RNG bytes to seed each boot; that byte count is
+a backend mechanism, not a requirement of `Machine`. Repeated reboots perform
+distinct resets. Zero-budget admission executes no guest instructions. An exited
 machine retains its exit reason until Reboot. Reboot clears earlier shutdown
 requests; Shutdown after Reboot targets the new boot. Both backends carry
 graceful shutdown requests through the named `seedbox-lifecycle` virtio-console
@@ -66,10 +73,10 @@ Playback controls can change at every barrier. Paused playback holds all work,
 including current-time actions; limited rational rates wait on the host without
 changing execution bounds. A single-quantum admission survives intermediate
 barriers and completes at the next fixed quantum boundary. Status distinguishes
-committed boundary positions from completed quanta. A one-shot pre-crash stop
-retains the exact queued occurrence before its effect; ordinary wakeups and
-crashes of exited machines do not consume the arm. Rearming resumes the held
-occurrence and targets the next effective crash. Permanent stop prevents further
+committed boundary positions from completed quanta. `pause_before_next_fault`
+holds the next effective fault just before dispatch, whether requested by a guest,
+a trigger or a host input. Rejected or stale effects do not consume the arm.
+Resuming applies the held effect exactly once; ordinary timer wakeups are not faults. Permanent stop prevents further
 execution without crashing machines. The driver never sleeps or preempts an
 active `Machine::run`; callers service controls and cancellation between steps.
 
