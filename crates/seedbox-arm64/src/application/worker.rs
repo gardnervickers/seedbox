@@ -353,9 +353,22 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 {
                     return Err("checkpoint header binding mismatch".into());
                 }
-                let boot = boot_inputs
-                    .as_ref()
+                let mut boot = boot_inputs
+                    .clone()
                     .ok_or("missing checkpoint boot inputs")?;
+                // A later incarnation booted with its own reboot entropy and no
+                // launch barrier: rebuild the replacement from the boot the
+                // checkpoint was captured under. Its kernel, initrd and layout
+                // must still match these inputs.
+                use std::io::{Seek, SeekFrom};
+                let stream = file
+                    .stream_position()
+                    .map_err(|e| format!("checkpoint position: {e}"))?;
+                let captured = Machine::<B>::checkpoint_boot_identity(&mut file)?;
+                file.seek(SeekFrom::Start(stream))
+                    .map_err(|e| format!("checkpoint seek: {e}"))?;
+                boot.seed = captured.seed;
+                boot.command_line = captured.command_line;
                 // HVF allows one VM per process and requires architectural restore
                 // into a never-entered replacement. Failure terminates this worker.
                 drop(machine.take());
