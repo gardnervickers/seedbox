@@ -83,6 +83,9 @@ def scenario():
         worker_channel.work()  # Warm the interpreter's code paths.
         before = worker_channel.work()
 
+        # The capture follows the first fault after this line (applications.rs).
+        print("CAPTURE_NEXT", flush=True)
+        world.now_ns()
         # Capture point: the branch starts with this throttle active.
         slow = world.throttle("worker", "500MHz")
         print(f"CAPTURE_PHASE at_ns={slow.effect.effect_at_ns}", flush=True)
