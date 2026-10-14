@@ -83,6 +83,18 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
     };
     let (mut lost, mut aborted_read, mut torn, mut aborted_poll, mut committed_fail) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    // Each partition's last stable offset at the final read: an open
+    // transaction below it hides later committed writes from read_committed
+    // readers, so those are unseen, not lost.
+    let mut unseen: Vec<Value> = Vec::new();
+    let lso: HashMap<i64, i64> = final_read
+        .and_then(|f| f["end-offsets"].as_object())
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| Some((k.parse().ok()?, int(v)?)))
+        .collect();
+    let beyond =
+        |k: i64, o: Option<i64>| o.is_some_and(|o| lso.get(&k).is_some_and(|end| o >= *end));
     let mut stats: BTreeMap<String, usize> = BTreeMap::new();
     let mut txns: Vec<elle::TxnOp> = Vec::new();
     let mut failed_values: HashMap<(i64, i64), Value> = HashMap::new();
@@ -98,7 +110,9 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
             *stats.entry(kind.clone()).or_default() += 1;
             if kind == "ok" {
                 observe(k, int(&e["offset"]), v, "ack".into(), &mut inconsistent);
-                if !position.contains_key(&(k, v)) {
+                if !position.contains_key(&(k, v)) && beyond(k, int(&e["offset"])) {
+                    unseen.push(json!({"unseen": [[k, v]], "offset": e.get("offset")}));
+                } else if !position.contains_key(&(k, v)) {
                     lost.push(
                         json!({"key": k, "value": v, "offset": e.get("offset"), "t": e.get("t")}),
                     );
@@ -177,10 +191,19 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
                     }
                 }
                 "ok" if complete => {
+                    let hidden: Vec<(i64, i64)> = attempted
+                        .iter()
+                        .filter(|(k, o, v)| !position.contains_key(&(*k, *v)) && beyond(*k, *o))
+                        .map(|(k, _, v)| (*k, *v))
+                        .collect();
+                    if !hidden.is_empty() {
+                        unseen
+                            .push(json!({"op": e["op"], "txid": e.get("txid"), "unseen": hidden}));
+                    }
                     let gone: Vec<(i64, i64)> = sends
                         .iter()
                         .copied()
-                        .filter(|kv| !position.contains_key(kv))
+                        .filter(|kv| !position.contains_key(kv) && !hidden.contains(kv))
                         .collect();
                     if !gone.is_empty() {
                         lost.push(json!({"op": e["op"], "txid": e.get("txid"), "lost": gone, "visible": visible}));
@@ -250,7 +273,9 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
         "records": logs.values().map(Vec::len).sum::<usize>(),
         "ops": stats,
         "lost": lost.len(), "aborted_read": aborted_read.len(), "aborted_poll": aborted_poll.len(),
-        "torn": torn.len(), "committed_fail": committed_fail.len(), "duplicates": duplicates.len(),
+        "torn": torn.len(), "committed_fail": committed_fail.len(),
+        "unseen": unseen.iter().map(|u| u["unseen"].as_array().map_or(0, Vec::len)).sum::<usize>(),
+        "duplicates": duplicates.len(),
         "inconsistent": inconsistent.len(), "nonmonotonic": nonmonotonic.len(), "elle": cycles,
     });
     let violation = [
@@ -265,7 +290,7 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
     .iter()
     .any(|items| !items.is_empty());
     let details = json!({
-        "lost": take50(&lost), "aborted_read": take50(&aborted_read), "aborted_poll": take50(&aborted_poll),
+        "lost": take50(&lost), "unseen": take50(&unseen), "aborted_read": take50(&aborted_read), "aborted_poll": take50(&aborted_poll),
         "torn": take50(&torn), "duplicates": take50(&duplicates), "inconsistent": take50(&inconsistent),
         "nonmonotonic": take50(&nonmonotonic),
     });
@@ -279,8 +304,8 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
 /// The one-line summary a VERDICT carries.
 pub fn summarize(result: &Value, faults: u64) -> String {
     format!(
-        "{} lost, {} aborted reads ({} in polls), {} torn, {} duplicates, {} inconsistent offsets; ops {}; elle {}; {} records; {faults} faults",
-        result["lost"], result["aborted_read"], result["aborted_poll"], result["torn"], result["duplicates"],
+        "{} lost, {} unseen, {} aborted reads ({} in polls), {} torn, {} duplicates, {} inconsistent offsets; ops {}; elle {}; {} records; {faults} faults",
+        result["lost"], result["unseen"], result["aborted_read"], result["aborted_poll"], result["torn"], result["duplicates"],
         result["inconsistent"], result["ops"], result["elle"], result["records"]
     )
 }
@@ -350,6 +375,28 @@ mod tests {
             (json!(1), json!(1))
         );
         assert_eq!(checked.details["lost"][0]["lost"], json!([[0, 10]]));
+    }
+
+    #[test]
+    fn writes_beyond_the_last_stable_offset_are_unseen() {
+        // An open transaction at offset 1 holds the LSO: the later committed write is unseen.
+        let mut last = final_read(json!({"0": [[0, 10]]}), "complete");
+        last["end-offsets"] = json!({"0": 1});
+        let events = [
+            op(0, "ok", json!([["send", 0, [0, 10]]])),
+            op(1, "info", json!([["send", 0, [1, 11]]])),
+            op(2, "ok", json!([["send", 0, [2, 12]]])),
+            last,
+        ];
+        let checked = check(&events, "txn");
+        assert!(!checked.violation);
+        assert_eq!(
+            (
+                checked.result["lost"].clone(),
+                checked.result["unseen"].clone()
+            ),
+            (json!(0), json!(1))
+        );
     }
 
     #[test]

@@ -45,9 +45,10 @@ pub struct Args {
     /// Also replay every run whose oracle reported a violation.
     #[arg(long)]
     pub replay_hits: bool,
-    /// Export a bundle for every run whose oracle reported a violation.
-    #[arg(long)]
-    pub export_hits: bool,
+    /// Export bundles for up to this many runs per scenario whose oracle
+    /// reported a violation (bundles are hundreds of MB each).
+    #[arg(long, default_value_t = 0)]
+    pub export_hits: usize,
     /// Keep the simulations instead of deleting them.
     #[arg(long)]
     pub keep: bool,
@@ -245,6 +246,9 @@ fn oracle_verdict(dir: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Bundles exported per scenario.
+static EXPORTED: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+
 fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args) -> Value {
     let dir = out.join("runs").join(&job.label);
     let _ = fs::create_dir_all(&dir);
@@ -344,7 +348,13 @@ fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args) -> Value {
             }
         }
     }
-    if hit && args.export_hits {
+    let export = hit && {
+        let mut exported = EXPORTED.lock().unwrap();
+        let count = exported.entry(scenario.clone()).or_insert(0);
+        *count += 1;
+        *count <= args.export_hits
+    };
+    if export {
         let bundles = out.join("bundles");
         let _ = fs::create_dir_all(&bundles);
         let path = bundles.join(format!("{}-{id}.seedbox.tar", job.label));

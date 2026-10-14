@@ -485,6 +485,8 @@ struct KafkaSpec {
     workload: &'static str,
     extra: &'static str,
     txn_timeout: u32,
+    /// The client's Kafka version, when it differs from the brokers'.
+    client: Option<&'static str>,
 }
 
 fn kafka() -> Vec<Scenario> {
@@ -503,12 +505,14 @@ fn kafka() -> Vec<Scenario> {
         workload: "txn",
         extra: "",
         txn_timeout: 1000,
+        client: None,
     };
     let specs = vec![
         KafkaSpec { duration: 30, ..base("kafka-healthy", "Baseline: Jepsen's transactional queue workload on Kafka 3.8.0, no faults.".into(), "3.8.0", "none") },
         KafkaSpec { txn_timeout: 60000, ..base("kafka-17754-end-partition", format!("{e2e}\nKafka 3.8.0 (the affected version), one broker, Kafka's default\ntransaction.timeout.ms (60 s)."), "3.8.0", "end-partition") },
         base("kafka-17754-end-partition-t1s", format!("{e2e}\nKafka 3.8.0, one broker, Jepsen's transaction.timeout.ms of 1 s: a cut that spans the\ncoordinator's 10 s timeout check aborts the transaction with an epoch bump, which fences\nthe delayed EndTxn."), "3.8.0", "end-partition"),
         KafkaSpec { txn_timeout: 60000, ..base("kafka-17754-control-v431-end-partition", "Negative control for KAFKA-17754: the end-partition schedule on Kafka 4.3.1 brokers and\nclient, with transaction.version 2 (KIP-890 part 2: every transaction bumps the producer\nepoch, so a delayed EndTxn carries a stale epoch and is fenced).".into(), "4.3.1", "end-partition") },
+        KafkaSpec { txn_timeout: 60000, client: Some("3.8.0"), ..base("kafka-17754-v431-brokers-v380-client", "The end-partition schedule on Kafka 4.3.1 brokers (transaction.version 2) with the\nKafka 3.8.0 Java client, which still sends EndTxn version 4: no epoch bump per\ntransaction, so the fix needs a new client as well as new brokers.".into(), "4.3.1", "end-partition") },
         KafkaSpec { brokers: 3, txn_timeout: 60000, ..base("kafka-17754-end-partition-3", format!("{e2e}\nKafka 3.8.0, three brokers, replication factor 3."), "3.8.0", "end-partition") },
         KafkaSpec { brokers: 3, duration: 90, ..base("kafka-17754-jepsen", "Jepsen's untargeted nemesis on Kafka 3.8.0: every 10 s, pause a broker's process or cut\nc1 off from a broker for 2-10 s.".into(), "3.8.0", "jepsen") },
         KafkaSpec { brokers: 3, workload: "produce", ..base("kafka-crash-all", "acks=all without fsync: an idempotent acks=all producer writes to a topic with\nreplication factor 3 and min.insync.replicas 2; after 1000 acknowledgements every\nbroker machine loses power at once, then all reboot. Kafka's default flush settings\nleave acknowledged records in the page cache, so they are lost.".into(), "3.8.0", "crash-all") },
@@ -558,7 +562,10 @@ fn kafka() -> Vec<Scenario> {
                 "c1".into(),
                 Machine::build(
                     "image",
-                    Some(&format!("client-{}.Dockerfile", spec.version)),
+                    Some(&format!(
+                        "client-{}.Dockerfile",
+                        spec.client.unwrap_or(spec.version)
+                    )),
                 )
                 .command(command)
                 .memory(1024)
@@ -579,8 +586,12 @@ fn kafka() -> Vec<Scenario> {
                 name: spec.name.into(),
                 comment: spec.comment,
                 generated: format!(
-                    "Kafka {}, {} broker(s), workload {}, nemesis {}",
-                    spec.version, spec.brokers, spec.workload, spec.nemesis
+                    "Kafka {} brokers, {} client, {} broker(s), workload {}, nemesis {}",
+                    spec.version,
+                    spec.client.unwrap_or(spec.version),
+                    spec.brokers,
+                    spec.workload,
+                    spec.nemesis
                 ),
                 machines,
                 oracle: Machine::program(&args),
@@ -625,12 +636,7 @@ mod tests {
         let mut names = std::collections::BTreeSet::new();
         for (path, text) in &all {
             assert!(
-                text.contains("image: docker.io/library/busybox:1.37.0-musl@sha256:"),
-                "{path}"
-            );
-            assert!(
-                text.contains("- source: ../../../build/jepsen/arm64/seedbox-jepsen")
-                    || text.contains("- source: ../../../../build/jepsen"),
+                text.contains("dockerfile: crates/seedbox-jepsen/guest.Dockerfile"),
                 "{path}"
             );
             let name = text.lines().find_map(|l| l.strip_prefix("name: ")).unwrap();

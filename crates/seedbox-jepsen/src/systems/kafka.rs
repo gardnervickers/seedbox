@@ -384,6 +384,9 @@ fn conclude(events: &[Value], workload: &str, faults: u64, faulted: bool) -> u8 
     evidence("check", result.clone());
     evidence("details", checked.details.clone());
     let summary = kafka::summarize(&result, faults);
+    if checked.violation {
+        return verdict(kit::VIOLATION, &summary);
+    }
     if result["final"] != "complete" {
         let status = match &result["final"] {
             Value::String(s) => s.clone(),
@@ -395,8 +398,11 @@ fn conclude(events: &[Value], workload: &str, faults: u64, faulted: bool) -> u8 
             &format!("final read {status}; {summary}"),
         );
     }
-    if checked.violation {
-        return verdict(kit::VIOLATION, &summary);
+    if result["unseen"].as_u64().unwrap_or(0) > 0 {
+        return verdict(
+            kit::INCONCLUSIVE,
+            &format!("committed writes beyond an open transaction; {summary}"),
+        );
     }
     if faulted && faults == 0 {
         return verdict(
