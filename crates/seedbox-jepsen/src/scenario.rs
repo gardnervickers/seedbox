@@ -721,17 +721,19 @@ fn mysql() -> Vec<Scenario> {
 /// (`image/mariadb-12.1.2.Dockerfile`), under galera-node.sh with the shared
 /// galera.cnf, its data directory on a volume, and `flush` as
 /// innodb_flush_log_at_trx_commit.
-fn galera_node(name: &str, flush: u8) -> Machine {
+fn galera_node(name: &str, flush: u8, extra: &[&str]) -> Machine {
+    let mut command = vec![
+        format!("--wsrep-node-address={name}"),
+        format!("--wsrep-node-name={name}"),
+        format!("--innodb-flush-log-at-trx-commit={flush}"),
+    ];
+    command.extend(strings(extra));
     Machine::build("image", Some("mariadb-12.1.2.Dockerfile"))
         // The root filesystem (about 200 MB) lives in guest RAM next to mariadbd.
         .memory(1280)
         .comment("galera-node.sh recovers the node's position and waits for the oracle to say bootstrap or join.")
         .entrypoint(&["bash", "/galera-node.sh"])
-        .command(vec![
-            format!("--wsrep-node-address={name}"),
-            format!("--wsrep-node-name={name}"),
-            format!("--innodb-flush-log-at-trx-commit={flush}"),
-        ])
+        .command(command)
         .env("GALERA_NODE", name)
         .file("galera-node.sh", "/galera-node.sh")
         .file("galera.cnf", "/etc/mysql/mariadb.conf.d/99-jepsen-galera.cnf")
@@ -744,7 +746,7 @@ fn galera() -> Vec<Scenario> {
     // --wsrep-recover, bootstrap, two SSTs); run on afterwards so later appends land.
     const FAULT: &[&str] = &["--fault-at", "20", "--duration", "130"];
     // (name, comment, innodb_flush_log_at_trx_commit, oracle arguments)
-    let specs: [(&str, &str, u8, Vec<&str>); 11] = [
+    let specs: [(&str, &str, u8, Vec<&str>); 12] = [
         ("galera-healthy-append", "MDEV-38977 (Jepsen, MariaDB Galera Cluster 12.1.2): with no faults, list-append on all\nthree nodes commits lost updates (P4) and G-single, which snapshot isolation forbids:\nGalera certifies write sets by key but has no first-committer-wins over reads.",
          0, vec![]),
         ("galera-pause-append", "MDEV-38977 as Jepsen first saw it, with process pauses: galera-healthy-append while a\nrandom node's processes are paused for 5 s, then 5 s of quiet, from 10 s on.",
@@ -763,16 +765,23 @@ fn galera() -> Vec<Scenario> {
          0, [&["--fault", "crash"][..], FAULT].concat()),
         ("galera-crash-all-flush1", "galera-crash-all-flush0 with innodb_flush_log_at_trx_commit=1: every commit is synced,\nso far fewer (Jepsen: not zero) acknowledged appends are lost.",
          1, [&["--fault", "crash"][..], FAULT].concat()),
-        ("galera-kill-all", "MDEV-38974 as Jepsen ran it: kill every node's processes together at 20 s with\ninnodb_flush_log_at_trx_commit=0, restart them and bootstrap from the most advanced node.\nThe page cache survives, but InnoDB's unflushed log buffer does not.",
+        ("galera-kill-all", "MDEV-38974 as Jepsen ran it: kill every node's processes together at 20 s with\ninnodb_flush_log_at_trx_commit=0, restart them and bootstrap from the most advanced node.\nThe page cache survives a kill, and with MariaDB 12's default memory-mapped redo log\n(innodb_log_file_mmap=ON) so does every redo record written; see galera-kill-all-nommap.",
          0, [&["--fault", "kill"][..], FAULT].concat()),
         ("galera-kill-all-flush1", "galera-kill-all with innodb_flush_log_at_trx_commit=1.",
          1, [&["--fault", "kill"][..], FAULT].concat()),
+        ("galera-kill-all-nommap", "galera-kill-all with innodb_log_file_mmap=OFF. MariaDB 12 memory-maps the redo log by\ndefault on Linux, so redo records are in the page cache as soon as they are written and a\nprocess kill loses nothing; with the log written from a private buffer once a second, the\nkill loses the acknowledged commits still in that buffer, as Jepsen saw.",
+         0, [&["--fault", "kill"][..], FAULT].concat()),
     ];
     let names = nodes("n", 3);
     specs
         .iter()
         .map(|(name, comment, flush, oracle)| {
             let stale = name.starts_with("galera-stale-read");
+            let server: &[&str] = if name.ends_with("-nommap") {
+                &["--innodb-log-file-mmap=OFF"]
+            } else {
+                &[]
+            };
             let mut args = strings(&["galera"]);
             args.extend(strings(oracle));
             args.extend(strings(&["--label", &format!("12.1.2/{name}")]));
@@ -786,7 +795,7 @@ fn galera() -> Vec<Scenario> {
                 ),
                 machines: names
                     .iter()
-                    .map(|n| (n.clone(), galera_node(n, *flush)))
+                    .map(|n| (n.clone(), galera_node(n, *flush, server)))
                     .collect(),
                 // The in-guest check holds the whole history: up to 200,000 transactions.
                 oracle: Machine::program(&args).memory(if stale { 2048 } else { 1024 }),
