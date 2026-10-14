@@ -387,7 +387,18 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
             sequence += 1;
             response
         };
-        call(Operation::Boot(boot.clone()));
+        if generation == 1 {
+            call(Operation::Boot(boot.clone()));
+        } else {
+            // A restore boots the world's first incarnation, whose launch
+            // entropy and barrier differ from a rebooted machine's; the
+            // replacement takes the boot the checkpoint was captured under.
+            call(Operation::Boot(Boot {
+                seed: 99,
+                command_line: "seedbox.barrier=1".into(),
+                ..boot.clone()
+            }));
+        }
         if generation == 1 {
             call(Operation::SeedProgressJitter { seed: 123 });
             call(Operation::Advance {

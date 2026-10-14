@@ -1,6 +1,6 @@
 //! Process environment and platform discovery for the server executable.
 
-use super::{backends::Executor, RuntimeInputs, Signals};
+use super::{backends::Executor, Performance, RuntimeInputs, Signals};
 use seedbox_application::{
     config::Simulation,
     execution::{Backend, CancellationToken, ExecutionBackend, PreparedInputs},
@@ -24,7 +24,8 @@ use std::{
 mod startup;
 pub(super) use startup::connect;
 
-struct NativeBackends(RuntimeInputs);
+/// Runtime inputs, and the performance settings every execution records.
+struct NativeBackends(RuntimeInputs, Performance);
 
 impl BackendProvider for NativeBackends {
     fn project(
@@ -37,7 +38,7 @@ impl BackendProvider for NativeBackends {
         let (preparation, execution) = self.0.backends(configuration, cancellation)?;
         Ok(Backends {
             preparation: Box::new(preparation),
-            execution: Box::new(execution),
+            execution: Box::new(self.1.apply(execution)?),
         })
     }
 
@@ -66,7 +67,7 @@ impl BackendProvider for NativeBackends {
         } else {
             Executor::Linux(VmmExecutor::for_profile(engine, inputs.profile.clone())?)
         };
-        Ok(Box::new(executor))
+        Ok(Box::new(self.1.apply(executor)?))
     }
 }
 
@@ -96,10 +97,11 @@ pub(super) fn state_directory(explicit: Option<PathBuf>) -> Result<PathBuf> {
 pub(super) fn serve(
     state: Option<PathBuf>,
     inputs: RuntimeInputs,
+    performance: Performance,
     startup_handshake: bool,
 ) -> Result<u8> {
     let mut ready = false;
-    let result = serve_inner(state, inputs, || {
+    let result = serve_inner(state, inputs, performance, || {
         if startup_handshake {
             startup::ready()?;
         }
@@ -138,6 +140,7 @@ fn prepare_directory(root: &Path) -> Result<()> {
 fn serve_inner(
     state: Option<PathBuf>,
     inputs: RuntimeInputs,
+    performance: Performance,
     ready: impl FnOnce() -> Result<()>,
 ) -> Result<u8> {
     let root = state_directory(state)?;
@@ -172,7 +175,7 @@ fn serve_inner(
             manager.clone(),
             session.clone(),
             store,
-            Arc::new(NativeBackends(inputs)),
+            Arc::new(NativeBackends(inputs, performance)),
         )
         .map_err(setup)?,
     );

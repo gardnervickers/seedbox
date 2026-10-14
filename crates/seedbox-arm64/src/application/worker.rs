@@ -353,9 +353,22 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 {
                     return Err("checkpoint header binding mismatch".into());
                 }
-                let boot = boot_inputs
-                    .as_ref()
+                let mut boot = boot_inputs
+                    .clone()
                     .ok_or("missing checkpoint boot inputs")?;
+                // A later incarnation booted with its own reboot entropy and no
+                // launch barrier: rebuild the replacement from the boot the
+                // checkpoint was captured under. Its kernel, initrd and layout
+                // must still match these inputs.
+                use std::io::{Seek, SeekFrom};
+                let stream = file
+                    .stream_position()
+                    .map_err(|e| format!("checkpoint position: {e}"))?;
+                let captured = Machine::<B>::checkpoint_boot_identity(&mut file)?;
+                file.seek(SeekFrom::Start(stream))
+                    .map_err(|e| format!("checkpoint seek: {e}"))?;
+                boot.seed = captured.seed;
+                boot.command_line = captured.command_line;
                 // HVF allows one VM per process and requires architectural restore
                 // into a never-entered replacement. Failure terminates this worker.
                 drop(machine.take());
@@ -752,14 +765,18 @@ impl OwnedWorker {
             Operation::Restore(_) => restored_identity.as_ref().expect("restore identity"),
             _ => &self.identity,
         };
+        // A failed operation leaves the worker's identity unchanged, so a
+        // failed boot answers unbound: report the worker's own error.
+        if response.sequence == request.sequence {
+            if let Answer::Error(error) = &response.answer {
+                return Err(error.clone());
+            }
+        }
         if response.sequence != request.sequence
             || response.before.as_ref() != expected_before
             || response.after.as_ref() != Some(expected_after)
         {
             return Err("worker response stamp mismatch".into());
-        }
-        if let Answer::Error(error) = &response.answer {
-            return Err(error.clone());
         }
         let kind_matches = matches!(
             (&request.operation, &response.answer),
@@ -1114,6 +1131,45 @@ mod tests {
         descriptor.predecessor.incarnation = u32::MAX;
         descriptor.successor.incarnation = 0;
         assert!(descriptor.validate().is_err());
+    }
+    #[test]
+    fn a_failed_boot_reports_the_worker_error_not_a_stamp_mismatch() {
+        let worker = OwnedWorker {
+            child: Command::new("true").spawn().unwrap(),
+            input: None,
+            output: None,
+            sequence: 0,
+            identity: identity("a", 1, 0),
+            bound: false,
+            observation: None,
+            poison: None,
+        };
+        let request = Request {
+            sequence: 0,
+            expected: identity("a", 1, 0),
+            operation: Operation::Quit,
+        };
+        let response = |sequence, answer| Response {
+            sequence,
+            before: None,
+            after: None,
+            observation: None,
+            answer,
+        };
+        assert_eq!(
+            worker
+                .validate_response(&request, &response(0, Answer::Error("hv_vm_create".into())))
+                .unwrap_err(),
+            "hv_vm_create"
+        );
+        for (sequence, answer) in [(1, Answer::Error("stale".into())), (0, Answer::Bye)] {
+            assert_eq!(
+                worker
+                    .validate_response(&request, &response(sequence, answer))
+                    .unwrap_err(),
+                "worker response stamp mismatch"
+            );
+        }
     }
     #[test]
     fn bounded_frames_reject_truncation_before_deserialization() {

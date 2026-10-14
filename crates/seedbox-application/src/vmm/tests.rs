@@ -124,6 +124,15 @@ fn replay_reconstructs_checkpoint_profile_without_performance_changes() {
     for invalid in [0, 60001] {
         assert!(ordinary.clone().with_watchdog_ms(invalid).is_err());
     }
+    let parallel = ordinary.clone().with_machine_workers(8).unwrap();
+    assert_eq!(parallel.profile(), ordinary.profile());
+    assert_eq!(
+        parallel.performance_parameters()["SEEDBOX_MACHINE_WORKERS"],
+        "8"
+    );
+    for invalid in [0, 65] {
+        assert!(ordinary.clone().with_machine_workers(invalid).is_err());
+    }
     let branch = ordinary.clone().with_checkpoint(500, 42);
     assert_eq!(
         branch.performance_parameters(),
