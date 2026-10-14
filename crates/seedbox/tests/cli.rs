@@ -82,6 +82,61 @@ fn long_server_state_path_fails_before_creating_state() {
 }
 
 #[test]
+fn server_performance_settings_are_bounded_usage_errors_before_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let help = seedbox(&["help", "serve"], directory.path());
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    let performance = help
+        .split_once("Performance (never changes results):")
+        .map(|(_, section)| section)
+        .unwrap_or_else(|| panic!("{help}"));
+    assert!(
+        performance.contains("--machine-workers <N>")
+            && performance
+                .contains("[default: one per machine, at most the host's available parallelism]"),
+        "{help}"
+    );
+    let state = directory.path().join("state");
+    let mut bounded = vec![("--machine-workers", ["0", "65", "all"])];
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        // The ARM engine has no PV watchdog to tune.
+        assert!(!help.contains("--watchdog-ms"), "{help}");
+        let output = seedbox(
+            &[
+                "serve",
+                "--state",
+                state.to_str().unwrap(),
+                "--watchdog-ms",
+                "20",
+            ],
+            directory.path(),
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("unexpected argument '--watchdog-ms'"));
+    } else {
+        assert!(performance.contains("--watchdog-ms <MS>"), "{help}");
+        assert!(performance.contains("[default: 20]"), "{help}");
+        bounded.push(("--watchdog-ms", ["0", "60001", "fast"]));
+    }
+    for (flag, values) in bounded {
+        for value in values {
+            let output = seedbox(
+                &["serve", "--state", state.to_str().unwrap(), flag, value],
+                directory.path(),
+            );
+            assert_eq!(output.status.code(), Some(2), "{flag} {value}");
+            assert!(
+                stderr(&output).contains(&format!("invalid value '{value}' for '{flag}")),
+                "{}",
+                stderr(&output)
+            );
+        }
+    }
+    assert!(!state.exists());
+}
+
+#[test]
 fn explicit_asset_directory_overrides_bundled_kernel_without_build_tools() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
@@ -335,6 +390,7 @@ fn execution_commands_keep_performance_settings_on_the_server() {
         for flag in [
             "--watchdog-ms",
             "--pv-watchdog-ms",
+            "--machine-workers",
             "--margin",
             "--undo",
             "--timebase",

@@ -130,8 +130,16 @@ impl VmmExecutor {
         if !(1..=60000).contains(&milliseconds) {
             return Err(Error::Setup("--watchdog-ms must be 1..60000".into()));
         }
-        self.performance
-            .insert("SEEDBOX_WATCHDOG_MS".into(), milliseconds.to_string());
+        self.performance.insert(
+            crate::worker_process::WATCHDOG_MS_PARAMETER.into(),
+            milliseconds.to_string(),
+        );
+        Ok(self)
+    }
+
+    /// Machine threads of the windowed scheduler; never changes results.
+    pub fn with_machine_workers(mut self, workers: usize) -> Result<Self> {
+        crate::worker_process::insert_machine_workers(&mut self.performance, workers)?;
         Ok(self)
     }
 }
