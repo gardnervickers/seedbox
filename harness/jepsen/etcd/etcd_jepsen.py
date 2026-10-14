@@ -125,7 +125,10 @@ class Store:
             else:
                 reply = {"ok": False}
             entry.pop("set", None)
-        entry["ok"] = reply["ok"] if kind in ("read", "write") else entry.get("ok")
+        if kind in ("read", "write") and self.guard != "txn":
+            entry["ok"] = reply["ok"]
+        else:  # txn clients report their own transaction's outcome
+            entry["ok"] = entry.get("ok")
         if kind == "invoke":
             self.waiting[client] = body.get("op")
         elif kind == "acquired":

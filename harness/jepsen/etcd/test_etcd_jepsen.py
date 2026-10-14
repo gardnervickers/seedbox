@@ -1,7 +1,7 @@
 """Checker tests for etcd_jepsen.py; run with `python3 -m unittest` in this directory."""
 import unittest
 
-from etcd_jepsen import check
+from etcd_jepsen import Store, check
 
 
 def history(*steps):
@@ -51,6 +51,20 @@ class CheckTest(unittest.TestCase):
         result, details, _ = check(h, ["c1-1"], "none", events)
         self.assertEqual(result["stale_grants"], 1)
         self.assertEqual(details["stale"][0]["deleted_revision"], 9)
+
+
+class StoreTest(unittest.TestCase):
+    def test_token_store_fences_lower_tokens(self):
+        store = Store("token")
+        self.assertTrue(store.handle({"type": "read", "client": "c2", "token": 12})["ok"])
+        self.assertFalse(store.handle({"type": "write", "client": "c1", "token": 10, "set": ["c1-1"]})["ok"])
+        self.assertTrue(store.handle({"type": "write", "client": "c2", "token": 12, "set": ["c2-1"]})["ok"])
+        self.assertEqual(store.set, ["c2-1"])
+
+    def test_txn_store_keeps_the_reported_outcome(self):
+        store = Store("txn")
+        store.handle({"type": "write", "client": "c1", "key": "lock/a", "ok": False, "element": "c1-1"})
+        self.assertIs(store.history[-1]["ok"], False)
 
 
 if __name__ == "__main__":
