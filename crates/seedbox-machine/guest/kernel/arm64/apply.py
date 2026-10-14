@@ -35,6 +35,16 @@ def counter_access(text):
         "\t\t/* Seedbox: PR_TSC_ENABLE means PV emulation, not hardware access. */\n"
         "\t\tsysreg_clear_set(cntkctl_el1, ARCH_TIMER_USR_VCT_ACCESS_EN, 0);")
 
+def permanent_halt(text):
+    # Linux halts by spinning with interrupts masked: no PV clock read, WFI or
+    # interrupt can ever end that loop, so execution could never reach its
+    # bound. A deliberate halt is permanent, like power-off; use the existing
+    # PSCI SYSTEM_OFF primitive. The spin remains only as an unreachable fallback.
+    return body(text, "machine_halt",
+        "\tlocal_irq_disable();\n\tsmp_send_stop();\n"
+        "\t/* Seedbox: a permanent halt is reported as power-off. */\n"
+        "\tdo_kernel_power_off();\n\twhile (1);")
+
 def futex_retries(text):
     # With one guest CPU and PREEMPT_NONE, exclusive-store failures cannot
     # represent contention from another guest task. Retry host-induced failures
@@ -88,7 +98,7 @@ def changes(root):
         s = replace(s, "#include <asm/paravirt.h>", "#include <asm/paravirt.h>\n#include <asm/seedbox.h>")
         return body(s, "time_init", "\tof_clk_init(NULL);\n\tseedbox_time_init();\n\ttick_setup_hrtimer_broadcast();\n\tlpj_fine = 1000000000UL / HZ;")
     edit("arch/arm64/kernel/time.c", time)
-    edit("arch/arm64/kernel/process.c", counter_access)
+    edit("arch/arm64/kernel/process.c", lambda s: permanent_halt(counter_access(s)))
     edit("arch/arm64/include/asm/futex.h", futex_retries)
     # Every return to EL0 crosses a guest exception/scheduling boundary, unlike
     # a host-only interruption. Publish its epoch and clear the physical

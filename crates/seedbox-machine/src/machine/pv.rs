@@ -7,6 +7,10 @@
 //! `seedbox-lifecycle` carries `shutdown\n` to a cooperating guest supervisor.
 //! The request itself executes no guest work. Cleanup and guest power-off require
 //! later run calls; an uncooperative guest can remain blocked until crashed.
+//! After the guest's ready handshake, a guest power-off or permanent halt ends
+//! as `Shutdown` and a guest reset request (deliberate reboot or panic restart)
+//! as `Crashed`; the worker never resets itself. Terminal requests before the
+//! handshake, unknown exits and hypervisor failures are errors.
 //! Snapshot bytes own boot inputs and all stopped worker/device state. Native
 //! architectural snapshot support currently requires macOS/HVF or x86-64 KVM;
 //! Linux ARM64 KVM snapshots are unsupported.
@@ -307,6 +311,16 @@ impl PVMachine {
                 Ok(StopReason::Exited {
                     reached: Timestamp::from_nanos(time),
                     reason: ExitReason::Shutdown,
+                })
+            }
+            // A guest reset request ends this boot; only an accepted Reboot
+            // request starts another one.
+            Stop::Reset => {
+                self.state = State::Crashed;
+                drop(self.worker.take());
+                Ok(StopReason::Exited {
+                    reached: Timestamp::from_nanos(time),
+                    reason: ExitReason::Crashed,
                 })
             }
             _ => Err("PV worker returned invalid stop".into()),

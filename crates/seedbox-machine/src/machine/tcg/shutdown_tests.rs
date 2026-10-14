@@ -108,3 +108,50 @@ fn unhandled_request_keeps_idle_state_and_lifecycle_resets_discard_it() {
     machine.state = State::Invalid;
     assert!(machine.request(crate::pv::Request::Shutdown).is_err());
 }
+
+/// The board's test finisher is how firmware powers off or resets. Each guest
+/// request stops at its instruction and is classified by its private cause;
+/// the reset never restarts the machine in place.
+#[test]
+fn guest_finisher_requests_stop_with_their_cause() {
+    // t0 = 0x100000 (finisher); t1 = request; sw t1, 0(t0); j .
+    let program = |upper: u32, low: u32| {
+        [
+            0x0010_02b7,
+            (upper << 12) | 0x337,
+            (low << 20) | 0x0003_0313,
+            0x0062_a023,
+            0x0000_006f,
+        ]
+    };
+    for (upper, low, reason) in [
+        (0x5, 0x555, ExitReason::Shutdown), // FINISHER_PASS: power-off
+        (0x7, 0x777, ExitReason::Crashed),  // FINISHER_RESET: reset request
+        (0x3, 0x333, ExitReason::Crashed),  // FINISHER_FAIL: guest-reported panic
+    ] {
+        let clock = Arc::new(TestClock(AtomicU64::new(0)));
+        let mut machine = start(&program(upper, low), clock.clone());
+        let stop = machine.run(&mut (), at(1000)).unwrap();
+        let StopReason::Exited {
+            reached,
+            reason: got,
+        } = stop
+        else {
+            panic!("{low:#x}: unexpected {stop:?}");
+        };
+        assert_eq!(got, reason, "{low:#x}");
+        assert!(reached <= at(4), "{low:#x} stops at its store, not later");
+        // Nothing executes afterwards: the PC stays at the store's successor.
+        assert_eq!(
+            machine.process().unwrap().registers().unwrap()[32],
+            0x8000_0010
+        );
+        clock.0.store(reached.as_nanos(), Ordering::Relaxed);
+        let saved = machine.snapshot().unwrap();
+        let mut restored =
+            TcgMachine::from_snapshot(Path::new("qemu-system-riscv64"), &saved, clock.clone())
+                .unwrap();
+        assert_eq!(restored.run(&mut (), reached).unwrap(), stop);
+        assert_eq!(machine.run(&mut (), reached).unwrap(), stop);
+    }
+}

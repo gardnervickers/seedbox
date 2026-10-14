@@ -15,13 +15,19 @@
 //! applications with guest getrandom draws; uninstrumented guest code that
 //! executes them regardless of CPUID still reads host entropy (the kernel only
 //! reaches them behind CPUID checks). Kernel TSC reads are PV time and CR4.TSD
-//! traps application RDTSC/RDTSCP. A guest reset or panic reboot ends in an
-//! architectural shutdown exit, which the worker reports as an error.
+//! traps application RDTSC/RDTSCP.
+//!
+//! Guest terminal requests after the ready handshake end the boot: a triple
+//! fault (KVM shutdown exit) is the platform's only reset, reached by a
+//! deliberate reboot or a `panic=-1` restart, and is reported as a reset; HLT
+//! with interrupts disabled can never resume (there is no NMI source) and is
+//! reported like power-off. Before the handshake both are setup errors.
 #[path = "kvm_x86.rs"]
 mod backend;
 use super::{
     boot,
     memory::{self, Memory},
+    protocol::Stop,
     Effect, Machine, Result,
 };
 pub(super) use backend::{Architecture, Backend, Exit, Native};
@@ -385,13 +391,16 @@ impl<B: Backend> Machine<B> {
                 if !self.state.ready {
                     return Err("PV HLT before handshake".into());
                 }
-                if !interrupts {
-                    return Err("PV guest halted with interrupts disabled".into());
+                if interrupts {
+                    effect.idle = true;
+                } else {
+                    // Linux halt (stop_this_cpu): permanently halted.
+                    effect.terminal = Some(Stop::PoweredOff);
                 }
-                effect.idle = true;
             }
             Exit::Window => (),
-            Exit::Shutdown => return Err("PV x86 guest shutdown (triple fault or reset)".into()),
+            // Triple fault: the only architectural reset on this platform.
+            Exit::Shutdown => effect.terminal = Some(Stop::Reset),
             // CPUID reports no local APIC, but Linux's CPU identification still
             // reads APIC registers through the default driver before falling
             // back to PIC mode. The absent APIC reads as zero (APIC ID 0).
@@ -634,17 +643,47 @@ mod tests {
         );
     }
     #[test]
-    fn masked_halt_and_shutdown_are_errors() {
+    fn terminal_exits_before_handshake_are_errors() {
+        for exit in [Exit::Halt { interrupts: false }, Exit::Shutdown, halt()] {
+            let mut vm = machine();
+            vm.native.exits.extend([exit]);
+            assert!(vm.run(0, 10, 1000, false, &[]).is_err());
+        }
+        // A power-off event before the handshake is a setup failure too.
         let mut vm = machine();
-        vm.native
-            .exits
-            .extend([event(32, 3), Exit::Halt { interrupts: false }]);
+        vm.native.exits.extend([event(40, 1)]);
         assert!(vm.run(0, 10, 1000, false, &[]).is_err());
+    }
+    #[test]
+    fn masked_halt_powers_off_and_triple_fault_resets_after_handshake() {
+        for (exit, expected) in [
+            (Exit::Halt { interrupts: false }, Stop::PoweredOff),
+            (Exit::Shutdown, Stop::Reset),
+        ] {
+            let mut vm = machine();
+            vm.native
+                .exits
+                .extend([event(32, 3), port(0x3f8, true, b'Z' as u64), exit]);
+            let stop = vm.run(0, 10, 1000, false, &[]).unwrap();
+            assert_eq!(stop, expected);
+            assert_eq!(vm.output, b"Z");
+            assert_eq!(vm.native.entries, 3);
+            // The ended boot is never entered or captured again.
+            assert!(vm.run(0, 10, 1000, false, &[]).is_err());
+            assert!(vm.run(10, 10, 1000, false, &[]).is_err());
+            assert_eq!(vm.native.entries, 3);
+            let directory = tempfile::tempdir().unwrap();
+            assert!(vm.capture(&directory.path().join("capture")).is_err());
+        }
+    }
+    #[test]
+    fn interruptible_halt_stays_blocked_not_exited() {
         let mut vm = machine();
-        vm.native.exits.extend([halt()]);
-        assert!(vm.run(0, 10, 1000, false, &[]).is_err());
-        let mut vm = machine();
-        vm.native.exits.extend([event(32, 3), Exit::Shutdown]);
-        assert!(vm.run(0, 10, 1000, false, &[]).is_err());
+        vm.native.exits.extend([event(32, 3), event(0, 50), halt()]);
+        assert!(matches!(
+            vm.run(0, 10, 1000, false, &[]).unwrap(),
+            Stop::Blocked(Some(50))
+        ));
+        assert!(!vm.ended);
     }
 }

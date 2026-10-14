@@ -65,7 +65,8 @@ struct Capture {
 struct Effect {
     response: Option<u64>,
     idle: bool,
-    off: bool,
+    /// A guest terminal request: [`Stop::PoweredOff`] or [`Stop::Reset`].
+    terminal: Option<Stop>,
 }
 struct Machine<B: Backend = Native> {
     native: B,
@@ -73,6 +74,8 @@ struct Machine<B: Backend = Native> {
     page: Rc<Memory>,
     state: State,
     output: Vec<u8>,
+    /// The guest ended this boot; it must never be entered again.
+    ended: bool,
 }
 impl<B: Backend> Machine<B> {
     fn boot(kernel: &[u8], initrd: &[u8], seed: u64, command_line: &str) -> Result<Self> {
@@ -92,6 +95,7 @@ impl<B: Backend> Machine<B> {
             page,
             state: State::default(),
             output: Vec::new(),
+            ended: false,
         })
     }
     fn publish(&self, upto: u64) {
@@ -150,6 +154,9 @@ impl<B: Backend> Machine<B> {
     ) -> Result<Stop> {
         if now > upto || upto == u64::MAX || syscall_cost_ns == 0 {
             return Err("PV invalid run interval".into());
+        }
+        if self.ended {
+            return Err("PV run after the guest ended its boot".into());
         }
         // Guest syscall progress samples this word once into its remaining
         // charge. Existing partial work keeps its old price in captured CPU/RAM.
@@ -243,7 +250,11 @@ impl<B: Backend> Machine<B> {
                             }
                             self.state.ready = true;
                         }
-                        offset => effect.off = self.event_register(offset, value)?,
+                        offset => {
+                            if self.event_register(offset, value)? {
+                                effect.terminal = Some(Stop::PoweredOff);
+                            }
+                        }
                     }
                 }
                 Exit::Mmio {
@@ -275,11 +286,14 @@ impl<B: Backend> Machine<B> {
             self.native.complete(effect.response)?;
             self.collect_lifecycle();
             self.publish(upto);
-            if effect.off {
+            // A guest terminal request ends the boot at this rendezvous. Before
+            // the ready handshake it is a setup failure, not a guest outcome.
+            if let Some(stop) = effect.terminal {
                 if !self.state.ready {
-                    return Err("PV poweroff before handshake".into());
+                    return Err(format!("PV guest terminal {stop:?} before handshake"));
                 }
-                return Ok(Stop::PoweredOff);
+                self.ended = true;
+                return Ok(stop);
             }
             if self.state.now == upto {
                 return Ok(Stop::Horizon);
@@ -293,6 +307,10 @@ impl<B: Backend> Machine<B> {
         }
     }
     fn capture(&mut self, path: &Path) -> Result<()> {
+        // The client owns an ended boot's exit state without a live worker.
+        if self.ended {
+            return Err("PV capture after the guest ended its boot".into());
+        }
         let state = Capture {
             state: self.state.clone(),
             architecture: self.native.capture()?,

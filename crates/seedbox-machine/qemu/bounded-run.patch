@@ -8,7 +8,7 @@
  #include "qemu/error-report.h"
  #include "system/cpus.h"
  #include "system/qtest.h"
-@@ -53,10 +54,321 @@
+@@ -53,10 +54,352 @@
  /* Do not count executed instructions */
  ICountMode use_icount = ICOUNT_DISABLED;
 
@@ -20,6 +20,18 @@
 +static int64_t seedbox_deadline = -1;
 +static bool (*seedbox_shutdown_handler)(void);
 +static void (*seedbox_console_handler)(uint8_t);
++
++/* Cause of the guest stop request, recorded by QEMU's shutdown notifiers just
++ * before the machine stops in RUN_STATE_SHUTDOWN. Seedbox runs with
++ * -action reboot=shutdown, so a guest reset also stops here rather than
++ * resetting the machine in place behind the caller's lifecycle accounting. */
++static ShutdownCause seedbox_shutdown_cause = SHUTDOWN_CAUSE_NONE;
++static Notifier seedbox_shutdown_notifier;
++
++static void seedbox_shutdown_notify(Notifier *notifier, void *data)
++{
++    seedbox_shutdown_cause = *(ShutdownCause *)data;
++}
 +
 +void seedbox_icount_set_console_handler(void (*handler)(uint8_t))
 +{
@@ -66,7 +78,18 @@
 +    if (!running) {
 +        seedbox_active = false;
 +        if (state == RUN_STATE_SHUTDOWN) {
-+            seedbox_reason = SEEDBOX_STOP_REASON_SHUTDOWN;
++            switch (seedbox_shutdown_cause) {
++            case SHUTDOWN_CAUSE_GUEST_SHUTDOWN:
++                seedbox_reason = SEEDBOX_STOP_REASON_SHUTDOWN;
++                break;
++            case SHUTDOWN_CAUSE_GUEST_RESET:
++            case SHUTDOWN_CAUSE_GUEST_PANIC:
++                seedbox_reason = SEEDBOX_STOP_REASON_RESET;
++                break;
++            default:
++                /* Host-initiated or unexpected stops are not guest outcomes. */
++                seedbox_reason = SEEDBOX_STOP_REASON_ERROR;
++            }
 +        } else if (state != RUN_STATE_PAUSED &&
 +                   state != RUN_STATE_FINISH_MIGRATE &&
 +                   state != RUN_STATE_POSTMIGRATE) {
@@ -220,6 +243,8 @@
 +    }
 +    if (!seedbox_controlled) {
 +        qemu_add_vm_change_state_handler(seedbox_state_changed, NULL);
++        seedbox_shutdown_notifier.notify = seedbox_shutdown_notify;
++        qemu_register_shutdown_notifier(&seedbox_shutdown_notifier);
 +        seedbox_controlled = true;
 +    }
 +    if (seedbox_cost.enabled) {
@@ -278,6 +303,12 @@
 +    if (!seedbox_active || !runstate_is_running()) {
 +        return;
 +    }
++    /* A guest shutdown or reset stopped the CPU at its requesting
++     * instruction. Let the main loop classify that stop by its cause instead
++     * of reporting a boundary or idle stop first. */
++    if (qemu_shutdown_requested_get()) {
++        return;
++    }
 +    now = icount_get();
 +    if (now >= seedbox_end) {
 +        seedbox_reanchor(now);
@@ -330,7 +361,7 @@
  }
 
  static void icount_enable_adaptive(void)
-@@ -123,6 +435,9 @@
+@@ -123,6 +466,9 @@
  static int64_t icount_get_locked(void)
  {
      int64_t icount = icount_get_raw_locked();
@@ -340,7 +371,7 @@
      return qatomic_read(&timers_state.qemu_icount_bias) + icount_to_ns(icount);
  }
 
-@@ -295,6 +610,10 @@
+@@ -295,6 +641,10 @@
      int64_t deadline;
 
      assert(icount_enabled());
@@ -665,7 +696,7 @@
  #endif /* EXEC_ICOUNT_H */
 --- a/qapi/run-state.json
 +++ b/qapi/run-state.json
-@@ -749,3 +749,167 @@
+@@ -749,3 +749,169 @@
  ##
  { 'enum': 'NotifyVmexitOption',
    'data': [ 'run', 'internal-error', 'disable' ] }
@@ -678,12 +709,14 @@
 +# @boundary: The instruction budget was exhausted.
 +# @blocked: All CPUs are idle, with no event due now.
 +# @shutdown: The guest requested shutdown.
++# @reset: The guest requested a reset or reported a panic; the machine
++#     stopped instead of resetting.
 +# @error: An unexpected stop requires caller diagnosis.
 +#
 +# Since: 11.1
 +##
 +{ 'enum': 'SeedboxStopReason',
-+  'data': ['boundary', 'blocked', 'shutdown', 'error'],
++  'data': ['boundary', 'blocked', 'shutdown', 'reset', 'error'],
 +  'if': 'CONFIG_TCG' }
 +
 +##

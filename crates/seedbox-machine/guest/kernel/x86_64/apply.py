@@ -93,6 +93,15 @@ def changes(root):
         return replace(s, "\ttsc_early_init();\n", "\tseedbox_time_init();\n\ttsc_early_init();\n")
     edit("arch/x86/kernel/setup.c", setup)
 
+    # The PV platform has no ACPI reset register, keyboard controller, EFI or
+    # BIOS. The default fallback chain would spin on absent ports and finally
+    # execute empty real-mode memory without any exit. A triple fault is the
+    # platform's only architectural reset; the worker reports it as a crash.
+    edit("kernel/reboot.c", lambda s: replace(
+        s, "enum reboot_type reboot_type = BOOT_ACPI;\n",
+        "/* Seedbox x86 PV: triple fault is the only platform reset. */\n"
+        "enum reboot_type reboot_type = BOOT_TRIPLE;\n"))
+
     # CR4.TSD must stay set for every task: PR_SET_TSC cannot re-enable host time.
     edit("arch/x86/kernel/process.c", lambda s: replace(
         s, "int set_tsc_mode(unsigned int val)\n{\n",

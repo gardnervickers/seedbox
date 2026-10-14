@@ -25,7 +25,9 @@ tracks each machine's execution position and next timer, advancing the shared
 clock only when no eligible runnable work or timer remains before it. Each round
 brings active machines to its boundary, a blocked state, or exit. The machine observes the
 read-only clock borrowed through its run context on its next `run`, delivering due timers before executing
-more instructions. Guest shutdown returns `Exited`. The driver runs ready machines
+more instructions. Guest power-off and halt return `Exited` with `Shutdown`; a
+guest reset, including a kernel panic restart, returns `Exited` with `Crashed`
+(see `Machine::run`). Only an accepted Reboot request starts a new boot. The driver runs ready machines
 on a persistent thread pool, holding the shared clock fixed until every call in
 the batch returns. Each worker creates and retains its own host execution resources, which may be
 thread-affine. Every run separately borrows those resources, the simulation clock,

@@ -163,6 +163,11 @@ impl Process {
             "none",
             "-S",           // Start stopped; only seedbox-run may execute code.
             "-no-shutdown", // Retain the stopped guest so it can be inspected/snapshotted.
+            // A guest reset (deliberate reboot or a panic restart) stops like a
+            // shutdown; the bounded result reports its cause as `reset`. The
+            // machine never reboots itself behind the caller's lifecycle.
+            "-action",
+            "reboot=shutdown",
             "-icount",
             "shift=0,align=off,sleep=off", // Nominal icount base; bounded execution applies fractional work pricing.
             "-global",

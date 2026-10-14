@@ -35,11 +35,15 @@ pub(super) enum Response {
     Captured,
     Error(String),
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Stop {
     Horizon,
     Blocked(Option<u64>),
+    /// The guest powered off or permanently halted.
     PoweredOff,
+    /// The guest requested an architectural reset after its ready handshake:
+    /// a deliberate reboot or a panic restart. The worker never resets itself.
+    Reset,
 }
 
 pub(super) fn send(out: &mut impl Write, value: &impl Serialize) -> Result<()> {

@@ -60,7 +60,7 @@
               inherit pkgs;
               kernel = "${kernel}/kernel";
               init = "${guest}/bin/init";
-              commandLine = "console=ttyS0 earlycon=sbi rdinit=/init nokaslr";
+              commandLine = "console=ttyS0 earlycon=sbi rdinit=/init nokaslr panic=-1";
               firmware = "${qemu}/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin";
             };
             testFixtures = import ./crates/seedbox-machine/tcg-test-fixtures.nix { inherit pkgs guest; };

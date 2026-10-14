@@ -1,5 +1,10 @@
 //! ARM64 platform of the stopped machine: Image/FDT boot, GICv3 SPIs, PL011,
 //! PSCI and the software exclusive-reservation epoch. HVF on macOS, KVM on Linux.
+//!
+//! After the ready handshake, PSCI SYSTEM_OFF ends the boot as power-off and
+//! SYSTEM_RESET (a deliberate reboot or a `panic=-1` restart) as a reset; the
+//! crate's kernel routes Linux halt to SYSTEM_OFF instead of an endless masked
+//! spin. Before the handshake both are setup errors.
 #[path = "backend.rs"]
 mod backend;
 #[path = "tree.rs"]
@@ -7,6 +12,7 @@ mod tree;
 use super::{
     boot,
     memory::{self, Memory},
+    protocol::Stop,
     Effect, Machine, Result,
 };
 pub(super) use backend::{Architecture, Backend, Exit, Native};
@@ -234,8 +240,15 @@ impl<B: Backend> Machine<B> {
                 let function = self.native.core(0)?;
                 let value = match function {
                     0x8400_0000 | 0x8400_0006 => 2,
+                    // SYSTEM_OFF; the patched kernel's halt also arrives here.
                     0x8400_0008 => {
-                        effect.off = true;
+                        effect.terminal = Some(Stop::PoweredOff);
+                        0
+                    }
+                    // SYSTEM_RESET: a deliberate reboot or a panic restart.
+                    // The worker never resets itself; the boot ends here.
+                    0x8400_0009 => {
+                        effect.terminal = Some(Stop::Reset);
                         0
                     }
                     _ => u64::MAX,
@@ -452,5 +465,44 @@ mod tests {
         assert_eq!(vm.state.now, 100);
         assert_eq!(vm.page.word(LAST), 100);
         assert_eq!(vm.native.entries, 0);
+    }
+    #[test]
+    fn psci_system_off_and_reset_end_the_boot_only_after_handshake() {
+        for (function, expected) in [
+            (0x8400_0008u64, Stop::PoweredOff),
+            (0x8400_0009, Stop::Reset),
+        ] {
+            let mut vm = machine();
+            vm.native.core[0] = function;
+            vm.native.exits.extend([Exit::Call]);
+            assert!(
+                vm.run(0, 10, 1000, false, &[]).is_err(),
+                "{function:#x} before handshake"
+            );
+            let mut vm = machine();
+            vm.native.core[0] = function;
+            vm.native.exits.extend([ready(), Exit::Call]);
+            assert_eq!(vm.run(0, 10, 1000, false, &[]).unwrap(), expected);
+            assert_eq!(vm.native.entries, 2);
+            // The ended boot is never entered or captured again.
+            assert!(vm.run(0, 10, 1000, false, &[]).is_err());
+            assert_eq!(vm.native.entries, 2);
+            let directory = tempfile::tempdir().unwrap();
+            assert!(vm.capture(&directory.path().join("capture")).is_err());
+        }
+    }
+    #[test]
+    fn unknown_psci_call_returns_not_supported_and_wfi_stays_blocked() {
+        let mut vm = machine();
+        vm.native.core[0] = 0x8400_000a;
+        vm.native
+            .exits
+            .extend([ready(), Exit::Call, Exit::Wait { event: false }]);
+        assert_eq!(
+            vm.run(0, 10, 1000, false, &[]).unwrap(),
+            Stop::Blocked(None)
+        );
+        assert_eq!(vm.native.core[0], u64::MAX);
+        assert!(!vm.ended);
     }
 }

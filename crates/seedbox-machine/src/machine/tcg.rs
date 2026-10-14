@@ -23,6 +23,13 @@
 //! boot and snapshots, with synchronous queue kicks at guest MMIO instructions.
 //! Guest userspace owns cleanup and Linux poweroff policy; a boot input without
 //! a cooperating receiver can ignore the request and continue running.
+//!
+//! Guest terminal requests stop QEMU at the requesting instruction. Power-off
+//! (including Linux halt, which powers off on this board) is `Shutdown`. QEMU
+//! runs with `-action reboot=shutdown`, so a guest reset request, including a
+//! kernel panic restart under `panic=-1`, stops instead of resetting in place
+//! and is reported as `Crashed`; only an accepted Reboot request starts a new
+//! boot. Host-caused stops and unknown causes are errors.
 
 mod factory;
 use super::{ExitReason, Machine, RunContext, StopReason, Timestamp};
@@ -377,6 +384,9 @@ impl TcgMachine {
                 State::Blocked { deadline }
             }
             Some("shutdown") => State::Exited(ExitReason::Shutdown),
+            // Guest reset request: a deliberate reboot or a panic restart.
+            // The Driver owns reboots, so this boot ends as a crash.
+            Some("reset") => State::Exited(ExitReason::Crashed),
             _ => return Err(Error(format!("unexpected QEMU stop: {result}"))),
         };
         let writes = self.process()?.drain_guest()?;
