@@ -1,4 +1,5 @@
-//! TigerBeetle's C client (`tb_client`, release 0.16.11) from Rust.
+//! TigerBeetle's C client (`tb_client`, release 0.16.11, and on Linux also
+//! 0.16.17 for the eviction control) from Rust.
 //!
 //! The library is the static `libtb_client.a` TigerBeetle ships in its Go
 //! client module for each release (see `tools::tb_client_lib`); `build.rs`
@@ -19,9 +20,6 @@ use std::{
     ffi::c_void,
     sync::mpsc::{self, Receiver, Sender},
 };
-
-/// The TigerBeetle release whose client this module binds.
-pub const CLIENT_RELEASE: &str = "0.16.11";
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,15 +158,40 @@ pub enum Operation {
     QueryTransfers = 136,
 }
 
-/// `TB_PACKET_STATUS` names.
-pub fn packet_status(status: u8) -> &'static str {
-    match status {
-        0 => "ok",
-        1 => "too_much_data",
-        2 => "client_shutdown",
-        3 => "invalid_operation",
-        4 => "invalid_data_size",
-        _ => "unknown",
+/// A client library release this build can link.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Release {
+    /// 0.16.11, the release under test: it panics when its session is evicted.
+    #[value(name = "0.16.11")]
+    V0_16_11,
+    /// 0.16.17: an evicted session's requests fail with `client_evicted`
+    /// (tigerbeetle#2484, fixed in 0.16.13). Linux builds only.
+    #[value(name = "0.16.17")]
+    V0_16_17,
+}
+
+impl Release {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::V0_16_11 => "0.16.11",
+            Self::V0_16_17 => "0.16.17",
+        }
+    }
+
+    /// `TB_PACKET_STATUS` names.
+    pub fn packet_status(self, status: u8) -> &'static str {
+        match (self, status) {
+            (_, 0) => "ok",
+            (_, 1) => "too_much_data",
+            (Self::V0_16_11, 2) => "client_shutdown",
+            (Self::V0_16_11, 3) => "invalid_operation",
+            (Self::V0_16_11, 4) => "invalid_data_size",
+            (Self::V0_16_17, 2) => "client_evicted",
+            (Self::V0_16_17, 3) => "client_shutdown",
+            (Self::V0_16_17, 4) => "invalid_operation",
+            (Self::V0_16_17, 5) => "invalid_data_size",
+            _ => "unknown",
+        }
     }
 }
 
@@ -184,6 +207,7 @@ struct Pending {
 /// One client session to a cluster.
 pub struct Client {
     raw: usize,
+    pub release: Release,
 }
 
 // SAFETY: tb_client's submit is thread-safe; completions run on its own thread.
@@ -205,6 +229,37 @@ mod ffi {
         ) -> i32;
         pub fn tb_client_submit(client: usize, packet: *mut Packet);
     }
+}
+
+/// 0.16.17's client, exports renamed (see `tools::tb_client_lib`): the
+/// cluster id is passed by pointer and completions carry a timestamp.
+#[cfg(tb_client_0_16_17)]
+mod ffi17 {
+    use super::Packet;
+    #[link(name = "tb_client_0_16_17", kind = "static")]
+    extern "C" {
+        pub fn tb17_client_init(
+            out_client: *mut usize,
+            cluster_id: *const u8,
+            address_ptr: *const u8,
+            address_len: u32,
+            on_completion_ctx: usize,
+            on_completion: extern "C" fn(usize, usize, *mut Packet, u64, *const u8, u32),
+        ) -> i32;
+        pub fn tb17_client_submit(client: usize, packet: *mut Packet);
+    }
+}
+
+#[cfg_attr(not(tb_client_0_16_17), allow(dead_code))]
+extern "C" fn on_completion17(
+    ctx: usize,
+    client: usize,
+    packet: *mut Packet,
+    _timestamp: u64,
+    data: *const u8,
+    len: u32,
+) {
+    on_completion(ctx, client, packet, data, len)
 }
 
 #[cfg_attr(not(tb_client), allow(dead_code))]
@@ -243,7 +298,31 @@ fn init_status(status: i32) -> &'static str {
 
 impl Client {
     /// Start a client for `cluster` at `addresses` (`ip:port,...`, replica order).
-    pub fn connect(cluster: u128, addresses: &str) -> Result<Self, String> {
+    pub fn connect(release: Release, cluster: u128, addresses: &str) -> Result<Self, String> {
+        if release == Release::V0_16_17 {
+            #[cfg(tb_client_0_16_17)]
+            {
+                let mut raw = 0usize;
+                let id = cluster.to_le_bytes();
+                // SAFETY: the id and address bytes outlive the call.
+                let status = unsafe {
+                    ffi17::tb17_client_init(
+                        &mut raw,
+                        id.as_ptr(),
+                        addresses.as_ptr(),
+                        addresses.len() as u32,
+                        0,
+                        on_completion17,
+                    )
+                };
+                if status != 0 {
+                    return Err(format!("tb_client_init 0.16.17: {}", init_status(status)));
+                }
+                return Ok(Self { raw, release });
+            }
+            #[cfg(not(tb_client_0_16_17))]
+            return Err("this build has no 0.16.17 TigerBeetle client library".into());
+        }
         #[cfg(tb_client)]
         {
             let mut raw = 0usize;
@@ -261,7 +340,7 @@ impl Client {
             if status != 0 {
                 return Err(format!("tb_client_init: {}", init_status(status)));
             }
-            Ok(Self { raw })
+            Ok(Self { raw, release })
         }
         #[cfg(not(tb_client))]
         {
@@ -298,6 +377,11 @@ impl Client {
         // SAFETY: the Box stays alive until on_completion reclaims it.
         unsafe {
             (*pending).packet.user_data = pending as *mut c_void;
+            #[cfg(tb_client_0_16_17)]
+            if self.release == Release::V0_16_17 {
+                ffi17::tb17_client_submit(self.raw, &mut (*pending).packet);
+                return completion;
+            }
             #[cfg(tb_client)]
             ffi::tb_client_submit(self.raw, &mut (*pending).packet);
             #[cfg(not(tb_client))]

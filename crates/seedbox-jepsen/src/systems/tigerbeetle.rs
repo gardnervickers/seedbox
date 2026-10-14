@@ -67,6 +67,9 @@ pub struct Args {
     pub agent_port: u16,
     #[arg(long, default_value_t = 0)]
     pub cluster: u128,
+    /// The client library release every session uses.
+    #[arg(long, value_enum, default_value = "0.16.11")]
+    pub client: tb_client::Release,
     /// Concurrent client sessions.
     #[arg(long, default_value_t = 8)]
     pub clients: usize,
@@ -141,6 +144,12 @@ pub struct Args {
     pub cut_at: f64,
     #[arg(long, default_value_t = 5.0)]
     pub cut_for: f64,
+    /// reformat: the replica (index into --nodes) to cut off [default: random].
+    #[arg(long)]
+    pub cut_node: Option<usize>,
+    /// reformat: the replica to replace, one of the other two [default: random].
+    #[arg(long)]
+    pub replace_node: Option<usize>,
     /// reformat: seconds the replaced replica and the cut-off one run alone.
     #[arg(long, default_value_t = 15.0)]
     pub alone_for: f64,
@@ -241,6 +250,9 @@ pub enum Reply {
 pub struct WorkerArgs {
     #[arg(long)]
     pub addresses: String,
+    /// The client library release.
+    #[arg(long, value_enum, default_value = "0.16.11")]
+    pub client: tb_client::Release,
     #[arg(long, default_value_t = 0)]
     pub cluster: u128,
 }
@@ -291,7 +303,7 @@ fn account_filter(s: &Selection) -> AccountFilter {
 
 /// Serve requests from stdin on one client session until stdin closes.
 pub fn worker(args: WorkerArgs) -> u8 {
-    let client = match Client::connect(args.cluster, &args.addresses) {
+    let client = match Client::connect(args.client, args.cluster, &args.addresses) {
         Ok(client) => client,
         Err(error) => {
             eprintln!("tb-worker: {error}");
@@ -335,7 +347,7 @@ pub fn worker(args: WorkerArgs) -> u8 {
         };
         let reply = if status != 0 {
             Reply::Status {
-                status: tb_client::packet_status(status).into(),
+                status: client.release.packet_status(status).into(),
             }
         } else {
             match operation {
@@ -392,10 +404,22 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn spawn(number: usize, addresses: &str, cluster: u128) -> kit::Result<Self> {
+    pub fn spawn(
+        number: usize,
+        addresses: &str,
+        cluster: u128,
+        client: tb_client::Release,
+    ) -> kit::Result<Self> {
         let exe = std::env::current_exe()?;
         let mut child = Command::new(exe)
-            .args(["tb-worker", "--addresses", addresses, "--cluster"])
+            .args([
+                "tb-worker",
+                "--addresses",
+                addresses,
+                "--client",
+                client.name(),
+                "--cluster",
+            ])
             .arg(cluster.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -556,7 +580,7 @@ impl Shared {
     fn session(&self) -> Session {
         loop {
             let number = self.sessions.fetch_add(1, Ordering::SeqCst);
-            match Session::spawn(number, &self.addresses, self.args.cluster) {
+            match Session::spawn(number, &self.addresses, self.args.cluster, self.args.client) {
                 Ok(session) => return session,
                 Err(error) => {
                     evidence("worker-spawn-failed", json!({"error": error.0}));
@@ -1057,7 +1081,7 @@ fn setup(args: &Args) -> kit::Result<Arc<Shared>> {
         "ready",
         json!({"addresses": shared.addresses, "accounts": shared.accounts.len(),
                "seconds": started.elapsed().as_secs_f64(), "seed": seed,
-               "client_release": tb_client::CLIENT_RELEASE}),
+               "client_release": shared.args.client.name()}),
     );
     Ok(shared)
 }
@@ -1192,9 +1216,14 @@ fn replace_schedule(shared: &Shared, started: Instant) -> kit::Result<()> {
     let mut ctl = kit::connect_world(None)?;
     let mut rng = Rng::stream(shared.seed, 7);
     let nodes = &args.nodes;
-    let behind = rng.below(nodes.len() as u64) as usize;
+    let behind = args
+        .cut_node
+        .unwrap_or_else(|| rng.below(nodes.len() as u64) as usize);
     let others: Vec<usize> = (0..nodes.len()).filter(|i| *i != behind).collect();
-    let replaced = others[rng.below(others.len() as u64) as usize];
+    let replaced = args
+        .replace_node
+        .filter(|i| others.contains(i))
+        .unwrap_or_else(|| others[rng.below(others.len() as u64) as usize]);
     let restarted: Vec<usize> = others.iter().copied().filter(|i| *i != replaced).collect();
     let at = |seconds: f64| kit::pause(seconds - started.elapsed().as_secs_f64());
     let fault = |action: &str, targets: Vec<&String>| {

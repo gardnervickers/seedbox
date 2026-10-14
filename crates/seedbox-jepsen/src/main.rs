@@ -156,7 +156,11 @@ fn main() -> ExitCode {
             let mut code = 0;
             for triple in tools::TB_CLIENT_TRIPLES {
                 match tools::tb_client_lib(&root, triple) {
-                    Ok(path) => println!("FETCHED: {}", path.display()),
+                    Ok(paths) => {
+                        for path in paths {
+                            println!("FETCHED: {}", path.display());
+                        }
+                    }
                     Err(error) => code = fail(&error),
                 }
             }

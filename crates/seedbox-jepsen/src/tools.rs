@@ -117,12 +117,13 @@ pub fn build_oracle(root: &Path, arch: &str, engine: Option<&str>) -> Result<Pat
         other => return Err(format!("--arch {other}: expected arm64 or amd64")),
     };
     // TigerBeetle's static C client, linked by build.rs.
-    let library = tb_client_lib(&root, triple)?;
     let target = context
         .join("crates/seedbox-jepsen/target/native/tb_client")
         .join(triple);
     fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    fs::copy(&library, target.join("libtb_client.a")).map_err(|e| e.to_string())?;
+    for library in tb_client_lib(&root, triple)? {
+        fs::copy(&library, target.join(library.file_name().unwrap())).map_err(|e| e.to_string())?;
+    }
     let output = root.join(format!("build/jepsen/{arch}"));
     fs::create_dir_all(&output).map_err(|e| e.to_string())?;
     run(docker(engine)
@@ -144,45 +145,95 @@ pub fn build_oracle(root: &Path, arch: &str, engine: Option<&str>) -> Result<Pat
 // ------------------------------------------------------------ TigerBeetle's C client
 
 /// TigerBeetle publishes its C client library, per release and platform, in
-/// its Go client module; this is the module zip of release 0.16.11 from the Go
-/// module proxy (sum.golang.org: `h1:qGr/UnF/Nslc023/otpGmaX9J0kzkTRGH6uIg/A3IyU=`).
-const TB_GO_ZIP_URL: &str =
-    "https://proxy.golang.org/github.com/tigerbeetle/tigerbeetle-go/@v/v0.16.11.zip";
-const TB_GO_ZIP_SHA256: &str = "8ab91392411635c017ca54b7bb94e20213041cb5136cd6534c2f7c2277dbe29b";
-const TB_GO_PREFIX: &str = "github.com/tigerbeetle/tigerbeetle-go@v0.16.11/pkg/native";
+/// its Go client module. These are module zips from the Go module proxy, with
+/// their sum.golang.org hashes for reference:
+/// * 0.16.11 (`h1:qGr/UnF/Nslc023/otpGmaX9J0kzkTRGH6uIg/A3IyU=`): the client
+///   under test, as `libtb_client.a`;
+/// * 0.16.17: the client that no longer panics
+///   on eviction (tigerbeetle#2484), as `libtb_client_0_16_17.a` with its five
+///   exported functions renamed `tb17_client_*`, so both link into one Linux
+///   binary (everything else in the ELF archives is weak).
+const TB_GO_RELEASES: [(&str, &str, &str); 2] = [
+    (
+        "0.16.11",
+        "8ab91392411635c017ca54b7bb94e20213041cb5136cd6534c2f7c2277dbe29b",
+        "",
+    ),
+    (
+        "0.16.17",
+        "d97b7bf9b3a27e00987f11a6017142b0503502d37eddb8eb1aeefb22de711d69",
+        "tb17",
+    ),
+];
+const TB_EXPORTS: [&str; 5] = [
+    "tb_client_init",
+    "tb_client_init_echo",
+    "tb_client_completion_context",
+    "tb_client_submit",
+    "tb_client_deinit",
+];
 
 /// The platforms `fetch-tb-client` prepares: the guests' and this Mac's.
 pub const TB_CLIENT_TRIPLES: [&str; 3] = ["aarch64-linux", "x86_64-linux", "aarch64-macos"];
 
-/// `libtb_client.a` for `triple` (`aarch64-linux`, ...) under
+/// The client libraries for `triple` (`aarch64-linux`, ...) under
 /// `crates/seedbox-jepsen/target/native/tb_client/TRIPLE/`, where `build.rs`
-/// looks for it, fetched and verified once.
-pub fn tb_client_lib(root: &Path, triple: &str) -> Result<PathBuf, String> {
+/// looks for them, fetched and verified once. Returns their paths.
+pub fn tb_client_lib(root: &Path, triple: &str) -> Result<Vec<PathBuf>, String> {
     let native = root.join("crates/seedbox-jepsen/target/native/tb_client");
-    let library = native.join(triple).join("libtb_client.a");
-    if library.is_file() {
-        return Ok(library);
+    let mut out = Vec::new();
+    for (release, zip_sha256, prefix) in TB_GO_RELEASES {
+        // Mach-O archives export compiler_rt strongly: the guests' ELF only.
+        if !prefix.is_empty() && !triple.ends_with("linux") {
+            continue;
+        }
+        let name = if prefix.is_empty() {
+            "libtb_client.a".to_string()
+        } else {
+            format!("libtb_client_{}.a", release.replace('.', "_"))
+        };
+        let library = native.join(triple).join(&name);
+        out.push(library.clone());
+        if library.is_file() {
+            continue;
+        }
+        fs::create_dir_all(library.parent().unwrap()).map_err(|e| e.to_string())?;
+        let zip = native.join(format!("tigerbeetle-go-v{release}.zip"));
+        if !zip.is_file() || sha256(&zip)? != zip_sha256 {
+            run(Command::new("curl")
+                .args(["-sSfL", "-o"])
+                .arg(&zip)
+                .arg(format!(
+                "https://proxy.golang.org/github.com/tigerbeetle/tigerbeetle-go/@v/v{release}.zip"
+            )))?;
+        }
+        if sha256(&zip)? != zip_sha256 {
+            return Err(format!("{}: unexpected SHA-256", zip.display()));
+        }
+        let bytes = run(Command::new("unzip").arg("-p").arg(&zip).arg(format!(
+            "github.com/tigerbeetle/tigerbeetle-go@v{release}/pkg/native/{triple}/libtb_client.a"
+        )))?;
+        if bytes.is_empty() {
+            return Err(format!(
+                "{release} {triple}: no libtb_client.a in the module"
+            ));
+        }
+        fs::write(&library, bytes).map_err(|e| e.to_string())?;
+        if !prefix.is_empty() {
+            let mut objcopy = Command::new("objcopy");
+            for export in TB_EXPORTS {
+                objcopy.arg(format!(
+                    "--redefine-sym={export}={prefix}{}",
+                    export.trim_start_matches("tb")
+                ));
+            }
+            if let Err(error) = run(objcopy.arg(&library)) {
+                let _ = fs::remove_file(&library);
+                return Err(format!("objcopy: {error}"));
+            }
+        }
     }
-    fs::create_dir_all(library.parent().unwrap()).map_err(|e| e.to_string())?;
-    let zip = native.join("tigerbeetle-go-v0.16.11.zip");
-    if !zip.is_file() || sha256(&zip)? != TB_GO_ZIP_SHA256 {
-        run(Command::new("curl")
-            .args(["-sSfL", "-o"])
-            .arg(&zip)
-            .arg(TB_GO_ZIP_URL))?;
-    }
-    if sha256(&zip)? != TB_GO_ZIP_SHA256 {
-        return Err(format!("{}: unexpected SHA-256", zip.display()));
-    }
-    let bytes = run(Command::new("unzip")
-        .arg("-p")
-        .arg(&zip)
-        .arg(format!("{TB_GO_PREFIX}/{triple}/libtb_client.a")))?;
-    if bytes.is_empty() {
-        return Err(format!("{triple}: no libtb_client.a in the module"));
-    }
-    fs::write(&library, bytes).map_err(|e| e.to_string())?;
-    Ok(library)
+    Ok(out)
 }
 
 // ------------------------------------------------------------ Elle cross-check

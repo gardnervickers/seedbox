@@ -814,8 +814,8 @@ fn galera() -> Vec<Scenario> {
 /// data file is at least 1.06 GiB (its write-ahead log alone is 1 GiB); on ramfs,
 /// which has no `fallocate`, TigerBeetle leaves it sparse, so memory holds only
 /// what it writes. `--development` (smaller caches, so a replica runs in under
-/// 1 GiB), a 256 KiB request limit (2,046 transfers per request) and the
-/// production request queue apply to every replica. `probe` also checks O_DIRECT and io_uring on a volume at /data.
+/// 1 GiB) and a 256 KiB request limit (2,046 transfers per request) apply to
+/// every replica. `probe` also checks O_DIRECT and io_uring on a volume at /data.
 fn tb_replica(version: &str, index: usize, replicas: usize, memory: u32, probe: bool) -> Machine {
     let peers = nodes("n", replicas).join(",");
     let mut entrypoint = vec![
@@ -833,11 +833,15 @@ fn tb_replica(version: &str, index: usize, replicas: usize, memory: u32, probe: 
         "--start-arg=--development".into(),
         "--start-arg=--experimental".into(),
         "--start-arg=--limit-request=256KiB".into(),
-        // --development queues no requests beyond the 8-prepare pipeline, and a
-        // replica then keeps only 8 clients connected: a 9th client's requests
-        // wait forever. Allow the production queue.
-        "--start-arg=--limit-pipeline-requests=56".into(),
     ];
+    // --development queues no requests beyond the 8-prepare pipeline, and a
+    // replica then keeps only 8 clients connected: a 9th client's requests wait
+    // forever. Allow the production queue, except on 0.16.43, whose replica
+    // then allocates 2 GiB and no longer fits a 3 GiB machine beside its data
+    // file (its scenarios use at most four clients).
+    if version != "0.16.43" {
+        entrypoint.push("--start-arg=--limit-pipeline-requests=56".into());
+    }
     let mut m = Machine::build(
         ROOT,
         Some(&format!(
@@ -907,11 +911,16 @@ fn tigerbeetle() -> Vec<Scenario> {
         "--cut-at",
         "3",
         "--cut-for",
-        "3",
+        "6",
         "--alone-for",
         "15",
         "--timeout",
         "10",
+        // Cut n3 off, replace n2, restart n1 (the primary of view 0) last.
+        "--cut-node",
+        "2",
+        "--replace-node",
+        "1",
     ];
     let specs = [
         TbSpec { name: "tb-smoke", comment: "Smoke test: a healthy 3-replica TigerBeetle 0.16.11 cluster, a short mixed\nworkload, and an O_DIRECT/io_uring probe on n1's volume.",
@@ -921,10 +930,14 @@ fn tigerbeetle() -> Vec<Scenario> {
             version: "0.16.11", replicas: 3, memory: 3072, oracle_memory: 1024, args: QUERY, probe: false },
         TbSpec { name: "tb-2544-query-fixed", comment: "Negative control for tb-2544-query: 0.16.17 carries the fix.",
             version: "0.16.17", replicas: 3, memory: 3072, oracle_memory: 1024, args: QUERY, probe: false },
-        TbSpec { name: "tb-2767-reformat", comment: "tigerbeetle#2767 (Jepsen 3.12): cut one replica off while transfers commit on the\nother two, kill both, reformat one with `tigerbeetle format` and let it rejoin with\nthe cut-off replica before the other returns. Acknowledged transfers are lost.",
+        TbSpec { name: "tb-2767-reformat", comment: "tigerbeetle#2767 (Jepsen 3.12): cut n3 off while transfers commit on n1 and n2, kill\nboth, reformat n2 with `tigerbeetle format` and let it rejoin with n3 before n1 returns.\nThe transfers acknowledged during the cut are lost.",
             version: "0.16.11", replicas: 3, memory: 3072, oracle_memory: 512, args: REFORMAT, probe: false },
         TbSpec { name: "tb-2767-recover-fixed", comment: "Negative control for tb-2767-reformat on 0.16.43, whose `tigerbeetle recover`\nreplaces the data file safely: it waits for a quorum before the replica rejoins.",
             version: "0.16.43", replicas: 3, memory: 3072, oracle_memory: 512, args: &[], probe: false },
+        TbSpec { name: "tb-2767-format-0-16-43", comment: "tb-2767-reformat on 0.16.43 with `tigerbeetle format`: the fix is the new recover\ncommand, so replacing a data file with format still loses acknowledged transfers.",
+            version: "0.16.43", replicas: 3, memory: 3072, oracle_memory: 512, args: REFORMAT, probe: false },
+        TbSpec { name: "tb-2767-reformat-late", comment: "tb-2767-reformat with the cut at 10 s, after the cluster's first checkpoints: on\n0.16.11 the reformatted replica panics (reached unreachable code) when the cut-off\nreplica connects, and the cluster waits for the killed one.",
+            version: "0.16.11", replicas: 3, memory: 3072, oracle_memory: 512, args: &[], probe: false },
         TbSpec { name: "tb-206-timeout", comment: "tigerbeetle#206 (Jepsen 3.1): with every replica killed, a create_transfers request\nneither fails nor times out; the client retries until the replicas return, and\nthen it commits.",
             version: "0.16.11", replicas: 3, memory: 2560, oracle_memory: 512,
             args: &["--workload", "timeout", "--hold", "60", "--accounts", "4"], probe: false },
@@ -934,6 +947,9 @@ fn tigerbeetle() -> Vec<Scenario> {
         TbSpec { name: "tb-2484-sessions", comment: "tigerbeetle#2484 (Jepsen 3.3): 64 client sessions, then five more, each registered\nafter closing the newest; each evicts the oldest live session, and the 0.16.11 client\npanics on eviction and takes its process down.",
             version: "0.16.11", replicas: 3, memory: 2560, oracle_memory: 3072,
             args: &["--workload", "sessions", "--sessions", "64", "--evictions", "5", "--accounts", "4"], probe: false },
+        TbSpec { name: "tb-2484-sessions-fixed", comment: "Negative control for tb-2484-sessions: 0.16.17 replicas and the 0.16.17 client, whose\nevicted sessions fail their requests with client_evicted instead of panicking.",
+            version: "0.16.17", replicas: 3, memory: 2560, oracle_memory: 3072,
+            args: &["--workload", "sessions", "--sessions", "64", "--evictions", "5", "--accounts", "4", "--client", "0.16.17"], probe: false },
     ];
     specs
         .into_iter()
@@ -943,6 +959,27 @@ fn tigerbeetle() -> Vec<Scenario> {
                 let mut a = REFORMAT.to_vec();
                 a.extend(["--replace", "recover"]);
                 a
+            } else if spec.name == "tb-2767-reformat-late" {
+                vec![
+                    "--workload",
+                    "reformat",
+                    "--duration",
+                    "60",
+                    "--clients",
+                    "4",
+                    "--batch",
+                    "8",
+                    "--query-fraction",
+                    "0",
+                    "--cut-at",
+                    "10",
+                    "--cut-for",
+                    "5",
+                    "--alone-for",
+                    "15",
+                    "--timeout",
+                    "10",
+                ]
             } else {
                 spec.args.to_vec()
             };
