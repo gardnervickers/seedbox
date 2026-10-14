@@ -1,7 +1,7 @@
 # Seedbox interface refactor handover
 
-**Temporary handover — REMOVE BEFORE MERGE.** Implementation is paused at the
-user's request. This is an incomplete checkpoint, not a claim of API parity.
+**Temporary handover — REMOVE BEFORE MERGE.** Implementation is in progress.
+This is an incomplete checkpoint, not a claim of API parity.
 Before removing this document, move lasting decisions into rustdoc and the
 existing architecture documentation.
 
@@ -37,12 +37,13 @@ The freeze includes:
   failure, snapshot and caller obligations. Keeping a signature unchanged does
   not authorize changing its meaning.
 
-**Agents must obtain explicit user authorization before changing these
-contracts.** Approval to build a feature, fix an implementation or refactor code
-is not approval to change an interface. Already approved changes do not need
-another approval. Error variants are the explicit exception; that exception
-must not be used to change a non-error contract indirectly. Private mechanical
-changes that preserve the contracts can proceed normally.
+**The user has delegated interface decisions for this completion to the
+coordinator. Subagents still require explicit authorization from that owner.**
+A feature or implementation task is not blanket permission to change a contract.
+The coordinator must first rule out an implementation-only correction. Each new
+or changed interface needs an adjacent `TODO: Re-evaluate` rationale of at most
+3–4 lines. Already approved changes do not need another approval. Error variants
+remain exempt, but must not hide changes to non-error behavior.
 
 Write specifications in terms that apply to every implementation. Do not put
 KVM, PMU, QEMU, DynamoRIO or other backend mechanisms into generic contracts.
@@ -54,8 +55,10 @@ cannot satisfy the interface, review the boundary rather than quietly weakening
 it or leaking backend details upward.
 
 The coordinator delegates bounded implementation work and independently reviews
-it. Keep one checklist item active, and close it with relevant evidence before
-opening the next interface discussion.
+it against explicit contracts. Independent work may proceed in parallel. The
+acceptance goal is real Linux kernels executing through the same Machine
+contract on TCG and PV, with native evidence; UI/API bridge completion is not a
+prerequisite. Do not expand the interface for presentation convenience.
 
 ## Design and ownership
 
