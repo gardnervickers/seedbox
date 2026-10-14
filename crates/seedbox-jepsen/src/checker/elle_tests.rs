@@ -419,3 +419,45 @@ fn h_lines_round_trip() {
         ops
     );
 }
+
+#[test]
+fn lost_update_two_writers_read_the_same_version() {
+    // Both read x = [1] and then append: Adya's P4, also a G-single cycle.
+    let ops = [
+        ok(1, vec![a("x", 1)]),
+        ok(2, vec![r("x", &[1]), a("x", 2)]),
+        ok(3, vec![r("x", &[1]), a("x", 3)]),
+        ok(4, vec![r("x", &[1, 2, 3])]),
+    ];
+    let result = serializable(&ops);
+    assert_eq!(result.counts["lost-update"], 1, "{:?}", result.anomalies);
+    assert_eq!(
+        result.anomalies["lost-update"][0],
+        json!({"key": "x", "value": 1, "txns": [2, 3]})
+    );
+    assert!(result.counts.contains_key("G-single"));
+    assert!(!check(&ops, "snapshot-isolation").unwrap().valid);
+    assert!(check(&ops, "read-committed").unwrap().valid);
+}
+
+#[test]
+fn reads_after_ones_own_append_are_not_lost_updates() {
+    let result = serializable(&[
+        ok(1, vec![a("x", 1), r("x", &[1])]),
+        ok(2, vec![r("x", &[1]), a("x", 2)]),
+        ok(3, vec![r("x", &[1, 2])]),
+    ]);
+    assert!(result.valid, "{:?}", result.anomalies);
+}
+
+#[test]
+fn read_committed_allows_a_non_repeatable_read_but_not_g1() {
+    let internal = [
+        ok(1, vec![r("x", &[]), a("x", 1), r("x", &[2, 1])]),
+        ok(2, vec![a("x", 2)]),
+    ];
+    assert!(check(&internal, "read-committed").unwrap().valid);
+    assert!(!serializable(&internal).valid);
+    let aborted = [other(1, "fail", vec![a("x", 1)]), ok(2, vec![r("x", &[1])])];
+    assert!(!check(&aborted, "read-committed").unwrap().valid);
+}

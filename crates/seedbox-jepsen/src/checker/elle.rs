@@ -19,7 +19,9 @@
 //! Non-cyclic anomalies: `G1a` (aborted read), `G1b` (intermediate read),
 //! `internal` (a read disagrees with the transaction's own earlier reads and
 //! appends), `incompatible-order` (neither read a prefix of the other),
-//! `duplicate-elements` and `garbage` (a value nobody appended).
+//! `duplicate-elements`, `garbage` (a value nobody appended) and
+//! `lost-update` (Adya's P4: two committed transactions read the same version
+//! of a key, then both append to it).
 //!
 //! The dependency graph over committed transactions has ww, wr and rw
 //! (anti-dependency) edges. A committed append that no read observed must
@@ -30,7 +32,8 @@
 //! `G-single` (exactly one rw) and `G2-item` (two or more rw).
 //!
 //! Under serializability every anomaly is a violation. Snapshot isolation
-//! allows G2-item only, and read committed G-single and G2-item as well.
+//! allows G2-item only, and read committed G-single, G2-item, internal
+//! inconsistency and lost updates as well.
 //! Adya's repeatable read (PL-2.99) allows only predicate G2, which this
 //! workload cannot produce, so it forbids what serializability does;
 //! PostgreSQL's REPEATABLE READ is snapshot isolation and is checked as such.
@@ -54,7 +57,9 @@ pub fn allowed(model: &str) -> Option<&'static [&'static str]> {
     match model {
         "serializable" | "repeatable-read" => Some(&[]),
         "snapshot-isolation" => Some(&["G2-item"]),
-        "read-committed" => Some(&["G-single", "G2-item"]),
+        // PL-2 forbids only G0 and G1: a non-repeatable read inside one
+        // transaction (`internal`) and a lost update are allowed.
+        "read-committed" => Some(&["G-single", "G2-item", "internal", "lost-update"]),
         _ => None,
     }
 }
@@ -853,6 +858,45 @@ pub fn analyze(ops: &[TxnOp]) -> Result<Analyzed, String> {
                     reads.push((index, k.clone(), value.clone()));
                 }
             }
+        }
+    }
+
+    // Lost updates (Adya's P4): committed transactions that read the same
+    // version of a key before appending to it themselves. A version is named
+    // by its last element (None for the empty list), as in Elle.
+    let mut updates: BTreeMap<(Key, Option<i64>), Vec<usize>> = BTreeMap::new();
+    for (index, op) in ops.iter().enumerate() {
+        if kind(index) != "ok" {
+            continue;
+        }
+        let mut first_read: HashMap<&Key, Option<i64>> = HashMap::new();
+        let mut appended: HashSet<&Key> = HashSet::new();
+        let mut updated: BTreeSet<(Key, Option<i64>)> = BTreeSet::new();
+        for mop in value_of(op) {
+            match mop {
+                Mop::Read(k, Some(value)) if !appended.contains(k) => {
+                    first_read.entry(k).or_insert_with(|| value.last().copied());
+                }
+                Mop::Append(k, _) => {
+                    appended.insert(k);
+                    if let Some(version) = first_read.get(k) {
+                        updated.insert((k.clone(), *version));
+                    }
+                }
+                Mop::Read(..) => {}
+            }
+        }
+        for key in updated {
+            updates.entry(key).or_default().push(index);
+        }
+    }
+    for ((k, version), txns) in &updates {
+        if txns.len() > 1 {
+            report(
+                "lost-update",
+                json!({"key": k.to_json(), "value": version,
+                       "txns": txns.iter().map(|&i| ops[i].op.id.to_json()).collect::<Vec<_>>()}),
+            );
         }
     }
 
