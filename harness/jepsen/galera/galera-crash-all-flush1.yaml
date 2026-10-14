@@ -62,6 +62,6 @@ oracle:
     context: ../../..
     dockerfile: crates/seedbox-jepsen/guest.Dockerfile
   entrypoint: ["/jepsen/seedbox-jepsen", "galera", "--fault", "crash", "--fault-at", "20", "--duration", "130", "--label", "12.1.2/galera-crash-all-flush1"]
-  memoryMiB: 256
+  memoryMiB: 1024
 network:
   latency: 1ms

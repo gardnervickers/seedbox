@@ -64,6 +64,6 @@ oracle:
     context: ../../..
     dockerfile: crates/seedbox-jepsen/guest.Dockerfile
   entrypoint: ["/jepsen/seedbox-jepsen", "galera", "--isolation", "serializable", "--label", "12.1.2/galera-healthy-append-ser"]
-  memoryMiB: 256
+  memoryMiB: 1024
 network:
   latency: 1ms

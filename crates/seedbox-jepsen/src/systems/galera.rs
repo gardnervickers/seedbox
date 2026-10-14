@@ -65,6 +65,10 @@ pub struct Args {
     /// Set wsrep_sync_wait to this in every client session.
     #[arg(long)]
     pub sync_wait: Option<u32>,
+    /// After each statement of a multi-statement transaction, check
+    /// @@in_transaction and report a session that silently left it (diagnostic).
+    #[arg(long)]
+    pub probe_transaction: bool,
     #[arg(long, default_value_t = 20)]
     pub clients: usize,
     #[arg(long, default_value_t = 60.0)]
@@ -311,7 +315,7 @@ impl Run {
         t0: f64,
         t1: f64,
         error: Option<String>,
-    ) {
+    ) -> i64 {
         let mut txns = self.txns.lock().unwrap();
         let index = txns.len() as i64;
         let value = if kind == "ok" {
@@ -335,6 +339,7 @@ impl Run {
             json!({"i": index, "p": process, "type": kind, "t0": t0, "t1": t1,
                    "value": value.iter().map(Mop::to_json).collect::<Vec<_>>(), "error": error})
         ));
+        index
     }
 
     fn open(&self, host: &str) -> my::Sql<Conn> {
@@ -417,9 +422,13 @@ impl Run {
         let t0 = now_us();
         let (sleep, tables) = (self.args.mop_sleep_ms, self.args.tables);
         let txn = ops.len() > 1;
+        let probe = txn && self.args.probe_transaction;
+        // With --probe-transaction: the first micro-operation after which the
+        // session was no longer in a transaction.
+        let mut ended_after: Option<usize> = None;
         let result = my::transact(conn, txn, |conn| {
             let mut value = Vec::new();
-            for mop in &ops {
+            for (position, mop) in ops.iter().enumerate() {
                 my::pause_ms(rng, sleep);
                 match mop {
                     Mop::Read(Atom::Int(k), _) => value.push(Mop::Read(
@@ -432,6 +441,12 @@ impl Run {
                     }
                     _ => {}
                 }
+                if probe && ended_after.is_none() {
+                    let open = my::scalar::<i64>(conn, "SELECT @@in_transaction")?;
+                    if open == Some(0) {
+                        ended_after = Some(position);
+                    }
+                }
             }
             Ok(value)
         });
@@ -441,7 +456,15 @@ impl Run {
             Err(error) => ("info", None, Some(error), true),
         };
         let not_ready = error.as_deref() == Some(WSREP_NOT_READY);
-        self.record_txn(json!(process), kind, &ops, value, t0, now_us(), error);
+        let reported = kind.to_string();
+        let index = self.record_txn(json!(process), kind, &ops, value, t0, now_us(), error);
+        if let Some(position) = ended_after {
+            evidence(
+                "transaction-ended-early",
+                json!({"txn": index, "process": process, "node": self.client_node(process % self.args.clients),
+                       "after_mop": position, "reported": reported}),
+            );
+        }
         (broken, not_ready)
     }
 
@@ -668,7 +691,7 @@ pub fn run(args: Args) -> u8 {
         "config",
         json!({"nodes": args.nodes, "client_nodes": args.client_nodes, "read_only": args.read_only,
                "isolation": args.isolation.name(), "model_checked": args.model,
-               "sync_wait": args.sync_wait, "clients": args.clients, "duration": args.duration,
+               "sync_wait": args.sync_wait, "probe_transaction": args.probe_transaction, "clients": args.clients, "duration": args.duration,
                "tables": args.tables, "key_count": args.key_count,
                "max_writes_per_key": args.max_writes_per_key, "max_txn_length": args.max_txn_length,
                "read_fraction": args.read_fraction, "mop_sleep_ms": args.mop_sleep_ms,
