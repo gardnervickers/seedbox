@@ -1,0 +1,51 @@
+# Diagnostic for a Seedbox issue: pg123-serializable-15s plus log_lock_waits=on and an idle
+# probe machine that reports pg_stat_activity and pg_locks at 13, 16 and 19 s. Seeds 7 and
+# 23 stall: two backends deadlock at about 2.3 s, and after about 3.3 s no deadlock_timeout
+# (SIGALRM) fires in any backend, so the deadlock is never broken. See STATUS.md.
+name: pg123-stall-lockwaits
+machines:
+  pg:
+    image: docker.io/library/postgres:12.3@sha256:a06e6e6e519b7a329c419f8221edec66cfc45511e8b80e262c12103ba745cf19
+    memoryMiB: 1024
+    # pgmon.sh runs the official entrypoint and reports guest memory and OOM kills.
+    entrypoint: [bash, /pgmon.sh]
+    # Log no ERROR (every serialization failure would be four lines); keep LOG, FATAL, PANIC.
+    command: [postgres, -c, log_min_messages=log, -c, log_lock_waits=on]
+    files:
+    - source: ../pgmon.sh
+      target: /pgmon.sh
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+  probe:
+    image: docker.io/library/python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
+    entrypoint: [python3, -u, /scenario/probe.py, "13", "16", "19"]
+    memoryMiB: 512
+    files:
+    - source: probe.py
+      target: /scenario/probe.py
+    - source: ../pg_append.py
+      target: /scenario/pg_append.py
+    - source: ../../elle/list_append.py
+      target: /scenario/list_append.py
+oracle:
+  image: docker.io/library/python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
+  entrypoint:
+  - python3
+  - -u
+  - /scenario/pg_append.py
+  - "--isolation"
+  - "serializable"
+  - "--clients"
+  - "20"
+  - "--duration"
+  - "15"
+  - "--label"
+  - "12.3/serializable"
+  memoryMiB: 1024
+  files:
+  - source: ../pg_append.py
+    target: /scenario/pg_append.py
+  - source: ../../elle/list_append.py
+    target: /scenario/list_append.py
+network:
+  latency: 1ms
