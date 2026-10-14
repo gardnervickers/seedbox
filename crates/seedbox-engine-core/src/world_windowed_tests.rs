@@ -2672,3 +2672,92 @@ fn checkpoint_continuation_schedules_edited_inputs_before_the_first_resumed_roun
         assert_eq!(w.faults.log[2].applied_at_ns, Some(at + 1));
     }
 }
+
+/// Bursts both ways: each send's frames arrive 1 ns apart (the FIFO link
+/// clock), interleaved with the receiver's own sends, a control stop and a
+/// halt, so chains both run to the slice end and stop short.
+fn bursts(early: u64) -> World<Mock> {
+    let mut w = world(&["a", "b"]);
+    w.early = early;
+    let frame = |to: u8, tag: u8| {
+        let mut frame = vec![tag; 60];
+        frame[..6].copy_from_slice(&[0, 0, 0, 0, 0, to]);
+        frame
+    };
+    for (n, at) in [(0u8, 2u64), (1, 9), (2, 23), (3, 24), (4, 41)] {
+        let mut send = Step::new(at, Stop::Sent);
+        send.frames = (0..5 + n).map(|i| frame(1, n * 16 + i)).collect();
+        w.machines[0].steps.push_back(send);
+    }
+    w.machines[0].steps.push_back(Step::new(70, Stop::Exited));
+    let mut reply = Step::new(15, Stop::Sent);
+    reply.frames.push(frame(0, 0xee));
+    let mut control = Step::new(36, Stop::Control);
+    control.effects.push((0, true));
+    w.machines[1].steps.extend([
+        Step::new(12, Stop::Reached),
+        reply,
+        control,
+        Step::new(52, Stop::Halted),
+    ]);
+    w.machines[1].timer = 58;
+    w
+}
+
+#[test]
+fn chained_slices_request_exactly_what_separate_slices_would() {
+    for early in [0, 3] {
+        let mut reference = None;
+        for (chain, workers) in [(0, 0), (1, 0), (2, 1), (5, 0), (1024, 0), (1024, 2)] {
+            let mut w = bursts(early);
+            configure_control(&mut w);
+            for m in &mut w.machines {
+                m.chain = chain;
+            }
+            let (outcome, evidence) =
+                run_with(&mut w, 90, Some("a"), workers, Duration::ZERO).unwrap();
+            assert!(w.machines.iter().all(|m| m.planned.is_empty()));
+            // With delivery slack the next 1 ns-spaced frame is already due
+            // when a slice reaches a frame, so the loop delivers it itself.
+            let replayed: usize = w.machines.iter().map(|m| m.replayed).sum();
+            assert_eq!(
+                chain == 0 || early > 0,
+                replayed == 0,
+                "early {early}, chain {chain}"
+            );
+            let got = (receipt(&w, outcome), evidence["effects_digest"].clone());
+            match &reference {
+                None => reference = Some(got),
+                Some(want) => assert_eq!(want, &got, "early {early}, chain {chain}"),
+            }
+        }
+        let (receipt, _) = reference.unwrap();
+        // Every burst frame arrived, at its own nanosecond.
+        let frames = receipt["traces"][1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|line| line.as_str().unwrap().contains(":frame:"))
+            .count();
+        assert_eq!(frames, 5 + 6 + 7 + 8 + 9, "early {early}");
+    }
+}
+
+#[test]
+fn chained_slices_leave_the_fault_and_control_world_unchanged() {
+    for variant in 0..8u64 {
+        let mut reference = None;
+        for chain in [0, 1, 3, 1024] {
+            let mut w = scenario(variant);
+            for m in &mut w.machines {
+                m.chain = chain;
+            }
+            let (outcome, evidence) = run_with(&mut w, 160, Some("a"), 0, Duration::ZERO).unwrap();
+            let got = (receipt(&w, outcome), evidence["effects_digest"].clone());
+            match &reference {
+                None => reference = Some(got),
+                Some(want) => assert_eq!(want, &got, "variant {variant}, chain {chain}"),
+            }
+        }
+    }
+}

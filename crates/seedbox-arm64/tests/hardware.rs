@@ -371,7 +371,7 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
         };
         let mut sequence = 0;
         let mut call = |operation| {
-            write_message(
+            send(
                 &mut client,
                 &Request {
                     sequence,
@@ -380,7 +380,7 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
                 },
             )
             .unwrap();
-            let response = read_message::<Response>(&mut client).unwrap().unwrap();
+            let response = receive::<Response>(&mut client).unwrap().unwrap();
             assert_eq!(response.sequence, sequence);
             assert_eq!(response.after.as_ref(), Some(&identity));
             assert!(!matches!(response.answer, Answer::Error(_)), "{response:?}");
@@ -405,6 +405,8 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
                 hard_limit: 10,
                 early_slack: 0,
                 observe_console: false,
+                then: Vec::new(),
+                ahead: Vec::new(),
             });
             let response = call(Operation::Snapshot {
                 artifact: root.join("checkpoint"),
@@ -424,6 +426,8 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
             hard_limit: 20,
             early_slack: 0,
             observe_console: false,
+            then: Vec::new(),
+            ahead: Vec::new(),
         });
         let Answer::Evidence(evidence) = call(Operation::Evidence {
             full_state: true,
