@@ -165,6 +165,7 @@ fn package(root: &Path, layers: Vec<Vec<u8>>) -> crate::Result<Vec<u8>> {
     prefix_archive(
         &root.join("filesystem.tar"),
         &root.join("rootfs.tar"),
+        "example/image",
         &|| Ok(()),
     )?;
     fs::write(root.join("init"), b"INIT").unwrap();
@@ -187,6 +188,7 @@ struct Newc {
     gid: u32,
     nlink: u32,
     mtime: u32,
+    rdev: (u32, u32),
     data: Vec<u8>,
 }
 
@@ -218,6 +220,7 @@ fn parse(bytes: &[u8]) -> Vec<Newc> {
             gid: field(3),
             nlink: field(4),
             mtime: field(5),
+            rdev: (field(9), field(10)),
             data: bytes[body..body + size].to_vec(),
         });
     }
@@ -484,22 +487,111 @@ fn extended_metadata_outside_overlay_bookkeeping_is_rejected() {
     }
 }
 
-#[test]
-fn device_nodes_are_rejected() {
-    let failure = with_entry(|layer| {
-        let mut header = layer.header(tar::EntryType::Char, 0o666);
-        header.set_device_major(1).unwrap();
-        header.set_device_minor(3).unwrap();
-        layer
-            .tar
-            .append_data(&mut header, "bin/null", std::io::empty())
+impl Layer {
+    fn device(
+        &mut self,
+        path: &str,
+        kind: tar::EntryType,
+        (major, minor): (u32, u32),
+    ) -> &mut Self {
+        let mut header = self.header(kind, 0o620);
+        header.set_device_major(major).unwrap();
+        header.set_device_minor(minor).unwrap();
+        self.tar
+            .append_data(&mut header, path, std::io::empty())
             .unwrap();
-    })
-    .expect_err("a device node was packaged")
-    .to_string();
-    assert!(
-        failure.contains("invalid Linux root filesystem archive"),
-        "{failure}"
+        self
+    }
+}
+
+/// Official MySQL images keep their base layer's device nodes and the
+/// `dev/initctl` FIFO. The guest mounts its own `/dev` over the image's, so
+/// these stay inert; the same kinds elsewhere keep their type and number.
+#[test]
+fn device_nodes_and_fifos_keep_their_type_and_number() {
+    use tar::EntryType::{Block, Char, Fifo};
+    let entries = parse(
+        &with_entry(|layer| {
+            layer
+                .dir("dev/", 0o755)
+                .device("dev/null", Char, (1, 3))
+                .device("dev/vda", Block, (254, 0))
+                .device("dev/initctl", Fifo, (0, 0))
+                .hardlink("dev/initctl-alias", "dev/initctl")
+                .device("bin/null", Char, (1, 3))
+                .device("bin/disk", Block, (8, 1))
+                .device("bin/pipe", Fifo, (0, 0))
+                .hardlink("bin/pipe-alias", "bin/pipe");
+        })
+        .unwrap(),
+    );
+    let get = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} missing"))
+    };
+    for (name, mode, rdev, nlink) in [
+        ("rootfs/dev/null", 0o020620, (1, 3), 1),
+        ("rootfs/dev/vda", 0o060620, (254, 0), 1),
+        ("rootfs/dev/initctl", 0o010620, (0, 0), 2),
+        ("rootfs/dev/initctl-alias", 0o010644, (0, 0), 2),
+        ("rootfs/bin/null", 0o020620, (1, 3), 1),
+        ("rootfs/bin/disk", 0o060620, (8, 1), 1),
+        ("rootfs/bin/pipe", 0o010620, (0, 0), 2),
+        ("rootfs/bin/pipe-alias", 0o010644, (0, 0), 2),
+    ] {
+        let entry = get(name);
+        assert_eq!(
+            (entry.mode, entry.rdev, entry.nlink, entry.data.len()),
+            (mode, rdev, nlink, 0),
+            "{name}"
+        );
+    }
+    // The kernel links an entry to an earlier one with the same inode and type.
+    assert_eq!(
+        get("rootfs/dev/initctl").inode,
+        get("rootfs/dev/initctl-alias").inode
+    );
+    assert_eq!(
+        get("rootfs/bin/pipe").inode,
+        get("rootfs/bin/pipe-alias").inode
+    );
+    assert_ne!(
+        get("rootfs/dev/initctl").inode,
+        get("rootfs/bin/pipe").inode
+    );
+    // Ordinary entries keep a zero device number.
+    assert_eq!(get("rootfs/bin").rdev, (0, 0));
+}
+
+/// What newc cannot represent fails before packaging, naming the image, the
+/// entry and its kind.
+#[test]
+fn unsupported_entries_name_the_image_and_path() {
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("filesystem.tar");
+    let mut tar = tar::Builder::new(fs::File::create(&input).unwrap());
+    let mut header = tar::Header::new_ustar();
+    header.set_entry_type(tar::EntryType::Continuous);
+    header.set_mode(0o644);
+    header.set_size(1);
+    tar.append_data(&mut header, "opt/contiguous", &b"x"[..])
+        .unwrap();
+    tar.finish().unwrap();
+    let failure = prefix_archive(
+        &input,
+        &root.path().join("rootfs.tar"),
+        "example/image@sha256:abc",
+        &|| Ok(()),
+    )
+    .unwrap_err();
+    assert!(matches!(failure, crate::Error::Setup(_)), "{failure:?}");
+    assert_eq!(
+        failure.to_string(),
+        "image example/image@sha256:abc: /opt/contiguous is a contiguous file, which a \
+         Seedbox root filesystem cannot hold; remove it from the image, for example \
+         with RUN rm in a derived Dockerfile"
     );
 }
 

@@ -331,7 +331,11 @@ impl ImageTransport for ContainerTransport {
         )?;
         let image = crate::oci::import_metadata_for_arch(&raw, service, store, architecture)?;
         let archive = directory.join("rootfs.tar");
-        prefix_archive(&rootfs, &archive, &|| self.check())?;
+        let label = match &service.source {
+            ImageSource::Registry { reference } => reference.clone(),
+            ImageSource::Build { dockerfile, .. } => format!("built from {}", dockerfile.display()),
+        };
+        prefix_archive(&rootfs, &archive, &label, &|| self.check())?;
         Ok(ImportedImage {
             image,
             rootfs: RootFilesystem::Archive(archive),
@@ -356,7 +360,15 @@ fn cached_export(store: &ContentStore, record: &ContentDigest) -> Option<(Vec<u8
 }
 
 /// Prefix metadata only. Guest filesystem paths are never extracted on the host.
-fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -> Result<()> {
+/// Device nodes and FIFOs are kept wherever the image has them: the guest mounts
+/// its own `/dev` over the image's, and a root application could create the
+/// same nodes itself. `image` names the image in errors.
+fn prefix_archive(
+    input: &Path,
+    output: &Path,
+    image: &str,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     fn relative(path: &Path) -> Result<std::path::PathBuf> {
         let mut result = std::path::PathBuf::new();
         for component in path.components() {
@@ -397,6 +409,15 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
         let path = relative(&entry.path()?)?;
         if path.as_os_str().is_empty() {
             continue;
+        }
+        let kind = entry.header().entry_type();
+        if !crate::guest::supported_entry(kind) {
+            return Err(Error::Setup(format!(
+                "image {image}: /{} is a {}, which a Seedbox root filesystem cannot hold; \
+                 remove it from the image, for example with RUN rm in a derived Dockerfile",
+                path.display(),
+                crate::guest::entry_kind(kind)
+            )));
         }
         let mut header = export_header(&mut entry, &path)?;
         let name = Path::new("rootfs").join(path);

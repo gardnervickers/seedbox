@@ -207,13 +207,18 @@ impl OciPreparer {
                 .collect::<Result<BTreeMap<_, _>>>()?;
             let source = serde_json::to_string(&service.source)?;
             let imported = successful_source(&mut imported_sources, source, || {
-                transport.import(
-                    service,
-                    &temporary.path().join(name),
-                    store,
-                    context.map(|c| (c, name.as_str())),
-                    architecture,
-                )
+                transport
+                    .import(
+                        service,
+                        &temporary.path().join(name),
+                        store,
+                        context.map(|c| (c, name.as_str())),
+                        architecture,
+                    )
+                    .map_err(|error| match error {
+                        Error::Setup(message) => Error::Setup(format!("machine {name}: {message}")),
+                        error => error,
+                    })
             })?
             .for_service(service, store)?;
             if let Some(context) = context {
