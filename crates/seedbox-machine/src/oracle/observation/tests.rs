@@ -502,7 +502,7 @@ fn service_correlation_is_consumed_after_settlement_then_terminal() {
 }
 
 #[test]
-fn physical_crash_updates_visible_condition_without_inventing_logical_down() {
+fn confirmed_physical_crash_is_logical_down_but_shutdown_is_not() {
     let mut s = state();
     ready(&mut s, 1);
     s.terminal(0, 4, 10, ExitReason::Crashed).unwrap();
@@ -513,9 +513,25 @@ fn physical_crash_updates_visible_condition_without_inventing_logical_down() {
         view.application.condition,
         ApplicationCondition::Unavailable
     );
-    assert_eq!(s.facts().unwrap().vm, Vm::Up);
-    assert_eq!(s.facts().unwrap().process, Process::Running);
+    // The confirmed state, not the crash's origin, owns reboot eligibility.
+    assert_eq!(s.facts().unwrap().vm, Vm::Down);
     assert!(s.facts().unwrap().physically_ended);
+    s.admission(
+        0,
+        11,
+        11,
+        Admission::Applied(Transition::Reboot { new_boot: 1 }),
+    )
+    .unwrap();
+    assert_eq!(s.facts().unwrap().vm, Vm::Up);
+    assert!(!s.facts().unwrap().physically_ended);
+    assert!(s.view().unwrap().first_terminal.is_none());
+
+    let mut s = state();
+    ready(&mut s, 1);
+    s.terminal(0, 4, 10, ExitReason::Shutdown).unwrap();
+    assert_eq!(s.view().unwrap().machine, MachineCondition::Exited);
+    assert_eq!(s.facts().unwrap().vm, Vm::Up, "shutdown still needs Crash");
     s.admission(0, 11, 11, Admission::Applied(Transition::Crash))
         .unwrap();
     assert_eq!(s.facts().unwrap().vm, Vm::Down);

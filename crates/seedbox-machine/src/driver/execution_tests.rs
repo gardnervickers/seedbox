@@ -222,7 +222,8 @@ fn exited_settings_and_crash_reboot_retain_the_configured_value() {
     assert_eq!(driver.machines[1].stopped, exited);
     assert_eq!(driver.machines[1].execution, config(2000));
     for (time, action) in [
-        // Physically exited without a crash: pause is unavailable.
+        // A confirmed physical crash makes the boot down: Pause and Crash are
+        // refused and Reboot is admitted directly. The new boot is live.
         (1, Action::Pause(Target::Machine(id))),
         (1, Action::Crash(Target::Machine(id))),
         (2, Action::Reboot(Target::Machine(id))),
@@ -242,15 +243,19 @@ fn exited_settings_and_crash_reboot_retain_the_configured_value() {
             .map(|call| (call.factor, call.lifecycle.clone()))
             .collect::<Vec<_>>(),
         [
-            (2000, vec!["crash"]),
             (2000, vec!["reboot"]),
             (1000, vec!["crash"]),
             (1000, vec!["reboot"])
         ]
     );
     let rejected = rejected(&driver.drain_events());
-    assert_eq!(rejected.len(), 1);
-    assert_eq!(rejected[0].1, RejectionReason::TargetUnavailable);
+    assert_eq!(
+        rejected
+            .iter()
+            .map(|(_, reason)| *reason)
+            .collect::<Vec<_>>(),
+        [RejectionReason::InvalidState, RejectionReason::InvalidState]
+    );
     assert!(!driver.machines[1].paused);
     assert_eq!(driver.machines[1].execution, ExecutionConfig::default());
 }

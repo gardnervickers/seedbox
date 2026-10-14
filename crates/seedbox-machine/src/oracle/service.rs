@@ -49,7 +49,8 @@ pub(crate) struct Facts {
 /// Logical Down excludes this preflight: new Machine may retain an Exited
 /// reason after Crash, while legacy Crash installed a fresh unrun machine.
 /// Down process faults therefore still admit and settle Unavailable regardless
-/// of physical state. Crash/Reboot validate retained lifecycle independently.
+/// of physical state. Crash/Reboot validate retained lifecycle independently;
+/// a confirmed physical crash (`ExitReason::Crashed`) makes that lifecycle Down.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CommandOwner {
     External,

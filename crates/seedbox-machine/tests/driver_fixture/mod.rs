@@ -63,6 +63,8 @@ pub enum Op {
     Sleep(u64),
     Park,
     Exit,
+    /// The guest ends its own boot as a crash (for example a reset request).
+    Crash,
     Fail,
     BadStop,
 }
@@ -246,6 +248,13 @@ impl Machine for TestMachine {
                     return Ok(StopReason::Exited {
                         reached: at(self.reached),
                         reason: ExitReason::Shutdown,
+                    });
+                }
+                Op::Crash => {
+                    self.crashed = true;
+                    return Ok(StopReason::Exited {
+                        reached: at(self.reached),
+                        reason: ExitReason::Crashed,
                     });
                 }
                 Op::Fail => return Err(std::io::Error::other("fixture execution failure")),

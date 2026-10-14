@@ -26,7 +26,7 @@ fn exited_target_can_crash_and_reboot_while_separate_oracle_remains_alive() {
         driver.step(at(100)).unwrap(),
         StepOutcome::Blocked { at: at(2) }
     );
-    // A machine that exited by itself is not down: Reboot needs a crash first.
+    // A machine that shut down by itself is not down: Reboot needs a crash first.
     driver
         .with_barrier(|barrier| {
             barrier.schedule(at(2), key("early"), Action::Reboot(Target::Machine(id)))
@@ -74,6 +74,92 @@ fn exited_target_can_crash_and_reboot_while_separate_oracle_remains_alive() {
         driver.step(at(100)).unwrap(),
         StepOutcome::Blocked { at: at(4) }
     );
+}
+
+/// Confirmed boot state, not the origin of a crash, owns reboot eligibility.
+/// A self-crashed boot is down: Reboot is admitted directly and a further
+/// Crash is rejected. A boot that shut down by itself still needs a Crash.
+#[test]
+fn self_crashed_target_reboots_directly_but_self_shutdown_needs_a_crash() {
+    let mut driver = controlled_targets(1, &[&[Op::Work(2), Op::Crash], &[Op::Work(2), Op::Exit]]);
+    let [crashed, shut] = ids(&mut driver)[..] else {
+        unreachable!()
+    };
+    assert_eq!(
+        driver.step(at(100)).unwrap(),
+        StepOutcome::Blocked { at: at(2) }
+    );
+    driver.drain_events();
+    driver
+        .with_barrier(|barrier| {
+            assert_eq!(
+                barrier.stopped(crashed)?,
+                StopReason::Exited {
+                    reached: at(2),
+                    reason: ExitReason::Crashed
+                }
+            );
+            barrier.schedule(
+                at(2),
+                key("crash-again"),
+                Action::Crash(Target::Machine(crashed)),
+            )?;
+            barrier.schedule(
+                at(2),
+                key("reboot-crashed"),
+                Action::Reboot(Target::Machine(crashed)),
+            )?;
+            barrier.schedule(
+                at(2),
+                key("reboot-shut"),
+                Action::Reboot(Target::Machine(shut)),
+            )
+        })
+        .unwrap();
+    driver.step(at(2)).unwrap();
+    let events = driver.drain_events();
+    let rejected = |name: &str| {
+        events.iter().any(|event| {
+            matches!(&event.kind,
+            EventKind::InputRejected { key: found, .. } if *found == key(name))
+        })
+    };
+    let applied = |name: &str| {
+        events.iter().any(|event| {
+            matches!(&event.kind,
+            EventKind::FaultSettled { record, status, .. }
+                if record.origin == FaultOrigin::Input { key: key(name) }
+                    && *status == SettlementStatus::Applied)
+        })
+    };
+    assert!(
+        rejected("crash-again"),
+        "an already crashed boot is not crashed again"
+    );
+    assert!(
+        applied("reboot-crashed"),
+        "a self-crashed boot reboots directly"
+    );
+    assert!(rejected("reboot-shut"), "a self-shutdown boot is not down");
+    driver
+        .with_barrier(|barrier| {
+            let guest = barrier.machine(crashed)?;
+            assert_eq!(guest.boot_times, [0, 2]);
+            assert_eq!(guest.lifecycle, ["reboot"], "no synthetic crash reached it");
+            assert_eq!(barrier.stopped(crashed)?, StopReason::BoundaryReached);
+            assert_eq!(barrier.machine(shut)?.boot_times, [0]);
+            Ok(())
+        })
+        .unwrap();
+    // Existing policy: the self-shutdown boot reboots after an explicit Crash.
+    crash_then_reboot(&mut driver, shut, 2);
+    driver.step(at(2)).unwrap();
+    driver
+        .with_barrier(|barrier| {
+            assert_eq!(barrier.machine(shut)?.boot_times, [0, 2]);
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

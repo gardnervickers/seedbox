@@ -113,13 +113,20 @@ pub enum Action {
     /// work. Admitted only for a paused machine.
     Resume(Target),
     /// Crash the current boot without graceful shutdown, including while
-    /// paused or after it exited by itself. Rejected for an already crashed
-    /// machine. Pending process commands of that boot settle Unavailable.
+    /// paused or after it shut down or exited by itself. Rejected for an
+    /// already crashed boot, whether an applied Crash or a confirmed machine
+    /// exit with [`ExitReason::Crashed`](crate::machine::ExitReason::Crashed)
+    /// crashed it. Pending process commands of that boot settle Unavailable.
     Crash(Target),
+    // TODO: Re-evaluate: the boot's confirmed state, not the cause or origin
+    // of its crash, owns reboot eligibility. A confirmed self-crash is already
+    // down; demanding a synthetic Crash would keep two contradictory views.
     /// Start a fresh boot of a crashed machine, clearing its driver pause and
-    /// old blocked/timer state. Admitted only after a crash has been applied;
-    /// crash a machine that exited by itself before rebooting it. Later
-    /// inputs bind to the new boot when they are admitted.
+    /// old blocked/timer state. Admitted once the current boot is confirmed
+    /// crashed: by an applied Crash, or by a machine exit with
+    /// [`ExitReason::Crashed`](crate::machine::ExitReason::Crashed) committed
+    /// before admission. A boot that shut down or whose program exited must be
+    /// crashed first. Later inputs bind to the new boot when they are admitted.
     Reboot(Target),
     /// Latch a graceful shutdown request for the current boot. Admitted for a
     /// live machine, including while paused; a physically exited or crashed

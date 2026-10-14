@@ -162,17 +162,16 @@ pub trait Machine {
     /// promise rollback or a resumable state. The caller must stop scheduling
     /// the machine and propagate the failure rather than blindly retrying.
     ///
-    // TODO: Re-evaluate: this only interprets the existing rule that crashes
-    // are Exited, not Err; backends changed, no interface did. A guest cannot
-    // start its own boot because the Driver owns boots and their accounting,
-    // so a guest reset ends the boot and the caller decides on Reboot.
-    /// A guest terminal request is a machine outcome, not a failure. Once the
-    /// guest has started running programs, power-off and a permanent halt end
-    /// execution as [`ExitReason::Shutdown`]. A guest reset request, including
-    /// the restart after a kernel panic, ends it as [`ExitReason::Crashed`]:
-    /// the machine never starts a new boot by itself, and only an accepted
-    /// Reboot request does. Simulator, hypervisor and protocol failures,
-    /// unrecognized stops, and terminal requests before the guest is ready
+    // TODO: Re-evaluate: guest termination is an outcome within this contract;
+    // `Err` means the contract could not be fulfilled. Requiring the caller's
+    // explicit Reboot keeps every new boot visible to the caller, with no
+    // hidden reset or change to its boot accounting.
+    /// A guest's own termination is a machine outcome, not a failure: guest
+    /// power-off or halt ends execution as [`ExitReason::Shutdown`], and a guest
+    /// reset request, including the restart after a kernel panic, as
+    /// [`ExitReason::Crashed`]. The machine never starts a new boot by itself;
+    /// only an accepted Reboot request does. Initialization, simulator,
+    /// hypervisor or protocol failures that prevent satisfying this contract
     /// are errors. An idle guest that can still be woken is `Blocked`.
     fn run(
         &mut self,

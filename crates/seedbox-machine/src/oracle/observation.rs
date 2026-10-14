@@ -488,6 +488,13 @@ impl State {
             };
             self.machine(condition, observed);
         }
+        // A confirmed crash is the same lifecycle fact as an applied Crash:
+        // the boot is down, Reboot is eligible and another Crash is not.
+        // Shutdown and program exit keep the policy and still need Crash.
+        if reason == ExitReason::Crashed {
+            self.policy = Vm::Down;
+            self.before_pause = None;
+        }
         if !matches!(
             self.application.condition,
             ApplicationCondition::Exited | ApplicationCondition::Stopped
