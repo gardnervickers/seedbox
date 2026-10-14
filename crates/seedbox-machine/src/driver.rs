@@ -270,11 +270,8 @@ pub struct Driver<M: Machine> {
     control: control::Control,
     inputs: BTreeMap<InputKey, LiveInput>,
     trigger_marker: Option<Timestamp>,
-    // Retained for upcoming barrier-time spawning.
-    #[allow(dead_code)]
+    // Unstarted definitions and their constructor, retained for FIFO spawn effects.
     definitions: Vec<MachineDefinition>,
-    // Retained for upcoming barrier-time spawning.
-    #[allow(dead_code)]
     factory: MachineFactory<M>,
 }
 
@@ -294,7 +291,9 @@ where
     /// RNG streams follow spawn admission order. Construction failure publishes a
     /// Failed settlement and poisons the driver; confirmed events remain drainable.
     /// The driver retains the factory and spawnable definitions.
-    /// TODO BEFORE MERGE: re-evaluate the MachineDefinition / spawnable representation.
+    /// TODO: Re-evaluate: declared spawnables keep future machines as complete inputs.
+    /// A factory alone cannot enumerate names for pre-execution uniqueness checks.
+    /// Retaining definitions supports one-shot admission without template or override APIs.
     /// The factory must return newly configured machines without executing them. This order
     /// breaks scheduling ties and assigns
     /// independent machine RNG streams by drawing one little-endian u64 seed

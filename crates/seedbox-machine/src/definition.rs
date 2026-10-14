@@ -1,7 +1,8 @@
 //! Common configured-machine inputs, independent of execution backend.
 //!
-//! TODO BEFORE MERGE: finalize this provisional definition API and the dynamic
-//! launch representation with its preparation and Driver callers.
+//! TODO: Re-evaluate: one definition owns a guest's resources and prepared launch.
+//! Splitting instance overrides from the definition would hide part of what runs.
+//! Backend boot inputs belong to concrete factories; caller-side templating needs no API.
 use std::{collections::BTreeMap, fmt};
 
 /// Owned prepared application and resources for one named machine.

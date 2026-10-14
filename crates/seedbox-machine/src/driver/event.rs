@@ -2,6 +2,10 @@
 //!
 //! See [`Driver::drain_events`](super::Driver::drain_events) for the ordering,
 //! failure and retention contract shared by every event.
+//!
+//! TODO: Re-evaluate: committed outputs and control settlements need a drainable stream.
+//! Polling current state cannot reconstruct their order or a prefix preceding failure.
+//! Events report owned facts; they do not claim transport delivery or a complete world view.
 
 use super::{FaultHandle, InputKey, InputRejection, MachineId, MachineResponse, Position};
 use crate::{

@@ -92,6 +92,10 @@ pub enum Target {
 
 /// A typed fault scheduled by the host.
 ///
+/// TODO: Re-evaluate: actions express admission policy, not raw machine work.
+/// Machine requests cannot represent Driver-owned pause/rate changes or target binding.
+/// Keeping this boundary makes host and guest controls share IDs and settlement rules.
+///
 /// Every action is admitted by the control policy at its scheduled time, with
 /// the same availability preflight and state validation as an ordinary guest
 /// control call, and settles like one. Admission binds the target's current
