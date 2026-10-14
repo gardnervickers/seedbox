@@ -188,40 +188,80 @@ async fn oracle_printed(
     Ok(output.windows(marker.len()).any(|window| window == marker))
 }
 
+/// Whether a simulation has finished executing: it has no worker control
+/// endpoint left to hold or capture.
+async fn ended(client: &seedbox_client::Client, id: &seedbox_api::SimulationId) -> bool {
+    client.describe(id).await.is_ok_and(|simulation| {
+        matches!(
+            simulation.status.phase,
+            seedbox_api::Phase::Finalizing | seedbox_api::Phase::Completed
+        )
+    })
+}
+
 /// Hold a paused run before the effect of the fault that follows the oracle's
 /// `marker` line. The oracle prints the line, then makes a non-fault call, so
-/// the line is published before that fault. Earlier faults are passed one at a
-/// time, pausing before each.
+/// the line is committed in an earlier round than that fault's admission.
+/// Earlier faults are passed one at a time, pausing before each.
+///
+/// Whether a held fault is the marked one does not depend on host speed or
+/// observation latency. The worker publishes each round's logs before the
+/// fault changes that round admits, on one ordered observation stream, and the
+/// server folds both in that order. So once the server's world shows the held
+/// fault admitted (scheduled, not yet applied), the marker is retained if and
+/// only if it preceded that fault. Each checkpoint oracle makes one fault call
+/// at a time, so the held fault is the only scheduled one not already passed.
 async fn hold_before_marked_fault(
     client: &seedbox_client::Client,
     id: &seedbox_api::SimulationId,
     marker: &[u8],
     deadline: Instant,
 ) -> Result<(), String> {
-    use seedbox_api::{ControlCommand, PlaybackRate};
+    use seedbox_api::{ControlCommand, FaultStatus, PlaybackRate};
+    let missing = || {
+        format!(
+            "run completed before the fault after its {:?} oracle line",
+            String::from_utf8_lossy(marker).trim_end()
+        )
+    };
     while client.playback(id).await.is_err() {
+        if ended(client, id).await {
+            return Err(missing());
+        }
         if Instant::now() > deadline {
             return Err("no live playback endpoint".into());
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let mut passed = None;
+    let mut held_faults = std::collections::BTreeSet::new();
     loop {
-        acknowledged(
+        let request = acknowledged(
             client,
             id,
             ControlCommand::PauseBeforeNextFault {
                 rate: PlaybackRate::Unlimited,
             },
         )
-        .await?;
+        .await;
+        if let Err(error) = request {
+            return Err(if ended(client, id).await {
+                missing()
+            } else {
+                error
+            });
+        }
         // Held before the next fault effect: paused, moved past the last
         // fault passed, and no longer moving.
         let mut last = None;
         let held = loop {
-            let observation = client.playback(id).await.map_err(|e| e.to_string())?;
+            let observation = match client.playback(id).await {
+                Ok(observation) => observation,
+                Err(_) if ended(client, id).await => return Err(missing()),
+                Err(error) => return Err(error.to_string()),
+            };
             if observation.state.terminal {
-                return Err("run completed before its marked capture phase".into());
+                return Err(missing());
             }
             let position = observation.state.position;
             if observation.state.rate == PlaybackRate::Paused
@@ -236,13 +276,28 @@ async fn hold_before_marked_fault(
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
-        // The line precedes a full RPC round trip, so it is published by now;
-        // allow for observation latency before passing this fault.
-        for _ in 0..20 {
-            if oracle_printed(client, id, marker).await? {
-                return Ok(());
+        // Wait for the held fault's admission to reach the server; every log
+        // the worker published before it has been retained by then.
+        let fault = loop {
+            let world = client.world(id).await.map_err(|e| e.to_string())?;
+            if let Some(fault) = world
+                .faults
+                .iter()
+                .find(|f| f.status == FaultStatus::Unrequested && !held_faults.contains(&f.id))
+            {
+                break fault.id;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "held at {held:?} without an observed scheduled fault: {:?}",
+                    world.faults
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        held_faults.insert(fault);
+        if oracle_printed(client, id, marker).await? {
+            return Ok(());
         }
         passed = Some(held);
     }
