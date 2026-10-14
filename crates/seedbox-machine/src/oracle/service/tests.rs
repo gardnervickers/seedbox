@@ -40,7 +40,7 @@ impl Owner {
     }
 }
 impl Adapter for Owner {
-    fn draw(&mut self) -> Result<u64, OperationError> {
+    fn draw(&mut self, _: &str) -> Result<u64, OperationError> {
         Ok(self.draws.pop_front().expect("scripted seeded draw"))
     }
     fn resolve(&self, target: &Target) -> Result<Facts, OperationError> {
@@ -1460,10 +1460,11 @@ fn step_waits_ready_completes_on_ack_and_heals_inversely() {
     assert!(s.handles.active_handles().unwrap().is_empty());
 }
 #[test]
-fn step_admission_requires_a_live_unpaused_guest_without_drawing() {
+fn step_admission_uses_process_state_rules_before_drawing() {
+    // Paused and physically exited (not down) targets are refused before any
+    // seeded draw or handle reservation, exactly as process commands are.
     for (vm, ended, code) in [
         (Vm::Paused, false, "invalid_state"),
-        (Vm::Down, true, "invalid_state"),
         (Vm::Up, true, "target_unavailable"),
     ] {
         let (mut s, mut o) = (Service::default(), Owner::default());
@@ -1478,8 +1479,87 @@ fn step_admission_requires_a_live_unpaused_guest_without_drawing() {
         ));
         assert_eq!(r["error"]["code"], code);
         assert!(s.pending.is_empty() && admitted_actions(&mut s).is_empty());
-        // No scripted draw was consumed (draw() would have panicked).
+        // No scripted draw (draw() would have panicked) and no handle number.
+        assert_eq!(s.handles.reserve().unwrap().to_string(), "p1");
     }
+    // A down target is admitted (drawing its value) and settles Unavailable
+    // with no guest command, like a process command; zero draws included.
+    for draw in [105, 5] {
+        let (mut s, mut o) = (Service::default(), Owner::default());
+        o.facts.vm = Vm::Down;
+        o.facts.physically_ended = true;
+        o.draws.push_back(draw);
+        let p = call(
+            &mut s,
+            &mut o,
+            1,
+            10,
+            json!({"op":"clock_skew","target":{"machine":"app"},"max_offset_ns":5}),
+        );
+        let offset = draw as i64 % 11 - 5;
+        assert_eq!(
+            admitted_actions(&mut s),
+            [FaultAction::Effect(Effect::StepRealtime(offset))]
+        );
+        assert!(!p.iter().any(|p| matches!(p, Plan::Effect { .. })));
+        assert_eq!(settlement(&p).status, SettlementStatus::Unavailable);
+        assert_eq!(reply(&p)["error"]["code"], "target_unavailable");
+        assert!(s.handles.active_handles().unwrap().is_empty() && o.draws.is_empty());
+    }
+}
+#[test]
+fn zero_steps_skip_only_the_guest_command_after_ordinary_checks() {
+    let (mut s, mut o) = (Service::default(), Owner::default());
+    o.facts.ready = false;
+    o.draws.push_back(5); // 5 % 11 - 5 == 0
+    let p = call(
+        &mut s,
+        &mut o,
+        1,
+        10,
+        json!({"op":"clock_skew","target":{"machine":"app"},"max_offset_ns":5}),
+    );
+    // Not ready: no command is needed, so it settles at admission.
+    assert!(!p
+        .iter()
+        .any(|p| matches!(p, Plan::Effect { .. } | Plan::Deadline { .. })));
+    assert_eq!(settlement(&p).status, SettlementStatus::Applied);
+    assert_eq!(reply(&p)["result"], json!({"handle":"p1","offset_ns":0}));
+    // Healing it follows the same state rules: refused while paused.
+    o.facts.vm = Vm::Paused;
+    let r = reply(&call(
+        &mut s,
+        &mut o,
+        2,
+        11,
+        json!({"op":"heal","handle":"p1"}),
+    ));
+    assert_eq!(r["error"]["code"], "invalid_state");
+    assert_eq!(s.handles.active_handles().unwrap(), ["p1"]);
+    o.facts.vm = Vm::Up;
+    let p = call(&mut s, &mut o, 3, 12, json!({"op":"heal","handle":"p1"}));
+    assert_eq!(settlement(&p).status, SettlementStatus::Applied);
+    assert_eq!(settlement(&p).detail, "zero realtime step");
+    assert!(s.handles.active_handles().unwrap().is_empty());
+}
+#[test]
+fn refused_duplicate_drift_consumes_a_handle_number_like_throttle() {
+    let (mut s, mut o) = (Service::default(), Owner::default());
+    for (op, extra) in [
+        ("throttle", ("factor_permille", 2000)),
+        ("clock_drift", ("rate_ppb", 5)),
+    ] {
+        let mut request = json!({"op":op,"target":{"machine":"app"}});
+        request[extra.0] = json!(extra.1);
+        let first = call(&mut s, &mut o, 1, 10, request.clone());
+        let fault = effect(&first).0;
+        s.applied(fault, 10, 10).unwrap();
+        let r = reply(&call(&mut s, &mut o, 2, 11, request));
+        assert_eq!(r["error"]["code"], "invalid_state");
+    }
+    // p1 throttle, p2 refused throttle, p3 drift, p4 refused drift.
+    assert_eq!(s.handles.active_handles().unwrap(), ["p1", "p3"]);
+    assert_eq!(s.handles.reserve().unwrap().to_string(), "p5");
 }
 #[test]
 fn settled_steps_are_lost_with_their_boot_and_healing_them_applies_without_guest() {

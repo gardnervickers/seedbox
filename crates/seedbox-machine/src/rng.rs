@@ -44,4 +44,4 @@ pub trait RngStreamExt: RngStream {
 }
 
 mod seeded;
-pub(crate) use seeded::SeededRng;
+pub(crate) use seeded::{Domain as RngDomain, SeededRng};

@@ -12,6 +12,8 @@ struct Observed {
     /// (boot, step) for every acknowledged realtime step.
     steps: Vec<(u64, i64)>,
     replies: Vec<serde_json::Value>,
+    /// (boot, bytes) drawn from the machine's own RNG at each boot's start.
+    entropy: Vec<(u64, [u8; 8])>,
 }
 
 /// Emits scripted control calls at machine times, acknowledges realtime
@@ -88,6 +90,13 @@ impl Machine for Guest {
                 return Ok(StopReason::BoundaryReached);
             }
             self.ready = true;
+            let mut bytes = [0; 8];
+            c.rng.fill_bytes(&mut bytes);
+            self.observed
+                .lock()
+                .unwrap()
+                .entropy
+                .push((self.boot, bytes));
             emit(c, Response::Ready);
         }
         if let Some(&(due, _)) = self
@@ -411,25 +420,24 @@ fn host_drift_step_and_heal_follow_keys_and_publish_resolved_payloads() {
                 FaultAction::Drift(ClockRate::new(100_000_000).unwrap()),
                 Some("p1".into())
             ),
-            // The refused second drift drew no handle number: this documents
-            // the branch's current choice, which awaits a policy decision.
+            // The refused duplicate drift consumed p2, as a throttle would.
             (
                 200,
                 "back".into(),
                 FaultAction::StepRealtime(-2_000),
-                Some("p2".into())
+                Some("p3".into())
             ),
             (
                 400,
                 "heal-back".into(),
                 FaultAction::Heal,
-                Some("p2".into())
+                Some("p3".into())
             ),
             (
                 500,
                 "back".into(),
                 FaultAction::StepRealtime(7),
-                Some("p3".into())
+                Some("p4".into())
             ),
             (
                 600,
@@ -549,4 +557,91 @@ fn host_clock_effects_hold_before_applying_and_bind_their_boot() {
         .unwrap();
     assert_eq!(late.1, SettlementStatus::Unavailable);
     assert!(observed.lock().unwrap().steps.is_empty());
+}
+
+/// Seeded clock faults draw from each target's own clock-fault stream, derived
+/// from its machine seed: they never shift later machine seeds, a machine's
+/// own RNG, or another target's draws.
+fn isolation(workers: usize, perturb: bool) -> Vec<Observed> {
+    let observed: Vec<_> = (0..4)
+        .map(|_| Arc::new(Mutex::new(Observed::default())))
+        .collect();
+    let skew = |machine: usize| {
+        format!(
+            r#""op":"clock_skew","target":{{"machine":"fixture-{machine}"}},"max_offset_ns":1000000"#
+        )
+    };
+    let mut script = Vec::new();
+    if perturb {
+        script.extend([(100, skew(1)), (150, skew(1))]);
+    }
+    script.push((200, skew(2)));
+    let mut scripts = [script, vec![], vec![], vec![]];
+    let observers = observed.clone();
+    let mut driver = Driver::new(
+        at(0),
+        Duration::from_nanos(50),
+        workers,
+        crate::rng::SeededRng::new(11),
+        || Ok(()),
+        fixture::definition(0),
+        vec![fixture::definition(1), fixture::definition(2)],
+        vec![fixture::definition(3)],
+        move |definition| {
+            let index: usize = definition
+                .name
+                .strip_prefix("fixture-")
+                .unwrap()
+                .parse()
+                .unwrap();
+            Ok(Guest {
+                script: std::mem::take(&mut scripts[index]).into_iter().collect(),
+                request: 0,
+                ready: false,
+                boot: 0,
+                exited: false,
+                observed: observers[index].clone(),
+            })
+        },
+    )
+    .unwrap();
+    driver
+        .with_barrier(|b| {
+            b.schedule(
+                at(300),
+                InputKey::new("spawn").unwrap(),
+                Action::Spawn {
+                    name: "fixture-3".into(),
+                },
+            )
+        })
+        .unwrap();
+    while driver.now() < at(1_000) {
+        if matches!(driver.step(at(1_000)).unwrap(), StepOutcome::Blocked { .. }) {
+            break;
+        }
+    }
+    observed.iter().map(|o| o.lock().unwrap().clone()).collect()
+}
+
+#[test]
+fn clock_fault_draws_do_not_perturb_seeds_entropy_or_other_targets() {
+    for workers in [1, 2, 4] {
+        let base = isolation(workers, false);
+        let perturbed = isolation(workers, true);
+        assert_eq!(base, isolation(1, false), "workers {workers}");
+        // Target 1 was stepped twice more; target 2's draw is unchanged.
+        assert_eq!(perturbed[1].steps.len(), 2);
+        assert_eq!(base[2].steps, perturbed[2].steps);
+        assert_eq!(base[2].steps.len(), 1);
+        // Every machine's own entropy, including the later spawn's seed, is
+        // unchanged by the extra clock-fault draws.
+        for machine in 0..4 {
+            assert_eq!(
+                base[machine].entropy, perturbed[machine].entropy,
+                "{machine}"
+            );
+            assert_eq!(base[machine].entropy.len(), 1);
+        }
+    }
 }

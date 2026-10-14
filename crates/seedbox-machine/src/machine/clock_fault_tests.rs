@@ -720,9 +720,8 @@ where
             .unwrap();
     }
 }
-/// Linux refuses a step below CLOCK_MONOTONIC. This records the branch's
-/// current, unapproved handling: the fault settles Rejected without failing
-/// the run, and realtime is unchanged.
+/// Linux refuses a step below CLOCK_MONOTONIC. The approved policy: the fault
+/// settles Rejected without failing the run, and realtime is unchanged.
 fn check_refusal(backend: &str, (events, clock, runs, _): &Outcome) {
     let settled = crate::driver::fixture::settlements(events);
     let refused: Vec<_> = settled

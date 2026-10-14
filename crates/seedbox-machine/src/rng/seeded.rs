@@ -7,14 +7,38 @@ use sha2::{Digest, Sha256};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SeededRng {
+    #[serde(default)]
+    domain: Domain,
     seed: u64,
     block: u64,
     bytes: [u8; 32],
     position: u8,
 }
+/// Independent byte streams derived from one machine seed. The format tag
+/// separates them: no domain's bytes predict another's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Domain {
+    /// The machine's own stream (boot and guest entropy).
+    #[default]
+    Machine,
+    /// Seeded clock-fault values drawn for that machine as a target.
+    ClockFaults,
+}
+impl Domain {
+    fn tag(self) -> &'static [u8] {
+        match self {
+            Self::Machine => b"seedbox-machine seeded bytes v1\0",
+            Self::ClockFaults => b"seedbox-machine clock fault bytes v1\0",
+        }
+    }
+}
 impl SeededRng {
     pub(crate) fn new(seed: u64) -> Self {
+        Self::derived(seed, Domain::Machine)
+    }
+    pub(crate) fn derived(seed: u64, domain: Domain) -> Self {
         Self {
+            domain,
             seed,
             block: 0,
             bytes: [0; 32],
@@ -33,7 +57,7 @@ impl RngStream for SeededRng {
                     .checked_add(1)
                     .expect("seeded RNG exhausted its u64 block counter");
                 let mut hash = Sha256::new();
-                hash.update(b"seedbox-machine seeded bytes v1\0");
+                hash.update(self.domain.tag());
                 hash.update(self.seed.to_le_bytes());
                 hash.update(self.block.to_le_bytes());
                 self.bytes = hash.finalize().into();
@@ -82,5 +106,20 @@ mod tests {
         let mut rng = SeededRng::new(0);
         rng.block = u64::MAX;
         rng.fill_bytes(&mut [0]);
+    }
+    #[test]
+    fn domains_share_a_seed_without_sharing_bytes() {
+        let mut machine = SeededRng::new(9);
+        let mut clock = SeededRng::derived(9, Domain::ClockFaults);
+        let (mut a, mut b) = ([0; 64], [0; 64]);
+        machine.fill_bytes(&mut a);
+        clock.fill_bytes(&mut b);
+        assert_ne!(a, b);
+        // The machine domain keeps its original format tag and bytes.
+        let mut hash = Sha256::new();
+        hash.update(b"seedbox-machine seeded bytes v1\0");
+        hash.update(9u64.to_le_bytes());
+        hash.update(0u64.to_le_bytes());
+        assert_eq!(a[..32], <[u8; 32]>::from(hash.finalize()));
     }
 }

@@ -299,8 +299,15 @@ where
     /// breaks scheduling ties and assigns
     /// independent machine RNG streams by drawing one little-endian u64 seed
     /// from the simulation RNG for each admitted machine. Failed additions draw
-    /// no seed. Only run calls borrow the clock and the machine's continuing RNG.
-    /// Machine-only snapshots do not capture either RNG cursor.
+    /// no seed. Seeded clock-fault values for a target come from a separate
+    /// stream derived from that same machine seed in its own domain: they draw
+    /// nothing from the simulation RNG or the machine's stream, and survive
+    /// reboot. Only run calls borrow the clock and the machine's continuing RNG.
+    /// Machine-only snapshots capture none of these RNG cursors.
+    // TODO: Re-evaluate: seeded clock faults need values that neither shift
+    // later machine seeds nor consume guest entropy or another target's draws;
+    // the shared simulation stream and the machine's own stream cannot isolate
+    // them, so each target gets a domain-separated stream from its seed.
     ///
     /// `quantum` is a positive duration representable in u64 nanoseconds; its
     /// first boundary must fit after `start`. `workers` must be nonzero. Invalid
@@ -358,11 +365,13 @@ where
             rng.fill_bytes(&mut bytes);
             u64::from_le_bytes(bytes)
         };
+        let seeds: Vec<u64> = machines.iter().map(|_| draw_seed()).collect();
         let machines = machines
             .into_iter()
-            .map(|machine| Entry::new(machine, draw_seed(), start))
+            .zip(&seeds)
+            .map(|(machine, &seed)| Entry::new(machine, seed, start))
             .collect();
-        let mut control = control::Control::new(&definitions, start);
+        let mut control = control::Control::new(&definitions, &seeds, start);
         control.declare_spawnable(&spawnable);
         let mut driver = Self {
             clock,
@@ -1267,7 +1276,7 @@ where
                             self.control.record_call(source, id, boot);
                             let plans = self
                                 .control
-                                .invoke_with(Some(&mut *self.rng), |service, view| {
+                                .invoke_plans(|service, view| {
                                     service.admit(
                                         view,
                                         control::Control::source(source),
@@ -1834,10 +1843,10 @@ where
         let mut bytes = [0; 8];
         self.rng.fill_bytes(&mut bytes);
         let now = self.now();
-        self.machines
-            .push(Entry::new(machine, u64::from_le_bytes(bytes), now));
+        let seed = u64::from_le_bytes(bytes);
+        self.machines.push(Entry::new(machine, seed, now));
         self.control
-            .spawned(name, self.now())
+            .spawned(name, seed, self.now())
             .map_err(Error::Control)?;
         self.definitions.remove(index);
         self.stage(
@@ -2013,6 +2022,12 @@ where
             .expect("stopped machine"))
     }
 
+    /// The machine's last stop projected into simulation time. Unlike a
+    /// `Machine::run` result, a `Blocked` deadline may equal `reached`.
+    // TODO: Re-evaluate: the projection rounds machine times up to whole
+    // simulation nanoseconds so nothing fires early; keeping the strict
+    // inequality would need delaying the timer, so the Driver relaxes it here
+    // instead of in the machine contract.
     pub fn stopped(&self, id: MachineId) -> Result<StopReason, Error<M::Error>> {
         Ok(self.driver.entry(id)?.stopped)
     }
@@ -2048,10 +2063,9 @@ where
         self.driver.rng.fill_bytes(&mut bytes);
         let id = MachineId(self.driver.machines.len());
         let now = self.driver.now();
-        self.driver
-            .machines
-            .push(Entry::new(machine, u64::from_le_bytes(bytes), now));
-        self.driver.control.add_unnamed(self.driver.now());
+        let seed = u64::from_le_bytes(bytes);
+        self.driver.machines.push(Entry::new(machine, seed, now));
+        self.driver.control.add_unnamed(seed, self.driver.now());
         self.driver.stage(
             self.driver.now(),
             EventKind::MachineAdded {
@@ -2071,7 +2085,8 @@ where
     /// time-base mapping (a pure function of its addition time and its
     /// `Transition::ClockRate` events), its last accepted position and pending
     /// timer in machine time, global RNG cursor, the independently continuing
-    /// RNG cursor of every machine, and the control timeline: host inputs
+    /// RNG cursor and clock-fault stream cursor of every machine, and the
+    /// control timeline: host inputs
     /// scheduled but not yet admitted, live input keys (with the handles they
     /// own), and admitted faults awaiting their effect or settlement. The
     /// Driver offers no snapshot or restore of that state: the host
@@ -2190,8 +2205,10 @@ where
     /// command's `deadline`, or the default 5 s for a realtime step, measured
     /// from admission, bounds dispatch and acknowledgment, and expiry fails the
     /// driver with a Failed settlement, as for guest controls. A guest refusal
-    /// of a realtime step currently settles Rejected without failing the
-    /// driver (a policy awaiting decision). Accepted work survives caller loss.
+    /// of a realtime step settles Rejected without failing the driver (Linux
+    /// may refuse an admissible step); a refused process command, or a
+    /// malformed, missing or late acknowledgment, is fatal. Accepted work
+    /// survives caller loss.
     ///
     /// After oracle completion, a permanent stop or a driver failure, pending
     /// inputs are never admitted and no per-key event is published.

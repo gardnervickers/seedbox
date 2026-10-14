@@ -65,8 +65,8 @@ pub(crate) enum CommandKind {
     StepRealtime,
 }
 pub(crate) trait Adapter {
-    /// Draw 64 seeded bits from the simulation RNG at the admission barrier.
-    fn draw(&mut self) -> Result<u64, OperationError> {
+    /// Draw 64 seeded bits from `target`'s clock-fault stream at admission.
+    fn draw(&mut self, _target: &str) -> Result<u64, OperationError> {
         Err(OperationError::unsupported())
     }
     /// Reserve a declared machine once, without building it or drawing entropy.
@@ -736,7 +736,7 @@ impl Service {
                 // Draw only after admission checks, at this barrier.
                 let offset = match nanoseconds {
                     Amount::Exact(offset) => offset,
-                    Amount::Seeded(max) => Self::uniform(adapter, max)?,
+                    Amount::Seeded(max) => Self::uniform(adapter, &facts.name, max)?,
                 };
                 let plan = self
                     .handles
@@ -746,8 +746,12 @@ impl Service {
             }
             Command::Drift { target, ppb } => {
                 let facts = adapter.resolve(&target)?;
-                // A machine runs at one rate; check before drawing.
+                // A machine runs at one rate. Like a refused throttle, a
+                // refused duplicate consumes its handle number; it draws no value.
                 if self.handles.drifting(&facts.name) {
+                    self.handles.reserve().map_err(|e| {
+                        error(ErrorCode::InvalidState, format!("clock_drift: {e:?}"))
+                    })?;
                     return Err(error(
                         ErrorCode::InvalidState,
                         "target machine clock is already drifting",
@@ -756,7 +760,7 @@ impl Service {
                 }
                 let ppb = match ppb {
                     Amount::Exact(rate) => rate,
-                    Amount::Seeded(max) => Self::uniform(adapter, max)?,
+                    Amount::Seeded(max) => Self::uniform(adapter, &facts.name, max)?,
                 };
                 let rate =
                     ClockRate::new(ppb).map_err(|e| OperationError::invalid(e.to_string()))?;
@@ -772,21 +776,22 @@ impl Service {
             adapter, mode, requester, call, facts, effect, handle, healing, now, deadline,
         )
     }
-    /// Realtime steps need a live, unpaused guest to perform them, like
-    /// process commands; unlike them, a down target is rejected outright.
+    /// Realtime steps are guest commands and share the process-command state
+    /// rules, applied before any seeded draw.
     fn step_state(mode: AdmissionMode, facts: &Facts) -> Result<(), OperationError> {
         if matches!(mode, AdmissionMode::Control) && facts.physically_ended && facts.vm != Vm::Down
         {
             return Err(error(ErrorCode::TargetUnavailable, "target VM has exited"));
         }
+        // As for process commands: paused is refused; a down target is
+        // admitted and then settles Unavailable (see `install`).
         match facts.vm {
-            Vm::Down => Err(error(ErrorCode::InvalidState, "target machine is down")),
             Vm::Paused => Err(error(ErrorCode::InvalidState, "target machine is paused")),
-            Vm::Up => Ok(()),
+            Vm::Up | Vm::Down => Ok(()),
         }
     }
     /// Uniform in [-max, max] by rejection sampling of seeded 64-bit draws.
-    fn uniform(adapter: &mut impl Adapter, max: u64) -> Result<i64, OperationError> {
+    fn uniform(adapter: &mut impl Adapter, target: &str, max: u64) -> Result<i64, OperationError> {
         let span = max
             .checked_mul(2)
             .and_then(|n| n.checked_add(1))
@@ -794,7 +799,7 @@ impl Service {
             .ok_or_else(|| OperationError::invalid("seeded clock bound overflow"))?;
         let limit = u64::MAX - u64::MAX % span;
         loop {
-            let draw = adapter.draw()?;
+            let draw = adapter.draw(target)?;
             if draw < limit {
                 return Ok((draw % span) as i64 - max as i64);
             }
@@ -886,8 +891,8 @@ impl Service {
             handle,
             healing,
         };
-        let unavailable = matches!(pending.effect, Effect::Process(_))
-            && (facts.vm == Vm::Down || facts.physically_ended);
+        let unavailable =
+            pending.effect.guest_command() && (facts.vm == Vm::Down || facts.physically_ended);
         self.notices.push(Notice::Admitted(Admitted {
             fault,
             requester: pending.requester.clone(),
@@ -898,11 +903,13 @@ impl Service {
             requested_at: Self::requested_at(&pending),
             admitted_at: now,
         }));
-        let immediate = pending.effect == Effect::StepRealtime(0);
+        // Healing a step whose kernel ended changes nothing in any state. A
+        // zero step (a seeded draw or its heal) needs no guest command, but
+        // only after the same admission and availability checks as any step.
+        let lost = pending.handle.as_ref().is_some_and(|h| h.lost);
+        let immediate = lost || (pending.effect == Effect::StepRealtime(0) && !unavailable);
         self.pending.insert(fault, pending);
         if immediate {
-            // Nothing for the guest to do: a zero draw, or healing a step
-            // whose kernel already ended.
             return Ok((fault, self.finish(fault, now, now, Ok(()))?));
         }
         let mut plans = vec![];

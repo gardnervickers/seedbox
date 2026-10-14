@@ -152,6 +152,10 @@ pub enum Action {
     /// admitted is rejected. The new identity is reserved at admission and the
     /// machine is built at its FIFO effect turn.
     Spawn { name: String },
+    // TODO: Re-evaluate: host clock faults must share the guest control
+    // policy, handles and events (`Transition::ClockRate`,
+    // `FaultAction::{Drift, StepRealtime}`); a raw Driver setter would bypass
+    // admission, keys and settlement. Steps carry no deadline: the default applies.
     /// Set the rate of the machine's time base from the effect's barrier and
     /// allocate a [`FaultHandle`]. The time-base mapping keeps the machine time
     /// already reached, so the offset accrued so far is kept. At most one drift

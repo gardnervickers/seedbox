@@ -14,7 +14,7 @@ use crate::{
         OperationError, Target,
     },
     pv::Request,
-    rng::RngStream,
+    rng::{RngDomain, RngStream, SeededRng},
 };
 use serde_json::Value;
 use std::{
@@ -59,6 +59,9 @@ struct Observed {
     name: Option<String>,
     state: State,
     commands: Commands,
+    /// Seeded clock-fault values for this target, derived from the machine
+    /// seed in its own domain; survives reboot, independent of guest entropy.
+    clock: SeededRng,
 }
 pub(super) struct Control {
     pub(super) service: Service,
@@ -72,11 +75,13 @@ pub(super) struct Control {
     calls: BTreeMap<(MachineId, u32, u32), u64>,
 }
 impl Control {
-    pub(super) fn new(definitions: &[MachineDefinition], start: Timestamp) -> Self {
+    /// `seeds` are the machine seeds already assigned in identity order.
+    pub(super) fn new(definitions: &[MachineDefinition], seeds: &[u64], start: Timestamp) -> Self {
         let entries = definitions
             .iter()
+            .zip(seeds)
             .enumerate()
-            .map(|(index, definition)| Observed {
+            .map(|(index, (definition, &seed))| Observed {
                 name: Some(definition.name.clone()),
                 state: State::new(
                     Self::source(MachineId(index)),
@@ -85,6 +90,7 @@ impl Control {
                     ExecutionConfig::default(),
                 ),
                 commands: Commands::default(),
+                clock: SeededRng::derived(seed, RngDomain::ClockFaults),
             })
             .collect();
         Self {
@@ -99,7 +105,12 @@ impl Control {
         self.spawnable
             .extend(definitions.iter().map(|d| d.name.clone()));
     }
-    pub(super) fn spawned(&mut self, name: &str, at: Timestamp) -> Result<MachineId, String> {
+    pub(super) fn spawned(
+        &mut self,
+        name: &str,
+        seed: u64,
+        at: Timestamp,
+    ) -> Result<MachineId, String> {
         let id = *self.spawning.get(name).ok_or("unreserved spawn")?;
         if id.0 != self.entries.len() {
             return Err("spawn identity out of insertion order".into());
@@ -113,6 +124,7 @@ impl Control {
                 ExecutionConfig::default(),
             ),
             commands: Commands::default(),
+            clock: SeededRng::derived(seed, RngDomain::ClockFaults),
         });
         self.spawning.remove(name);
         Ok(id)
@@ -147,12 +159,13 @@ impl Control {
     pub(super) fn spawn_pending(&self) -> bool {
         !self.spawning.is_empty()
     }
-    pub(super) fn add_unnamed(&mut self, at: Timestamp) {
+    pub(super) fn add_unnamed(&mut self, seed: u64, at: Timestamp) {
         let key = Self::source(MachineId(self.entries.len()));
         self.entries.push(Observed {
             name: None,
             state: State::new(key, 0, at.as_nanos(), ExecutionConfig::default()),
             commands: Commands::default(),
+            clock: SeededRng::derived(seed, RngDomain::ClockFaults),
         });
     }
     /// Canonical private key of a machine, also its control-call source.
@@ -255,8 +268,6 @@ impl Control {
     }
 }
 pub(super) struct View<'a> {
-    /// Simulation RNG for seeded fault draws, lent only to call admission.
-    rng: Option<&'a mut dyn RngStream>,
     entries: &'a mut [Observed],
     spawnable: &'a mut BTreeSet<String>,
     spawning: &'a mut BTreeMap<String, MachineId>,
@@ -267,10 +278,10 @@ impl View<'_> {
     }
 }
 impl Adapter for View<'_> {
-    fn draw(&mut self) -> Result<u64, OperationError> {
-        let rng = self.rng.as_mut().ok_or_else(OperationError::unsupported)?;
+    fn draw(&mut self, target: &str) -> Result<u64, OperationError> {
+        let index = self.index(target).map_err(OperationError::invalid)?;
         let mut bytes = [0; 8];
-        rng.fill_bytes(&mut bytes);
+        self.entries[index].clock.fill_bytes(&mut bytes);
         Ok(u64::from_le_bytes(bytes))
     }
     fn reserve_spawn(&mut self, name: &str) -> Result<(), OperationError> {
@@ -344,6 +355,7 @@ mod tests {
     fn duplicate_display_names_never_alias_sources_and_unnamed_additions_route() {
         let mut control = Control::new(
             &[fixture::definition(0), fixture::definition(0)],
+            &[0, 1],
             Timestamp::from_nanos(0),
         );
         assert!(control.target("fixture-0").is_err());
@@ -355,7 +367,7 @@ mod tests {
                 MachineId(index)
             );
         }
-        control.add_unnamed(Timestamp::from_nanos(3));
+        control.add_unnamed(2, Timestamp::from_nanos(3));
         assert_eq!(
             control
                 .reply_target(&Control::source(MachineId(2)))
@@ -424,18 +436,9 @@ impl Control {
         &mut self,
         f: impl FnOnce(&mut Service, &mut View<'_>) -> Result<T, crate::oracle::service::Failure>,
     ) -> Result<T, String> {
-        self.invoke_with(None, f)
-    }
-    /// Invoke with the simulation RNG available for seeded draws.
-    pub(super) fn invoke_with<'r, T>(
-        &'r mut self,
-        rng: Option<&'r mut (dyn RngStream + 'r)>,
-        f: impl FnOnce(&mut Service, &mut View<'_>) -> Result<T, crate::oracle::service::Failure>,
-    ) -> Result<T, String> {
         let result = f(
             &mut self.service,
             &mut View {
-                rng,
                 entries: &mut self.entries,
                 spawnable: &mut self.spawnable,
                 spawning: &mut self.spawning,
