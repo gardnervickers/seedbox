@@ -54,6 +54,34 @@ pub fn word(value: &impl serde::Serialize) -> String {
     }
 }
 
+/// A simulated time in seconds, without trailing zeros: `1.5s`, `122.955s`.
+pub fn seconds(ns: u64) -> String {
+    let text = format!("{:.3}", ns as f64 / 1e9);
+    format!("{}s", text.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// One guest kernel out-of-memory kill, as an `out-of-memory` field value.
+pub fn out_of_memory(kill: &seedbox_api::MachineOutOfMemoryKill) -> String {
+    let victim = match &kill.kill.process {
+        Some(process) => format!(
+            "{} (pid {}, anon-rss {} kB)",
+            process.command.escape_debug(),
+            process.pid,
+            process.anon_rss_kib
+        ),
+        None => "a process whose kernel log record was lost".into(),
+    };
+    let memory = kill
+        .memory_mib
+        .map_or_else(String::new, |memory| format!(" (now {memory})"));
+    format!(
+        "machine {} incarnation {} at {}: the guest kernel's out-of-memory killer killed {victim}; raise memoryMiB{memory}",
+        kill.machine,
+        kill.kill.incarnation,
+        seconds(kill.kill.simulated_time_ns),
+    )
+}
+
 /// An aligned text table. Cells stay on one line, including untrusted names.
 pub struct Table<const N: usize> {
     widths: [usize; N],
@@ -170,5 +198,41 @@ impl<W: std::io::Write> std::io::Write for IndentedJson<W> {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.output.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn out_of_memory_names_the_victim_or_its_lost_record() {
+        let mut kill = seedbox_api::MachineOutOfMemoryKill {
+            machine: "n3".into(),
+            memory_mib: Some(512),
+            kill: seedbox_api::OutOfMemoryKill {
+                incarnation: 1,
+                simulated_time_ns: 122_954_950_231,
+                process: Some(seedbox_api::OutOfMemoryProcess {
+                    pid: 412,
+                    command: "nats-server".into(),
+                    total_vm_kib: 1_203_328,
+                    anon_rss_kib: 446_228,
+                    file_rss_kib: 1024,
+                    shmem_rss_kib: 0,
+                }),
+            },
+        };
+        assert_eq!(
+            out_of_memory(&kill),
+            "machine n3 incarnation 1 at 122.955s: the guest kernel's out-of-memory killer killed nats-server (pid 412, anon-rss 446228 kB); raise memoryMiB (now 512)"
+        );
+        kill.memory_mib = None;
+        kill.kill.process = None;
+        kill.kill.simulated_time_ns = 2_000_000_000;
+        assert_eq!(
+            out_of_memory(&kill),
+            "machine n3 incarnation 1 at 2s: the guest kernel's out-of-memory killer killed a process whose kernel log record was lost; raise memoryMiB"
+        );
     }
 }

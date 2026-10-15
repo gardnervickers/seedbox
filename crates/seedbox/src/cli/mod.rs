@@ -335,7 +335,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show completed simulation raw diagnostics, distinct from timed application logs.
+    /// Show completed simulation raw diagnostics and guest out-of-memory kills, distinct from timed application logs.
     Diagnostics {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,

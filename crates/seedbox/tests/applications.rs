@@ -1391,3 +1391,158 @@ fn retained_output_is_accounted_attributed_and_replayed() {
         );
     }
 }
+
+/// The guest kernel's out-of-memory kill of an application, as events,
+/// `get world` and `diagnostics` report it. Each line is the guest kernel's own
+/// report, so a replay reports the same kill at the same simulated time.
+fn out_of_memory_kill(
+    cli: &Path,
+    directory: &Path,
+    state: &Path,
+    id: &str,
+    name: &str,
+) -> Result<seedbox_api::OutOfMemoryKill, String> {
+    let events = invoke(
+        cli,
+        directory,
+        state,
+        &format!("{name}-events"),
+        &["events", id],
+    )?;
+    let mut kills = Vec::new();
+    let mut exit = None;
+    for line in events.lines() {
+        let delivery: seedbox_api::EventDelivery =
+            serde_json::from_str(line).map_err(|e| format!("event {line:?}: {e}"))?;
+        let seedbox_api::EventDelivery::Event { observation, .. } = delivery else {
+            continue;
+        };
+        match observation.event {
+            seedbox_api::EventKind::OutOfMemoryKill {
+                machine,
+                incarnation,
+                process,
+            } => kills.push((
+                machine,
+                seedbox_api::OutOfMemoryKill {
+                    incarnation,
+                    simulated_time_ns: observation.simulated_time_ns.unwrap_or_default(),
+                    process,
+                },
+            )),
+            seedbox_api::EventKind::MachineExited { machine, code, .. } if machine == "app" => {
+                exit = Some((code, observation.simulated_time_ns, kills.len()));
+            }
+            _ => {}
+        }
+    }
+    let [(machine, kill)] = &kills[..] else {
+        return Err(format!("expected one out-of-memory kill, got {kills:?}"));
+    };
+    let process = kill.process.as_ref().ok_or("kill has no process details")?;
+    if machine != "app" || kill.incarnation != 0 || process.anon_rss_kib < 32 * 1024 {
+        return Err(format!("unexpected kill on {machine}: {kill:?}"));
+    }
+    // The kill is reported before the exit it caused.
+    if !exit.is_some_and(|(code, time, before)| {
+        code == 137 && before == 1 && time.is_some_and(|time| time >= kill.simulated_time_ns)
+    }) {
+        return Err(format!(
+            "app exit {exit:?} does not follow the kill {kill:?}"
+        ));
+    }
+    let world = invoke(
+        cli,
+        directory,
+        state,
+        &format!("{name}-world"),
+        &["get", "world", id],
+    )?;
+    if !world.lines().any(|line| {
+        line.starts_with("app ")
+            && line.contains(" exited ")
+            && line.contains("137 (out of memory)")
+    }) {
+        return Err(format!("get world does not explain the exit:\n{world}"));
+    }
+    let diagnostics = invoke(
+        cli,
+        directory,
+        state,
+        &format!("{name}-diagnostics"),
+        &["diagnostics", id],
+    )?;
+    let expected = format!(
+        "out-of-memory: machine app incarnation 0 at {}s: the guest kernel's out-of-memory killer killed {} (pid {}, anon-rss {} kB); raise memoryMiB (now 384)",
+        format!("{:.3}", kill.simulated_time_ns as f64 / 1e9)
+            .trim_end_matches('0')
+            .trim_end_matches('.'),
+        process.command,
+        process.pid,
+        process.anon_rss_kib
+    );
+    if !diagnostics.lines().any(|line| line == expected) {
+        return Err(format!("diagnostics lacks {expected:?}:\n{diagnostics}"));
+    }
+    eprintln!("out of memory: {name}: {expected}");
+    Ok(kill.clone())
+}
+
+#[test]
+fn out_of_memory_kill_is_reported_and_replayed() {
+    let cli = std::env::var_os("SEEDBOX_TEST_CLI")
+        .expect("harness/check.sh supplies the current release CLI");
+    let reports =
+        std::env::var_os("SEEDBOX_TEST_REPORT_DIR").expect("set a fresh SEEDBOX_TEST_REPORT_DIR");
+    let cli = Path::new(&cli);
+    let workload = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../harness/acceptance/workloads/out-of-memory.yaml");
+    let directory = Path::new(&reports).join("out-of-memory");
+    fs::create_dir_all(&directory).unwrap();
+    let state_directory = tempfile::Builder::new()
+        .prefix("seedbox-oom-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let state_path = state_directory.path().join("state");
+    let state = state_path.as_path();
+    let server = match Server::start(cli, state) {
+        Ok(server) => server,
+        Err(error) => {
+            let retained = state_directory.keep();
+            panic!("{error}; retained server state: {}", retained.display());
+        }
+    };
+    let check = || -> Result<(), String> {
+        let output = invoke(
+            cli,
+            &directory,
+            state,
+            "run",
+            &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
+        )?;
+        let id = simulation_id(&output)?;
+        let kill = out_of_memory_kill(cli, &directory, state, id, "run")?;
+        let replay = invoke(
+            cli,
+            &directory,
+            state,
+            "replay",
+            &["replay", id, "--wall-time", "30m"],
+        )?;
+        let replayed = replay
+            .lines()
+            .find_map(|line| line.strip_prefix("MATCH: "))
+            .ok_or_else(|| format!("replay did not match: {replay}"))?;
+        let again = out_of_memory_kill(cli, &directory, state, replayed, "replay")?;
+        if again != kill {
+            return Err(format!("replay reported {again:?}, not {kill:?}"));
+        }
+        Ok(())
+    };
+    let result = check();
+    drop(server);
+    if let Err(error) = result {
+        let retained = state_directory.keep();
+        panic!("{error}\nretained server state: {}", retained.display());
+    }
+}
