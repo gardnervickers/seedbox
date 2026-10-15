@@ -106,6 +106,7 @@ pub fn resolve(
             schedule: configuration.schedule.clone(),
             disk: configuration.disk.clone(),
             oracle_control: configuration.control.is_some(),
+            progress_client: configuration.progress_client,
         },
         start: Start::Fresh,
         overrides,
@@ -439,6 +440,8 @@ fn resolved_boot(
         &BTreeMap::new(),
         definition.clock.epoch_seconds,
     )?;
+    let lean = format!("{}\0", crate::guest::LEAN_PROGRESS_MARKER);
+    let mut lean_packaged = false;
     let mut input = tempfile::tempfile()?;
     store.copy_to(&digest(&machine.boot_archive)?, &mut input)?;
     input.rewind()?;
@@ -470,6 +473,7 @@ fn resolved_boot(
         let name_pad = (4 - (110 + length) % 4) % 4;
         let mut padding = [0u8; 3];
         input.read_exact(&mut padding[..name_pad])?;
+        lean_packaged |= path == lean.as_bytes();
         if path == b"seedbox/launch.bin\0" {
             if size > 16 * 1024 * 1024 {
                 return Err(Error::Integrity("launch record exceeds 16 MiB".into()));
@@ -505,6 +509,13 @@ fn resolved_boot(
         return Err(Error::Integrity(
             "bootArchive omits seedbox/launch.bin".into(),
         ));
+    }
+    // The archive packages the client; the definition must name the same one.
+    let packaged = if lean_packaged { "lean" } else { "standard" };
+    if definition.simulator.progress_client.is_standard() == lean_packaged {
+        return Err(Error::Setup(format!(
+            "machine {name}: simulator.progressClient differs from its bootArchive's {packaged} client; resubmit the project to change engine.progressClient"
+        )));
     }
     // newc permits final zero padding; retaining it preserves byte identity for unchanged recipes.
     std::io::copy(&mut input, &mut output)?;
@@ -672,6 +683,138 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("archive boot floor"));
+    }
+
+    #[test]
+    fn progress_client_resolves_explicitly_and_matches_the_archive() {
+        use seedbox_spec::project::ProgressClient;
+        let (temporary, store, mut definition, original) = fixture();
+        // Omission resolves to the explicit standard client, and definitions
+        // saved before the field existed read as standard.
+        let mut saved = serde_json::to_value(&definition).unwrap();
+        assert_eq!(saved["simulator"]["progressClient"], "standard");
+        saved["simulator"]
+            .as_object_mut()
+            .unwrap()
+            .remove("progressClient");
+        let older: Definition = serde_json::from_value(saved).unwrap();
+        assert!(older.simulator.progress_client.is_standard());
+        assert_eq!(prepared(&older, &store).unwrap().guests["oracle"], original);
+        // Package a runtime with both clients.
+        let runtime = temporary.path().join("progress.tar");
+        let mut tar = tar::Builder::new(std::fs::File::create(&runtime).unwrap());
+        for (name, bytes) in [
+            ("bin64/drrun", &b"drrun"[..]),
+            ("libseedbox_progress.so", b"standard client"),
+            (crate::guest::LEAN_PROGRESS_CLIENT, b"lean client"),
+            ("lib64/release/libdynamorio.so", b"core"),
+            ("ext/lib64/release/libdrmgr.so", b"drmgr"),
+            ("ext/lib64/release/libdrreg.so", b"drreg"),
+        ] {
+            let mut header = tar::Header::new_ustar();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, name, bytes).unwrap();
+        }
+        tar.into_inner().unwrap();
+        let root = temporary.path().join("rootfs");
+        let init = temporary.path().join("init");
+        let recipe = crate::guest::launch_recipe(
+            &prepared(&older, &store).unwrap().images["oracle"].launch,
+            "10.0.0.1/24",
+            "127.0.0.1 localhost\n::1 localhost\n10.0.0.1 oracle\n",
+            "oracle",
+            &BTreeMap::from([("/etc/test.conf".into(), b"preserve me".to_vec())]),
+            86400,
+        )
+        .unwrap();
+        let contains = |bytes: &[u8], part: &[u8]| bytes.windows(part.len()).any(|w| w == part);
+        let mut boots = Vec::new();
+        for client in [ProgressClient::Standard, ProgressClient::Lean] {
+            let archive = temporary.path().join(format!("{client:?}.cpio"));
+            crate::guest::build_initramfs_with(
+                &root,
+                &init,
+                None,
+                Some((&runtime, client)),
+                &recipe,
+                &archive,
+            )
+            .unwrap();
+            // The supervisor's client path holds the chosen client alone, and
+            // only a lean archive is marked.
+            let bytes = std::fs::read(&archive).unwrap();
+            let lean = client == ProgressClient::Lean;
+            assert_eq!(contains(&bytes, b"lean client"), lean);
+            assert_eq!(contains(&bytes, b"standard client"), !lean);
+            assert!(!contains(
+                &bytes,
+                crate::guest::LEAN_PROGRESS_CLIENT.as_bytes()
+            ));
+            assert!(contains(
+                &bytes,
+                b"seedbox/progress/libseedbox_progress.so\0"
+            ));
+            assert_eq!(
+                contains(&bytes, crate::guest::LEAN_PROGRESS_MARKER.as_bytes()),
+                lean
+            );
+            boots.push(store.put_file(&archive).unwrap());
+        }
+        // A definition names its archive's client; prepared inputs keep the archive.
+        for (boot, client) in boots
+            .iter()
+            .zip([ProgressClient::Standard, ProgressClient::Lean])
+        {
+            definition.oracle.boot_archive = asset(boot);
+            definition.simulator.progress_client = client;
+            assert_eq!(
+                &prepared(&definition, &store).unwrap().guests["oracle"],
+                boot
+            );
+            assert_eq!(definition.configuration("check").progress_client, client);
+        }
+        for (boot, client, packaged) in [
+            (&boots[0], ProgressClient::Lean, "standard"),
+            (&boots[1], ProgressClient::Standard, "lean"),
+        ] {
+            definition.oracle.boot_archive = asset(boot);
+            definition.simulator.progress_client = client;
+            let error = prepared(&definition, &store).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("machine oracle: simulator.progressClient differs from its bootArchive's {packaged} client")),
+                "{error}"
+            );
+        }
+        // Without the lean client the bundle cannot package a lean machine.
+        let archive = temporary.path().join("missing.cpio");
+        let mut tar = tar::Builder::new(std::fs::File::create(&runtime).unwrap());
+        for name in [
+            "bin64/drrun",
+            "libseedbox_progress.so",
+            "lib64/release/libdynamorio.so",
+            "ext/lib64/release/libdrmgr.so",
+            "ext/lib64/release/libdrreg.so",
+        ] {
+            let mut header = tar::Header::new_ustar();
+            header.set_size(1);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, name, &b"x"[..]).unwrap();
+        }
+        tar.into_inner().unwrap();
+        let error = crate::guest::build_initramfs_with(
+            &root,
+            &init,
+            None,
+            Some((&runtime, ProgressClient::Lean)),
+            &recipe,
+            &archive,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("has no lean client (arm64 only)"), "{error}");
     }
 
     #[test]

@@ -32,6 +32,8 @@ pub struct Simulation {
     pub machine: MachineOptions,
     #[serde(default, skip_serializing_if = "DiskOptions::is_default")]
     pub disk: DiskOptions,
+    #[serde(default, skip_serializing_if = "project::ProgressClient::is_standard")]
+    pub progress_client: project::ProgressClient,
 }
 
 /// Default guest machine settings; per-service RAM may override memory_mb.

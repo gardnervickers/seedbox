@@ -4,6 +4,7 @@
 //! files have normalized timestamps. The image runs at the guest mount namespace root.
 
 use crate::{image::Launch, limits::exceeds, Error, Result};
+use seedbox_spec::project::ProgressClient;
 use std::{
     collections::BTreeMap,
     fs,
@@ -85,6 +86,13 @@ pub const LAUNCH_MAGIC: &[u8; 10] = b"SBXLAUNCH6";
 /// Linux rejects a CLOCK_REALTIME earlier than the guest's uptime, so an epoch
 /// below this would stop every guest at the launch barrier.
 pub const MIN_WALL_CLOCK_EPOCH: u32 = 86400;
+
+/// The lean progress client in the runtime bundle (arm64 only).
+pub const LEAN_PROGRESS_CLIENT: &str = "libseedbox_progress_lean.so";
+/// The client the guest supervisor runs applications with.
+const PROGRESS_CLIENT: &str = "libseedbox_progress.so";
+/// Present in a boot archive whose progress client is the lean one.
+pub const LEAN_PROGRESS_MARKER: &str = "seedbox/progress/lean-client";
 
 /// This binary recipe is consumed by the small static Linux guest init. Length
 /// prefixes avoid shell evaluation of command, environment or config contents.
@@ -195,7 +203,10 @@ fn check_progress(path: &Path, architecture: Option<Architecture>) -> Result<()>
             .filter(|n| *n <= 128 << 20)
             .ok_or_else(bad)?;
         if let Some(arch) = architecture {
-            if name == Path::new("bin64/drrun") || name == Path::new("libseedbox_progress.so") {
+            if name == Path::new("bin64/drrun")
+                || name == Path::new("libseedbox_progress.so")
+                || name == Path::new(LEAN_PROGRESS_CLIENT)
+            {
                 let mut header = [0; 20];
                 entry.read_exact(&mut header).map_err(|_| bad())?;
                 if &header[..6] != b"\x7fELF\x02\x01" || header[18..20] != arch.elf_machine() {
@@ -228,7 +239,7 @@ pub fn build_initramfs_with(
     rootfs: &Path,
     init: &Path,
     mke2fs: Option<&Path>,
-    progress: Option<&Path>,
+    progress: Option<(&Path, ProgressClient)>,
     recipe: &[u8],
     output: &Path,
 ) -> Result<()> {
@@ -238,8 +249,8 @@ pub fn build_initramfs_with(
     if let Some(mke2fs) = mke2fs {
         archive.owned("seedbox/mke2fs", 0o100755, &fs::read(mke2fs)?)?;
     }
-    if let Some(progress) = progress {
-        archive.progress(progress)?;
+    if let Some((progress, client)) = progress {
+        archive.progress(progress, client)?;
     }
     archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
     archive.tree(rootfs, "rootfs")?;
@@ -252,7 +263,7 @@ pub fn build_initramfs_from_tar(
     rootfs: &Path,
     init: &Path,
     mke2fs: Option<&Path>,
-    progress: Option<&Path>,
+    progress: Option<(&Path, ProgressClient)>,
     recipe: &[u8],
     output: &Path,
 ) -> Result<()> {
@@ -262,8 +273,8 @@ pub fn build_initramfs_from_tar(
     if let Some(path) = mke2fs {
         archive.owned("seedbox/mke2fs", 0o100755, &fs::read(path)?)?;
     }
-    if let Some(progress) = progress {
-        archive.progress(progress)?;
+    if let Some((progress, client)) = progress {
+        archive.progress(progress, client)?;
     }
     archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
     archive.tar_tree(rootfs)?;
@@ -452,13 +463,28 @@ impl<W: Write> Newc<W> {
         Ok(())
     }
 
-    fn progress(&mut self, path: &Path) -> Result<()> {
+    /// Package the runtime with the machine's progress client at the path the
+    /// supervisor runs, so neither the supervisor nor its recipe depends on
+    /// the choice and a standard machine's archive is the same as before it
+    /// existed. A lean archive also carries a marker that names its client.
+    fn progress(&mut self, path: &Path, client: ProgressClient) -> Result<()> {
         check_progress(path, None)?;
         let mut directories = std::collections::BTreeSet::new();
+        let mut lean = false;
         self.owned("seedbox/progress", 0o040755, &[])?;
         for entry in tar::Archive::new(fs::File::open(path)?).entries()? {
             let mut entry = entry?;
-            let path = entry.path()?.into_owned();
+            let mut path = entry.path()?.into_owned();
+            let standard = path == Path::new(PROGRESS_CLIENT);
+            if path == Path::new(LEAN_PROGRESS_CLIENT) {
+                if client.is_standard() {
+                    continue;
+                }
+                lean = true;
+                path = PROGRESS_CLIENT.into();
+            } else if standard && !client.is_standard() {
+                continue;
+            }
             let mut parents: Vec<_> = path
                 .ancestors()
                 .skip(1)
@@ -481,6 +507,15 @@ impl<W: Write> Newc<W> {
                 0o100000 | (entry.header().mode()? & 0o755),
                 &bytes,
             )?;
+        }
+        if !client.is_standard() {
+            if !lean {
+                return Err(Error::Setup(format!(
+                    "progress bundle {} has no lean client (arm64 only); rebuild with cargo xtask build-assets",
+                    path.display()
+                )));
+            }
+            self.owned(LEAN_PROGRESS_MARKER, 0o100444, &[])?;
         }
         Ok(())
     }

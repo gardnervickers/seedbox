@@ -104,6 +104,13 @@ impl OciPreparer {
                 )));
             }
         }
+        if simulation.progress_client == seedbox_spec::project::ProgressClient::Lean
+            && architecture != crate::guest::Architecture::Arm64
+        {
+            return Err(Error::Setup(
+                "engine.progressClient: lean is available on arm64 only".into(),
+            ));
+        }
         if let Some(context) = context {
             context.check()?;
         }
@@ -265,15 +272,20 @@ impl OciPreparer {
             // replaced by another build while an image is being downloaded.
             let mke2fs = mke2fs.as_deref().filter(|_| !service.volumes.is_empty());
             match &imported.rootfs {
-                crate::oci::RootFilesystem::Directory(root) => {
-                    build_initramfs_with(root, &init, mke2fs, Some(&progress), &recipe, &archive)?
-                }
+                crate::oci::RootFilesystem::Directory(root) => build_initramfs_with(
+                    root,
+                    &init,
+                    mke2fs,
+                    Some((&progress, simulation.progress_client)),
+                    &recipe,
+                    &archive,
+                )?,
                 crate::oci::RootFilesystem::Archive(root) => {
                     crate::guest::build_initramfs_from_tar(
                         root,
                         &init,
                         mke2fs,
-                        Some(&progress),
+                        Some((&progress, simulation.progress_client)),
                         &recipe,
                         &archive,
                     )?

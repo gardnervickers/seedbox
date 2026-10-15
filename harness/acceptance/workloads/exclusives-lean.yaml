@@ -1,0 +1,9 @@
+# The progress fixtures under the lean progress client (arm64 only).
+name: exclusives-lean
+machines: {}
+oracle:
+  build:
+    context: "../../../guest/progress/fixtures"
+    dockerfile: Dockerfile
+engine:
+  progressClient: lean

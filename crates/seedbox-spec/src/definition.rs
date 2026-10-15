@@ -169,6 +169,10 @@ pub struct Simulator {
     pub disk: crate::DiskOptions,
     /// The oracle exposes the world control API.
     pub oracle_control: bool,
+    /// Resolved explicitly; definitions retained before the choice existed
+    /// used the standard client.
+    #[serde(default)]
+    pub progress_client: crate::project::ProgressClient,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -264,6 +268,7 @@ impl Definition {
                 ..Default::default()
             },
             disk: self.simulator.disk.clone(),
+            progress_client: self.simulator.progress_client,
         }
     }
 }

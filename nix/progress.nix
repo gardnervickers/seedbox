@@ -24,6 +24,13 @@ in pkgs.runCommand "seedbox-progress.tar" {
   cmake -G Ninja -S ${../guest/progress} -B build \
     -DDynamoRIO_DIR="$PWD/sdk/cmake" -DCMAKE_BUILD_TYPE=Release
   cmake --build build
+  # A separate source keeps the standard client's build inputs unchanged.
+  ${pkgs.lib.optionalString arm ''
+    cmake -G Ninja -S ${../guest/progress-lean} -B build-lean \
+      -DDynamoRIO_DIR="$PWD/sdk/cmake" -DCMAKE_BUILD_TYPE=Release \
+      -DSEEDBOX_PROGRESS_SOURCE=${../guest/progress}
+    cmake --build build-lean
+  ''}
   mkdir -p bundle/bin64 bundle/lib64/release bundle/ext/lib64/release bundle/lib
   cp sdk/bin64/drrun bundle/bin64/
   cp sdk/lib64/release/*.so bundle/lib64/release/
@@ -33,6 +40,7 @@ in pkgs.runCommand "seedbox-progress.tar" {
   rm bundle/ext/lib64/release/libdrmgr.so bundle/ext/lib64/release/libdrreg.so
   cp ${runtime}/ext/lib64/release/*.so bundle/ext/lib64/release/
   cp build/libseedbox_progress.so bundle/
+  ${pkgs.lib.optionalString arm "cp build-lean/libseedbox_progress_lean.so bundle/"}
   # Only the launcher needs libc. Its private loader/search path must never
   # override the application's libc, including musl and static images.
   cp -L ${pkgs.glibc}/lib/${loader} bundle/lib/
@@ -41,7 +49,9 @@ in pkgs.runCommand "seedbox-progress.tar" {
   done
   patchelf --set-interpreter /seedbox/progress/lib/${loader} \
     --set-rpath '$ORIGIN/../lib' bundle/bin64/drrun
-  patchelf --set-rpath '$ORIGIN/lib64/release:$ORIGIN/ext/lib64/release' bundle/libseedbox_progress.so
+  for client in bundle/libseedbox_progress*.so; do
+    patchelf --set-rpath '$ORIGIN/lib64/release:$ORIGIN/ext/lib64/release' "$client"
+  done
   cp sdk/License.txt bundle/DynamoRIO-LICENSE.txt
   cp sdk/ACKNOWLEDGEMENTS bundle/DynamoRIO-ACKNOWLEDGEMENTS.txt
   tar -xf ${pkgs.glibc.src}

@@ -26,6 +26,7 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
         .filter(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "yaml")
+                && runs_here(path)
         })
         .collect();
     workloads.sort();
@@ -121,6 +122,13 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
             retained.display()
         );
     }
+}
+
+/// The lean progress client exists for arm64 guests only.
+fn runs_here(workload: &Path) -> bool {
+    let project: seedbox_spec::project::Project =
+        serde_yaml_ng::from_str(&fs::read_to_string(workload).unwrap()).unwrap();
+    project.engine.progress_client.is_standard() || cfg!(target_arch = "aarch64")
 }
 
 /// The CLI's `--json` resource for a submitted simulation.

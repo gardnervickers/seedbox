@@ -1183,6 +1183,45 @@ fn volume_sizes_validate_with_errors_that_name_the_field() {
 }
 
 #[test]
+fn progress_client_is_optional_and_validated() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = |engine: &str| {
+        fs::write(
+            directory.path().join("seedbox.yaml"),
+            format!(
+                "name: engine
+oracle: {{image: checker}}
+{engine}"
+            ),
+        )
+        .unwrap();
+        seedbox(&["validate"], directory.path())
+    };
+    for engine in [
+        "",
+        "engine: {}\n",
+        "engine: {progressClient: standard}\n",
+        "engine: {progressClient: lean}\n",
+    ] {
+        let output = project(engine);
+        assert!(output.status.success(), "{engine}: {}", stderr(&output));
+    }
+    let output = project("engine: {progressClient: fast}\n");
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: engine.progressClient: unknown variant `fast`, expected `standard` or `lean` at line 3 column 26\n"
+    );
+    let output = project("engine: {progress: lean}\n");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("unknown field `progress`, expected `progressClient`"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn capacity_help_explains_resident_slots_and_accepts_json() {
     let directory = tempfile::tempdir().unwrap();
     let output = seedbox(&["get", "capacity", "--help"], directory.path());

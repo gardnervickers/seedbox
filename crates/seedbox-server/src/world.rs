@@ -529,6 +529,7 @@ mod tests {
             wall_clock_epoch: None,
             machine: Default::default(),
             disk: Default::default(),
+            progress_client: Default::default(),
         };
         spec.network.links.push(seedbox_spec::Link {
             from: "a".into(),

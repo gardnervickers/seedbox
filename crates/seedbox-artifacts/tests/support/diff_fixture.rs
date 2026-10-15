@@ -19,7 +19,7 @@ fn fixture() -> sb::record::RunRecord {
         limits: config::Limits { simulated_time_ns: 1_000_000_000, wall_time_ns: 60_000_000_000 },
         check: config::Check { service: "workload".into(), exit_code: 0 },
         seed: Some(0), wall_clock_epoch: None,
-        machine: config::MachineOptions::default(), disk: config::DiskOptions::default(),
+        machine: config::MachineOptions::default(), disk: config::DiskOptions::default(), progress_client: Default::default(),
     };
     let identity = RunIdentity {
         program: Vec::new(),
