@@ -201,8 +201,11 @@ impl Submission {
                 volumes.push(seedbox_spec::VolumeMount {
                     source: key,
                     target: volume.target,
+                    size_bytes: volume.size_bytes,
                 });
             }
+            project::machine_disk_bytes(volumes.iter().map(|v| v.size_bytes))
+                .map_err(|error| format!("{name}.volumes: {error}"))?;
             services.insert(
                 name,
                 seedbox_spec::Service {
@@ -396,6 +399,7 @@ impl Submission {
                             v.source.clone(),
                             project::Volume {
                                 target: v.target.clone(),
+                                size_bytes: v.size_bytes,
                             },
                         )
                     })
@@ -701,5 +705,31 @@ mod tests {
         let mut relative = wire;
         relative["oracle"]["build"]["context"] = "relative".into();
         assert!(serde_json::from_value::<SimulationSpec>(relative).is_err());
+    }
+    #[test]
+    fn volume_sizes_roundtrip_and_are_bounded_per_machine() {
+        let value = serde_json::json!({"oracle":{"image":"example/app","volumes":{
+            "data":{"target":"/data","size":"4GiB"},"wal":{"target":"/wal"}}}});
+        let spec: SimulationSpec = serde_json::from_value(value).unwrap();
+        let sizes: Vec<_> = spec.configuration.services["oracle"]
+            .volumes
+            .iter()
+            .map(|v| v.size_bytes)
+            .collect();
+        assert_eq!(sizes, [Some(4 << 30), None]);
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            wire["oracle"]["volumes"],
+            serde_json::json!({"data":{"target":"/data","size":"4GiB"},"wal":{"target":"/wal"}})
+        );
+        let large = serde_json::json!({"oracle":{"image":"example/app","volumes":{
+            "a":{"target":"/a","size":"33GiB"},"b":{"target":"/b","size":"32GiB"}}}});
+        let error = serde_json::from_value::<SimulationSpec>(large)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("oracle.volumes: volume sizes total 65GiB, above the 64GiB limit"),
+            "{error}"
+        );
     }
 }

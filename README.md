@@ -58,6 +58,9 @@ Set `memoryMiB` on a machine or the oracle to choose its RAM independently.
 Omission uses 1024 MiB; supported sizes are 64–3072 MiB on Apple Silicon and
 64–65536 MiB on Linux x86-64. Preparation checks the image archive’s boot memory
 requirement; applications may need more.
+A machine's `volumes` keep their contents across a machine crash. Each one adds its
+`size` (default `1GiB`, from `16MiB`, in whole MiB or GiB such as `size: 4GiB`) to
+the machine's disk, which all of its volumes share and which holds at most 64 GiB.
 
 Images must match the guest architecture: `linux/arm64` on Apple Silicon,
 `linux/amd64` on Linux x86-64. Pull private images with Docker or Podman first;

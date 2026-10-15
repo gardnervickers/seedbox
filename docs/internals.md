@@ -466,6 +466,14 @@ in a resolved definition keeps each one with probability one half. Neither
 keeps the guest's unwritten page cache.
 Restarting an application process is different from crashing its machine and disk.
 
+A machine whose service mounts named volumes gets one disk. The supervisor
+formats it as ext4 on first boot and bind-mounts one directory per volume, so
+volumes share its space. Its size is the sum of the resolved volumes'
+`sizeBytes` (each 1 GiB unless authored), at most 64 GiB, and is part of the
+world document. The disk is sparse: it stores only written sectors, in the
+worker's memory. Host memory, crash transfers, checkpoints and disk digests
+scale with written sectors, not the declared size.
+
 Code: [block](../crates/seedbox-engine-core/src/virtio_block.rs),
 [console](../crates/seedbox-engine-core/src/virtio_console.rs),
 [network](../crates/seedbox-engine-core/src/virtio_network.rs),

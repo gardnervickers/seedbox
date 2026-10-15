@@ -1152,6 +1152,37 @@ fn native_project_discovery_prefers_seedbox_yaml_and_validates_oracle() {
 }
 
 #[test]
+fn volume_sizes_validate_with_errors_that_name_the_field() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = |volumes: &str| {
+        fs::write(
+            directory.path().join("seedbox.yaml"),
+            format!("name: sized\nmachines:\n  db:\n    image: app\n    volumes:\n{volumes}oracle: {{image: checker}}\n"),
+        )
+        .unwrap();
+        seedbox(&["validate"], directory.path())
+    };
+    let output = project("      data: {target: /data, size: 4GiB}\n      wal: {target: /wal}\n");
+    assert!(output.status.success(), "{}", stderr(&output));
+    for (size, column) in [("4GB", 35), ("4096", 35), ("1.5GiB", 35), ("128GiB", 35)] {
+        let output = project(&format!("      data: {{target: /data, size: {size}}}\n"));
+        assert_eq!(output.status.code(), Some(2), "{size}");
+        assert_eq!(
+            stderr(&output),
+            format!("error: machines.db.volumes.data.size: size \"{size}\": expected a whole number of MiB or GiB such as 4GiB or 512MiB, from 16MiB to 64GiB at line 6 column {column}\n"),
+        );
+    }
+    let output = project(
+        "      data: {target: /data, size: 40GiB}\n      wal: {target: /wal, size: 30GiB}\n",
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: $.machines.db.volumes: volume sizes total 70GiB, above the 64GiB limit for one machine\n"
+    );
+}
+
+#[test]
 fn capacity_help_explains_resident_slots_and_accepts_json() {
     let directory = tempfile::tempdir().unwrap();
     let output = seedbox(&["get", "capacity", "--help"], directory.path());
