@@ -14,6 +14,8 @@ static int test_adjtimex(struct timex *adjustment);
 #define SEEDBOX_READY_IOPERM readiness_ioperm
 #define SEEDBOX_READY_OUTL readiness_outl
 #define SEEDBOX_TEST_READY_DELAY_NS 10000000ULL
+static char test_vmstat[] = "/tmp/seedbox-vmstat-XXXXXX";
+#define SEEDBOX_VMSTAT test_vmstat
 #define SEEDBOX_SUPERVISOR_TEST
 #include "compose-init.c"
 #undef setrlimit
@@ -340,4 +342,37 @@ int main(int argc, char **argv) {
         assert(waitpid(check, &status, 0) == check);
         assert(WIFEXITED(status) && WEXITSTATUS(status) == (later ? 7 : 1));
     }
+    /* Each kernel kill record becomes one frame and other records none; each
+     * kill /proc/vmstat counted beyond them is reported without details. A
+     * datagram socket stands in for /dev/kmsg's one record per read. */
+    int records[2]; assert(!socketpair(AF_UNIX, SOCK_SEQPACKET, 0, records));
+    assert(!fcntl(records[0], F_SETFL, O_NONBLOCK));
+    int reports[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, reports));
+    assert(!fcntl(reports[1], F_SETFL, O_NONBLOCK));
+    management = reports[0]; kernel_log = records[0];
+    const char *other = "6,8,2,-;random: crng init done\n";
+    const char *killed = "3,9,3,-;Out of memory: Killed process 42 (memhog) total-vm:9kB, anon-rss:8kB, "
+                         "file-rss:2kB, shmem-rss:1kB, UID:0 pgtables:1kB oom_score_adj:0\n";
+    assert(send(records[1], other, strlen(other), 0) == (ssize_t)strlen(other));
+    assert(send(records[1], killed, strlen(killed), 0) == (ssize_t)strlen(killed));
+    int vmstat = mkstemp(test_vmstat); assert(vmstat >= 0);
+    const char *counter = "nr_free_pages 9\noom_kill 5\n";
+    assert(write(vmstat, counter, strlen(counter)) == (ssize_t)strlen(counter)); close(vmstat);
+    oom_kills_counted = 3;
+    service_channels(&child, 0);
+    size_t reported = 0;
+    while ((n = read(reports[1], buffer + reported, sizeof(buffer) - reported - 1)) > 0) reported += (size_t)n;
+    assert(n == -1 && errno == EAGAIN); buffer[reported] = 0;
+    assert(!strcmp(buffer, "SBX_OOM1 42 9 8 2 1 6d656d686f67\nSBX_OOM1 -\n"));
+    assert(oom_kills_counted == 5);
+    report_oom_kills();
+    assert(read(reports[1], buffer, sizeof(buffer)) == -1 && errno == EAGAIN);
+    /* Without a counter, each record is still reported. */
+    assert(!unlink(test_vmstat)); oom_kills_counted = oom_kill_count(); assert(oom_kills_counted == -1);
+    assert(send(records[1], killed, strlen(killed), 0) == (ssize_t)strlen(killed));
+    report_oom_kills();
+    n = read(reports[1], buffer, sizeof(buffer) - 1); assert(n > 0); buffer[n] = 0;
+    assert(!strcmp(buffer, "SBX_OOM1 42 9 8 2 1 6d656d686f67\n"));
+    close(records[0]); close(records[1]); close(reports[0]); close(reports[1]);
+    kernel_log = -1;
 }

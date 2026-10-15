@@ -36,6 +36,7 @@ impl ExecutionService {
             .evidence
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?;
+        let out_of_memory_kills = self.out_of_memory_kills(id)?;
         let Some(record) = self.diagnostic_record(id)? else {
             return Ok(seedbox_api::DiagnosticFiles {
                 files: Vec::new(),
@@ -43,6 +44,7 @@ impl ExecutionService {
                     "record".into(),
                     "execution record unavailable".into(),
                 )]),
+                out_of_memory_kills,
             });
         };
         let mut files = Vec::new();
@@ -56,7 +58,39 @@ impl ExecutionService {
         Ok(seedbox_api::DiagnosticFiles {
             files,
             omissions: record.omitted_logs,
+            out_of_memory_kills,
         })
+    }
+
+    /// Guest kernel out-of-memory kills the server observed, in simulated time
+    /// order, with each machine's configured memory.
+    fn out_of_memory_kills(
+        &self,
+        id: &SimulationId,
+    ) -> Result<Vec<seedbox_api::MachineOutOfMemoryKill>, Error> {
+        let configuration = self.manager.describe(id)?.spec.configuration;
+        let mut kills: Vec<_> =
+            self.manager
+                .world(id)?
+                .machines
+                .into_iter()
+                .flat_map(|machine| {
+                    let memory_mib = configuration.services.get(&machine.name).map(|service| {
+                        service.memory_mb.unwrap_or(configuration.machine.memory_mb)
+                    });
+                    machine.out_of_memory_kills.into_iter().map(move |kill| {
+                        seedbox_api::MachineOutOfMemoryKill {
+                            machine: machine.name.clone(),
+                            memory_mib,
+                            kill,
+                        }
+                    })
+                })
+                .collect();
+        kills.sort_by(|a, b| {
+            (a.kill.simulated_time_ns, &a.machine).cmp(&(b.kill.simulated_time_ns, &b.machine))
+        });
+        Ok(kills)
     }
 
     /// Copy and verify under the evidence lock; HTTP owns the completed spool.

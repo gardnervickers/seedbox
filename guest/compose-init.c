@@ -25,6 +25,7 @@
 #endif
 #include "control.h"
 #include "application-output.h"
+#include "oom-report.h"
 #include "barrier.h"
 #include "progress-launch.h"
 #include "world-clock.h"
@@ -505,6 +506,50 @@ static void drain_output(void) {
         }
     }
 }
+#ifndef SEEDBOX_VMSTAT
+#define SEEDBOX_VMSTAT "/proc/vmstat"
+#endif
+static int kernel_log = -1;
+static int64_t oom_kills_counted = -1;
+static int64_t oom_kill_count(void) {
+    static char text[32768];
+    int fd = open(SEEDBOX_VMSTAT, O_RDONLY|O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t used = 0;
+    for (;;) {
+        ssize_t n = read(fd, text + used, sizeof(text) - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { if (n < 0) used = 0; break; }
+        used += (size_t)n;
+        if (used == sizeof(text)) break;
+    }
+    close(fd);
+    return oom_report_count(text, used);
+}
+/* Report the guest kernel's out-of-memory kills since the last report: one
+ * frame per kernel kill record, plus a detail-free frame for each further kill
+ * that /proc/vmstat counted, whose record the log ring overwrote. Called when
+ * the kernel log has new records and before the exit is reported. */
+static void report_oom_kills(void) {
+    if (kernel_log < 0 || management < 0) return;
+    static char record[OOM_REPORT_RECORD_BYTES];
+    int64_t reported = 0;
+    for (;;) {
+        ssize_t n = read(kernel_log, record, sizeof(record));
+        if (n < 0 && (errno == EINTR || errno == EPIPE)) continue; /* EPIPE: overwritten records. */
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        if (n < 0) die("read kernel log");
+        if (!n) break;
+        char frame[OOM_REPORT_FRAME_BYTES];
+        size_t size = oom_report_frame(record, (size_t)n, frame);
+        if (size) { send_all(management, frame, size); reported++; }
+    }
+    int64_t counted = oom_kill_count();
+    if (counted >= 0 && oom_kills_counted >= 0) {
+        for (int64_t missing = counted - oom_kills_counted - reported; missing > 0; missing--) send_all(management, "SBX_OOM1 -\n", 11);
+    }
+    if (counted >= 0) oom_kills_counted = counted;
+}
 static pid_t start(void) {
     for (unsigned stream = 0; stream < 2; ++stream) {
         application_output_close(&application_outputs[stream]);
@@ -743,15 +788,16 @@ static void relay_management(pid_t *child) {
  * idle disconnect releases the current session; a partial or outstanding RPC
  * still fails closed. The listener stays open for a later connection. */
 static void service_channels(pid_t *child, int timeout) {
-    struct pollfd pfds[5] = {
+    struct pollfd pfds[6] = {
         {.fd = management, .events = POLLIN},
         {.fd = control_client < 0 ? control_listener : -1, .events = POLLIN},
         {.fd = control_client, .events = POLLIN},
         {.fd = application_outputs[0].read_fd, .events = POLLIN},
-        {.fd = application_outputs[1].read_fd, .events = POLLIN}
+        {.fd = application_outputs[1].read_fd, .events = POLLIN},
+        {.fd = management < 0 ? -1 : kernel_log, .events = POLLIN}
     };
     struct timespec limit = {.tv_sec = timeout / 1000, .tv_nsec = timeout % 1000 * 1000000L};
-    int ready = ppoll(pfds, 5, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
+    int ready = ppoll(pfds, 6, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
     if (ready < 0) { if (errno != EINTR) die("poll management"); return; }
     if (!ready) return;
     if (pfds[1].revents & (POLLERR|POLLHUP|POLLNVAL)) { errno = EIO; die("control listener poll"); }
@@ -762,6 +808,9 @@ static void service_channels(pid_t *child, int timeout) {
         if (pfds[3 + stream].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("application output poll"); }
         if (pfds[3 + stream].revents & (POLLIN|POLLHUP)) relay_output(stream, APPLICATION_OUTPUT_BYTES);
     }
+    /* /dev/kmsg reports overwritten records as POLLERR; the next read skips them. */
+    if (pfds[5].revents & POLLNVAL) { errno = EIO; die("kernel log poll"); }
+    if (pfds[5].revents & (POLLIN|POLLERR)) report_oom_kills();
     if (pfds[0].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("management port poll"); }
     if (pfds[0].revents & (POLLIN|POLLHUP)) relay_management(child);
 }
@@ -772,6 +821,7 @@ static void supervise(pid_t *child) {
         while ((done = waitpid(-1, &status, WNOHANG)) > 0) {
             if (done == *child) {
                 drain_output();
+                report_oom_kills();
                 finish(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), 0);
             }
         }
@@ -790,6 +840,10 @@ int main(void) {
         if (fchmod(console, 0666)) die("console permissions");
         dup2(console, 0); dup2(console, 1); dup2(console, 2); if (console > 2) close(console);
     }
+    /* Read only records logged from here on; a kernel without printk has no log. */
+    kernel_log = open("/dev/kmsg", O_RDONLY|O_NONBLOCK|O_CLOEXEC);
+    if (kernel_log < 0 && errno != ENOENT && errno != ENODEV && errno != ENXIO) die("open kernel log");
+    if (kernel_log >= 0 && lseek(kernel_log, 0, SEEK_END) < 0) die("seek kernel log");
 #if defined(__aarch64__)
     if (seedbox_retain_io("/dev/seedbox-io")) die("retain supervisor I/O");
 #endif
@@ -846,6 +900,7 @@ int main(void) {
     if (clock_settime(CLOCK_REALTIME, &wall_clock)) die("set recorded wall clock");
     if (seedbox_launch_barrier("/proc/cmdline", "/dev/urandom")) die("launch barrier");
     watch_children();
+    oom_kills_counted = oom_kill_count();
     pid_t child = start();
     if (child < 0) die("initial application launch failed");
     management_ready();

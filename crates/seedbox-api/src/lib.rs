@@ -48,7 +48,8 @@ pub use seeds::{SeedRangeRequest, SeedRangeStatus};
 mod world;
 pub use world::{
     ApplicationCondition, ApplicationState, FaultState, Frame, FrameDelivery, FrameFate,
-    LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, WorldState,
+    LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, OutOfMemoryKill,
+    OutOfMemoryProcess, WorldState, MAX_OUT_OF_MEMORY_KILLS,
 };
 
 mod timeline;
@@ -63,4 +64,7 @@ pub use capacity::{ExecutionCapacity, ExecutionOccupant, QueueReason, QueuedSimu
 mod bundles;
 mod diagnostics;
 pub use bundles::*;
-pub use diagnostics::{DiagnosticDocument, DiagnosticFile, DiagnosticFileQuery, DiagnosticFiles};
+pub use diagnostics::{
+    DiagnosticDocument, DiagnosticFile, DiagnosticFileQuery, DiagnosticFiles,
+    MachineOutOfMemoryKill,
+};

@@ -229,6 +229,26 @@ automatically an event that belongs in the simulated world.
 
 Code: [x86 PV execution](../crates/seedbox-vmm/src/machine/pv.rs), [ARM machine](../crates/seedbox-arm64/src/machine.rs).
 
+## Out-of-memory kills
+
+A process the guest kernel kills for lack of memory exits with SIGKILL, which
+looks like any other `137`. The guest supervisor therefore reports each kill on
+its management transport as an `SBX_OOM1` frame, before it reports the exit.
+`/proc/vmstat` `oom_kill` counts kills. Linux reports a victim's PID, name and
+memory only in its log, so the supervisor polls `/dev/kmsg` from its start and
+parses the kernel's own `Killed process` record; it accepts only facility 0,
+which userspace cannot write. If the log ring overwrote a counted kill's
+record, that kill's frame carries no details. Both sources are guest state, so
+a replay reports the same kills at the same simulated times.
+
+The shared decoder turns each frame into an observation. The server publishes an
+`outOfMemoryKill` event, keeps the last 64 kills per machine in the world, and
+lists them in `diagnostics`. Like other events, they are not compared evidence.
+A kill that does not end the application, such as of a child process, is
+reported when it happens.
+
+Code: [guest parser](../guest/oom-report.h), [frame](../crates/seedbox-engine-protocol/src/out_of_memory.rs), [server world](../crates/seedbox-server/src/world.rs).
+
 ## Software exclusive reservations
 
 ARM load-exclusive/store-exclusive instructions implement atomic updates. A host

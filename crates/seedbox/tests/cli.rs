@@ -1238,20 +1238,62 @@ fn transfer_symlinks_are_rejected_and_compare_documents_exit_codes() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("NOT_COMPARABLE"));
 }
 
+/// Answer one GET whose request line starts with `path` on the default server
+/// socket, as a stand-in for the server.
+fn stand_in_server(state: &Path, path: &'static str, body: String) {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(state)
+        .unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(state.join("server.sock")).unwrap();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&buffer[..n]),
+                }
+            }
+            if !request.starts_with(format!("GET {path} ").as_bytes()) {
+                continue;
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            return;
+        }
+    });
+}
+
+fn out_of_memory_kill(incarnation: u32) -> seedbox_api::OutOfMemoryKill {
+    seedbox_api::OutOfMemoryKill {
+        incarnation,
+        simulated_time_ns: 122_954_950_231,
+        process: Some(seedbox_api::OutOfMemoryProcess {
+            pid: 412,
+            command: "nats-server".into(),
+            total_vm_kib: 1_203_328,
+            anon_rss_kib: 446_228,
+            file_rss_kib: 1024,
+            shmem_rss_kib: 0,
+        }),
+    }
+}
+
 #[test]
 fn get_world_prints_machine_and_link_tables() {
     use seedbox_api::{
         LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, WorldState,
     };
-    use std::io::{Read, Write};
-    use std::os::unix::fs::DirBuilderExt;
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path().join(".local/state/seedbox");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&state)
-        .unwrap();
     let machine = |name: &str, oracle| MachineState {
         name: name.into(),
         incarnation: 0,
@@ -1264,6 +1306,16 @@ fn get_world_prints_machine_and_link_tables() {
         last_transition_at_ns: None,
         condition_since_ns: None,
         application: Default::default(),
+        out_of_memory_kills: Vec::new(),
+    };
+    // n2 exited after the guest kernel killed its application for memory;
+    // n3's kill was in an earlier incarnation, so its exit is unexplained.
+    let exited = |name: &str, incarnation, killed| MachineState {
+        incarnation,
+        condition: MachineCondition::Exited,
+        exit_code: Some(137),
+        out_of_memory_kills: vec![out_of_memory_kill(killed)],
+        ..machine(name, false)
     };
     let link = |from: &str, to: &str, cut: Option<&str>| LinkState {
         from: from.into(),
@@ -1289,42 +1341,30 @@ fn get_world_prints_machine_and_link_tables() {
         simulation: "k7m2p9qx".parse().unwrap(),
         revision: 3,
         simulated_time_ns: 1_000_000_000,
-        machines: vec![machine("n1", false), machine("oracle", true)],
+        machines: vec![
+            machine("n1", false),
+            exited("n2", 0, 0),
+            exited("n3", 1, 0),
+            machine("oracle", true),
+        ],
         links: vec![link("n1", "oracle", None), link("oracle", "n1", Some("p1"))],
         faults: Vec::new(),
     };
-    let body = serde_json::to_string(&world).unwrap();
-    // A stand-in server answering the one world request on the default socket.
-    let listener = std::os::unix::net::UnixListener::bind(state.join("server.sock")).unwrap();
-    std::thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            let mut request = Vec::new();
-            let mut buffer = [0; 1024];
-            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => request.extend_from_slice(&buffer[..n]),
-                }
-            }
-            if !request.starts_with(b"GET /v1/simulations/k7m2p9qx/world ") {
-                continue;
-            }
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            return;
-        }
-    });
+    stand_in_server(
+        &state,
+        "/v1/simulations/k7m2p9qx/world",
+        serde_json::to_string(&world).unwrap(),
+    );
     let output = seedbox(&["get", "world", "k7m2p9qx"], directory.path());
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "\
-MACHINE  CONDITION  INCARNATION  EXIT  ORACLE
-n1       ready      0            -     -
-oracle   ready      0            -     yes
+MACHINE  CONDITION  INCARNATION  EXIT                 ORACLE
+n1       ready      0            -                    -
+n2       exited     0            137 (out of memory)  -
+n3       exited     1            137                  -
+oracle   ready      0            -                    yes
 
 FROM    TO      LATENCY  JITTER  LOSS    FRAMES  BYTES  DROPPED  FAULT
 n1      oracle  2.5ms    500µs   100ppm  12      960    4        -
@@ -1332,5 +1372,55 @@ oracle  n1      2.5ms    500µs   100ppm  12      960    4        cut p1
 
 simulated time: 1s
 "
+    );
+}
+
+#[test]
+fn diagnostics_lists_out_of_memory_kills_after_retained_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join(".local/state/seedbox");
+    let lost = seedbox_api::OutOfMemoryKill {
+        simulated_time_ns: 130_000_000_000,
+        process: None,
+        ..out_of_memory_kill(1)
+    };
+    let report = seedbox_api::DiagnosticFiles {
+        files: vec![seedbox_api::DiagnosticFile {
+            name: "vmm.json".into(),
+            sha256: "ab".repeat(32),
+            size_bytes: 29414,
+        }],
+        omissions: Default::default(),
+        out_of_memory_kills: vec![
+            seedbox_api::MachineOutOfMemoryKill {
+                machine: "n3".into(),
+                memory_mib: Some(512),
+                kill: out_of_memory_kill(0),
+            },
+            seedbox_api::MachineOutOfMemoryKill {
+                machine: "n3".into(),
+                memory_mib: Some(512),
+                kill: lost,
+            },
+        ],
+    };
+    stand_in_server(
+        &state,
+        "/v1/simulations/k7m2p9qx/diagnostics",
+        serde_json::to_string(&report).unwrap(),
+    );
+    let output = seedbox(&["diagnostics", "k7m2p9qx"], directory.path());
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "\
+NAME      BYTES  SHA256
+vmm.json  29414  {}
+out-of-memory: machine n3 incarnation 0 at 122.955s: the guest kernel's out-of-memory killer killed nats-server (pid 412, anon-rss 446228 kB); raise memoryMiB (now 512)
+out-of-memory: machine n3 incarnation 1 at 130s: the guest kernel's out-of-memory killer killed a process whose kernel log record was lost; raise memoryMiB (now 512)
+",
+            "ab".repeat(32)
+        )
     );
 }

@@ -154,6 +154,14 @@ impl Receiver {
                                         code,
                                     },
                                 ),
+                                Kind::OutOfMemoryKill(kill) => event(
+                                    last_time,
+                                    EventKind::OutOfMemoryKill {
+                                        machine: observation.machine,
+                                        incarnation: observation.incarnation,
+                                        process: kill.process,
+                                    },
+                                ),
                                 Kind::Closed => {
                                     closed = true;
                                     break;
@@ -264,9 +272,16 @@ mod tests {
                     transition: seedbox_engine_protocol::observation::MachineTransition::Paused,
                 },
             ),
-            (4, 20, Kind::MachineExited { code: 7 }),
             (
-                5,
+                4,
+                20,
+                Kind::OutOfMemoryKill(seedbox_engine_protocol::out_of_memory::Kill {
+                    process: None,
+                }),
+            ),
+            (5, 20, Kind::MachineExited { code: 7 }),
+            (
+                6,
                 30,
                 Kind::FaultChanged {
                     id: 1,
@@ -279,7 +294,7 @@ mod tests {
                 },
             ),
             (
-                6,
+                7,
                 30,
                 Kind::Frames {
                     frames: vec![frame.clone()],
@@ -319,6 +334,14 @@ mod tests {
                     }
                 ),
                 (20, EventKind::SourceGap { first: 3, last: 3 }),
+                (
+                    20,
+                    EventKind::OutOfMemoryKill {
+                        machine: "oracle".into(),
+                        incarnation: 2,
+                        process: None
+                    }
+                ),
                 (
                     20,
                     EventKind::MachineExited {

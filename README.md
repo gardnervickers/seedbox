@@ -75,7 +75,7 @@ seedbox logs <sim-id>                    # Recent application output, all machin
 seedbox logs <sim-id> n1 --follow         # Stream one machine's output.
 seedbox events <sim-id> --follow          # Structured simulator events.
 seedbox replay <sim-id>                  # Rerun and compare results.
-seedbox diagnostics <sim-id>             # List completed raw worker/console evidence.
+seedbox diagnostics <sim-id>             # Raw worker/console evidence; out-of-memory kills.
 seedbox export <sim-id> -o saved.seedbox.tar
 seedbox import saved.seedbox.tar          # Fresh completed resource; no execution.
 seedbox describe simulation <sim-id> > simulation.yaml

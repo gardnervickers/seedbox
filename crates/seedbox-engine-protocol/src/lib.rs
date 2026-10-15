@@ -10,6 +10,7 @@ pub mod launch;
 pub mod log_index;
 pub mod network_counters;
 pub mod observation;
+pub mod out_of_memory;
 pub mod output_layout;
 pub mod report;
 pub mod trace;
