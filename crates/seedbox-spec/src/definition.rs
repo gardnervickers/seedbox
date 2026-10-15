@@ -231,6 +231,7 @@ impl Definition {
                         .map(|(n, v)| crate::VolumeMount {
                             source: n.clone(),
                             target: v.target.clone(),
+                            size_bytes: Some(v.size_bytes),
                         })
                         .collect(),
                     network: self.network.name.clone(),

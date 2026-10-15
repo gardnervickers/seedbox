@@ -3,11 +3,12 @@ use super::*;
 use seedbox_spec::project::{Machine, Project};
 
 pub(super) fn parse(
-    doc: Value,
+    yaml: &str,
     source: &Path,
     architecture: crate::guest::Architecture,
 ) -> Result<Simulation> {
-    let project: Project = serde_yaml_ng::from_value(doc)?;
+    // Parse the text, not the tag-checked value, so errors name the field and line.
+    let project: Project = serde_yaml_ng::from_str(yaml)?;
     if !dns_label(&project.name) {
         return invalid(
             "$.name",
@@ -183,7 +184,13 @@ fn resolve_machine(
         volumes.push(VolumeMount {
             source: format!("{name}-{volume}"),
             target: options.target,
+            size_bytes: options.size_bytes,
         });
+    }
+    if let Err(error) =
+        seedbox_spec::project::machine_disk_bytes(volumes.iter().map(|v| v.size_bytes))
+    {
+        return invalid(&format!("{path}.volumes"), error);
     }
     Ok(Service {
         memory_mb: machine.memory_mib.map(|memory| memory.get()),
@@ -342,5 +349,40 @@ mod tests {
             crate::guest::Architecture::Arm64
         )
         .is_err());
+    }
+
+    #[test]
+    fn volume_sizes_are_optional_and_bounded_per_machine() {
+        let sim = parse_native(
+            "name: demo\nmachines:\n  db:\n    image: app\n    volumes:\n      data: {target: /data, size: 4GiB}\n      wal: {target: /wal}\noracle: {image: test}\n",
+        )
+        .unwrap();
+        let sizes: Vec<_> = sim.services["db"]
+            .volumes
+            .iter()
+            .map(|v| v.size_bytes)
+            .collect();
+        assert_eq!(sizes, [Some(4 << 30), None]);
+        let error = parse_native(
+            "name: demo\nmachines:\n  db:\n    image: app\n    volumes:\n      a: {target: /a, size: 40GiB}\n      b: {target: /b, size: 40GiB}\noracle: {image: test}\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("$.machines.db.volumes")
+                && error.contains("volume sizes total 80GiB, above the 64GiB limit"),
+            "{error}"
+        );
+        for size in ["4GB", "1.5GiB", "8MiB", "65GiB", "4096", "''"] {
+            let error = parse_native(&format!(
+                "name: demo\noracle: {{image: test, volumes: {{data: {{target: /data, size: {size}}}}}}}\n"
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("expected a whole number of MiB or GiB"),
+                "{size}: {error}"
+            );
+        }
     }
 }

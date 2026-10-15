@@ -17,10 +17,6 @@ pub(super) fn control_latency(request: &ExecutionRequest<'_>) -> Result<u64> {
         .ok_or_else(|| Error::Execution("control latency overflow".into()))
 }
 
-/// Size of the retained disk of a machine whose service mounts named volumes.
-/// Part of the execution semantics: changing it changes runs.
-pub const VOLUME_DISK_MIB: u64 = 1024;
-
 /// Translate an execution request without consulting registry tags or source
 /// paths. Exposed for preparation tools and report inspection without KVM.
 pub fn world(request: &ExecutionRequest<'_>) -> Result<WorldConfig> {
@@ -135,20 +131,31 @@ fn artifact(request: &ExecutionRequest<'_>, digest: &ContentDigest) -> Result<st
 }
 
 /// A machine booting `digest`; it gets a disk when a service placed on it
-/// mounts a volume.
+/// mounts a volume. The disk holds all of the machine's volumes, so its size
+/// is the sum of theirs. Part of the execution semantics: it changes runs.
 fn machine(
     request: &ExecutionRequest<'_>,
     name: &String,
     digest: &ContentDigest,
 ) -> Result<MachineConfig> {
-    let volumes = request.prepared.placement.iter().any(|(service, machine)| {
-        machine == name
-            && request
-                .prepared
-                .images
-                .get(service)
-                .is_some_and(|image| !image.launch.disk_volumes.is_empty())
-    });
+    let volumes: Vec<_> = request
+        .prepared
+        .placement
+        .iter()
+        .filter(|(_, machine)| *machine == name)
+        .filter_map(|(service, _)| request.prepared.images.get(service))
+        .flat_map(|image| image.launch.disk_volumes.iter().map(|v| v.size_bytes))
+        .collect();
+    let disk = if volumes.is_empty() {
+        None
+    } else {
+        let bytes = seedbox_spec::project::machine_disk_bytes(volumes)
+            .map_err(|error| Error::Setup(format!("machine {name}: {error}")))?;
+        Some(DiskConfig {
+            size_mib: Some(bytes / (1024 * 1024)),
+            image: None,
+        })
+    };
     let cpu = request
         .prepared
         .placement
@@ -171,10 +178,7 @@ fn machine(
             .copied()
             .map(u64::from),
         initrd: artifact(request, digest)?,
-        disk: volumes.then_some(DiskConfig {
-            size_mib: Some(VOLUME_DISK_MIB),
-            image: None,
-        }),
+        disk,
         cmdline: None,
     })
 }

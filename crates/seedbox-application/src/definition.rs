@@ -68,7 +68,9 @@ pub fn resolve(
                         v.source.clone(),
                         Volume {
                             target: v.target.clone(),
-                            size_bytes: crate::engine_adapter::VOLUME_DISK_MIB * 1024 * 1024,
+                            size_bytes: v
+                                .size_bytes
+                                .unwrap_or(seedbox_spec::project::DEFAULT_VOLUME_BYTES),
                         },
                     )
                 })
@@ -187,13 +189,10 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
         if memory_mb != profile.semantic_parameters.memory_mb {
             machine_memory_mb.insert(name.into(), memory_mb);
         }
-        for volume in machine.volumes.values() {
-            if volume.size_bytes != crate::engine_adapter::VOLUME_DISK_MIB * 1024 * 1024 {
-                return Err(Error::Setup(
-                    "volume sizeBytes must equal the supported 1 GiB disk size".into(),
-                ));
-            }
-        }
+        seedbox_spec::project::machine_disk_bytes(
+            machine.volumes.values().map(|v| Some(v.size_bytes)),
+        )
+        .map_err(|error| Error::Setup(format!("machine {name}: volume sizeBytes: {error}")))?;
         let boot = if matches!(profile.backend, crate::execution::Backend::Other(_)) {
             digest(&machine.boot_archive)?
         } else {
@@ -224,6 +223,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
                         .map(|(n, v)| seedbox_spec::VolumeMount {
                             source: n.clone(),
                             target: v.target.clone(),
+                            size_bytes: Some(v.size_bytes),
                         })
                         .collect(),
                 },
@@ -427,6 +427,7 @@ fn resolved_boot(
             .map(|(n, v)| seedbox_spec::VolumeMount {
                 source: n.clone(),
                 target: v.target.clone(),
+                size_bytes: Some(v.size_bytes),
             })
             .collect(),
     };
@@ -760,5 +761,57 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("sizeBytes"));
+    }
+    #[test]
+    fn volume_sizes_resolve_explicitly_and_reach_the_prepared_launch() {
+        let (_temporary, store, mut definition, _) = fixture();
+        let mut configuration = definition.configuration("sized");
+        let oracle = configuration.services.get_mut("oracle").unwrap();
+        oracle.volumes = vec![
+            seedbox_spec::VolumeMount {
+                source: "data".into(),
+                target: "/data".into(),
+                size_bytes: Some(4 << 30),
+            },
+            seedbox_spec::VolumeMount {
+                source: "wal".into(),
+                target: "/wal".into(),
+                size_bytes: None,
+            },
+        ];
+        let mut inputs = prepared(&definition, &store).unwrap();
+        inputs.images.get_mut("oracle").unwrap().launch.disk_volumes = oracle.volumes.clone();
+        let resolved = resolve(&configuration, &inputs, 1, Vec::new()).unwrap();
+        // Omission resolves to the explicit default in the definition.
+        let sizes: Vec<_> = resolved
+            .oracle
+            .volumes
+            .iter()
+            .map(|(name, v)| (name.as_str(), v.size_bytes))
+            .collect();
+        assert_eq!(sizes, [("data", 4 << 30), ("wal", 1 << 30)]);
+        let saved: Definition =
+            serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&resolved).unwrap()).unwrap();
+        let launch = &prepared(&saved, &store).unwrap().images["oracle"].launch;
+        let sizes: Vec<_> = launch.disk_volumes.iter().map(|v| v.size_bytes).collect();
+        assert_eq!(sizes, [Some(4 << 30), Some(1 << 30)]);
+        definition.oracle.volumes = saved.oracle.volumes.clone();
+        for (size, message) in [
+            ((4 << 30) + 1, "whole number of MiB"),
+            (8 << 20, "from 16MiB to 64GiB"),
+            (64 << 30, "volume sizes total 65GiB, above the 64GiB limit"),
+        ] {
+            definition
+                .oracle
+                .volumes
+                .get_mut("data")
+                .unwrap()
+                .size_bytes = size;
+            let error = prepared(&definition, &store).unwrap_err().to_string();
+            assert!(
+                error.contains("machine oracle: volume sizeBytes") && error.contains(message),
+                "{error}"
+            );
+        }
     }
 }
