@@ -14,6 +14,44 @@ pub struct Project {
     pub oracle: Machine,
     #[serde(default)]
     pub network: NetworkDefaults,
+    #[serde(default, skip_serializing_if = "Engine::is_default")]
+    pub engine: Engine,
+}
+
+/// Simulation-wide engine choices that change results.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Engine {
+    #[serde(default)]
+    pub progress_client: ProgressClient,
+}
+
+impl Engine {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The build of the guest progress instrumentation that runs applications
+/// (guest/progress). Both charge the same instructions at the same points;
+/// they differ in how much translator work and memory each translated block
+/// costs, which the translator's own charged syscalls make visible in
+/// simulated time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProgressClient {
+    /// The established client.
+    #[default]
+    Standard,
+    /// Cheaper instrumentation: short-lived processes start about 2.5 times
+    /// faster under the translator (arm64 only).
+    Lean,
+}
+
+impl ProgressClient {
+    pub fn is_standard(&self) -> bool {
+        *self == Self::Standard
+    }
 }
 
 /// Launch inputs shared by application machines and the oracle.
@@ -516,6 +554,40 @@ mod tests {
             "name: test\noracle: {image: oracle}\nsimulator: {instructionsPerProgressCall: 7}\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn progress_client_defaults_to_standard_and_is_omitted_when_standard() {
+        let parse = |extra: &str| {
+            serde_yaml_ng::from_str::<Project>(&format!(
+                "name: test\noracle: {{image: oracle}}\n{extra}"
+            ))
+        };
+        assert_eq!(
+            parse("").unwrap().engine.progress_client,
+            ProgressClient::Standard
+        );
+        assert_eq!(
+            parse("engine: {}\n").unwrap().engine.progress_client,
+            ProgressClient::Standard
+        );
+        let lean = parse("engine: {progressClient: lean}\n").unwrap();
+        assert_eq!(lean.engine.progress_client, ProgressClient::Lean);
+        assert!(serde_yaml_ng::to_string(&lean)
+            .unwrap()
+            .contains("progressClient: lean"));
+        let standard = parse("engine: {progressClient: standard}\n").unwrap();
+        assert!(!serde_yaml_ng::to_string(&standard)
+            .unwrap()
+            .contains("engine"));
+        for bad in [
+            "engine: {progressClient: Lean}\n",
+            "engine: {progressClient: ''}\n",
+            "engine: {progressClient: lean, budget: 1}\n",
+            "engine: lean\n",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

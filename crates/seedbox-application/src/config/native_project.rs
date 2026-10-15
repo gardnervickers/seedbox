@@ -87,6 +87,7 @@ pub(super) fn parse(
         wall_clock_epoch: None,
         machine: MachineOptions::default(),
         disk: DiskOptions::default(),
+        progress_client: project.engine.progress_client,
     })
 }
 

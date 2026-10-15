@@ -524,6 +524,7 @@ mod tests {
                 schedule: Default::default(),
                 disk: Default::default(),
                 oracle_control: false,
+                progress_client: Default::default(),
             },
             start: Start::Fresh,
             overrides: Vec::new(),

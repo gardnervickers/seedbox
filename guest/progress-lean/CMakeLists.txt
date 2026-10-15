@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.16)
+project(seedbox_progress_lean C CXX)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(DynamoRIO_USE_LIBC OFF)
+find_package(DynamoRIO REQUIRED)
+# The standard client's directory provides the shared option parser.
+include_directories(${SEEDBOX_PROGRESS_SOURCE})
+add_library(seedbox_progress_lean SHARED progress-lean.c)
+configure_DynamoRIO_client(seedbox_progress_lean)
+use_DynamoRIO_extension(seedbox_progress_lean drmgr)

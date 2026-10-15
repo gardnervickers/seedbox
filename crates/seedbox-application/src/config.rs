@@ -571,6 +571,7 @@ pub fn parse_for_architecture(
         wall_clock_epoch,
         machine,
         disk,
+        progress_client: Default::default(),
     })
 }
 

@@ -98,6 +98,28 @@ straight-line code no longer reads can still be read on a fault path: HotSpot's
 implicit null checks deoptimize through handlers that save such registers, and a
 budget left there corrupted the heap.
 
+A simulation can choose the lean ARM client instead
+(`engine: {progressClient: lean}`, resolved into `simulator.progressClient`).
+It charges the same blocks, points and amounts and leaves through the dispatcher
+the same way, but it saves one fixed scratch register to its own TLS slot instead
+of using drreg, and a charge that crosses the budget branches to one shared slow
+path, emitted at start-up, instead of a clean call emitted into every block.
+drreg's per-block liveness analysis and those clean calls cost more than running
+the code: a shell started four times slower than under the bare translator, and
+2.4 times faster with the lean client. No application instruction runs while the
+register holds the budget. The charge's instructions have no translation, so the
+translator never relocates a thread there; when it reports such a thread's state
+from a recreated block, the client's restore-state event puts the register back,
+but a translation from stored tables cannot. Translated code and the client's
+own memory are smaller, so the translator commits less memory, and those commits
+are marked syscalls: simulated times differ slightly from the standard client.
+Preparation packages the chosen client at the path the guest supervisor runs, so
+neither the supervisor nor its launch recipe depends on the choice, and a
+standard machine's boot archive is byte-for-byte the one it was before the
+choice existed: the exit witness records guest PCs, so even a rebuilt supervisor
+changes it. A lean archive also carries a marker file, and preparing a
+definition checks that its `simulator.progressClient` names the archive's client.
+
 Guest signals arrive only at progress calls, so when the ARM translator
 synchronizes all threads, for example to flush code a JIT has rewritten, it
 always finds a busy thread inside the progress call. The translator cannot
@@ -142,6 +164,7 @@ code write otherwise retook the lock each time and the fork never ran.
 Minimal reproducers are in [`tools/jvm-fuzz/repros`](../tools/jvm-fuzz/repros).
 
 Code: [progress client](../guest/progress/progress.c),
+[lean client](../guest/progress/progress-lean.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
 the vector context and translator syscall mark commits in the ARM DynamoRIO
 fork (the `dynamorio-arm` flake input, [`nix/dynamorio.nix`](../nix/dynamorio.nix)),
