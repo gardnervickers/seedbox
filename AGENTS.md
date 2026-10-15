@@ -61,7 +61,19 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
 - `harness/` holds YAML acceptance scenarios with guest Python drivers, portable
   checks, and the batch runner for low-level world fixtures. Application
   acceptance uses `seedbox run` / `seedbox replay` directly; do not add a host
-  scenario runner. `kernel/` and `guest/` hold guest build inputs.
+  scenario runner to acceptance or `harness/check.sh`. `kernel/` and `guest/`
+  hold guest build inputs.
+- `crates/seedbox-control-client` is the Rust guest client for the control RPC,
+  mirroring `python/seedbox/control.py`.
+- Jepsen-style reproductions live in `harness/jepsen/` (generated scenarios)
+  and `crates/seedbox-jepsen` (oracles, clients, checkers, generator and the
+  seed campaign runner). Write their oracles, checkers, generators and campaign
+  tooling in Rust; use Python only for a real reason, such as a system whose
+  only client library is Python. Linearizability checks use `wgl` models.
+  The crate is its own workspace, outside `harness/check.sh`, because it
+  depends on the private `wgl-checker` repository: use `cargo jepsen` and
+  `cargo test-jepsen`, and `cargo jepsen build-oracle` before running a
+  scenario. Its campaign runner is research tooling, not acceptance.
 
 ## Crate and test boundaries
 

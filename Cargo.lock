@@ -2028,6 +2028,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-control-client"
+version = "0.1.0"
+dependencies = [
+ "seedbox-control",
+ "serde_json",
+]
+
+[[package]]
 name = "seedbox-engine-core"
 version = "0.1.0"
 dependencies = [
