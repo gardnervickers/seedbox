@@ -1,0 +1,46 @@
+# NEXT-100 case 13 (long-running tier): the same broker; an idempotent producer
+# loses the broker's responses to one batch on a connection-scoped fault.
+name: kafka-idempotent-retry
+machines:
+  kafka:
+    build:
+      context: "../guest/kafka"
+      dockerfile: broker.Dockerfile
+    environment:
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+    memoryMiB: 2048
+    cpu:
+      speed: 1GHz
+    volumes:
+      data:
+        target: "/data"
+  producer:
+    build:
+      context: "../guest/kafka"
+      dockerfile: client.Dockerfile
+    entrypoint:
+    - python3
+    - "/scenario/kafka_broker.py"
+    - producer
+    memoryMiB: 1024
+    files:
+    - source: "../driver/kafka_broker.py"
+      target: "/scenario/kafka_broker.py"
+oracle:
+  build:
+    context: "../guest/kafka"
+    dockerfile: client.Dockerfile
+  entrypoint:
+  - python3
+  - "/scenario/kafka_broker.py"
+  - idempotent-retry
+  memoryMiB: 512
+  files:
+  - source: "../driver/kafka_broker.py"
+    target: "/scenario/kafka_broker.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

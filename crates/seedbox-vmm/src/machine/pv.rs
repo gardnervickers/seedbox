@@ -398,6 +398,165 @@ mod tests {
         }
     }
 
+    /// The guest-RAM accounting of the x86 kernel's syscall hook, as a probe:
+    /// per iteration three translator-marked syscalls (a residue `pending` that
+    /// counts one syscall per ten) and one 2,500 ns progress call (a `carry`
+    /// below 1,000 ns), both in guest RAM like `seedbox_translator_syscalls` and
+    /// `seedbox_progress_syscalls`, and a yield once the count reaches the
+    /// published target. Assembled from (Intel syntax, `.code32`):
+    ///
+    /// ```text
+    ///     mov [PENDING], 0 / mov [CARRY], 0 / mov [ITER], 0
+    /// top: mov ecx, 3
+    /// marked: mov eax, [PENDING]; inc eax; cmp eax, 10; jb 1f
+    ///     xor eax, eax; inc [SYSCALLS]
+    /// 1:  mov [PENDING], eax; YIELD_IF_DUE; dec ecx; jnz marked
+    ///     mov eax, [CARRY]; add eax, 2500; xor edx, edx; mov ebx, 1000; div ebx
+    ///     add [SYSCALLS], eax; mov [CARRY], edx; YIELD_IF_DUE
+    ///     inc [ITER]; cmp [ITER], 400; jb top
+    ///     exit(0)
+    /// YIELD_IF_DUE: if TARGET.high == 0 && SYSCALLS.low >= TARGET.low: out 0x52c, 0
+    /// ```
+    const FRACTIONAL_GUEST: [u8; 184] = [
+        0xc7, 0x05, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x05, 0x04, 0x00, 0x20,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x05, 0x08, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xb9, 0x03, 0x00, 0x00, 0x00, 0xa1, 0x00, 0x00, 0x20, 0x00, 0x40, 0x83, 0xf8, 0x0a, 0x72,
+        0x08, 0x31, 0xc0, 0xff, 0x05, 0x18, 0x00, 0x00, 0xd0, 0xa3, 0x00, 0x00, 0x20, 0x00, 0x83,
+        0x3d, 0x44, 0x00, 0x00, 0xd0, 0x00, 0x75, 0x15, 0xa1, 0x18, 0x00, 0x00, 0xd0, 0x3b, 0x05,
+        0x40, 0x00, 0x00, 0xd0, 0x72, 0x08, 0xba, 0x2c, 0x05, 0x00, 0x00, 0x31, 0xc0, 0xee, 0x49,
+        0x75, 0xc7, 0xa1, 0x04, 0x00, 0x20, 0x00, 0x05, 0xc4, 0x09, 0x00, 0x00, 0x31, 0xd2, 0xbb,
+        0xe8, 0x03, 0x00, 0x00, 0xf7, 0xf3, 0x01, 0x05, 0x18, 0x00, 0x00, 0xd0, 0x89, 0x15, 0x04,
+        0x00, 0x20, 0x00, 0x83, 0x3d, 0x44, 0x00, 0x00, 0xd0, 0x00, 0x75, 0x15, 0xa1, 0x18, 0x00,
+        0x00, 0xd0, 0x3b, 0x05, 0x40, 0x00, 0x00, 0xd0, 0x72, 0x08, 0xba, 0x2c, 0x05, 0x00, 0x00,
+        0x31, 0xc0, 0xee, 0xff, 0x05, 0x08, 0x00, 0x20, 0x00, 0x81, 0x3d, 0x08, 0x00, 0x20, 0x00,
+        0x90, 0x01, 0x00, 0x00, 0x0f, 0x82, 0x6f, 0xff, 0xff, 0xff, 0xba, 0xf4, 0x00, 0x00, 0x00,
+        0x31, 0xc0, 0xee, 0xf4,
+    ];
+    const PENDING: usize = 0x20_0000;
+    const CARRY: usize = PENDING + 4;
+    const ITERATIONS: usize = PENDING + 8;
+
+    /// One stopped boundary: time, owed CPU time, the guest's residue, carry,
+    /// iteration and the published syscall count.
+    type Boundary = (u64, u64, u32, u32, u32, u64);
+
+    fn fractional_machine(kvm: &Kvm) -> Machine {
+        let mut m = machine(kvm, &FRACTIONAL_GUEST);
+        m.page_timer_requested = true;
+        m.abi = super::super::ABI_PAGE_TIMER;
+        m.enable_page_timer();
+        m.pic.set_masks(0xffff);
+        m
+    }
+
+    fn boundary(m: &mut Machine) -> Boundary {
+        let word =
+            |memory: &[u8], at: usize| u32::from_le_bytes(memory[at..at + 4].try_into().unwrap());
+        let syscalls = m.page_get(PAGE_SYSCALLS);
+        let (time, debt) = (m.time, m.pv_debt_ns);
+        let memory = m.memory();
+        (
+            time,
+            debt,
+            word(memory, PENDING),
+            word(memory, CARRY),
+            word(memory, ITERATIONS),
+            syscalls,
+        )
+    }
+
+    /// Run to exit through fixed 700 ns world bounds, optionally capturing a
+    /// checkpoint at bound `capture` and continuing in a fresh machine.
+    fn fractional_run(
+        kvm: &Kvm,
+        watchdog: Duration,
+        capture: Option<usize>,
+    ) -> (Vec<Boundary>, (u64, String)) {
+        let mut m = fractional_machine(kvm);
+        let mut clock = PvClock::new(watchdog).unwrap();
+        let mut frames = Vec::new();
+        let mut trace = Vec::new();
+        for index in 1.. {
+            let stop = m
+                .run_until(&mut clock, index as u64 * 700, 0, &mut frames)
+                .unwrap();
+            trace.push(boundary(&mut m));
+            if stop == Stop::Exited {
+                break;
+            }
+            assert_eq!(stop, Stop::Reached);
+            if capture == Some(index) {
+                let saved = m.snapshot().unwrap();
+                drop(m);
+                m = fractional_machine(kvm);
+                m.restore(&saved).unwrap();
+                clock = PvClock::new(watchdog).unwrap();
+                clock.restore_boundary().unwrap();
+                assert_eq!(
+                    boundary(&mut m),
+                    *trace.last().unwrap(),
+                    "restore at {index}"
+                );
+            }
+            assert!(index < 10_000, "the probe never exited");
+        }
+        (trace, (m.time, m.exit_witness()))
+    }
+
+    /// NEXT-100 case 43: checkpoints captured with the translator-syscall
+    /// residue at every value 1-9 and the progress carry at nonintegral
+    /// multiples of the 1,000 ns charge must continue to the same boundaries,
+    /// total charged work and stop position as the uncheckpointed run. The
+    /// residue and carry live in guest RAM, so capture must neither lose nor
+    /// double them.
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    fn fractional_charges_survive_checkpoints_at_every_residue() {
+        let kvm = Kvm::new().unwrap();
+        // The work the probe charges: every whole syscall its accounting emits.
+        let (mut pending, mut carry, mut syscalls) = (0u64, 0u64, 0u64);
+        for _ in 0..400 {
+            for _ in 0..3 {
+                pending += 1;
+                if pending == 10 {
+                    pending = 0;
+                    syscalls += 1;
+                }
+            }
+            syscalls += (carry + 2500) / 1000;
+            carry = (carry + 2500) % 1000;
+        }
+        for watchdog in [Duration::from_secs(10), Duration::from_micros(100)] {
+            let (reference, end) = fractional_run(&kvm, watchdog, None);
+            assert_eq!(end.0, syscalls * 1000, "total charged work");
+            assert_eq!(reference.last().unwrap().1, 0, "no CPU time left owed");
+            // Bounds whose residue covers 1-9 and whose carry is nonintegral.
+            let mut captures = Vec::new();
+            for residue in 1..=9 {
+                let index = reference
+                    .iter()
+                    .position(|b| b.2 == residue && b.3 != 0 && b.4 < 400)
+                    .unwrap_or_else(|| panic!("no bound with residue {residue}: {reference:?}"));
+                captures.push(index + 1);
+            }
+            // Also where debt spans the bound.
+            if let Some(index) = reference.iter().position(|b| b.1 > 0) {
+                captures.push(index + 1);
+            }
+            for capture in captures {
+                let (trace, finished) = fractional_run(&kvm, watchdog, Some(capture));
+                assert_eq!(
+                    trace, reference,
+                    "watchdog {watchdog:?}, capture at bound {capture}"
+                );
+                assert_eq!(
+                    finished, end,
+                    "watchdog {watchdog:?}, capture at bound {capture}"
+                );
+            }
+        }
+    }
+
     #[test]
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn watchdog_plans_do_not_adopt_expire_or_draw_page_timer_latency() {

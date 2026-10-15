@@ -313,6 +313,32 @@ impl Catalogue {
         Ok(())
     }
 
+    /// Every content digest the remaining resources name: their submitted and
+    /// resolved inputs, and imported checkpoints that have not been deleted.
+    pub(crate) fn referenced_content(
+        &self,
+    ) -> Result<BTreeSet<seedbox_artifacts::store::ContentDigest>> {
+        let mut digests = BTreeSet::new();
+        let json = |value: std::result::Result<serde_json::Value, serde_json::Error>| {
+            value.map_err(|e| Error::Invalid(e.to_string()))
+        };
+        for entry in self.entries.values() {
+            let mut values = vec![
+                json(serde_json::to_value(&entry.request.spec))?,
+                json(serde_json::to_value(&entry.resource.spec))?,
+            ];
+            for (name, definition) in entry.imported_checkpoints.iter().flatten() {
+                if !entry.deleted_checkpoints.contains(name) {
+                    values.push(json(serde_json::to_value(definition))?);
+                }
+            }
+            for value in &values {
+                crate::execution::content::digests_in(value, &mut digests);
+            }
+        }
+        Ok(digests)
+    }
+
     pub(crate) fn imported_checkpoint(
         &self,
         id: &SimulationId,

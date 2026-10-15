@@ -4,6 +4,7 @@
 //! files have normalized timestamps. The image runs at the guest mount namespace root.
 
 use crate::{image::Launch, limits::exceeds, Error, Result};
+use seedbox_spec::project::ProgressClient;
 use std::{
     collections::BTreeMap,
     fs,
@@ -85,6 +86,13 @@ pub const LAUNCH_MAGIC: &[u8; 10] = b"SBXLAUNCH6";
 /// Linux rejects a CLOCK_REALTIME earlier than the guest's uptime, so an epoch
 /// below this would stop every guest at the launch barrier.
 pub const MIN_WALL_CLOCK_EPOCH: u32 = 86400;
+
+/// The lean progress client in the runtime bundle (arm64 only).
+pub const LEAN_PROGRESS_CLIENT: &str = "libseedbox_progress_lean.so";
+/// The client the guest supervisor runs applications with.
+const PROGRESS_CLIENT: &str = "libseedbox_progress.so";
+/// Present in a boot archive whose progress client is the lean one.
+pub const LEAN_PROGRESS_MARKER: &str = "seedbox/progress/lean-client";
 
 /// This binary recipe is consumed by the small static Linux guest init. Length
 /// prefixes avoid shell evaluation of command, environment or config contents.
@@ -195,7 +203,10 @@ fn check_progress(path: &Path, architecture: Option<Architecture>) -> Result<()>
             .filter(|n| *n <= 128 << 20)
             .ok_or_else(bad)?;
         if let Some(arch) = architecture {
-            if name == Path::new("bin64/drrun") || name == Path::new("libseedbox_progress.so") {
+            if name == Path::new("bin64/drrun")
+                || name == Path::new("libseedbox_progress.so")
+                || name == Path::new(LEAN_PROGRESS_CLIENT)
+            {
                 let mut header = [0; 20];
                 entry.read_exact(&mut header).map_err(|_| bad())?;
                 if &header[..6] != b"\x7fELF\x02\x01" || header[18..20] != arch.elf_machine() {
@@ -228,7 +239,7 @@ pub fn build_initramfs_with(
     rootfs: &Path,
     init: &Path,
     mke2fs: Option<&Path>,
-    progress: Option<&Path>,
+    progress: Option<(&Path, ProgressClient)>,
     recipe: &[u8],
     output: &Path,
 ) -> Result<()> {
@@ -238,8 +249,8 @@ pub fn build_initramfs_with(
     if let Some(mke2fs) = mke2fs {
         archive.owned("seedbox/mke2fs", 0o100755, &fs::read(mke2fs)?)?;
     }
-    if let Some(progress) = progress {
-        archive.progress(progress)?;
+    if let Some((progress, client)) = progress {
+        archive.progress(progress, client)?;
     }
     archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
     archive.tree(rootfs, "rootfs")?;
@@ -252,7 +263,7 @@ pub fn build_initramfs_from_tar(
     rootfs: &Path,
     init: &Path,
     mke2fs: Option<&Path>,
-    progress: Option<&Path>,
+    progress: Option<(&Path, ProgressClient)>,
     recipe: &[u8],
     output: &Path,
 ) -> Result<()> {
@@ -262,8 +273,8 @@ pub fn build_initramfs_from_tar(
     if let Some(path) = mke2fs {
         archive.owned("seedbox/mke2fs", 0o100755, &fs::read(path)?)?;
     }
-    if let Some(progress) = progress {
-        archive.progress(progress)?;
+    if let Some((progress, client)) = progress {
+        archive.progress(progress, client)?;
     }
     archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
     archive.tar_tree(rootfs)?;
@@ -298,13 +309,30 @@ impl<W: Write> Newc<W> {
         mtime: u32,
         size: u32,
     ) -> Result<()> {
+        self.node(name, inode, mode, uid, gid, nlink, mtime, size, (0, 0))
+    }
+
+    /// A header with the device number a character or block special names.
+    #[allow(clippy::too_many_arguments)]
+    fn node(
+        &mut self,
+        name: &str,
+        inode: u32,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        nlink: u32,
+        mtime: u32,
+        size: u32,
+        (rdev_major, rdev_minor): (u32, u32),
+    ) -> Result<()> {
         if name.as_bytes().contains(&0)
             || name.starts_with('/')
             || name.split('/').any(|p| p == "..")
         {
             return Err(Error::Execution("invalid initramfs entry name".into()));
         }
-        write!(self.output, "070701{inode:08x}{mode:08x}{uid:08x}{gid:08x}{nlink:08x}{mtime:08x}{size:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}", 0, 0, 0, 0, name.len() + 1, 0)?;
+        write!(self.output, "070701{inode:08x}{mode:08x}{uid:08x}{gid:08x}{nlink:08x}{mtime:08x}{size:08x}{:08x}{:08x}{rdev_major:08x}{rdev_minor:08x}{:08x}{:08x}", 0, 0, name.len() + 1, 0)?;
         self.output.write_all(name.as_bytes())?;
         self.output.write_all(&[0])?;
         self.padding(110 + name.len() as u64 + 1)
@@ -435,13 +463,28 @@ impl<W: Write> Newc<W> {
         Ok(())
     }
 
-    fn progress(&mut self, path: &Path) -> Result<()> {
+    /// Package the runtime with the machine's progress client at the path the
+    /// supervisor runs, so neither the supervisor nor its recipe depends on
+    /// the choice and a standard machine's archive is the same as before it
+    /// existed. A lean archive also carries a marker that names its client.
+    fn progress(&mut self, path: &Path, client: ProgressClient) -> Result<()> {
         check_progress(path, None)?;
         let mut directories = std::collections::BTreeSet::new();
+        let mut lean = false;
         self.owned("seedbox/progress", 0o040755, &[])?;
         for entry in tar::Archive::new(fs::File::open(path)?).entries()? {
             let mut entry = entry?;
-            let path = entry.path()?.into_owned();
+            let mut path = entry.path()?.into_owned();
+            let standard = path == Path::new(PROGRESS_CLIENT);
+            if path == Path::new(LEAN_PROGRESS_CLIENT) {
+                if client.is_standard() {
+                    continue;
+                }
+                lean = true;
+                path = PROGRESS_CLIENT.into();
+            } else if standard && !client.is_standard() {
+                continue;
+            }
             let mut parents: Vec<_> = path
                 .ancestors()
                 .skip(1)
@@ -464,6 +507,15 @@ impl<W: Write> Newc<W> {
                 0o100000 | (entry.header().mode()? & 0o755),
                 &bytes,
             )?;
+        }
+        if !client.is_standard() {
+            if !lean {
+                return Err(Error::Setup(format!(
+                    "progress bundle {} has no lean client (arm64 only); rebuild with cargo xtask build-assets",
+                    path.display()
+                )));
+            }
+            self.owned(LEAN_PROGRESS_MARKER, 0o100444, &[])?;
         }
         Ok(())
     }
@@ -491,7 +543,7 @@ impl<W: Write> Newc<W> {
             if !seen.insert(key.clone()) {
                 return Err(invalid());
             }
-            if entry.header().entry_type().is_file() {
+            if inode_type(entry.header().entry_type()).is_some() {
                 links.insert(key, 1);
             }
             if entry.header().entry_type().is_hard_link() {
@@ -500,6 +552,7 @@ impl<W: Write> Newc<W> {
                 *count = count.checked_add(1).ok_or_else(invalid)?;
             }
         }
+        // Each hard-link target's inode, file type and device number.
         let mut inodes = BTreeMap::new();
         for entry in tar::Archive::new(io::BufReader::new(fs::File::open(path)?)).entries()? {
             let mut entry = entry?;
@@ -524,22 +577,48 @@ impl<W: Write> Newc<W> {
                     mtime,
                     size,
                 )?;
-                inodes.insert(key, inode);
+                inodes.insert(key, (inode, 0o100000, (0, 0)));
                 if io::copy(&mut entry, &mut self.output)? != u64::from(size) {
                     return Err(invalid());
                 }
                 self.padding(size.into())?;
+            } else if let Some(file_type) = inode_type(kind) {
+                // Character and block specials and FIFOs carry no data. The
+                // kernel's unpacker creates them as the image recorded them.
+                let rdev = if kind.is_fifo() {
+                    (0, 0)
+                } else {
+                    (
+                        header.device_major()?.ok_or_else(invalid)?,
+                        header.device_minor()?.ok_or_else(invalid)?,
+                    )
+                };
+                self.node(
+                    &key,
+                    inode,
+                    mode | file_type,
+                    uid,
+                    gid,
+                    links[&key],
+                    mtime,
+                    0,
+                    rdev,
+                )?;
+                inodes.insert(key, (inode, file_type, rdev));
             } else if kind.is_hard_link() {
                 let target = name(entry.link_name()?.ok_or_else(invalid)?.into_owned())?;
-                self.header(
+                // The unpacker links entries that agree on inode and file type.
+                let (inode, file_type, rdev) = *inodes.get(&target).ok_or_else(invalid)?;
+                self.node(
                     &key,
-                    *inodes.get(&target).ok_or_else(invalid)?,
-                    mode | 0o100000,
+                    inode,
+                    mode | file_type,
                     uid,
                     gid,
                     links[&target],
                     mtime,
                     0,
+                    rdev,
                 )?;
             } else if kind.is_dir() {
                 self.header(&key, inode, mode | 0o040000, uid, gid, 2, mtime, 0)?;
@@ -551,7 +630,10 @@ impl<W: Write> Newc<W> {
                 self.output.write_all(bytes)?;
                 self.padding(size.into())?;
             } else {
-                return Err(invalid());
+                return Err(Error::Integrity(format!(
+                    "invalid Linux root filesystem archive: {key} has unsupported {}",
+                    entry_kind(kind)
+                )));
             }
         }
         if !seen.contains("rootfs") {
@@ -564,5 +646,42 @@ impl<W: Write> Newc<W> {
         self.owned("TRAILER!!!", 0, &[])?;
         self.output.flush()?;
         Ok(())
+    }
+}
+
+/// The newc file type of a tar entry that has its own inode and no children:
+/// one a hard link can name.
+fn inode_type(kind: tar::EntryType) -> Option<u32> {
+    if kind.is_file() {
+        Some(0o100000)
+    } else if kind.is_character_special() {
+        Some(0o020000)
+    } else if kind.is_block_special() {
+        Some(0o060000)
+    } else if kind.is_fifo() {
+        Some(0o010000)
+    } else {
+        None
+    }
+}
+
+/// Whether the Linux root filesystem packager can represent a tar entry of
+/// this kind. Hard links must also name an earlier non-directory entry.
+pub(crate) fn supported_entry(kind: tar::EntryType) -> bool {
+    inode_type(kind).is_some() || kind.is_hard_link() || kind.is_dir() || kind.is_symlink()
+}
+
+/// A tar entry kind as a user-facing phrase.
+pub(crate) fn entry_kind(kind: tar::EntryType) -> String {
+    match kind {
+        tar::EntryType::Regular => "regular file".into(),
+        tar::EntryType::Link => "hard link".into(),
+        tar::EntryType::Symlink => "symbolic link".into(),
+        tar::EntryType::Char => "character device".into(),
+        tar::EntryType::Block => "block device".into(),
+        tar::EntryType::Directory => "directory".into(),
+        tar::EntryType::Fifo => "FIFO".into(),
+        tar::EntryType::Continuous => "contiguous file".into(),
+        other => format!("tar entry type {:?}", char::from(other.as_byte())),
     }
 }

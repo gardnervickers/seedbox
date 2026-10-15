@@ -104,6 +104,13 @@ impl OciPreparer {
                 )));
             }
         }
+        if simulation.progress_client == seedbox_spec::project::ProgressClient::Lean
+            && architecture != crate::guest::Architecture::Arm64
+        {
+            return Err(Error::Setup(
+                "engine.progressClient: lean is available on arm64 only".into(),
+            ));
+        }
         if let Some(context) = context {
             context.check()?;
         }
@@ -207,13 +214,18 @@ impl OciPreparer {
                 .collect::<Result<BTreeMap<_, _>>>()?;
             let source = serde_json::to_string(&service.source)?;
             let imported = successful_source(&mut imported_sources, source, || {
-                transport.import(
-                    service,
-                    &temporary.path().join(name),
-                    store,
-                    context.map(|c| (c, name.as_str())),
-                    architecture,
-                )
+                transport
+                    .import(
+                        service,
+                        &temporary.path().join(name),
+                        store,
+                        context.map(|c| (c, name.as_str())),
+                        architecture,
+                    )
+                    .map_err(|error| match error {
+                        Error::Setup(message) => Error::Setup(format!("machine {name}: {message}")),
+                        error => error,
+                    })
             })?
             .for_service(service, store)?;
             if let Some(context) = context {
@@ -260,15 +272,20 @@ impl OciPreparer {
             // replaced by another build while an image is being downloaded.
             let mke2fs = mke2fs.as_deref().filter(|_| !service.volumes.is_empty());
             match &imported.rootfs {
-                crate::oci::RootFilesystem::Directory(root) => {
-                    build_initramfs_with(root, &init, mke2fs, Some(&progress), &recipe, &archive)?
-                }
+                crate::oci::RootFilesystem::Directory(root) => build_initramfs_with(
+                    root,
+                    &init,
+                    mke2fs,
+                    Some((&progress, simulation.progress_client)),
+                    &recipe,
+                    &archive,
+                )?,
                 crate::oci::RootFilesystem::Archive(root) => {
                     crate::guest::build_initramfs_from_tar(
                         root,
                         &init,
                         mke2fs,
-                        Some(&progress),
+                        Some((&progress, simulation.progress_client)),
                         &recipe,
                         &archive,
                     )?

@@ -47,7 +47,7 @@ pub fn parse_for_architecture(
     let doc: Value = serde_yaml_ng::from_str(yaml)?;
     reject_tags(&doc, "$")?;
     if doc.get("machines").is_some() || doc.get("oracle").is_some() {
-        return native_project::parse(doc, source, architecture);
+        return native_project::parse(yaml, source, architecture);
     }
     let top = fields(
         &doc,
@@ -285,7 +285,11 @@ pub fn parse_for_architecture(
                 {
                     return invalid(&vp, "volume target overlaps a config mount");
                 }
-                volume_mounts.push(VolumeMount { source, target });
+                volume_mounts.push(VolumeMount {
+                    source,
+                    target,
+                    size_bytes: None,
+                });
             }
         }
         let working_dir = optional_text(svc.get("working_dir"), &format!("{p}.working_dir"))?;
@@ -567,6 +571,7 @@ pub fn parse_for_architecture(
         wall_clock_epoch,
         machine,
         disk,
+        progress_client: Default::default(),
     })
 }
 

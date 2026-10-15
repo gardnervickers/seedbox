@@ -50,6 +50,56 @@ fn linux(root: &Path, output: &Path) -> Result<()> {
     fs::copy(runtime, output.join("runtime.tar.gz"))?;
     Ok(())
 }
+/// The locked `dynamorio-arm` flake input, the private DynamoRIO fork the ARM
+/// runtime builds: its Git URL and revision.
+fn locked_dynamorio(root: &Path) -> Result<(String, String)> {
+    let lock: serde_json::Value = serde_json::from_slice(&fs::read(root.join("flake.lock"))?)?;
+    let locked = &lock["nodes"]["dynamorio-arm"]["locked"];
+    let (Some(url), Some(rev)) = (locked["url"].as_str(), locked["rev"].as_str()) else {
+        return Err("flake.lock: no locked dynamorio-arm input; run nix flake lock".into());
+    };
+    if rev.len() != 40 || !rev.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("flake.lock: invalid dynamorio-arm revision {rev}").into());
+    }
+    Ok((url.to_owned(), rev.to_owned()))
+}
+/// Checks out the locked DynamoRIO revision under `build/dynamorio-arm/REV`
+/// with the user's own Git credentials (their SSH key), which the builder
+/// container does not have. Returns the parent directory and the revision.
+fn dynamorio_checkout(root: &Path) -> Result<(PathBuf, String)> {
+    let (url, rev) = locked_dynamorio(root)?;
+    let parent = root.join("build/dynamorio-arm");
+    fs::create_dir_all(&parent)?;
+    if !parent.join(&rev).is_dir() {
+        eprintln!("fetching DynamoRIO {rev} from {url}");
+        let fetch = tempfile::Builder::new()
+            .prefix(".fetch-")
+            .tempdir_in(&parent)?;
+        let git = |args: &[&str]| capture(command("git", fetch.path()).args(args));
+        git(&["init", "--quiet"])?;
+        git(&["fetch", "--quiet", "--depth", "1", &url, &rev])?;
+        git(&[
+            "-c",
+            "advice.detachedHead=false",
+            "checkout",
+            "--quiet",
+            "FETCH_HEAD",
+        ])?;
+        if git(&["rev-parse", "HEAD"])? != rev {
+            return Err(format!("{url}: fetched revision is not {rev}").into());
+        }
+        fs::remove_dir_all(fetch.path().join(".git"))?;
+        fs::rename(fetch.keep(), parent.join(&rev))?;
+    }
+    // Keep only the locked revision.
+    for entry in fs::read_dir(&parent)? {
+        let path = entry?.path();
+        if path.file_name().is_some_and(|name| name != rev.as_str()) {
+            fs::remove_dir_all(path)?;
+        }
+    }
+    Ok((parent, rev))
+}
 fn mac(root: &Path, output: &Path) -> Result<()> {
     let candidates = env::var("SEEDBOX_ASSET_BUILDER")
         .map(|s| vec![s])
@@ -106,13 +156,25 @@ fn mac(root: &Path, output: &Path) -> Result<()> {
         .arg("-cf")
         .arg(source.path().join("source.tar"))
         .env("COPYFILE_DISABLE", "1"))?;
+    // The container cannot fetch the private DynamoRIO fork, so the archive
+    // carries the locked revision, which overrides the flake input.
+    let (dynamorio, rev) = dynamorio_checkout(root)?;
+    run(command("tar", root)
+        .arg("-rf")
+        .arg(source.path().join("source.tar"))
+        .arg("-C")
+        .arg(&dynamorio)
+        .arg(&rev)
+        .env("COPYFILE_DISABLE", "1"))?;
     let script = r#"mkdir /source /output
  tar -xf - -C /source
+ mv "/source/$DYNAMORIO" /dynamorio
  cd /source
  export NIX_CONFIG="experimental-features = nix-command flakes
 sandbox = false"
  kernel=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#guestKernel)
- runtime=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#runtimeArchive)
+ runtime=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths \
+   --override-input dynamorio-arm path:/dynamorio .#runtimeArchive)
  cp "$kernel/Image" /output/kernel
  cp "$runtime" /output/runtime.tar.gz
 "#;
@@ -121,6 +183,8 @@ sandbox = false"
         "-i",
         "--platform",
         "linux/arm64",
+        "--env",
+        &format!("DYNAMORIO={rev}"),
         "--mount",
         &format!(
             "type=volume,source=seedbox-nix-{},destination=/nix",
@@ -195,6 +259,24 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_locked_dynamorio_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let rev = "5c49d8c38b0beed54e5d6fd2e2f4e5d0699071a6";
+        let lock = serde_json::json!({"nodes": {"dynamorio-arm": {"locked": {
+            "type": "git", "url": "ssh://git@github.com/example/dynamorio.git", "rev": rev}}}});
+        fs::write(root.path().join("flake.lock"), lock.to_string()).unwrap();
+        assert_eq!(
+            locked_dynamorio(root.path()).unwrap(),
+            (
+                "ssh://git@github.com/example/dynamorio.git".to_owned(),
+                rev.to_owned()
+            )
+        );
+        fs::write(root.path().join("flake.lock"), r#"{"nodes": {}}"#).unwrap();
+        assert!(locked_dynamorio(root.path()).is_err());
+    }
 
     #[test]
     fn failed_assets_preserve_previous_publication_and_success_replaces_it() {

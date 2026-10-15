@@ -76,8 +76,13 @@ fn seeded_survival_branch(
 }
 
 fn sector_survives(model: DiskFaultModel, rng: &mut Rng) -> bool {
-    let draw = rng.next() as f64 / (u64::MAX as f64 + 1.0);
-    draw < model.survival_probability
+    draw_survives(model.survival_probability, rng.next())
+}
+
+/// One sector's survival from its draw. Draws within 2^10 of `u64::MAX` round
+/// to exactly 1.0 as `f64`, so probability one must keep them explicitly.
+fn draw_survives(probability: f64, draw: u64) -> bool {
+    probability >= 1.0 || (draw as f64 / (u64::MAX as f64 + 1.0)) < probability
 }
 
 type Sector = Box<[u8; SECTOR]>;
@@ -483,6 +488,17 @@ mod tests {
             before,
             "crash selection leaves the source intact"
         );
+    }
+
+    #[test]
+    fn probability_one_keeps_draws_that_round_to_one() {
+        for draw in [0, u64::MAX / 2, u64::MAX - 1024, u64::MAX] {
+            assert!(draw_survives(1.0, draw), "draw {draw:#x}");
+            assert!(!draw_survives(0.0, draw), "draw {draw:#x}");
+        }
+        assert!(draw_survives(0.5, u64::MAX / 2 - 4096));
+        assert!(!draw_survives(0.5, u64::MAX / 2 + 4096));
+        assert!(!draw_survives(0.5, u64::MAX));
     }
 
     #[test]

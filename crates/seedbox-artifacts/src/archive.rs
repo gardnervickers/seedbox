@@ -456,8 +456,10 @@ pub fn import(input: impl Read, store: &ContentStore, options: &Options) -> Resu
             remaining: max_bytes,
             cancellation: options.cancellation.clone(),
         };
+        // Imported binaries belong to the imported resource, unless the cache
+        // already holds them; the server reclaims them with that resource.
         let published = if binaries.contains(&digest) {
-            store.put_reader(reader)?
+            store.put_reader_owned(reader)?
         } else {
             store.put_reader_unsynced(reader)?
         };
@@ -522,6 +524,7 @@ mod tests {
                 schedule: Default::default(),
                 disk: Default::default(),
                 oracle_control: false,
+                progress_client: Default::default(),
             },
             start: Start::Fresh,
             overrides: Vec::new(),

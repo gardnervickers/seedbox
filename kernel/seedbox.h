@@ -20,11 +20,17 @@
 /* A progress call: getpid with this first argument (guest/progress/budget.h). */
 #define SEEDBOX_PROGRESS_NR	39
 #define SEEDBOX_PROGRESS_MARK	0x5eedb0c5UL
+/* rbx of a syscall the translator makes for itself
+ * (guest/progress/dynamorio-x86-translator-syscalls.patch). */
+#define SEEDBOX_TRANSLATOR_MARK	0x5eedd1a900000000UL
+/* Translator syscalls cost this fraction of an application syscall. */
+#define SEEDBOX_TRANSLATOR_DIVISOR	10
 
 #ifndef __ASSEMBLY__
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/jump_label.h>
+#include <asm/current.h>
 #include <asm/io.h>
 #include <asm/ptrace.h>
 
@@ -61,7 +67,10 @@ struct seedbox_time_page {
 };
 
 struct pt_regs;
+struct task_struct;
 extern struct seedbox_time_page *seedbox_page;
+/* The task whose progress call is at its exit, if any (seedbox_user_tick). */
+extern struct task_struct *seedbox_user_charge;
 unsigned long long seedbox_rdtsc(void);
 void seedbox_cpu_relax(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
@@ -74,11 +83,20 @@ void seedbox_timer_disarm(void);
 void seedbox_take_entropy(void);
 /* The syscalls a progress call counts as: its charge in whole syscall costs. */
 u64 seedbox_progress_syscalls(struct seedbox_time_page *p);
+/* The syscalls a translator syscall counts as: one in every SEEDBOX_TRANSLATOR_DIVISOR. */
+u64 seedbox_translator_syscalls(void);
+/* The current tick interrupted a progress call's exit: user time. */
+bool seedbox_user_tick(void);
 
 /*
  * Offer the VMM a deterministic stopping point. The executed conditional
  * branches are the same whether or not the exit happens. A progress call
  * counts as the syscalls its compute charge comes to, not one.
+ *
+ * Time moves only at exits, so timer interrupts arrive in the kernel, right
+ * after a yield. One that arrives at a progress call's yield samples the
+ * user compute that call charged: mark it as user time for tick accounting.
+ * The yield has no memory clobber; the barriers keep it inside the mark.
  */
 static __always_inline void seedbox_syscall_hook(struct pt_regs *regs, int nr)
 {
@@ -86,16 +104,27 @@ static __always_inline void seedbox_syscall_hook(struct pt_regs *regs, int nr)
 
 	if (p) {
 		u64 n = p->syscalls;
+		struct task_struct *user = NULL;
 
-		if (nr == SEEDBOX_PROGRESS_NR && regs->di == SEEDBOX_PROGRESS_MARK)
+		if (nr == SEEDBOX_PROGRESS_NR && regs->di == SEEDBOX_PROGRESS_MARK) {
 			n += seedbox_progress_syscalls(p);
+			user = current;
+		}
+		/* The translator's own syscalls (thread suspension, signal
+		 * returns, futex waits) are bookkeeping, not application work. */
+		else if (regs->bx == SEEDBOX_TRANSLATOR_MARK)
+			n += seedbox_translator_syscalls();
 		else
 			n += 1;
 		WRITE_ONCE(p->syscalls, n);
+		WRITE_ONCE(seedbox_user_charge, user);
+		barrier();
 		if (READ_ONCE(p->exit_req))
 			outl(0, SEEDBOX_PORT_YIELD);
 		else if (n >= READ_ONCE(p->syscall_target))
 			outl(0, SEEDBOX_PORT_YIELD);
+		barrier();
+		WRITE_ONCE(seedbox_user_charge, NULL);
 	}
 }
 #endif

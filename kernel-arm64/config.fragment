@@ -58,6 +58,9 @@ CONFIG_ARM64_BTI=n
 CONFIG_ARM64_SVE=n
 CONFIG_ARM64_SME=n
 CONFIG_ARM64_MTE=n
+# Tagged user pointers through syscalls (prctl PR_SET_TAGGED_ADDR_CTRL), used by
+# hardware-assisted sanitizers and tagging allocators; independent of MTE.
+CONFIG_ARM64_TAGGED_ADDR_ABI=y
 CONFIG_ARM64_PSEUDO_NMI=n
 CONFIG_CPU_IDLE=n
 CONFIG_CPU_FREQ=n

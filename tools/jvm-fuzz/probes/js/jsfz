@@ -1,0 +1,3 @@
+#!/bin/sh
+# V8 probes (jsfz.js) on the image's Node.js; gc() lets the probe force collections.
+exec /fuzz/node/node --expose-gc /fuzz/js/jsfz.js "$@"

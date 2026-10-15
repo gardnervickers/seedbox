@@ -139,6 +139,12 @@ static void charge_before(void *context, instrlist_t *block, instr_t *where,
 #ifdef X86_64
     DR_ASSERT(drreg_unreserve_aflags(context, block, where) == DRREG_SUCCESS);
 #else
+    /* Give the scratch register its application value back before `where`.
+     * drreg would restore it lazily, at the next application read, and an
+     * application instruction that faults before then would expose the budget:
+     * HotSpot's implicit null checks deoptimize through handlers that read
+     * registers the straight-line code has not read yet. */
+    DR_ASSERT(drreg_get_app_value(context, block, where, scratch, scratch) == DRREG_SUCCESS);
     DR_ASSERT(drreg_unreserve_register(context, block, where, scratch) == DRREG_SUCCESS);
 #endif
 }
@@ -235,7 +241,9 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
      * as an instruction immediate: the entire u32 range fits in ptr_int_t. */
     instruction_budget = (ptr_int_t)parsed_budget;
     points_per_block = parsed_points;
-    drreg_options_t options = {sizeof(options), 3, false};
+    /* Conservative: a register dead on the straight-line path can still be read
+     * on a fault path (see charge_before), so always save the application value. */
+    drreg_options_t options = {sizeof(options), 3, true};
     DR_ASSERT(drmgr_init());
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);
     DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 1, 0));

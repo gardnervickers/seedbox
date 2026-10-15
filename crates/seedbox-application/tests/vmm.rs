@@ -264,6 +264,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
                     disk_volumes: vec![seedbox_application::config::VolumeMount {
                         source: "state".into(),
                         target: "/state".into(),
+                        size_bytes: None,
                     }],
                 },
             },
@@ -304,6 +305,49 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         .unwrap();
         assert_eq!(checkpoint_world["checkpoint"]["parent_identity"], parent);
         assert_eq!(checkpoint_world["machines"], world["machines"]);
+        // The disk holds every volume of the machine: their sizes add up.
+        let mut sized = prepared.clone();
+        let volumes = &mut sized.images.get_mut("server").unwrap().launch.disk_volumes;
+        volumes[0].size_bytes = Some(3 << 30);
+        volumes.push(seedbox_application::config::VolumeMount {
+            source: "wal".into(),
+            target: "/wal".into(),
+            size_bytes: None,
+        });
+        let sized_world = world_json(&ExecutionRequest {
+            program: &[],
+            intervention_history: None,
+            start_paused: false,
+            resume_checkpoint: None,
+            replay_interventions: None,
+            observations: None,
+            prepared: &sized,
+            ..*request
+        })
+        .unwrap();
+        assert_eq!(
+            sized_world["machines"][1]["disk"],
+            json!({"size_mib": 4096})
+        );
+        assert_ne!(
+            sized_world["checkpoint"]["parent_identity"],
+            checkpoint_world["checkpoint"]["parent_identity"]
+        );
+        let volumes = &mut sized.images.get_mut("server").unwrap().launch.disk_volumes;
+        volumes[0].size_bytes = Some(64 << 30);
+        assert!(world_json(&ExecutionRequest {
+            program: &[],
+            intervention_history: None,
+            start_paused: false,
+            resume_checkpoint: None,
+            replay_interventions: None,
+            observations: None,
+            prepared: &sized,
+            ..*request
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("machine server-machine: volume sizes total 65GiB, above the 64GiB limit"));
         prepared.images.clear();
         let without_volume = world_json(&ExecutionRequest {
             program: &[],
@@ -327,10 +371,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
             disks,
             [
                 ("client-machine", None),
-                (
-                    "server-machine",
-                    Some(json!({"size_mib": engine_adapter::VOLUME_DISK_MIB}))
-                )
+                ("server-machine", Some(json!({"size_mib": 1024})))
             ]
         );
     });

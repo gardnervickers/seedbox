@@ -78,6 +78,38 @@ pub struct MachineState {
     pub condition_since_ns: Option<u64>,
     #[serde(default)]
     pub application: ApplicationState,
+    /// Guest kernel out-of-memory kills on this machine, oldest first, across
+    /// incarnations. Only the most recent [`MAX_OUT_OF_MEMORY_KILLS`] are kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_memory_kills: Vec<OutOfMemoryKill>,
+}
+
+/// Kills retained per machine; each needs the guest to exhaust its memory.
+pub const MAX_OUT_OF_MEMORY_KILLS: usize = 64;
+
+/// The process the guest kernel's out-of-memory killer chose, from its log.
+pub use seedbox_engine_protocol::out_of_memory::Process as OutOfMemoryProcess;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OutOfMemoryKill {
+    pub incarnation: u32,
+    pub simulated_time_ns: u64,
+    /// Absent when the kernel counted the kill but its log record was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<OutOfMemoryProcess>,
+}
+
+impl MachineState {
+    /// The kill that ended the current incarnation's application, if it exited.
+    pub fn exited_out_of_memory(&self) -> Option<&OutOfMemoryKill> {
+        if self.condition != MachineCondition::Exited {
+            return None;
+        }
+        self.out_of_memory_kills
+            .last()
+            .filter(|kill| kill.incarnation == self.incarnation)
+    }
 }
 
 /// One direction of a machine pair.

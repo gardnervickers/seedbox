@@ -86,6 +86,15 @@ def polling(text):
     return replace(text, '\tasm volatile("yield" ::: "memory");',
                    '\tasm volatile("yield" ::: "memory");\n#ifndef BUILD_VDSO\n\tseedbox_cpu_relax();\n#endif')
 
+def user_ticks(text):
+    # Guest time advances only in the kernel, so every tick interrupts EL1 and
+    # tick accounting would charge translated compute as system time. Count a
+    # tick that interrupts a progress charge as user time. Only the accounting
+    # changes: RCU and the scheduler still see the interrupted kernel mode.
+    text = replace(text, "#include <asm/io.h>\n", "#include <asm/io.h>\n#include <asm/seedbox.h>\n")
+    return replace(text, "\taccount_process_tick(p, user_tick);\n",
+                   "\taccount_process_tick(p, user_tick || seedbox_user_tick());\n")
+
 def changes(root, application=False):
     edits = {}
     def edit(path, fn):
@@ -99,6 +108,22 @@ def changes(root, application=False):
     edit("arch/arm64/kernel/process.c", counter_access)
     edit("arch/arm64/include/asm/futex.h", futex_retries)
     edit("arch/arm64/include/asm/vdso/processor.h", polling)
+    edit("kernel/time/timer.c", user_ticks)
+    # Kernel retry loops that wait for another task, such as shrink_dcache_parent
+    # waiting for a concurrent dentry kill, yield only through cond_resched().
+    # Kernel code charges no guest time, so the tick that sets need_resched never
+    # comes and the other task never runs. A cond_resched() that does not
+    # reschedule polls like cpu_relax(): one bounded PV read.
+    edit("kernel/sched/core.c", lambda s: replace(s,
+        "\tif (should_resched(0) && !irqs_disabled()) {\n"
+        "\t\tpreempt_schedule_common();\n"
+        "\t\treturn 1;\n"
+        "\t}\n",
+        "\tif (should_resched(0) && !irqs_disabled()) {\n"
+        "\t\tpreempt_schedule_common();\n"
+        "\t\treturn 1;\n"
+        "\t}\n"
+        "\tcpu_relax();\n"))
     # Every return to EL0 crosses a guest exception/scheduling boundary, unlike
     # a host-only interruption. Publish its epoch and clear the physical
     # reservation before restoring user x0/x1; EL1 returns do not publish one.

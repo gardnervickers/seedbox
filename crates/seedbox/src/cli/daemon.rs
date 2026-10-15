@@ -1,6 +1,6 @@
 //! Process environment and platform discovery for the server executable.
 
-use super::{backends::Executor, RuntimeInputs, Signals};
+use super::{backends::Executor, Performance, RuntimeInputs, Signals};
 use seedbox_application::{
     config::Simulation,
     execution::{Backend, CancellationToken, ExecutionBackend, PreparedInputs},
@@ -24,7 +24,8 @@ use std::{
 mod startup;
 pub(super) use startup::connect;
 
-struct NativeBackends(RuntimeInputs);
+/// Runtime inputs, and the performance settings every execution records.
+struct NativeBackends(RuntimeInputs, Performance);
 
 impl BackendProvider for NativeBackends {
     fn project(
@@ -37,7 +38,7 @@ impl BackendProvider for NativeBackends {
         let (preparation, execution) = self.0.backends(configuration, cancellation)?;
         Ok(Backends {
             preparation: Box::new(preparation),
-            execution: Box::new(execution),
+            execution: Box::new(self.1.apply(execution)?),
         })
     }
 
@@ -66,7 +67,7 @@ impl BackendProvider for NativeBackends {
         } else {
             Executor::Linux(VmmExecutor::for_profile(engine, inputs.profile.clone())?)
         };
-        Ok(Box::new(executor))
+        Ok(Box::new(self.1.apply(executor)?))
     }
 }
 
@@ -96,10 +97,11 @@ pub(super) fn state_directory(explicit: Option<PathBuf>) -> Result<PathBuf> {
 pub(super) fn serve(
     state: Option<PathBuf>,
     inputs: RuntimeInputs,
+    performance: Performance,
     startup_handshake: bool,
 ) -> Result<u8> {
     let mut ready = false;
-    let result = serve_inner(state, inputs, || {
+    let result = serve_inner(state, inputs, performance, || {
         if startup_handshake {
             startup::ready()?;
         }
@@ -138,6 +140,7 @@ fn prepare_directory(root: &Path) -> Result<()> {
 fn serve_inner(
     state: Option<PathBuf>,
     inputs: RuntimeInputs,
+    performance: Performance,
     ready: impl FnOnce() -> Result<()>,
 ) -> Result<u8> {
     let root = state_directory(state)?;
@@ -161,16 +164,18 @@ fn serve_inner(
     let socket = root.join("server.sock");
     remove_stale_socket(&socket)?;
     let catalogue = Catalogue::in_memory();
-    let scratch = session_directory(&root)?;
+    let cache = root.join("cache");
+    prepare_directory(&cache)?;
+    let scratch = session_directory(&root, &cache)?;
     let session = scratch.path().to_path_buf();
-    let store = session_store(&root, &session)?;
+    let store = session_store(&cache, &session);
     let manager = Arc::new(Manager::new(catalogue));
     let execution = Arc::new(
         ExecutionService::new(
             manager.clone(),
             session.clone(),
             store,
-            Arc::new(NativeBackends(inputs)),
+            Arc::new(NativeBackends(inputs, performance)),
         )
         .map_err(setup)?,
     );
@@ -184,14 +189,26 @@ fn serve_inner(
             .map_err(|e| Error::Setup(format!("server socket {}: {e}", socket.display())))?;
         ready()?;
         let capacity = NonZeroUsize::MIN.saturating_add(1);
-        seedbox_server::serve(listener, manager, execution, capacity, shutdown)
+        seedbox_server::serve(listener, manager, execution.clone(), capacity, shutdown)
             .await
             .map_err(setup)
     });
+    // Objects still referenced at shutdown remain in the cache for saved
+    // definitions. Drop the ledger first so a partial cleanup cannot list them.
+    let reclaimed = execution
+        .reclaim_content()
+        .map_err(|error| Error::Setup(format!("content reclamation: {error}")))
+        .and_then(|_| match fs::remove_dir_all(session.join(OWNED_LEDGER)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(Error::Setup(
+                format!("session cleanup {}: {error}", session.display()),
+            )),
+            _ => Ok(()),
+        });
     let cleanup = scratch
         .close()
         .map_err(|error| Error::Setup(format!("session cleanup {}: {error}", session.display())));
     result?;
+    reclaimed?;
     cleanup?;
     // The socket lock and temporary execution files live through worker shutdown.
     // Leave the socket inode for the next owner's stale-socket check.
@@ -199,17 +216,18 @@ fn serve_inner(
 }
 
 /// Binary inputs outlive the server; observations and run evidence do not.
-fn session_store(root: &Path, session: &Path) -> Result<ContentStore> {
-    let cache = root.join("cache");
-    prepare_directory(&cache)?;
-    Ok(ContentStore::with_ephemeral_evidence(
-        cache,
-        session.join("store"),
-    ))
+/// The session ledger lists cache objects its resources own (`OWNED_LEDGER`).
+fn session_store(cache: &Path, session: &Path) -> ContentStore {
+    ContentStore::with_ephemeral_evidence(cache, session.join("store"))
+        .with_owned_ledger(session.join(OWNED_LEDGER))
 }
 
+/// Owned cache objects of a session; an abandoned session's are reclaimed.
+const OWNED_LEDGER: &str = "owned";
+
 /// Called only while holding the exclusive server lock and with no listener.
-fn session_directory(root: &Path) -> Result<tempfile::TempDir> {
+/// A crashed session's resources are gone, so its owned cache objects go too.
+fn session_directory(root: &Path, cache: &Path) -> Result<tempfile::TempDir> {
     let sessions = root.join("sessions");
     prepare_directory(&sessions)?;
     for entry in fs::read_dir(&sessions)? {
@@ -219,6 +237,9 @@ fn session_directory(root: &Path) -> Result<tempfile::TempDir> {
         }
         let path = entry.path();
         let result = if entry.file_type()?.is_dir() {
+            ContentStore::reclaim_ledger(cache, &path.join(OWNED_LEDGER)).map_err(|error| {
+                Error::Setup(format!("stale session cleanup {}: {error}", path.display()))
+            })?;
             fs::remove_dir_all(&path)
         } else {
             fs::remove_file(&path)
@@ -339,12 +360,13 @@ mod session_tests {
     #[test]
     fn cleanup_reclaims_abandoned_sessions_and_preserves_unrelated_files() {
         let root = tempfile::tempdir().unwrap();
-        let first = session_directory(root.path()).unwrap();
+        let cache = root.path().join("cache");
+        let first = session_directory(root.path(), &cache).unwrap();
         fs::write(first.path().join("execution"), b"scratch").unwrap();
         let abandoned = first.keep();
         let unrelated = root.path().join("sessions/keep-me");
         fs::write(&unrelated, b"unrelated").unwrap();
-        let next = session_directory(root.path()).unwrap();
+        let next = session_directory(root.path(), &cache).unwrap();
         assert!(!abandoned.exists());
         assert!(unrelated.exists());
         let path = next.path().to_path_buf();
@@ -355,10 +377,11 @@ mod session_tests {
     #[test]
     fn binary_cache_survives_shutdown_and_abandoned_sessions_without_run_state() {
         let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
         let mut assets = Vec::new();
         for abandoned in [false, true] {
-            let session = session_directory(root.path()).unwrap();
-            let store = session_store(root.path(), session.path()).unwrap();
+            let session = session_directory(root.path(), &cache).unwrap();
+            let store = session_store(&cache, session.path());
             for bytes in [
                 b"kernel".as_slice(),
                 b"engine".as_slice(),
@@ -377,9 +400,9 @@ mod session_tests {
             } else {
                 session.close().unwrap();
             }
-            let next = session_directory(root.path()).unwrap();
+            let next = session_directory(root.path(), &cache).unwrap();
             assert!(!old.exists());
-            let restarted = session_store(root.path(), next.path()).unwrap();
+            let restarted = session_store(&cache, next.path());
             for (digest, bytes) in &assets {
                 assert_eq!(&restarted.read(digest).unwrap(), bytes);
             }
@@ -387,5 +410,31 @@ mod session_tests {
             assert!(!next.path().join("simulation-state").exists());
             next.close().unwrap();
         }
+    }
+
+    #[test]
+    fn startup_reclaims_only_the_owned_objects_of_an_abandoned_session() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let session = session_directory(root.path(), &cache).unwrap();
+        let store = session_store(&cache, session.path());
+        let input = store.put(b"kernel").unwrap();
+        let owned = store.put_reader_owned(&b"checkpoint state"[..]).unwrap();
+        let _ = session.keep();
+        let next = session_directory(root.path(), &cache).unwrap();
+        let restarted = session_store(&cache, next.path());
+        assert_eq!(restarted.read(&input).unwrap(), b"kernel");
+        assert!(restarted.read(&owned).is_err());
+        // After a graceful shutdown, still referenced owned objects are inputs.
+        let kept = restarted
+            .put_reader_owned(&b"checkpoint state"[..])
+            .unwrap();
+        fs::remove_dir_all(next.path().join(OWNED_LEDGER)).unwrap();
+        next.close().unwrap();
+        let last = session_directory(root.path(), &cache).unwrap();
+        assert_eq!(
+            session_store(&cache, last.path()).read(&kept).unwrap(),
+            b"checkpoint state"
+        );
     }
 }

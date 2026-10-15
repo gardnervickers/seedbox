@@ -8,7 +8,7 @@ pub const MAX_DATAGRAM_BYTES: usize = 16 * 1024;
 
 /// Size sockets explicitly: Darwin's default datagram send limit is 2048
 /// bytes, below this protocol's maximum record. The bounded receive buffer
-/// absorbs short bursts without blocking a worker on observer progress.
+/// absorbs short bursts; beyond it a sender sees [`receiver_full`].
 #[cfg(unix)]
 pub fn configure_socket(socket: &std::os::unix::net::UnixDatagram) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
@@ -32,6 +32,14 @@ pub fn configure_socket(socket: &std::os::unix::net::UnixDatagram) -> std::io::R
         }
     }
     Ok(())
+}
+
+/// Whether a nonblocking send failed only because the receiver has not yet
+/// drained earlier datagrams: Linux reports a full peer queue as `EAGAIN`,
+/// Darwin a full receive buffer as `ENOBUFS`.
+#[cfg(unix)]
+pub fn receiver_full(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock || error.raw_os_error() == Some(libc::ENOBUFS)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +89,8 @@ pub enum Kind {
     MachineExited {
         code: u8,
     },
+    /// The guest kernel's out-of-memory killer killed a process.
+    OutOfMemoryKill(crate::out_of_memory::Kill),
     /// Records omitted by a bounded machine/round observation buffer.
     LogGap {
         records: u64,

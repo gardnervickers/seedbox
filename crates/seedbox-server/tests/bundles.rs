@@ -35,7 +35,8 @@ impl BackendProvider for NeverExecute {
 }
 fn service(root: &Path) -> (Arc<Manager>, Arc<ExecutionService>, ContentStore) {
     let manager = Arc::new(Manager::new(Catalogue::in_memory()));
-    let store = ContentStore::with_ephemeral_evidence(root.join("cache"), root.join("evidence"));
+    let store = ContentStore::with_ephemeral_evidence(root.join("cache"), root.join("evidence"))
+        .with_owned_ledger(root.join("owned"));
     let execution = Arc::new(
         ExecutionService::new(
             manager.clone(),
@@ -619,6 +620,110 @@ async fn http_transfers_binary_spools_and_imports_without_enqueuing_work() {
     server.await.unwrap();
 }
 
+/// NEXT-100 case 10, uncertain-upload arm: an import whose client disconnects
+/// before the last byte publishes nothing; one whose client disconnects after
+/// the whole upload, before the response, publishes at most one complete
+/// resource, and exactly one once the import was published before the
+/// response was lost; nothing duplicates it (clients never retry an import).
+#[tokio::test]
+async fn disconnected_imports_publish_nothing_or_one_complete_resource() {
+    use tokio::io::AsyncWriteExt;
+    let directory = tempfile::tempdir().unwrap();
+    let (manager, execution, store) = service(directory.path());
+    let bytes = encode(&fixture(&store, true), &store);
+    let (queue, mut work) = tokio::sync::mpsc::channel(4);
+    let socket = directory.path().join("api.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let (shutdown, done) = tokio::sync::oneshot::channel::<()>();
+    let api = seedbox_server::http::router(
+        seedbox_server::http::ApiState::new(manager.clone(), queue).with_execution(execution),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, api)
+            .with_graceful_shutdown(async {
+                let _ = done.await;
+            })
+            .await
+            .unwrap();
+    });
+    let connect = |sent: usize| {
+        let socket = socket.clone();
+        let bytes = bytes.clone();
+        async move {
+            let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+            let headers = format!("POST /v1/bundles HTTP/1.1\r\nHost: localhost\r\nContent-Type: {BUNDLE_CONTENT_TYPE}\r\nContent-Length: {}\r\n\r\n", bytes.len());
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(&bytes[..sent]).await.unwrap();
+            stream.flush().await.unwrap();
+            stream
+        }
+    };
+    // Disconnect without reading any response.
+    let upload = |sent: usize| {
+        let connection = connect(sent);
+        async move { drop(connection.await) }
+    };
+    let count = || {
+        manager
+            .read(|catalogue| Ok(catalogue.list().count()))
+            .unwrap()
+    };
+    let settled = || async {
+        // Let any spawned import finish; its count must then stay fixed.
+        let mut last = count();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let now = count();
+            if now == last {
+                continue;
+            }
+            last = now;
+        }
+        last
+    };
+    for sent in [0, 1, bytes.len() / 2, bytes.len() - 1] {
+        upload(sent).await;
+        assert_eq!(
+            settled().await,
+            0,
+            "{sent} of {} bytes published",
+            bytes.len()
+        );
+    }
+    upload(bytes.len()).await;
+    let published = settled().await;
+    assert!(published <= 1, "one upload published {published} resources");
+    eprintln!("a full upload without its response published {published} resource(s)");
+    if published == 1 {
+        let id = manager
+            .read(|catalogue| Ok(catalogue.list().next().unwrap().metadata.id.clone()))
+            .unwrap();
+        let resource = manager.describe(&id).unwrap();
+        assert_eq!(resource.status.phase, Phase::Completed);
+        assert!(manager
+            .read(|catalogue| catalogue.checkpoints(&id))
+            .unwrap()
+            .iter()
+            .any(|r| r.request.request_id == "capture"));
+    }
+    // The response is lost after the import was published: exactly one resource.
+    let before = count();
+    let connection = connect(bytes.len()).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while count() == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "full upload never imported"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    drop(connection);
+    assert_eq!(settled().await, before + 1);
+    assert!(work.try_recv().is_err(), "an import enqueued execution");
+    shutdown.send(()).unwrap();
+    server.await.unwrap();
+}
+
 #[test]
 fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override_cursor() {
     let source = tempfile::tempdir().unwrap();
@@ -755,6 +860,154 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     };
     manifest["ram"]["path"] = serde_json::json!("/tmp/untrusted");
     assert!(archive::export(&bad, &store, Vec::new(), &Options::default()).is_err());
+}
+
+/// NEXT-100 case 97, server arm: a checkpoint acknowledged as requested
+/// whose run ends before capture, and one refused because the run completed,
+/// are never exported, imported or branchable as checkpoints, even when the
+/// engine had already written its native checkpoint file before the ack.
+#[test]
+fn terminated_pending_checkpoints_never_become_branchable() {
+    let source = tempfile::tempdir().unwrap();
+    let store = ContentStore::with_ephemeral_evidence(
+        source.path().join("cache"),
+        source.path().join("evidence"),
+    );
+    let fixture = fixture(&store, false);
+    let mut catalogue = Catalogue::in_memory();
+    let mut request = support::resolved_request("pending-source");
+    request.spec = fixture.simulation.spec.clone();
+    let mut simulation = catalogue.submit(request).unwrap().0;
+    let id = simulation.metadata.id.clone();
+    for phase in [Phase::Preparing, Phase::Running] {
+        simulation.status.phase = phase;
+        simulation = catalogue.update(simulation).unwrap();
+    }
+    let checkpoint = |name: &str| ControlRequest {
+        request_id: name.into(),
+        command: ControlCommand::Checkpoint,
+    };
+    let status = PlaybackStatus {
+        position: Default::default(),
+        rate: PlaybackRate::Paused,
+        achieved_rate: None,
+        stepping: false,
+        terminal: true,
+        application_ready: true,
+    };
+    catalogue
+        .accept_control(&id, checkpoint("refused"))
+        .unwrap();
+    catalogue
+        .acknowledge_control(
+            &id,
+            "refused",
+            ControlState::Acknowledged {
+                status,
+                error: Some(seedbox_engine_protocol::host_control::ControlError::Completed),
+                intervention: None,
+                detail: None,
+                checkpoint: None,
+            },
+        )
+        .unwrap();
+    // Acknowledged by the worker as requested only: the receipt stays Accepted.
+    catalogue
+        .accept_control(&id, checkpoint("pending"))
+        .unwrap();
+    simulation.status.phase = Phase::Completed;
+    catalogue.update(simulation).unwrap();
+    let receipts = catalogue.checkpoints(&id).unwrap();
+    assert_eq!(receipts.len(), 2);
+    let pending = receipts
+        .iter()
+        .find(|r| r.request.request_id == "pending")
+        .unwrap();
+    assert_eq!(pending.state, ControlState::Interrupted);
+
+    let manager = Arc::new(Manager::new(catalogue));
+    let execution = ExecutionService::new(
+        manager.clone(),
+        source.path().into(),
+        store.clone(),
+        Arc::new(NeverExecute),
+    )
+    .unwrap();
+    let attempt = source
+        .path()
+        .join("runs")
+        .join(id.as_str())
+        .join("owned-attempt");
+    std::fs::create_dir_all(attempt.join("output/machines")).unwrap();
+    // The engine published its capture, then ended before acknowledging it.
+    let memory = attempt.join("ram.bin");
+    std::fs::write(&memory, b"published but unacknowledged RAM").unwrap();
+    let ram = seedbox_artifacts::store::ContentDigest::of(b"published but unacknowledged RAM");
+    let native = serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[],"failed":false}}}, "ram":{"path":std::path::absolute(&memory).unwrap(), "sha256":ram.hex()}});
+    std::fs::write(
+        attempt.join("output/machines/checkpoint-pending.json"),
+        serde_json::to_vec(&native).unwrap(),
+    )
+    .unwrap();
+    let record = fixture.record.as_ref().unwrap();
+    write_record(&attempt, record).unwrap();
+    seedbox_artifacts::interventions::Journal::initialize(&attempt.join("interventions.json"))
+        .unwrap();
+    std::fs::write(source.path().join("inputs").join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({"checkpoint":null,"prepared":record.identity.inputs,"interventions":null,"attempt":std::path::absolute(&attempt).unwrap()})).unwrap()).unwrap();
+    for name in ["pending", "refused"] {
+        assert!(
+            execution.checkpoint_definition(&id, name).is_err(),
+            "{name}"
+        );
+    }
+    let mut bytes = Vec::new();
+    execution
+        .export_bundle(&id, &mut bytes, &Options::default())
+        .unwrap();
+    let portable = archive::import(bytes.as_slice(), &store, &Options::default()).unwrap();
+    assert!(portable.checkpoints.is_empty());
+    for name in ["pending", "refused"] {
+        assert_eq!(
+            portable
+                .omissions
+                .get(&format!("checkpoint:{name}"))
+                .map(String::as_str),
+            Some("capture unavailable"),
+            "{:?}",
+            portable.omissions
+        );
+    }
+    execution.delete(&id).unwrap();
+    drop(execution);
+    let destination = tempfile::tempdir().unwrap();
+    let (manager, execution, _) = service(destination.path());
+    let imported = execution
+        .import_bundle(bytes.as_slice(), &Options::default())
+        .unwrap()
+        .metadata
+        .id;
+    let receipts = manager
+        .read(|catalogue| catalogue.checkpoints(&imported))
+        .unwrap();
+    assert_eq!(receipts.len(), 2);
+    for receipt in &receipts {
+        assert!(
+            !matches!(
+                &receipt.state,
+                ControlState::Acknowledged {
+                    checkpoint: Some(CheckpointStatus {
+                        state: CheckpointState::Captured,
+                        ..
+                    }),
+                    ..
+                }
+            ),
+            "{receipt:?}"
+        );
+        assert!(execution
+            .checkpoint_definition(&imported, &receipt.request.request_id)
+            .is_err());
+    }
 }
 
 #[test]
@@ -1079,4 +1332,51 @@ fn prepared_reference_to_imported_checkpoint_starts_fresh_before_override_valida
     assert!(prepared.metadata.parent.is_none());
     execution.delete(&imported.metadata.id).unwrap();
     assert!(manager.describe(&prepared.metadata.id).is_ok());
+}
+
+#[test]
+fn deleting_imports_reclaims_only_binaries_they_brought_and_branches_still_need() {
+    let source = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(source.path());
+    let bytes = encode(&fixture(&store, true), &store);
+    let destination = tempfile::tempdir().unwrap();
+    let (manager, execution, store) = service(destination.path());
+    // The kernel and boot archive are already cache inputs here.
+    store.put(b"catalogue-only-binary").unwrap();
+    let objects = || -> std::collections::BTreeSet<_> {
+        std::fs::read_dir(destination.path().join("cache/sha256"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    };
+    let baseline = objects();
+    let ram = seedbox_artifacts::store::ContentDigest::of(b"retained checkpoint RAM");
+    let imported = execution
+        .import_bundle(bytes.as_slice(), &Options::default())
+        .unwrap()
+        .metadata
+        .id;
+    assert_eq!(store.owned_objects(), [ram.clone()].into());
+    let resource = execution
+        .checkpoint_definition(&imported, "capture")
+        .unwrap();
+    let mut request = support::resolved_request("imported-branch");
+    request.spec = resource.spec;
+    let branch = manager.submit(request).unwrap().0.metadata.id;
+    manager.begin(&branch).unwrap();
+    manager
+        .update(&branch, |s| s.status.phase = Phase::Completed)
+        .unwrap();
+    execution.delete(&imported).unwrap();
+    store.verify(&ram).unwrap();
+    execution.delete(&branch).unwrap();
+    assert_eq!(objects(), baseline);
+    // A second import of the same bundle owns its binaries again.
+    let again = execution
+        .import_bundle(bytes.as_slice(), &Options::default())
+        .unwrap()
+        .metadata
+        .id;
+    execution.delete_checkpoint(&again, "capture").unwrap();
+    assert_eq!(objects(), baseline);
 }

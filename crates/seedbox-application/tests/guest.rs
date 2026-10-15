@@ -110,6 +110,7 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         disk_volumes: vec![seedbox_application::config::VolumeMount {
             source: "state".into(),
             target: "/var/lib/state".into(),
+            size_bytes: Some(4 << 30),
         }],
     };
     let recipe = launch_recipe(

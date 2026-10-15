@@ -28,7 +28,7 @@ pub struct ContainerTransport {
 
 /// Keys cached image exports. Change it whenever export or layer merging
 /// changes the bytes produced for the same image.
-const EXPORT_FORMAT: &str = "image-export-v2";
+const EXPORT_FORMAT: &str = "image-export-v3";
 fn setup(error: impl std::fmt::Display) -> Error {
     Error::Setup(format!("container image preparation: {error}"))
 }
@@ -331,7 +331,11 @@ impl ImageTransport for ContainerTransport {
         )?;
         let image = crate::oci::import_metadata_for_arch(&raw, service, store, architecture)?;
         let archive = directory.join("rootfs.tar");
-        prefix_archive(&rootfs, &archive, &|| self.check())?;
+        let label = match &service.source {
+            ImageSource::Registry { reference } => reference.clone(),
+            ImageSource::Build { dockerfile, .. } => format!("built from {}", dockerfile.display()),
+        };
+        prefix_archive(&rootfs, &archive, &label, &|| self.check())?;
         Ok(ImportedImage {
             image,
             rootfs: RootFilesystem::Archive(archive),
@@ -356,7 +360,15 @@ fn cached_export(store: &ContentStore, record: &ContentDigest) -> Option<(Vec<u8
 }
 
 /// Prefix metadata only. Guest filesystem paths are never extracted on the host.
-fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -> Result<()> {
+/// Device nodes and FIFOs are kept wherever the image has them: the guest mounts
+/// its own `/dev` over the image's, and a root application could create the
+/// same nodes itself. `image` names the image in errors.
+fn prefix_archive(
+    input: &Path,
+    output: &Path,
+    image: &str,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     fn relative(path: &Path) -> Result<std::path::PathBuf> {
         let mut result = std::path::PathBuf::new();
         for component in path.components() {
@@ -397,6 +409,15 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
         let path = relative(&entry.path()?)?;
         if path.as_os_str().is_empty() {
             continue;
+        }
+        let kind = entry.header().entry_type();
+        if !crate::guest::supported_entry(kind) {
+            return Err(Error::Setup(format!(
+                "image {image}: /{} is a {}, which a Seedbox root filesystem cannot hold; \
+                 remove it from the image, for example with RUN rm in a derived Dockerfile",
+                path.display(),
+                crate::guest::entry_kind(kind)
+            )));
         }
         let mut header = export_header(&mut entry, &path)?;
         let name = Path::new("rootfs").join(path);
@@ -450,6 +471,11 @@ pub(crate) fn export_header<R: std::io::Read>(
                     }
                 }
                 "path" | "linkpath" | "size" | "atime" | "ctime" | "uname" | "gname" => (),
+                // Overlay filesystems record their own bookkeeping (origin, redirect,
+                // opaque directories) in these xattrs, and rootless engines export
+                // them. They describe the build host's layer storage, not the image.
+                _ if field.starts_with("SCHILY.xattr.user.overlay.")
+                    || field.starts_with("SCHILY.xattr.trusted.overlay.") => {}
                 _ => {
                     return Err(setup(format!(
                         "exported filesystem {}: unsupported extended metadata {field}",
@@ -463,9 +489,34 @@ pub(crate) fn export_header<R: std::io::Read>(
 }
 
 #[cfg(test)]
+mod layer_merge_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{BufRead, Read, Write};
+    #[test]
+    fn overlay_bookkeeping_xattrs_are_ignored() {
+        for key in [
+            "SCHILY.xattr.user.overlay.origin",
+            "SCHILY.xattr.trusted.overlay.opaque",
+        ] {
+            let mut tar = tar::Builder::new(Vec::new());
+            tar.append_pax_extensions([(key, &b"y"[..])]).unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o755);
+            header.set_size(0);
+            tar.append_data(&mut header, "bin/app", std::io::empty())
+                .unwrap();
+            let bytes = tar.into_inner().unwrap();
+            let mut archive = tar::Archive::new(bytes.as_slice());
+            let mut entry = archive.entries().unwrap().next().unwrap().unwrap();
+            assert!(
+                export_header(&mut entry, Path::new("bin/app")).is_ok(),
+                "{key}"
+            );
+        }
+    }
     #[test]
     fn unsupported_xattr_names_the_image_path_and_key() {
         let mut tar = tar::Builder::new(Vec::new());

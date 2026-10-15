@@ -8,6 +8,8 @@
 #include <linux/irq.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
+#include <linux/preempt.h>
+#include <linux/sched.h>
 #include <linux/sched_clock.h>
 #include <linux/sizes.h>
 #include <asm/ptrace.h>
@@ -29,6 +31,15 @@ struct seedbox_page {
 /* A progress call: getpid with this first argument (guest/progress/budget.h). */
 #define SEEDBOX_PROGRESS_NR 172
 #define SEEDBOX_PROGRESS_MARK 0x5eedb0c5UL
+/* Time syscalls (clock_gettime, clock_getres, gettimeofday). */
+#define SEEDBOX_CLOCK_GETTIME_NR 113
+#define SEEDBOX_CLOCK_GETRES_NR 114
+#define SEEDBOX_GETTIMEOFDAY_NR 169
+/* x7 of a syscall the translator makes for itself
+ * (the translator-syscalls commit in the DynamoRIO fork, nix/dynamorio.nix). */
+#define SEEDBOX_TRANSLATOR_MARK 0x5eedd1a900000000UL
+/* Translator syscalls cost this fraction of an application syscall. */
+#define SEEDBOX_TRANSLATOR_DIVISOR 10
 static struct seedbox_page *page;
 static void __iomem *event;
 static u64 early_last;
@@ -166,17 +177,47 @@ static void seedbox_charge(u64 ns)
 	}
 }
 
+/* The task whose progress call is charging its translated compute, if any.
+ * The clock advances only in the kernel, so every tick lands at EL1; a tick
+ * that interrupts this charge samples user work. One guest CPU, and no
+ * preemption inside the charge. */
+static struct task_struct *user_charge;
+
+/* Account the current tick as user time (kernel/time/timer.c): it interrupted
+ * a progress charge directly, not a softirq or a nested interrupt. */
+bool seedbox_user_tick(void)
+{
+	return READ_ONCE(user_charge) == current && irq_count() == HARDIRQ_OFFSET;
+}
+
 /* Charge syscall work through the bounded clock rendezvous. Load the charge
  * once: throttle/heal changes at a rendezvous affect the next syscall, while
  * the remaining charge survives in guest registers or stack. A progress call
- * charges the compute it stands for instead of one syscall.
+ * charges the compute it stands for instead of one syscall, as user time.
  */
 void seedbox_syscall_progress(struct pt_regs *regs, int scno)
 {
-	u64 ns = page ? READ_ONCE(page->syscall_ns) : SYSCALL_NS;
+	u64 ns;
 
-	if (page && scno == SEEDBOX_PROGRESS_NR && regs->regs[0] == SEEDBOX_PROGRESS_MARK)
+	/* Time syscalls stand in for the vDSO, which the PV clock disables. They
+	 * cost only the clock read they make, so frequent application time reads
+	 * do not each advance the clock by a syscall. */
+	if (scno == SEEDBOX_CLOCK_GETTIME_NR || scno == SEEDBOX_CLOCK_GETRES_NR ||
+	    scno == SEEDBOX_GETTIMEOFDAY_NR)
+		return;
+	ns = page ? READ_ONCE(page->syscall_ns) : SYSCALL_NS;
+
+	if (page && scno == SEEDBOX_PROGRESS_NR && regs->regs[0] == SEEDBOX_PROGRESS_MARK) {
 		ns = progress_charge(ns);
+		WRITE_ONCE(user_charge, current);
+		seedbox_charge(ns);
+		WRITE_ONCE(user_charge, NULL);
+		return;
+	}
+	/* The translator's own syscalls (thread suspension, signal returns,
+	 * futex waits) are bookkeeping, not application work. */
+	if (regs->regs[7] == SEEDBOX_TRANSLATOR_MARK)
+		ns /= SEEDBOX_TRANSLATOR_DIVISOR;
 	seedbox_charge(ns);
 }
 

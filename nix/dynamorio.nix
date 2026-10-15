@@ -1,18 +1,25 @@
-{ pkgs }:
+{ pkgs, dynamorioSource ? null }:
+let
+  arm = pkgs.stdenv.hostPlatform.isAarch64;
+in
 pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio";
-  version = "11.91.20735";
-  src = pkgs.fetchurl {
-    url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/cronbuild-11.91.20735.tar.gz";
-    hash = "sha256-VNzTsfM80ByTlTeHGTDqE5cKa48oAWiNgdZ6oKCpOZo=";
+  # ARM builds the DynamoRIO fork (the flake's `dynamorio-arm` input): upstream
+  # plus Seedbox's translator fixes and AArch64 IR fixes, as commits on its
+  # master. x86 builds the source of its existing release with one patch;
+  # nix/progress.nix fetches the matching SDK for each.
+  version = if arm then "11.91-seedbox" else "11.3.0";
+  src = if arm then
+    (if dynamorioSource == null
+     then throw "the ARM runtime needs the dynamorio-arm flake input"
+     else dynamorioSource)
+  else pkgs.fetchurl {
+    url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/release_11.3.0-1.tar.gz";
+    hash = "sha256-aj7BN0bravXAY72wVB37ZbTJvS+hZTxC61RAMiBDLsI=";
   };
-  patches = [
-    ../guest/progress/dynamorio-exclusives.patch
-    # Rebuilding a block discards its region list and must recheck the start.
-    ../guest/progress/dynamorio-rebuild-vmareas.patch
-    # Clean calls without SVE must save each vector register in its own
-    # context slot, where dr_get_mcontext() and redirection read it.
-    ../guest/progress/dynamorio-cleancall-simd.patch
+  patches = if arm then [ ] else [
+    # The same translator syscall mark, in rbx.
+    ../guest/progress/dynamorio-x86-translator-syscalls.patch
   ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build
@@ -40,6 +47,10 @@ pkgs.stdenv.mkDerivation {
     "-DBUILD_CLIENTS=OFF"
     "-DBUILD_EXT=ON"
     "-DBUILD_DOCS=OFF"
+  ] ++ pkgs.lib.optionals (!arm) [
+    # 11.3 probes bool before applying that standard unless try_compile
+    # honours it (policy CMP0067).
+    "-DCMAKE_POLICY_DEFAULT_CMP0067=NEW"
   ];
   ninjaFlags = [ "dynamorio" "drreg" ];
   installPhase = ''

@@ -1,7 +1,15 @@
 {
   description = "Seedbox simulator: deterministic multi-VM world on KVM";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-  outputs = { nixpkgs, ... }:
+  # The ARM translator core: a DynamoRIO fork whose master carries Seedbox's
+  # translator fixes. It is private, so fetching uses your SSH key; on a Mac,
+  # `cargo xtask build-assets` fetches it on the host and passes it to the
+  # builder container. Only the ARM runtime evaluates it.
+  inputs.dynamorio-arm = {
+    url = "git+ssh://git@github.com/lbradstreet/dynamorio.git?ref=master";
+    flake = false;
+  };
+  outputs = { nixpkgs, dynamorio-arm, ... }:
     let
       systems = [ "aarch64-darwin" "aarch64-linux" "x86_64-linux" ];
       shell = system:
@@ -44,7 +52,8 @@
           networkTools = pkgs.iproute2;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # Name outputs explicitly so selecting helpers never imports the kernel recipe.
-          inherit (import ./nix/runtime.nix { inherit pkgs; }) runtimeAssets runtimeArchive runtimeSources;
+          inherit (import ./nix/runtime.nix { inherit pkgs; dynamorioSource = dynamorio-arm; })
+            runtimeAssets runtimeArchive runtimeSources;
           inherit (import ./nix/kernels.nix { inherit pkgs; }) guestKernel guestKernelArchive guestKernelSources;
         }
         );

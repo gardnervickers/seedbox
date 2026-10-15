@@ -26,6 +26,8 @@ pub struct Submission {
     pub network: Network,
     #[serde(default)]
     pub simulator: Simulator,
+    #[serde(default, skip_serializing_if = "project::Engine::is_default")]
+    pub engine: project::Engine,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<Override>,
 }
@@ -201,8 +203,11 @@ impl Submission {
                 volumes.push(seedbox_spec::VolumeMount {
                     source: key,
                     target: volume.target,
+                    size_bytes: volume.size_bytes,
                 });
             }
+            project::machine_disk_bytes(volumes.iter().map(|v| v.size_bytes))
+                .map_err(|error| format!("{name}.volumes: {error}"))?;
             services.insert(
                 name,
                 seedbox_spec::Service {
@@ -275,7 +280,11 @@ impl Submission {
             wall_clock_epoch: None,
             machine: Default::default(),
             disk: Default::default(),
+            progress_client: self.engine.progress_client,
         };
+        if self.architecture == Some(Architecture::X86_64) {
+            lean_architecture(&configuration, Architecture::X86_64)?;
+        }
         Ok(SimulationSpec {
             start_paused: false,
             seed: self.seed,
@@ -396,6 +405,7 @@ impl Submission {
                             v.source.clone(),
                             project::Volume {
                                 target: v.target.clone(),
+                                size_bytes: v.size_bytes,
                             },
                         )
                     })
@@ -434,6 +444,9 @@ impl Submission {
             },
             simulator: Simulator {
                 oracle_control: config.control.is_some(),
+            },
+            engine: project::Engine {
+                progress_client: config.progress_client,
             },
             overrides: spec
                 .program
@@ -474,8 +487,21 @@ impl SimulationSpec {
             }
             service.platform = expected.into();
         }
-        Ok(())
+        lean_architecture(&self.configuration, architecture)
     }
+}
+
+/// The lean progress client is built for arm64 only.
+fn lean_architecture(
+    configuration: &seedbox_spec::Simulation,
+    architecture: Architecture,
+) -> Result<(), String> {
+    if configuration.progress_client == project::ProgressClient::Lean
+        && architecture != Architecture::Aarch64
+    {
+        return Err("engine.progressClient: lean is available on arm64 only".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -701,5 +727,67 @@ mod tests {
         let mut relative = wire;
         relative["oracle"]["build"]["context"] = "relative".into();
         assert!(serde_json::from_value::<SimulationSpec>(relative).is_err());
+    }
+    #[test]
+    fn progress_client_roundtrips_and_lean_requires_arm64() {
+        let mut value = serde_json::json!({"oracle":{"image":"example/app"}});
+        let standard: SimulationSpec = serde_json::from_value(value.clone()).unwrap();
+        assert!(standard.configuration.progress_client.is_standard());
+        assert!(serde_json::to_value(&standard)
+            .unwrap()
+            .get("engine")
+            .is_none());
+        value["engine"] = serde_json::json!({"progressClient":"lean"});
+        let mut lean: SimulationSpec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            lean.configuration.progress_client,
+            project::ProgressClient::Lean
+        );
+        assert_eq!(
+            serde_json::to_value(&lean).unwrap()["engine"],
+            value["engine"]
+        );
+        let error = lean
+            .clone()
+            .resolve_project_architecture(Architecture::X86_64)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "engine.progressClient: lean is available on arm64 only"
+        );
+        lean.resolve_project_architecture(Architecture::Aarch64)
+            .unwrap();
+        value["architecture"] = serde_json::json!("x86_64");
+        let error = serde_json::from_value::<SimulationSpec>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("lean is available on arm64 only"), "{error}");
+    }
+
+    #[test]
+    fn volume_sizes_roundtrip_and_are_bounded_per_machine() {
+        let value = serde_json::json!({"oracle":{"image":"example/app","volumes":{
+            "data":{"target":"/data","size":"4GiB"},"wal":{"target":"/wal"}}}});
+        let spec: SimulationSpec = serde_json::from_value(value).unwrap();
+        let sizes: Vec<_> = spec.configuration.services["oracle"]
+            .volumes
+            .iter()
+            .map(|v| v.size_bytes)
+            .collect();
+        assert_eq!(sizes, [Some(4 << 30), None]);
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            wire["oracle"]["volumes"],
+            serde_json::json!({"data":{"target":"/data","size":"4GiB"},"wal":{"target":"/wal"}})
+        );
+        let large = serde_json::json!({"oracle":{"image":"example/app","volumes":{
+            "a":{"target":"/a","size":"33GiB"},"b":{"target":"/b","size":"32GiB"}}}});
+        let error = serde_json::from_value::<SimulationSpec>(large)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("oracle.volumes: volume sizes total 65GiB, above the 64GiB limit"),
+            "{error}"
+        );
     }
 }
