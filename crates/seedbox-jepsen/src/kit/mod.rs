@@ -163,6 +163,46 @@ pub fn declare_check(name: &str) {
     }
 }
 
+/// How much work a run's clients completed. A system that stops serving
+/// passes every safety check vacuously, so an oracle compares this with the
+/// throughput a healthy run reaches before it calls a clean history valid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Progress {
+    /// Operations that completed successfully (commits, acknowledgements, ...).
+    pub done: usize,
+    /// Clients issuing operations concurrently.
+    pub clients: usize,
+    /// Seconds the clients ran.
+    pub seconds: f64,
+}
+
+impl Progress {
+    /// Completed operations per client-second.
+    pub fn rate(&self) -> f64 {
+        let client_seconds = self.clients as f64 * self.seconds;
+        if client_seconds > 0.0 {
+            self.done as f64 / client_seconds
+        } else {
+            0.0
+        }
+    }
+
+    /// Why the run cannot decide, when it completed fewer than `minimum`
+    /// `noun` per client-second; `None` when it reached `minimum` (or
+    /// `minimum` is zero, which disables the check).
+    pub fn shortfall(&self, minimum: f64, noun: &str) -> Option<String> {
+        (minimum > 0.0 && self.rate() < minimum).then(|| {
+            format!(
+                "insufficient progress: {} {noun} by {} clients in {} s ({:.3} per client-second, minimum {minimum})",
+                self.done,
+                self.clients,
+                self.seconds,
+                self.rate()
+            )
+        })
+    }
+}
+
 /// Lines of a saved oracle log (or a split `seedbox logs` file) that carry
 /// `prefix`, parsed as JSON. Unparseable lines are skipped.
 pub fn tagged_lines(text: &str, prefix: &str) -> Vec<Value> {
@@ -221,5 +261,40 @@ mod tests {
             Value::from(ranges([5, 1, 2, 3, 7, 3])),
             serde_json::json!(["1-3", 5, 7])
         );
+    }
+
+    #[test]
+    fn progress_below_the_minimum_rate_is_a_shortfall() {
+        let stalled = Progress {
+            done: 21,
+            clients: 20,
+            seconds: 15.0,
+        };
+        assert!((stalled.rate() - 0.07).abs() < 1e-9);
+        assert_eq!(
+            stalled.shortfall(0.25, "commits").as_deref(),
+            Some("insufficient progress: 21 commits by 20 clients in 15 s (0.070 per client-second, minimum 0.25)")
+        );
+        assert_eq!(stalled.shortfall(0.0, "commits"), None);
+        let healthy = Progress {
+            done: 258,
+            clients: 20,
+            seconds: 15.0,
+        };
+        assert_eq!(healthy.shortfall(0.25, "commits"), None);
+        // Exactly at the minimum suffices; no clients or no time is no progress.
+        let edge = Progress {
+            done: 75,
+            clients: 20,
+            seconds: 15.0,
+        };
+        assert_eq!(edge.shortfall(0.25, "commits"), None);
+        let idle = Progress {
+            done: 5,
+            clients: 0,
+            seconds: 15.0,
+        };
+        assert_eq!(idle.rate(), 0.0);
+        assert!(idle.shortfall(0.25, "commits").is_some());
     }
 }

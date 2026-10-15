@@ -12,7 +12,11 @@
 //! definite abort (`fail`); a timeout or lost connection is indeterminate
 //! (`info`) and the client continues as a new process. Nothing is retried.
 //! A final read-only transaction reads every key the run touched, and
-//! [`crate::checker::elle`] checks the history.
+//! [`crate::checker::elle`] checks the history. A clean history counts as
+//! valid only when the clients committed at least `--min-commit-rate`
+//! transactions per client-second: a server that stalls (as in
+//! `harness/jepsen/postgres/stall/`) passes the check vacuously, so such a run
+//! is inconclusive instead.
 use super::pg_proto::{Pg, PgError};
 use crate::checker::elle::{self, Atom, Mop, TxnOp};
 use crate::kit::{self, emit, evidence, now_us, verdict, Rng};
@@ -56,6 +60,11 @@ pub struct Args {
     pub timeout: f64,
     #[arg(long, default_value_t = 300.0)]
     pub ready_timeout: f64,
+    /// Commits per client-second below which a valid history is inconclusive;
+    /// 0 disables the check. Healthy runs commit 0.86-4 per client-second and
+    /// stalled ones 0.035-0.11.
+    #[arg(long, default_value_t = MIN_COMMIT_RATE, value_parser = non_negative)]
+    pub min_commit_rate: f64,
     /// Generator seed; Seedbox's seed varies the schedule.
     #[arg(long, default_value_t = 1)]
     pub seed: u64,
@@ -64,6 +73,20 @@ pub struct Args {
     pub examples: usize,
     #[arg(long, default_value = "")]
     pub label: String,
+}
+
+/// The default `--min-commit-rate`. Across 543 recorded healthy Seedbox
+/// oracle logs (runs and replays, 15 s and 60 s, 20 clients) the lowest rate
+/// was 0.86 commits per client-second, with a probe machine competing for the
+/// database; the 16 logs of startup stalls committed 0.035-0.11. This sits
+/// well clear of both.
+pub const MIN_COMMIT_RATE: f64 = 0.25;
+
+fn non_negative(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(value) if value >= 0.0 && value.is_finite() => Ok(value),
+        _ => Err(format!("{text}: expected a non-negative number")),
+    }
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,7 +420,7 @@ pub fn run(args: Args) -> u8 {
                "clients": args.clients, "duration": args.duration, "tables": args.tables, "key_count": args.key_count,
                "max_writes_per_key": args.max_writes_per_key, "max_txn_length": args.max_txn_length,
                "read_fraction": args.read_fraction, "sk_reads": args.sk_reads, "timeout": args.timeout,
-               "seed": args.seed, "label": args.label}),
+               "min_commit_rate": args.min_commit_rate, "seed": args.seed, "label": args.label}),
     );
     let mut pg = match wait_ready(&args) {
         Ok(pg) => pg,
@@ -470,46 +493,100 @@ pub fn run(args: Args) -> u8 {
     }
     let txns = run.txns.lock().unwrap().clone();
     let _ = run.started;
-    let committed = txns.iter().filter(|t| elle::kind_of(t) == "ok").count();
     let result = match report(&txns, &model, args.examples) {
         Ok(result) => result,
         Err(error) => return verdict(kit::INCONCLUSIVE, &format!("checker: {error}")),
     };
-    let counts = json!(result.counts);
-    let types = json!(result.txns);
-    if result.valid && (committed <= 1 || final_read.is_none()) {
-        let reason = if committed <= 1 {
-            "no transaction committed"
-        } else {
-            "the final read failed"
-        };
-        return verdict(kit::INCONCLUSIVE, &format!("{reason}: {types}"));
-    }
-    let word = if result.valid { "valid" } else { "INVALID" };
-    let text = format!(
-        "{word} {} checked as {model}: {counts} txns {types}",
-        args.isolation.name()
+    let progress = progress(&txns, args.clients, args.duration);
+    evidence(
+        "throughput",
+        json!({"commits": progress.done, "clients": progress.clients, "seconds": progress.seconds,
+               "per_client_second": progress.rate(), "minimum": args.min_commit_rate}),
     );
-    verdict(
-        if result.valid {
-            kit::OK
-        } else {
-            kit::VIOLATION
-        },
-        &text,
-    )
+    let (code, text) = decide(
+        &result,
+        progress,
+        final_read.is_some(),
+        args.isolation.name(),
+        args.min_commit_rate,
+    );
+    verdict(code, &text)
 }
 
-/// Re-check a saved oracle log of `H` lines.
+/// The clients' commits (the final read is not one) over the run's window.
+fn progress(txns: &[TxnOp], clients: usize, seconds: f64) -> kit::Progress {
+    let done = txns
+        .iter()
+        .filter(|t| elle::kind_of(t) == "ok" && t.op.process != Some(Atom::from("final")))
+        .count();
+    kit::Progress {
+        done,
+        clients,
+        seconds,
+    }
+}
+
+/// The verdict for a checked history. An anomaly is a violation however
+/// little the clients did; a clean history is valid only when they committed
+/// something, reached `min_rate` commits per client-second and the final read
+/// succeeded, and is otherwise inconclusive.
+pub fn decide(
+    result: &elle::Checked,
+    progress: kit::Progress,
+    final_read: bool,
+    isolation: &str,
+    min_rate: f64,
+) -> (u8, String) {
+    let model = &result.model;
+    let counts = json!(result.counts);
+    let types = json!(result.txns);
+    if !result.valid {
+        return (
+            kit::VIOLATION,
+            format!("INVALID {isolation} checked as {model}: {counts} txns {types}"),
+        );
+    }
+    let reason = if progress.done == 0 {
+        Some("no transaction committed".to_string())
+    } else if let Some(shortfall) = progress.shortfall(min_rate, "commits") {
+        Some(format!(
+            "{shortfall}; history valid {isolation} checked as {model}"
+        ))
+    } else if !final_read {
+        Some("the final read failed".to_string())
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => (kit::INCONCLUSIVE, format!("{reason}: {types}")),
+        None => (
+            kit::OK,
+            format!("valid {isolation} checked as {model}: {counts} txns {types}"),
+        ),
+    }
+}
+
+/// Re-check a saved oracle log of `H` lines, with the oracle's verdict rules
+/// (the clients and duration come from its config evidence).
 pub fn recheck(text: &str, model: &str) -> Result<(u8, Value), String> {
     let txns = elle::from_h_lines(&kit::tagged_lines(text, "H "))?;
     let result = elle::check(&txns, model)?;
-    let code = if result.valid {
-        kit::OK
-    } else {
-        kit::VIOLATION
-    };
-    Ok((code, result.to_json()))
+    let config = kit::evidence_of(text, "config").unwrap_or_default();
+    let progress = progress(
+        &txns,
+        config["clients"].as_u64().unwrap_or(0) as usize,
+        config["duration"].as_f64().unwrap_or(0.0),
+    );
+    let final_read = txns
+        .iter()
+        .any(|t| t.op.process == Some(Atom::from("final")) && elle::kind_of(t) == "ok");
+    let isolation = config["isolation"].as_str().unwrap_or("serializable");
+    let (code, verdict) = decide(&result, progress, final_read, isolation, MIN_COMMIT_RATE);
+    let mut out = result.to_json();
+    out["verdict"] = verdict.into();
+    out["throughput"] = json!({"commits": progress.done, "clients": progress.clients,
+                               "seconds": progress.seconds, "per_client_second": progress.rate()});
+    Ok((code, out))
 }
 
 const PROBES: [(&str, &str); 4] = [
@@ -550,5 +627,194 @@ pub fn probe(host: &str, at: &[f64]) -> u8 {
     }
     loop {
         std::thread::sleep(Duration::from_secs(3600));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn append(k: i64, v: i64) -> Mop {
+        Mop::Append(Atom::Int(k), v)
+    }
+    fn read(k: i64, value: &[i64]) -> Mop {
+        Mop::Read(Atom::Int(k), Some(value.to_vec()))
+    }
+
+    /// `commits` serial single-append transactions on key 0, `infos` lost
+    /// ones, then (if `final_read`) the final read of key 0.
+    fn history(commits: i64, infos: i64, final_read: bool) -> Vec<TxnOp> {
+        let mut txns = Vec::new();
+        let mut at = 0;
+        let mut push = |kind: &str, value: Vec<Mop>, process: Atom| {
+            let i = txns.len() as i64;
+            txns.push(elle::txn(i, kind, value, Some(process), at, at + 1, None).unwrap());
+            at += 2;
+        };
+        for v in 1..=commits {
+            push("ok", vec![append(0, v)], Atom::Int(v % 20));
+        }
+        for v in 0..infos {
+            push("info", vec![append(1, v + 1)], Atom::Int(100 + v));
+        }
+        if final_read {
+            let all: Vec<i64> = (1..=commits).collect();
+            push("ok", vec![read(0, &all)], Atom::from("final"));
+        }
+        txns
+    }
+
+    /// Two transactions that each miss the other's append: G2-item.
+    fn write_skew() -> Vec<TxnOp> {
+        vec![
+            elle::txn(
+                0,
+                "ok",
+                vec![read(0, &[]), append(1, 1)],
+                Some(Atom::Int(0)),
+                0,
+                10,
+                None,
+            )
+            .unwrap(),
+            elle::txn(
+                1,
+                "ok",
+                vec![read(1, &[]), append(0, 1)],
+                Some(Atom::Int(1)),
+                1,
+                11,
+                None,
+            )
+            .unwrap(),
+            elle::txn(
+                2,
+                "ok",
+                vec![read(0, &[1]), read(1, &[1])],
+                Some(Atom::from("final")),
+                20,
+                20,
+                None,
+            )
+            .unwrap(),
+        ]
+    }
+
+    fn decide_on(txns: &[TxnOp], clients: usize, seconds: f64, final_read: bool) -> (u8, String) {
+        let result = elle::check(txns, "serializable").unwrap();
+        decide(
+            &result,
+            progress(txns, clients, seconds),
+            final_read,
+            "serializable",
+            MIN_COMMIT_RATE,
+        )
+    }
+
+    #[test]
+    fn a_stalled_clean_run_is_inconclusive_and_reports_its_counts() {
+        // pg124-serializable-15s seed 3 on seedbox-m10: 21 client commits and
+        // 40 indeterminate transactions in 15 s, valid as a history.
+        let txns = history(21, 40, true);
+        assert_eq!(
+            progress(&txns, 20, 15.0).done,
+            21,
+            "the final read is no commit"
+        );
+        let (code, text) = decide_on(&txns, 20, 15.0, true);
+        assert_eq!(code, kit::INCONCLUSIVE);
+        assert_eq!(
+            text,
+            "insufficient progress: 21 commits by 20 clients in 15 s (0.070 per client-second, \
+             minimum 0.25); history valid serializable checked as serializable: \
+             {\"info\":40,\"ok\":22}"
+        );
+    }
+
+    #[test]
+    fn healthy_clean_runs_stay_valid() {
+        // The slowest recorded healthy run: 258 commits in 15 s with a probe
+        // competing; 60 s runs commit thousands.
+        for (commits, seconds) in [(258, 15.0), (2320, 60.0)] {
+            let (code, text) = decide_on(&history(commits, 0, true), 20, seconds, true);
+            assert_eq!(code, kit::OK, "{text}");
+            assert!(text.starts_with("valid serializable checked as serializable: {} txns"));
+        }
+        // Disabling the check keeps even a stalled run valid.
+        let txns = history(21, 40, true);
+        let result = elle::check(&txns, "serializable").unwrap();
+        let (code, _) = decide(
+            &result,
+            progress(&txns, 20, 15.0),
+            true,
+            "serializable",
+            0.0,
+        );
+        assert_eq!(code, kit::OK);
+    }
+
+    #[test]
+    fn an_anomaly_is_a_violation_however_slow_the_run() {
+        let (code, text) = decide_on(&write_skew(), 20, 15.0, true);
+        assert_eq!(code, kit::VIOLATION);
+        assert!(
+            text.starts_with("INVALID serializable checked as serializable: {\"G2-item\":1}"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn no_commits_or_no_final_read_is_inconclusive() {
+        let (code, text) = decide_on(&history(0, 5, true), 20, 15.0, true);
+        assert_eq!(
+            (code, text.as_str()),
+            (
+                kit::INCONCLUSIVE,
+                "no transaction committed: {\"info\":5,\"ok\":1}"
+            )
+        );
+        let (code, text) = decide_on(&history(300, 0, false), 20, 15.0, false);
+        assert_eq!(code, kit::INCONCLUSIVE);
+        assert!(text.starts_with("the final read failed"), "{text}");
+    }
+
+    fn log(config: Value, txns: &[TxnOp]) -> String {
+        let mut text = format!("EVIDENCE {config}\n");
+        for t in txns {
+            text += &format!("H {}\n", elle::h_line(t));
+        }
+        text
+    }
+
+    #[test]
+    fn recheck_applies_the_progress_rule_from_the_logged_config() {
+        let config =
+            json!({"kind": "config", "clients": 20, "duration": 15.0, "isolation": "serializable"});
+        let (code, out) =
+            recheck(&log(config.clone(), &history(21, 40, true)), "serializable").unwrap();
+        assert_eq!(code, kit::INCONCLUSIVE);
+        assert_eq!(out["valid"], true);
+        assert_eq!(out["throughput"]["commits"], 21);
+        assert!(out["verdict"]
+            .as_str()
+            .unwrap()
+            .starts_with("insufficient progress: 21 commits"));
+        let (code, out) =
+            recheck(&log(config.clone(), &history(400, 0, true)), "serializable").unwrap();
+        assert_eq!(
+            (code, out["throughput"]["commits"].as_u64()),
+            (kit::OK, Some(400))
+        );
+        let (code, _) = recheck(&log(config, &write_skew()), "serializable").unwrap();
+        assert_eq!(code, kit::VIOLATION);
+    }
+
+    #[test]
+    fn min_commit_rate_must_be_non_negative() {
+        assert_eq!(non_negative("0.25"), Ok(0.25));
+        assert_eq!(non_negative("0"), Ok(0.0));
+        assert!(non_negative("-1").is_err());
+        assert!(non_negative("nan").is_err());
+        assert!(non_negative("x").is_err());
     }
 }
