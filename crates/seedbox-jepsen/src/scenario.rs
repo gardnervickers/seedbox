@@ -619,6 +619,130 @@ fn kafka() -> Vec<Scenario> {
         .collect()
 }
 
+// ------------------------------------------------------------ KRaft
+
+struct KraftSpec {
+    name: &'static str,
+    comment: &'static str,
+    workload: &'static str,
+    nemesis: &'static str,
+    quorum: &'static str,
+    /// Voters at format time (dynamic quorum); the rest join as observers.
+    initial_voters: usize,
+    duration: u32,
+    extra_oracle: &'static [&'static str],
+    controllers: usize,
+    brokers: usize,
+}
+
+const KRAFT_VERSION: &str = "4.3.1";
+
+fn kraft() -> Vec<Scenario> {
+    let base = |name, comment, workload, nemesis| KraftSpec {
+        name,
+        comment,
+        workload,
+        nemesis,
+        quorum: "static",
+        initial_voters: 5,
+        duration: 120,
+        extra_oracle: &[],
+        controllers: 5,
+        brokers: 2,
+    };
+    let all = "partition,kill,pause,crash,clock";
+    let specs = vec![
+        KraftSpec { duration: 60, ..base("kraft-healthy-append", "Baseline: list-append over topic configs, no faults.", "append", "none") },
+        KraftSpec { duration: 60, ..base("kraft-healthy-topics", "Baseline: topic create/delete/probe, no faults.", "topics", "none") },
+        base("kraft-append-partition", "List-append under network partitions: random halves, an isolated active\ncontroller, a majorities ring and a bridge.", "append", "partition"),
+        base("kraft-append-kill", "List-append while SIGKILLing one, a minority, a majority, all or the active\ncontroller (sometimes a broker), restarting them after each interval.", "append", "kill"),
+        base("kraft-append-pause", "List-append while SIGSTOPping one, a minority or the active controller.", "append", "pause"),
+        base("kraft-append-crash", "List-append while power-failing controllers (unflushed writes lost): one, a\nminority, a majority, all, or the active controller, rebooted after each interval.", "append", "crash"),
+        base("kraft-append-clock", "List-append while stepping nodes' wall clocks by up to 30 s (Kafka's raft\ntimers read wall-clock milliseconds).", "append", "clock"),
+        base("kraft-append-mix", "List-append under Jepsen's combined nemesis: partitions, kills, pauses, power\nloss and clock steps.", "append", all),
+        KraftSpec { duration: 60, ..base("kraft-healthy-ids", "Baseline: producer IDs from both brokers, no faults.", "ids", "none") },
+        base("kraft-ids-mix", "Unique producer IDs (brokers lease ID blocks from the active controller) under the\ncombined nemesis.", "ids", all),
+        base("kraft-topics-partition", "Topic existence register under partitions.", "topics", "partition"),
+        base("kraft-topics-mix", "Topic existence register under the combined nemesis.", "topics", all),
+        KraftSpec { quorum: "dynamic", initial_voters: 3, ..base("kraft-dynamic-append-member", "Dynamic quorum (KIP-853), 3 of 5 controllers voting at format time: list-append\nwhile voters are removed (keeping 3) and observers added, mixed with partitions\nand kills.", "append", "member,partition,kill") },
+        KraftSpec { quorum: "dynamic", initial_voters: 3, ..base("kraft-dynamic-append-mix", "Dynamic quorum (KIP-853): list-append under membership changes and the full\ncombined nemesis.", "append", "member,partition,kill,pause,crash,clock") },
+    ];
+    let cluster_id = "4L6g3nShT-eMCtK--X86sw";
+    specs
+        .into_iter()
+        .map(|spec| {
+            let controllers = nodes("k", spec.controllers);
+            let brokers = nodes("b", spec.brokers);
+            let directory = |i: usize| crate::systems::kraft_proto::uuid_text([i as u8; 16]);
+            let voters: Vec<String> = (1..=spec.controllers).map(|i| format!("{i}@k{i}:9093")).collect();
+            let bootstrap: Vec<String> = (1..=spec.controllers).map(|i| format!("k{i}:9093")).collect();
+            let initial: Vec<String> = (1..=spec.initial_voters)
+                .map(|i| format!("{i}@k{i}:9093:{}", directory(i)))
+                .collect();
+            let node = |id: usize, host: &str, role: &str, heap: &str| {
+                let mut m = Machine::build("image", Some(&format!("kafka-{KRAFT_VERSION}.Dockerfile")))
+                    .env("KAFKA_NODE_ID", id.to_string())
+                    .env("KAFKA_ROLE", role)
+                    .env("KAFKA_HOST", host)
+                    .env("CLUSTER_ID", cluster_id)
+                    .env("QUORUM", spec.quorum);
+                if spec.quorum == "static" {
+                    m = m.env("KAFKA_VOTERS", voters.join(","));
+                } else {
+                    m = m.env("KAFKA_BOOTSTRAP", bootstrap.join(","));
+                    if role == "controller" && id <= spec.initial_voters {
+                        m = m.env("KAFKA_INITIAL_CONTROLLERS", initial.join(","));
+                    }
+                }
+                m.env("KAFKA_HEAP_OPTS", format!("-Xms{heap} -Xmx{heap}"))
+                    .env("KAFKA_JVM_PERFORMANCE_OPTS", KAFKA_JVM)
+                    .data("/data")
+                    .cpu("4GHz")
+            };
+            let mut machines: Vec<(String, Machine)> = Vec::new();
+            for (i, name) in controllers.iter().enumerate() {
+                machines.push((name.clone(), node(i + 1, name, "controller", "192m").memory(1280)));
+            }
+            for (i, name) in brokers.iter().enumerate() {
+                machines.push((name.clone(), node(101 + i, name, "broker", "256m").memory(1536)));
+            }
+            let topology = vec![
+                "--controllers".to_string(),
+                controllers.join(","),
+                "--brokers".into(),
+                brokers.join(","),
+                "--workload".into(),
+                spec.workload.into(),
+            ];
+            let mut client = vec!["kraft-client".to_string()];
+            client.extend(topology.iter().cloned());
+            machines.push(("w1".into(), Machine::program(&client).cpu("4GHz")));
+            let mut oracle = vec!["kraft".to_string()];
+            oracle.extend(topology);
+            oracle.extend([
+                "--nemesis".into(),
+                spec.nemesis.into(),
+                "--duration".into(),
+                spec.duration.to_string(),
+                "--interval".into(),
+                "5".into(),
+            ]);
+            oracle.extend(spec.extra_oracle.iter().map(|s| s.to_string()));
+            Scenario {
+                name: spec.name.into(),
+                comment: spec.comment.into(),
+                generated: format!(
+                    "Kafka {KRAFT_VERSION}, {} controllers ({} quorum, {} initial voters), {} brokers, workload {}, nemesis {}",
+                    spec.controllers, spec.quorum, spec.initial_voters.min(spec.controllers), spec.brokers, spec.workload, spec.nemesis
+                ),
+                machines,
+                oracle: Machine::program(&oracle),
+                latency: "1ms".into(),
+            }
+        })
+        .collect()
+}
+
 // ------------------------------------------------------------ MySQL
 
 /// One MySQL server: the official image without its /dev entries (see
@@ -1300,6 +1424,7 @@ pub fn all() -> Vec<(String, String)> {
         ("etcd", etcd()),
         ("postgres", postgres()),
         ("kafka", kafka()),
+        ("kraft", kraft()),
         ("mysql", mysql()),
         ("galera", galera()),
         ("tigerbeetle", tigerbeetle()),

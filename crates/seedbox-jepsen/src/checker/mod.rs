@@ -8,6 +8,7 @@
 pub mod edn;
 pub mod elle;
 pub mod kafka;
+pub mod kraft;
 pub mod ledger;
 pub mod lockset;
 pub mod models;
