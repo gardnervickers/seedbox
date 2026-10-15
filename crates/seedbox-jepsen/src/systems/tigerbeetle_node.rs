@@ -2,31 +2,43 @@
 //! data file and process, and takes commands from the oracle, as
 //! `galera-node.sh` and Kafka's `start-broker.sh` do for theirs.
 //!
-//! On every boot (the first, and each `restart` after a `stop`) the agent
-//! formats the data file if there is none, then listens on `--agent-port` for
-//! one-line commands, each answered with one JSON line:
+//! On every boot (the first, and each `restart` after a `stop` or `reboot`
+//! after a `crash`) the agent formats the data file if there is none, then
+//! listens on `--agent-port` for one-line commands, each answered with one
+//! JSON line:
 //!
-//! * `status`: whether the replica runs, its past exits, the data file's size.
+//! * `status`: whether the replica runs, its release, past exits (each with
+//!   the last lines it wrote), notable log lines, the data file's size.
 //! * `start`: start `tigerbeetle start` on the existing data file.
 //! * `reformat`: delete the data file, `tigerbeetle format` a new one, start.
 //!   This is the undocumented node-replacement procedure of tigerbeetle#2767.
 //! * `recover`: delete the data file and run `tigerbeetle recover` (0.16.43 and
 //!   later), which waits for the cluster, then start.
 //! * `kill`: SIGKILL the replica process but keep the agent.
+//! * `install RELEASE`: atomically replace the replica's binary with
+//!   `--releases/RELEASE/tigerbeetle` (needs `--binary-dir`). A production
+//!   replica polls its binary every second and, once every replica has the
+//!   new release, the cluster upgrades itself and each replica `exec`s it.
+//!   `install RELEASE SECONDS` does so that many seconds later: if the machine
+//!   is paused meanwhile, as soon as it resumes.
 //!
-//! The replica inherits the agent's stdout and stderr. Lines the agent writes
-//! itself start with `TBNODE`. Addresses are resolved to IPv4 here, because
-//! TigerBeetle 0.16 accepts only IP addresses.
+//! The replica's stdout and stderr pass through the agent, which copies each
+//! line to its own stderr and keeps the notable ones (upgrades, state sync,
+//! panics) for `status`. Lines the agent writes itself start with `TBNODE`.
+//! Addresses are resolved to IPv4 here, because TigerBeetle 0.16 accepts only
+//! IP addresses. With `--respawn N` an unexpected exit is followed by a new
+//! `start` a second later, up to N times, as a service manager would.
 //!
 //! `--probe DIR` first checks that `DIR`'s file system takes O_DIRECT reads
 //! and writes through io_uring (TigerBeetle's I/O path) and `fallocate`, and
 //! reports the result as `TBNODE {"io_probe": ...}`.
 use serde_json::{json, Value};
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -47,6 +59,20 @@ pub struct Args {
     pub data: PathBuf,
     #[arg(long, default_value = "/tigerbeetle")]
     pub tigerbeetle: PathBuf,
+    /// Run the replica from `DIR/tigerbeetle`, installed on first boot from
+    /// --release (or --tigerbeetle) and replaced by `install`; keep it on the
+    /// data volume so it outlives a crash.
+    #[arg(long)]
+    pub binary_dir: Option<PathBuf>,
+    /// Where `install RELEASE` finds `RELEASE/tigerbeetle`.
+    #[arg(long, default_value = "/opt/tigerbeetle")]
+    pub releases: PathBuf,
+    /// The release --binary-dir starts with [default: --tigerbeetle].
+    #[arg(long)]
+    pub release: Option<String>,
+    /// Start the replica again after this many unexpected exits.
+    #[arg(long, default_value_t = 0)]
+    pub respawn: u32,
     /// Extra `tigerbeetle format` argument; repeatable.
     #[arg(long = "format-arg", allow_hyphen_values = true)]
     pub format_args: Vec<String>,
@@ -87,6 +113,95 @@ pub fn resolve(name: &str, port: u16, patience: Duration) -> Result<String, Stri
     }
 }
 
+/// What the replica's output has shown so far.
+#[derive(Default)]
+struct Output {
+    /// The release the running process reported at startup.
+    release: Option<String>,
+    /// Notable lines, oldest first (at most [`NOTABLE_MAX`]).
+    notable: Vec<Value>,
+    /// The last lines of any kind, for an exit's report.
+    tail: Vec<String>,
+    /// Lines that mention a panic.
+    panics: u32,
+    /// The view and role of the last transition to normal status.
+    view: Option<u64>,
+    role: Option<String>,
+}
+
+const NOTABLE_MAX: usize = 400;
+const TAIL_MAX: usize = 30;
+
+/// Lines worth keeping: release changes, upgrades, state sync, failures.
+fn notable(line: &str) -> bool {
+    if line.contains("(message_bus)") || line.contains("(clock)") {
+        return false;
+    }
+    [
+        "panic",
+        "release_transition",
+        "executing",
+        "upgrading from",
+        "diverged",
+        "sync_",
+        "state sync",
+        "unreachable",
+        "corrupt",
+        "binary change",
+        "(main): release=",
+        "releases_bundled=",
+        "error(",
+        "(multiversioning)",
+        "fatal",
+    ]
+    .iter()
+    .any(|needle| line.contains(needle))
+}
+
+/// Copy a child's output to our stderr line by line, recording what matters.
+fn pass_through(pipe: impl Read + Send + 'static, output: Arc<Mutex<Output>>, started: Instant) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(pipe);
+        let mut bytes = Vec::new();
+        loop {
+            bytes.clear();
+            match reader.read_until(b'\n', &mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            if !bytes.ends_with(b"\n") {
+                bytes.push(b'\n');
+            }
+            let _ = std::io::stderr().write_all(&bytes);
+            let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
+            let mut out = output.lock().unwrap();
+            if let Some(at) = line.find("(main): release=") {
+                let release = line[at + "(main): release=".len()..].trim();
+                out.release = Some(release.to_string());
+            }
+            if let Some((view, role)) = normal_view(&line) {
+                out.view = Some(view);
+                out.role = Some(role);
+            }
+            if line.contains("panic") {
+                out.panics += 1;
+            }
+            if notable(&line) {
+                if out.notable.len() >= NOTABLE_MAX {
+                    out.notable.remove(0);
+                }
+                let at = started.elapsed().as_secs_f64();
+                out.notable
+                    .push(json!({"at": (at * 1000.0).round() / 1000.0, "line": line}));
+            }
+            out.tail.push(line);
+            if out.tail.len() > TAIL_MAX {
+                out.tail.remove(0);
+            }
+        }
+    });
+}
+
 struct Agent {
     args: Args,
     addresses: String,
@@ -94,11 +209,73 @@ struct Agent {
     recovering: Option<Child>,
     exits: Vec<Value>,
     starts: u32,
+    output: Arc<Mutex<Output>>,
+    /// The agent's start, the clock of notable lines.
+    booted: Instant,
+    /// The oracle killed the replica: its exit is expected.
+    killed: bool,
+    respawns: u32,
+    respawn_at: Option<Instant>,
+    installs: Vec<Value>,
+    /// Installs due later: (when, release).
+    pending: Vec<(Instant, String)>,
 }
 
 impl Agent {
+    fn binary(&self) -> PathBuf {
+        match &self.args.binary_dir {
+            Some(dir) => dir.join("tigerbeetle"),
+            None => self.args.tigerbeetle.clone(),
+        }
+    }
+
     fn tigerbeetle(&self) -> Command {
-        Command::new(&self.args.tigerbeetle)
+        Command::new(self.binary())
+    }
+
+    /// Spawn `command` with its output passed through.
+    fn spawn(&self, mut command: Command) -> std::io::Result<Child> {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        if let Some(pipe) = child.stdout.take() {
+            pass_through(pipe, self.output.clone(), self.booted);
+        }
+        if let Some(pipe) = child.stderr.take() {
+            pass_through(pipe, self.output.clone(), self.booted);
+        }
+        Ok(child)
+    }
+
+    /// Replace the replica's binary with `release`'s, atomically and durably.
+    fn install(&mut self, release: &str) -> Result<Value, String> {
+        let Some(dir) = self.args.binary_dir.clone() else {
+            return Err("no --binary-dir".into());
+        };
+        let source = if release == "image" {
+            self.args.tigerbeetle.clone()
+        } else {
+            self.args.releases.join(release).join("tigerbeetle")
+        };
+        let bytes = install_binary(&source, &dir)?;
+        let value = json!({"release": release, "bytes": bytes,
+                           "at": self.booted.elapsed().as_secs_f64()});
+        say(json!({"event": "installed", "install": value}));
+        self.installs.push(value);
+        Ok(json!({"ok": true, "installed": release, "bytes": bytes}))
+    }
+
+    /// Run the delayed installs that are due.
+    fn install_due(&mut self) {
+        let now = Instant::now();
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending)
+            .into_iter()
+            .partition(|(at, _)| *at <= now);
+        self.pending = later;
+        for (_, release) in due {
+            if let Err(error) = self.install(&release) {
+                say(json!({"event": "install-failed", "release": release, "error": error}));
+            }
+        }
     }
 
     fn format(&mut self) -> Result<(), String> {
@@ -135,8 +312,10 @@ impl Agent {
             .arg(format!("--addresses={}", self.addresses))
             .args(&self.args.start_args)
             .arg(&self.args.data);
-        let child = command.spawn().map_err(|e| format!("start: {e}"))?;
+        let child = self.spawn(command).map_err(|e| format!("start: {e}"))?;
         self.starts += 1;
+        self.killed = false;
+        self.respawn_at = None;
         say(json!({"event": "started", "pid": child.id(), "starts": self.starts}));
         let pid = child.id();
         self.replica = Some(child);
@@ -152,10 +331,22 @@ impl Agent {
     }
 
     fn command(&mut self, line: &str) -> Value {
-        let result = match line.trim() {
-            "status" => Ok(self.status()),
-            "start" => self.start(),
-            "reformat" => {
+        let mut words = line.split_whitespace();
+        let verb = words.next().unwrap_or("");
+        let argument = words.next();
+        let result = match (verb, argument) {
+            ("status", _) => Ok(self.status()),
+            ("start", _) => self.start(),
+            ("install", Some(release)) => match words.next().map(str::parse::<f64>) {
+                None => self.install(release),
+                Some(Ok(delay)) if delay >= 0.0 => {
+                    let due = Instant::now() + Duration::from_secs_f64(delay);
+                    self.pending.push((due, release.to_string()));
+                    Ok(json!({"ok": true, "pending": release, "in": delay}))
+                }
+                Some(_) => Err(format!("install {release}: bad delay")),
+            },
+            ("reformat", _) => {
                 if self.replica.is_some() {
                     Err("replica running".into())
                 } else {
@@ -165,7 +356,7 @@ impl Agent {
                         .and_then(|()| self.start())
                 }
             }
-            "recover" => {
+            ("recover", _) => {
                 if self.replica.is_some() || self.recovering.is_some() {
                     Err("replica running".into())
                 } else {
@@ -180,21 +371,22 @@ impl Agent {
                             .arg(format!("--replica-count={}", self.args.peers.len()))
                             .args(&self.args.format_args)
                             .arg(&self.args.data);
-                        let child = command.spawn().map_err(|e| format!("recover: {e}"))?;
+                        let child = self.spawn(command).map_err(|e| format!("recover: {e}"))?;
                         let pid = child.id();
                         self.recovering = Some(child);
                         Ok(json!({"ok": true, "recovering": pid}))
                     })
                 }
             }
-            "kill" => match self.replica.as_mut() {
+            ("kill", _) => match self.replica.as_mut() {
                 Some(child) => {
                     let _ = child.kill();
+                    self.killed = true;
                     Ok(json!({"ok": true}))
                 }
                 None => Err("not running".into()),
             },
-            other => Err(format!("unknown command {other:?}")),
+            _ => Err(format!("unknown command {:?}", line.trim())),
         };
         match result {
             Ok(value) => value,
@@ -204,37 +396,89 @@ impl Agent {
 
     fn status(&self) -> Value {
         let size = std::fs::metadata(&self.args.data).ok().map(|m| m.len());
+        let output = self.output.lock().unwrap();
         json!({"ok": true, "replica": self.args.replica, "running": self.replica.is_some(),
                "recovering": self.recovering.is_some(), "starts": self.starts,
-               "exits": self.exits, "data_bytes": size})
+               "respawns": self.respawns, "release": output.release,
+               "panic_lines": output.panics, "installs": self.installs,
+               "view": output.view, "role": output.role,
+               "exits": self.exits, "notable": output.notable, "data_bytes": size})
+    }
+
+    fn exited(&mut self, status: &std::process::ExitStatus, what: &str) -> Value {
+        // Let the output threads drain the last lines.
+        std::thread::sleep(Duration::from_millis(100));
+        let mut exit = exit_json(status);
+        let output = self.output.lock().unwrap();
+        exit["what"] = json!(what);
+        exit["at"] = json!(self.booted.elapsed().as_secs_f64());
+        exit["release"] = json!(output.release);
+        exit["killed"] = json!(self.killed);
+        exit["tail"] = json!(output.tail);
+        exit
     }
 
     fn reap(&mut self) {
-        if let Some(child) = self.replica.as_mut() {
-            if let Ok(Some(status)) = child.try_wait() {
-                let exit = exit_json(&status);
-                say(
-                    json!({"event": "replica-exited", "exit": exit, "mem": memory(None, &self.args.data)}),
-                );
-                self.exits.push(exit);
-                self.replica = None;
+        if let Some(mut child) = self.replica.take() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let exit = self.exited(&status, "replica");
+                    say(
+                        json!({"event": "replica-exited", "exit": exit, "mem": memory(None, &self.args.data)}),
+                    );
+                    self.exits.push(exit);
+                    if !self.killed && self.respawns < self.args.respawn {
+                        self.respawn_at = Some(Instant::now() + Duration::from_secs(1));
+                    }
+                }
+                _ => self.replica = Some(child),
             }
         }
-        if let Some(child) = self.recovering.as_mut() {
-            if let Ok(Some(status)) = child.try_wait() {
-                let exit = exit_json(&status);
-                say(json!({"event": "recover-exited", "exit": exit}));
-                self.recovering = None;
-                if status.success() {
-                    if let Err(error) = self.start() {
-                        say(json!({"event": "start-failed", "error": error}));
+        if self.replica.is_none() && self.respawn_at.is_some_and(|at| Instant::now() >= at) {
+            self.respawns += 1;
+            say(json!({"event": "respawn", "respawns": self.respawns}));
+            if let Err(error) = self.start() {
+                say(json!({"event": "start-failed", "error": error}));
+            }
+        }
+        if let Some(mut child) = self.recovering.take() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let exit = self.exited(&status, "recover");
+                    say(json!({"event": "recover-exited", "exit": exit}));
+                    if status.success() {
+                        if let Err(error) = self.start() {
+                            say(json!({"event": "start-failed", "error": error}));
+                        }
+                    } else {
+                        self.exits.push(exit);
                     }
-                } else {
-                    self.exits.push(json!({"recover": exit}));
                 }
+                _ => self.recovering = Some(child),
             }
         }
     }
+}
+
+/// Copy `source` into `dir/tigerbeetle` through a temporary file: write,
+/// fsync, rename, fsync the directory. Returns the size.
+fn install_binary(source: &Path, dir: &Path) -> Result<u64, String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let target = dir.join("tigerbeetle");
+    let temporary = dir.join("tigerbeetle.installing");
+    let bytes = std::fs::copy(source, &temporary)
+        .map_err(|e| format!("copy {} to {}: {e}", source.display(), temporary.display()))?;
+    let file = std::fs::File::open(&temporary).map_err(|e| e.to_string())?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
+    std::fs::rename(&temporary, &target).map_err(|e| format!("rename: {e}"))?;
+    if let Ok(directory) = std::fs::File::open(dir) {
+        let _ = directory.sync_all();
+    }
+    Ok(bytes)
 }
 
 /// Guest memory, the replica's resident size and the data file's allocated size.
@@ -357,13 +601,28 @@ pub fn run(args: Args) -> u8 {
         recovering: None,
         exits: Vec::new(),
         starts: 0,
+        output: Arc::new(Mutex::new(Output::default())),
+        booted: Instant::now(),
+        killed: false,
+        respawns: 0,
+        respawn_at: None,
+        installs: Vec::new(),
+        pending: Vec::new(),
     };
     if let Some(parent) = agent.args.data.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    if agent.args.binary_dir.is_some() && !agent.binary().exists() {
+        let release = agent.args.release.clone().unwrap_or_else(|| "image".into());
+        if let Err(error) = agent.install(&release) {
+            say(json!({"event": "fatal", "error": error}));
+            return 2;
+        }
+    }
     let fresh = !agent.args.data.exists();
     say(
-        json!({"event": "boot", "replica": agent.args.replica, "addresses": agent.addresses, "fresh": fresh}),
+        json!({"event": "boot", "replica": agent.args.replica, "addresses": agent.addresses, "fresh": fresh,
+               "binary": agent.binary().display().to_string()}),
     );
     if fresh {
         if let Err(error) = agent.format() {
@@ -389,6 +648,7 @@ pub fn run(args: Args) -> u8 {
             say(json!({"mem": memory(pid, &agent.args.data)}));
         }
         agent.reap();
+        agent.install_due();
         match listener.accept() {
             Ok((stream, _)) => serve(&mut agent, stream),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -411,7 +671,10 @@ fn serve(agent: &mut Agent, stream: TcpStream) {
         return;
     }
     let reply = agent.command(&line);
-    say(json!({"event": "command", "command": line.trim(), "reply": reply}));
+    // Status is polled every second; log only the commands that act.
+    if line.trim() != "status" {
+        say(json!({"event": "command", "command": line.trim(), "reply": reply}));
+    }
     let mut stream = stream;
     let _ = stream.write_all(format!("{reply}\n").as_bytes());
 }
@@ -569,4 +832,37 @@ fn linux_probe(dir: &Path) -> Value {
     drop(file);
     let _ = std::fs::remove_file(&path);
     Value::Object(report)
+}
+
+/// The view and role of a `transition_to_normal_from_*` line, such as
+/// `0: transition_to_normal_from_view_change_status: view=1..2 primary`.
+fn normal_view(line: &str) -> Option<(u64, String)> {
+    let rest = &line[line.find("transition_to_normal_from")?..];
+    let view = rest[rest.find("view=")? + 5..].split_whitespace().next()?;
+    let view = view.rsplit("..").next()?.parse().ok()?;
+    let role = rest.split_whitespace().last()?;
+    matches!(role, "primary" | "backup").then(|| (view, role.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn views_come_from_transitions_to_normal() {
+        let line = "2026-10-15 01:30:54.669Z info(replica): 1: transition_to_normal_from_view_change_status: view=1..4 primary";
+        assert_eq!(normal_view(line), Some((4, "primary".into())));
+        let line = "info(replica): 2: transition_to_normal_from_recovering_status: view=0 backup";
+        assert_eq!(normal_view(line), Some((0, "backup".into())));
+        assert_eq!(
+            normal_view("info(replica): 0: transition_to_view_change_status: view=0..1 status=x"),
+            None
+        );
+        assert!(notable(
+            "info(replica): 2: release_transition: release=0.16.25..0.16.26 (reason=open)"
+        ));
+        assert!(!notable(
+            "warning(message_bus): error connecting to replica 1: error.ConnectionRefused"
+        ));
+    }
 }

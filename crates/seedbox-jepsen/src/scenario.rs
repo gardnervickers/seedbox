@@ -25,7 +25,8 @@ pub struct Machine {
     pub memory_mib: Option<u32>,
     pub cpu_speed: Option<String>,
     pub files: Vec<(String, String)>,
-    pub volumes: Vec<(String, String)>,
+    /// (name, target, size such as `4GiB`; none takes Seedbox's default).
+    pub volumes: Vec<(String, String, Option<String>)>,
 }
 
 impl Machine {
@@ -87,7 +88,14 @@ impl Machine {
 
     /// Keep `target` on a fresh disk so it outlives a crash and is not RAM.
     pub fn data(mut self, target: &str) -> Self {
-        self.volumes.push(("data".into(), target.into()));
+        self.volumes.push(("data".into(), target.into(), None));
+        self
+    }
+
+    /// [`Self::data`] on a disk of `size` (`4GiB`) instead of the default.
+    pub fn data_sized(mut self, target: &str, size: &str) -> Self {
+        self.volumes
+            .push(("data".into(), target.into(), Some(size.into())));
         self
     }
 
@@ -169,8 +177,11 @@ fn machine(out: &mut String, indent: &str, m: &Machine) {
     }
     if !m.volumes.is_empty() {
         let _ = writeln!(out, "{indent}volumes:");
-        for (name, target) in &m.volumes {
+        for (name, target, size) in &m.volumes {
             let _ = writeln!(out, "{indent}  {name}:\n{indent}    target: {target}");
+            if let Some(size) = size {
+                let _ = writeln!(out, "{indent}    size: {size}");
+            }
         }
     }
 }
@@ -808,15 +819,29 @@ fn galera() -> Vec<Scenario> {
 
 // ------------------------------------------------------------ TigerBeetle
 
-/// One TigerBeetle replica: the pinned official image plus this crate's binary
-/// (`image/tigerbeetle-VERSION.Dockerfile`), whose `tb-node` agent formats and
-/// runs it. The data file lives on a ramfs: a Seedbox volume holds 1 GiB and a
-/// data file is at least 1.06 GiB (its write-ahead log alone is 1 GiB); on ramfs,
-/// which has no `fallocate`, TigerBeetle leaves it sparse, so memory holds only
-/// what it writes. `--development` (smaller caches, so a replica runs in under
-/// 1 GiB) and a 256 KiB request limit (2,046 transfers per request) apply to
-/// every replica. `probe` also checks O_DIRECT and io_uring on a volume at /data.
-fn tb_replica(version: &str, index: usize, replicas: usize, memory: u32, probe: bool) -> Machine {
+/// How a TigerBeetle replica runs.
+#[derive(Clone, Copy)]
+enum TbRun {
+    /// `--development` on one pinned release's image
+    /// (`image/tigerbeetle-VERSION.Dockerfile`): smaller caches, so a replica
+    /// runs in about 1 GiB, and a 256 KiB request limit (2,046 transfers per
+    /// request). Development mode never upgrades itself.
+    Development(&'static str),
+    /// Production mode on the multiversion image
+    /// (`image/tigerbeetle-upgrade.Dockerfile`, every release under
+    /// `/opt/tigerbeetle`), starting on this release. The agent runs the
+    /// binary from the data volume and `install` replaces it; the replica
+    /// polls it and the cluster upgrades itself. Only the stable
+    /// `--cache-grid` flag is lowered (to 128 MiB, about 2.2 GB in all):
+    /// any experimental flag disables the upgrade polling.
+    Production(&'static str),
+}
+
+/// One TigerBeetle replica, run by this crate's `tb-node` agent, with its
+/// data file on a 4 GiB volume (a data file is at least 1.06 GiB: its
+/// write-ahead log alone is 1 GiB). `probe` also checks O_DIRECT and io_uring
+/// on that volume.
+fn tb_replica(run: TbRun, index: usize, replicas: usize, memory: u32, probe: bool) -> Machine {
     let peers = nodes("n", replicas).join(",");
     let mut entrypoint = vec![
         "/jepsen/seedbox-jepsen".to_string(),
@@ -825,34 +850,46 @@ fn tb_replica(version: &str, index: usize, replicas: usize, memory: u32, probe: 
         index.to_string(),
         "--peers".into(),
         peers,
-        "--ramfs".into(),
-        "/var/lib/tigerbeetle".into(),
         "--data".into(),
         format!("/var/lib/tigerbeetle/0_{index}.tigerbeetle"),
-        "--format-arg=--development".into(),
-        "--start-arg=--development".into(),
-        "--start-arg=--experimental".into(),
-        "--start-arg=--limit-request=256KiB".into(),
     ];
-    // --development queues no requests beyond the 8-prepare pipeline, and a
-    // replica then keeps only 8 clients connected: a 9th client's requests wait
-    // forever. Allow the production queue, except on 0.16.43, whose replica
-    // then allocates 2 GiB and no longer fits a 3 GiB machine beside its data
-    // file (its scenarios use at most four clients).
-    if version != "0.16.43" {
-        entrypoint.push("--start-arg=--limit-pipeline-requests=56".into());
-    }
-    let mut m = Machine::build(
-        ROOT,
-        Some(&format!(
-            "harness/jepsen/tigerbeetle/image/tigerbeetle-{version}.Dockerfile"
-        )),
-    )
-    .memory(memory);
+    let dockerfile = match run {
+        TbRun::Development(version) => {
+            entrypoint.extend(strings(&[
+                "--format-arg=--development",
+                "--start-arg=--development",
+                "--start-arg=--experimental",
+                "--start-arg=--limit-request=256KiB",
+            ]));
+            // --development queues no requests beyond the 8-prepare pipeline,
+            // and a replica then keeps only 8 clients connected: a 9th
+            // client's requests wait forever. Allow the production queue,
+            // except on 0.16.43, whose replica then allocates 2 GiB (its
+            // scenarios use at most four clients).
+            if version != "0.16.43" {
+                entrypoint.push("--start-arg=--limit-pipeline-requests=56".into());
+            }
+            format!("harness/jepsen/tigerbeetle/image/tigerbeetle-{version}.Dockerfile")
+        }
+        TbRun::Production(release) => {
+            entrypoint.extend(strings(&[
+                "--binary-dir",
+                "/var/lib/tigerbeetle/bin",
+                "--release",
+                release,
+                "--respawn",
+                "2",
+                "--start-arg=--cache-grid=128MiB",
+            ]));
+            "harness/jepsen/tigerbeetle/image/tigerbeetle-upgrade.Dockerfile".into()
+        }
+    };
     if probe {
-        entrypoint.extend(["--probe".to_string(), "/data".into()]);
-        m = m.data("/data");
+        entrypoint.extend(["--probe".to_string(), "/var/lib/tigerbeetle".into()]);
     }
+    let mut m = Machine::build(ROOT, Some(&dockerfile))
+        .memory(memory)
+        .data_sized("/var/lib/tigerbeetle", "4GiB");
     m.entrypoint = Some(entrypoint);
     m
 }
@@ -860,19 +897,36 @@ fn tb_replica(version: &str, index: usize, replicas: usize, memory: u32, probe: 
 struct TbSpec {
     name: &'static str,
     comment: &'static str,
-    version: &'static str,
+    run: TbRun,
     replicas: usize,
     memory: u32,
     oracle_memory: u32,
-    args: &'static [&'static str],
+    args: Vec<String>,
     probe: bool,
+}
+
+impl TbSpec {
+    fn version(&self) -> String {
+        match self.run {
+            TbRun::Development(version) => version.into(),
+            TbRun::Production(release) => format!("{release}, production"),
+        }
+    }
+}
+
+/// `--step` arguments.
+fn tb_steps(steps: &[&str]) -> Vec<String> {
+    steps
+        .iter()
+        .flat_map(|s| ["--step".to_string(), s.to_string()])
+        .collect()
 }
 
 fn tigerbeetle() -> Vec<Scenario> {
     // tigerbeetle#2544 needs an index level of two or more tables, which takes
     // more than 262,080 entries (32 compaction ops x 8,190 per batch): preload
     // 300,000 lean transfers in a single ledger, then query.
-    const QUERY: &[&str] = &[
+    let query = strings(&[
         "--workload",
         "query",
         "--preload",
@@ -894,8 +948,8 @@ fn tigerbeetle() -> Vec<Scenario> {
         "2000",
         "--final-filters",
         "500",
-    ];
-    const REFORMAT: &[&str] = &[
+    ]);
+    let reformat = strings(&[
         "--workload",
         "reformat",
         "--duration",
@@ -921,58 +975,194 @@ fn tigerbeetle() -> Vec<Scenario> {
         "2",
         "--replace-node",
         "1",
-    ];
-    let specs = [
-        TbSpec { name: "tb-smoke", comment: "Smoke test: a healthy 3-replica TigerBeetle 0.16.11 cluster, a short mixed\nworkload, and an O_DIRECT/io_uring probe on n1's volume.",
-            version: "0.16.11", replicas: 3, memory: 3072, oracle_memory: 512,
-            args: &["--workload", "query", "--duration", "20", "--clients", "4"], probe: true },
+    ]);
+    let with = |base: &[String], extra: &[&str]| {
+        let mut out = base.to_vec();
+        out.extend(strings(extra));
+        out
+    };
+    // Steady small transfers from four clients, no queries.
+    let steady = |duration: &str, steps: &[&str]| {
+        let mut out = strings(&[
+            "--workload",
+            "steps",
+            "--duration",
+            duration,
+            "--clients",
+            "4",
+            "--batch",
+            "8",
+            "--think-ms",
+            "20",
+            "--query-fraction",
+            "0",
+            "--timeout",
+            "10",
+        ]);
+        out.extend(tb_steps(steps));
+        out
+    };
+    let timeout = strings(&["--workload", "timeout", "--hold", "60", "--accounts", "4"]);
+    let sessions = strings(&[
+        "--workload",
+        "sessions",
+        "--sessions",
+        "64",
+        "--evictions",
+        "5",
+        "--accounts",
+        "4",
+    ]);
+    use TbRun::{Development as Dev, Production as Prod};
+    // tigerbeetle#2745: the replica at the end of the replication ring learns
+    // of the new release, then is stopped; the other two upgrade without it
+    // (an upgrade needs every replica to have the release, and the primary
+    // remembers the stopped one's) and commit several checkpoints past its
+    // log. It restarts on the old release, state-syncs from a replica on the
+    // new one, and upgrades. (Stopping the primary's ring successor instead
+    // all but stops commits: Jepsen's ring replication finding, #2739.)
+    let lag_upgrade = |to: &str| {
+        let lagging = format!("2:install:ring-last:{to}");
+        let rest = format!("6:install:primary,ring-next:{to}");
+        let mut out = steady(
+            "60",
+            &[&lagging, "5:stop:ring-last", &rest, "50:restart:ring-last"],
+        );
+        out.extend(strings(&["--await-release", to]));
+        out
+    };
+    // tigerbeetle#2758: three binary swaps around a pause. B is installed
+    // everywhere and C on one replica only (at the end of the replication
+    // ring, so that commits continue without it), which reads C into memory:
+    // the cluster upgrades to B, the highest release every replica has. That
+    // replica is paused as the primary proposes B, and D replaces C on its
+    // disk as it resumes. It catches up to B's checkpoint, execs C (from
+    // memory) to run B, and C, opening, finds D's header on disk instead of
+    // its own and asserts in release_transition. D is then installed on the
+    // others too.
+    let quick_upgrades = |releases: [&str; 3]| {
+        let [b, c, d] = releases;
+        let s1 = format!("5:install:!ring-last:{b}");
+        let s2 = format!("5:install:ring-last:{c}");
+        let s3 = format!("+0:install:ring-last:{d}@0.5");
+        let s4 = format!("+5:install:!ring-last:{d}");
+        let mut out = steady(
+            "45",
+            &[
+                &s1,
+                &s2,
+                "5:await:all:upgrading from",
+                &s3,
+                "+0:pause-process:ring-last",
+                "+2-3:resume-process:ring-last",
+                &s4,
+            ],
+        );
+        out.extend(strings(&["--await-release", d]));
+        out
+    };
+    // tigerbeetle#2763: a rolling install (one replica a second), then a view
+    // change across the release transition. The replica at the end of the
+    // replication ring is paused as the primary proposes the upgrade, so it
+    // stays on the old release while the other two upgrade. The primary
+    // execs first, and its ring successor leads the next view; that replica
+    // is paused in turn, and the lagging one resumes into the view change
+    // that follows, which it leads: still on the old release and repairing,
+    // it sends the deprecated start_view message type to the replica on the
+    // new release.
+    let rolling = |to: &str| {
+        let s1 = format!("5:install:n1:{to}");
+        let s2 = format!("6:install:n2:{to}");
+        let s3 = format!("7:install:n3:{to}");
+        let mut out = steady(
+            "40",
+            &[
+                &s1,
+                &s2,
+                &s3,
+                "7:await:all:upgrading from",
+                "+0:pause-process:ring-last",
+                "+6:pause-process:primary",
+                "+0.1:resume-process:ring-last",
+                "+3:resume-process:primary",
+            ],
+        );
+        out.extend(strings(&["--await-release", to]));
+        out
+    };
+    let specs = vec![
+        TbSpec { name: "tb-smoke", comment: "Smoke test: a healthy 3-replica TigerBeetle 0.16.11 cluster, a short mixed\nworkload, and an O_DIRECT/io_uring probe on n1's data volume.",
+            run: Dev("0.16.11"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: strings(&["--workload", "query", "--duration", "20", "--clients", "4"]), probe: true },
         TbSpec { name: "tb-2544-query", comment: "tigerbeetle#2544 (Jepsen 3.6, missing query results): a healthy 3-replica 0.16.11\ncluster with 300,000 transfers; query_transfers and get_account_transfers that\nfilter on two fields omit results, because the zig-zag merge join ends a scan\nearly once a probe skips past an index table.",
-            version: "0.16.11", replicas: 3, memory: 3072, oracle_memory: 1024, args: QUERY, probe: false },
+            run: Dev("0.16.11"), replicas: 3, memory: 3072, oracle_memory: 1024, args: query.clone(), probe: false },
         TbSpec { name: "tb-2544-query-fixed", comment: "Negative control for tb-2544-query: 0.16.17 carries the fix.",
-            version: "0.16.17", replicas: 3, memory: 3072, oracle_memory: 1024, args: QUERY, probe: false },
+            run: Dev("0.16.17"), replicas: 3, memory: 3072, oracle_memory: 1024, args: query, probe: false },
         TbSpec { name: "tb-2767-reformat", comment: "tigerbeetle#2767 (Jepsen 3.12): cut n3 off while transfers commit on n1 and n2, kill\nboth, reformat n2 with `tigerbeetle format` and let it rejoin with n3 before n1 returns.\nThe transfers acknowledged during the cut are lost.",
-            version: "0.16.11", replicas: 3, memory: 3072, oracle_memory: 512, args: REFORMAT, probe: false },
+            run: Dev("0.16.11"), replicas: 3, memory: 3072, oracle_memory: 512, args: reformat.clone(), probe: false },
         TbSpec { name: "tb-2767-recover-fixed", comment: "Negative control for tb-2767-reformat on 0.16.43, whose `tigerbeetle recover`\nreplaces the data file safely: it waits for a quorum before the replica rejoins.",
-            version: "0.16.43", replicas: 3, memory: 3072, oracle_memory: 512, args: &[], probe: false },
+            run: Dev("0.16.43"), replicas: 3, memory: 3072, oracle_memory: 512, args: with(&reformat, &["--replace", "recover"]), probe: false },
         TbSpec { name: "tb-2767-format-0-16-43", comment: "tb-2767-reformat on 0.16.43 with `tigerbeetle format`: the fix is the new recover\ncommand, so replacing a data file with format still loses acknowledged transfers.",
-            version: "0.16.43", replicas: 3, memory: 3072, oracle_memory: 512, args: REFORMAT, probe: false },
+            run: Dev("0.16.43"), replicas: 3, memory: 3072, oracle_memory: 512, args: reformat, probe: false },
         TbSpec { name: "tb-206-timeout", comment: "tigerbeetle#206 (Jepsen 3.1): with every replica killed, a create_transfers request\nneither fails nor times out; the client retries until the replicas return, and\nthen it commits.",
-            version: "0.16.11", replicas: 3, memory: 2560, oracle_memory: 512,
-            args: &["--workload", "timeout", "--hold", "60", "--accounts", "4"], probe: false },
+            run: Dev("0.16.11"), replicas: 3, memory: 2560, oracle_memory: 512, args: timeout.clone(), probe: false },
         TbSpec { name: "tb-206-timeout-0-16-43", comment: "tb-206-timeout on 0.16.43: tigerbeetle#206 is a design decision, still open, so the\nrequest still neither fails nor times out.",
-            version: "0.16.43", replicas: 3, memory: 3072, oracle_memory: 512,
-            args: &["--workload", "timeout", "--hold", "60", "--accounts", "4"], probe: false },
+            run: Dev("0.16.43"), replicas: 3, memory: 3072, oracle_memory: 512, args: timeout, probe: false },
         TbSpec { name: "tb-2484-sessions", comment: "tigerbeetle#2484 (Jepsen 3.3): 64 client sessions, then five more, each registered\nafter closing the newest; each evicts the oldest live session, and the 0.16.11 client\npanics on eviction and takes its process down.",
-            version: "0.16.11", replicas: 3, memory: 2560, oracle_memory: 3072,
-            args: &["--workload", "sessions", "--sessions", "64", "--evictions", "5", "--accounts", "4"], probe: false },
+            run: Dev("0.16.11"), replicas: 3, memory: 2560, oracle_memory: 3072, args: sessions.clone(), probe: false },
         TbSpec { name: "tb-2484-sessions-fixed", comment: "Negative control for tb-2484-sessions: 0.16.17 replicas and the 0.16.17 client, whose\nevicted sessions fail their requests with client_evicted instead of panicking.",
-            version: "0.16.17", replicas: 3, memory: 2560, oracle_memory: 3072,
-            args: &["--workload", "sessions", "--sessions", "64", "--evictions", "5", "--accounts", "4", "--client", "0.16.17"], probe: false },
+            run: Dev("0.16.17"), replicas: 3, memory: 2560, oracle_memory: 3072, args: with(&sessions, &["--client", "0.16.17"]), probe: false },
+        TbSpec { name: "tb-crash-one", comment: "Power loss on one replica: a random replica of a 0.16.11 cluster is crashed\nmid-load (its unflushed writes are lost) and rebooted. No acknowledged transfer may\nbe lost.",
+            run: Dev("0.16.11"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: steady("40", &["8-12:crash:r1", "18-22:reboot:r1"]), probe: false },
+        TbSpec { name: "tb-crash-all", comment: "Power loss on every replica: all three replicas of a 0.16.11 cluster are crashed\ntogether mid-load and rebooted. No acknowledged transfer may be lost.",
+            run: Dev("0.16.11"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: steady("40", &["8-12:crash:all", "16-20:reboot:all"]), probe: false },
+        TbSpec { name: "tb-crash-rolling", comment: "Power loss on each replica in turn: crash and reboot n1, n2 and n3 of a 0.16.11\ncluster one after another (in random order) under load. No acknowledged transfer may\nbe lost.",
+            run: Dev("0.16.11"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: steady("45", &["6:crash:r1", "10:reboot:r1", "16:crash:r2", "20:reboot:r2", "26:crash:r3", "30:reboot:r3"]), probe: false },
+        TbSpec { name: "tb-crash-all-0-16-43", comment: "tb-crash-all on 0.16.43.",
+            run: Dev("0.16.43"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: steady("40", &["8-12:crash:all", "16-20:reboot:all"]), probe: false },
+        TbSpec { name: "tb-2745-sync-upgrade", comment: "tigerbeetle#2745 (Jepsen 3.10, checkpoint divergence): upgrade a production 0.16.25\ncluster to 0.16.26 while n3 is down and far behind. n3 restarts on 0.16.25, state-syncs\nfrom a 0.16.26 replica's old-format checkpoint (without its released blocks), then\nupgrades to 0.16.26 and crashes.",
+            run: Prod("0.16.25"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: lag_upgrade("0.16.26"), probe: false },
+        TbSpec { name: "tb-2745-sync-upgrade-fixed", comment: "Negative control for tb-2745-sync-upgrade: the same schedule from 0.16.26 to 0.16.27,\nwhich both carry the new checkpoint format.",
+            run: Prod("0.16.26"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: lag_upgrade("0.16.27"), probe: false },
+        TbSpec { name: "tb-2758-quick-upgrades", comment: "tigerbeetle#2758 (Jepsen 3.11, release_transition panic): from 0.16.26, install 0.16.27,\n0.16.28 and 0.16.29 within a few seconds, pausing one replica meanwhile. A replica that\nexecs 0.16.28 while 0.16.29 is on disk panics in release_transition.",
+            run: Prod("0.16.26"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: quick_upgrades(["0.16.27", "0.16.28", "0.16.29"]), probe: false },
+        TbSpec { name: "tb-2758-quick-upgrades-fixed", comment: "Negative control for tb-2758-quick-upgrades: the same schedule from 0.16.29 through\n0.16.30, 0.16.31 and 0.16.32, which log the race instead of asserting.",
+            run: Prod("0.16.29"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: quick_upgrades(["0.16.30", "0.16.31", "0.16.32"]), probe: false },
+        TbSpec { name: "tb-2763-rolling-upgrade", comment: "tigerbeetle#2763 (Jepsen 3.11, deprecated message types): a rolling upgrade from\n0.16.26 to 0.16.27 with a view change during it. A replica already on 0.16.27 receives\nthe deprecated start_view message a 0.16.26 primary still sends, and panics.",
+            run: Prod("0.16.26"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: rolling("0.16.27"), probe: false },
+        TbSpec { name: "tb-2763-rolling-upgrade-fixed", comment: "Negative control for tb-2763-rolling-upgrade: the same schedule from 0.16.29 to\n0.16.30, after the fix.",
+            run: Prod("0.16.29"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: rolling("0.16.30"), probe: false },
     ];
     specs
         .into_iter()
         .map(|spec| {
             let mut args = strings(&["tigerbeetle"]);
-            let oracle_args: Vec<&str> = if spec.name == "tb-2767-recover-fixed" {
-                let mut a = REFORMAT.to_vec();
-                a.extend(["--replace", "recover"]);
-                a
-            } else {
-                spec.args.to_vec()
-            };
-            args.extend(strings(&oracle_args));
+            args.extend(spec.args.iter().cloned());
             args.extend(["--nodes".into(), nodes("n", spec.replicas).join(",")]);
-            args.extend(["--label".into(), format!("{}/{}", spec.version, spec.name)]);
+            args.extend([
+                "--label".into(),
+                format!("{}/{}", spec.version(), spec.name),
+            ]);
             Scenario {
                 name: spec.name.into(),
                 comment: spec.comment.into(),
-                generated: format!("TigerBeetle {}, {} replicas", spec.version, spec.replicas),
+                generated: format!("TigerBeetle {}, {} replicas", spec.version(), spec.replicas),
                 machines: (0..spec.replicas)
                     .map(|i| {
                         (
                             format!("n{}", i + 1),
                             tb_replica(
-                                spec.version,
+                                spec.run,
                                 i,
                                 spec.replicas,
                                 spec.memory,

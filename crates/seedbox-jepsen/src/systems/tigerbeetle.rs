@@ -162,6 +162,25 @@ pub struct Args {
     /// sessions: sessions to replace afterwards, each evicting the oldest.
     #[arg(long, default_value_t = 5)]
     pub evictions: usize,
+    /// steps: one fault or upgrade step, `AT:ACTION:TARGETS[:ARGUMENT]`;
+    /// repeatable, run in the order given. AT is seconds from the workload
+    /// start, `A-B` for a uniform random time between, and either after `+`
+    /// counts from the end of the previous step. ACTION is install (ARGUMENT:
+    /// the release, or `RELEASE@SECONDS` to install it that much later, which
+    /// on a paused machine is when it resumes), await (ARGUMENT: text; wait
+    /// until a target's replica logs a new notable line containing it), stop,
+    /// restart, crash, reboot, pause-process, resume-process, pause, resume,
+    /// isolate, heal (ends the target's isolation), kill or start. TARGETS is a
+    /// comma list of `all`, machines, `r1`, `r2`, ... (distinct machines drawn
+    /// at random once per run, so that steps can share them), `!X` (every
+    /// machine but X), or `primary`, `ring-next` and `ring-last`: the machine in
+    /// that place in the view current at the first use (`primary.2` binds
+    /// again, at its own first use).
+    #[arg(long = "step")]
+    pub steps: Vec<String>,
+    /// steps: after the final heal, wait until every replica runs this release.
+    #[arg(long)]
+    pub await_release: Option<String>,
     /// Workload seed [default: the guest's entropy, which a Seedbox seed fixes].
     #[arg(long)]
     pub seed: Option<u64>,
@@ -181,6 +200,10 @@ pub enum Workload {
     Timeout,
     /// More client sessions than the cluster keeps (tigerbeetle#2484).
     Sessions,
+    /// Transfers under a schedule of `--step`s: crashes, pauses, partitions
+    /// and binary upgrades. Every acknowledged transfer must survive and no
+    /// replica may panic.
+    Steps,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1104,17 +1127,48 @@ pub fn run(args: Args) -> u8 {
         Err(error) => return verdict(kit::INCONCLUSIVE, &format!("setup failed: {error}")),
     };
     match args.workload {
-        Workload::Query => mixed(shared, false),
-        Workload::Reformat => mixed(shared, true),
+        Workload::Query => mixed(shared, Mode::Healthy),
+        Workload::Reformat => mixed(shared, Mode::Replace),
+        Workload::Steps => mixed(shared, Mode::Steps),
         Workload::Timeout => timeout(shared),
         Workload::Sessions => sessions(shared),
     }
 }
 
-// ------------------------------------------------------------ query and reformat
+// ------------------------------------------------------------ query, reformat and steps
 
-fn mixed(shared: Arc<Shared>, faults: bool) -> u8 {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// No faults; check every query.
+    Healthy,
+    /// tigerbeetle#2767's replacement schedule.
+    Replace,
+    /// The `--step` schedule, watching the agents for replica exits.
+    Steps,
+}
+
+fn mixed(shared: Arc<Shared>, mode: Mode) -> u8 {
     let args = shared.args.clone();
+    let faults = mode != Mode::Healthy;
+    let schedule = if mode == Mode::Steps {
+        match parse_steps(&args, shared.seed) {
+            Ok(steps) => steps,
+            Err(error) => return verdict(kit::INCONCLUSIVE, &format!("--step: {error}")),
+        }
+    } else {
+        Vec::new()
+    };
+    let watch = Arc::new(Mutex::new(Watch::default()));
+    let watching = Arc::new(std::sync::atomic::AtomicBool::new(mode == Mode::Steps));
+    let watcher = (mode == Mode::Steps).then(|| {
+        let (shared, watch, watching) = (shared.clone(), watch.clone(), watching.clone());
+        thread::spawn(move || {
+            while watching.load(Ordering::SeqCst) {
+                poll_agents(&shared, &watch);
+                kit::pause(1.0);
+            }
+        })
+    });
     let started = Instant::now();
     if args.preload == 0 {
         *shared.stop_at.lock().unwrap() = Some(started + Duration::from_secs_f64(args.duration));
@@ -1122,7 +1176,10 @@ fn mixed(shared: Arc<Shared>, faults: bool) -> u8 {
     *shared.started.lock().unwrap() = started;
     let nemesis = faults.then(|| {
         let shared = shared.clone();
-        thread::spawn(move || replace_schedule(&shared, started))
+        thread::spawn(move || match mode {
+            Mode::Steps => run_steps(&shared, &schedule, started).map(Some),
+            _ => replace_schedule(&shared, started).map(|()| None),
+        })
     });
     let threads: Vec<_> = (0..args.clients)
         .map(|process| {
@@ -1144,27 +1201,48 @@ fn mixed(shared: Arc<Shared>, faults: bool) -> u8 {
     for thread in threads {
         let _ = thread.join();
     }
-    let nemesis_ok = match nemesis.map(|t| t.join()) {
-        Some(Ok(Ok(()))) | None => true,
+    let (nemesis_ok, ctl) = match nemesis.map(|t| t.join()) {
+        None => (true, None),
+        Some(Ok(Ok(ctl))) => (true, ctl),
         Some(Ok(Err(error))) => {
             evidence("nemesis-failed", json!({"error": error.0}));
-            false
+            (false, None)
         }
-        Some(Err(_)) => false,
+        Some(Err(_)) => (false, None),
     };
     evidence(
         "workload-done",
         json!({"counts": *shared.counts.lock().unwrap(), "seconds": started.elapsed().as_secs_f64()}),
     );
     if faults {
-        if let Err(error) = final_heal(&shared) {
+        if let Err(error) = final_heal(&shared, ctl) {
             return verdict(kit::INCONCLUSIVE, &format!("final heal failed: {error}"));
         }
     }
+    let upgraded = match &args.await_release {
+        Some(release) => Some(await_release(&shared, &watch, release)),
+        None => None,
+    };
     let (transfers, accounts) = match final_reads(&shared) {
         Ok(models) => models,
-        Err(error) => return verdict(kit::INCONCLUSIVE, &format!("final read failed: {error}")),
+        Err(error) => {
+            watching.store(false, Ordering::SeqCst);
+            poll_agents(&shared, &watch);
+            let panics = watch.lock().unwrap().panics();
+            if !panics.is_empty() {
+                return verdict(
+                    kit::VIOLATION,
+                    &format!("{}; then the final read failed: {error}", panics.join("; ")),
+                );
+            }
+            return verdict(kit::INCONCLUSIVE, &format!("final read failed: {error}"));
+        }
     };
+    watching.store(false, Ordering::SeqCst);
+    if let Some(watcher) = watcher {
+        let _ = watcher.join();
+        poll_agents(&shared, &watch);
+    }
     let durability = durability(&shared, &transfers);
     let lost = durability["lost"].as_u64().unwrap_or(0);
     let phantom = durability["failed_but_present"].as_u64().unwrap_or(0);
@@ -1176,7 +1254,14 @@ fn mixed(shared: Arc<Shared>, faults: bool) -> u8 {
     if phantom > 0 {
         problems.push(format!("{phantom} failed transfers present"));
     }
-    if !faults {
+    let mut notes = Vec::new();
+    if mode == Mode::Steps {
+        let watch = watch.lock().unwrap();
+        evidence("replicas", watch.summary());
+        problems.extend(watch.panics());
+        notes.extend(watch.other_exits());
+    }
+    if mode == Mode::Healthy {
         let (live, battery) = check_queries(&shared, &transfers, &accounts);
         let missing_live = live.violations;
         let missing_final = battery.violations;
@@ -1191,21 +1276,479 @@ fn mixed(shared: Arc<Shared>, faults: bool) -> u8 {
             return verdict(kit::INCONCLUSIVE, "no query completed");
         }
     }
+    if !problems.is_empty() {
+        problems.extend(notes);
+        return verdict(kit::VIOLATION, &problems.join("; "));
+    }
     if ok_transfers == 0 {
         return verdict(kit::INCONCLUSIVE, "no transfer was acknowledged");
-    }
-    if !problems.is_empty() {
-        return verdict(kit::VIOLATION, &problems.join("; "));
     }
     if faults && !nemesis_ok {
         return verdict(kit::INCONCLUSIVE, "the fault schedule did not complete");
     }
-    verdict(
-        kit::OK,
-        &format!(
-            "{ok_transfers} acknowledged transfers all present; every checked query result correct"
-        ),
-    )
+    if let (Some(release), Some(false)) = (&args.await_release, upgraded) {
+        notes.push(format!("the cluster never reached {release}"));
+        return verdict(kit::INCONCLUSIVE, &notes.join("; "));
+    }
+    let mut text = format!(
+        "{ok_transfers} acknowledged transfers all present; every checked query result correct"
+    );
+    if mode == Mode::Steps {
+        text = format!("{ok_transfers} acknowledged transfers all present; no replica panicked");
+        if let Some(release) = &args.await_release {
+            text.push_str(&format!("; every replica reached {release}"));
+        }
+    }
+    for note in notes {
+        text.push_str(&format!("; {note}"));
+    }
+    verdict(kit::OK, &text)
+}
+
+// ------------------------------------------------------------ steps
+
+/// One `--step`, its time drawn.
+#[derive(Clone, Debug)]
+struct Step {
+    /// Seconds from the workload start, or from the end of the previous step.
+    at: f64,
+    relative: bool,
+    action: String,
+    targets: Vec<String>,
+    argument: Option<String>,
+    spec: String,
+}
+
+/// Targets named by their place in the current view, bound to a machine the
+/// first time a step uses them: `primary`; `ring-next`, the backup the
+/// primary replicates to; `ring-last`, the end of the replication ring.
+/// A suffix (`primary.2`) names another binding, made at its own first use.
+const ROLE_TARGETS: &[&str] = &["primary", "ring-next", "ring-last"];
+
+/// The machine that holds `role` in the highest view any agent reports.
+/// A view's primary is replica `view mod replicas`, and replication runs
+/// in a ring from it through replica `primary + 1`, and so on.
+fn role_node(shared: &Shared, role: &str) -> kit::Result<String> {
+    let nodes = &shared.args.nodes;
+    let mut view = None;
+    for node in nodes {
+        if let Ok(status) = tigerbeetle_node::command(
+            node,
+            shared.args.agent_port,
+            "status",
+            Duration::from_secs(5),
+        ) {
+            if let Some(v) = status["view"].as_u64() {
+                view = view.max(Some(v));
+            }
+        }
+    }
+    let Some(view) = view else {
+        crate::bail!("{role}: no agent reports a view");
+    };
+    let n = nodes.len() as u64;
+    let primary = view % n;
+    let index = match role {
+        "primary" => primary,
+        "ring-next" => (primary + 1) % n,
+        _ => (primary + n - 1) % n,
+    };
+    Ok(nodes[index as usize].clone())
+}
+
+const STEP_ACTIONS: &[&str] = &[
+    "await",
+    "install",
+    "stop",
+    "restart",
+    "crash",
+    "reboot",
+    "pause-process",
+    "resume-process",
+    "pause",
+    "resume",
+    "isolate",
+    "heal",
+    "kill",
+    "start",
+];
+
+fn parse_steps(args: &Args, seed: u64) -> Result<Vec<Step>, String> {
+    let mut rng = Rng::stream(seed, 7);
+    // r1, r2, ...: a random permutation of the machines.
+    let mut drawn = args.nodes.clone();
+    rng.shuffle(&mut drawn);
+    let mut steps = Vec::new();
+    for spec in &args.steps {
+        let mut parts = spec.splitn(4, ':');
+        let (Some(at), Some(action), Some(targets)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(format!("{spec:?}: expected AT:ACTION:TARGETS[:ARGUMENT]"));
+        };
+        let argument = parts.next().map(str::to_owned);
+        let (relative, at) = match at.strip_prefix('+') {
+            Some(offset) => (true, offset),
+            None => (false, at),
+        };
+        let at = match at.split_once('-') {
+            Some((low, high)) => {
+                let low: f64 = low.parse().map_err(|_| format!("{spec:?}: bad time"))?;
+                let high: f64 = high.parse().map_err(|_| format!("{spec:?}: bad time"))?;
+                low + rng.unit() * (high - low)
+            }
+            None => at.parse().map_err(|_| format!("{spec:?}: bad time"))?,
+        };
+        if !STEP_ACTIONS.contains(&action) {
+            return Err(format!("{spec:?}: unknown action {action}"));
+        }
+        if matches!(action, "install" | "await") && argument.is_none() {
+            return Err(format!("{spec:?}: {action} needs an argument"));
+        }
+        let mut resolved = Vec::new();
+        for target in targets.split(',') {
+            if let Some(role) = target
+                .strip_prefix('!')
+                .filter(|t| ROLE_TARGETS.contains(&t.split('.').next().unwrap_or(t)))
+            {
+                resolved.push(format!("!@{role}"));
+            } else if let Some(excluded) = target.strip_prefix('!') {
+                let excluded = match excluded
+                    .strip_prefix('r')
+                    .and_then(|n| n.parse::<usize>().ok())
+                {
+                    Some(index) => drawn.get(index.wrapping_sub(1)).cloned(),
+                    None => args.nodes.iter().find(|n| *n == excluded).cloned(),
+                }
+                .ok_or_else(|| format!("{spec:?}: unknown target {target}"))?;
+                resolved.extend(args.nodes.iter().filter(|n| **n != excluded).cloned());
+            } else if target == "all" {
+                resolved.extend(args.nodes.iter().cloned());
+            } else if let Some(index) = target
+                .strip_prefix('r')
+                .and_then(|n| n.parse::<usize>().ok())
+            {
+                let node = drawn
+                    .get(index.wrapping_sub(1))
+                    .ok_or_else(|| format!("{spec:?}: {target}: only {} machines", drawn.len()))?;
+                resolved.push(node.clone());
+            } else if ROLE_TARGETS.contains(&target.split('.').next().unwrap_or(target)) {
+                resolved.push(format!("@{target}"));
+            } else if args.nodes.iter().any(|n| n == target) {
+                resolved.push(target.to_string());
+            } else {
+                return Err(format!("{spec:?}: unknown target {target}"));
+            }
+        }
+        steps.push(Step {
+            at,
+            relative,
+            action: action.into(),
+            targets: resolved,
+            argument,
+            spec: spec.clone(),
+        });
+    }
+    evidence(
+        "schedule",
+        json!(steps
+            .iter()
+            .map(|s| json!({"at": s.at, "relative": s.relative, "action": s.action, "targets": s.targets,
+                            "argument": s.argument, "spec": s.spec}))
+            .collect::<Vec<_>>()),
+    );
+    Ok(steps)
+}
+
+fn run_steps(shared: &Shared, steps: &[Step], started: Instant) -> kit::Result<kit::world::Ctl> {
+    let args = &shared.args;
+    let mut ctl = kit::connect_world(None)?;
+    let mut cuts: BTreeMap<String, kit::world::Cut> = BTreeMap::new();
+    let mut roles: BTreeMap<String, String> = BTreeMap::new();
+    // When the previous step ended, for relative times.
+    let mut last = 0.0;
+    for step in steps {
+        let at = if step.relative {
+            last + step.at
+        } else {
+            step.at
+        };
+        kit::pause(at - started.elapsed().as_secs_f64());
+        let mut resolved = Vec::new();
+        for target in &step.targets {
+            let (negated, name) = match target.strip_prefix('!') {
+                Some(name) => (true, name),
+                None => (false, target.as_str()),
+            };
+            match name.strip_prefix('@') {
+                Some(role) => {
+                    if !roles.contains_key(role) {
+                        let base = role.split('.').next().unwrap_or(role);
+                        let node = role_node(shared, base)?;
+                        evidence("role", json!({"role": role, "node": node, "at": at}));
+                        roles.insert(role.to_string(), node);
+                    }
+                    if negated {
+                        resolved.extend(args.nodes.iter().filter(|n| **n != roles[role]).cloned());
+                    } else {
+                        resolved.push(roles[role].clone());
+                    }
+                }
+                None => resolved.push(target.clone()),
+            }
+        }
+        let targets: Vec<&str> = resolved.iter().map(String::as_str).collect();
+        let extra = json!({"at": at, "spec": step.spec});
+        match step.action.as_str() {
+            "await" => {
+                let text = step.argument.as_deref().unwrap_or_default();
+                let line = await_line(shared, &targets, text, 60.0)?;
+                evidence(
+                    "awaited",
+                    json!({"text": text, "line": line, "spec": step.spec}),
+                );
+            }
+            "install" => {
+                let argument = step.argument.as_deref().unwrap_or_default();
+                let (release, delay) = match argument.split_once('@') {
+                    Some((release, delay)) => (release, format!(" {delay}")),
+                    None => (argument, String::new()),
+                };
+                for node in &targets {
+                    let reply = agent(args, node, &format!("install {release}{delay}"), 30.0)?;
+                    if reply["ok"] != json!(true) {
+                        crate::bail!("install {release} on {node}: {reply}");
+                    }
+                }
+                let mut fields = extra.as_object().cloned().unwrap_or_default();
+                fields.insert("action".into(), "install".into());
+                fields.insert("targets".into(), json!(targets));
+                fields.insert("release".into(), json!(release));
+                evidence("fault", Value::Object(fields));
+            }
+            "restart" | "reboot" => {
+                crate::nemesis::step_with(&mut ctl, &step.action, &targets, extra)?;
+                for node in &targets {
+                    agent(args, node, "start", 120.0)?;
+                }
+            }
+            "kill" | "start" => {
+                for node in &targets {
+                    agent(args, node, &step.action, 30.0)?;
+                }
+                evidence(
+                    "fault",
+                    json!({"action": step.action, "targets": targets, "at": step.at}),
+                );
+            }
+            "isolate" => {
+                for node in &targets {
+                    let rest: Vec<&str> = args
+                        .nodes
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|n| n != node)
+                        .collect();
+                    let cut = crate::nemesis::cut(&mut ctl, &[*node], &rest, extra.clone())?;
+                    cuts.insert(node.to_string(), cut);
+                }
+            }
+            "heal" => {
+                for node in &targets {
+                    if let Some(cut) = cuts.remove(*node) {
+                        ctl.heal(&cut)?;
+                    }
+                }
+                evidence(
+                    "fault",
+                    json!({"action": "heal", "targets": targets, "at": step.at}),
+                );
+            }
+            other => {
+                let action = other.replace('-', "_");
+                crate::nemesis::step_with(&mut ctl, &action, &targets, extra)?;
+            }
+        }
+        shared.faults.lock().unwrap().insert(
+            format!("{} {}", step.action, resolved.join(",")),
+            kit::now(),
+        );
+        last = started.elapsed().as_secs_f64();
+    }
+    Ok(ctl)
+}
+
+/// Wait until a new notable line containing `text` appears in one of
+/// `targets`' agents, and return it.
+fn await_line(shared: &Shared, targets: &[&str], text: &str, patience: f64) -> kit::Result<String> {
+    let read = |node: &str| -> Vec<String> {
+        tigerbeetle_node::command(
+            node,
+            shared.args.agent_port,
+            "status",
+            Duration::from_secs(2),
+        )
+        .ok()
+        .and_then(|s| s["notable"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|n| n["line"].as_str().map(str::to_owned))
+        .filter(|l| l.contains(text))
+        .collect()
+    };
+    let seen: Vec<Vec<String>> = targets.iter().map(|n| read(n)).collect();
+    let started = Instant::now();
+    loop {
+        for (node, before) in targets.iter().zip(&seen) {
+            if let Some(line) = read(node).into_iter().find(|l| !before.contains(l)) {
+                return Ok(format!("{node}: {line}"));
+            }
+        }
+        if started.elapsed().as_secs_f64() >= patience {
+            crate::bail!("no {text:?} from {targets:?} in {patience} s");
+        }
+        kit::pause(0.1);
+    }
+}
+
+/// What the agents reported: every replica exit, and each machine's release.
+#[derive(Default)]
+struct Watch {
+    /// (machine, agent clock, kind) to the exit.
+    exits: BTreeMap<(String, String, String), Value>,
+    releases: BTreeMap<String, String>,
+    timeline: Vec<Value>,
+    /// Notable lines per machine, from the last status read.
+    notable: BTreeMap<String, Value>,
+}
+
+impl Watch {
+    /// Lines that report a panic, each with the next two lines.
+    fn panic_lines(exit: &Value) -> Vec<String> {
+        let tail: Vec<String> = exit["tail"]
+            .as_array()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter_map(|l| l.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        if let Some(first) = tail.iter().position(|l| l.contains("panic")) {
+            out.extend(tail[first..].iter().take(3).cloned());
+        }
+        out
+    }
+
+    fn panics(&self) -> Vec<String> {
+        self.exits
+            .iter()
+            .filter_map(|((node, _, _), exit)| {
+                let lines = Self::panic_lines(exit);
+                let first = lines.first()?;
+                Some(format!(
+                    "{node} panicked on {}: {}",
+                    exit["release"].as_str().unwrap_or("?"),
+                    first.trim()
+                ))
+            })
+            .collect()
+    }
+
+    fn other_exits(&self) -> Vec<String> {
+        self.exits
+            .iter()
+            .filter(|(_, exit)| Self::panic_lines(exit).is_empty())
+            .map(|((node, _, _), exit)| {
+                format!(
+                    "{node}'s replica exited (code {}, signal {})",
+                    exit["code"], exit["signal"]
+                )
+            })
+            .collect()
+    }
+
+    fn summary(&self) -> Value {
+        json!({"releases": self.releases, "timeline": self.timeline,
+               "exits": self.exits.iter().map(|((node, _, _), e)| json!({"node": node,
+                   "code": e["code"], "signal": e["signal"], "release": e["release"],
+                   "panic": Self::panic_lines(e)})).collect::<Vec<_>>(),
+               "notable": self.notable})
+    }
+}
+
+/// Read every agent's status once (briefly: a machine may be down) and
+/// record new exits and release changes.
+fn poll_agents(shared: &Shared, watch: &Mutex<Watch>) {
+    for node in &shared.args.nodes {
+        let Ok(status) = tigerbeetle_node::command(
+            node,
+            shared.args.agent_port,
+            "status",
+            Duration::from_secs(2),
+        ) else {
+            continue;
+        };
+        let mut watch = watch.lock().unwrap();
+        if let Some(release) = status["release"].as_str() {
+            if watch.releases.get(node).map(String::as_str) != Some(release) {
+                watch.releases.insert(node.clone(), release.into());
+                let entry = json!({"node": node, "release": release, "at": kit::now()});
+                evidence("release", entry.clone());
+                watch.timeline.push(entry);
+            }
+        }
+        let notable: Vec<Value> = status["notable"]
+            .as_array()
+            .map(|n| n.iter().rev().take(60).rev().cloned().collect())
+            .unwrap_or_default();
+        watch.notable.insert(node.clone(), json!(notable));
+        for exit in status["exits"].as_array().cloned().unwrap_or_default() {
+            if exit["killed"] == json!(true) {
+                continue;
+            }
+            let key = (
+                node.clone(),
+                exit["at"].to_string(),
+                exit["what"].as_str().unwrap_or("").to_string(),
+            );
+            if !watch.exits.contains_key(&key) {
+                evidence(
+                    "replica-exit",
+                    json!({"node": node, "code": exit["code"], "signal": exit["signal"],
+                           "release": exit["release"], "panic": Watch::panic_lines(&exit),
+                           "tail": exit["tail"]}),
+                );
+                watch.exits.insert(key, exit);
+            }
+        }
+    }
+}
+
+/// Wait (up to --ready-timeout) until every replica reports `release`.
+fn await_release(shared: &Shared, watch: &Mutex<Watch>, release: &str) -> bool {
+    let started = Instant::now();
+    loop {
+        poll_agents(shared, watch);
+        let reached = {
+            let watch = watch.lock().unwrap();
+            shared
+                .args
+                .nodes
+                .iter()
+                .all(|n| watch.releases.get(n).map(String::as_str) == Some(release))
+        };
+        if reached || started.elapsed().as_secs_f64() >= shared.args.ready_timeout {
+            evidence(
+                "await-release",
+                json!({"release": release, "reached": reached,
+                       "seconds": started.elapsed().as_secs_f64(),
+                       "releases": watch.lock().unwrap().releases}),
+            );
+            return reached;
+        }
+        kit::pause(1.0);
+    }
 }
 
 /// tigerbeetle#2767's schedule: cut one replica off, kill the two that hold
@@ -1261,8 +1804,13 @@ fn replace_schedule(shared: &Shared, started: Instant) -> kit::Result<()> {
     Ok(())
 }
 
-fn final_heal(shared: &Shared) -> kit::Result<()> {
-    let mut ctl = kit::connect_world(None)?;
+/// Undo every fault still in force (those `ctl` applied), then start every
+/// replica that does not run.
+fn final_heal(shared: &Shared, ctl: Option<kit::world::Ctl>) -> kit::Result<()> {
+    let mut ctl = match ctl {
+        Some(ctl) => ctl,
+        None => kit::connect_world(None)?,
+    };
     let failures = ctl.heal_everything();
     if !failures.is_empty() {
         crate::bail!("{}", failures.join("; "));
@@ -1887,6 +2435,65 @@ mod tests {
             panic!()
         };
         assert_eq!(transfers[0].id, u128::MAX - 1);
+    }
+
+    fn args_with(steps: &[&str]) -> Args {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: Args,
+        }
+        let mut argv = vec!["tigerbeetle".to_string()];
+        for step in steps {
+            argv.push(format!("--step={step}"));
+        }
+        Cli::parse_from(argv).args
+    }
+
+    #[test]
+    fn steps_resolve_times_and_shared_random_targets() {
+        let args = args_with(&[
+            "2-4:crash:r1",
+            "5:install:all:0.16.26@0.5",
+            "+0.5-1:isolate:n2,r2",
+            "9:reboot:r1",
+            "9:await:!r1,primary.2:upgrading from",
+        ]);
+        let steps = parse_steps(&args, 3).unwrap();
+        // In the order given.
+        let actions: Vec<&str> = steps.iter().map(|s| s.action.as_str()).collect();
+        assert_eq!(actions, ["crash", "install", "isolate", "reboot", "await"]);
+        assert!((2.0..=4.0).contains(&steps[0].at) && !steps[0].relative);
+        assert!((0.5..=1.0).contains(&steps[2].at) && steps[2].relative);
+        // r1 names the same machine in both steps; r2 is another.
+        assert_eq!(steps[0].targets, steps[3].targets);
+        assert_eq!(steps[1].targets, ["n1", "n2", "n3"]);
+        assert_eq!(steps[1].argument.as_deref(), Some("0.16.26@0.5"));
+        assert_eq!(steps[2].targets[0], "n2");
+        assert_ne!(steps[2].targets[1], steps[0].targets[0]);
+        // `!r1` is the other two; roles stay names until the step runs.
+        assert_eq!(steps[4].targets.len(), 3);
+        assert!(!steps[4].targets.contains(&steps[0].targets[0]));
+        assert_eq!(steps[4].targets[2], "@primary.2");
+        let negated = parse_steps(&args_with(&["1:stop:!ring-last"]), 1).unwrap();
+        assert_eq!(negated[0].targets, ["!@ring-last"]);
+        // The same seed draws the same schedule.
+        let again = parse_steps(&args, 3).unwrap();
+        assert_eq!(steps[0].at, again[0].at);
+        for bad in [
+            "5:explode:n1",
+            "5:install:n1",
+            "5:await:n1",
+            "x:crash:n1",
+            "+x:crash:n1",
+            "5:crash:n9",
+            "5:crash:r4",
+            "5:crash:!n9",
+            "5:crash:!bogus",
+        ] {
+            assert!(parse_steps(&args_with(&[bad]), 1).is_err(), "{bad}");
+        }
     }
 
     #[test]
