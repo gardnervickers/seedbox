@@ -1,9 +1,10 @@
 # A leaner Seedbox progress client (AArch64): agreed design
 
-Authors: Fable (Claude) with Codex (gpt-6-astra, xhigh) as reviewer; transcript in
-`codex-transcript.md`.  Design only; nothing was edited, built or committed in either repo.
-Measurements: `measurements.md` (raw: `matrix.log`, `dumps.log`, `variants/`,
-`seedbox-build/`).  DynamoRIO fork at master 25842b959; Seedbox's committed client at
+Authors: Fable (Claude) with Codex (gpt-6-astra, xhigh) as reviewer.  Design only;
+nothing was edited, built or committed in either repo.  Measurements:
+[lean-progress-client-measurements.md](lean-progress-client-measurements.md).  The
+review transcript and raw logs (`codex-transcript.md`, `matrix.log`, `dumps.log`,
+`variants/`, `seedbox-build/`) were not copied into this repository.  DynamoRIO fork at master 25842b959; Seedbox's committed client at
 5ebddb73:guest/progress/progress.c, and its branch `claude/lean-progress` whose head
 4bbb627e already implements the design below (reviewed in section 7).
 
