@@ -349,6 +349,29 @@ comparison, so a replay may use a different count and must still match.
 Code: [round contract](../crates/seedbox-engine-core/src/window/mod.rs),
 [world adapter](../crates/seedbox-engine-core/src/world_windowed.rs).
 
+## Chained ARM slices
+
+Each ARM machine runs in its own HVF worker process, driven by the coordinator
+over a pipe. A link delivers frames in order, at least 1 ns apart, so a burst
+from one send reaches the receiver as a run of delivery points: a slice to
+each frame's time, then its delivery. One host exchange per step limited bulk
+TCP to about 20 MiB of guest data per wall second.
+
+With each slice, the scheduler gives the ARM adapter the frames due at its
+limit and the slices it will request next if each one reaches its limit. The
+worker runs them in one exchange and stops after the first that falls short.
+Their answers wait in the worker handle and go only to the identical next
+requests, each validated as a separate exchange would be. Any other operation
+while chained slices are pending is a protocol error. Horizons, events,
+deliveries and interrupt state are therefore those of separate requests, and
+the chain is not in any witness. Planning stops before anything the loop
+handles itself: an event already due (with early-delivery slack), the slice
+end, a fork or a suspension. Payload bytes cross the pipe as one binary
+attachment after the JSON message.
+
+Code: [planner](../crates/seedbox-engine-core/src/world_windowed.rs),
+[worker protocol](../crates/seedbox-arm64/src/application/worker.rs).
+
 ## Fault ordering and replay
 
 An external override has a stable key, simulated time, and action. Its execution

@@ -1042,7 +1042,13 @@ impl Oracles {
     async fn accepted_fault_survives_disconnect(&self, baseline: &SimulationId) -> Outcome {
         let id = self.submit(&self.document, true).await?;
         self.live(&id).await?;
-        self.rate(&id, PlaybackRate::Unlimited).await?;
+        // Real time: unlimited, the rest of the run can finish within the
+        // retry's half-second wait, before the partition is admitted.
+        let real_time = PlaybackRate::Limited {
+            numerator: NonZeroU32::MIN,
+            denominator: NonZeroU32::MIN,
+        };
+        self.rate(&id, real_time).await?;
         if !self.reach(&id, 2 * SECOND).await? {
             return Err(format!("{id} ended before 2 s"));
         }
