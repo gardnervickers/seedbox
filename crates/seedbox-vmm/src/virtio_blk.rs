@@ -20,12 +20,12 @@ pub(crate) struct Snapshot {
 }
 
 impl VirtioBlk {
-    pub(crate) fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            model: self.model.snapshot(),
+    pub(crate) fn snapshot(&self) -> Result<Snapshot, String> {
+        Ok(Snapshot {
+            model: self.model.snapshot()?,
             transport: self.transport.snapshot(),
             dirty: self.dirty.clone(),
-        }
+        })
     }
     pub(crate) fn from_snapshot(snapshot: Snapshot, disk: Disk) -> Result<Self, String> {
         let device = Self::new(disk);

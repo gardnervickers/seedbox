@@ -138,9 +138,19 @@ pub enum Event {
     Frame(Vec<u8>),
     Control(Vec<u8>),
     Ready,
-    Effect { id: u32, success: bool },
-    Exit { code: u8, setup_error: bool },
+    Effect {
+        id: u32,
+        success: bool,
+    },
+    Exit {
+        code: u8,
+        setup_error: bool,
+    },
     Barrier,
+    /// The block device held the request a trigger selected.
+    Held {
+        trigger: u32,
+    },
 }
 
 /// The dedicated guest driver admits only these logical supervisor registers.

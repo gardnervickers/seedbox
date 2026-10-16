@@ -318,6 +318,19 @@ past; at that boundary the effect meets the same state checks as a timed input
 and is admitted as an ordinary fault, or the trigger is rejected. Triggers
 still armed or matched when the run ends are cut off.
 
+A `block_request` trigger works at the device instead. Arming installs a
+hold in its machine's block model, which counts matching requests from then
+on (a successor incarnation starts afresh, as `disk_error` does). On admission
+of the `nth` one, earlier requests in the notification complete normally; the
+selected request gets no disk effect, used-ring entry or IRQ, and nothing
+after it is processed. The MMIO write completes and the machine stops with a
+held suspension: it neither runs nor receives, and its queued inputs stay
+unconsumed. The coordinator records the hold time as the match and commits
+the crash one causal lookahead later through the ordinary lifecycle path, so
+the crash time never depends on where rounds end. An oracle exit first cuts
+the pending crash off with both times recorded. No checkpoint or anchor
+capture is taken while a request is held. x86 does not support holds yet.
+
 Records are checkpointed whole and their receipts (armed, matched, fired,
 expired, rejected, cut off) are published for the world view; a fired
 trigger's fault carries the trigger's input key, and its status says whether

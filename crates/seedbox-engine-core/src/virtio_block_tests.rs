@@ -99,7 +99,7 @@ fn successful_disk_operations_and_snapshot_restore_keep_layers_and_stats() {
         let mut g = Guest::new(policy);
         g.request(1, 1, &[7; 512], false);
         g.notify().unwrap();
-        let metadata = serde_json::to_vec(&g.b.snapshot()).unwrap();
+        let metadata = serde_json::to_vec(&g.b.snapshot().unwrap()).unwrap();
         let mut disk_bytes = Vec::new();
         g.b.disk().write_checkpoint(&mut disk_bytes).unwrap();
         let saved = (
@@ -335,7 +335,8 @@ fn partial_injected_errors_are_seeded_and_survive_snapshots() {
         for i in 0..20 {
             if snapshot_after == Some(i) {
                 let snapshot: Snapshot =
-                    serde_json::from_slice(&serde_json::to_vec(&g.b.snapshot()).unwrap()).unwrap();
+                    serde_json::from_slice(&serde_json::to_vec(&g.b.snapshot().unwrap()).unwrap())
+                        .unwrap();
                 let disk = g.b.clone().into_disk();
                 g.b = Block::new(disk, Policy::Block)
                     .restore_snapshot(snapshot)
@@ -356,4 +357,43 @@ fn partial_injected_errors_are_seeded_and_survive_snapshots() {
     );
     assert_eq!(run(Some(9)), (statuses, counts));
     assert!(InjectedErrors::new(DiskOp::Any, 0, crate::rng::Rng::new(1, "x")).is_err());
+}
+#[test]
+fn a_hold_completes_earlier_requests_and_leaves_the_selected_one_untouched() {
+    use seedbox_control::DiskOp;
+    let mut g = Guest::new(Policy::Block);
+    let hold = Hold {
+        trigger_id: 7,
+        op: DiskOp::Write,
+        nth: 2,
+        seen: 0,
+    };
+    g.b.set_hold(Some(hold)).unwrap();
+    // The count survives a checkpoint taken before the hold.
+    let (_, first) = g.request(1, 1, &[1; 512], false);
+    assert_eq!(g.notify().unwrap().held, None);
+    let saved = g.b.snapshot().unwrap();
+    let disk = g.b.clone().into_disk();
+    g.b = Block::new(disk, Policy::Block)
+        .restore_snapshot(saved)
+        .unwrap();
+    // One notification: a read, the held write, and a write after it.
+    let (_, read) = g.request(0, 1, &[0; 512], true);
+    let (_, held) = g.request(1, 2, &[2; 512], false);
+    let (_, after) = g.request(1, 3, &[3; 512], false);
+    let used_before = u16::from_le_bytes([g.m[8194], g.m[8195]]);
+    let notified = g.notify().unwrap();
+    assert_eq!((notified.held, notified.completed), (Some(7), 1));
+    assert_eq!(
+        (g.m[first], g.m[read], g.m[held], g.m[after]),
+        (0, 0, 0xff, 0xff)
+    );
+    assert_eq!(u16::from_le_bytes([g.m[8194], g.m[8195]]), used_before + 1);
+    let mut sector = [0; 512];
+    g.b.disk().read(2, &mut sector).unwrap();
+    assert_eq!(sector, [0; 512], "the held write has no disk effect");
+    assert_eq!(g.b.held(), Some(7));
+    assert!(g.b.snapshot().is_err());
+    assert!(g.notify().is_err());
+    assert!(g.b.set_hold(None).is_err());
 }

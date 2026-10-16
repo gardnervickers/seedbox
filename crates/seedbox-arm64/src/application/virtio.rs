@@ -52,15 +52,15 @@ enum ModelSnapshot {
 
 impl Virtio {
     /// Disk sectors are streamed separately through `Disk::write_checkpoint`.
-    pub fn snapshot(&self) -> Snapshot {
-        Snapshot {
+    pub fn snapshot(&self) -> Result<Snapshot> {
+        Ok(Snapshot {
             transport: self.transport.snapshot(),
             model: match &self.model {
                 Model::Net(net) => ModelSnapshot::Net(net.snapshot()),
                 Model::Console(console) => ModelSnapshot::Console(console.snapshot()),
-                Model::Block(block) => ModelSnapshot::Block(block.snapshot()),
+                Model::Block(block) => ModelSnapshot::Block(block.snapshot()?),
             },
-        }
+        })
     }
 
     /// Restore into a configured device. A block device must already contain
@@ -189,9 +189,11 @@ impl Virtio {
                     // they outlive a guest reset like the disk itself.
                     Model::Block(mut block) => {
                         let errors = block.take_errors();
+                        let hold = block.take_hold();
                         let mut device = Self::block(block.into_disk());
                         if let Model::Block(rebuilt) = &mut device.model {
                             rebuilt.set_errors(errors);
+                            rebuilt.set_hold(hold)?;
                         }
                         device
                     }
@@ -209,14 +211,35 @@ impl Virtio {
             return Ok(output.payloads.into_iter().map(Event::Control).collect());
         }
         if let Model::Block(block) = &mut self.model {
-            block.notify(&mut self.transport, memory, RAM_BASE, |_, _| {})?;
-            return Ok(Vec::new());
+            let notified = block.notify(&mut self.transport, memory, RAM_BASE, |_, _| {})?;
+            return Ok(notified
+                .held
+                .map(|trigger| Event::Held { trigger })
+                .into_iter()
+                .collect());
         }
         if let Model::Net(net) = &mut self.model {
             let output = net.notify(&mut self.transport, memory, RAM_BASE, index, |_, _| {})?;
             return Ok(output.frames.into_iter().map(Event::Frame).collect());
         }
         unreachable!("all device models handled")
+    }
+    /// Install or remove a block request hold.
+    pub fn set_hold(
+        &mut self,
+        hold: Option<seedbox_engine_core::virtio_block::Hold>,
+    ) -> Result<()> {
+        match &mut self.model {
+            Model::Block(block) => block.set_hold(hold),
+            _ => Err("a block request hold needs a block device".into()),
+        }
+    }
+    /// The trigger whose hold stopped this block device, if any.
+    pub fn held(&self) -> Option<u32> {
+        match &self.model {
+            Model::Block(block) => block.held(),
+            _ => None,
+        }
     }
     /// Start or end injected errors on a block device; ending returns counts.
     pub fn set_disk_errors(

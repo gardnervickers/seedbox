@@ -267,8 +267,12 @@ impl Triggers {
     pub fn arm_typed(&mut self, key: &str, spec: &TriggerSpec, now: u64) -> Result<u32, String> {
         check_trigger_budget(&self.records)?;
         spec.validate()?;
-        if matches!(spec.when, EventSelector::BlockRequest { .. }) {
-            return Err("block_request triggers are not supported yet".into());
+        if let EventSelector::BlockRequest { machine, .. } = &spec.when {
+            if self.armed_holds().any(|(m, _)| m == machine) {
+                return Err(format!(
+                    "{machine} already has an armed block_request trigger"
+                ));
+            }
         }
         let deadline = match spec.within_ns {
             Some(within) => now
@@ -377,6 +381,53 @@ impl Triggers {
                 r.effect_at_ns = Some(effect);
             }
         }
+        Ok(())
+    }
+    /// The holds armed `block_request` triggers install, by machine. Each
+    /// counts from installation; a successor incarnation starts afresh.
+    pub fn armed_holds(&self) -> impl Iterator<Item = (&str, crate::virtio_block::Hold)> {
+        self.records
+            .iter()
+            .filter_map(|r| match (&r.selector, r.status) {
+                (Some(EventSelector::BlockRequest { machine, op }), TriggerStatus::Armed) => {
+                    Some((
+                        machine.as_str(),
+                        crate::virtio_block::Hold {
+                            trigger_id: r.id,
+                            op: *op,
+                            nth: r.nth,
+                            seen: 0,
+                        },
+                    ))
+                }
+                _ => None,
+            })
+    }
+    /// A machine held the request a `block_request` trigger selected at
+    /// `at`. Its crash follows one causal lookahead later, independent of
+    /// where rounds end; both times are recorded.
+    pub fn hold(&mut self, id: u32, at: u64, lookahead: u64, max_time: u64) -> Result<(), String> {
+        let r = id
+            .checked_sub(1)
+            .and_then(|i| self.records.get_mut(i as usize))
+            .filter(|r| {
+                r.status == TriggerStatus::Armed
+                    && matches!(r.selector, Some(EventSelector::BlockRequest { .. }))
+                    && at >= r.armed_at_ns
+                    && at < r.match_deadline_ns
+            })
+            .ok_or("held block request for no armed trigger")?;
+        let effect = at.checked_add(lookahead).ok_or("trigger effect overflow")?;
+        effect
+            .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
+            .ok_or("trigger effect deadline overflow")?;
+        if effect < max_time {
+            return Err("held request crash is in committed machine past".into());
+        }
+        r.seen = r.nth;
+        r.status = TriggerStatus::Matched;
+        r.matched_at_ns = Some(at);
+        r.effect_at_ns = Some(effect);
         Ok(())
     }
     /// Resolved marker triggers free their matcher tables.

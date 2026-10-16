@@ -170,6 +170,8 @@ struct Guest<'a, M> {
     observations: crate::observation::Buffer,
     /// Exited in the last round.
     exited_now: bool,
+    /// Held a block request in the last round: when, and for which trigger.
+    held_now: Option<(u64, u32)>,
 }
 
 /// Machine capability and exited-target policy shared by all host-origin inputs.
@@ -224,11 +226,12 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
             properties: Vec::new(),
             observations: crate::observation::Buffer::default(),
             exited_now: false,
+            held_now: None,
         }
     }
 
     fn suspended(&self) -> bool {
-        self.m.parked || self.m.paused || self.m.down
+        self.m.parked || self.m.paused || self.m.down || self.m.held.is_some()
     }
 
     fn exited_at(&self) -> Option<u64> {
@@ -445,6 +448,14 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
                     suspended = true;
                     break;
                 }
+                Stop::Held(trigger) => {
+                    // Terminal suspension: it neither acts nor receives, and
+                    // its queued inputs stay unconsumed until the crash.
+                    self.m.held = Some(trigger);
+                    self.held_now = Some((self.m.time, trigger));
+                    suspended = true;
+                    break;
+                }
                 Stop::Reached | Stop::Halted | Stop::Sent | Stop::Control => {}
             }
             // Equal-time returns are legal (a send, an early event, a control
@@ -526,6 +537,8 @@ struct Coord<'a, M: WorldMachine> {
     /// No frame arrives sooner than this after it is sent; typed trigger
     /// effects follow their match by at least this much.
     lookahead: u64,
+    /// The block request hold installed in each machine, by trigger ID.
+    holds: Vec<Option<u32>>,
     properties: &'a mut seedbox_engine_protocol::property::Ledger,
     anchor_captures: &'a std::collections::BTreeSet<String>,
     captured_anchor: Option<String>,
@@ -534,8 +547,35 @@ struct Coord<'a, M: WorldMachine> {
 }
 
 impl<M: WorldMachine> Coord<'_, M> {
-    /// Called only after policy mutations, never on idle execution rounds.
-    /// This cache is runtime-only and starts at the segment's existing state.
+    /// Install each armed `block_request` trigger's hold in its machine, and
+    /// remove holds whose trigger no longer is armed. Runs at boundaries,
+    /// where no machine is past the boundary's time.
+    fn sync_holds(&mut self, guests: &mut [Guest<'_, M>]) -> Result<(), String> {
+        for (m, g) in guests.iter_mut().enumerate() {
+            let wanted = (self.control.triggers.armed_holds())
+                .find(|(machine, _)| *machine == self.names[m])
+                .map(|(_, hold)| hold);
+            // A held device has consumed its hold; the crash replaces it.
+            if g.m.held.is_some() {
+                self.holds[m] = None;
+                continue;
+            }
+            if wanted.map(|h| h.trigger_id) == self.holds[m] {
+                continue;
+            }
+            // A down or exited machine has no device to hold; its successor does.
+            if g.m.down || matches!(g.m.state, State::Exited(_)) {
+                if wanted.is_none() {
+                    self.holds[m] = None;
+                }
+                continue;
+            }
+            g.m.hold_block(wanted)?;
+            self.holds[m] = wanted.map(|h| h.trigger_id);
+        }
+        Ok(())
+    }
+
     /// The input that admitted a fault: directly, or through a typed trigger.
     fn input_key(&self, id: u32) -> Option<String> {
         self.input_program
@@ -584,6 +624,8 @@ impl<M: WorldMachine> Coord<'_, M> {
         }
     }
 
+    /// Called only after policy mutations, never on idle execution rounds.
+    /// This cache is runtime-only and starts at the segment's existing state.
     fn publish_faults(&mut self, at: u64) {
         self.publish_triggers(at);
         let Some(publisher) = self.observations else {
@@ -860,6 +902,13 @@ impl<M: WorldMachine> Coord<'_, M> {
             }
             self.faults.machine_exited(m, g.m.time);
         }
+        for g in guests.iter_mut() {
+            if let Some((at, trigger)) = g.held_now.take() {
+                self.control
+                    .triggers
+                    .hold(trigger, at, self.lookahead, committed)?;
+            }
+        }
         for (j, (at, from, to, opened)) in std::mem::take(&mut self.trigger_frames)
             .into_iter()
             .enumerate()
@@ -1009,6 +1058,8 @@ impl<M: WorldMachine> Coord<'_, M> {
                     self.failure = Some(error.clone());
                     return Err(error);
                 }
+                // The successor's device starts without a hold.
+                self.holds[m] = None;
             }
             faults::Lifecycle::Throttle(speed_hz) => {
                 applied_speed_hz = guests[m].m.throttle(speed_hz)?;
@@ -1045,6 +1096,7 @@ impl<M: WorldMachine> Coord<'_, M> {
         let g = &guests[m];
         self.life[m] = (g.m.paused, g.m.down);
         sync(plan, m, g)?;
+        let current_incarnation = g.m.incarnation();
         let transition = match op {
             faults::Lifecycle::Pause => Some(Transition::Paused),
             faults::Lifecycle::Resume => Some(Transition::Resumed),
@@ -1061,6 +1113,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 .triggers
                 .observe(&event, t, self.lookahead, t)?;
         }
+        self.sync_holds(guests)?;
         if let Some(publisher) = self.observations {
             use seedbox_engine_protocol::observation::{Kind, MachineTransition};
             let transition = match op {
@@ -1078,7 +1131,7 @@ impl<M: WorldMachine> Coord<'_, M> {
             let incarnation = if op == faults::Lifecycle::Crash {
                 previous_incarnation
             } else {
-                g.m.incarnation()
+                current_incarnation
             };
             publisher.publish(
                 &self.names[m],
@@ -1142,7 +1195,11 @@ impl<M: WorldMachine> Coord<'_, M> {
         let mut admission =
             crate::intervention::Admission::new(self.faults, boundary, &validate_action)
                 .with_program(self.input_program)
-                .with_checkpoint_support(matches!(flow, sw::Flow::Continue) && !terminal);
+                .with_checkpoint_support(
+                    matches!(flow, sw::Flow::Continue)
+                        && !terminal
+                        && guests.iter().all(|g| g.m.held.is_none()),
+                );
         self.published_boundary = boundary;
         self.host.boundary(boundary, &mut admission)?;
         if admission.checkpoint_requested() {
@@ -1187,13 +1244,19 @@ impl<M: WorldMachine> Coord<'_, M> {
             let fault_boundary = self.faults.next_boundary();
             let input_boundary = self.input_program.next_time();
             // A checkpoint precedes every action at T, including exact-time faults.
-            if self.run.checkpoint.is_some_and(|t| {
+            if let Some(t) = self.run.checkpoint.filter(|&t| {
                 start >= t
                     && control_boundary >= t
                     && fault_boundary >= t
                     && trigger_boundary >= t
                     && input_boundary >= t
             }) {
+                if let Some(g) = guests.iter().find(|g| g.m.held.is_some()) {
+                    return Err(format!(
+                        "checkpoint at {t} ns: {} holds an unresolved block request",
+                        g.m.name
+                    ));
+                }
                 self.stopped = Some(RunOutcome::Checkpoint);
                 return Ok(sw::Flow::Stop);
             }
@@ -1238,8 +1301,11 @@ impl<M: WorldMachine> Coord<'_, M> {
                     gate,
                     &|_| Ok(()),
                 )? {
+                    // A capture is only a cache: none is taken while a
+                    // machine holds an unresolved block request.
                     crate::input_program::Admitted::Anchor { key }
-                        if self.anchor_captures.contains(&key) =>
+                        if self.anchor_captures.contains(&key)
+                            && guests.iter().all(|g| g.m.held.is_none()) =>
                     {
                         self.captured_anchor = Some(key);
                         self.stopped = Some(RunOutcome::Checkpoint);
@@ -1272,6 +1338,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 self.control
                     .triggers
                     .apply_boundary(self.faults, trigger_boundary)?;
+                self.sync_holds(guests)?;
                 self.publish_faults(trigger_boundary);
                 continue;
             }
@@ -1296,6 +1363,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                     gate,
                     &|action| validate_host_action(guests, action),
                 )?;
+                self.sync_holds(guests)?;
                 self.publish_faults(input_boundary);
                 self.apply_faults(plan, guests, input_boundary)?;
                 if self.faults.error.is_some() && self.control.pending.is_none() {
@@ -1850,6 +1918,15 @@ where
         trigger_statuses: Vec::new(),
         trigger_frames: Vec::new(),
         lookahead,
+        // A restored machine's device already holds its armed rule.
+        holds: names
+            .iter()
+            .map(|name| {
+                (control.triggers.armed_holds())
+                    .find(|(machine, _)| machine == name)
+                    .map(|(_, hold)| hold.trigger_id)
+            })
+            .collect(),
         properties,
         anchor_captures,
         captured_anchor: None,

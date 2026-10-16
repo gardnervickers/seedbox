@@ -28,11 +28,25 @@ const ENTROPY_OFFSET: usize = 88;
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MachineStop {
-    Horizon { time_ns: u64 },
+    Horizon {
+        time_ns: u64,
+    },
     PoweredOff,
-    Device { time_ns: u64 },
-    Console { time_ns: u64 },
-    ApplicationExit { code: u8, setup_error: bool },
+    Device {
+        time_ns: u64,
+    },
+    /// The block device held a selected request: terminal until a crash.
+    Held {
+        time_ns: u64,
+        trigger: u32,
+    },
+    Console {
+        time_ns: u64,
+    },
+    ApplicationExit {
+        code: u8,
+        setup_error: bool,
+    },
     Barrier,
 }
 
@@ -214,8 +228,18 @@ impl<B: Backend> Machine<B> {
         _early_slack: u64,
         observe_console: bool,
     ) -> Result<MachineStop> {
+        if self.held().is_some() {
+            return Err("machine holds a block request until its crash".into());
+        }
         self.clock.set_horizon(Some(hard_limit))?;
         self.advance(|| {}, observe_console)
+    }
+    /// The trigger whose block request hold suspended this machine.
+    pub fn held(&self) -> Option<u32> {
+        self.application
+            .as_ref()
+            .and_then(|d| d.block.as_ref())
+            .and_then(|b| b.held())
     }
     pub fn stopped_observation(&self) -> application::worker::StoppedObservation {
         application::worker::StoppedObservation {
@@ -330,6 +354,17 @@ impl<B: Backend> Machine<B> {
     }
     pub fn time_ns(&self) -> u64 {
         self.clock.now()
+    }
+    /// Install or remove a block request hold on the retained disk.
+    pub fn hold_block(
+        &mut self,
+        hold: Option<seedbox_engine_core::virtio_block::Hold>,
+    ) -> Result<()> {
+        self.application
+            .as_mut()
+            .and_then(|devices| devices.block.as_mut())
+            .ok_or("no retained disk for a block request hold")?
+            .set_hold(hold)
     }
     /// Start or end injected errors on the retained disk, from its next request.
     pub fn disk_errors(
@@ -856,6 +891,13 @@ impl<B: Backend> Machine<B> {
                 }
                 if devices.barrier {
                     return Ok(MachineStop::Barrier);
+                }
+                // The MMIO write completed, but the held request did not.
+                if let Some(trigger) = devices.block.as_ref().and_then(|b| b.held()) {
+                    return Ok(MachineStop::Held {
+                        time_ns: self.clock.now(),
+                        trigger,
+                    });
                 }
                 if !devices.events.is_empty() {
                     return Ok(MachineStop::Device {

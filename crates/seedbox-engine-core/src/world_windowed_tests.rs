@@ -3069,3 +3069,95 @@ fn typed_trigger_receipts_publish_each_status_change_once_and_link_their_fault()
         ])
     );
 }
+
+fn held_world(exit_a_at: Option<u64>) -> World<Mock> {
+    use crate::input_program::TimedInput;
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(
+        vec![TimedInput {
+            key: "hold-write".into(),
+            at_ns: 0,
+            action: serde_json::from_value(json!({"action":"trigger","when":{"on":"block_request","machine":"b","op":"write"},"nth":2,"then":{"action":"crash","machine":"b"}})).unwrap(),
+            timeout_ns: 1_000,
+        }],
+        u64::MAX,
+        0,
+    )
+    .unwrap();
+    for (at, kind) in [(10, 1), (14, 0), (20, 1), (26, 1)] {
+        let mut step = Step::new(at, Stop::Control);
+        step.block = Some(kind);
+        w.machines[1].steps.push_back(step);
+    }
+    if let Some(at) = exit_a_at {
+        w.machines[0].steps.push_back(Step::new(at, Stop::Exited));
+    }
+    w
+}
+
+fn held_outcome(w: &World<Mock>) -> (Value, Value, Value) {
+    (
+        w.control.triggers.evidence().unwrap().unwrap(),
+        serde_json::to_value(w.faults.log.iter().map(|r| r.json()).collect::<Vec<_>>()).unwrap(),
+        json!(w.incarnations),
+    )
+}
+
+#[test]
+fn a_held_block_request_suspends_its_machine_and_crashes_it_one_lookahead_later() {
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = held_world(None);
+        run_with(&mut w, 100, None, workers, Duration::from_micros(3)).unwrap();
+        let outcome = held_outcome(&w);
+        assert_eq!(reference.get_or_insert_with(|| outcome.clone()), &outcome);
+    }
+    let (triggers, faults, incarnations) = reference.unwrap();
+    // The second write at 20 is held; its crash follows at 30. The machine
+    // never runs again in that incarnation, so the write at 26 never happens.
+    assert_eq!(triggers[0]["status"], "fired");
+    assert_eq!(
+        (&triggers[0]["matched_at_ns"], &triggers[0]["effect_at_ns"]),
+        (&json!(20), &json!(30))
+    );
+    assert_eq!(cold_statuses(&faults), [("crash", "applied")]);
+    assert_eq!(faults[0]["applied_at_ns"], 30);
+    assert_eq!(incarnations[1][0]["held_request_trigger"], 1);
+    assert_eq!(incarnations[1][0]["time_ns"], 20);
+
+    // A checkpoint before the hold carries the device's count with it.
+    let mut warm = held_world(None);
+    assert_eq!(
+        segment(&mut warm, 100, None, None, Some(15), true).unwrap(),
+        "checkpoint"
+    );
+    assert_eq!(warm.machines[1].hold.unwrap().seen, 1);
+    let saved = WorldSnapshot::take_checkpoint(&mut warm).unwrap();
+    saved.restore_checkpoint(&mut warm).unwrap();
+    segment(&mut warm, 100, None, None, None, true).unwrap();
+    assert_eq!(
+        (held_outcome(&warm).0, held_outcome(&warm).1),
+        (triggers, faults)
+    );
+
+    // No checkpoint can contain the unresolved hold.
+    let mut held = held_world(None);
+    let error = segment(&mut held, 100, None, None, Some(25), true).unwrap_err();
+    assert!(error.contains("unresolved block request"), "{error}");
+}
+
+#[test]
+fn an_oracle_exit_before_the_held_crash_cuts_it_off_with_both_times() {
+    let mut w = held_world(Some(22));
+    assert_eq!(run(&mut w, 100, Some("a")).unwrap(), "end_machine_exited");
+    w.finish("end_machine_exited", 100, &Some("a".into()))
+        .unwrap();
+    let records = &w.control.triggers.records;
+    assert_eq!(records[0].status, "cut_off");
+    assert_eq!(
+        (records[0].matched_at_ns, records[0].effect_at_ns),
+        (Some(20), Some(30))
+    );
+    assert!(w.faults.log.is_empty());
+}

@@ -37,6 +37,9 @@ pub enum Stop {
     Sent,
     Barrier,
     Control,
+    /// The block device held a request for this trigger: the machine is
+    /// suspended until the coordinator crashes it.
+    Held(u32),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reseed {
@@ -83,8 +86,14 @@ pub struct MachineState {
     pub committed_properties: Vec<(u64, u32, Option<Vec<u8>>)>,
     #[serde(with = "crate::observation::empty_checkpoint")]
     pub(crate) observations: crate::observation::Buffer,
+    /// The trigger whose block request hold suspended this incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) held: Option<u32>,
 }
 impl MachineState {
+    pub fn held(&self) -> Option<u32> {
+        self.held
+    }
     pub fn is_parked(&self) -> bool {
         self.parked
     }
@@ -117,6 +126,7 @@ impl MachineState {
             committed_output: Vec::new(),
             committed_properties: Vec::new(),
             observations: crate::observation::Buffer::default(),
+            held: None,
         }
     }
 }
@@ -304,6 +314,14 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     /// Whether the machine has a retained disk that disk errors can target.
     fn has_disk(&self) -> bool {
         false
+    }
+    /// Install (`Some`) or remove (`None`) a block request hold on the
+    /// machine's retained disk; it counts from the next request.
+    fn hold_block(&mut self, _hold: Option<crate::virtio_block::Hold>) -> Result<(), String> {
+        Err(format!(
+            "{}: block request triggers are unsupported by this backend",
+            self.name
+        ))
     }
     /// Start (`Some`) or end (`None`) injected disk errors on the machine's
     /// retained disk, from its next request. Ending returns their counts.
@@ -1152,6 +1170,9 @@ pub(crate) fn crash_machine<M: WorldMachine>(
             "discarded_management_bytes": discarded,
             "witness": witness,
         });
+        if let Some(trigger) = old.held {
+            summary["held_request_trigger"] = trigger.into();
+        }
         if let Some(observations) = old.crash_observations().as_object() {
             for (key, value) in observations {
                 summary[key] = value.clone();
@@ -1513,6 +1534,12 @@ impl<M: WorldMachine> WorldSnapshot<M> {
     fn capture(world: &mut World<M>, boot_snapshot: bool) -> Result<Self, String> {
         world.check_active()?;
         world.validate()?;
+        if let Some(m) = world.machines.iter().find(|m| m.held.is_some()) {
+            return Err(format!(
+                "{}: a checkpoint cannot contain an unresolved held block request",
+                m.name
+            ));
+        }
         if world.machines.iter().any(|m| {
             !m.fault_effects.is_empty()
                 || !m.control_requests.is_empty()

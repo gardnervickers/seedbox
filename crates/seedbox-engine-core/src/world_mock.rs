@@ -30,6 +30,9 @@ pub(crate) struct Step {
     /// Committed property lines, as the shared decoder produces them.
     #[serde(default)]
     pub(crate) properties: Vec<Vec<u8>>,
+    /// A disk request admitted at the step, by VIRTIO_BLK_T_* kind.
+    #[serde(default)]
+    pub(crate) block: Option<u32>,
 }
 impl Step {
     pub(crate) fn new(at: u64, stop: Stop) -> Self {
@@ -43,6 +46,7 @@ impl Step {
             effects: vec![],
             frames: vec![],
             properties: vec![],
+            block: None,
         }
     }
 }
@@ -55,6 +59,7 @@ pub(crate) struct Mock {
     pub(crate) timer: u64,
     pub(crate) bad: Option<&'static str>,
     pub(crate) throttleable: bool,
+    pub(crate) hold: Option<crate::virtio_block::Hold>,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Saved {
@@ -62,6 +67,8 @@ pub(crate) struct Saved {
     steps: VecDeque<Step>,
     irq: bool,
     timer: u64,
+    #[serde(default)]
+    hold: Option<crate::virtio_block::Hold>,
 }
 impl Deref for Mock {
     type Target = MachineState;
@@ -85,6 +92,7 @@ impl Mock {
             timer: u64::MAX,
             bad: None,
             throttleable: true,
+            hold: None,
         }
     }
     fn record(&self, kind: &str) {
@@ -266,6 +274,18 @@ impl WorldMachine for Mock {
     fn snapshot_bytes(_: &Self::Snapshot) -> u64 {
         100
     }
+    fn hold_block(&mut self, hold: Option<crate::virtio_block::Hold>) -> Result<(), String> {
+        if self.common.held.is_some() {
+            return Err("block device already holds a request".into());
+        }
+        self.record(if hold.is_some() {
+            "hold/on"
+        } else {
+            "hold/off"
+        });
+        self.hold = hold;
+        Ok(())
+    }
     fn disk_errors(
         &mut self,
         errors: Option<crate::virtio_block::InjectedErrors>,
@@ -304,6 +324,7 @@ impl WorldMachine for Mock {
             steps: self.steps.clone(),
             irq: self.irq,
             timer: self.timer,
+            hold: self.hold,
         })
     }
     fn restore(&mut self, s: &Saved) -> Result<u64, String> {
@@ -316,6 +337,7 @@ impl WorldMachine for Mock {
         self.owed = None;
         self.irq = s.irq;
         self.timer = s.timer;
+        self.hold = s.hold;
         self.common.clear_effects();
         Ok(1)
     }
@@ -391,6 +413,25 @@ impl WorldMachine for Mock {
                 .extend([(0, step.at, true), (0, 0, true)]),
             None => (),
             Some(other) => panic!("unknown test mutation {other}"),
+        }
+        // A held request stops the machine at the step, before its effect.
+        let matched = step
+            .block
+            .zip(self.hold.as_mut())
+            .is_some_and(|(kind, hold)| {
+                let matches = match hold.op {
+                    seedbox_control::DiskOp::Any => true,
+                    seedbox_control::DiskOp::Read => kind == 0,
+                    seedbox_control::DiskOp::Write => kind == 1,
+                    seedbox_control::DiskOp::Flush => kind == 4,
+                };
+                hold.seen += u64::from(matches);
+                matches && hold.seen == hold.nth
+            });
+        if matched {
+            let trigger = self.hold.take().map(|h| h.trigger_id).unwrap_or(0);
+            self.record("held");
+            return Ok(Stop::Held(trigger));
         }
         match step.stop {
             Stop::Exited => self.common.state = State::Exited(0),

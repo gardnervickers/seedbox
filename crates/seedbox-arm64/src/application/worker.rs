@@ -168,6 +168,7 @@ pub enum Operation {
         factor_permille: u64,
     },
     DiskErrors(Option<seedbox_engine_core::virtio_block::InjectedErrors>),
+    HoldBlock(Option<seedbox_engine_core::virtio_block::Hold>),
     ReseedGuest {
         entropy: [u32; 8],
     },
@@ -443,6 +444,10 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                     Ok(Answer::Ready)
                 }
                 Operation::DiskErrors(errors) => Ok(Answer::DiskErrors(vm.disk_errors(errors)?)),
+                Operation::HoldBlock(hold) => {
+                    vm.hold_block(hold)?;
+                    Ok(Answer::Ready)
+                }
                 Operation::ReseedGuest { entropy } => {
                     vm.reseed_guest(entropy)?;
                     Ok(Answer::Ready)
@@ -786,6 +791,7 @@ impl OwnedWorker {
                     | Operation::SeedTimer { .. }
                     | Operation::SeedProgressJitter { .. }
                     | Operation::Throttle { .. }
+                    | Operation::HoldBlock(_)
                     | Operation::ReseedGuest { .. },
                 Answer::Ready
             ) | (Operation::Advance { .. }, Answer::Advanced { .. })
@@ -911,6 +917,7 @@ impl OwnedWorker {
                             | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
                             | Operation::DiskErrors(_)
+                            | Operation::HoldBlock(_)
                             | Operation::ReseedGuest { .. }
                             | Operation::Evidence { .. }
                     );
@@ -921,6 +928,7 @@ impl OwnedWorker {
                             | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
                             | Operation::DiskErrors(_)
+                            | Operation::HoldBlock(_)
                             | Operation::ReseedGuest { .. }
                             | Operation::Evidence { .. }
                     );
@@ -1007,6 +1015,16 @@ impl OwnedWorker {
                         *t == *time_ns
                             && *observe_console
                             && console.len() == 1
+                            && !observation.powered_off
+                            && observation.exit.is_none()
+                            && !observation.barrier
+                    }
+                    MachineStop::Held {
+                        time_ns: t,
+                        trigger,
+                    } => {
+                        *t == *time_ns
+                            && events.contains(&Event::Held { trigger: *trigger })
                             && !observation.powered_off
                             && observation.exit.is_none()
                             && !observation.barrier

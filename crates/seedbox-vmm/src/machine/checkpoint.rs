@@ -122,7 +122,7 @@ impl<T: Read> Read for Hashing<T> {
 fn write(saved: &MemorySnapshot, output: impl Write) -> Result<String, String> {
     let metadata = serde_json::to_vec(&Metadata {
         state: &saved.state,
-        block: saved.blk.as_ref().map(VirtioBlk::snapshot),
+        block: saved.blk.as_ref().map(VirtioBlk::snapshot).transpose()?,
     })
     .map_err(|e| format!("machine checkpoint metadata: {e}"))?;
     if metadata.len() as u64 > MAX_METADATA {

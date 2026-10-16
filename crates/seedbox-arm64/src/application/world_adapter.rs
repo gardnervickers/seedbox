@@ -676,6 +676,12 @@ impl WorldMachine for ArmMachine {
     fn snapshot_bytes(snapshot: &Self::Snapshot) -> u64 {
         std::fs::metadata(&snapshot.checkpoint.artifact).map_or(0, |m| m.len())
     }
+    fn hold_block(&mut self, hold: Option<seedbox_engine_core::virtio_block::Hold>) -> Result<()> {
+        let Answer::Ready = self.worker.call(Operation::HoldBlock(hold))? else {
+            return self.reject("invalid block request hold response".into());
+        };
+        Ok(())
+    }
     fn disk_errors(
         &mut self,
         errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,
@@ -803,6 +809,7 @@ impl WorldMachine for ArmMachine {
                 || (!matches!(
                     stop,
                     MachineStop::Device { .. }
+                        | MachineStop::Held { .. }
                         | MachineStop::ApplicationExit { .. }
                         | MachineStop::Barrier
                 ) && !events.is_empty())
@@ -844,6 +851,11 @@ impl WorldMachine for ArmMachine {
                             return Err("ARM barrier effect without physical barrier".into());
                         }
                     }
+                    Event::Held { trigger } => {
+                        if !matches!(stop, MachineStop::Held { trigger: t, .. } if t == *trigger) {
+                            return Err("ARM held request without its stop".into());
+                        }
+                    }
                 }
             }
             let observed = if request.observe_console {
@@ -861,6 +873,10 @@ impl WorldMachine for ArmMachine {
                 MachineStop::PoweredOff => (Stop::Exited, State::Exited(255)),
                 MachineStop::ApplicationExit { code, .. } => (Stop::Exited, State::Exited(code)),
                 MachineStop::Barrier => (Stop::Barrier, State::Running),
+                MachineStop::Held {
+                    time_ns: stopped,
+                    trigger,
+                } if stopped == time_ns => (Stop::Held(trigger), State::Running),
                 MachineStop::Device { time_ns: stopped } if stopped == time_ns => (
                     if sent.is_empty() {
                         Stop::Control

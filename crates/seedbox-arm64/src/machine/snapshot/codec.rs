@@ -105,15 +105,25 @@ fn read_vec(reader: &mut impl Read, length: u64) -> Result<Vec<u8>> {
 
 impl Snapshot {
     pub fn write_checkpoint(&self, mut writer: impl Write) -> Result<()> {
-        let devices = self.application.as_ref().map(|d| Devices {
-            net: d.net.snapshot(),
-            console: d.console.snapshot(),
-            block: d.block.as_ref().map(application::virtio::Virtio::snapshot),
-            events: d.events.clone(),
-            exit: d.exit,
-            barrier: d.barrier,
-            entropy: d.entropy.clone(),
-        });
+        let devices = self
+            .application
+            .as_ref()
+            .map(|d| {
+                Ok::<_, String>(Devices {
+                    net: d.net.snapshot()?,
+                    console: d.console.snapshot()?,
+                    block: d
+                        .block
+                        .as_ref()
+                        .map(application::virtio::Virtio::snapshot)
+                        .transpose()?,
+                    events: d.events.clone(),
+                    exit: d.exit,
+                    barrier: d.barrier,
+                    entropy: d.entropy.clone(),
+                })
+            })
+            .transpose()?;
         let metadata = serde_json::to_vec(&Metadata {
             state: self.clone(),
             devices,

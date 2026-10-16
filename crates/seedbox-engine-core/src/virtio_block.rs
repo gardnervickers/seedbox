@@ -41,6 +41,37 @@ pub struct Notified {
     pub flushed: u64,
     pub irq: bool,
     pub log: Vec<(u32, u64, u8)>,
+    /// The trigger whose hold stopped processing at a selected request.
+    pub held: Option<u32>,
+}
+
+/// A `block_request` trigger's rule, installed in the device: on admission
+/// of the `nth` matching request it stops processing before that request
+/// has any effect, and the machine suspends until the coordinator crashes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hold {
+    pub trigger_id: u32,
+    pub op: seedbox_control::DiskOp,
+    pub nth: u64,
+    /// Matching requests admitted so far.
+    #[serde(default)]
+    pub seen: u64,
+}
+impl Hold {
+    fn matches(&self, kind: u32) -> bool {
+        disk_op_matches(self.op, kind)
+    }
+}
+fn disk_op_matches(op: seedbox_control::DiskOp, kind: u32) -> bool {
+    use seedbox_control::DiskOp;
+    matches!(
+        (op, kind),
+        (DiskOp::Any, T_IN | T_OUT | T_FLUSH)
+            | (DiskOp::Read, T_IN)
+            | (DiskOp::Write, T_OUT)
+            | (DiskOp::Flush, T_FLUSH)
+    )
 }
 
 #[derive(Clone)]
@@ -50,6 +81,9 @@ pub struct Block {
     // Application counters stay disabled and are not part of retained state.
     stats: Stats,
     errors: Option<InjectedErrors>,
+    hold: Option<Hold>,
+    /// A request was held: the device processes nothing more.
+    held: Option<u32>,
 }
 
 /// An active `disk_error` fault: which requests it fails, how often, its own
@@ -96,15 +130,7 @@ impl InjectedErrors {
     }
     /// Draw for one request; only matching requests consume the stream.
     fn fails(&mut self, kind: u32) -> bool {
-        use seedbox_control::DiskOp;
-        let matches = matches!(
-            (self.op, kind),
-            (DiskOp::Any, T_IN | T_OUT | T_FLUSH)
-                | (DiskOp::Read, T_IN)
-                | (DiskOp::Write, T_OUT)
-                | (DiskOp::Flush, T_FLUSH)
-        );
-        if !matches {
+        if !disk_op_matches(self.op, kind) {
             return false;
         }
         self.counts.matched += 1;
@@ -124,6 +150,8 @@ pub struct Snapshot {
     disk_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     errors: Option<InjectedErrors>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hold: Option<Hold>,
 }
 
 struct Request {
@@ -192,13 +220,18 @@ impl Request {
 }
 
 impl Block {
-    pub fn snapshot(&self) -> Snapshot {
-        Snapshot {
+    /// A device holding a request has no reusable state.
+    pub fn snapshot(&self) -> Result<Snapshot> {
+        if self.held.is_some() {
+            return Err("a block device holding a request cannot be checkpointed".into());
+        }
+        Ok(Snapshot {
             policy: self.policy,
             stats: self.stats.clone(),
             disk_digest: self.disk.digest(),
             errors: self.errors.clone(),
-        }
+            hold: self.hold,
+        })
     }
 
     /// Construct with the restored disk first. Reject mismatched sidecars before
@@ -212,6 +245,7 @@ impl Block {
         }
         self.stats = snapshot.stats;
         self.errors = snapshot.errors;
+        self.hold = snapshot.hold;
         Ok(self)
     }
 
@@ -221,7 +255,27 @@ impl Block {
             policy,
             stats: Stats::default(),
             errors: None,
+            hold: None,
+            held: None,
         }
+    }
+    /// Install or remove a hold. Like injected errors it is a world rule and
+    /// outlives a guest reset; it starts counting at the next request.
+    pub fn set_hold(&mut self, hold: Option<Hold>) -> Result<()> {
+        if self.held.is_some() {
+            return Err("block device already holds a request".into());
+        }
+        if hold.is_some_and(|h| h.nth == 0 || h.seen >= h.nth) {
+            return Err("invalid block request hold".into());
+        }
+        self.hold = hold;
+        Ok(())
+    }
+    pub fn take_hold(&mut self) -> Option<Hold> {
+        self.hold.take()
+    }
+    pub fn held(&self) -> Option<u32> {
+        self.held
     }
     /// Remove the injected errors with their stream and counts, so a device
     /// rebuilt on reset can keep them.
@@ -262,8 +316,22 @@ impl Block {
             reject_empty: false,
             diagnostics: Diagnostics::Disk,
         };
+        if self.held.is_some() {
+            return Err("block device notified while holding a request".into());
+        }
         while let Some(chain) = transport.queues[0].validated_chain(memory, base, policy)? {
             let request = Request::decode(memory, &chain)?;
+            // A held request gets no disk effect, used-ring entry or IRQ, and
+            // nothing after it is processed. Earlier requests stay complete.
+            if let Some(hold) = self.hold.as_mut().filter(|h| h.matches(request.kind)) {
+                hold.seen += 1;
+                if hold.seen == hold.nth {
+                    self.held = Some(hold.trigger_id);
+                    out.held = self.held;
+                    self.hold = None;
+                    break;
+                }
+            }
             let mut data = Vec::new();
             // An injected error fails a valid request before any disk effect.
             let injected = self
