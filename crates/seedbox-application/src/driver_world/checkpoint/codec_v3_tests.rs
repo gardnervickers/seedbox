@@ -162,7 +162,6 @@ fn codec_v3_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
             Capture {
                 inventory: &inventory,
                 state: &mut state,
-                held: false,
                 prepared: false,
             },
             root.path(),

@@ -52,7 +52,6 @@ fn codec4_service_envelope_preserves_controller_and_disabled_authority() {
                 inventory: &inventory,
                 state: &mut state,
                 prepared: false,
-                held: false,
             },
             &output,
             "controller",

@@ -240,9 +240,7 @@ where
                 {
                     return Ok(Dispatch::Reply(reply));
                 }
-                let error = if playback.before_fault.is_some() {
-                    Some(ControlError::Unsupported)
-                } else if playback.rate != driver::PlaybackRate::Paused {
+                let error = if playback.rate != driver::PlaybackRate::Paused {
                     Some(ControlError::NotPaused)
                 } else if !self.state.world.readiness.latched {
                     Some(ControlError::NotReady)
@@ -304,9 +302,6 @@ where
         };
         self.flush()
             .map_err(checkpoint::CaptureFailure::Publication)?;
-        let playback = self
-            .playback()
-            .map_err(checkpoint::CaptureFailure::Refused)?;
         let names = &self.names;
         let publisher = &mut self.publisher;
         let result = checkpoint::capture(
@@ -315,7 +310,6 @@ where
                 inventory: &self.inventory,
                 state: &mut self.state,
                 prepared: self.prepared.is_some(),
-                held: playback.before_fault.is_some(),
             },
             &self.output,
             &checkpoint.request_id,

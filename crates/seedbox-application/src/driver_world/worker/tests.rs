@@ -400,8 +400,11 @@ fn paused_real_driver_prepare_journal_commit_receipt_holds_effect_and_releases_o
                 }
             )
             .error,
-            Some(ControlError::Unsupported)
+            None
         );
+        let captured = worker.capture_pending().unwrap().unwrap();
+        assert_eq!(captured.state, host::CheckpointState::Captured);
+        assert!(worker.state.world.publication.applied_faults.is_empty());
         playback(
             &mut worker,
             6,

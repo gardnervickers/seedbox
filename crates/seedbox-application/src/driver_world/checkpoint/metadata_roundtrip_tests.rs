@@ -40,7 +40,6 @@ fn tcg_policy_option_survives_envelope_and_descriptor_roundtrip_without_defaulti
             Capture {
                 inventory: &inventory,
                 state: &mut state,
-                held: false,
                 prepared: false,
             },
             root.path(),
@@ -99,7 +98,6 @@ fn pv_optional_policy_roundtrips_envelope_and_driver_metadata_without_defaulting
             Capture {
                 inventory: &inventory,
                 state: &mut state,
-                held: false,
                 prepared: false,
             },
             root.path(),
@@ -155,7 +153,6 @@ fn complete_boot_factory_authority_survives_checkpoint_source_deletion() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         root.path(),
@@ -197,7 +194,6 @@ fn distinct_runtime_closure_bytes_are_retained_and_exported_independently() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -268,7 +264,6 @@ fn config_artifact_map_above_64_entries_keeps_large_contents_outside_metadata() 
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -322,7 +317,6 @@ fn valid_future_named_handle_above_64k_captures_and_reads_exactly() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -360,7 +354,6 @@ fn envelope_exceeding_whole_resource_budget_is_rejected_before_manifest_publicat
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,

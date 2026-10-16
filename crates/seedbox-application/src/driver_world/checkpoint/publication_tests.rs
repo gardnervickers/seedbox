@@ -24,7 +24,6 @@ fn cheap_output_and_identity_refusals_precede_drain_and_native_capture() {
             Capture {
                 inventory: &inventory,
                 state: &mut state,
-                held: false,
                 prepared: false,
             },
             &output,
@@ -58,7 +57,6 @@ fn missing_factory_authority_is_a_benign_pre_drain_refusal() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -84,7 +82,6 @@ fn publication_after_drain_failure_is_distinctly_terminal_not_an_ordinary_refusa
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -114,7 +111,6 @@ fn abandoned_bodies_never_publish_or_block_identity_and_are_never_clobbered() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -138,7 +134,7 @@ fn abandoned_bodies_never_publish_or_block_identity_and_are_never_clobbered() {
     );
 }
 #[test]
-fn actual_driver_before_fault_hold_refuses_capture_even_without_service_hold_flag() {
+fn actual_driver_before_fault_hold_is_captured_without_applying_effect() {
     use seedbox_driver::driver::{Action, DueOutcome, InputKey, PlaybackRate, Target};
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
@@ -162,22 +158,46 @@ fn actual_driver_before_fault_hold_refuses_capture_even_without_service_hold_fla
             .unwrap(),
         DueOutcome::BeforeFault { .. }
     ));
-    let error = capture(
+    let before = driver
+        .with_barrier(|barrier| Ok(barrier.playback()))
+        .unwrap();
+    let mut effects = vec![];
+    let path = capture(
         &mut driver,
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         root.path(),
         "held",
-        |_, _| panic!("must not publish"),
-        |_, _| panic!("must not capture"),
+        |state, event| {
+            if let EventKind::FaultSettled { .. } = &event.kind {
+                effects.push(event.clone());
+            }
+            publish(state, event)
+        },
+        encode,
     )
-    .unwrap_err();
-    assert!(matches!(error, CaptureFailure::Refused(_)));
-    assert!(error.to_string().contains("held fault"));
-    assert_eq!(peak.load(Ordering::SeqCst), 0);
-    assert!(!driver.drain_events().is_empty());
+    .unwrap();
+    assert!(effects.is_empty(), "capture must not publish an effect");
+    assert_eq!(peak.load(Ordering::SeqCst), 1);
+    let captured = resolve(&read(&path).unwrap(), limits(), decode).unwrap();
+    let mut restored = restored(&captured, 4);
+    assert_eq!(
+        restored
+            .with_barrier(|barrier| Ok(barrier.playback()))
+            .unwrap(),
+        before
+    );
+    assert!(
+        restored.drain_events().is_empty(),
+        "capture must not replay observations"
+    );
+    assert_eq!(
+        driver
+            .with_barrier(|barrier| Ok(barrier.playback()))
+            .unwrap(),
+        before
+    );
 }

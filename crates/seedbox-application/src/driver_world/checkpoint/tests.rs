@@ -276,7 +276,6 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -337,7 +336,6 @@ fn mapper_failure_drops_current_snapshot_and_publishes_nothing_without_retry() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -380,7 +378,6 @@ fn later_native_capture_failure_never_acknowledges_partial_checkpoint() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -395,29 +392,26 @@ fn later_native_capture_failure_never_acknowledges_partial_checkpoint() {
 }
 
 #[test]
-fn held_and_prepared_capture_refusals_do_not_drain_or_call_native_snapshot() {
+fn prepared_capture_refusal_does_not_drain_or_call_native_snapshot() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
     let live = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let mut driver = driver(1, 1, live, peak.clone(), None);
     let mut state = state(1);
-    for (held, prepared) in [(true, false), (false, true)] {
-        assert!(capture(
-            &mut driver,
-            Capture {
-                inventory: &inventory,
-                state: &mut state,
-                held,
-                prepared
-            },
-            root.path(),
-            "saved",
-            |_, _| panic!("must not publish"),
-            |_, _| panic!("must not snapshot")
-        )
-        .is_err());
-    }
+    assert!(capture(
+        &mut driver,
+        Capture {
+            inventory: &inventory,
+            state: &mut state,
+            prepared: true,
+        },
+        root.path(),
+        "saved",
+        |_, _| panic!("must not publish"),
+        |_, _| panic!("must not snapshot")
+    )
+    .is_err());
     assert_eq!(peak.load(Ordering::SeqCst), 0);
     assert!(!driver.drain_events().is_empty());
 }
@@ -433,7 +427,6 @@ fn integrity_and_length_are_verified_before_decoding_any_native_body() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         root.path(),
@@ -468,7 +461,6 @@ fn body_manifest_mismatch_and_unused_entries_are_not_silently_accepted() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         root.path(),
@@ -505,7 +497,6 @@ fn durable_capture_exports_without_source_paths() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -556,7 +547,6 @@ fn failed_manifest_publication_preserves_unowned_file_and_removes_unpublished_bo
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -587,7 +577,6 @@ fn publish_failure_is_terminal_for_capture_without_native_calls_or_republication
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         &output,
@@ -619,7 +608,6 @@ fn corrupt_later_body_and_unused_manifest_entries_fail_before_any_backend_decode
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         root.path(),

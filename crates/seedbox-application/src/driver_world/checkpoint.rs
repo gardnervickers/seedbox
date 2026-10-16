@@ -19,15 +19,14 @@ fn integrity(message: impl Into<String>) -> Error {
     Error::Integrity(message.into())
 }
 
-/// Hold exact already-drained service state alongside the Driver. A prepared
-/// intervention or a held pre-effect fault must be resolved before capture.
+/// Hold exact already-drained service state alongside the Driver. Prepared
+/// interventions must commit first; an admitted pre-effect hold is Driver state.
 // TODO: Re-evaluate: these two service gates are not backend snapshot state;
 // publishing a capture there would sever the durable prepare/commit handshake.
 pub(super) struct Capture<'a> {
     pub inventory: &'a Inventory,
     pub state: &'a mut State,
     pub prepared: bool,
-    pub held: bool,
 }
 
 /// A refused capture preserves previously valid Driver/service usability. A
@@ -76,9 +75,9 @@ where
         let playback = driver
             .with_barrier(|barrier| Ok(barrier.playback()))
             .map_err(|e| integrity(e.to_string()))?;
-        if capture.prepared || capture.held || playback.before_fault.is_some() {
+        if capture.prepared {
             return Err(integrity(
-                "Driver checkpoint requires no held fault or prepared intervention",
+                "Driver checkpoint requires no prepared intervention",
             ));
         }
         if request_id.is_empty()

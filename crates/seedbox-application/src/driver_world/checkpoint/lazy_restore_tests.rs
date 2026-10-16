@@ -112,7 +112,6 @@ fn service_name_substitution_is_refused_before_any_native_mapping() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         root.path(),
@@ -158,7 +157,6 @@ fn simultaneous_restores_share_verified_descriptors_not_reader_positions() {
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         root.path(),
@@ -239,7 +237,6 @@ fn descriptor_backed_restore_has_one_decoded_body_at_a_time_and_cleans_partial_t
         Capture {
             inventory: &inventory,
             state: &mut state,
-            held: false,
             prepared: false,
         },
         root.path(),
