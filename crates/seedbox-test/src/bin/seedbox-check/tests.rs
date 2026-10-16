@@ -39,6 +39,35 @@ fn checks(root: &std::path::Path) -> Checks<Spy> {
 fn suites(names: &[&str]) -> Vec<Suite> {
     expand(&strings(names)).unwrap()
 }
+// A cross-process readiness file is a publication event, not merely an inode.
+// Keep incomplete contents private until same-directory rename publishes them.
+fn publish_ready_file(
+    path: &std::path::Path,
+    contents: &[u8],
+    pending_complete: impl FnOnce(&std::path::Path),
+) {
+    let pending = path.with_extension("pending");
+    fs::write(&pending, contents).unwrap();
+    pending_complete(&pending);
+    fs::rename(pending, path).unwrap();
+}
+#[test]
+fn readiness_is_published_only_after_complete_contents_are_written() {
+    let t = fixture();
+    let ready = t.0.join("ready");
+    publish_ready_file(&ready, b"12345", |pending| {
+        assert!(
+            !ready.exists(),
+            "a reader must not see the unpublished file"
+        );
+        assert_eq!(fs::read(pending).unwrap(), b"12345");
+    });
+    assert_eq!(
+        fs::read_to_string(&ready).unwrap().parse::<u32>().unwrap(),
+        12345
+    );
+    assert!(!ready.with_extension("pending").exists());
+}
 fn artifact(path: &std::path::Path, name: &str, test: bool) -> String {
     json!({"reason":"compiler-artifact","executable":path,"target":{"name":name},"profile":{"test":test}}).to_string()
 }
@@ -837,7 +866,7 @@ fn process_interruption_cleans_group_and_does_not_start_later_commands() {
                 assert!(std::time::Instant::now() < deadline);
                 std::thread::sleep(Duration::from_millis(5));
             }
-            fs::write(ready.join("ready"), pid.to_string()).unwrap();
+            publish_ready_file(&ready.join("ready"), pid.to_string().as_bytes(), |_| {});
         });
         let mut real = Real::install_signals().unwrap();
         let mut job = Job::new(
