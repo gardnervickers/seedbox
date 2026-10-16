@@ -63,19 +63,26 @@ fn many_held_children_release_without_joining_one_at_a_time() {
     // Later forks hold copies of earlier children's spawn status pipes; a
     // release-then-join per child could wait forever. Mixed modes too.
     let _serial = serial();
-    for _ in 0..25 {
-        let mut held = HeldChildren::new();
-        for index in 0..6 {
-            let how = if index % 2 == 0 {
-                Spawn::GuardWhileHeld
-            } else {
-                Spawn::GuardForkOnly
-            };
-            held.hold(how).unwrap();
+    for how in [Spawn::GuardForkOnly, Spawn::GuardWhileHeld] {
+        for _ in 0..25 {
+            let mut held = HeldChildren::new();
+            for _ in 0..6 {
+                held.hold(how).unwrap();
+            }
+            assert_eq!(held.len(), 6);
+            held.release().unwrap();
         }
-        assert_eq!(held.len(), 6);
-        held.release().unwrap();
     }
+}
+
+#[test]
+fn a_fork_only_hold_after_a_guarded_one_is_refused_not_deadlocked() {
+    let _serial = serial();
+    let mut held = HeldChildren::new();
+    held.hold(Spawn::GuardWhileHeld).unwrap();
+    let error = held.hold(Spawn::GuardForkOnly).unwrap_err();
+    assert!(error.to_string().contains("would deadlock"), "{error}");
+    held.release().unwrap();
 }
 
 #[test]
@@ -83,7 +90,7 @@ fn a_panicking_test_still_releases_its_held_children() {
     let _serial = serial();
     let result = std::panic::catch_unwind(|| {
         let mut held = HeldChildren::new();
-        held.hold(Spawn::GuardWhileHeld).unwrap();
+        held.hold(Spawn::GuardForkOnly).unwrap();
         held.hold(Spawn::GuardForkOnly).unwrap();
         panic!("assertion failure while children are held");
     });

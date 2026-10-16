@@ -629,18 +629,20 @@ mod descriptor_probe {
     }
 
     #[test]
-    fn installed_wrapper_launches_while_guarded_forks_are_held() {
+    fn installed_wrapper_launches_while_forks_are_held_before_exec() {
         let saved = initial();
         let source = tempfile::tempdir().unwrap();
         let root = root(source.path());
         let record = root.join("ok-records.ndjson");
         let binary = root.join("ok-exec-wrapper");
-        install_executable(&binary, script(&record).as_bytes(), 0o700).unwrap();
+        // Children forked before and after the install stay held through the
+        // launch. Fork-only guarding keeps sibling tests' installs and this
+        // launch free to proceed (a child held with the guard would make the
+        // launch wait behind any sibling's queued install).
         let mut held = HeldChildren::new();
-        for _ in 0..4 {
-            held.hold(Spawn::GuardWhileHeld).unwrap();
-        }
-        // The worker spawn shares the guard with the held forks.
+        held.hold(Spawn::GuardForkOnly).unwrap();
+        install_executable(&binary, script(&record).as_bytes(), 0o700).unwrap();
+        held.hold(Spawn::GuardForkOnly).unwrap();
         let m = launch(&binary, &saved, &root).unwrap();
         held.release().unwrap();
         drop(m);

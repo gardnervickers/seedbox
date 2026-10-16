@@ -106,15 +106,6 @@ pub fn writing() -> Writing {
     Writing::new(SCOPE.write().unwrap_or_else(PoisonError::into_inner))
 }
 
-/// Shared guard without spawning: excludes executable writes while held, so
-/// a fork made in that window copies no descriptor to an executable being
-/// written. For test probes that fork by other means; normal code uses
-/// [`spawn`].
-pub fn spawning() -> Spawning {
-    held::assert_none("spawning");
-    Spawning::new(SCOPE.read().unwrap_or_else(PoisonError::into_inner))
-}
-
 /// Non-blocking [`writing`]; `None` while any spawn or writer is active.
 pub fn try_writing() -> Option<Writing> {
     match SCOPE.try_write() {

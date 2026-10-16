@@ -51,15 +51,21 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spawn {
     /// Through [`spawn`]: the fork holds the shared exec-file guard while it
-    /// is held, as every real spawn does. A blocking executable write in this
-    /// process would wait for it, so probe writers with
-    /// `seedbox_exec::try_writing`, never [`install_executable`].
+    /// is held, as every real spawn does. While such a child is held, a
+    /// blocking executable write anywhere in the process waits for it, and
+    /// any later spawn waits behind that queued writer. So while one is held,
+    /// the test must not spawn or hold again, directly or through library
+    /// code, unless nothing else in the binary can write an executable at the
+    /// same time. Probe writers with `seedbox_exec::try_writing`, never
+    /// [`install_executable`]. Most probes want [`Spawn::GuardForkOnly`].
     GuardWhileHeld,
-    /// The guard is held only across the fork and released once the child is
-    /// parked: the child copies no descriptor of a file being installed with
-    /// [`install_executable`] (so sibling tests are safe), but does copy any
-    /// file this process opened for writing some other way. Reproduces an
-    /// uncoordinated write, and lets the test write executables while it holds.
+    /// The exclusive guard is held across the fork only and released once the
+    /// child is parked. At the fork no executable is being installed and no
+    /// other spawn is between fork and exec, so the child copies neither an
+    /// installer's descriptor nor another spawn's status pipe: sibling tests
+    /// and later spawns proceed while it is held. It does copy any file this
+    /// process opened for writing some other way, which reproduces an
+    /// uncoordinated write.
     GuardForkOnly,
 }
 
@@ -77,6 +83,7 @@ pub struct HeldChildren {
 }
 
 struct Held {
+    guarded: bool,
     release: fs::File,
     spawned: JoinHandle<io::Result<Child>>,
 }
@@ -88,7 +95,16 @@ impl HeldChildren {
 
     /// Fork one `/bin/sh -c 'exit 0'` on a new thread and return once the
     /// child is past fork and blocked before exec.
+    ///
+    /// A [`Spawn::GuardForkOnly`] hold needs exclusive access for its fork, so
+    /// it is refused while this holder has a [`Spawn::GuardWhileHeld`] child,
+    /// which would otherwise wait for itself forever.
     pub fn hold(&mut self, how: Spawn) -> io::Result<()> {
+        if how == Spawn::GuardForkOnly && self.held.iter().any(|held| held.guarded) {
+            return Err(io::Error::other(
+                "a fork-only hold after a guard-holding child would deadlock",
+            ));
+        }
         let (mut ready, ready_write) = pipe()?;
         let (release_read, release) = pipe()?;
         let (ready_fd, release_fd) = (ready_write.as_raw_fd(), release_read.as_raw_fd());
@@ -113,19 +129,23 @@ impl HeldChildren {
                 }
             });
         }
-        let fork_guard = (how == Spawn::GuardForkOnly).then(seedbox_exec::spawning);
+        let fork_guard = (how == Spawn::GuardForkOnly).then(seedbox_exec::writing);
         let spawned = std::thread::spawn(move || {
             let _keep = (ready_write, release_read);
             match how {
                 Spawn::GuardWhileHeld => spawn(&mut command),
                 #[allow(
                     clippy::disallowed_methods,
-                    reason = "the caller holds the shared guard across this fork only"
+                    reason = "the caller holds the exclusive guard across this fork only"
                 )]
                 Spawn::GuardForkOnly => command.spawn(),
             }
         });
-        self.held.push(Held { release, spawned });
+        self.held.push(Held {
+            guarded: how == Spawn::GuardWhileHeld,
+            release,
+            spawned,
+        });
         let mut byte = [0];
         // EOF here means the spawn failed before the child reached pre_exec.
         let parked = ready.read_exact(&mut byte);
@@ -152,6 +172,7 @@ impl HeldChildren {
         for Held {
             mut release,
             spawned,
+            ..
         } in held
         {
             // Ignore: a child whose spawn already failed has closed its end.

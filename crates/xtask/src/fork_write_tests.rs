@@ -77,10 +77,10 @@ fn cloexec_fork_copy_blocks_exec_after_close_and_after_temp_rename_until_child_e
         }
         let parent_fd = parent.as_raw_fd();
         let child_fd = child.as_raw_fd();
-        // The shared guard covers only the fork itself: the child copies this
-        // test's own deliberately open writer, never another test's
-        // executable being written under seedbox_exec::writing().
-        let fork_guard = seedbox_exec::spawning();
+        // The exclusive guard covers only the fork itself: the child copies
+        // this test's own deliberately open writer, but no other test's
+        // executable install or in-flight spawn status pipe.
+        let fork_guard = seedbox_exec::writing();
         #[allow(
             clippy::disallowed_methods,
             reason = "deliberate raw fork held before exec; guarded across the fork"
