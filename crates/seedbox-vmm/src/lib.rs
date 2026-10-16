@@ -1060,6 +1060,7 @@ fn network_witness(world: &World) -> sha2::digest::Output<Sha256> {
 fn world_witness_prefix(world: &World, network_witness: &[u8]) -> Result<Sha256, String> {
     let mut world_witness = Sha256::new();
     world.control().triggers.hash_into(&mut world_witness)?;
+    world.choices().hash_into(&mut world_witness)?;
     // Only a run that uses link policy carries the network witness, so a run
     // without it keeps the world witness it had before link policy existed.
     if world.faults().links.in_use() || world.faults().connections.used {
@@ -1350,6 +1351,7 @@ fn report(
             control_latency_ns: world.control().latency,
             triggers,
             properties,
+            choices: world.choices().evidence().cloned(),
         },
         sim_seconds,
         host_seconds,

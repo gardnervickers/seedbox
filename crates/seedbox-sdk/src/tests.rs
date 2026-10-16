@@ -142,3 +142,40 @@ fn records_and_flush_round_trip_over_seqpacket() {
     client.flush().unwrap();
     replier.join().unwrap();
 }
+
+#[test]
+fn choices_match_the_engine_schema_and_choose_the_first_outside_seedbox() {
+    assert_eq!(
+        parse(json!({"choice": {"site": "pick", "alternatives": ["a", "b"]}})),
+        Record::Choice {
+            site: "pick".into(),
+            alternatives: vec!["a".into(), "b".into()],
+        }
+    );
+    let client = Client::new("/nonexistent/seedbox/sdk.sock");
+    assert_eq!(client.choose("pick", &["a", "b"]).unwrap(), 0);
+    assert!(client.choose("pick", &[]).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_choice_waits_for_its_reply() {
+    let (_directory, path, listener) = server();
+    let client = Client::new(&path);
+    client.event("connect", json!(null));
+    let server = listener.accept();
+    let mut buffer = [0u8; MAX_RECORD_BYTES];
+    server.recv(&mut buffer).unwrap();
+    let replier = std::thread::spawn(move || {
+        let n = server.recv(&mut buffer).unwrap();
+        assert!(matches!(
+            Record::parse(&buffer[..n]).unwrap(),
+            Record::Choice { .. }
+        ));
+        server
+            .send(br#"{"choice":{"index":2,"occurrence":1,"site":"pick"}}"#)
+            .unwrap();
+    });
+    assert_eq!(client.choose("pick", &["a", "b", "c"]).unwrap(), 2);
+    replier.join().unwrap();
+}

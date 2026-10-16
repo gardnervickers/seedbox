@@ -540,6 +540,9 @@ struct Coord<'a, M: WorldMachine> {
     /// The block request hold installed in each machine, by trigger ID.
     holds: Vec<Option<u32>>,
     properties: &'a mut seedbox_engine_protocol::property::Ledger,
+    choices: &'a mut crate::choices::Choices,
+    /// Choice replies committed this round: when, to which machine, what.
+    choice_replies: Vec<(u64, usize, Vec<u8>)>,
     anchor_captures: &'a std::collections::BTreeSet<String>,
     captured_anchor: Option<String>,
     /// Resume the boundary an anchor capture stopped in.
@@ -861,6 +864,33 @@ impl<M: WorldMachine> Coord<'_, M> {
         }
         properties.sort();
         for (at, m, j, incarnation, line) in properties {
+            if let Some((session, site, alternatives)) =
+                line.as_deref().and_then(crate::properties::choice)
+            {
+                let request = crate::choices::Request {
+                    machine: &self.names[m],
+                    incarnation,
+                    session,
+                    site: &site,
+                    alternatives: &alternatives,
+                    at,
+                };
+                let answer = self.choices.request(
+                    request,
+                    self.lookahead,
+                    self.run_seed,
+                    self.branch_identity.as_deref(),
+                )?;
+                self.choice_replies.push((answer.reply_at, m, answer.reply));
+                if let (Some(publisher), Some(input_key)) = (self.observations, answer.input_key) {
+                    let kind = ObservationKind::ChoiceChanged {
+                        input_key,
+                        chosen: Some(answer.chosen),
+                        selected_at_ns: Some(at),
+                    };
+                    publisher.publish("", 0, at, kind);
+                }
+            }
             if typed {
                 if let Some(event) = line
                     .as_deref()
@@ -1226,6 +1256,12 @@ impl<M: WorldMachine> Coord<'_, M> {
         let duration = self.run.duration;
         let n = guests.len();
         self.absorb(guests, committed)?;
+        // Replies travel the management channel like a control reply; a
+        // crash before delivery discards them with the incarnation.
+        for (at, m, bytes) in std::mem::take(&mut self.choice_replies) {
+            plan.schedule(m, at, Msg::Control(bytes))?;
+            plan.add_boundary(at)?;
+        }
         if self.fault_failed() {
             self.stopped = Some(RunOutcome::FaultFailed);
             return Ok(sw::Flow::Stop);
@@ -1356,13 +1392,24 @@ impl<M: WorldMachine> Coord<'_, M> {
                     ready: self.application_ready,
                     quiet_until: self.control.quiet_until(),
                 };
-                self.input_program.admit_due(
+                let admitted = self.input_program.admit_due(
                     self.faults,
                     &mut self.control.triggers,
                     input_boundary,
                     gate,
                     &|action| validate_host_action(guests, action),
                 )?;
+                if let crate::input_program::Admitted::Choice { key, choice } = admitted {
+                    if let Some(publisher) = self.observations {
+                        let kind = ObservationKind::ChoiceChanged {
+                            input_key: key.clone(),
+                            chosen: None,
+                            selected_at_ns: None,
+                        };
+                        publisher.publish("", 0, input_boundary, kind);
+                    }
+                    self.choices.arm(key, choice);
+                }
                 self.sync_holds(guests)?;
                 self.publish_faults(input_boundary);
                 self.apply_faults(plan, guests, input_boundary)?;
@@ -1836,6 +1883,7 @@ where
         boundaries,
         scheduler_continuation,
         properties,
+        choices,
         anchor_captures,
         captured_anchor,
         resume_after_anchor,
@@ -1918,6 +1966,8 @@ where
         trigger_statuses: Vec::new(),
         trigger_frames: Vec::new(),
         lookahead,
+        choices,
+        choice_replies: Vec::new(),
         // A restored machine's device already holds its armed rule.
         holds: names
             .iter()

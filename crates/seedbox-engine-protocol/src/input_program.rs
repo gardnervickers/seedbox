@@ -42,6 +42,7 @@ impl InputAction {
             Self::Branch(BranchAction::Anchor {}) => "anchor",
             Self::Branch(BranchAction::Reseed { .. }) => "reseed",
             Self::Rule(RuleAction::Trigger(_)) => "trigger",
+            Self::Rule(RuleAction::Choice(_)) => "choice",
         }
     }
 }
@@ -51,14 +52,71 @@ impl InputAction {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RuleAction {
     Trigger(TriggerSpec),
+    Choice(ChoiceOverride),
 }
-/// A consumed trigger input: the trigger ID it armed.
+/// Select one choice occurrence's alternative instead of drawing it. Once
+/// due, it answers the first matching request; omitted fields match any.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChoiceOverride {
+    pub machine: String,
+    pub site: String,
+    #[serde(
+        default = "first_occurrence",
+        skip_serializing_if = "is_first_occurrence"
+    )]
+    pub occurrence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<u32>,
+    pub select: usize,
+}
+fn first_occurrence() -> u64 {
+    1
+}
+fn is_first_occurrence(value: &u64) -> bool {
+    *value == 1
+}
+impl ChoiceOverride {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.machine.is_empty() || self.site.is_empty() || self.occurrence == 0 {
+            return Err("a choice input names a machine, a site and an occurrence from 1".into());
+        }
+        if self.select >= crate::property::MAX_CHOICE_ALTERNATIVES {
+            return Err("a choice input selects an alternative index below 256".into());
+        }
+        Ok(())
+    }
+}
+/// A consumed rule input: the trigger ID a trigger input armed. A choice
+/// input arms no trigger.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArmReceipt {
     pub key: String,
     pub at_ns: u64,
-    pub trigger_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_id: Option<u32>,
+}
+impl ArmReceipt {
+    /// The receipt matches its input's kind; trigger IDs increase.
+    pub fn validate(&self, input: &TimedInput, previous_trigger: &mut u32) -> Result<(), String> {
+        let InputAction::Rule(rule) = &input.action else {
+            return Err("rule receipt for another input".into());
+        };
+        if self.key != input.key || self.at_ns != input.at_ns {
+            return Err("rule receipt differs from its source".into());
+        }
+        match (rule, self.trigger_id) {
+            (RuleAction::Trigger(_), Some(id)) if id > *previous_trigger => {
+                *previous_trigger = id;
+                Ok(())
+            }
+            (RuleAction::Choice(_), None) => Ok(()),
+            _ => Err("rule receipt differs from its source".into()),
+        }
+    }
 }
 /// Branch inputs. An anchor establishes the timed checkpoint phase at its
 /// time, before ordinary actions due then; a capture there is an optional
@@ -146,10 +204,13 @@ fn validate_branches(inputs: &[TimedInput]) -> Result<(), String> {
     for input in inputs {
         match &input.action {
             InputAction::Fault(_) => ordinary_at = Some(input.at_ns),
-            InputAction::Rule(RuleAction::Trigger(spec)) => {
+            InputAction::Rule(rule) => {
                 ordinary_at = Some(input.at_ns);
-                spec.validate()
-                    .map_err(|e| format!("input {}: {e}", input.key))?;
+                match rule {
+                    RuleAction::Trigger(spec) => spec.validate(),
+                    RuleAction::Choice(choice) => choice.validate(),
+                }
+                .map_err(|e| format!("input {}: {e}", input.key))?;
             }
             InputAction::Branch(branch) => {
                 if ordinary_at == Some(input.at_ns) {

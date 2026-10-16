@@ -3161,3 +3161,115 @@ fn an_oracle_exit_before_the_held_crash_cuts_it_off_with_both_times() {
     );
     assert!(w.faults.log.is_empty());
 }
+
+fn choice_world(program: Vec<crate::input_program::TimedInput>) -> World<Mock> {
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(program, u64::MAX, 0).unwrap();
+    let sdk = |seq: u64, record: Value| {
+        let hex: String = serde_json::to_vec(&record)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("SBX_PROP1 1 {seq} {hex}").into_bytes()
+    };
+    for (seq, at) in [(1, 10), (2, 40)] {
+        let mut step = Step::new(at, Stop::Control);
+        step.properties = vec![sdk(
+            seq,
+            json!({"choice":{"site":"pick","alternatives":["x","y","z","w"]}}),
+        )];
+        w.machines[0].steps.push_back(step);
+    }
+    w
+}
+
+fn choice_outcome(w: &World<Mock>) -> (Value, Vec<String>) {
+    (
+        serde_json::to_value(w.choices.evidence()).unwrap(),
+        machine_trace(w, "a")
+            .into_iter()
+            .filter(|line| line.contains("control/"))
+            .collect(),
+    )
+}
+
+#[test]
+fn choices_reply_one_lookahead_later_identically_cold_and_restored() {
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = choice_world(Vec::new());
+        run_with(&mut w, 100, None, workers, Duration::from_micros(3)).unwrap();
+        let outcome = choice_outcome(&w);
+        assert_eq!(reference.get_or_insert_with(|| outcome.clone()), &outcome);
+    }
+    let (evidence, replies) = reference.unwrap();
+    let records = evidence["records"].as_array().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        (&records[1]["occurrence"], &records[1]["reply_at_ns"]),
+        (&json!(2), &json!(50))
+    );
+    // Each reply reaches the asking machine at its reply time.
+    assert_eq!(replies.len(), 2);
+    assert!(replies[0].starts_with("a:control/SBX_SDK1 1 {\"choice\""));
+    assert!(replies[0].ends_with(":20"), "{}", replies[0]);
+
+    // A checkpoint between a request and its reply keeps the queued reply.
+    let mut warm = choice_world(Vec::new());
+    assert_eq!(
+        segment(&mut warm, 100, None, None, Some(15), true).unwrap(),
+        "checkpoint"
+    );
+    let saved = WorldSnapshot::take_checkpoint(&mut warm).unwrap();
+    saved.restore_checkpoint(&mut warm).unwrap();
+    segment(&mut warm, 100, None, None, None, true).unwrap();
+    assert_eq!(choice_outcome(&warm).0, evidence);
+}
+
+#[test]
+fn a_choice_input_selects_its_occurrence_and_a_reseed_redraws_the_rest() {
+    use crate::input_program::{BranchAction, InputAction, TimedInput};
+    let force = TimedInput {
+        key: "force".into(),
+        at_ns: 1,
+        action: serde_json::from_value(
+            json!({"action":"choice","machine":"a","site":"pick","occurrence":2,"select":3}),
+        )
+        .unwrap(),
+        timeout_ns: 1_000,
+    };
+    let mut w = choice_world(vec![force]);
+    run(&mut w, 100, None).unwrap();
+    let records = &w.choices.evidence().unwrap().records;
+    assert_eq!((records[1].selected, records[1].chosen.as_str()), (3, "w"));
+    assert_eq!(records[1].input_key.as_deref(), Some("force"));
+    assert!(records[0].input_key.is_none());
+
+    // Draws follow the branch: reseeding changes a later choice's stream.
+    let drawn = |seed: u64| {
+        let branch = |key: &str, action: BranchAction| TimedInput {
+            key: key.into(),
+            at_ns: 20,
+            action: InputAction::Branch(action),
+            timeout_ns: 1_000,
+        };
+        let mut w = choice_world(vec![
+            branch("anchor", BranchAction::Anchor {}),
+            branch(
+                "child",
+                BranchAction::Reseed {
+                    seed,
+                    identity: format!("child-{seed}"),
+                },
+            ),
+        ]);
+        run(&mut w, 100, None).unwrap();
+        let records = &w.choices.evidence().unwrap().records;
+        (records[0].selected, records[1].selected)
+    };
+    let outcomes: Vec<_> = (0..12).map(drawn).collect();
+    assert!(outcomes.iter().all(|o| o.0 == outcomes[0].0));
+    assert!(outcomes.iter().any(|o| o.1 != outcomes[0].1));
+}

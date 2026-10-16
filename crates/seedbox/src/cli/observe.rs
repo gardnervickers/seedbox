@@ -515,7 +515,18 @@ pub(super) fn timeline(id: &SimulationId, json: bool) -> Result<u8> {
         {
             return trigger_outcome(trigger, world);
         }
-        if entry.action["action"] == "trigger" {
+        if let Some(choice) = entry
+            .id
+            .strip_prefix("program:")
+            .and_then(|key| world.choice_inputs.get(key))
+        {
+            return match &choice.chosen {
+                Some(chosen) => format!("selected {chosen}"),
+                None if completed => "unused".into(),
+                None => "armed".into(),
+            };
+        }
+        if matches!(entry.action["action"].as_str(), Some("trigger" | "choice")) {
             return if completed { "not reached" } else { "upcoming" }.into();
         }
         entry

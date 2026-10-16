@@ -28,6 +28,8 @@ use std::sync::Mutex;
 pub const SOCKET: &str = "/run/seedbox/sdk.sock";
 /// Largest record the supervisor relays.
 pub const MAX_RECORD_BYTES: usize = 4096;
+/// A choice offers at most this many alternatives.
+pub const MAX_CHOICE_ALTERNATIVES: usize = 256;
 const FLUSH: &[u8] = br#"{"flush":{}}"#;
 
 /// How a property is judged.
@@ -111,6 +113,44 @@ impl Client {
                 )),
             }
         })
+    }
+
+    /// Ask the engine to choose one of `alternatives` at `site`, and wait
+    /// for its answer: an index into `alternatives`. The engine draws it from
+    /// the run's seed, or a choice input selects it, so a run's choices
+    /// replay exactly and a branch can vary them. Outside Seedbox the first
+    /// alternative is chosen.
+    pub fn choose(&self, site: &str, alternatives: &[&str]) -> io::Result<usize> {
+        if alternatives.is_empty() || alternatives.len() > MAX_CHOICE_ALTERNATIVES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a choice offers 1 to 256 alternatives",
+            ));
+        }
+        let record = json!({"choice": {"site": site, "alternatives": alternatives}});
+        let bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
+        if bytes.len() > MAX_RECORD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "choice record exceeds 4096 bytes",
+            ));
+        }
+        let mut selected = 0;
+        self.with_socket(|socket| {
+            socket.send(&bytes)?;
+            let mut reply = [0u8; 1024];
+            let size = socket.recv(&mut reply)?;
+            let invalid = || io::Error::new(io::ErrorKind::InvalidData, "unexpected choice reply");
+            let reply: Value = serde_json::from_slice(&reply[..size]).map_err(|_| invalid())?;
+            let choice = &reply["choice"];
+            selected = choice["index"]
+                .as_u64()
+                .map(|index| index as usize)
+                .filter(|index| choice["site"] == site && *index < alternatives.len())
+                .ok_or_else(invalid)?;
+            Ok(())
+        })?;
+        Ok(selected)
     }
 
     fn with_socket(&self, f: impl FnOnce(&UnixDatagram) -> io::Result<()>) -> io::Result<()> {
@@ -249,6 +289,16 @@ pub fn event(name: &str, details: Value) {
 /// Mark the workload on this machine as set up.
 pub fn setup_complete(details: Value) {
     CLIENT.setup_complete(details);
+}
+/// Let the engine choose one of `alternatives` at `site`; see
+/// [`Client::choose`]. Outside Seedbox, or if the reply path fails, the first
+/// alternative is chosen and the failure is reported once on stderr.
+pub fn choose(site: &str, alternatives: &[&str]) -> usize {
+    CLIENT.choose(site, alternatives).unwrap_or_else(|error| {
+        static REPORTED: std::sync::Once = std::sync::Once::new();
+        REPORTED.call_once(|| eprintln!("seedbox-sdk: choice not answered: {error}"));
+        0
+    })
 }
 /// Wait until every earlier record from this process reached the engine.
 /// Succeeds immediately outside Seedbox.

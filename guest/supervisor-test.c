@@ -362,6 +362,14 @@ int main(int argc, char **argv) {
     /* 7b226c6f7374223a = {"lost": */
     assert(strstr(buffer, "SBX_PROP1 0 1 7b226c6f7374223a") && buffer[n - 1] == '\n');
     char ok[4]; assert(recv(sdk, ok, sizeof(ok), MSG_DONTWAIT) == 2 && !memcmp(ok, "ok", 2));
+    /* The engine answers a session over management; other sessions get nothing. */
+    char choice_reply[] = "SBX_SDK1 1 {\"choice\":{\"index\":1}}";
+    control(choice_reply, &child);
+    char other_session[] = "SBX_SDK1 9 {}";
+    control(other_session, &child);
+    char answer[64]; n = recv(sdk, answer, sizeof(answer), MSG_DONTWAIT);
+    assert(n == 22 && !memcmp(answer, "{\"choice\":{\"index\":1}}", 22));
+    assert(recv(sdk, answer, sizeof(answer), MSG_DONTWAIT) < 0 && errno == EAGAIN);
     /* Connections beyond the session limit are refused and reported. */
     int extra[PROPERTY_SESSIONS];
     for (unsigned i = 0; i < PROPERTY_SESSIONS; i++) {

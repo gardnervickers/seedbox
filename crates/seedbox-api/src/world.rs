@@ -23,6 +23,19 @@ pub struct WorldState {
     /// Typed trigger inputs by input key: what each has matched and done.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub triggers: std::collections::BTreeMap<String, TriggerState>,
+    /// Due choice inputs by input key, and the alternative each selected.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub choice_inputs: std::collections::BTreeMap<String, ChoiceInputState>,
+}
+
+/// A due choice input: active until it answers its request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChoiceInputState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_at_ns: Option<u64>,
 }
 
 /// A typed trigger input's receipt. A fired trigger's effect is the fault

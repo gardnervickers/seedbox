@@ -573,6 +573,16 @@ static void property_read(struct property_client *client) {
         property_relay(client->session, ++client->seq, record, (size_t)received);
     }
 }
+/* The engine's answer to an SDK request (a choice) for one session. A session
+ * that has gone, or cannot take it now, loses it; the engine has its record. */
+static void property_reply(uint32_t session, const char *payload) {
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
+        if (property_clients[i].fd < 0 || property_clients[i].session != session) continue;
+        ssize_t sent;
+        do { sent = send(property_clients[i].fd, payload, strlen(payload), MSG_DONTWAIT|MSG_NOSIGNAL); } while (sent < 0 && errno == EINTR);
+        return;
+    }
+}
 /* Relay every record already sent, without waiting for further writers. */
 static void kernel_log_read(void);
 static void property_drain(void) {
@@ -820,6 +830,13 @@ static int thaw(pid_t *child) {
     return kill(-*child, SIGCONT);
 }
 static void control(char *command, pid_t *child) {
+    if (!strncmp(command, "SBX_SDK1 ", 9)) {
+        char *end; errno = 0;
+        unsigned long session = strtoul(command + 9, &end, 10);
+        if (errno || !session || session > UINT32_MAX || *end != ' ' || !end[1]) { errno = EINVAL; die("malformed SDK reply"); }
+        property_reply((uint32_t)session, end + 1);
+        return;
+    }
     if (!strncmp(command, "SBX_REPLY1 ", 11)) {
         char *payload = command + 11, *end; errno = 0;
         unsigned long id = strtoul(payload, &end, 10);

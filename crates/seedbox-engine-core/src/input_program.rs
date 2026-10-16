@@ -35,6 +35,11 @@ pub enum Admitted {
     Anchor { key: String },
     /// Every future draw changes from here, before ordinary inputs due now.
     Reseed { seed: u64, identity: String },
+    /// A choice override, active from now until a request consumes it.
+    Choice {
+        key: String,
+        choice: seedbox_engine_protocol::input_program::ChoiceOverride,
+    },
 }
 
 /// World conditions that gate generated inputs at their boundary.
@@ -184,14 +189,8 @@ impl Program {
                 continue;
             }
             if let InputAction::Rule(_) = &input.action {
-                let receipt = armed.next().ok_or("missing trigger input receipt")?;
-                if receipt.key != input.key
-                    || receipt.at_ns != input.at_ns
-                    || receipt.trigger_id <= previous_trigger
-                {
-                    return Err("trigger input receipt differs from its source".into());
-                }
-                previous_trigger = receipt.trigger_id;
+                let receipt = armed.next().ok_or("missing rule input receipt")?;
+                receipt.validate(input, &mut previous_trigger)?;
                 continue;
             }
             let row = admitted.next().ok_or("missing input admission evidence")?;
@@ -261,7 +260,7 @@ impl Program {
                     Ok(trigger_id) => self.armed.push(ArmReceipt {
                         key,
                         at_ns: at,
-                        trigger_id,
+                        trigger_id: Some(trigger_id),
                     }),
                     Err(reason) => self.rejections.push(InputRejection {
                         key,
@@ -271,6 +270,22 @@ impl Program {
                 }
                 self.next += 1;
                 return Ok(Admitted::Fault);
+            }
+            InputAction::Rule(RuleAction::Choice(choice)) => {
+                if !faults.names().iter().any(|n| n == &choice.machine) {
+                    self.failed = true;
+                    return Err(format!("input {key}: unknown machine {}", choice.machine));
+                }
+                self.armed.push(ArmReceipt {
+                    key: key.clone(),
+                    at_ns: at,
+                    trigger_id: None,
+                });
+                self.next += 1;
+                return Ok(Admitted::Choice {
+                    key,
+                    choice: choice.clone(),
+                });
             }
         };
         let result = (|| {

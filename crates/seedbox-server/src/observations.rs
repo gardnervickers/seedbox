@@ -93,6 +93,20 @@ impl Receiver {
                             }
                             last = observation.sequence;
                             match observation.kind {
+                                Kind::ChoiceChanged {
+                                    input_key,
+                                    chosen,
+                                    selected_at_ns,
+                                } => event(
+                                    last_time,
+                                    EventKind::ChoiceChanged {
+                                        input_key,
+                                        choice: seedbox_api::ChoiceInputState {
+                                            chosen,
+                                            selected_at_ns,
+                                        },
+                                    },
+                                ),
                                 Kind::TriggerChanged {
                                     input_key,
                                     status,

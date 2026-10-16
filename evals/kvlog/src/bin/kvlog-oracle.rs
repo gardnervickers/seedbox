@@ -100,7 +100,13 @@ fn main() {
         eprintln!("kvlog-oracle: no quiet period: {error}");
     }
     let mut lost = Vec::new();
-    for (key, value) in &acknowledged {
+    // The engine picks the read-back order: a structured choice that branches
+    // can vary without changing what the check means.
+    let mut order: Vec<_> = acknowledged.iter().collect();
+    if seedbox_sdk::choose("read-back order", &["ascending", "descending"]) == 1 {
+        order.reverse();
+    }
+    for (key, value) in order {
         let reply = loop {
             if !available {
                 break None;

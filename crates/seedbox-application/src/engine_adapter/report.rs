@@ -68,13 +68,9 @@ fn validate_input_admissions(
         }
         if let InputAction::Rule(_) = &input.action {
             let receipt = armed.next().ok_or_else(correlation_mismatch)?;
-            if receipt.key != input.key
-                || receipt.at_ns != input.at_ns
-                || receipt.trigger_id <= previous_trigger
-            {
-                return Err(correlation_mismatch());
-            }
-            previous_trigger = receipt.trigger_id;
+            receipt
+                .validate(input, &mut previous_trigger)
+                .map_err(|_| correlation_mismatch())?;
             continue;
         }
         let row = admitted.next().ok_or_else(correlation_mismatch)?;
@@ -782,6 +778,57 @@ pub(super) fn validate_triggers(
     Ok(plans)
 }
 
+/// Answered choices are bounded, select one of their alternatives, and name
+/// only choice inputs that could select them.
+fn validate_choices(
+    choices: Option<&seedbox_engine_protocol::choice::ChoiceEvidence>,
+    program: &[seedbox_engine_protocol::input_program::TimedInput],
+    request: &ExecutionRequest<'_>,
+) -> Result<()> {
+    use seedbox_engine_protocol::input_program::{InputAction, RuleAction};
+    use seedbox_engine_protocol::property::MAX_CHOICE_ALTERNATIVES;
+    let bad = || Error::Integrity("invalid choice evidence".into());
+    let Some(choices) = choices else {
+        return Ok(());
+    };
+    if choices.records.len() > seedbox_engine_protocol::choice::MAX_CHOICES
+        || (choices.records.is_empty() && choices.untracked == 0)
+    {
+        return Err(bad());
+    }
+    let mut used = BTreeSet::new();
+    for r in &choices.records {
+        if !request.prepared.guests.contains_key(&r.machine)
+            || r.occurrence == 0
+            || r.alternatives == 0
+            || r.alternatives > MAX_CHOICE_ALTERNATIVES
+            || r.selected >= r.alternatives
+            || r.chosen.is_empty()
+            || r.reply_at_ns < r.requested_at_ns
+        {
+            return Err(bad());
+        }
+        if let Some(key) = &r.input_key {
+            let input = program.iter().find(|i| &i.key == key).ok_or_else(bad)?;
+            let InputAction::Rule(RuleAction::Choice(o)) = &input.action else {
+                return Err(bad());
+            };
+            if !used.insert(key)
+                || o.machine != r.machine
+                || o.site != r.site
+                || o.occurrence != r.occurrence
+                || o.select != r.selected
+                || o.incarnation.is_some_and(|i| i != r.incarnation)
+                || o.session.is_some_and(|s| s != r.session)
+                || input.at_ns > r.requested_at_ns
+            {
+                return Err(bad());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Each typed trigger was armed by its input's receipt, exactly as authored.
 fn correlate_typed_triggers(
     typed: &[&TriggerRecord],
@@ -790,6 +837,7 @@ fn correlate_typed_triggers(
 ) -> Result<()> {
     use seedbox_engine_protocol::input_program::{InputAction, RuleAction};
     let bad = invalid_trigger_evidence;
+    let armed: Vec<_> = armed.iter().filter(|r| r.trigger_id.is_some()).collect();
     if typed.len() != armed.len() {
         return Err(bad());
     }
@@ -805,7 +853,7 @@ fn correlate_typed_triggers(
             Some(within) => receipt.at_ns.checked_add(within),
             None => Some(u64::MAX),
         };
-        if r.id != receipt.trigger_id
+        if Some(r.id) != receipt.trigger_id
             || r.key.as_ref() != Some(&receipt.key)
             || r.armed_at_ns != receipt.at_ns
             || input.at_ns != receipt.at_ns
@@ -1193,6 +1241,7 @@ pub(super) fn checked_report(
         &program,
         &raw.input_armed,
     )?;
+    validate_choices(raw.choices.as_ref(), &program, request)?;
     let scheduled = validate_input_admissions(
         &program,
         &raw.input_admissions,
@@ -1479,7 +1528,7 @@ mod typed_trigger_tests {
         let receipt = ArmReceipt {
             key: "kill".into(),
             at_ns: 5,
-            trigger_id: 1,
+            trigger_id: Some(1),
         };
         correlate_typed_triggers(&[&record], &program, std::slice::from_ref(&receipt)).unwrap();
         assert!(correlate_typed_triggers(&[&record], &program, &[]).is_err());

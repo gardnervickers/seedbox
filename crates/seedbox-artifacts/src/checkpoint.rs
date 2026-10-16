@@ -77,17 +77,15 @@ impl CapturedProgram {
                 &input.action
             {
                 let receipt = armed.next().ok_or_else(|| {
-                    Error::Integrity("checkpoint consumed trigger input lacks its receipt".into())
+                    Error::Integrity("checkpoint consumed rule input lacks its receipt".into())
                 })?;
-                if receipt.key != input.key
-                    || receipt.at_ns != input.at_ns
-                    || receipt.trigger_id <= previous_trigger
-                {
-                    return Err(Error::Integrity(
-                        "checkpoint trigger receipt disagrees with consumed input".into(),
-                    ));
-                }
-                previous_trigger = receipt.trigger_id;
+                receipt
+                    .validate(input, &mut previous_trigger)
+                    .map_err(|_| {
+                        Error::Integrity(
+                            "checkpoint rule receipt disagrees with consumed input".into(),
+                        )
+                    })?;
             } else {
                 let row = admitted.next().ok_or_else(|| {
                     Error::Integrity("checkpoint consumed input lacks admission evidence".into())

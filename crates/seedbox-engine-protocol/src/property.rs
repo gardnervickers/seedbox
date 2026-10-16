@@ -21,6 +21,10 @@ pub const MAX_DETAILS_BYTES: usize = 1024;
 pub const MAX_PROPERTIES: usize = 1024;
 pub const MAX_EVENT_NAMES: usize = 1024;
 pub const MAX_ERRORS: usize = 16;
+/// A choice offers 1..=this many alternatives.
+pub const MAX_CHOICE_ALTERNATIVES: usize = 256;
+/// Each alternative's name holds 1..=this many bytes.
+pub const MAX_CHOICE_ALTERNATIVE_BYTES: usize = 256;
 /// The supervisor's own records use this session.
 pub const SUPERVISOR_SESSION: u32 = 0;
 
@@ -121,6 +125,12 @@ pub enum Record {
         #[serde(default)]
         details: Option<Value>,
     },
+    /// Ask the engine to choose among named alternatives. The SDK waits for
+    /// the selected index on its session's reply path.
+    Choice {
+        site: String,
+        alternatives: Vec<String>,
+    },
     /// The workload on this machine finished setting up.
     SetupComplete {
         #[serde(default)]
@@ -147,9 +157,19 @@ impl Record {
             Record::Declare { id, message, .. } | Record::Assert { id, message, .. } => {
                 (Some(id), message.as_ref())
             }
-            Record::Event { name, .. } => (Some(name), None),
+            Record::Event { name, .. } | Record::Choice { site: name, .. } => (Some(name), None),
             _ => (None, None),
         };
+        if let Record::Choice { alternatives, .. } = &record {
+            if alternatives.is_empty()
+                || alternatives.len() > MAX_CHOICE_ALTERNATIVES
+                || alternatives
+                    .iter()
+                    .any(|a| a.is_empty() || a.len() > MAX_CHOICE_ALTERNATIVE_BYTES)
+            {
+                return Err("invalid choice alternatives".into());
+            }
+        }
         if let Some(id) = id {
             if id.is_empty() || id.len() > MAX_ID_BYTES || id.chars().any(char::is_control) {
                 return Err("invalid property id".into());
@@ -420,6 +440,8 @@ impl Ledger {
                     self.error("too many event names", Some(&origin));
                 }
             }
+            // The engine selects and records choices; the ledger keeps none.
+            Record::Choice { .. } => {}
             Record::SetupComplete { details: _ } => {
                 self.setup.entry(machine.into()).or_insert(origin);
             }

@@ -541,6 +541,7 @@ pub struct World<M: WorldMachine> {
     pub(crate) boundaries: u64,
     /// Reduced property evidence, in commit order.
     pub(crate) properties: seedbox_engine_protocol::property::Ledger,
+    pub(crate) choices: crate::choices::Choices,
     /// Anchors to stop at for a capture. A runtime option, never semantic.
     pub(crate) anchor_captures: std::collections::BTreeSet<String>,
     /// The anchor the last segment stopped at, for its owner to capture.
@@ -602,6 +603,7 @@ impl<M: WorldMachine> World<M> {
             slices: 0,
             boundaries: 0,
             properties: Default::default(),
+            choices: Default::default(),
             anchor_captures: Default::default(),
             captured_anchor: None,
             resume_after_anchor: false,
@@ -667,6 +669,9 @@ impl<M: WorldMachine> World<M> {
     }
     pub fn properties(&self) -> &seedbox_engine_protocol::property::Ledger {
         &self.properties
+    }
+    pub fn choices(&self) -> &crate::choices::Choices {
+        &self.choices
     }
     /// Stop at these anchors so the owner can capture checkpoints there.
     /// Captures never change results; a cold run takes the same path.
@@ -1513,6 +1518,8 @@ pub struct WorldSnapshot<M: WorldMachine> {
     #[serde(default)]
     properties: seedbox_engine_protocol::property::Ledger,
     #[serde(default)]
+    choices: crate::choices::Choices,
+    #[serde(default)]
     resume_after_anchor: bool,
 }
 
@@ -1579,6 +1586,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             incarnations: world.incarnations.clone(),
             paused_ingress: world.paused_ingress.clone(),
             properties: world.properties.clone(),
+            choices: world.choices.clone(),
             resume_after_anchor: world.resume_after_anchor,
         })
     }
@@ -1703,6 +1711,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         world.slices = self.slices;
         world.boundaries = self.boundaries;
         world.properties = self.properties.clone();
+        world.choices = self.choices.clone();
         world.resume_after_anchor = self.resume_after_anchor;
         if self.boot_snapshot && self.control.triggers.records.is_empty() {
             let names: Vec<_> = world.machines.iter().map(|m| m.name.clone()).collect();

@@ -123,6 +123,9 @@ pub struct WorldEvidence {
     /// Reduced property evidence; absent when the run produced no records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties: Option<crate::property::Ledger>,
+    /// Answered structured choices; absent when the run made none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<crate::choice::ChoiceEvidence>,
 }
 
 /// The x86 engine's report of one run segment.

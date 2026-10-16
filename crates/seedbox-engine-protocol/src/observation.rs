@@ -69,6 +69,14 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         counts: Option<serde_json::Value>,
     },
+    /// A choice input became active, or answered its request.
+    ChoiceChanged {
+        input_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chosen: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_at_ns: Option<u64>,
+    },
     /// A typed trigger input's receipt changed status.
     TriggerChanged {
         input_key: String,

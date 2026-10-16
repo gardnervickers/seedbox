@@ -335,6 +335,7 @@ mod tests {
     #[test]
     fn every_form_generates_a_real_action_with_serializable_defaults() {
         let world = WorldState {
+            choice_inputs: Default::default(),
             triggers: Default::default(),
             override_rejections: Default::default(),
             simulation: "abcdefgh".parse().unwrap(),

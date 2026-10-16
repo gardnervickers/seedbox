@@ -611,6 +611,7 @@ pub fn run(options: &Options) -> Result<Value> {
             .map_err(|e| e.to_string())?,
     );
     world.control().triggers.hash_into(&mut hash)?;
+    world.choices().hash_into(&mut hash)?;
     let trigger_evidence = world.control().triggers.evidence()?;
     if !world.input_rejections().is_empty() {
         hash.update(serde_json::to_vec(world.input_rejections()).map_err(|e| e.to_string())?);
@@ -644,6 +645,9 @@ pub fn run(options: &Options) -> Result<Value> {
     }
     if let Some(properties) = properties {
         report["properties"] = serde_json::to_value(properties).map_err(|e| e.to_string())?;
+    }
+    if let Some(choices) = world.choices().evidence() {
+        report["choices"] = serde_json::to_value(choices).map_err(|e| e.to_string())?;
     }
     Ok(report)
 }

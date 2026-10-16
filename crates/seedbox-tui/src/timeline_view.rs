@@ -376,6 +376,7 @@ mod tests {
     fn observed_status_requires_actual_world_evidence() {
         let entry = entry();
         let mut world = WorldState {
+            choice_inputs: Default::default(),
             triggers: Default::default(),
             override_rejections: Default::default(),
             simulation: "k7m2p9qx".parse().unwrap(),

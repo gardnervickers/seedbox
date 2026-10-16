@@ -488,6 +488,7 @@ pub(crate) fn world(names: &[&str]) -> World<Mock> {
         slices: 0,
         boundaries: 0,
         properties: Default::default(),
+        choices: Default::default(),
         anchor_captures: Default::default(),
         captured_anchor: None,
         resume_after_anchor: false,

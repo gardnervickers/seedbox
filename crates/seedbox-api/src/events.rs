@@ -76,6 +76,11 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         counts: Option<Box<serde_json::Value>>,
     },
+    /// A choice input became active, or answered its request.
+    ChoiceChanged {
+        input_key: String,
+        choice: crate::ChoiceInputState,
+    },
     /// A typed trigger input's receipt changed.
     TriggerChanged {
         input_key: String,

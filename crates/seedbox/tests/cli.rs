@@ -1235,6 +1235,7 @@ fn get_world_prints_machine_and_link_tables() {
         },
     };
     let world = WorldState {
+        choice_inputs: Default::default(),
         triggers: Default::default(),
         override_rejections: Default::default(),
         simulation: "k7m2p9qx".parse().unwrap(),

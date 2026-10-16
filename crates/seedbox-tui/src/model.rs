@@ -2721,6 +2721,7 @@ pub(crate) mod tests {
             }
         }
         WorldState {
+            choice_inputs: Default::default(),
             triggers: Default::default(),
             override_rejections: Default::default(),
             simulation: "k7m2p9qx".parse().unwrap(),

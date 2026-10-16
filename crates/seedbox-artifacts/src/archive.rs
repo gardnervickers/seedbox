@@ -543,6 +543,7 @@ mod tests {
         );
         simulation.status.phase = Phase::Completed;
         let world = WorldState {
+            choice_inputs: Default::default(),
             triggers: Default::default(),
             simulation: simulation.metadata.id.clone(),
             revision: 1,

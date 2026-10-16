@@ -378,6 +378,24 @@ Code: [reducer](../crates/seedbox-engine-protocol/src/property.rs),
 [commit](../crates/seedbox-engine-core/src/properties.rs),
 [supervisor](../guest/compose-init.c), [SDK](../crates/seedbox-sdk/src/lib.rs).
 
+## Structured choices
+
+`seedbox_sdk::choose(site, alternatives)` sends a choice record on its SDK
+session and waits. The engine accepts it with the session's other records, at
+complete-frame commit, and numbers its occurrence within its machine,
+incarnation, producer session and site. A due `choice` input matching that
+identity selects the alternative and is consumed; otherwise a draw from a
+domain naming the whole identity does, under the current seed and branch
+identity, so a reseed changes later choices and nothing else shifts them.
+The reply, `SBX_SDK1 <session> <json>`, is queued on the management channel
+one causal lookahead after the request; the supervisor hands it to that
+session's socket, and a crash before delivery discards it with the
+incarnation. Occurrence counts, armed inputs and answered choices are
+checkpointed; answered choices enter the world witness and the report. Code:
+[choices](../crates/seedbox-engine-core/src/choices.rs),
+[SDK](../crates/seedbox-sdk/src/lib.rs),
+[supervisor](../guest/compose-init.c).
+
 ## Fault discovery and previews
 
 The server owns categories, parameter schemas and effect explanations.

@@ -21,6 +21,7 @@ pub(crate) struct Tracker {
     faults: BTreeMap<u32, FaultState>,
     override_rejections: BTreeMap<String, String>,
     triggers: BTreeMap<String, seedbox_api::TriggerState>,
+    choice_inputs: BTreeMap<String, seedbox_api::ChoiceInputState>,
     counters: BTreeMap<Pair, LinkCounters>,
     /// Active partition and shape handles, with the fault that set them.
     partitions: BTreeMap<String, (u32, BTreeSet<Pair>)>,
@@ -71,6 +72,7 @@ impl Tracker {
             faults: BTreeMap::new(),
             override_rejections: BTreeMap::new(),
             triggers: BTreeMap::new(),
+            choice_inputs: BTreeMap::new(),
             counters: BTreeMap::new(),
             partitions: BTreeMap::new(),
             shapes: BTreeMap::new(),
@@ -118,6 +120,10 @@ impl Tracker {
             } => {
                 self.override_rejections
                     .insert(input_key.clone(), reason.clone());
+            }
+            EventKind::ChoiceChanged { input_key, choice } => {
+                self.choice_inputs.insert(input_key.clone(), choice.clone());
+                self.revision += 1;
             }
             EventKind::TriggerChanged { input_key, trigger } => {
                 self.triggers.insert(input_key.clone(), trigger.clone());
@@ -446,6 +452,7 @@ impl Tracker {
             .collect();
         WorldState {
             triggers: self.triggers.clone(),
+            choice_inputs: self.choice_inputs.clone(),
             override_rejections: self.override_rejections.clone(),
             simulation: self.simulation.clone(),
             revision: self.revision,

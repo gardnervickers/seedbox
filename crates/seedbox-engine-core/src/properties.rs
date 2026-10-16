@@ -31,3 +31,17 @@ pub fn observed(machine: &str, line: &[u8]) -> Option<crate::triggers::Observed>
     }
     crate::triggers::Observed::from_record(machine, &Record::parse(&frame.payload).ok()?)
 }
+
+/// A committed choice request: its session, site and alternatives. Records
+/// the ledger refuses (bad alternatives, the supervisor's session) are none.
+pub fn choice(line: &[u8]) -> Option<(u32, String, Vec<String>)> {
+    use seedbox_engine_protocol::property::{Record, SUPERVISOR_SESSION};
+    let frame = decode(line).ok()??;
+    if frame.session == SUPERVISOR_SESSION {
+        return None;
+    }
+    match Record::parse(&frame.payload).ok()? {
+        Record::Choice { site, alternatives } => Some((frame.session, site, alternatives)),
+        _ => None,
+    }
+}
