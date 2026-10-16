@@ -49,7 +49,7 @@ use std::{
     num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -135,6 +135,41 @@ struct NativeProvider {
     session: PathBuf,
     runtimes: Arc<Mutex<Vec<PathBuf>>>,
     workers: Arc<AtomicUsize>,
+    observed: Arc<AtomicBool>,
+}
+/// Test-only executor that launches its inner Driver worker without the
+/// server-owned observation socket, as an unobserved execution would.
+struct Unobserved(Box<dyn ExecutionBackend>);
+impl ExecutionBackend for Unobserved {
+    fn preflight_workers(&self, workers: u32) -> seedbox_application::Result<()> {
+        self.0.preflight_workers(workers)
+    }
+    fn preflight(&self, output: Option<&Path>) -> seedbox_application::Result<()> {
+        self.0.preflight(output)
+    }
+    fn validate_retained(&self, inputs: &PreparedInputs) -> seedbox_application::Result<()> {
+        self.0.validate_retained(inputs)
+    }
+    fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
+        self.0.runtime_inputs(inputs)
+    }
+    fn profile(&self) -> ExecutionProfile {
+        self.0.profile()
+    }
+    fn performance_parameters(&self) -> BTreeMap<String, String> {
+        self.0.performance_parameters()
+    }
+    fn execute(
+        &self,
+        mut request: seedbox_application::execution::ExecutionRequest<'_>,
+    ) -> seedbox_application::Result<seedbox_application::execution::ExecutionReport> {
+        assert!(
+            request.observations.is_some(),
+            "service supplies observations"
+        );
+        request.observations = None;
+        self.0.execute(request)
+    }
 }
 impl BackendProvider for NativeProvider {
     fn project(
@@ -160,7 +195,7 @@ impl BackendProvider for NativeProvider {
             .lock()
             .unwrap()
             .push(selected.archive().parent().unwrap().to_owned());
-        Ok(Box::new(
+        let executor: Box<dyn ExecutionBackend> = Box::new(
             DriverExecutor::new(
                 inputs.profile.clone(),
                 self.backend,
@@ -168,7 +203,12 @@ impl BackendProvider for NativeProvider {
             )?
             .with_runtime(selected)?
             .with_launch_context(vec![], Some(self.session.join(SESSION_LEASE_FILE))),
-        ))
+        );
+        Ok(if self.observed.load(Ordering::SeqCst) {
+            executor
+        } else {
+            Box::new(Unobserved(executor))
+        })
     }
 }
 
@@ -544,6 +584,7 @@ struct NativeSession {
     execution_root: PathBuf,
     runtime_paths: Arc<Mutex<Vec<PathBuf>>>,
     workers: Arc<AtomicUsize>,
+    observed: Arc<AtomicBool>,
     client: Client,
     submitted: usize,
 }
@@ -560,6 +601,7 @@ impl NativeSession {
         fs::write(session.path().join(SESSION_LEASE_FILE), []).unwrap();
         let runtime_paths = Arc::new(Mutex::new(Vec::new()));
         let workers = Arc::new(AtomicUsize::new(1));
+        let observed = Arc::new(AtomicBool::new(true));
         let manager = Arc::new(Manager::new(Catalogue::in_memory()));
         let execution_root = session.path().join("execution");
         let service = Arc::new(
@@ -572,6 +614,7 @@ impl NativeSession {
                     session: session.path().to_owned(),
                     runtimes: runtime_paths.clone(),
                     workers: workers.clone(),
+                    observed: observed.clone(),
                 }),
             )
             .unwrap(),
@@ -596,6 +639,7 @@ impl NativeSession {
             execution_root,
             runtime_paths,
             workers,
+            observed,
             client: Client::connect_to(&socket).unwrap(),
             submitted: 0,
         }
@@ -1773,6 +1817,178 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
     })
     .await
     .expect("in-flight checkpoint exceeded its hang guard");
+}
+/// Bytes and frames scheduled from `from` to `to`.
+fn scheduled(frames: &[seedbox_api::Frame], from: &str, to: &str) -> (u64, u64) {
+    frames
+        .iter()
+        .filter(|f| f.from == from && f.to == to && f.fate == seedbox_api::FrameFate::Scheduled)
+        .fold((0, 0), |(count, bytes), f| {
+            (count + 1, bytes + u64::from(f.bytes))
+        })
+}
+/// Frames are observation only: in the bd-f50 network world, fresh runs with
+/// observations on and off, on one and four workers, and continuations of a
+/// mid-transfer checkpoint with observations on and off, all reach one raw
+/// witness. Observed runs publish their routed frames and link counters.
+pub async fn pv_network_frames_are_observation_only() {
+    use seedbox_api::{CheckpointState, ControlCommand, ControlState, PlaybackRate};
+    let backend = DriverBackend::Pv;
+    // Hang guard only: every decision below is taken from guest events.
+    tokio::time::timeout(HANG_GUARD, async {
+        let seed = 123;
+        let mut session = NativeSession::new(backend);
+        let request = network_submission(backend, session.root.path(), &session.store, seed);
+        let plain = session.submit(request.clone(), 1).await;
+        session.worker(&plain).await;
+        session.complete(&plain, false, 1, seed).await.unwrap();
+        let client_timed = session.stdout_timed(&plain, "client", false).await;
+        let tcp_begin_ns = marker_time(&client_timed, PROBE_CLIENT_MID);
+        let tcp_end_ns = marker_time(&client_timed, PROBE_TCP_DONE);
+        let request =
+            with_capture_marker(request, tcp_begin_ns + (tcp_end_ns - tcp_begin_ns) / 2);
+
+        // Fresh runs: subscribe while paused at start, so every frame is seen.
+        let mut witnesses = Vec::new();
+        let mut reference = None;
+        for (observed, workers) in [(true, 1), (true, 4), (false, 1), (false, 4)] {
+            session.observed.store(observed, Ordering::SeqCst);
+            let mut paused = request.clone();
+            paused.options.start_paused = true;
+            let id = session.submit(paused, workers).await;
+            session.worker(&id).await;
+            session
+                .control(&id, "frames-paused", ControlCommand::SetRate { rate: PlaybackRate::Paused })
+                .await;
+            let frames = collect_frames(&session.client, &id).await;
+            session
+                .control(&id, "frames-run", ControlCommand::SetRate { rate: PlaybackRate::Unlimited })
+                .await;
+            let witness = session.complete(&id, false, workers, seed).await.unwrap();
+            let (frames, missing) = frames.await.unwrap();
+            let up = scheduled(&frames, "client", "server");
+            let down = scheduled(&frames, "server", "client");
+            eprintln!("fresh observed={observed} workers={workers} witness={witness} frames={} missing={missing} client_to_server={up:?} server_to_client={down:?}", frames.len());
+            if observed {
+                // The whole echoed stream crosses each direction, every frame
+                // scheduled for a later delivery, with nothing omitted.
+                assert_eq!(missing, 0);
+                assert!(up.1 >= 262_144 && down.1 >= 262_144, "{up:?} {down:?}");
+                assert!(frames.iter().all(|f| f.fate == seedbox_api::FrameFate::Scheduled
+                    && f.due_ns.is_some_and(|due| due > f.sent_ns)));
+                let world = session.client.world(&id).await.unwrap();
+                for (from, to) in [("client", "server"), ("server", "client")] {
+                    let link = world.links.iter().find(|l| l.from == from && l.to == to)
+                        .unwrap_or_else(|| panic!("{from}->{to} link: {:?}", world.links));
+                    let (count, bytes) = scheduled(&frames, from, to);
+                    assert_eq!((link.counters.scheduled, link.counters.bytes), (count, bytes));
+                    assert_eq!(
+                        link.counters.last_sent_ns,
+                        frames.iter().filter(|f| f.from == from && f.to == to).map(|f| f.sent_ns).max()
+                    );
+                }
+                let stream = (frames.len(), up, down);
+                assert_eq!(*reference.get_or_insert(stream), stream, "frames depend on workers");
+            } else {
+                assert!(frames.is_empty() && missing == 0, "unobserved run published frames");
+            }
+            witnesses.push(witness);
+        }
+        assert!(witnesses.windows(2).all(|pair| pair[0] == pair[1]), "{witnesses:?}");
+        let uninterrupted = witnesses[0].clone();
+
+        // Capture mid-transfer, as in the bd-f50 continuation, while observed.
+        session.observed.store(true, Ordering::SeqCst);
+        let mut capture = request.clone();
+        capture.options.start_paused = true;
+        let source = session.submit(capture, 1).await;
+        session.worker(&source).await;
+        session
+            .control(&source, "verify-paused-source", ControlCommand::SetRate { rate: PlaybackRate::Paused })
+            .await;
+        let source_frames = collect_frames(&session.client, &source).await;
+        session
+            .control(&source, "run-to-marker", ControlCommand::PauseBeforeNextFault { rate: PlaybackRate::Unlimited })
+            .await;
+        loop {
+            let status = session.client.playback(&source).await.unwrap().state;
+            assert!(!status.terminal, "fixture ended before the in-flight capture");
+            if status.rate == PlaybackRate::Paused && !status.stepping {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let before = session.client.playback(&source).await.unwrap().state.position.completed_rounds;
+        session.control(&source, "apply-marker", ControlCommand::Step).await;
+        loop {
+            let status = session.client.playback(&source).await.unwrap().state;
+            assert!(!status.terminal);
+            if !status.stepping && status.position.completed_rounds > before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let captured = session.control(&source, "saved", ControlCommand::Checkpoint).await;
+        let captured_ns = match &captured.state {
+            ControlState::Acknowledged { checkpoint: Some(checkpoint), error: None, .. }
+                if checkpoint.state == CheckpointState::Captured =>
+            {
+                checkpoint.position.simulated_time_ns
+            }
+            other => panic!("checkpoint not captured: {other:?}"),
+        };
+        assert!(captured_ns > tcp_begin_ns && captured_ns < tcp_end_ns);
+        let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
+        session.client.stop(&source).await.unwrap();
+        session.complete(&source, true, 1, seed).await;
+        let (frames, missing) = source_frames.await.unwrap();
+        assert_eq!(missing, 0);
+        assert!(frames.iter().all(|f| f.sent_ns <= captured_ns));
+        let in_flight = frames
+            .iter()
+            .filter(|f| f.due_ns.is_some_and(|due| f.sent_ns <= captured_ns && due > captured_ns))
+            .count();
+        eprintln!("source capture: captured_ns={captured_ns} frames={} in_flight={in_flight}", frames.len());
+        assert!(in_flight > 0, "no routed frame in flight at capture");
+
+        // Continue the one exported capture observed and unobserved.
+        let definition = serde_json::to_value(exported).unwrap();
+        for (observed, workers) in [(true, 4), (false, 1)] {
+            session.observed.store(observed, Ordering::SeqCst);
+            session.workers.store(workers, Ordering::SeqCst);
+            let restored = session.client.submit_definition(&definition, true).await.unwrap().metadata.id;
+            session.submitted += 1;
+            session.worker(&restored).await;
+            assert!(session.launch_request(&restored).resume_checkpoint.is_some());
+            session
+                .control(&restored, "verify-paused-restore", ControlCommand::SetRate { rate: PlaybackRate::Paused })
+                .await;
+            let paused = session.client.playback(&restored).await.unwrap().state;
+            assert_eq!(paused.position.simulated_time_ns, captured_ns);
+            let frames = collect_frames(&session.client, &restored).await;
+            session
+                .control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited })
+                .await;
+            let continued = session.complete(&restored, false, workers, seed).await.unwrap();
+            let (frames, missing) = frames.await.unwrap();
+            eprintln!("restored observed={observed} workers={workers} witness={continued} frames={} missing={missing}", frames.len());
+            if observed {
+                // Only frames routed after the capture are published again.
+                assert_eq!(missing, 0);
+                assert!(!frames.is_empty());
+                assert!(frames.iter().all(|f| f.sent_ns >= captured_ns));
+            } else {
+                assert!(frames.is_empty() && missing == 0);
+            }
+            assert_eq!(continued, uninterrupted, "restored observed={observed} workers={workers}");
+        }
+        session.client.delete_checkpoint(&source, "saved").await.unwrap();
+        session.client.delete(&source).await.unwrap();
+        eprintln!("frames observation-only: witness={uninterrupted} fresh=on1,on4,off1,off4 restored=on4,off1");
+        session.close().await;
+    })
+    .await
+    .expect("frames observation proof exceeded its hang guard");
 }
 fn runtime_backend(backend: DriverBackend) -> runtime_assets::Backend {
     match backend {

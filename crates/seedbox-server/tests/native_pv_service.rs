@@ -62,3 +62,7 @@ async fn native_pv_public_checkpoint_export_import_matches_uninterrupted() {
 async fn native_pv_checkpoint_with_pending_sleep_and_network_continues() {
     native_service::checkpoint_in_flight_continuation(DriverBackend::Pv).await;
 }
+#[tokio::test]
+async fn native_pv_network_frames_are_observation_only() {
+    native_service::pv_network_frames_are_observation_only().await;
+}
