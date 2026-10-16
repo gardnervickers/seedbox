@@ -1116,11 +1116,18 @@ async fn native_case<Body>(body: Body)
 where
     Body: for<'a> FnOnce(&'a mut NativeCase) -> BoxFuture<'a, ()>,
 {
+    native_case_with_guard(HANG_GUARD, body).await;
+}
+
+async fn native_case_with_guard<Body>(guard: Duration, body: Body)
+where
+    Body: for<'a> FnOnce(&'a mut NativeCase) -> BoxFuture<'a, ()>,
+{
     let owner = finish_before_rethrow(
         NativeCase::default(),
         body,
         |owner| Box::pin(owner.cleanup()),
-        tokio::time::sleep(HANG_GUARD),
+        tokio::time::sleep(guard),
     )
     .await;
     owner.remove_verified();

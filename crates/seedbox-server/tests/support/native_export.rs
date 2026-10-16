@@ -49,9 +49,8 @@ impl Drop for CpuLoad {
 pub async fn pv_large_export_under_load() {
     // New size/load scenario: 600 seconds is only a failure/hang guard, not an
     // expected duration or completion oracle. Existing native budgets unchanged.
-    // test-time: allow(hang-guard) -- Outer failure-only budget for the finite three-machine checkpoint transfer and cleanup; 600s accommodates the 500MB native closure under load, never selects a simulated outcome.
-    tokio::time::timeout(Duration::from_secs(600), async {
-        let mut session = NativeSession::new(DriverBackend::Pv);
+    native_case_with_guard(Duration::from_secs(600), |owner| Box::pin(async move {
+        let session = owner.session(DriverBackend::Pv);
         let mut request = submission_with_machines(DriverBackend::Pv, session.root.path(), &session.store, 2_000_000, 123, vec!["export-one", "export-two"]);
         request.options.start_paused = true;
         let source = session.submit(request, 1).await;
@@ -63,6 +62,14 @@ pub async fn pv_large_export_under_load() {
         loop {
             let state = session.client.playback(&source).await.unwrap().state;
             assert!(!state.terminal, "source ended before native capture");
+            check_bound(
+                &session.client,
+                &source,
+                DriverBackend::Pv,
+                state.position.simulated_time_ns,
+                "its three-machine capture point",
+            )
+            .await;
             if !state.stepping && state.position.completed_rounds > 0 { break; }
             tokio::task::yield_now().await;
         }
@@ -113,6 +120,5 @@ pub async fn pv_large_export_under_load() {
         session.complete(&source, true, 1, 123).await;
         session.client.delete_checkpoint(&source, "saved").await.unwrap();
         session.client.delete(&source).await.unwrap();
-        session.close().await;
-    }).await.expect("large native export exceeded 600-second failure-only hang guard");
+    })).await;
 }
