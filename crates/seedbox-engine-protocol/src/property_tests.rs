@@ -357,3 +357,25 @@ fn kernel_oom_and_crash_lines_violate_their_default_properties() {
     assert_eq!(l.error_count, 1);
     assert_eq!(l.properties[DEFAULT_NO_OOM].failures, 1);
 }
+
+#[test]
+fn coverage_maps_union_per_machine_and_only_from_the_supervisor() {
+    let map = |set: &[usize]| {
+        let mut bytes = vec![0u8; COVERAGE_BYTES];
+        for &bit in set {
+            bytes[bit / 8] |= 1 << (bit % 8);
+        }
+        hex(&bytes)
+    };
+    let mut ledger = Ledger::default();
+    let coverage = |m: String| json!({"coverage": {"map": m}});
+    ledger.apply(&frame(0, 1, coverage(map(&[3]))), "n1", 0, 10);
+    ledger.apply(&frame(0, 2, coverage(map(&[9]))), "n1", 0, 20);
+    assert_eq!(ledger.coverage["n1"], map(&[3, 9]));
+    assert_eq!(ledger.error_count, 0);
+    // An application cannot claim coverage, and a malformed map is an error.
+    ledger.apply(&frame(1, 1, coverage(map(&[1]))), "n1", 0, 30);
+    ledger.apply(&frame(0, 3, coverage("zz".into())), "n1", 0, 40);
+    assert_eq!(ledger.error_count, 2);
+    assert_eq!(ledger.coverage["n1"], map(&[3, 9]));
+}

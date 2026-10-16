@@ -21,6 +21,7 @@ use std::{
 
 pub(crate) fn incomplete(reason: StopReason) -> ExecutionReport {
     ExecutionReport {
+        choices: None,
         host_wait_ns: 0,
         simulated_time_ns: None,
         reason,

@@ -159,6 +159,52 @@ impl Client {
             .await
     }
 
+    pub async fn submit_campaign(
+        &self,
+        request: &seedbox_api::CampaignRequest,
+    ) -> Result<seedbox_api::Campaign, Error> {
+        self.document(self.json_request("/v1/campaigns", request)?)
+            .await
+    }
+    pub async fn campaigns(&self) -> Result<Vec<seedbox_api::CampaignSummary>, Error> {
+        self.document(self.request(Method::GET, "/v1/campaigns"))
+            .await
+    }
+    pub async fn campaign(&self, id: &str) -> Result<seedbox_api::Campaign, Error> {
+        self.document(self.request(Method::GET, &format!("/v1/campaigns/{id}")))
+            .await
+    }
+    pub async fn stop_campaign(&self, id: &str) -> Result<seedbox_api::Campaign, Error> {
+        self.document(self.request(Method::POST, &format!("/v1/campaigns/{id}/stop")))
+            .await
+    }
+    pub async fn campaign_encounters(
+        &self,
+        id: &str,
+        query: &seedbox_api::FindingQuery,
+    ) -> Result<seedbox_api::EncounterPage, Error> {
+        self.document(
+            self.request(Method::GET, &format!("/v1/campaigns/{id}/encounters"))
+                .query(query),
+        )
+        .await
+    }
+    pub async fn submit_shrink(
+        &self,
+        source: &SimulationId,
+        request: &seedbox_api::ShrinkRequest,
+    ) -> Result<seedbox_api::Shrink, Error> {
+        self.document(
+            self.request(Method::POST, &format!("/v1/simulations/{source}/shrink"))
+                .json(request),
+        )
+        .await
+    }
+    pub async fn shrink(&self, id: &str) -> Result<seedbox_api::Shrink, Error> {
+        self.document(self.request(Method::GET, &format!("/v1/shrinks/{id}")))
+            .await
+    }
+
     pub async fn compare(
         &self,
         baseline: &SimulationId,

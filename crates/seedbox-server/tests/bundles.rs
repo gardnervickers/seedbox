@@ -94,6 +94,7 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
         )]),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
+            choices: None,
             host_wait_ns: 0,
             simulated_time_ns: Some(25),
             reason: StopReason::Completed,

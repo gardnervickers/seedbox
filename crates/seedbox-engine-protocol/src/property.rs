@@ -21,6 +21,26 @@ pub const MAX_DETAILS_BYTES: usize = 1024;
 pub const MAX_PROPERTIES: usize = 1024;
 pub const MAX_EVENT_NAMES: usize = 1024;
 pub const MAX_ERRORS: usize = 16;
+/// A coverage map's size in bytes: one bit per hashed block.
+pub const COVERAGE_BYTES: usize = 1024;
+
+/// Lowercase hex as bytes; None for anything else.
+pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    text.as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let digit = |b: u8| match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'a'..=b'f' => Some(b - b'a' + 10),
+                _ => None,
+            };
+            Some(digit(pair[0])? * 16 + digit(pair[1])?)
+        })
+        .collect()
+}
 /// A choice offers 1..=this many alternatives.
 pub const MAX_CHOICE_ALTERNATIVES: usize = 256;
 /// Each alternative's name holds 1..=this many bytes.
@@ -147,6 +167,9 @@ pub enum Record {
     Lost { reason: String, count: u64 },
     /// Supervisor only: a kernel log line about an OOM kill or a crash.
     Kernel { message: String },
+    /// Supervisor only: the OR of the machine's block coverage maps, as hex,
+    /// when the application's environment enables coverage.
+    Coverage { map: String },
 }
 
 impl Record {
@@ -183,7 +206,10 @@ impl Record {
     fn supervisor_only(&self) -> bool {
         matches!(
             self,
-            Record::Exit { .. } | Record::Lost { .. } | Record::Kernel { .. }
+            Record::Exit { .. }
+                | Record::Lost { .. }
+                | Record::Kernel { .. }
+                | Record::Coverage { .. }
         )
     }
 }
@@ -319,6 +345,9 @@ pub struct Ledger {
     pub exits: Vec<ExitRecord>,
     /// Records accepted, including ones that only produced evidence errors.
     pub records: u64,
+    /// Block coverage per machine: the union of every map relayed, as hex.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub coverage: BTreeMap<String, String>,
     /// Count of evidence errors; only the first [`MAX_ERRORS`] are kept.
     pub error_count: u64,
     pub errors: Vec<EvidenceError>,
@@ -442,6 +471,24 @@ impl Ledger {
             }
             // The engine selects and records choices; the ledger keeps none.
             Record::Choice { .. } => {}
+            Record::Coverage { map } => {
+                let bytes = (map.len() == 2 * COVERAGE_BYTES)
+                    .then(|| decode_hex(&map))
+                    .flatten();
+                let Some(bytes) = bytes else {
+                    return self.error("invalid coverage map", Some(&origin));
+                };
+                let union = self
+                    .coverage
+                    .get(machine)
+                    .and_then(|old| decode_hex(old))
+                    .unwrap_or_else(|| vec![0; COVERAGE_BYTES]);
+                let merged: Vec<u8> = union.iter().zip(&bytes).map(|(a, b)| a | b).collect();
+                self.coverage.insert(
+                    machine.into(),
+                    merged.iter().map(|b| format!("{b:02x}")).collect(),
+                );
+            }
             Record::SetupComplete { details: _ } => {
                 self.setup.entry(machine.into()).or_insert(origin);
             }

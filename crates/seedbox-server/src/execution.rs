@@ -2,6 +2,7 @@
 //! injected by the executable; clients never own worker lifetimes or leases.
 
 mod bundles;
+mod campaigns;
 mod diagnostics;
 
 use crate::{catalogue, manager::Manager};
@@ -83,6 +84,8 @@ pub struct ExecutionService {
     preparation_limit: Duration,
     evidence: Mutex<()>,
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
+    jobs: Mutex<campaigns::Jobs>,
+    findings_root: Option<PathBuf>,
 }
 
 impl ExecutionService {
@@ -101,6 +104,8 @@ impl ExecutionService {
             backends,
             preparation_limit: crate::preparation_budget::DEFAULT_LIMIT,
             evidence: Mutex::new(()),
+            jobs: Mutex::default(),
+            findings_root: None,
             admission: Mutex::new((0, BTreeMap::new())),
         })
     }
@@ -313,6 +318,28 @@ impl ExecutionService {
 
     /// Read final evidence using server-owned attempt references. Clients never
     /// need host run paths, and comparison never changes a simulation's verdict.
+    /// A completed simulation's retained run record, if it has one.
+    fn run_record(
+        &self,
+        id: &SimulationId,
+    ) -> Result<Option<seedbox_artifacts::record::RunRecord>, Error> {
+        if self.manager.read(|catalogue| catalogue.is_imported(id))? {
+            return Ok(self.imported_snapshot(id)?.record);
+        }
+        let path = self.root.join("inputs").join(format!("{id}.json"));
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let inputs: RetainedInputs =
+            serde_json::from_reader(file).map_err(std::io::Error::other)?;
+        let Some(attempt) = inputs.attempt else {
+            return Ok(None);
+        };
+        Ok(Some(seedbox_application::orchestration::inspect(&attempt)?))
+    }
+
     pub fn compare(
         &self,
         baseline: &SimulationId,
@@ -332,31 +359,8 @@ impl ExecutionService {
                     "simulation {id} is not complete"
                 )));
             }
-            if self
-                .manager
-                .read(|catalogue| catalogue.is_imported(id))
-                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
-            {
-                let snapshot = self
-                    .imported_snapshot(id)
-                    .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
-                return Ok(snapshot.record);
-            }
-            let path = self.root.join("inputs").join(format!("{id}.json"));
-            let file = match fs::File::open(&path) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => {
-                    return Err(seedbox_application::Error::Setup(format!(
-                        "simulation {id} retained inputs: {error}"
-                    )))
-                }
-            };
-            let inputs: RetainedInputs = serde_json::from_reader(file)?;
-            let Some(attempt) = inputs.attempt else {
-                return Ok(None);
-            };
-            seedbox_application::orchestration::inspect(&attempt).map(Some)
+            self.run_record(id)
+                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))
         };
         let (Some(first), Some(second)) = (record(baseline)?, record(simulation)?) else {
             return Ok(seedbox_api::SimulationComparison {
@@ -1102,6 +1106,7 @@ mod tests {
                 assert_eq!(request.prepared.memory_mb("oracle"), 256);
                 assert_eq!(request.prepared.memory_mb("helper"), 1024);
                 Ok(ExecutionReport {
+                    choices: None,
                     simulated_time_ns: Some(1),
                     host_wait_ns: 0,
                     reason: StopReason::Completed,

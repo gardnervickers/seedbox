@@ -46,6 +46,14 @@ pub const API_VERSION: &str = "seedbox/v1";
 mod seeds;
 pub use seeds::{SeedRangeRequest, SeedRangeStatus};
 
+mod campaign;
+pub use campaign::{
+    AppliedFault, Campaign, CampaignAssessment, CampaignCompletion, CampaignMember, CampaignPhase,
+    CampaignPlan, CampaignProperty, CampaignRequest, CampaignSummary, Encounter, EncounterPage,
+    ExportState, Finding, FindingLabel, FindingQuery, MemberPlan, Moment, Shrink, ShrinkOutcome,
+    ShrinkProbe, ShrinkRequest, MAX_PAGE,
+};
+
 mod world;
 pub use world::{
     ApplicationCondition, ApplicationState, ChoiceInputState, FaultState, Frame, FrameDelivery,

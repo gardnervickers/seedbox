@@ -312,6 +312,7 @@ impl Orchestrator {
             }
             if cancellation.is_cancelled() {
                 return Ok(ExecutionReport {
+                    choices: None,
                     host_wait_ns: 0,
                     simulated_time_ns: None,
                     reason: StopReason::Cancelled,

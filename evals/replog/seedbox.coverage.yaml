@@ -1,0 +1,37 @@
+# The buggy variant with block coverage on the servers: campaigns can
+# guide by new code reached as well as by property outcomes.
+name: replog-eval-coverage
+machines:
+  r1:
+    build:
+      context: ../..
+      dockerfile: evals/replog/Dockerfile
+    entrypoint: [/replog-replica]
+    environment:
+      SEEDBOX_COVERAGE: "1"
+      REPLOG_LEADER: "1"
+      REPLOG_FOLLOWERS: "r2,r3"
+      REPLOG_BUG: "1"
+  r2:
+    build:
+      context: ../..
+      dockerfile: evals/replog/Dockerfile
+    entrypoint: [/replog-replica]
+    environment:
+      SEEDBOX_COVERAGE: "1"
+      REPLOG_BUG: "1"
+  r3:
+    build:
+      context: ../..
+      dockerfile: evals/replog/Dockerfile
+    entrypoint: [/replog-replica]
+    environment:
+      SEEDBOX_COVERAGE: "1"
+      REPLOG_BUG: "1"
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/replog/Dockerfile
+  entrypoint: [/replog-oracle]
+network:
+  latency: 1ms

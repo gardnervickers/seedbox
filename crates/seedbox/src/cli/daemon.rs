@@ -97,9 +97,10 @@ pub(super) fn serve(
     state: Option<PathBuf>,
     inputs: RuntimeInputs,
     startup_handshake: bool,
+    capacity: NonZeroUsize,
 ) -> Result<u8> {
     let mut ready = false;
-    let result = serve_inner(state, inputs, || {
+    let result = serve_inner(state, inputs, capacity, || {
         if startup_handshake {
             startup::ready()?;
         }
@@ -138,6 +139,7 @@ fn prepare_directory(root: &Path) -> Result<()> {
 fn serve_inner(
     state: Option<PathBuf>,
     inputs: RuntimeInputs,
+    capacity: NonZeroUsize,
     ready: impl FnOnce() -> Result<()>,
 ) -> Result<u8> {
     let root = state_directory(state)?;
@@ -172,7 +174,8 @@ fn serve_inner(
             store,
             Arc::new(NativeBackends(inputs)),
         )
-        .map_err(setup)?,
+        .map_err(setup)?
+        .with_findings_root(root.join("findings")),
     );
     let shutdown = CancellationToken::default();
     let _signals = Signals::register(&shutdown)?;
@@ -183,7 +186,6 @@ fn serve_inner(
         let listener = tokio::net::UnixListener::bind(&socket)
             .map_err(|e| Error::Setup(format!("server socket {}: {e}", socket.display())))?;
         ready()?;
-        let capacity = NonZeroUsize::MIN.saturating_add(1);
         seedbox_server::serve(listener, manager, execution, capacity, shutdown)
             .await
             .map_err(setup)

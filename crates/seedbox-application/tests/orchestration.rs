@@ -171,6 +171,7 @@ impl Fixture {
             performance: BTreeMap::from([("SEEDBOX_WATCHDOG_MS".into(), "20".into())]),
             extra_logs: BTreeMap::new(),
             report: ExecutionReport {
+                choices: None,
                 host_wait_ns: 0,
                 simulated_time_ns: None,
                 reason: StopReason::Completed,

@@ -340,6 +340,63 @@ marker triggers free their matcher tables. Code:
 [matchers](../crates/seedbox-engine-core/src/triggers.rs),
 [rules](../crates/seedbox-control/src/lib.rs).
 
+## Campaigns
+
+The planner (`seedbox-explore::campaign`) is passive: the server asks for a
+generation, submits its members, and reports each finished member's
+feedback. Ordinals are assigned when a generation is planned, and the planner
+folds a generation only when all its members have reported, in ordinal order,
+so neither capacity nor completion order reaches a plan. Its own choices draw
+from a stream seeded by the campaign seed. Generation 0 is a seed sweep of
+roots, each with the declared anchors and captures at all of them. A member's
+features (property outcomes, power-of-two event-count buckets, setup and
+exits, chosen alternatives) are novel when no earlier ordinal showed them; a
+member with novelty and captures joins the bounded corpus. Branches pick a
+corpus member weighted by novelty against picks and depth, prefer the last
+anchor before its earliest novel feature, and continue from that capture with
+a reseed, sometimes a choice input for a later occurrence, and a freshly
+sampled fault suffix. The branch keeps its parent's consumed prefix, the
+teardowns of generated faults already started, and the later anchors.
+Members that leave or never enter the corpus release their captures.
+
+Aggregation counts each member's own evaluations: a branch's ledger less the
+ledger in the checkpoint it started from, so an encounter inherited from an
+ancestor's prefix counts once. Members violating a property over completed
+members is reported as the observed campaign rate. Findings group a member's
+own violations by property and selected detail fields; the earliest ordinal
+is the representative, exported without anchor captures, synced, linked
+without overwriting, then the directory synced, before it is reported as
+published. `findings.json` in the directory is the baseline for later
+campaigns. Code: [planner](../crates/seedbox-explore/src/campaign.rs),
+[server](../crates/seedbox-server/src/execution/campaigns.rs).
+
+## Block coverage (experimental)
+
+A machine whose process environment has `SEEDBOX_COVERAGE=1` runs the
+progress client with `--coverage-dir`: when the translator first builds a
+block it sets one bit, hashed from the module's name and the block's offset in
+it, in an 8192-bit map, and every 32 new bits it overwrites the process's map
+file. Building blocks is not guest execution, so the bits change no code that
+runs, but the file writes and the supervisor's checks once a second of guest
+time do change timing; runs replay only with the same setting, which is part
+of the resolved definition. The supervisor relays the OR of every process's
+map as a `coverage` record when it changes and at the main process's exit.
+The ledger keeps each machine's union, and the campaign planner treats each
+set bit as a feature. Code: [client](../guest/progress/progress.c),
+[supervisor](../guest/compose-init.c).
+
+## Shrinking
+
+`seedbox shrink` runs ddmin (`seedbox-explore::shrink`) over a failed
+simulation's external inputs; a checkpoint's consumed prefix is fixed, and
+oracle calls are never in the program. A generated fault and its teardown are
+one atom; removing an anchor removes its reseeds, and removing a fault removes
+the heals of its handle. The unchanged program runs first to confirm the
+failure, then every probe reruns the whole simulation and its oracle and
+counts as reproducing only when the same property is violated (or the oracle
+fails again). The result is "1-minimal under these transformations" only when
+ddmin finished at single-atom granularity; otherwise it is "reduced".
+
 ## Property records
 
 Guest properties travel the same committed path as application output. Every

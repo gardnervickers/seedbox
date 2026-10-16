@@ -619,6 +619,50 @@ static void property_exit(int status) {
     else snprintf(record, sizeof(record), "{\"exit\":{\"signal\":%d}}", WTERMSIG(status));
     supervisor_record(record);
 }
+/* Block coverage, when the application's environment asks for it: the
+ * translator writes one map per process, and the supervisor relays the OR of
+ * every map whenever it changes, checked about once a second of guest time.
+ * The size matches SEEDBOX_COVERAGE_BYTES in progress/budget.h. */
+enum { COVERAGE_BYTES = 1024 };
+#define COVERAGE_DIR "/run/seedbox/coverage"
+static int coverage_enabled;
+static unsigned char coverage_sent[COVERAGE_BYTES];
+static struct timespec coverage_checked;
+static void coverage_relay(void) {
+    if (!coverage_enabled) return;
+    unsigned char map[COVERAGE_BYTES] = {0};
+    DIR *dir = opendir(COVERAGE_DIR);
+    if (!dir) return;
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.') continue;
+        int fd = openat(dirfd(dir), entry->d_name, O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        if (fd < 0) continue;
+        unsigned char bytes[COVERAGE_BYTES];
+        ssize_t n = read(fd, bytes, sizeof(bytes));
+        close(fd);
+        for (ssize_t i = 0; i < n; ++i) map[i] |= bytes[i];
+    }
+    closedir(dir);
+    if (!memcmp(map, coverage_sent, sizeof(map))) return;
+    memcpy(coverage_sent, map, sizeof(map));
+    char record[64 + 2 * COVERAGE_BYTES];
+    int used = snprintf(record, sizeof(record), "{\"coverage\":{\"map\":\"");
+    for (unsigned i = 0; i < COVERAGE_BYTES; ++i) used += snprintf(record + used, sizeof(record) - used, "%02x", map[i]);
+    used += snprintf(record + used, sizeof(record) - used, "\"}}");
+    if (used <= 0 || (size_t)used >= sizeof(record)) { errno = E2BIG; die("coverage record"); }
+    supervisor_record(record);
+}
+/* Relay at most about once a second of guest time while the application runs. */
+static void coverage_tick(void) {
+    if (!coverage_enabled) return;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now)) die("coverage clock");
+    if (now.tv_sec - coverage_checked.tv_sec >= 1) {
+        coverage_checked = now;
+        coverage_relay();
+    }
+}
 static struct application_output application_outputs[2] = {{-1, -1}, {-1, -1}};
 static void relay_output(unsigned stream, size_t limit) {
     char frame[2 * APPLICATION_OUTPUT_BYTES + 16];
@@ -640,6 +684,14 @@ static void drain_output(void) {
     }
 }
 static pid_t start(void) {
+    for (char **entry = environment; entry && *entry; ++entry) {
+        if (!strcmp(*entry, "SEEDBOX_COVERAGE=1")) coverage_enabled = 1;
+    }
+    if (coverage_enabled) {
+        directories(COVERAGE_DIR, 0755);
+        if (chmod(COVERAGE_DIR, 01777)) die("coverage directory");
+        if (clock_gettime(CLOCK_MONOTONIC, &coverage_checked)) die("coverage clock");
+    }
     for (unsigned stream = 0; stream < 2; ++stream) {
         application_output_close(&application_outputs[stream]);
         if (application_output_open(&application_outputs[stream])) die("application output pipe");
@@ -671,7 +723,7 @@ static pid_t start(void) {
         size_t count = 0;
         while (arguments[count]) ++count;
         /* Translator arguments, the application's own, and execv's NULL. */
-        enum { PREFIX_MAX = 13 };
+        enum { PREFIX_MAX = 15 };
         char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
         if (!instrumented) die("instrumentation arguments");
         size_t prefix = 0;
@@ -698,6 +750,10 @@ static pid_t start(void) {
         instrumented[prefix++] = progress_budget;
         instrumented[prefix++] = "--progress-points-per-block";
         instrumented[prefix++] = progress_points;
+        if (coverage_enabled) {
+            instrumented[prefix++] = "--coverage-dir";
+            instrumented[prefix++] = COVERAGE_DIR;
+        }
         instrumented[prefix++] = "--";
         if (prefix > PREFIX_MAX) die("instrumentation prefix");
         for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
@@ -927,11 +983,12 @@ static void supervise(pid_t *child) {
         while ((done = waitpid(-1, &status, WNOHANG)) > 0) {
             if (done == *child) {
                 drain_output();
-                if (property_listener >= 0) { property_drain(); property_exit(status); }
+                if (property_listener >= 0) { property_drain(); coverage_relay(); property_exit(status); }
                 finish(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), 0);
             }
         }
-        service_channels(child, -1);
+        service_channels(child, coverage_enabled ? 1000 : -1);
+        coverage_tick();
     }
 }
 #ifndef SEEDBOX_SUPERVISOR_TEST

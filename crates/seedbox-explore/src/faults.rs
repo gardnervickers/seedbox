@@ -53,7 +53,7 @@ pub fn generate(
     if targets.is_empty() {
         return Err("fault profile has no machine to target".into());
     }
-    let mut rng = Rng::new(seed);
+    let mut rng = Rng::new(seed, 0x6661_756c_7470_726f);
     let total_weight: u64 = profile.faults.iter().map(|f| u64::from(f.weight())).sum();
     let mut lifecycle_free: BTreeMap<&str, u64> = BTreeMap::new();
     let mut clock_free: BTreeMap<&str, u64> = BTreeMap::new();
@@ -286,30 +286,12 @@ pub fn generate(
 
 /// splitmix64: small, fast and fully specified, so schedules never depend on
 /// a library's generator choice.
-struct Rng(u64);
+use crate::rng::Rng;
 
-impl Rng {
-    fn new(seed: u64) -> Self {
-        // Separate the profile's stream from every other use of the seed.
-        Self(seed ^ 0x6661_756c_7470_726f)
-    }
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    }
-    /// Uniform in `0..bound` by rejection; `bound` must be positive.
-    fn below(&mut self, bound: u64) -> u64 {
-        let zone = u64::MAX - u64::MAX % bound;
-        loop {
-            let value = self.next();
-            if value < zone {
-                return value % bound;
-            }
-        }
-    }
+trait Within {
+    fn within(&mut self, range: &DurationRange) -> u64;
+}
+impl Within for Rng {
     fn within(&mut self, range: &DurationRange) -> u64 {
         range.min.0 + self.below(range.max.0 - range.min.0 + 1)
     }

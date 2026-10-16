@@ -1318,3 +1318,46 @@ fn fault_profiles_are_checked_before_connecting() {
         );
     }
 }
+
+#[test]
+fn campaign_shrink_and_findings_bounds_are_usage_errors_before_any_server() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path();
+    for (args, phrase) in [
+        (vec!["campaign", "--budget", "0"], "--budget"),
+        (vec!["campaign", "--batch", "65"], "--batch"),
+        (vec!["campaign", "--fresh-share", "1001"], "--fresh-share"),
+        (vec!["campaign", "--corpus", "0"], "--corpus"),
+        (vec!["campaign", "--anchor", "soon"], "--anchor"),
+        (
+            vec!["shrink", "k7m2p9qx", "--max-probes", "0"],
+            "--max-probes",
+        ),
+        (vec!["shrink", "not-an-id"], "ID"),
+        (
+            vec!["get", "findings", "campaign-1", "--limit", "101"],
+            "--limit",
+        ),
+        (
+            vec!["get", "findings", "campaign-1", "--within", "x"],
+            "--within",
+        ),
+        (vec!["stop", "nonsense!"], "ID"),
+    ] {
+        let output = seedbox(&args, project);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(
+            stderr(&output).contains(phrase),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+    let help = seedbox(&["help", "campaign"], project);
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    assert!(
+        help.contains("--budget") && help.contains("Exit status"),
+        "{help}"
+    );
+    let help = seedbox(&["help", "serve"], project);
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Performance (never changes results)"));
+}

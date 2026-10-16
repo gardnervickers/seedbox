@@ -60,6 +60,12 @@ pub fn router(state: ApiState) -> Router {
             get(describe).delete(delete_simulation),
         )
         .route("/v1/simulations/{id}/stop", post(stop))
+        .route("/v1/campaigns", get(campaigns).post(submit_campaign))
+        .route("/v1/campaigns/{id}", get(campaign))
+        .route("/v1/campaigns/{id}/stop", post(stop_campaign))
+        .route("/v1/campaigns/{id}/encounters", get(campaign_encounters))
+        .route("/v1/simulations/{id}/shrink", post(submit_shrink))
+        .route("/v1/shrinks/{id}", get(shrink))
         .route("/v1/simulations/{id}/compare/{other}", get(compare))
         .route("/v1/simulations/{id}/diagnostics", get(diagnostics))
         .route(
@@ -979,6 +985,79 @@ async fn checkpoint_definition(
     })
     .await
     .map_err(|_| HttpError::internal("checkpoint export task failed"))?
+}
+
+/// Run a blocking job-service call off the async runtime.
+async fn jobs<T: Send + 'static>(
+    state: ApiState,
+    call: impl FnOnce(&crate::execution::ExecutionService) -> Result<T, crate::execution::Error>
+        + Send
+        + 'static,
+) -> Result<Json<T>, HttpError> {
+    let execution = state
+        .execution
+        .ok_or_else(|| HttpError::invalid("campaigns are unavailable"))?;
+    tokio::task::spawn_blocking(move || call(&execution).map(Json).map_err(HttpError::from))
+        .await
+        .map_err(|_| HttpError::internal("campaign task failed"))?
+}
+
+async fn submit_campaign(
+    State(state): State<ApiState>,
+    body: Result<Json<seedbox_api::CampaignRequest>, JsonRejection>,
+) -> Result<Json<seedbox_api::Campaign>, HttpError> {
+    let Json(request) = body.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.submit_campaign(request)).await
+}
+
+async fn campaigns(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<seedbox_api::CampaignSummary>>, HttpError> {
+    jobs(state, |e| e.campaigns()).await
+}
+
+async fn campaign(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<seedbox_api::Campaign>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.campaign(&id)).await
+}
+
+async fn stop_campaign(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<seedbox_api::Campaign>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.stop_campaign(&id)).await
+}
+
+async fn campaign_encounters(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<seedbox_api::FindingQuery>, QueryRejection>,
+) -> Result<Json<seedbox_api::EncounterPage>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let Query(query) = query.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.campaign_encounters(&id, &query)).await
+}
+
+async fn submit_shrink(
+    State(state): State<ApiState>,
+    path: Result<Path<SimulationId>, PathRejection>,
+    body: Result<Json<seedbox_api::ShrinkRequest>, JsonRejection>,
+) -> Result<Json<seedbox_api::Shrink>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let Json(request) = body.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.submit_shrink(&id, request)).await
+}
+
+async fn shrink(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<seedbox_api::Shrink>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.shrink(&id)).await
 }
 
 #[cfg(test)]

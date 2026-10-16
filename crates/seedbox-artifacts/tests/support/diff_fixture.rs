@@ -53,6 +53,7 @@ fn fixture() -> sb::record::RunRecord {
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
+            choices: None,
             host_wait_ns: 0,
             simulated_time_ns: None,
             reason: StopReason::Completed,

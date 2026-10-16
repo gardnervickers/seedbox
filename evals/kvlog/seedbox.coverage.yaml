@@ -1,0 +1,23 @@
+# The buggy variant with block coverage on the servers: campaigns can
+# guide by new code reached as well as by property outcomes.
+name: kvlog-eval-coverage
+machines:
+  kv:
+    build:
+      context: ../..
+      dockerfile: evals/kvlog/Dockerfile
+    entrypoint: [/kvlog-server]
+    environment:
+      SEEDBOX_COVERAGE: "1"
+      KVLOG_BUG: "1"
+    # The log must outlive a crash: keep it on a disk.
+    volumes:
+      data:
+        target: /data
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/kvlog/Dockerfile
+  entrypoint: [/kvlog-oracle]
+network:
+  latency: 1ms

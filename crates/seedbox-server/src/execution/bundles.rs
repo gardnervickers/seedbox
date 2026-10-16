@@ -17,6 +17,18 @@ impl ExecutionService {
         output: impl Write,
         options: &Options,
     ) -> Result<(), Error> {
+        self.export_bundle_with(id, output, options, true)
+    }
+
+    /// Without `anchors`, captures at anchor inputs are left out with their
+    /// receipts: a campaign's branch points, not the finding's reproduction.
+    pub(crate) fn export_bundle_with(
+        &self,
+        id: &SimulationId,
+        output: impl Write,
+        options: &Options,
+        anchors: bool,
+    ) -> Result<(), Error> {
         let _guard = self
             .evidence
             .lock()
@@ -90,7 +102,19 @@ impl ExecutionService {
                     .map(|(name, reason)| (format!("diagnostic:{name}"), reason.clone())),
             );
         }
-        let controls = self.manager.read(|catalogue| catalogue.checkpoints(id))?;
+        let mut controls = self.manager.read(|catalogue| catalogue.checkpoints(id))?;
+        if !anchors {
+            controls.retain(|receipt| {
+                let anchor = receipt.request.request_id.starts_with("anchor-");
+                if anchor {
+                    omissions.insert(
+                        format!("checkpoint:{}", receipt.request.request_id),
+                        "anchor capture left out of the finding".into(),
+                    );
+                }
+                !anchor
+            });
+        }
         let mut checkpoints = BTreeMap::new();
         for receipt in &controls {
             if let ControlState::Acknowledged {

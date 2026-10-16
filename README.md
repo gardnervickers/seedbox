@@ -100,6 +100,27 @@ a cancelled or disconnected upload may still complete, so do not retry blindly.
 Frames and missing/evicted observations are not recovered; omissions remain explicit.
 `SEEDBOX_STATE` selects the server storage directory. The cache is not automatically pruned.
 
+## Search for bugs
+
+```sh
+seedbox explore . --count 20 --fault-profile faults.yaml     # A seed sweep.
+seedbox campaign . --budget 32 --fault-profile faults.yaml   # Guided search.
+seedbox get campaign <campaign-id>        # Members, assessment and findings.
+seedbox get findings <campaign-id> --preceded-by crash --within 2s
+seedbox shrink <sim-id>                   # Fewest external inputs that still fail.
+```
+
+A campaign starts as a seed sweep of roots that declare candidate anchors
+(`--anchor`). Each later generation mostly branches from members that showed
+something new (property outcomes, SDK events, setup, structured choices) at
+one of their anchor captures, reseeded and sometimes with a changed choice,
+and spends a fixed share on fresh roots. Plans depend only on results, never
+on capacity or completion order. Each finding's earliest member is exported
+to the state directory's `findings/<campaign>`; `--baseline DIR` labels
+findings new or observed again against an earlier campaign's directory, and
+the exit status follows the campaign's assessment, for CI. Anchor captures hold
+every machine's memory; members outside the corpus (`--corpus`) release theirs.
+
 [Design](docs/design.md) explains the architecture and principles.
 [Technical details](docs/internals.md) covers determinism, fault ordering,
 checkpoints, and development checks.

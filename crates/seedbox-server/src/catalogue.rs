@@ -1014,7 +1014,7 @@ fn random(bytes: &mut [u8]) -> Result<()> {
     getrandom::fill(bytes).map_err(|e| Error::Random(e.to_string()))
 }
 
-fn random_id() -> Result<SimulationId> {
+pub(crate) fn random_id() -> Result<SimulationId> {
     let alphabet = SimulationId::ALPHABET.as_bytes();
     let limit = 256 - 256 % alphabet.len();
     let mut id = String::with_capacity(SimulationId::LENGTH);

@@ -60,6 +60,7 @@ pub async fn serve(
         }
     });
     let seeds = run_seeds(manager.clone(), sender.clone(), shutdown.clone());
+    let jobs = run_jobs(execution.clone(), sender.clone(), shutdown.clone());
     let controls = controls::run(manager.clone(), shutdown.clone());
     let router =
         http::router(http::ApiState::new(manager, sender).with_execution(execution.clone()));
@@ -76,17 +77,51 @@ pub async fn serve(
         http_finished.cancel();
         result
     };
-    let (http, execution, controls, seeds) = tokio::join!(
+    let (http, execution, controls, seeds, jobs) = tokio::join!(
         http,
         execution.run(receiver, capacity, shutdown),
         controls,
-        seeds
+        seeds,
+        jobs
     );
     recovery.await?;
+    jobs?;
     execution?;
     controls?;
     seeds?;
     http?;
+    Ok(())
+}
+
+/// Drive campaigns and shrinks: fold finished members, queue new ones.
+#[cfg(unix)]
+async fn run_jobs(
+    execution: std::sync::Arc<execution::ExecutionService>,
+    sender: tokio::sync::mpsc::Sender<seedbox_api::SimulationId>,
+    shutdown: seedbox_application::execution::CancellationToken,
+) -> Result<(), execution::Error> {
+    while !shutdown.is_cancelled() {
+        let service = execution.clone();
+        match tokio::task::spawn_blocking(move || service.advance_jobs()).await {
+            Ok(Ok(queued)) => {
+                for id in queued {
+                    if sender.send(id).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(Err(execution::Error::Catalogue(catalogue::Error::Unavailable))) => return Ok(()),
+            Ok(Err(error)) => {
+                shutdown.cancel();
+                return Err(error);
+            }
+            Err(error) => {
+                shutdown.cancel();
+                return Err(error.into());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
     Ok(())
 }
 

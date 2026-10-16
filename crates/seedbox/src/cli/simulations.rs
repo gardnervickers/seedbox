@@ -87,7 +87,7 @@ pub(super) fn tui(id: Option<SimulationId>) -> Result<u8> {
     Ok(0)
 }
 
-fn load_spec(
+pub(super) fn load_spec(
     compose: &ComposeArg,
     seed: Option<u64>,
 ) -> Result<(SimulationSpec, seedbox_spec::definition::Metadata)> {

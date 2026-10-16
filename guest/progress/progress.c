@@ -30,6 +30,12 @@
 #include "budget.h"
 
 static ptr_int_t instruction_budget;
+/* Coverage, when enabled: one bit per hashed module-relative block, set when
+ * the block is first translated, so it never changes the code that runs. */
+static const char *coverage_dir;
+static byte coverage_map[SEEDBOX_COVERAGE_BYTES];
+static uint coverage_new;
+static void *coverage_lock;
 static uint points_per_block;
 static reg_id_t budget_segment;
 static uint budget_offset;
@@ -180,9 +186,45 @@ static uint point_start(const charge_plan_t *plan, uint point)
     return (uint)((uint64)point * plan->length / plan->points);
 }
 
+/* Overwrite this process's map file; the supervisor ORs every file. */
+static void coverage_flush(void)
+{
+    char path[512];
+    dr_snprintf(path, sizeof(path), "%s/%d", coverage_dir, (int)dr_get_process_id());
+    path[sizeof(path) - 1] = 0;
+    file_t file = dr_open_file(path, DR_FILE_WRITE_OVERWRITE);
+    if (file == INVALID_FILE)
+        return;
+    dr_write_file(file, coverage_map, sizeof(coverage_map));
+    dr_close_file(file);
+}
+
+static void coverage_record(void *tag)
+{
+    module_data_t *module = dr_lookup_module((app_pc)tag);
+    if (module == NULL)
+        return;
+    const char *name = dr_module_preferred_name(module);
+    uint hash = 2166136261u;
+    for (; name != NULL && *name; ++name)
+        hash = (hash ^ (byte)*name) * 16777619u;
+    hash ^= (uint)((ptr_uint_t)((app_pc)tag - module->start) * 2654435761u);
+    dr_free_module_data(module);
+    uint bit = hash % (SEEDBOX_COVERAGE_BYTES * 8);
+    dr_mutex_lock(coverage_lock);
+    if (!(coverage_map[bit / 8] & (1u << (bit % 8)))) {
+        coverage_map[bit / 8] |= (byte)(1u << (bit % 8));
+        if (++coverage_new % 32 == 0)
+            coverage_flush();
+    }
+    dr_mutex_unlock(coverage_lock);
+}
+
 static dr_emit_flags_t analyze(void *context, void *tag, instrlist_t *block, bool trace,
                                bool translating, void **user)
 {
+    if (coverage_dir != NULL && !translating && !trace)
+        coverage_record(tag);
     charge_plan_t *plan = dr_thread_alloc(context, sizeof(*plan));
     plan->length = 0;
     for (instr_t *instruction = instrlist_first_app(block); instruction != NULL;
@@ -217,6 +259,10 @@ static dr_emit_flags_t instrument(void *context, void *tag, instrlist_t *block,
 
 static void finished(void)
 {
+    if (coverage_dir != NULL) {
+        coverage_flush();
+        dr_mutex_destroy(coverage_lock);
+    }
     DR_ASSERT(dr_raw_tls_cfree(budget_offset, 1));
     drreg_exit();
     drmgr_exit();
@@ -225,15 +271,19 @@ static void finished(void)
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
 {
     uint32_t parsed_budget, parsed_points;
-    if (!seedbox_progress_arguments(argc, argv, &parsed_budget, &parsed_points)) {
+    if (!seedbox_progress_arguments(argc, argv, &parsed_budget, &parsed_points,
+                                    &coverage_dir)) {
         dr_fprintf(STDERR, "seedbox progress: expected " SEEDBOX_PROGRESS_INSTRUCTIONS
-                   " and " SEEDBOX_PROGRESS_POINTS ", each with a positive u32\n");
+                   " and " SEEDBOX_PROGRESS_POINTS ", each with a positive u32, then"
+                   " optionally " SEEDBOX_PROGRESS_COVERAGE " DIR\n");
         dr_abort();
         return;
     }
     /* Both supported ISAs use a 64-bit raw TLS word. Never encode the budget
      * as an instruction immediate: the entire u32 range fits in ptr_int_t. */
     instruction_budget = (ptr_int_t)parsed_budget;
+    if (coverage_dir != NULL)
+        coverage_lock = dr_mutex_create();
     points_per_block = parsed_points;
     drreg_options_t options = {sizeof(options), 3, false};
     DR_ASSERT(drmgr_init());
