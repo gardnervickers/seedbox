@@ -3140,6 +3140,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "seedbox-exec",
+ "seedbox-test",
  "serde_json",
  "tar",
  "tempfile",

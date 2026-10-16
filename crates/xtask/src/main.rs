@@ -7,34 +7,35 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 mod runtime;
 
-// Unit tests share one fd table. Coordinate executable writes/copies and ALL
-// subprocess users: CLOEXEC closes fork copies only at exec, not at parent
-// close (nor temp-file rename). Production build-assets is single-threaded;
-// separate integration-test processes cannot inherit these test-process fds.
-#[cfg(test)]
-fn fork_write_scope() -> std::sync::MutexGuard<'static, ()> {
-    static FORK_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    FORK_WRITE.lock().unwrap_or_else(|poisoned| {
-        eprintln!("xtask fork/write scope: stateless coordination lock re-acquired");
-        FORK_WRITE.clear_poison();
-        poisoned.into_inner()
-    })
-}
 #[cfg(all(test, target_os = "linux"))]
 mod fork_write_tests;
 
+// Spawns and executable writes go through the process-wide seedbox_exec scope
+// (runtime.rs writes the QEMU launcher and copies its closure). Production
+// build-assets is sequential; the unit tests share one descriptor table.
+fn guarded_status(command: &mut Command) -> io::Result<std::process::ExitStatus> {
+    seedbox_exec::spawn(command)?.wait()
+}
+/// Like `Command::output` with stdin null and stdout captured; stderr is
+/// whatever the caller set (std's default would capture it).
+fn guarded_output(command: &mut Command) -> io::Result<std::process::Output> {
+    command.stdin(Stdio::null()).stdout(Stdio::piped());
+    seedbox_exec::spawn(command)?.wait_with_output()
+}
+
 fn run(command: &mut Command) -> Result<()> {
-    let status = command
-        .stdout(Stdio::from(io::stderr()))
-        .stderr(Stdio::inherit())
-        .status()?;
+    let status = guarded_status(
+        command
+            .stdout(Stdio::from(io::stderr()))
+            .stderr(Stdio::inherit()),
+    )?;
     if !status.success() {
         return Err(format!("{command:?}: {status}").into());
     }
     Ok(())
 }
 fn capture(command: &mut Command) -> Result<String> {
-    let output = command.stderr(Stdio::inherit()).output()?;
+    let output = guarded_output(command.stderr(Stdio::inherit()))?;
     if !output.status.success() {
         return Err(format!("{command:?}: {}", output.status).into());
     }
@@ -75,12 +76,13 @@ fn mac(root: &Path, output: &Path) -> Result<()> {
     let client = candidates
         .into_iter()
         .find(|p| {
-            Command::new(p)
-                .arg("info")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
+            guarded_status(
+                Command::new(p)
+                    .arg("info")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .is_ok_and(|s| s.success())
         })
         .ok_or("start Podman or Docker Desktop to build Mac guest inputs")?;
     let image = "docker.io/nixos/nix:latest";
@@ -98,15 +100,17 @@ fn mac(root: &Path, output: &Path) -> Result<()> {
         return Err("invalid builder image ID".into());
     }
     let source = tempfile::tempdir_in(output)?;
-    let listed = command("git", root)
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
-        .output()?;
+    let listed = guarded_output(
+        command("git", root)
+            .args([
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ])
+            .stderr(Stdio::piped()),
+    )?;
     if !listed.status.success() {
         return Err("cannot list checkout files".into());
     }
@@ -244,7 +248,6 @@ mod tests {
 
     #[test]
     fn failed_assets_preserve_previous_publication_and_success_replaces_it() {
-        let _scope = fork_write_scope();
         let root = tempfile::tempdir().unwrap();
         let first = publish(root.path(), |out| {
             fs::write(out.join("kernel"), b"old")?;

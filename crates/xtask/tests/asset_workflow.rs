@@ -4,19 +4,20 @@ use serde_json::json;
 use std::{fs, path::Path, process::Command};
 
 fn git(root: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(root)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args([
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
+    let output = seedbox_test::process::output(
+        Command::new("git")
+            .current_dir(root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@invalid",
+            ])
+            .args(args),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -74,17 +75,18 @@ fn pull_request_compares_base_even_when_previous_head_is_unavailable() {
     ] {
         fs::write(root.join("event.json"), event.to_string()).unwrap();
         fs::write(root.join("output"), "").unwrap();
-        let result = Command::new("python3")
-            .args(["-c", &script])
-            .current_dir(root)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GITHUB_EVENT_PATH", root.join("event.json"))
-            .env("GITHUB_EVENT_NAME", name)
-            .env("GITHUB_OUTPUT", root.join("output"))
-            .env("ASSET_RUN_ID", "123")
-            .output()
-            .unwrap();
+        let result = seedbox_test::process::output(
+            Command::new("python3")
+                .args(["-c", &script])
+                .current_dir(root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GITHUB_EVENT_PATH", root.join("event.json"))
+                .env("GITHUB_EVENT_NAME", name)
+                .env("GITHUB_OUTPUT", root.join("output"))
+                .env("ASSET_RUN_ID", "123"),
+        )
+        .unwrap();
         assert!(
             result.status.success(),
             "{name}: {}",

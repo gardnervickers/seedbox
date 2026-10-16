@@ -46,7 +46,6 @@ impl Drop for Probe {
 
 #[test]
 fn cloexec_fork_copy_blocks_exec_after_close_and_after_temp_rename_until_child_exec() {
-    let _scope = crate::fork_write_scope();
     let executable = CString::new(std::env::current_exe().unwrap().as_os_str().as_bytes()).unwrap();
     let help = CString::new("--help").unwrap();
     let argv = [executable.as_ptr(), help.as_ptr(), std::ptr::null()];
@@ -78,6 +77,14 @@ fn cloexec_fork_copy_blocks_exec_after_close_and_after_temp_rename_until_child_e
         }
         let parent_fd = parent.as_raw_fd();
         let child_fd = child.as_raw_fd();
+        // The shared guard covers only the fork itself: the child copies this
+        // test's own deliberately open writer, never another test's
+        // executable being written under seedbox_exec::writing().
+        let fork_guard = seedbox_exec::spawning();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "deliberate raw fork held before exec; guarded across the fork"
+        )]
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
         if pid == 0 {
@@ -109,7 +116,9 @@ fn cloexec_fork_copy_blocks_exec_after_close_and_after_temp_rename_until_child_e
             pipe: parent,
         };
         let mut ack = [0];
-        probe.pipe.read_exact(&mut ack).unwrap();
+        let acked = probe.pipe.read_exact(&mut ack);
+        drop(fork_guard);
+        acked.unwrap();
         assert_eq!(ack, [1], "child inherited writable CLOEXEC fd");
         drop(file);
         if let Some(path) = path {
@@ -120,13 +129,15 @@ fn cloexec_fork_copy_blocks_exec_after_close_and_after_temp_rename_until_child_e
             inode,
             "rename preserves inode"
         );
-        let error = Command::new(&target).status().unwrap_err();
+        let error = crate::guarded_status(&mut Command::new(&target)).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY));
         eprintln!("controlled pre-exec ETXTBSY: temporary={temporary}, fd CLOEXEC, parent closed, errno={:?}", error.raw_os_error());
         let status = probe.reap();
         assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
         assert!(
-            Command::new(&target).status().unwrap().success(),
+            crate::guarded_status(&mut Command::new(&target))
+                .unwrap()
+                .success(),
             "same inode becomes executable after the inheriting child execs/reaps"
         );
     }

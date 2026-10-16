@@ -6,7 +6,6 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -46,15 +45,16 @@ impl Fixture {
         fs::create_dir(&tools).unwrap();
         for name in ["nix", "docker", "podman", "python3", "cc", "git"] {
             let executable = tools.join(name);
-            fs::write(
+            seedbox_test::process::install_executable(
                 &executable,
                 format!(
                     "#!/bin/sh\necho {name} >> '{}'\nexit 97\n",
                     marker.display()
-                ),
+                )
+                .as_bytes(),
+                0o755,
             )
             .unwrap();
-            fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let environment = std::env::vars_os()
             .filter(|(key, _)| !key.to_string_lossy().starts_with("SEEDBOX_"))

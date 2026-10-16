@@ -27,6 +27,9 @@ fn copy(source: &Path, destination: &Path) -> Result<()> {
         return Err(format!("runtime input {}: not a regular file", source.display()).into());
     }
     fs::create_dir_all(destination.parent().ok_or("missing destination parent")?)?;
+    // Closure members (QEMU, its loader) are executed later: no fork may copy
+    // a writable descriptor while the copy is open.
+    let _writing = seedbox_exec::writing();
     fs::copy(source, destination)?;
     let mode = if fs::metadata(source)?.permissions().mode() & 0o111 != 0 {
         0o755
@@ -206,6 +209,7 @@ fn linux_closure(qemu: &Path, destination: &Path) -> Result<()> {
     let script = format!("#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"${{0%/*}}/..\" && pwd)\nexec \"$root/lib/{loader_name}\" --library-path '$ORIGIN/../lib' \"$root/libexec/qemu-system-x86_64\" -L \"$root/share/qemu\" \"$@\"\n");
     let launcher = destination.join("bin/qemu-system-x86_64");
     fs::create_dir_all(launcher.parent().ok_or("launcher parent")?)?;
+    let _writing = seedbox_exec::writing();
     fs::write(&launcher, script)?;
     fs::set_permissions(launcher, fs::Permissions::from_mode(0o755))?;
     Ok(())
@@ -309,6 +313,7 @@ fn darwin_closure(qemu: &Path, destination: &Path) -> Result<()> {
     }
     let launcher = destination.join("bin/qemu-system-x86_64");
     fs::create_dir_all(launcher.parent().ok_or("launcher parent")?)?;
+    let _writing = seedbox_exec::writing();
     fs::write(&launcher, "#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"${0%/*}/..\" && pwd)\nexec \"$root/libexec/qemu-system-x86_64\" -L \"$root/share/qemu\" \"$@\"\n")?;
     fs::set_permissions(launcher, fs::Permissions::from_mode(0o755))?;
     Ok(())
@@ -388,7 +393,7 @@ pub(super) fn archive(root: &Path, input: &Path, output: &Path) -> Result<()> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
-    let mut child = command.spawn()?;
+    let mut child = seedbox_exec::spawn(&mut command)?;
     use std::io::Write;
     let result = child.stdin.take().ok_or("tar stdin")?.write_all(&list);
     let status = child.wait()?;
@@ -425,7 +430,6 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn real_qemu_elf_closure_is_relocated_without_executing_it() {
-        let _scope = crate::fork_write_scope();
         let qemu = std::env::var_os("SEEDBOX_TCG_QEMU")
             .expect("run host packaging checks inside nix develop");
         let directory = tempfile::tempdir().unwrap();
@@ -472,7 +476,6 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn launcher_preserves_inherited_qmp_and_gdb_socket_descriptors() {
-        let _scope = crate::fork_write_scope();
         use std::{
             io::{Read, Write},
             os::{fd::OwnedFd, unix::net::UnixStream},
@@ -552,14 +555,15 @@ mod tests {
         let gdb_fd: OwnedFd = gdb_child.into();
         let diagnostics = directory.path().join("probe.stderr");
         let mut child = Child(
-            Command::new(package.join("bin/qemu-system-x86_64"))
-                .env_clear()
-                .arg("--host-fixture")
-                .stdin(Stdio::from(qmp_fd))
-                .stdout(Stdio::from(gdb_fd))
-                .stderr(fs::File::create(&diagnostics).unwrap())
-                .spawn()
-                .unwrap(),
+            seedbox_exec::spawn(
+                Command::new(package.join("bin/qemu-system-x86_64"))
+                    .env_clear()
+                    .arg("--host-fixture")
+                    .stdin(Stdio::from(qmp_fd))
+                    .stdout(Stdio::from(gdb_fd))
+                    .stderr(fs::File::create(&diagnostics).unwrap()),
+            )
+            .unwrap(),
         );
         let mut bytes = [0; 3];
         qmp.read_exact(&mut bytes).unwrap_or_else(|error| {
@@ -612,7 +616,6 @@ mod tests {
     }
     #[test]
     fn packaged_members_preserve_bytes_and_modes_without_links_or_directories() {
-        let _scope = crate::fork_write_scope();
         use std::io::Read;
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("input");
@@ -624,11 +627,13 @@ mod tests {
         let output = directory.path().join("runtime.tar.gz");
         archive(directory.path(), &input, &output).unwrap();
         fs::remove_dir_all(&input).unwrap();
-        let decompressed = Command::new("gzip")
-            .arg("-dc")
-            .arg(&output)
-            .output()
-            .unwrap();
+        let decompressed = crate::guarded_output(
+            Command::new("gzip")
+                .arg("-dc")
+                .arg(&output)
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
         assert!(decompressed.status.success());
         let mut tar = tar::Archive::new(&decompressed.stdout[..]);
         let mut names = Vec::new();

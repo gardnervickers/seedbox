@@ -34,9 +34,7 @@ pub fn run(command: &mut Command, seconds: u64) -> Output {
         .stdout(File::create(&stdout).unwrap())
         .stderr(File::create(&stderr).unwrap());
     let mut child = OwnedChild(
-        command
-            .spawn()
-            .unwrap_or_else(|e| panic!("{command:?}: {e}")),
+        seedbox_test::process::spawn(command).unwrap_or_else(|e| panic!("{command:?}: {e}")),
     );
     let start = Instant::now();
     let status = loop {

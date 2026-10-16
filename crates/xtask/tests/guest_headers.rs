@@ -69,18 +69,18 @@ fn interpreter_arguments_path_permissions_and_recursion() {
     let interpreter = path.join("interpreter");
     let mut elf = b"\x7fELF".to_vec();
     elf.extend([0; 20]);
-    fs::write(&interpreter, elf).unwrap();
-    fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o755)).unwrap();
+    seedbox_test::process::install_executable(&interpreter, &elf, 0o755).unwrap();
     let script = path.join("entrypoint");
-    fs::write(
+    seedbox_test::process::install_executable(
         &script,
         format!(
             "#!  {}\targument with spaces  \nignored\n",
             interpreter.display()
-        ),
+        )
+        .as_bytes(),
+        0o755,
     )
     .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     let invoke = |arguments: &[&OsStr]| {
         run(
             Command::new(&probe)
@@ -121,9 +121,9 @@ fn interpreter_arguments_path_permissions_and_recursion() {
     fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
     code(&invoke(&[script.as_os_str()]), 2);
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::write(&script, format!("#!{}\n", script.display())).unwrap();
+    rewrite(&script, format!("#!{}\n", script.display()));
     code(&invoke(&[script.as_os_str()]), 2);
-    fs::write(&script, format!("#!{}", "x".repeat(300))).unwrap();
+    rewrite(&script, format!("#!{}", "x".repeat(300)));
     code(&invoke(&[script.as_os_str()]), 2);
     code(&invoke(&["missing".as_ref()]), 2);
     drop(directory);
@@ -220,4 +220,11 @@ fn compiler_words_preserve_quoting_without_expansion_or_comments() {
             OsString::from_vec(b"\xff path".to_vec())
         ],
     );
+}
+
+/// Replace an executable this test runs, with forks excluded until the
+/// rewritten file is closed.
+fn rewrite(path: &Path, contents: String) {
+    let _writing = seedbox_exec::writing();
+    fs::write(path, contents).unwrap();
 }

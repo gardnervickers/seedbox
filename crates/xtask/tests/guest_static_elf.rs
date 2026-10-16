@@ -2,7 +2,7 @@
 #![cfg(unix)]
 mod support;
 
-use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+use std::{fs, process::Command};
 use support::{diagnostic, root, run};
 
 struct Fixture(tempfile::TempDir);
@@ -10,9 +10,9 @@ impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let readelf = directory.path().join("readelf");
-        fs::write(
+        seedbox_test::process::install_executable(
             &readelf,
-            r##"#!/bin/sh
+            br##"#!/bin/sh
 [ "$#" = 3 ] && [ "$2" = -- ] && [ "$3" = "$EXPECTED_BINARY" ] || exit 90
 printf '%s\n' "$1" >> "$TRACE"
 if [ "$1" = "$FAIL_MODE" ]; then
@@ -26,9 +26,9 @@ case "$1" in
   *) exit 91 ;;
 esac
 "##,
+            0o755,
         )
         .unwrap();
-        fs::set_permissions(readelf, fs::Permissions::from_mode(0o755)).unwrap();
         Self(directory)
     }
 
