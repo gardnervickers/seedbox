@@ -11,10 +11,17 @@
  *   ext4           mounts /dev/vda at /mnt (commit=600, so only fsync or
  *                  sync commit): writes and fsyncs count and synced, then
  *                  writes dirty without any sync.
+ *   volume DIR N   files on an already-mounted volume (a named volume backed
+ *                  by the disk): reports the previous count, then for each of
+ *                  N rounds writes a 64 KiB file without sync, sleeps 1 s of
+ *                  guest time, and fsyncs it and DIR. Finally fsyncs count,
+ *                  reads every round file back and exits 0. It never waits.
  *
  * Report lines:
  *   DISK raw boot=N a=XX b=XX base=XX bytes=N
  *   DISK ext4 boot=N synced=S dirty=S          (S is "-" when absent)
+ *   DISK volume boot=N, DISK volume wrote R, DISK volume synced R,
+ *   DISK volume done count=N sum=HEX           (FNV-1a over all round files)
  * Failures print "DISK error <step>: <errno text>" and exit 70. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -137,8 +144,52 @@ static int ext4(void) {
     marker("DISK dirty %llu\n", next);
     wait_forever();
 }
+#define ROUND_BYTES (64 * 1024)
+static void fsync_path(const char *path, int flags) {
+    int fd = open(path, flags | O_CLOEXEC);
+    if (fd < 0 || fsync(fd) || close(fd)) fail(path);
+}
+static int volume(const char *dir, int rounds) {
+    char path[512], count_text[32];
+    snprintf(path, sizeof(path), "%s/count", dir);
+    slurp(path, count_text, sizeof(count_text));
+    unsigned long long count = strcmp(count_text, "-") ? strtoull(count_text, NULL, 10) : 0;
+    marker("DISK volume boot=%llu\n", count);
+    static unsigned char data[ROUND_BYTES];
+    for (int round = 1; round <= rounds; ++round) {
+        for (size_t i = 0; i < sizeof(data); ++i)
+            data[i] = (unsigned char)(i * 31u + (unsigned)round * 7u + count);
+        snprintf(path, sizeof(path), "%s/round-%d", dir, round);
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (fd < 0 || write(fd, data, sizeof(data)) != (ssize_t)sizeof(data) || close(fd))
+            fail(path);
+        marker("DISK volume wrote %llu\n", (unsigned long long)round);
+        struct timespec delay = {1, 0};
+        while (nanosleep(&delay, &delay) && errno == EINTR) {}
+        fsync_path(path, O_RDONLY);
+        fsync_path(dir, O_RDONLY | O_DIRECTORY);
+        marker("DISK volume synced %llu\n", (unsigned long long)round);
+    }
+    snprintf(path, sizeof(path), "%s/count", dir);
+    put(path, count + 1, 1);
+    fsync_path(dir, O_RDONLY | O_DIRECTORY);
+    uint64_t sum = 1469598103934665603ull;
+    for (int round = 1; round <= rounds; ++round) {
+        snprintf(path, sizeof(path), "%s/round-%d", dir, round);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) fail(path);
+        ssize_t length;
+        while ((length = read(fd, data, sizeof(data))) > 0)
+            for (ssize_t i = 0; i < length; ++i) sum = (sum ^ data[i]) * 1099511628211ull;
+        if (length < 0 || close(fd)) fail(path);
+    }
+    printf("DISK volume done count=%llu sum=%016llx\n", count + 1, (unsigned long long)sum);
+    fflush(stdout);
+    return 0;
+}
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "raw")) return raw(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "ext4")) return ext4();
+    if (argc == 4 && !strcmp(argv[1], "volume")) return volume(argv[2], atoi(argv[3]));
     return 64;
 }
