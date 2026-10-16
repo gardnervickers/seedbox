@@ -116,7 +116,25 @@ fn test_machine_suites_are_explicit_and_require_inputs() {
         inputs.insert(key, executable.to_string_lossy().into());
     }
     inputs.insert("SEEDBOX_TCG_ASSETS".into(), root.to_string_lossy().into());
+    // The public-service tests need the normal runtime package as well.
+    assert_eq!(
+        requirements(Suite::MachineTcg, &denied, &inputs, root),
+        [format!(
+            "{SERVICE_RUNTIME} is missing; run cargo xtask build-assets"
+        )]
+    );
+    fs::create_dir_all(root.join("build/assets")).unwrap();
+    fs::write(root.join(SERVICE_RUNTIME), "runtime").unwrap();
     assert!(requirements(Suite::MachineTcg, &denied, &inputs, root).is_empty());
+    // Both suites need the explicit backend-neutral cpu-loop input; TCG
+    // still needs no KVM to use it.
+    assert!(machine_inputs(Suite::MachinePv).contains(&CPU_LOOP_FIXTURE.to_string()));
+    let value = inputs.remove(CPU_LOOP_FIXTURE).unwrap();
+    assert_eq!(
+        requirements(Suite::MachineTcg, &denied, &inputs, root),
+        [format!("set {CPU_LOOP_FIXTURE} to an existing file")]
+    );
+    inputs.insert(CPU_LOOP_FIXTURE.into(), value);
     for key in [
         "SEEDBOX_TCG_CLOCK_APPLICATION",
         "SEEDBOX_TCG_NETWORK_APPLICATION",
@@ -563,6 +581,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
         "cargo test -p seedbox-test --locked --test guest_services -- --ignored tcg",
         "cargo test -p seedbox-test --locked --test prepared_application -- --ignored tcg",
         "cargo test -p seedbox-test --locked --test simulation_control -- --ignored tcg",
+        "cargo test -p seedbox-server --locked --features tcg-tests --test native_tcg_service --",
         "cargo test -p seedbox-machine-pv --locked --lib -- --ignored",
         "cargo test -p seedbox-machine-pv --locked --test native_machine -- --ignored",
         "cargo test -p seedbox-driver --locked --test native_driver -- --ignored pv",
@@ -572,6 +591,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
         "cargo test -p seedbox-test --locked --test guest_services -- --ignored pv",
         "cargo test -p seedbox-test --locked --test prepared_application -- --ignored pv",
         "cargo test -p seedbox-test --locked --test simulation_control -- --ignored pv",
+        "cargo test -p seedbox-server --locked --features kvm-tests --test native_pv_service --",
     ]
     .map(|line| {
         line.split_whitespace()
@@ -587,7 +607,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
             .map(|job| job.args.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        17
+        19
     );
     assert_eq!(
         runs.iter().map(|job| job.name.as_str()).collect::<Vec<_>>(),
@@ -600,6 +620,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
             "machine-tcg/seedbox-test/--test/guest_services",
             "machine-tcg/seedbox-test/--test/prepared_application",
             "machine-tcg/seedbox-test/--test/simulation_control",
+            "machine-tcg/seedbox-server/--test/native_tcg_service",
             "machine-pv-x86/seedbox-machine-pv/--lib/",
             "machine-pv-x86/seedbox-machine-pv/--test/native_machine",
             "machine-pv-x86/seedbox-driver/--test/native_driver",
@@ -608,12 +629,67 @@ fn test_machine_suites_do_not_force_serial_execution() {
             "machine-pv-x86/seedbox-test/--test/driver_guest_services",
             "machine-pv-x86/seedbox-test/--test/guest_services",
             "machine-pv-x86/seedbox-test/--test/prepared_application",
-            "machine-pv-x86/seedbox-test/--test/simulation_control"
+            "machine-pv-x86/seedbox-test/--test/simulation_control",
+            "machine-pv-x86/seedbox-server/--test/native_pv_service"
         ]
     );
     for job in runs {
         assert!(!job.args.iter().any(|arg| arg.starts_with("--test-threads")));
     }
+}
+#[test]
+fn test_machine_suites_schedule_feature_gated_public_service_targets_unfiltered() {
+    for (suite, feature, target) in [
+        ("machine-tcg", "tcg-tests", "native_tcg_service"),
+        ("machine-pv-x86", "kvm-tests", "native_pv_service"),
+    ] {
+        let runs = machine_suite_runs(
+            &suites(&[suite]),
+            &Environment::new(),
+            std::path::Path::new("/fixture"),
+        );
+        let service: Vec<_> = runs
+            .iter()
+            .filter(|job| job.args.iter().any(|a| a == "seedbox-server"))
+            .collect();
+        assert_eq!(service.len(), 1, "{suite}");
+        let args = &service[0].args;
+        assert_eq!(
+            args,
+            &strings(&[
+                "cargo",
+                "test",
+                "-p",
+                "seedbox-server",
+                "--locked",
+                "--features",
+                feature,
+                "--test",
+                target,
+                "--",
+            ])
+        );
+        // Feature-gated, not ignored: no --ignored and no libtest filter, so
+        // run_machine's --list counts and then runs the whole target.
+        assert!(!args.iter().any(|a| a == "--ignored"));
+        assert_eq!(args.last().unwrap(), "--");
+        assert_eq!(
+            service[0].name,
+            format!("{suite}/seedbox-server/--test/{target}")
+        );
+    }
+}
+#[test]
+fn test_service_release_build_targets_the_checkout_release_cli() {
+    let job = service_release_build(
+        &env(&[("PATH", "/bin"), ("CARGO_TARGET_DIR", "/elsewhere")]),
+        std::path::Path::new("/fixture"),
+    );
+    assert_eq!(
+        job.args,
+        strings(&["cargo", "build", "--release", "--locked", "-p", "seedbox"])
+    );
+    assert_eq!(job.environment, env(&[("PATH", "/bin")]));
 }
 #[test]
 fn test_unselected_machine_suites_have_no_runs() {

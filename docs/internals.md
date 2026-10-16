@@ -180,7 +180,12 @@ macOS/HVF or x86-64 KVM; Linux ARM64 KVM snapshot/restore is unsupported.
 Both architectures share the PV time page, event registers and lifecycle
 console; the x86 platform is described in its
 [worker module](../crates/seedbox-machine/src/machine/pv/worker/x86_64.rs).
-`nix build .#machinePvTestFixtures` builds the native test inputs.
+`nix build .#machinePvTestFixtures` builds the native test inputs. Its
+`bin/cpu-loop` is also `SEEDBOX_CPU_LOOP_FIXTURE`, which both the `machine-pv-x86`
+and `machine-tcg` suites submit through the public service
+(`seedbox-server` `native_pv_service` / `native_tcg_service`, gated by `kvm-tests`
+/ `tcg-tests`). Those tests need `build/assets` from `cargo xtask build-assets`;
+the checker builds the release CLI itself.
 
 Code: [PV example](../crates/seedbox-machine/examples/pv.rs),
 [shared example RNG](../crates/seedbox-machine/examples/support/mod.rs).

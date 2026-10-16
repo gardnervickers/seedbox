@@ -201,6 +201,22 @@ pub fn build_requirements(host: &Host, env: &Environment) -> Vec<String> {
         }
     }
 }
+/// The static x86-64 cpu-loop ELF that both named machine suites run through
+/// the public service (`machinePvTestFixtures/bin/cpu-loop`; building it needs
+/// no KVM). Backend-neutral: it selects no backend.
+pub const CPU_LOOP_FIXTURE: &str = "SEEDBOX_CPU_LOOP_FIXTURE";
+/// The normal runtime package the public-service tests submit through, from
+/// `cargo xtask build-assets`.
+pub const SERVICE_RUNTIME: &str = "build/assets/driver-runtime.tar.gz";
+/// The feature and `seedbox-server` integration target of a machine suite's
+/// public-service acceptance. These tests are feature-gated, not ignored.
+pub fn service_target(suite: Suite) -> Option<(&'static str, &'static str)> {
+    match suite {
+        Suite::MachineTcg => Some(("tcg-tests", "native_tcg_service")),
+        Suite::MachinePv => Some(("kvm-tests", "native_pv_service")),
+        _ => None,
+    }
+}
 pub fn machine_inputs(suite: Suite) -> Vec<String> {
     let backend = if suite == Suite::MachineTcg {
         "TCG"
@@ -242,6 +258,7 @@ pub fn machine_inputs(suite: Suite) -> Vec<String> {
     suffixes
         .into_iter()
         .map(|s| format!("SEEDBOX_{backend}_{s}"))
+        .chain([CPU_LOOP_FIXTURE.to_string()])
         .collect()
 }
 pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -> Vec<String> {
@@ -291,6 +308,10 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
                 );
             }
         }
+        need(
+            root.join(SERVICE_RUNTIME).is_file(),
+            format!("{SERVICE_RUNTIME} is missing; run cargo xtask build-assets"),
+        );
         return missing;
     }
     let mut guest_keys = Vec::new();

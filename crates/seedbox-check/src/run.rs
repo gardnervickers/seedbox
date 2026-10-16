@@ -311,7 +311,22 @@ pub fn coordinate<C: Commands>(
     if checks.failed || options.suites == [Suite::Portable] {
         return Ok(u8::from(checks.failed));
     }
-    for job in machine_suite_runs(&options.suites, &checks.environment, &checks.root) {
+    let mut runs = machine_suite_runs(&options.suites, &checks.environment, &checks.root);
+    if runs
+        .iter()
+        .any(|job| job.args.iter().any(|a| a == "seedbox-server"))
+    {
+        // The public-service tests submit through the checkout's normal
+        // release CLI; build it from these sources rather than trust a
+        // possibly stale target/release/seedbox. Without it, skip only them.
+        if checks
+            .run(service_release_build(&checks.environment, &checks.root))
+            .is_none()
+        {
+            runs.retain(|job| !job.args.iter().any(|a| a == "seedbox-server"));
+        }
+    }
+    for job in runs {
         run_machine(checks, job)?;
     }
     native(checks, host, &options.suites)?;
@@ -513,12 +528,45 @@ pub fn machine_suite_runs(suites: &[Suite], environment: &Environment, root: &Pa
                 root,
             ));
         }
+        // Public-service acceptance is feature-gated rather than ignored:
+        // build with the suite's feature and run the whole target unfiltered.
+        if let Some((feature, target)) = service_target(suite) {
+            result.push(Job::new(
+                &format!("{}/seedbox-server/--test/{target}", suite.name()),
+                words(&[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "seedbox-server",
+                    "--locked",
+                    "--features",
+                    feature,
+                    "--test",
+                    target,
+                    "--",
+                ]),
+                &environment,
+                root,
+            ));
+        }
         // native_tcg_driver retains unignored raw cases, so it was not part
         // of the old --ignored native selection. Keep its existing workspace
         // compile/execution classification unchanged; do not add an ignored
         // filter or independently schedule refused fixtures here.
     }
     result
+}
+/// `cargo build --release` of the CLI into the checkout's `target/release`,
+/// where the public-service tests find it; it embeds `build/assets`.
+pub fn service_release_build(environment: &Environment, root: &Path) -> Job {
+    let mut environment = environment.clone();
+    environment.remove("CARGO_TARGET_DIR");
+    Job::new(
+        "service-release-cli",
+        words(&["cargo", "build", "--release", "--locked", "-p", "seedbox"]),
+        &environment,
+        root,
+    )
 }
 fn list_selection(output: &str) -> usize {
     output.lines().filter(|l| l.ends_with(": test")).count()

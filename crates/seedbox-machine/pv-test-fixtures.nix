@@ -1,7 +1,8 @@
 # Static native PV test inputs for the guest architecture of `pkgs`. These are
 # test fixtures only; the factory never reads them. Each output path matches one
 # SEEDBOX_PV_* test input:
-#   bin/cpu-loop                     SEEDBOX_PV_PROGRESS_FIXTURE
+#   bin/cpu-loop                     SEEDBOX_PV_PROGRESS_FIXTURE and the
+#                                    backend-neutral SEEDBOX_CPU_LOOP_FIXTURE
 #   bin/prepared-fixture             SEEDBOX_PV_PREPARED_FIXTURE
 #   bin/driver-simulation-control    SEEDBOX_PV_DRIVER_CONTROL_APPLICATION
 #   bin/clock-faults                 SEEDBOX_PV_CLOCK_APPLICATION

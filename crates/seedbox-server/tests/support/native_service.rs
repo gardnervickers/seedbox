@@ -239,11 +239,11 @@ fn submission_with_machines(
     seed: u64,
     extra_machines: Vec<&'static str>,
 ) -> SubmitRequest {
-    // Both backends run the exact same static x86 cpu-loop ELF. The input's
-    // historical PV fixture-package name does not select a backend or need KVM.
+    // Both backends run the exact same static x86 cpu-loop ELF. The input is
+    // backend-neutral: it selects no backend and building it needs no KVM.
     let binary = fs::read(
-        std::env::var_os("SEEDBOX_PV_PROGRESS_FIXTURE")
-            .expect("machinePvTestFixtures/bin/cpu-loop fixture"),
+        std::env::var_os("SEEDBOX_CPU_LOOP_FIXTURE")
+            .expect("SEEDBOX_CPU_LOOP_FIXTURE: machinePvTestFixtures/bin/cpu-loop"),
     )
     .unwrap();
     let mut tar = tar::Builder::new(Vec::new());
@@ -327,7 +327,7 @@ fn fixture_submission(
     eprintln!(
         "native backend={}; fixture={:?}; executable={}; runtime_archive={}; selected_guest_assets={}; retained_qemu={:?}",
         label(backend),
-        std::env::var_os("SEEDBOX_PV_PROGRESS_FIXTURE"),
+        std::env::var_os("SEEDBOX_CPU_LOOP_FIXTURE"),
         executable.display(),
         archive.display(),
         selected.guest_assets.display(),
