@@ -11,7 +11,10 @@ pub use controller::{pv_controller_checkpoint, pv_controller_repeat};
 mod export;
 #[cfg(feature = "kvm-tests")]
 pub use export::pv_large_export_under_load;
+#[path = "native_held_checkpoint.rs"]
+mod held_checkpoint;
 use futures_util::StreamExt;
+pub use held_checkpoint::native_held_checkpoint;
 use seedbox_api::{
     ComparisonStatus, ExecutionTermination, Phase, SimulationSpec, SubmitRequest, TestVerdict,
 };
