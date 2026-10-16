@@ -296,6 +296,11 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     /// next slice. Returns the effective nominal speed after backend rounding
     /// and clamping, or `None` when healed.
     fn throttle(&mut self, speed_hz: Option<u64>) -> Result<Option<u64>, String>;
+    /// Bytes a retained snapshot of this machine holds (RAM image or its
+    /// on-disk artifact), for live checkpoint retention budgets.
+    fn snapshot_bytes(_: &Self::Snapshot) -> u64 {
+        0
+    }
     /// Whether the machine has a retained disk that disk errors can target.
     fn has_disk(&self) -> bool {
         false

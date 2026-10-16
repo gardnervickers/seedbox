@@ -263,6 +263,9 @@ impl WorldMachine for Mock {
     fn has_disk(&self) -> bool {
         true
     }
+    fn snapshot_bytes(_: &Self::Snapshot) -> u64 {
+        100
+    }
     fn disk_errors(
         &mut self,
         errors: Option<crate::virtio_block::InjectedErrors>,

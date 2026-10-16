@@ -639,6 +639,58 @@ mod tests {
     }
 
     #[test]
+    fn live_checkpoints_retain_within_a_byte_budget_and_release_frees_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("control");
+        let mut control = HostControl::bind(&endpoint).unwrap();
+        control.enable_checkpoints();
+        let boundary = Boundary::default();
+        control.request(
+            Request {
+                id: 1,
+                command: Command::SetRate {
+                    rate: PlaybackRate::Paused,
+                },
+            },
+            boundary,
+        );
+        let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
+        client.connect(&endpoint).unwrap();
+        // Two machines at 100 bytes each: one capture fits a 300-byte budget.
+        let mut world = crate::world_mock::world(&["a", "b"]);
+        let replay = crate::intervention::Replay::new(Default::default()).unwrap();
+        let mut owner = crate::checkpoint::LiveCheckpoints::with_budget(300);
+        let mut capture =
+            |id: u64, name: &str, owner: &mut crate::checkpoint::LiveCheckpoints<_>| {
+                let request = Request {
+                    id,
+                    command: Command::Checkpoint {
+                        request_id: name.into(),
+                    },
+                };
+                client.send(&serde_json::to_vec(&request).unwrap()).unwrap();
+                let mut faults =
+                    crate::faults::Faults::new(vec![], vec!["a".into(), "b".into()]).unwrap();
+                let mut admission = Admission::new(&mut faults, boundary, &|_| Ok(()))
+                    .with_checkpoint_support(true);
+                control
+                    .boundary_with_admission(boundary, &mut admission)
+                    .unwrap();
+                owner.capture_pending_with(&mut world, &replay, &mut control, |_, _| Ok(()))
+            };
+        assert!(capture(2, "first", &mut owner).unwrap());
+        assert_eq!(owner.used_bytes(), 200);
+        let refused = capture(3, "second", &mut owner).unwrap_err();
+        assert!(
+            refused.contains("budget exhausted: 200 of 300 bytes held, capture needs 200"),
+            "{refused}"
+        );
+        assert!(owner.get("second").is_none());
+        assert!(owner.release("first") && !owner.release("first"));
+        assert_eq!(owner.used_bytes(), 0);
+    }
+
+    #[test]
     fn checkpoint_acceptance_releases_paused_boundary_and_completion_is_explicit() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = directory.path().join("control");

@@ -263,6 +263,20 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
         .get(&request.prepared.kernel)
         .ok_or_else(|| Error::Integrity("missing retained kernel".into()))?;
     let kernel = fs::read(kernel_path)?;
+    // A reseed input moves later draws to the branch's streams: timers of
+    // every incarnation, and boot entropy of incarnations a later crash made.
+    let reseed: Option<(u64, u64, String)> = serde_json::from_value::<
+        Vec<seedbox_engine_protocol::input_program::BranchReceipt>,
+    >(report["input_branches"].clone())
+    .unwrap_or_default()
+    .into_iter()
+    .rev()
+    .find_map(|receipt| match receipt.action {
+        seedbox_engine_protocol::input_program::BranchAction::Reseed { seed, identity } => {
+            Some((receipt.at_ns, seed, identity))
+        }
+        _ => None,
+    });
     let mut remaining: std::collections::BTreeSet<_> =
         request.prepared.guests.keys().map(String::as_str).collect();
     for row in report["machines"]
@@ -299,7 +313,23 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
         } else {
             format!("reboot-entropy/{name}/{incarnation}")
         };
-        let seed = seedbox_arm64::application::world::entropy_seed(request.seed, &domain);
+        let booted_after_reseed = incarnation > 0
+            && reseed.as_ref().is_some_and(|(at, _, _)| {
+                row["crashed_incarnations"]
+                    .as_array()
+                    .and_then(|crashes| crashes.last())
+                    .and_then(|crash| crash["crashed_at_ns"].as_u64())
+                    .is_some_and(|crashed| crashed >= *at)
+            });
+        let seed = match &reseed {
+            Some((_, seed, identity)) if booted_after_reseed => {
+                seedbox_arm64::application::world::entropy_seed(
+                    *seed,
+                    &format!("checkpoint/{identity}/{domain}"),
+                )
+            }
+            _ => seedbox_arm64::application::world::entropy_seed(request.seed, &domain),
+        };
         let mut cmdline = seedbox_arm64::boot::DEFAULT_COMMAND_LINE.to_owned();
         if request.control.is_some_and(|control| {
             request
@@ -321,10 +351,17 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
         } else {
             format!("timer-jitter/{name}/{incarnation}")
         };
-        let timer_policy = seedbox_arm64::application::TimerPolicy {
-            seed: request.seed,
-            domain: timer_domain,
-            jitter_ns: request.schedule.timer_jitter_ns,
+        let timer_policy = match &reseed {
+            Some((_, seed, identity)) => seedbox_arm64::application::TimerPolicy {
+                seed: *seed,
+                domain: format!("checkpoint/{identity}/timer-jitter/{name}/{incarnation}"),
+                jitter_ns: request.schedule.timer_jitter_ns,
+            },
+            None => seedbox_arm64::application::TimerPolicy {
+                seed: request.seed,
+                domain: timer_domain,
+                jitter_ns: request.schedule.timer_jitter_ns,
+            },
         };
         for digest in [
             &evidence.witness,

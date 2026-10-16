@@ -134,6 +134,9 @@ impl WorldMachine for Machine {
     fn has_disk(&self) -> bool {
         Machine::has_disk(self)
     }
+    fn snapshot_bytes(snapshot: &Self::Snapshot) -> u64 {
+        snapshot.ram_bytes()
+    }
     fn disk_errors(
         &mut self,
         errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,

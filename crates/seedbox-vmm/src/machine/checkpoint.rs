@@ -50,6 +50,13 @@ struct Metadata<T> {
 }
 
 impl MachineSnapshot {
+    /// Bytes this snapshot retains: its RAM copy, or its persisted file.
+    pub fn ram_bytes(&self) -> u64 {
+        match self {
+            Self::Memory(saved) => saved.ram.size as u64,
+            Self::File(artifact) => std::fs::metadata(&artifact.path).map_or(0, |m| m.len()),
+        }
+    }
     /// Publish only a complete file. Coordinator metadata is written afterward.
     pub fn persist(&self, path: &Path) -> Result<(), String> {
         let Self::Memory(saved) = self else {

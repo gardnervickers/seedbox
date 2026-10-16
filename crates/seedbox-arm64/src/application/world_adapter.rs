@@ -673,6 +673,9 @@ impl WorldMachine for ArmMachine {
     fn has_disk(&self) -> bool {
         self.has_disk
     }
+    fn snapshot_bytes(snapshot: &Self::Snapshot) -> u64 {
+        std::fs::metadata(&snapshot.checkpoint.artifact).map_or(0, |m| m.len())
+    }
     fn disk_errors(
         &mut self,
         errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,

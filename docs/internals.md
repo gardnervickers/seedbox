@@ -283,6 +283,26 @@ operation extends the quiet period from its admission time, so a workload can
 let its system recover before checking it; generated faults already active
 still end on schedule. Code: [gate](../crates/seedbox-engine-core/src/input_program.rs).
 
+## Anchors, reseeds and branch captures
+
+Program inputs may be branch inputs as well as faults. An `anchor` at T
+establishes the timed checkpoint phase: branch inputs due at T run before the
+controls, triggers and ordinary inputs due then, and allocate no fault IDs.
+A `reseed` after an anchor at the same time changes every future draw (guest
+entropy through the PV page, timer and progress jitter, network streams, and
+the seed later crashes, reboots and disk faults derive from); effects already
+sampled stay. The anchor's time is a scheduling boundary whether or not
+anything is captured there, so a parent and its children share it.
+
+A run can stop at listed anchors (`capture_anchors`) to capture
+`checkpoint-anchor-<key>.json`. The capture stops inside the boundary, after
+the anchor's receipt and before its remaining inputs, without counting the
+boundary or entering the host; the resumed segment finishes the boundary and
+counts it once, as a cold run does. Branching from the capture with a reseed
+added after the anchor is identical to running the child cold. Code:
+[coordinator](../crates/seedbox-engine-core/src/world_windowed.rs),
+[program](../crates/seedbox-engine-core/src/input_program.rs).
+
 ## Property records
 
 Guest properties travel the same committed path as application output. Every
