@@ -313,3 +313,47 @@ fn ledger_survives_flattened_report_deserialization() {
     let report: Report = serde_json::from_str(&text).unwrap();
     assert_eq!(report.evidence.properties, l);
 }
+
+#[test]
+fn kernel_oom_and_crash_lines_violate_their_default_properties() {
+    let mut l = Ledger::default();
+    let kernel = |seq, message: &str| {
+        frame(
+            SUPERVISOR_SESSION,
+            seq,
+            json!({"kernel": {"message": message}}),
+        )
+    };
+    l.apply(
+        &kernel(
+            1,
+            "Out of memory: Killed process 412 (java) total-vm:1024kB",
+        ),
+        "n1",
+        0,
+        5,
+    );
+    l.apply(
+        &kernel(1, "worker[77]: segfault at 0 ip 0000 sp 0000 error 4"),
+        "n2",
+        0,
+        6,
+    );
+    assert_eq!(status(&l, DEFAULT_NO_OOM), PropertyStatus::Violated);
+    assert_eq!(status(&l, DEFAULT_NO_CRASH), PropertyStatus::Violated);
+    let oom = l.properties[DEFAULT_NO_OOM].first_failure.clone().unwrap();
+    assert_eq!(oom.origin.machine, "n1");
+    assert!(oom.details.unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .contains("java"));
+    // Applications cannot forge kernel evidence.
+    l.apply(
+        &frame(1, 1, json!({"kernel": {"message": "Killed process"}})),
+        "n3",
+        0,
+        7,
+    );
+    assert_eq!(l.error_count, 1);
+    assert_eq!(l.properties[DEFAULT_NO_OOM].failures, 1);
+}

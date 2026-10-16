@@ -327,6 +327,22 @@ int main(int argc, char **argv) {
     unsigned char large[PROPERTY_RECORD_BYTES + 1]; memset(large, 'x', sizeof(large));
     assert(property_frame(frame, 1, 1, large, PROPERTY_RECORD_BYTES) == strlen("SBX_PROP1 1 1 \n") + 2 * PROPERTY_RECORD_BYTES);
     assert(!property_frame(frame, 1, 1, large, sizeof(large)) && !property_frame(frame, 1, 1, large, 0));
+    /* Kernel log records: only OOM kills and crashes are evidence, and the
+     * message is escaped into one JSON string. */
+    char kernel[PROPERTY_RECORD_BYTES];
+    const char oom[] = "3,812,4096,-;Out of memory: Killed process 412 (ja\"va) total-vm:1kB\n SUBSYSTEM=x\n";
+    size_t kernel_size = kernel_record(kernel, oom, sizeof(oom) - 1);
+    kernel[kernel_size] = 0;
+    assert(!strcmp(kernel, "{\"kernel\":{\"message\":\"Out of memory: Killed process 412 (ja\\\"va) total-vm:1kB\"}}"));
+    const char segv[] = "6,9,1,-;worker[77]: segfault at 0 ip 1 sp 2 error 4\tx\n";
+    kernel_size = kernel_record(kernel, segv, sizeof(segv) - 1);
+    kernel[kernel_size] = 0;
+    assert(strstr(kernel, "segfault at 0") && strstr(kernel, "\\u0009x"));
+    const char fatal[] = "6,11,3,-;potentially unexpected fatal signal 6.\n";
+    assert(kernel_record(kernel, fatal, sizeof(fatal) - 1));
+    const char noise[] = "6,10,2,-;virtio_net virtio1 eth0: link up\n";
+    assert(!kernel_record(kernel, noise, sizeof(noise) - 1));
+    assert(!kernel_record(kernel, "no separator", 12));
     char sdk_directory[] = "/tmp/seedbox-sdk-XXXXXX"; assert(mkdtemp(sdk_directory));
     struct sockaddr_un sdk_address = {.sun_family = AF_UNIX};
     assert(snprintf(sdk_address.sun_path, sizeof(sdk_address.sun_path), "%s/run/sdk.sock", sdk_directory) > 0);

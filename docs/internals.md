@@ -303,6 +303,15 @@ Checkpoints carry the ledger, so a continuation keeps earlier records and
 sequencing. Reports include the ledger, and the world witness hashes it, only
 when a run produced records.
 
+The supervisor also reports default-property evidence on session 0: its main
+process's exit status, and kernel log lines (read from `/dev/kmsg`, from the
+application's start) about OOM kills and crashes. It enables the kernel's
+`print-fatal-signals`, because the translator re-raises an application fault
+with `kill()`, which the kernel's fault messages never report; that sysctl logs
+every process a core-dumping signal kills and never SIGKILL or SIGTERM, so
+injected stops and machine crashes are not evidence. The reducer turns these
+into `seedbox.no_out_of_memory_kills` and `seedbox.no_crashing_processes`.
+
 A flush reply means the supervisor has written every earlier record from that
 connection to the management port. Records sent before the main process exits
 are relayed before its exit record, but descendants still writing are not

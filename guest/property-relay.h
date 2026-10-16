@@ -35,4 +35,46 @@ static size_t property_frame(char frame[PROPERTY_FRAME_BYTES], uint32_t session,
     frame[used++] = '\n';
     return (size_t)used;
 }
+/* Kernel log lines that are property evidence: OOM kills, and crashes from
+ * faults the process did not handle. Injected stops and machine crashes log
+ * none of these. */
+static int kernel_evidence(const char *message) {
+    static const char *const markers[] = {
+        "Out of memory: Killed process", "Memory cgroup out of memory: Killed process",
+        "segfault at", "unhandled", "traps:", "potentially unexpected fatal signal",
+    };
+    for (size_t i = 0; i < sizeof(markers) / sizeof(*markers); ++i) {
+        if (strstr(message, markers[i])) return 1;
+    }
+    return 0;
+}
+
+/* Turn one /dev/kmsg record ("prio,seq,usec,flags;message\n...") into a
+ * supervisor record, {"kernel":{"message":"..."}}, when it is evidence.
+ * Returns the record length, or zero when the line is not evidence. */
+static size_t kernel_record(char record[PROPERTY_RECORD_BYTES], const char *kmsg, size_t size) {
+    const char *message = memchr(kmsg, ';', size);
+    if (!message) return 0;
+    message++;
+    size_t length = 0;
+    while (message + length < kmsg + size && message[length] != '\n') length++;
+    char line[512];
+    if (length >= sizeof(line)) length = sizeof(line) - 1;
+    memcpy(line, message, length);
+    line[length] = 0;
+    if (!kernel_evidence(line)) return 0;
+    static const char prefix[] = "{\"kernel\":{\"message\":\"", suffix[] = "\"}}";
+    size_t used = sizeof(prefix) - 1;
+    memcpy(record, prefix, used);
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)line[i];
+        /* JSON escaping; leave room for the suffix and an escape. */
+        if (used + 8 + sizeof(suffix) > PROPERTY_RECORD_BYTES) break;
+        if (c == '"' || c == '\\') { record[used++] = '\\'; record[used++] = (char)c; }
+        else if (c < 0x20 || c >= 0x7f) used += (size_t)snprintf(record + used, 8, "\\u%04x", c);
+        else record[used++] = (char)c;
+    }
+    memcpy(record + used, suffix, sizeof(suffix) - 1);
+    return used + sizeof(suffix) - 1;
+}
 #endif

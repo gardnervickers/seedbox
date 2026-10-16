@@ -135,6 +135,8 @@ pub enum Record {
     },
     /// Supervisor only: SDK messages it could not relay.
     Lost { reason: String, count: u64 },
+    /// Supervisor only: a kernel log line about an OOM kill or a crash.
+    Kernel { message: String },
 }
 
 impl Record {
@@ -159,7 +161,10 @@ impl Record {
         Ok(record)
     }
     fn supervisor_only(&self) -> bool {
-        matches!(self, Record::Exit { .. } | Record::Lost { .. })
+        matches!(
+            self,
+            Record::Exit { .. } | Record::Lost { .. } | Record::Kernel { .. }
+        )
     }
 }
 
@@ -276,6 +281,11 @@ pub struct ExitRecord {
 pub const RESERVED_PREFIX: &str = "seedbox.";
 /// Default property: no main process dies from a signal it did not handle.
 pub const DEFAULT_FATAL_SIGNAL: &str = "seedbox.main_process_not_killed_by_signal";
+/// Default property: the kernel kills no process for running out of memory.
+pub const DEFAULT_NO_OOM: &str = "seedbox.no_out_of_memory_kills";
+/// Default property: no process crashes on a fault it did not handle, as the
+/// kernel reports it (segfaults, unhandled exceptions, traps).
+pub const DEFAULT_NO_CRASH: &str = "seedbox.no_crashing_processes";
 
 /// Reduced property evidence. Checkpoints retain it whole; every field is
 /// ordered, so serialization is canonical.
@@ -427,6 +437,18 @@ impl Ledger {
                     code,
                     signal,
                 });
+            }
+            Record::Kernel { message } => {
+                let id = if message.contains("Killed process") {
+                    DEFAULT_NO_OOM
+                } else {
+                    DEFAULT_NO_CRASH
+                };
+                let kind = Kind::AlwaysOrUnreachable;
+                if self.declare(id.into(), kind, None, true, &origin) {
+                    let details = serde_json::json!({"message": message});
+                    self.evaluate(id, false, Some(details), &origin);
+                }
             }
             Record::Lost { reason, count } => {
                 let lost = match count {

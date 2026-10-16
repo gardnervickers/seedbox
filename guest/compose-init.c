@@ -345,6 +345,10 @@ static void write_sysctl(const char *path, unsigned long value) {
 }
 static void application_sysctls(uint32_t max_map_count) {
     write_sysctl("/proc/sys/vm/max_map_count", max_map_count);
+    /* Log every process a core-dumping signal kills, however it was raised:
+     * the translator re-raises an application fault with kill(), which the
+     * kernel's fault messages never see. SIGKILL and SIGTERM are not logged. */
+    write_sysctl("/proc/sys/kernel/print-fatal-signals", 1);
     write_sysctl("/proc/sys/fs/nr_open", APPLICATION_NOFILE + INSTRUMENTATION_FDS);
 }
 static void application_limits(void) {
@@ -570,9 +574,34 @@ static void property_read(struct property_client *client) {
     }
 }
 /* Relay every record already sent, without waiting for further writers. */
+static void kernel_log_read(void);
 static void property_drain(void) {
+    kernel_log_read();
     property_accept();
     for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) property_read(&property_clients[i]);
+}
+/* The kernel log, opened before the application starts and read from its
+ * end, so only messages from the run itself are evidence. */
+static int kernel_log = -1;
+/* Open while the bootstrap devtmpfs is mounted; the image's /dev has no kmsg. */
+static void kernel_log_open(void) {
+    kernel_log = open("/dev/kmsg", O_RDONLY|O_NONBLOCK|O_CLOEXEC);
+}
+/* Skip everything logged before the application starts. */
+static void kernel_log_skip(void) {
+    if (kernel_log >= 0 && lseek(kernel_log, 0, SEEK_END) < 0) die("seek kernel log");
+}
+static void kernel_log_read(void) {
+    char kmsg[8192], record[PROPERTY_RECORD_BYTES];
+    while (kernel_log >= 0) {
+        ssize_t n = read(kernel_log, kmsg, sizeof(kmsg));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && errno == EPIPE) continue; /* Overwritten records; read on. */
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (n <= 0) die("read kernel log");
+        size_t size = kernel_record(record, kmsg, (size_t)n);
+        if (size) property_relay(0, ++supervisor_seq, record, size);
+    }
 }
 static void property_exit(int status) {
     char record[64];
@@ -839,19 +868,20 @@ static void relay_management(pid_t *child) {
  * idle disconnect releases the current session; a partial or outstanding RPC
  * still fails closed. The listener stays open for a later connection. */
 static void service_channels(pid_t *child, int timeout) {
-    struct pollfd pfds[6 + PROPERTY_SESSIONS] = {
+    struct pollfd pfds[7 + PROPERTY_SESSIONS] = {
         {.fd = management, .events = POLLIN},
         {.fd = control_client < 0 ? control_listener : -1, .events = POLLIN},
         {.fd = control_client, .events = POLLIN},
         {.fd = application_outputs[0].read_fd, .events = POLLIN},
         {.fd = application_outputs[1].read_fd, .events = POLLIN},
-        {.fd = property_listener, .events = POLLIN}
+        {.fd = property_listener, .events = POLLIN},
+        {.fd = property_listener >= 0 ? kernel_log : -1, .events = POLLIN}
     };
     for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
-        pfds[6 + i] = (struct pollfd){.fd = property_listener >= 0 ? property_clients[i].fd : -1, .events = POLLIN};
+        pfds[7 + i] = (struct pollfd){.fd = property_listener >= 0 ? property_clients[i].fd : -1, .events = POLLIN};
     }
     struct timespec limit = {.tv_sec = timeout / 1000, .tv_nsec = timeout % 1000 * 1000000L};
-    int ready = ppoll(pfds, 6 + PROPERTY_SESSIONS, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
+    int ready = ppoll(pfds, 7 + PROPERTY_SESSIONS, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
     if (ready < 0) { if (errno != EINTR) die("poll management"); return; }
     if (!ready) return;
     if (pfds[1].revents & (POLLERR|POLLHUP|POLLNVAL)) { errno = EIO; die("control listener poll"); }
@@ -864,9 +894,11 @@ static void service_channels(pid_t *child, int timeout) {
     }
     if (pfds[5].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("SDK listener poll"); }
     if (pfds[5].revents & POLLIN) property_accept();
+    if (pfds[6].revents & POLLNVAL) { errno = EIO; die("kernel log poll"); }
+    if (pfds[6].revents & (POLLIN|POLLERR)) kernel_log_read();
     for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
-        if (pfds[6 + i].revents & POLLNVAL) { errno = EIO; die("SDK client poll"); }
-        if (pfds[6 + i].revents & (POLLIN|POLLHUP|POLLERR)) property_read(&property_clients[i]);
+        if (pfds[7 + i].revents & POLLNVAL) { errno = EIO; die("SDK client poll"); }
+        if (pfds[7 + i].revents & (POLLIN|POLLHUP|POLLERR)) property_read(&property_clients[i]);
     }
     if (pfds[0].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("management port poll"); }
     if (pfds[0].revents & (POLLIN|POLLHUP)) relay_management(child);
@@ -890,6 +922,7 @@ int main(void) {
     if (signal(SIGPIPE,SIG_IGN)==SIG_ERR) die("ignore relay SIGPIPE");
     directories("/dev", 0755);
     if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL)) die("mount bootstrap dev");
+    kernel_log_open();
     int console = open("/dev/console", O_RDWR);
     if (console >= 0) {
         /* /proc/self/fd/1 rechecks this inode's permissions on reopen, even
@@ -948,6 +981,7 @@ int main(void) {
     close(recipe_fd);
     relay_socket("/proc/cmdline", "/run/seedbox/control.sock");
     property_socket("/run/seedbox/sdk.sock");
+    kernel_log_skip();
     /* Everything before this point is fixed by the boot seed; the application
      * starts after the world is released under the run seed. */
     struct timespec wall_clock = seedbox_wall_clock_at(wall_clock_epoch, seedbox_world_time_ns());
