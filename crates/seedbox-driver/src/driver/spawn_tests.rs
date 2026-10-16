@@ -500,7 +500,7 @@ fn pending_spawn_rejects_host_add_without_mutation_then_allows_next_identity() {
         driver.control_plans(plans).unwrap();
         driver.flush_events().unwrap();
         let position = driver.position();
-        let published = driver.published.clone();
+        let published = driver.observations.published.clone();
         let queued = driver.events[&at(0)].len();
         let definitions = driver.definitions.clone();
         assert_eq!(
@@ -522,7 +522,7 @@ fn pending_spawn_rejects_host_add_without_mutation_then_allows_next_identity() {
             })
             .unwrap();
         assert_eq!(driver.position(), position);
-        assert_eq!(driver.published, published);
+        assert_eq!(driver.observations.published, published);
         assert_eq!(driver.events[&at(0)].len(), queued);
         assert_eq!(driver.definitions, definitions);
         assert_eq!(

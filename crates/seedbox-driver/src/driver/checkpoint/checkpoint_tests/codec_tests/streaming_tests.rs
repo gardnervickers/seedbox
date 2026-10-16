@@ -436,7 +436,7 @@ fn every_boundary_validation_precedes_first_capture_and_mapping() {
             2 => d.machines[2].rng = None,
             3 => d.quantum_ns = 0,
             4 => d.machines[2].reached = at(1),
-            5 => d.next_sequence = 0,
+            5 => d.observations.next_sequence = 0,
             _ => unreachable!(),
         }
         let runs = audit.runs.load(Ordering::SeqCst);

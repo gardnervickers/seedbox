@@ -38,9 +38,12 @@ where
             quantum_end,
             machines,
             events,
-            staged_events,
-            published: _,
-            next_sequence,
+            observations:
+                ObservationState {
+                    staged_events,
+                    published: _,
+                    next_sequence,
+                },
             boundary_index,
             completed_quanta,
             quantum_committed,

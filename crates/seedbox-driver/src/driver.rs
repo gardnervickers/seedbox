@@ -225,6 +225,15 @@ impl<E> From<ClockOverflow> for Error<E> {
 type MachineFactory<M> =
     Box<dyn FnMut(&MachineDefinition) -> Result<M, <M as Machine>::Error> + Send>;
 
+/// Already-committed descriptions owned by one observer session. These are
+/// distinct from Entry::staged, whose accepted outputs still drive execution.
+#[derive(Clone, Default)]
+struct ObservationState {
+    staged_events: Vec<Staged>,
+    published: Vec<Event>,
+    next_sequence: u64,
+}
+
 /// Owns simulation scheduling and shared time.
 ///
 /// # Machine time bases
@@ -298,9 +307,7 @@ pub struct Driver<M: Machine> {
     quantum_end: Timestamp,
     machines: Vec<Entry<M>>,
     events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
-    staged_events: Vec<Staged>,
-    published: Vec<Event>,
-    next_sequence: u64,
+    observations: ObservationState,
     boundary_index: u64,
     completed_quanta: u64,
     quantum_committed: bool,
@@ -526,9 +533,7 @@ where
             machines,
             rng,
             events: BTreeMap::new(),
-            staged_events: Vec::new(),
-            published: Vec::new(),
-            next_sequence: 0,
+            observations: ObservationState::default(),
             boundary_index: 0,
             completed_quanta: 0,
             quantum_committed: false,
@@ -640,7 +645,7 @@ where
     /// and the `upto` bounds passed to `step`). Worker count and playback rate
     /// never change it.
     pub fn drain_events(&mut self) -> Vec<Event> {
-        std::mem::take(&mut self.published)
+        std::mem::take(&mut self.observations.published)
     }
 
     fn stage_notices(&mut self) {
@@ -648,7 +653,8 @@ where
         for notice in &notices {
             Self::track_input(&mut self.inputs, notice);
         }
-        self.staged_events
+        self.observations
+            .staged_events
             .extend(notices.into_iter().map(Staged::Notice));
     }
 
@@ -724,7 +730,9 @@ where
     /// Record a Driver fact after any service facts confirmed before it.
     fn stage(&mut self, at: Timestamp, kind: EventKind) {
         self.stage_notices();
-        self.staged_events.push(Staged::Driver(at, kind));
+        self.observations
+            .staged_events
+            .push(Staged::Driver(at, kind));
     }
 
     /// Publish staged facts at the current committed position. A conversion
@@ -733,7 +741,7 @@ where
         self.stage_notices();
         let position = self.position();
         let mut result = Ok(());
-        for staged in std::mem::take(&mut self.staged_events) {
+        for staged in std::mem::take(&mut self.observations.staged_events) {
             let (at, kind) = match staged {
                 Staged::Driver(at, kind) => (at, kind),
                 Staged::Notice(notice) => match self.control.event(notice) {
@@ -746,13 +754,13 @@ where
                     }
                 },
             };
-            self.published.push(Event {
-                sequence: self.next_sequence,
+            self.observations.published.push(Event {
+                sequence: self.observations.next_sequence,
                 position,
                 at,
                 kind,
             });
-            self.next_sequence += 1;
+            self.observations.next_sequence += 1;
         }
         result
     }

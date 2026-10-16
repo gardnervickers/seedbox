@@ -259,7 +259,7 @@ where
             return Err(Error::PreparedInputMismatch);
         }
         let result = (|| {
-            let start = self.driver.published.len();
+            let start = self.driver.observations.published.len();
             self.driver
                 .inputs
                 .insert(prepared.key.clone(), LiveInput::Pending);
@@ -270,11 +270,14 @@ where
                 self.driver.now(),
             )?;
             self.driver.commit_boundary()?;
-            if !self.driver.published[start..].iter().any(|event| {
-                matches!((&event.kind, &prepared.outcome),
+            if !self.driver.observations.published[start..]
+                .iter()
+                .any(|event| {
+                    matches!((&event.kind, &prepared.outcome),
                     (EventKind::FaultAdmitted(fault), PreparedOutcome::Admitted(expected))
                     if fault == expected)
-            }) {
+                })
+            {
                 // Preflight was exact; divergence here is an implementation bug
                 // after mutation. Poison through finish_execution, before effects.
                 return Err(Error::Control(

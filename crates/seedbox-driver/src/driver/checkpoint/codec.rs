@@ -27,9 +27,7 @@ impl<S> Checkpoint<S> {
             quantum_end,
             machines,
             events,
-            staged_events,
-            published,
-            next_sequence,
+            observations,
             boundary_index,
             completed_quanta,
             quantum_committed,
@@ -82,9 +80,7 @@ impl<S> Checkpoint<S> {
             quantum_end,
             machines,
             events,
-            staged_events,
-            published,
-            next_sequence,
+            observations,
             boundary_index,
             completed_quanta,
             quantum_committed,
@@ -429,12 +425,12 @@ impl Checkpoint<SnapshotReference> {
                 visit(output)?;
             }
         }
-        for event in &self.published {
+        for event in &self.observations.published {
             if let EventKind::Output(output) = &event.kind {
                 visit(output)?;
             }
         }
-        for event in &self.staged_events {
+        for event in &self.observations.staged_events {
             if let Staged::Driver(_, EventKind::Output(output)) = event {
                 visit(output)?;
             }
@@ -453,8 +449,8 @@ impl Checkpoint<SnapshotReference> {
         )
         .map_err(CodecError::Invalid)?;
         validate_publications(
-            &self.published,
-            self.next_sequence,
+            &self.observations.published,
+            self.observations.next_sequence,
             Position {
                 boundary_index: self.boundary_index,
                 completed_quanta: self.completed_quanta,
@@ -538,10 +534,10 @@ impl Checkpoint<SnapshotReference> {
                 )?;
             }
         }
-        for event in &self.published {
+        for event in &self.observations.published {
             self.check_kind(&event.kind)?;
         }
-        for staged in &self.staged_events {
+        for staged in &self.observations.staged_events {
             match staged {
                 Staged::Driver(at, kind) => {
                     require(*at <= self.now, "staged fact time")?;
@@ -755,4 +751,19 @@ impl<T: Wire> Wire for Entry<T> {
         })
     }
 }
-wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,staged_events,published,next_sequence,boundary_index,completed_quanta,quantum_committed,playback,oracle,finished,oracle_stops,control,inputs,trigger_marker,definitions,network});
+// This grouping is transparent to the existing v4 byte order and depth budget.
+impl Wire for ObservationState {
+    fn put<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        self.staged_events.put(e)?;
+        self.published.put(e)?;
+        self.next_sequence.put(e)
+    }
+    fn get<R: Read>(d: &mut Decoder<R>) -> Result<Self> {
+        Ok(Self {
+            staged_events: Wire::get(d)?,
+            published: Wire::get(d)?,
+            next_sequence: Wire::get(d)?,
+        })
+    }
+}
+wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,observations,boundary_index,completed_quanta,quantum_committed,playback,oracle,finished,oracle_stops,control,inputs,trigger_marker,definitions,network});

@@ -550,7 +550,7 @@ fn decoded_invariants_reject_untrusted_complete_objects() {
             0 => c.quantum_ns = 0,
             1 => c.oracle = MachineId(100),
             2 => c.network = network::Network::new(NetworkConfig::default()),
-            3 => c.next_sequence = 0,
+            3 => c.observations.next_sequence = 0,
             4 => c.machines[0].machine = None,
             5 => c.machines[0].lifecycle.uncertain_failure(),
             6 => {

@@ -25,9 +25,7 @@ pub struct Checkpoint<S> {
     quantum_end: Timestamp,
     machines: Vec<Entry<S>>,
     events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
-    staged_events: Vec<Staged>,
-    published: Vec<Event>,
-    next_sequence: u64,
+    observations: ObservationState,
     boundary_index: u64,
     completed_quanta: u64,
     quantum_committed: bool,
@@ -318,8 +316,12 @@ where
             &self.network,
         )
         .map_err(|error| capture(Error::InvalidCheckpoint(error)))?;
-        validate_publications(&self.published, self.next_sequence, self.position())
-            .map_err(|error| capture(Error::InvalidCheckpoint(error)))?;
+        validate_publications(
+            &self.observations.published,
+            self.observations.next_sequence,
+            self.position(),
+        )
+        .map_err(|error| capture(Error::InvalidCheckpoint(error)))?;
         let rng = rng.clone();
         let machines = self
             .machines
@@ -348,9 +350,7 @@ where
             quantum_ns: self.quantum_ns,
             quantum_end: self.quantum_end,
             events: self.events.clone(),
-            staged_events: self.staged_events.clone(),
-            published: self.published.clone(),
-            next_sequence: self.next_sequence,
+            observations: self.observations.clone(),
             boundary_index: self.boundary_index,
             completed_quanta: self.completed_quanta,
             quantum_committed: self.quantum_committed,
@@ -410,8 +410,8 @@ where
         )
         .map_err(Error::InvalidCheckpoint)?;
         validate_publications(
-            &checkpoint.published,
-            checkpoint.next_sequence,
+            &checkpoint.observations.published,
+            checkpoint.observations.next_sequence,
             Position {
                 boundary_index: checkpoint.boundary_index,
                 completed_quanta: checkpoint.completed_quanta,
@@ -441,9 +441,7 @@ where
             quantum_end: checkpoint.quantum_end,
             machines,
             events: checkpoint.events.clone(),
-            staged_events: checkpoint.staged_events.clone(),
-            published: checkpoint.published.clone(),
-            next_sequence: checkpoint.next_sequence,
+            observations: checkpoint.observations.clone(),
             boundary_index: checkpoint.boundary_index,
             completed_quanta: checkpoint.completed_quanta,
             quantum_committed: checkpoint.quantum_committed,
