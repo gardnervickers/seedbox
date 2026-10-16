@@ -247,7 +247,7 @@ fn normal_driver_existing_example_run_and_replay_match() {
         .unwrap();
     let project = service.path().join("example");
     copy_project(&source, &project);
-    let id = service.run(&project.join("compose.yaml"));
+    let id = service.run(&project.join("seedbox.yaml"));
     fs::rename(&project, service.path().join("source-no-longer-available")).unwrap();
     service.replay(&id);
     service.close();
