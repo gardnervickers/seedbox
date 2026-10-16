@@ -210,6 +210,43 @@ fn attrs(item: &Item) -> &[syn::Attribute] {
         _ => &[],
     }
 }
+fn expand_alias(aliases: &BTreeMap<String, String>, path: &str) -> String {
+    let mut path = path.to_owned();
+    let mut seen = BTreeSet::new();
+    loop {
+        if let Some(rest) = path
+            .strip_prefix("self::")
+            .or_else(|| path.strip_prefix("super::"))
+        {
+            path = rest.into();
+            continue;
+        }
+        let (first, rest) = path.split_once("::").unwrap_or((&path, ""));
+        if !seen.insert(first.to_owned()) {
+            break;
+        }
+        let Some(prefix) = aliases.get(first) else {
+            break;
+        };
+        let next = if rest.is_empty() {
+            prefix.clone()
+        } else {
+            format!("{prefix}::{rest}")
+        };
+        if next == path {
+            break;
+        }
+        path = next;
+    }
+    path
+}
+fn import_target(aliases: &BTreeMap<String, String>, target: String) -> String {
+    if target.starts_with("super::") {
+        expand_alias(aliases, &target)
+    } else {
+        target
+    }
+}
 fn paths(tree: &UseTree, prefix: &str, aliases: &mut BTreeMap<String, String>) {
     match tree {
         UseTree::Path(path) => paths(&path.tree, &format!("{prefix}{}::", path.ident), aliases),
@@ -217,10 +254,12 @@ fn paths(tree: &UseTree, prefix: &str, aliases: &mut BTreeMap<String, String>) {
             if name.ident == "self" {
                 let target = prefix.trim_end_matches("::");
                 if let Some(name) = target.rsplit("::").next() {
-                    aliases.insert(name.into(), target.into());
+                    let resolved = import_target(aliases, target.into());
+                    aliases.insert(name.into(), resolved);
                 }
             } else {
-                aliases.insert(name.ident.to_string(), format!("{prefix}{}", name.ident));
+                let target = import_target(aliases, format!("{prefix}{}", name.ident));
+                aliases.insert(name.ident.to_string(), target);
             }
         }
         UseTree::Rename(rename) => {
@@ -229,6 +268,7 @@ fn paths(tree: &UseTree, prefix: &str, aliases: &mut BTreeMap<String, String>) {
             } else {
                 format!("{prefix}{}", rename.ident)
             };
+            let target = import_target(aliases, target);
             aliases.insert(rename.rename.to_string(), target);
         }
         UseTree::Group(group) => {
@@ -237,22 +277,30 @@ fn paths(tree: &UseTree, prefix: &str, aliases: &mut BTreeMap<String, String>) {
             }
         }
         UseTree::Glob(_) => {
-            let names: &[&str] = match prefix {
-                "std::thread::" => &["sleep", "sleep_until", "park_timeout"],
-                "std::time::" => &["Instant", "SystemTime"],
-                "tokio::time::" => &["Instant", "sleep", "sleep_until", "timeout", "timeout_at"],
+            let prefix = expand_alias(aliases, prefix.trim_end_matches("::"));
+            let names: &[&str] = match prefix.as_str() {
+                "std::thread" => &["sleep", "sleep_until", "park_timeout"],
+                "std::time" => &["Instant", "SystemTime"],
+                "tokio::time" => &["Instant", "sleep", "sleep_until", "timeout", "timeout_at"],
                 _ => &[],
             };
             for name in names {
-                aliases.insert((*name).into(), format!("{prefix}{name}"));
+                aliases.insert((*name).into(), format!("{prefix}::{name}"));
             }
         }
     }
 }
 fn imports(items: &[Item], aliases: &mut BTreeMap<String, String>) {
-    for item in items {
-        if let Item::Use(item) = item {
-            paths(&item.tree, "", aliases);
+    // Rust imports are not source-order dependent, including aliased globs.
+    for _ in 0..=items.len() {
+        let before = aliases.clone();
+        for item in items {
+            if let Item::Use(item) = item {
+                paths(&item.tree, "", aliases);
+            }
+        }
+        if *aliases == before {
+            break;
         }
     }
 }
@@ -344,12 +392,7 @@ impl Policy {
         }
     }
     fn resolve(&self, path: &str) -> String {
-        let (first, rest) = path.split_once("::").unwrap_or((path, ""));
-        match self.aliases.get(first) {
-            Some(prefix) if rest.is_empty() => prefix.clone(),
-            Some(prefix) => format!("{prefix}::{rest}"),
-            None => path.into(),
-        }
+        expand_alias(&self.aliases, path)
     }
     fn raw_path(&self, path: &str) -> bool {
         let path = self.resolve(path);
@@ -475,9 +518,15 @@ impl<'ast> Visit<'ast> for Policy {
         // closure or loop body supplied to it.
         let outer = std::mem::take(&mut self.active_allow);
         let before = self.aliases.clone();
-        for stmt in &block.stmts {
-            if let Stmt::Item(Item::Use(item)) = stmt {
-                paths(&item.tree, "", &mut self.aliases);
+        for _ in 0..=block.stmts.len() {
+            let previous = self.aliases.clone();
+            for stmt in &block.stmts {
+                if let Stmt::Item(Item::Use(item)) = stmt {
+                    paths(&item.tree, "", &mut self.aliases);
+                }
+            }
+            if self.aliases == previous {
+                break;
             }
         }
         visit::visit_block(self, block);
@@ -584,19 +633,29 @@ fn forced(path: &Path) -> bool {
 pub fn source(path: &Path, text: &str, test_context: bool) -> Result<Vec<Finding>, String> {
     source_with_pending(path, text, test_context, &[]).map(|report| report.findings)
 }
+#[cfg(test)]
 fn source_with_pending(
     path: &Path,
     text: &str,
     test_context: bool,
     registry: &[PendingSite],
 ) -> Result<Report, String> {
+    source_in_context(path, text, test_context, registry, &BTreeMap::new())
+}
+fn source_in_context(
+    path: &Path,
+    text: &str,
+    test_context: bool,
+    registry: &[PendingSite],
+    inherited: &BTreeMap<String, String>,
+) -> Result<Report, String> {
     let ast = syn::parse_file(text).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut aliases = BTreeMap::new();
+    let mut aliases = inherited.clone();
     imports(&ast.items, &mut aliases);
     let mut errors = Vec::new();
     let allows = exemptions(text, &mut errors);
     let mut policy = Policy {
-        test: test_context || forced(path),
+        test: test_context || forced(path) || test_attrs(&ast.attrs),
         owners: Vec::new(),
         statements: Vec::new(),
         aliases,
@@ -696,7 +755,11 @@ fn module_contexts(
     source_directory: &Path,
     test: bool,
     force: &mut BTreeSet<PathBuf>,
+    aliases: &BTreeMap<String, String>,
+    inherited: &mut BTreeMap<PathBuf, BTreeMap<String, String>>,
 ) {
+    let mut scope = aliases.clone();
+    imports(items, &mut scope);
     for item in items {
         let Item::Mod(module) = item else {
             continue;
@@ -704,8 +767,16 @@ fn module_contexts(
         let test = test || test_attrs(&module.attrs);
         let name = module.ident.to_string();
         if let Some((_, items)) = &module.content {
-            module_contexts(items, &directory.join(name), source_directory, test, force);
-        } else if test {
+            module_contexts(
+                items,
+                &directory.join(name),
+                source_directory,
+                test,
+                force,
+                &scope,
+                inherited,
+            );
+        } else {
             let override_path = module.attrs.iter().find_map(|attr| {
                 if !attr.path().is_ident("path") {
                     return None;
@@ -733,7 +804,30 @@ fn module_contexts(
             };
             for path in candidates {
                 if let Ok(path) = path.canonicalize() {
-                    force.insert(path);
+                    if test {
+                        force.insert(path.clone());
+                    }
+                    let target = inherited.entry(path).or_default();
+                    for (name, value) in &scope {
+                        let value = expand_alias(&scope, value);
+                        let known = |value: &str| {
+                            value == "std"
+                                || value == "tokio"
+                                || value.starts_with("std::")
+                                || value.starts_with("tokio::")
+                                || value.starts_with("seedbox_engine_protocol::host_clock::")
+                        };
+                        target
+                            .entry(name.clone())
+                            .and_modify(|old| {
+                                if (known(&value) && !known(old))
+                                    || (known(&value) == known(old) && value < *old)
+                                {
+                                    *old = value.clone();
+                                }
+                            })
+                            .or_insert(value);
+                    }
                 }
             }
         }
@@ -773,9 +867,15 @@ fn check_with_pending(root: &Path, registry: &[PendingSite]) -> Result<Report, S
                 .map_err(|error| format!("{}: {error}", path.display()))
         })
         .collect::<Result<_, _>>()?;
+    let mut inherited = BTreeMap::<PathBuf, BTreeMap<String, String>>::new();
     loop {
         let before = force.len();
+        let previous_aliases = inherited.clone();
         for (path, ast) in &asts {
+            if test_attrs(&ast.attrs) {
+                force.insert(path.clone());
+            }
+            let aliases = inherited.get(path).cloned().unwrap_or_default();
             let directory = if path
                 .file_name()
                 .is_some_and(|name| matches!(name.to_str(), Some("lib.rs" | "main.rs" | "mod.rs")))
@@ -790,20 +890,23 @@ fn check_with_pending(root: &Path, registry: &[PendingSite]) -> Result<Report, S
                 path.parent().unwrap(),
                 force.contains(path),
                 &mut force,
+                &aliases,
+                &mut inherited,
             );
         }
-        if force.len() == before {
+        if force.len() == before && inherited == previous_aliases {
             break;
         }
     }
     let mut report = Report::default();
     for (path, text) in files {
         let context = force.contains(&path);
-        let local = source_with_pending(
+        let local = source_in_context(
             path.strip_prefix(root).unwrap_or(&path),
             &text,
             context,
             registry,
+            &inherited.get(&path).cloned().unwrap_or_default(),
         )?;
         report.findings.extend(local.findings);
         report.pending_sites.extend(local.pending_sites);

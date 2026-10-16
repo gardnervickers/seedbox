@@ -4,6 +4,31 @@ fn findings(code: &str) -> Vec<Finding> {
 }
 
 #[test]
+fn file_level_test_and_test_support_gates_mark_helpers_but_not_negated_gates() {
+    for gate in ["test", "feature=\"test-support\""] {
+        assert_eq!(
+            findings(&format!(
+                "#![cfg({gate})]\nfn helper(){{std::thread::sleep(delay);}}"
+            ))
+            .len(),
+            1
+        );
+    }
+    assert!(findings("#![cfg(not(test))]\nfn production(){std::thread::sleep(delay);}").is_empty());
+}
+#[test]
+fn chained_aliases_and_aliased_globs_resolve_without_source_order_assumptions() {
+    for code in [
+        "use std::thread as host; use host::sleep as pause; #[test] fn f(){pause(delay);}",
+        "use host::sleep as pause; use std::thread as host; #[test] fn f(){pause(delay);}",
+        "use host::*; use std::thread as host; #[test] fn f(){sleep(delay);}",
+        "use std::thread::sleep as pause; #[cfg(test)] mod tests {use super::*; fn helper(){pause(delay);}}",
+        "use std::thread::sleep as pause; #[cfg(test)] mod tests {use super::pause; fn helper(){pause(delay);}}",
+        "use std::thread as host; #[cfg(test)] mod tests {use super::host::sleep as pause; fn helper(){pause(delay);}}",
+    ] { assert_eq!(findings(code).len(),1,"{code}"); }
+    assert!(findings("use a as b; use b as a; #[test] fn f(){a::unrelated();}").is_empty());
+}
+#[test]
 fn production_time_is_not_a_test_oracle() {
     assert!(findings(
         "fn serve() { let start=std::time::Instant::now(); std::thread::sleep(start.elapsed()); }"
@@ -316,6 +341,65 @@ fn cfg_test_trait_methods_are_not_missed() {
         findings("trait Example {#[cfg(test)] fn probe(){std::time::Instant::now();}} ").len(),
         1
     );
+}
+#[test]
+fn file_inner_gates_propagate_into_external_descendants() {
+    for gate in ["test", "feature=\"test-support\""] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for (name, code) in [
+            ("crates/a/src/lib.rs".to_owned(), "mod helper;".to_owned()),
+            (
+                "crates/a/src/helper.rs".to_owned(),
+                format!("#![cfg({gate})]\nfn helper(){{std::thread::sleep(delay);}} mod detail;"),
+            ),
+            (
+                "crates/a/src/helper/detail.rs".to_owned(),
+                "fn detail(){std::thread::sleep(delay);}".to_owned(),
+            ),
+        ] {
+            let file = root.join(name);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, code).unwrap();
+        }
+        assert_eq!(check_with_pending(root, &[]).unwrap().findings.len(), 2);
+    }
+}
+#[test]
+fn external_path_modules_inherit_chained_parent_imports_through_super() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name,code) in [
+        ("crates/a/src/lib.rs", "use std::thread as host; use host::sleep as pause; #[cfg(test)] #[path=\"check_body.rs\"] mod checks;"),
+        ("crates/a/src/check_body.rs", "use super::*; fn helper(){pause(delay);} mod deep;"),
+        ("crates/a/src/check_body/deep.rs", "use super::pause as again; fn helper(){again(delay);}"),
+    ] {let file=root.join(name);fs::create_dir_all(file.parent().unwrap()).unwrap();fs::write(file,code).unwrap();}
+    assert_eq!(check_with_pending(root, &[]).unwrap().findings.len(), 2);
+}
+#[test]
+fn shared_external_source_cannot_lose_a_known_time_import_from_another_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name, code) in [
+        ("crates/a/src/lib.rs", "mod a;mod b;"),
+        (
+            "crates/a/src/a.rs",
+            "use std::thread::sleep as pause;#[cfg(test)] #[path=\"shared.rs\"]mod checks;",
+        ),
+        (
+            "crates/a/src/b.rs",
+            "use crate::ordinary::pause;#[cfg(test)] #[path=\"shared.rs\"]mod checks;",
+        ),
+        (
+            "crates/a/src/shared.rs",
+            "use super::pause;fn helper(){pause(delay);}",
+        ),
+    ] {
+        let file = root.join(name);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, code).unwrap();
+    }
+    assert_eq!(check_with_pending(root, &[]).unwrap().findings.len(), 1);
 }
 #[test]
 fn external_path_attribute_and_nested_test_gate_are_followed() {
