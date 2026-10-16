@@ -1779,7 +1779,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
     // test-time: allow(measurement) -- Phase elapsed time is printed for diagnosis only; capture and success use guest evidence.
     let began = Instant::now();
-    let phase = |name: &str| {
+    let phase = move |name: &str| {
         // test-time: allow(measurement) -- Report phase duration, never a functional deadline or ordering assertion.
         eprintln!(
             "in-flight checkpoint phase: backend={} elapsed_ms={} {name}",
@@ -1787,10 +1787,9 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
             began.elapsed().as_millis()
         )
     };
-    // test-time: allow(hang-guard) -- Preserve the native proof's 600s infrastructure bound; success uses simulated capture position, output and witness, never elapsed host time.
-    tokio::time::timeout(Duration::from_secs(600), async {
+    native_case_with_guard(Duration::from_secs(600), move |owner| Box::pin(async move {
         let seed = 123;
-        let mut session = NativeSession::new(backend);
+        let session = owner.session(backend);
         session.bound = network_bound(backend);
         let request = network_submission(backend, session.root.path(), &session.store, seed);
         // An unmarked run only locates the transfer in simulated time.
@@ -1974,10 +1973,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
         let comparison = session.client.compare(&baseline, &restored).await.unwrap();
         assert_eq!(comparison.witness_matches, Some(true));
         eprintln!("in-flight checkpoint continuation: backend={} raw_equal=true witness={continued}", label(backend));
-        session.close().await;
-    })
-    .await
-    .expect("in-flight checkpoint exceeded its hang guard");
+    })).await;
 }
 /// Bytes and frames scheduled from `from` to `to`.
 fn scheduled(frames: &[seedbox_api::Frame], from: &str, to: &str) -> (u64, u64) {
@@ -1995,10 +1991,9 @@ fn scheduled(frames: &[seedbox_api::Frame], from: &str, to: &str) -> (u64, u64) 
 pub async fn pv_network_frames_are_observation_only() {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, PlaybackRate};
     let backend = DriverBackend::Pv;
-    // test-time: allow(hang-guard) -- Preserve the native proof's 900s infrastructure bound; frame payloads, counters and equal witnesses alone decide success.
-    tokio::time::timeout(Duration::from_secs(900), async {
+    native_case_with_guard(Duration::from_secs(900), move |owner| Box::pin(async move {
         let seed = 123;
-        let mut session = NativeSession::new(backend);
+        let session = owner.session(backend);
         session.bound = network_bound(backend);
         let request = network_submission(backend, session.root.path(), &session.store, seed);
         let plain = session.submit(request.clone(), 1).await;
@@ -2147,10 +2142,7 @@ pub async fn pv_network_frames_are_observation_only() {
         session.client.delete_checkpoint(&source, "saved").await.unwrap();
         session.client.delete(&source).await.unwrap();
         eprintln!("frames observation-only: witness={uninterrupted} fresh=on1,on4,off1,off4 restored=on4,off1");
-        session.close().await;
-    })
-    .await
-    .expect("frames observation proof exceeded its hang guard");
+    })).await;
 }
 fn runtime_backend(backend: DriverBackend) -> runtime_assets::Backend {
     match backend {
