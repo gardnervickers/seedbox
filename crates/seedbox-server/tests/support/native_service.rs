@@ -1526,6 +1526,42 @@ fn with_capture_marker(mut request: SubmitRequest, at_ns: u64) -> SubmitRequest 
     assert_eq!(request.spec.program.len(), 1);
     request
 }
+/// Every frame a simulation publishes after this subscription, until its
+/// stream closes, and the number of batch sequence numbers reported missing.
+async fn collect_frames(
+    client: &Client,
+    id: &seedbox_api::SimulationId,
+) -> tokio::task::JoinHandle<(Vec<seedbox_api::Frame>, u64)> {
+    use seedbox_api::FrameDelivery;
+    let mut stream = client.frames(id).await.unwrap();
+    tokio::spawn(async move {
+        let (mut frames, mut missing) = (Vec::new(), 0u64);
+        while let Some(delivery) = stream.next().await {
+            match delivery.unwrap() {
+                FrameDelivery::Frames { frames: batch, .. } => frames.extend(batch),
+                FrameDelivery::Gap { first, last } => missing += last - first + 1,
+                FrameDelivery::Closed => break,
+            }
+        }
+        (frames, missing)
+    })
+}
+/// Frames longer than ARP, the UDP token and bare TCP control segments
+/// carry stream data.
+const DATA_FRAME_BYTES: u32 = 128;
+/// Scheduled stream-data frames from `from` to `to`.
+fn data_frames<'a>(
+    frames: &'a [seedbox_api::Frame],
+    from: &'a str,
+    to: &'a str,
+) -> impl Iterator<Item = &'a seedbox_api::Frame> {
+    frames.iter().filter(move |f| {
+        f.from == from
+            && f.to == to
+            && f.fate == seedbox_api::FrameFate::Scheduled
+            && f.bytes > DATA_FRAME_BYTES
+    })
+}
 fn count(text: &str, marker: &str) -> usize {
     text.matches(marker).count()
 }
@@ -1597,6 +1633,8 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
         session
             .control(&source, "verify-paused-source", ControlCommand::SetRate { rate: PlaybackRate::Paused })
             .await;
+        // Every frame the source routes, subscribed before it first runs.
+        let source_frames = collect_frames(&session.client, &source).await;
         // Run to the boundary before the marker takes effect; it pauses there.
         session
             .control(&source, "run-to-marker", ControlCommand::PauseBeforeNextFault { rate: PlaybackRate::Unlimited })
@@ -1659,7 +1697,23 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
         assert_eq!(prefix[1], PROBE_READY);
         assert!(prefix[2].contains(PROBE_CLIENT_MID));
         assert_eq!(count(&prefix[2], PROBE_TCP_DONE), 0);
-        eprintln!("in flight at capture: oracle_sleep_pending=true client_stream_pending=true captured_ns={captured_ns} arp_ok_ns={tcp_begin_ns} tcp_ok_ns={tcp_end_ns}");
+        // The stream's data crossed both ways before capture, and routed
+        // frames were in flight across the capture boundary.
+        let (frames, missing) = source_frames.await.unwrap();
+        assert_eq!(missing, 0, "source frame batches omitted");
+        assert!(frames.iter().all(|f| f.sent_ns <= captured_ns));
+        let in_flight = frames
+            .iter()
+            .filter(|f| {
+                f.fate == seedbox_api::FrameFate::Scheduled
+                    && f.due_ns.is_some_and(|due| due > captured_ns)
+            })
+            .collect::<Vec<_>>();
+        let up = data_frames(&frames, "client", "server").count();
+        let down = data_frames(&frames, "server", "client").count();
+        eprintln!("in flight at capture: frames={} data_client_to_server={up} data_server_to_client={down} in_flight={in_flight:?} oracle_sleep_pending=true captured_ns={captured_ns}", frames.len());
+        assert!(up > 0 && down > 0, "stream data had not crossed both ways");
+        assert!(!in_flight.is_empty(), "no routed frame in flight at capture");
         session.client.delete_checkpoint(&source, "saved").await.unwrap();
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
@@ -1686,6 +1740,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
         assert!(!paused.stepping && !paused.terminal);
         assert_eq!(paused.position.completed_rounds, captured_rounds);
         assert_eq!(paused.position.simulated_time_ns, captured_ns);
+        let restored_frames = collect_frames(&session.client, &restored).await;
         session
             .control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited })
             .await;
@@ -1695,6 +1750,15 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
             final_ns
         );
         phase("restored_completed");
+        // The stream carried on from the captured connection: only frames
+        // routed after the capture, including more of its data, appear.
+        let (frames, missing) = restored_frames.await.unwrap();
+        assert_eq!(missing, 0, "restored frame batches omitted");
+        assert!(frames.iter().all(|f| f.sent_ns >= captured_ns));
+        let up = data_frames(&frames, "client", "server").count();
+        let down = data_frames(&frames, "server", "client").count();
+        eprintln!("restored frames={} data_client_to_server={up} data_server_to_client={down}", frames.len());
+        assert!(up > 0 && down > 0, "stream data did not continue after restore");
         // The continuation resumed every guest rather than restarting any: its
         // output is exactly the uninterrupted remainder after the capture.
         for (index, machine) in ["oracle", "server", "client"].into_iter().enumerate() {
