@@ -271,13 +271,25 @@ pub(super) fn get(id: &str, json: bool) -> Result<u8> {
                         m.ordinal.to_string(),
                         m.generation.to_string(),
                         match &m.plan {
-                            MemberPlan::Root { seed } => format!("root seed={seed}"),
+                            MemberPlan::Root { seed, kinds: None } => format!("root seed={seed}"),
+                            MemberPlan::Root {
+                                seed,
+                                kinds: Some(kinds),
+                            } => format!("root seed={seed} kinds={kinds:?}"),
                             MemberPlan::Branch {
                                 parent,
                                 anchor,
                                 choices,
+                                mutation,
                                 ..
-                            } => format!("branch {parent}@{anchor} choices={choices}"),
+                            } => {
+                                let mut plan =
+                                    format!("branch {parent}@{anchor} choices={choices}");
+                                if let Some(m) = mutation {
+                                    plan.push_str(&format!(" {m}"));
+                                }
+                                plan
+                            }
                         },
                         m.simulation
                             .as_ref()

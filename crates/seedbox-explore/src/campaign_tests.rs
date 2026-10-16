@@ -9,13 +9,18 @@ fn config() -> Config {
         fresh_permille: 250,
         corpus_limit: 3,
         anchors: vec![1_000, 2_000],
+        mutations: Mutations {
+            kinds: vec![MutationKind::Crash, MutationKind::Isolate],
+            targets: vec!["db".into()],
+            machines: vec!["db".into(), "oracle".into()],
+        },
     }
 }
 
 /// A synthetic workload: what a member shows depends only on its plan.
 fn feedback(plan: &Plan) -> Feedback {
     let (salt, anchors) = match &plan.kind {
-        PlanKind::Root { seed } => (*seed, vec![("a0".into(), 1_000), ("a1".into(), 2_000)]),
+        PlanKind::Root { seed, .. } => (*seed, vec![("a0".into(), 1_000), ("a1".into(), 2_000)]),
         PlanKind::Branch(b) => (
             b.reseed % 5,
             if b.anchor == "a0" {
@@ -53,6 +58,13 @@ fn feedback(plan: &Plan) -> Feedback {
             selected: (salt % 3) as usize,
             requested_at_ns: 1_800,
         }],
+        moments: vec![(
+            seedbox_control::EventSelector::Event {
+                name: "commit".into(),
+                machine: Some("db".into()),
+            },
+            1_900,
+        )],
     }
 }
 
@@ -89,14 +101,15 @@ fn plans_depend_on_results_not_completion_order() {
         assert_eq!(
             plan.kind,
             PlanKind::Root {
-                seed: 100 + i as u64
+                seed: 100 + i as u64,
+                kinds: None
             }
         );
     }
     let branches: Vec<&Branch> = forward
         .iter()
         .filter_map(|p| match &p.kind {
-            PlanKind::Branch(b) => Some(b),
+            PlanKind::Branch(b) => Some(&**b),
             _ => None,
         })
         .collect();
@@ -111,6 +124,17 @@ fn plans_depend_on_results_not_completion_order() {
         }
     }
     assert!(branches.iter().any(|b| !b.choices.is_empty()));
+    // Mutations select what the parent did after the anchor.
+    let mutated: Vec<&Mutation> = branches
+        .iter()
+        .filter_map(|b| b.mutation.as_ref())
+        .collect();
+    assert!(!mutated.is_empty());
+    for m in &mutated {
+        assert_eq!(m.target, "db");
+        assert_eq!(m.others, ["oracle"]);
+        assert!(DELAYS_NS.contains(&m.delay_ns) && DURATIONS_NS.contains(&m.duration_ns));
+    }
     assert!(nodes.iter().filter(|n| n.in_corpus).count() <= 3);
 }
 
@@ -219,6 +243,7 @@ fn branch_programs_keep_the_prefix_and_resample_the_suffix() {
             session: None,
             select: 1,
         }],
+        mutation: None,
     };
     let suffix = vec![
         Generated {
@@ -258,4 +283,58 @@ fn branch_programs_keep_the_prefix_and_resample_the_suffix() {
         ]
     );
     validate_program(&child, 10_000).unwrap();
+    // A mutation arms a fault and its teardown at the anchor.
+    let mut mutated = branch.clone();
+    mutated.mutation = Some(Mutation {
+        when: seedbox_control::EventSelector::Lifecycle {
+            machine: "db".into(),
+            transition: seedbox_control::Transition::Rebooted,
+        },
+        nth: 1,
+        delay_ns: 3_000_000,
+        kind: MutationKind::Isolate,
+        target: "db".into(),
+        duration_ns: 100_000_000,
+        others: vec!["oracle".into()],
+    });
+    let child = branch_program(&parent, &mutated, 6, Vec::new()).unwrap();
+    let keys: Vec<&str> = child.iter().map(|i| i.key.as_str()).collect();
+    assert_eq!(
+        &keys[..6],
+        [
+            "gen-0",
+            "a0",
+            "reseed-6",
+            "mutate-6",
+            "mutate-6-end",
+            "choice-6-0"
+        ]
+    );
+    validate_program(&child, 10_000).unwrap();
+}
+
+#[test]
+fn later_fresh_roots_sample_fault_kinds_and_generation_zero_stays_a_sweep() {
+    let mut config = config();
+    config.fresh_permille = 1000;
+    config.budget = 40;
+    let mut planner = Planner::new(config).unwrap();
+    planner.set_profile_kinds(3);
+    let mut sampled = 0;
+    while !planner.done() {
+        for plan in planner.next_batch() {
+            let PlanKind::Root { kinds, .. } = &plan.kind else {
+                panic!("all fresh");
+            };
+            if plan.generation == 0 {
+                assert!(kinds.is_none());
+            }
+            if let Some(kinds) = kinds {
+                assert!(!kinds.is_empty() && kinds.iter().all(|k| *k < 3));
+                sampled += 1;
+            }
+            planner.report(feedback(&plan)).unwrap();
+        }
+    }
+    assert!(sampled > 5 && sampled < 36, "{sampled}");
 }

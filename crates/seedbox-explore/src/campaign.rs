@@ -41,7 +41,46 @@ pub struct Config {
     pub corpus_limit: u32,
     /// Candidate anchor times every root declares, ascending.
     pub anchors: Vec<u64>,
+    /// Faults branches may place relative to what their parent did.
+    pub mutations: Mutations,
 }
+
+/// The fault mutations a campaign may make: which kinds, on which targets.
+/// Empty kinds make none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mutations {
+    pub kinds: Vec<MutationKind>,
+    pub targets: Vec<String>,
+    /// Every machine, for isolating a target from the rest.
+    pub machines: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MutationKind {
+    /// Crash the target, rebooting it after the duration.
+    Crash,
+    /// Partition the target from every other machine for the duration.
+    Isolate,
+    /// Pause the target's whole machine for the duration.
+    Pause,
+}
+
+/// A fault placed `delay_ns` after the `nth` occurrence of `when`, which the
+/// parent was seen doing after the branch's anchor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mutation {
+    pub when: seedbox_control::EventSelector,
+    pub nth: u64,
+    pub delay_ns: u64,
+    pub kind: MutationKind,
+    pub target: String,
+    pub duration_ns: u64,
+    /// Every other machine, which an isolated target is cut off from.
+    pub others: Vec<String>,
+}
+
+const DELAYS_NS: [u64; 6] = [0, 1_000_000, 3_000_000, 10_000_000, 30_000_000, 100_000_000];
+const DURATIONS_NS: [u64; 3] = [100_000_000, 300_000_000, 1_000_000_000];
 
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
@@ -84,11 +123,13 @@ pub struct Plan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanKind {
-    /// A fresh simulation with this seed and the declared anchors.
+    /// A fresh simulation with this seed and the declared anchors. With
+    /// `kinds`, only those entries of the fault profile (swarm testing).
     Root {
         seed: u64,
+        kinds: Option<Vec<u32>>,
     },
-    Branch(Branch),
+    Branch(Box<Branch>),
 }
 
 /// Continue `parent` from its capture at `anchor`, reseeded, with choice
@@ -101,6 +142,7 @@ pub struct Branch {
     pub reseed: u64,
     pub identity: String,
     pub choices: Vec<ChoiceOverride>,
+    pub mutation: Option<Mutation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -139,6 +181,8 @@ pub struct Feedback {
     /// Captured anchors it can be branched from, by key and time.
     pub anchors: Vec<(String, u64)>,
     pub choices: Vec<ObservedChoice>,
+    /// Things it did that a trigger can select, with when it first did them.
+    pub moments: Vec<(seedbox_control::EventSelector, u64)>,
 }
 
 /// The features a member's property evidence and choices show. Event counts
@@ -161,12 +205,26 @@ pub fn features(ledger: Option<&Ledger>, choices: &[ObservedChoice]) -> Vec<Feat
             }
         }
         for (name, count) in &ledger.events {
+            let first = ledger.event_first.get(name).map(|o| o.time_ns);
             for bucket in 0..u64::BITS - count.leading_zeros() {
                 out.push(Feature {
                     key: format!("event:{name}:{bucket}"),
-                    at_ns: None,
+                    // Only the first occurrence has a position.
+                    at_ns: if bucket == 0 { first } else { None },
                 });
             }
+        }
+        for (key, origin) in &ledger.states {
+            out.push(Feature {
+                key: format!("state:{key}"),
+                at_ns: Some(origin.time_ns),
+            });
+        }
+        for (key, origin) in &ledger.transitions {
+            out.push(Feature {
+                key: format!("transition:{key}"),
+                at_ns: Some(origin.time_ns),
+            });
         }
         for (machine, origin) in &ledger.setup {
             out.push(Feature {
@@ -224,7 +282,13 @@ struct Entry {
     depth: u32,
     anchors: Vec<(String, u64)>,
     choices: Vec<ObservedChoice>,
+    moments: Vec<(seedbox_control::EventSelector, u64)>,
     novelty: u32,
+    features: Vec<String>,
+    /// Its failure features, so re-finding a known failure costs less budget.
+    fails: Vec<String>,
+    /// Features no more than two members had when it was folded.
+    rarity: u32,
     /// When its earliest novel timed feature appeared.
     interest_ns: Option<u64>,
     picks: u32,
@@ -244,7 +308,16 @@ pub struct Planner {
     nodes: Vec<Node>,
     /// Members no plan can branch from any more: their captures may go.
     released: Vec<u32>,
+    /// How many folded members showed each feature.
+    counts: BTreeMap<String, u32>,
+    /// Entries in the fault profile, for swarm roots.
+    profile_kinds: u32,
 }
+
+/// Members at or below this count make a feature rare.
+const RARE: u32 = 2;
+/// A known failure is re-found cheaply after this many members.
+const KNOWN_FAILURE: u32 = 3;
 
 impl Planner {
     pub fn new(config: Config) -> Result<Self, String> {
@@ -261,10 +334,22 @@ impl Planner {
             corpus: Vec::new(),
             nodes: Vec::new(),
             released: Vec::new(),
+            counts: BTreeMap::new(),
+            profile_kinds: 0,
         })
     }
     pub fn config(&self) -> &Config {
         &self.config
+    }
+    /// Set the mutations once the campaign knows its machines; plans made
+    /// before then mutate nothing.
+    pub fn set_mutations(&mut self, mutations: Mutations) {
+        self.config.mutations = mutations;
+    }
+    /// The fault profile's entry count; with two or more, later fresh roots
+    /// may sample a subset of them.
+    pub fn set_profile_kinds(&mut self, kinds: u32) {
+        self.profile_kinds = kinds;
     }
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
@@ -306,9 +391,21 @@ impl Planner {
             let kind = if fresh {
                 let seed = self.config.first_seed + self.roots;
                 self.roots += 1;
-                PlanKind::Root { seed }
+                // Generation 0 stays a plain sweep; later fresh roots may
+                // try a subset of the fault kinds.
+                let kinds = (generation > 0 && self.profile_kinds > 1 && self.rng.chance(500))
+                    .then(|| {
+                        let mut kinds: Vec<u32> = (0..self.profile_kinds)
+                            .filter(|_| self.rng.chance(500))
+                            .collect();
+                        if kinds.is_empty() {
+                            kinds.push(self.rng.below(u64::from(self.profile_kinds)) as u32);
+                        }
+                        kinds
+                    });
+                PlanKind::Root { seed, kinds }
             } else {
-                PlanKind::Branch(self.branch(ordinal))
+                PlanKind::Branch(Box::new(self.branch(ordinal)))
             };
             let (parent, anchor) = match &kind {
                 PlanKind::Branch(b) => (Some(b.parent), Some(b.anchor.clone())),
@@ -337,14 +434,41 @@ impl Planner {
     /// Weighted by novelty, against how often it was already picked and how
     /// deep it already is, so short prefixes and fresh discoveries win.
     fn branch(&mut self, ordinal: u32) -> Branch {
+        // A portfolio: half the picks favour novelty, a quarter are uniform,
+        // and a quarter favour rare features. Any member whose failures are
+        // all already well known costs a quarter as much budget.
+        let strategy = self.rng.below(4);
+        let counts = &self.counts;
         let weights: Vec<u64> = self
             .corpus
             .iter()
             .map(|e| {
-                (1 + u64::from(e.novelty)) * 64
-                    / (1 + u64::from(e.picks))
-                    / (1 + u64::from(e.depth))
-                    + 1
+                let weight = match strategy {
+                    0 | 1 => {
+                        (1 + u64::from(e.novelty)) * 64
+                            / (1 + u64::from(e.picks))
+                            / (1 + u64::from(e.depth))
+                            + 1
+                    }
+                    2 => 16,
+                    _ => {
+                        e.features
+                            .iter()
+                            .map(|f| 256 / u64::from(*counts.get(f).unwrap_or(&1)).max(1))
+                            .sum::<u64>()
+                            / (1 + u64::from(e.picks))
+                            + 1
+                    }
+                };
+                let known = !e.fails.is_empty()
+                    && e.fails
+                        .iter()
+                        .all(|f| counts.get(f).is_some_and(|n| *n >= KNOWN_FAILURE));
+                if known {
+                    (weight / 4).max(1)
+                } else {
+                    weight
+                }
             })
             .collect();
         let mut pick = self.rng.below(weights.iter().sum());
@@ -388,6 +512,46 @@ impl Planner {
                 select: (c.selected + shift) % c.alternatives,
             });
         }
+        let later: Vec<(seedbox_control::EventSelector, u64)> = entry
+            .moments
+            .iter()
+            .filter(|(_, at)| *at > at_ns)
+            .cloned()
+            .collect();
+        let mutations = &self.config.mutations;
+        let mutation = if !later.is_empty()
+            && !mutations.kinds.is_empty()
+            && !mutations.targets.is_empty()
+            && self.rng.chance(600)
+        {
+            let (when, _) = later[self.rng.below(later.len() as u64) as usize].clone();
+            let near = when
+                .machines()
+                .into_iter()
+                .find(|m| mutations.targets.iter().any(|t| t == m))
+                .map(str::to_owned);
+            let target = match near {
+                Some(machine) if self.rng.chance(500) => machine,
+                _ => mutations.targets[self.rng.below(mutations.targets.len() as u64) as usize]
+                    .clone(),
+            };
+            Some(Mutation {
+                when,
+                nth: if self.rng.chance(250) { 2 } else { 1 },
+                delay_ns: DELAYS_NS[self.rng.below(DELAYS_NS.len() as u64) as usize],
+                kind: mutations.kinds[self.rng.below(mutations.kinds.len() as u64) as usize],
+                duration_ns: DURATIONS_NS[self.rng.below(DURATIONS_NS.len() as u64) as usize],
+                others: mutations
+                    .machines
+                    .iter()
+                    .filter(|m| **m != target)
+                    .cloned()
+                    .collect(),
+                target,
+            })
+        } else {
+            None
+        };
         Branch {
             parent: entry.ordinal,
             anchor,
@@ -395,6 +559,7 @@ impl Planner {
             reseed: self.rng.next(),
             identity: format!("campaign-{:x}-{ordinal}", self.config.seed),
             choices,
+            mutation,
         }
     }
 
@@ -428,6 +593,14 @@ impl Planner {
                 }
             }
         }
+        for feature in &feedback.features {
+            *self.counts.entry(feature.key.clone()).or_default() += 1;
+        }
+        let rarity = feedback
+            .features
+            .iter()
+            .filter(|f| self.counts.get(&f.key).is_some_and(|n| *n <= RARE))
+            .count() as u32;
         let index = feedback.ordinal as usize;
         let parent = self.nodes[index].parent;
         let depth = parent
@@ -436,13 +609,25 @@ impl Planner {
         let node = &mut self.nodes[index];
         node.outcome = Some(feedback.outcome);
         node.novelty = novelty;
-        if novelty > 0 && !feedback.anchors.is_empty() {
+        // Novel members join the corpus, and so do members with rare
+        // features, so a useful state survives once the vocabulary saturates.
+        if (novelty > 0 || rarity > 0) && !feedback.anchors.is_empty() {
             node.in_corpus = true;
+            let fails = feedback
+                .features
+                .iter()
+                .filter(|f| f.key.ends_with(":fails"))
+                .map(|f| f.key.clone())
+                .collect();
             self.corpus.push(Entry {
                 ordinal: feedback.ordinal,
                 depth,
                 anchors: feedback.anchors,
                 choices: feedback.choices,
+                moments: feedback.moments,
+                features: feedback.features.iter().map(|f| f.key.clone()).collect(),
+                fails,
+                rarity,
                 novelty,
                 interest_ns,
                 picks: 0,
@@ -451,7 +636,7 @@ impl Planner {
                 let evict = (0..self.corpus.len())
                     .min_by_key(|&i| {
                         let e = &self.corpus[i];
-                        (e.novelty, std::cmp::Reverse(e.picks), e.ordinal)
+                        (e.novelty + e.rarity, std::cmp::Reverse(e.picks), e.ordinal)
                     })
                     .expect("a nonempty corpus");
                 let gone = self.corpus.remove(evict).ordinal;
@@ -462,6 +647,75 @@ impl Planner {
             self.released.push(feedback.ordinal);
         }
     }
+}
+
+/// A mutation as two trigger inputs: the fault after the selected moment,
+/// and its teardown after the fault's own effect.
+fn mutation_inputs(
+    m: &Mutation,
+    ordinal: u32,
+    at_ns: u64,
+    timeout_ns: u64,
+) -> Result<Vec<seedbox_engine_protocol::input_program::TimedInput>, String> {
+    use seedbox_control::{Action, EventSelector, TriggerSpec};
+    use seedbox_engine_protocol::input_program::{InputAction, RuleAction, TimedInput};
+    let key = format!("mutate-{ordinal}");
+    let (fault, undo) = match m.kind {
+        MutationKind::Crash => (
+            Action::Crash {
+                machine: m.target.clone(),
+            },
+            Action::Reboot {
+                machine: m.target.clone(),
+            },
+        ),
+        MutationKind::Pause => (
+            Action::Pause {
+                machine: m.target.clone(),
+            },
+            Action::Resume {
+                machine: m.target.clone(),
+            },
+        ),
+        MutationKind::Isolate => (
+            Action::Partition {
+                handle: key.clone(),
+                left: vec![m.target.clone()],
+                right: m.others.clone(),
+            },
+            Action::Heal {
+                handle: key.clone(),
+            },
+        ),
+    };
+    let rule = |key: String, spec: TriggerSpec| TimedInput {
+        key,
+        at_ns,
+        action: InputAction::Rule(RuleAction::Trigger(Box::new(spec))),
+        timeout_ns,
+    };
+    Ok(vec![
+        rule(
+            key.clone(),
+            TriggerSpec {
+                when: m.when.clone(),
+                nth: m.nth,
+                delay_ns: m.delay_ns,
+                within_ns: None,
+                then: fault,
+            },
+        ),
+        rule(
+            format!("{key}-end"),
+            TriggerSpec {
+                when: EventSelector::Fired { trigger: key },
+                nth: 1,
+                delay_ns: m.duration_ns,
+                within_ns: None,
+                then: undo,
+            },
+        ),
+    ])
 }
 
 /// A root's program: its authored inputs and the declared candidate anchors.
@@ -519,6 +773,9 @@ pub fn branch_program(
         .map(|i| i.key.as_str())
         .collect();
     let mut pending: Vec<TimedInput> = Vec::new();
+    if let Some(m) = &branch.mutation {
+        pending.extend(mutation_inputs(m, ordinal, branch.at_ns, timeout_ns)?);
+    }
     pending.push(TimedInput {
         key: format!("reseed-{ordinal}"),
         at_ns: branch.at_ns,

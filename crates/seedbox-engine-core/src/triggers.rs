@@ -114,6 +114,15 @@ pub enum Observed {
     SetupComplete {
         machine: String,
     },
+    State {
+        machine: String,
+        name: String,
+        value: String,
+    },
+    /// A typed trigger, by input key, admitted its effect.
+    Fired {
+        key: String,
+    },
     Lifecycle {
         machine: String,
         transition: Transition,
@@ -152,6 +161,11 @@ impl Observed {
                 holds: *condition || matches!(kind, Kind::Reachable | Kind::Unreachable),
             },
             Record::SetupComplete { .. } => Self::SetupComplete { machine },
+            Record::State { name, value } => Self::State {
+                machine,
+                name: name.clone(),
+                value: value.clone(),
+            },
             _ => return None,
         })
     }
@@ -177,6 +191,19 @@ fn selects(selector: &EventSelector, event: &Observed) -> bool {
         (EventSelector::SetupComplete { machine: m }, Observed::SetupComplete { machine }) => {
             any(m, machine)
         }
+        (
+            EventSelector::State {
+                name,
+                value: v,
+                machine: m,
+            },
+            Observed::State {
+                machine,
+                name: n,
+                value,
+            },
+        ) => name == n && any(v, value) && any(m, machine),
+        (EventSelector::Fired { trigger }, Observed::Fired { key }) => trigger == key,
         (
             EventSelector::Lifecycle {
                 machine: m,
@@ -513,11 +540,13 @@ impl Triggers {
             .unwrap_or(u64::MAX)
     }
     /// Equal-time effects follow arm ID, independent of source-machine ties.
+    /// Returns the input keys of typed triggers that fired, in that order.
     pub fn apply_boundary(
         &mut self,
         faults: &mut crate::faults::Faults,
         now: u64,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<String>, String> {
+        let mut fired = Vec::new();
         for r in &mut self.records {
             if r.status == TriggerStatus::Armed && r.match_deadline_ns == now {
                 r.status = TriggerStatus::Expired;
@@ -548,10 +577,11 @@ impl Triggers {
                     )?,
                 );
                 r.status = TriggerStatus::Fired;
+                fired.extend(r.key.clone());
             }
         }
         self.reclaim();
-        Ok(())
+        Ok(fired)
     }
     pub fn reset_source(&mut self, source: &str) {
         for r in &mut self.records {

@@ -318,6 +318,13 @@ past; at that boundary the effect meets the same state checks as a timed input
 and is admitted as an ordinary fault, or the trigger is rejected. Triggers
 still armed or matched when the run ends are cut off.
 
+Two selectors refer to other evidence. `state` matches an SDK state report
+(a name, optionally one value) at frame acceptance, like an event. `fired`
+matches another typed trigger, by input key, admitting its effect at a
+boundary; it is offered right after that boundary's effects, in arm order,
+so a teardown (reboot, heal, resume) placed one delay after a triggered
+crash or partition follows the effect it undoes rather than a fixed time.
+
 A `block_request` trigger works at the device instead. Arming installs a
 hold in its machine's block model, which counts matching requests from then
 on (a successor incarnation starts afresh, as `disk_error` does). On admission
@@ -359,6 +366,25 @@ sampled fault suffix. The branch keeps its parent's consumed prefix, the
 teardowns of generated faults already started, and the later anchors.
 Members that leave or never enter the corpus release their captures.
 
+States are features too. An SDK `state(name, value)` report keeps, per
+machine, the commit time of each value's and each transition's first
+occurrence (bounded counts and lengths, overflow counted), and event-count
+bucket 0 carries its first time, so the planner can pick an anchor before a
+state first appeared. Feedback also lists a member's moments: first event
+times, first state times, and crashes and reboots from its report. A branch
+sometimes adds one event-relative mutation after a parent moment later than
+its anchor: a `crash`, `isolate` or `pause` of a target, from the kinds in the
+fault profile, as a typed trigger on the `nth` occurrence of that moment's
+event or state plus a delay; its teardown (`<key>-end`) is a `fired` trigger,
+so recovery timing stays causal. Each branch draws a strategy: novelty
+weighting (half), uniform (a quarter) or rarity, which weights members by how
+few others share their features. A failure feature already seen in three or
+more members divides a source's weight by four, so budget is not spent
+re-finding one bug. The corpus admits on novelty or rarity and evicts the
+member with the least of both. Fresh roots after generation 0 may sample a
+subset of the profile's fault kinds (swarm testing); the subset is part of the
+member's plan, and the server filters the profile before generating faults.
+
 Aggregation counts each member's own evaluations: a branch's ledger less the
 ledger in the checkpoint it started from, so an encounter inherited from an
 ancestor's prefix counts once. Members violating a property over completed
@@ -390,7 +416,7 @@ set bit as a feature. Code: [client](../guest/progress/progress.c),
 `seedbox shrink` runs ddmin (`seedbox-explore::shrink`) over a failed
 simulation's external inputs; a checkpoint's consumed prefix is fixed, and
 oracle calls are never in the program. A generated fault and its teardown are
-one atom; removing an anchor removes its reseeds, and removing a fault removes
+one atom, as is a mutation and its `-end` teardown; removing an anchor removes its reseeds, and removing a fault removes
 the heals of its handle. The unchanged program runs first to confirm the
 failure, then every probe reruns the whole simulation and its oracle and
 counts as reproducing only when it fails the same way: the target property is

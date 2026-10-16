@@ -8,7 +8,7 @@
 //! The result is "1-minimal under these transformations" only when ddmin
 //! finished at single-atom granularity; otherwise it is merely reduced.
 use seedbox_engine_protocol::input_program::{
-    BranchAction, InputAction, TimedInput, GENERATED_END_SUFFIX, GENERATED_PREFIX,
+    BranchAction, InputAction, TimedInput, GENERATED_END_SUFFIX,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,10 +36,8 @@ pub fn candidates(inputs: &[TimedInput], pending: usize) -> Candidates {
     let mut handles: BTreeMap<String, String> = BTreeMap::new();
     for input in removable {
         let key = &input.key;
-        if let Some(start) = key
-            .strip_suffix(GENERATED_END_SUFFIX)
-            .filter(|s| s.starts_with(GENERATED_PREFIX))
-        {
+        // A teardown goes with its fault: generated pairs and mutations.
+        if let Some(start) = key.strip_suffix(GENERATED_END_SUFFIX) {
             if let Some(atom) = atoms.iter_mut().find(|a| a[0] == start) {
                 atom.push(key.clone());
                 continue;

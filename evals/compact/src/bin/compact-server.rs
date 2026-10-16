@@ -60,11 +60,13 @@ fn empty_log() -> std::io::Result<()> {
 }
 
 fn recover(buggy: bool) -> std::io::Result<BTreeMap<String, String>> {
+    seedbox_sdk::state("phase", "recovering");
     let mut values = BTreeMap::new();
     load(SNAPSHOT, &mut values);
     let replayed = load(WAL, &mut values);
     if replayed > 0 {
         seedbox_sdk::event("compacting", json!({"replayed": replayed}));
+        seedbox_sdk::state("phase", "compacting");
         if buggy {
             empty_log()?;
             install_snapshot(&values)?;
@@ -117,6 +119,7 @@ fn main() -> std::io::Result<()> {
         values: Mutex::new(values),
     });
     let listener = TcpListener::bind(("0.0.0.0", PORT))?;
+    seedbox_sdk::state("phase", "serving");
     seedbox_sdk::setup_complete(json!({"buggy": buggy}));
     for stream in listener.incoming() {
         let store = store.clone();

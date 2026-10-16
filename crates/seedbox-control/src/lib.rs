@@ -302,6 +302,17 @@ pub enum EventSelector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
     },
+    /// An SDK state report: `name` taking `value` (any value when absent).
+    State {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// Another typed trigger's effect, by its input key, being admitted: a
+    /// teardown that follows the effect it undoes.
+    Fired { trigger: String },
     /// The SDK marker that a machine's workload finished setting up.
     SetupComplete {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,6 +347,8 @@ impl EventSelector {
         match self {
             Self::Event { .. } => "event",
             Self::Assertion { .. } => "assertion",
+            Self::State { .. } => "state",
+            Self::Fired { .. } => "fired",
             Self::SetupComplete { .. } => "setup_complete",
             Self::Lifecycle { .. } => "lifecycle",
             Self::ConnectionOpen { .. } => "connection_open",
@@ -348,7 +361,9 @@ impl EventSelector {
         match self {
             Self::Event { machine, .. }
             | Self::Assertion { machine, .. }
+            | Self::State { machine, .. }
             | Self::SetupComplete { machine } => machine.iter().map(String::as_str).collect(),
+            Self::Fired { .. } => Vec::new(),
             Self::Lifecycle { machine, .. } | Self::BlockRequest { machine, .. } => {
                 vec![machine]
             }
@@ -361,6 +376,8 @@ impl EventSelector {
         let name = match self {
             Self::Event { name, .. } => Some(name),
             Self::Assertion { property, .. } => Some(property),
+            Self::State { name, .. } => Some(name),
+            Self::Fired { trigger } => Some(trigger),
             _ => None,
         };
         if name.is_some_and(|n| n.is_empty() || n.len() > MAX_TRIGGER_MARKER) {

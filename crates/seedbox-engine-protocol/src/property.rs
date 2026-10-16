@@ -21,6 +21,10 @@ pub const MAX_DETAILS_BYTES: usize = 1024;
 pub const MAX_PROPERTIES: usize = 1024;
 pub const MAX_EVENT_NAMES: usize = 1024;
 pub const MAX_ERRORS: usize = 16;
+/// Distinct states and transitions each ledger keeps first positions for.
+pub const MAX_STATES: usize = 1024;
+/// A state name or value holds 1..=this many bytes.
+pub const MAX_STATE_BYTES: usize = 64;
 /// A coverage map's size in bytes: one bit per hashed block.
 pub const COVERAGE_BYTES: usize = 1024;
 
@@ -151,6 +155,9 @@ pub enum Record {
         site: String,
         alternatives: Vec<String>,
     },
+    /// A named piece of the workload's state took a value, such as a
+    /// replica's role or a recovery phase. Values are short, bounded labels.
+    State { name: String, value: String },
     /// The workload on this machine finished setting up.
     SetupComplete {
         #[serde(default)]
@@ -183,6 +190,14 @@ impl Record {
             Record::Event { name, .. } | Record::Choice { site: name, .. } => (Some(name), None),
             _ => (None, None),
         };
+        if let Record::State { name, value } = &record {
+            let bad = |s: &str| {
+                s.is_empty() || s.len() > MAX_STATE_BYTES || s.chars().any(char::is_control)
+            };
+            if bad(name) || bad(value) {
+                return Err("invalid state name or value".into());
+            }
+        }
         if let Record::Choice { alternatives, .. } = &record {
             if alternatives.is_empty()
                 || alternatives.len() > MAX_CHOICE_ALTERNATIVES
@@ -345,6 +360,21 @@ pub struct Ledger {
     pub exits: Vec<ExitRecord>,
     /// Records accepted, including ones that only produced evidence errors.
     pub records: u64,
+    /// Where each event name was first committed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub event_first: BTreeMap<String, Origin>,
+    /// Each machine's current value of each state, keyed `machine/name`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub state_values: BTreeMap<String, String>,
+    /// Where each `machine/name=value` was first reached.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub states: BTreeMap<String, Origin>,
+    /// Where each `machine/name:from>to` transition first happened.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub transitions: BTreeMap<String, Origin>,
+    /// States and transitions not kept once [`MAX_STATES`] were.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub states_dropped: u64,
     /// Block coverage per machine: the union of every map relayed, as hex.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub coverage: BTreeMap<String, String>,
@@ -383,7 +413,32 @@ mod sequence_list {
     }
 }
 
+#[derive(Clone, Copy)]
+enum StateKind {
+    State,
+    Transition,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl Ledger {
+    /// Keep the first position of a state or transition, within bounds.
+    fn first_position(&mut self, kind: StateKind, key: String, origin: &Origin) {
+        let map = match kind {
+            StateKind::State => &mut self.states,
+            StateKind::Transition => &mut self.transitions,
+        };
+        if map.contains_key(&key) {
+            return;
+        }
+        if map.len() < MAX_STATES {
+            map.insert(key, origin.clone());
+        } else {
+            self.states_dropped += 1;
+        }
+    }
     fn error(&mut self, error: impl Into<String>, origin: Option<&Origin>) {
         self.error_count += 1;
         if self.errors.len() < MAX_ERRORS {
@@ -464,6 +519,7 @@ impl Ledger {
                 if let Some(count) = self.events.get_mut(&name) {
                     *count += 1;
                 } else if self.events.len() < MAX_EVENT_NAMES {
+                    self.event_first.insert(name.clone(), origin.clone());
                     self.events.insert(name, 1);
                 } else {
                     self.error("too many event names", Some(&origin));
@@ -471,6 +527,22 @@ impl Ledger {
             }
             // The engine selects and records choices; the ledger keeps none.
             Record::Choice { .. } => {}
+            Record::State { name, value } => {
+                let key = format!("{machine}/{name}");
+                if !self.state_values.contains_key(&key) && self.state_values.len() >= MAX_STATES {
+                    self.states_dropped += 1;
+                    return;
+                }
+                let previous = self.state_values.insert(key.clone(), value.clone());
+                if previous.as_ref() == Some(&value) {
+                    return;
+                }
+                self.first_position(StateKind::State, format!("{key}={value}"), &origin);
+                if let Some(previous) = previous {
+                    let transition = format!("{key}:{previous}>{value}");
+                    self.first_position(StateKind::Transition, transition, &origin);
+                }
+            }
             Record::Coverage { map } => {
                 let bytes = (map.len() == 2 * COVERAGE_BYTES)
                     .then(|| decode_hex(&map))

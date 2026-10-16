@@ -379,3 +379,38 @@ fn coverage_maps_union_per_machine_and_only_from_the_supervisor() {
     assert_eq!(ledger.error_count, 2);
     assert_eq!(ledger.coverage["n1"], map(&[3, 9]));
 }
+
+#[test]
+fn states_keep_first_positions_of_values_and_transitions() {
+    let state = |name: &str, value: &str| json!({"state": {"name": name, "value": value}});
+    let ledger = ledger(&[
+        state("role", "follower"),
+        state("role", "follower"),
+        state("role", "leader"),
+        state("role", "follower"),
+        json!({"event": {"name": "commit"}}),
+        json!({"event": {"name": "commit"}}),
+    ]);
+    let times = |map: &BTreeMap<String, Origin>| -> Vec<(String, u64)> {
+        map.iter().map(|(k, o)| (k.clone(), o.time_ns)).collect()
+    };
+    assert_eq!(
+        times(&ledger.states),
+        [
+            ("n1/role=follower".into(), 10),
+            ("n1/role=leader".into(), 12)
+        ]
+    );
+    assert_eq!(
+        times(&ledger.transitions),
+        [
+            ("n1/role:follower>leader".into(), 12),
+            ("n1/role:leader>follower".into(), 13)
+        ]
+    );
+    assert_eq!(ledger.state_values["n1/role"], "follower");
+    assert_eq!(ledger.event_first["commit"].time_ns, 14);
+    assert_eq!(ledger.error_count, 0);
+    let bad = super::Record::parse(br#"{"state":{"name":"","value":"x"}}"#);
+    assert!(bad.is_err());
+}

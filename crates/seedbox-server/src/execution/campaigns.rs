@@ -250,6 +250,7 @@ impl ExecutionService {
             fresh_permille: request.plan.fresh_permille,
             corpus_limit: request.plan.corpus_limit,
             anchors: request.plan.anchors_ns.clone(),
+            mutations: plan::Mutations::default(),
         };
         let planner = Planner::new(config).map_err(invalid)?;
         if let Some(group) = request
@@ -596,6 +597,14 @@ impl ExecutionService {
                         .collect();
                     job.oracle = resource.spec.configuration.check.service.clone();
                     job.limit_ns = resource.spec.configuration.limits.simulated_time_ns;
+                    job.planner.set_mutations(mutations(
+                        job.request.fault_profile.as_ref(),
+                        &job.machines,
+                        &job.oracle,
+                    ));
+                    if let Some(profile) = &job.request.fault_profile {
+                        job.planner.set_profile_kinds(profile.faults.len() as u32);
+                    }
                 }
             }
             if resource.status.phase != Phase::Completed {
@@ -661,6 +670,7 @@ impl ExecutionService {
                             features: Vec::new(),
                             anchors: Vec::new(),
                             choices: Vec::new(),
+                            moments: Vec::new(),
                         })
                         .map_err(invalid)?;
                 }
@@ -679,7 +689,7 @@ impl ExecutionService {
         let anchors = &job.request.plan.anchors_ns;
         let mut options = job.request.options.clone();
         let (spec, fault_profile, inherited) = match &plan.kind {
-            plan::PlanKind::Root { seed } => {
+            plan::PlanKind::Root { seed, kinds } => {
                 let mut spec = job.root.clone().unwrap_or_else(|| job.request.spec.clone());
                 if ordinal > 0 {
                     // Later roots reuse the prepared closure with a fresh timeline.
@@ -699,7 +709,17 @@ impl ExecutionService {
                     .map(program_input)
                     .collect::<Result<_, _>>()?;
                 options.capture_anchors = (0..anchors.len()).map(plan::anchor_key).collect();
-                (spec, job.request.fault_profile.clone(), None)
+                // A swarm root keeps only the profile entries it sampled.
+                let profile = job.request.fault_profile.clone().map(|mut profile| {
+                    if let Some(kinds) = kinds {
+                        profile.faults = (profile.faults.into_iter().enumerate())
+                            .filter(|(i, _)| kinds.contains(&(*i as u32)))
+                            .map(|(_, f)| f)
+                            .collect();
+                    }
+                    profile
+                });
+                (spec, profile, None)
             }
             plan::PlanKind::Branch(branch) => {
                 let parent = job
@@ -845,6 +865,10 @@ impl ExecutionService {
             && record.is_some();
         member.verdict = Some(verdict);
         let features = plan::features(ledger.as_ref(), &choices);
+        let moments = moments(
+            ledger.as_ref(),
+            report.map(|r| r.faults.as_slice()).unwrap_or(&[]),
+        );
         member.evidence = Some(Evidence {
             ledger,
             inherited: member.inherited.clone(),
@@ -858,6 +882,7 @@ impl ExecutionService {
                 features,
                 anchors,
                 choices,
+                moments,
             })
             .map_err(invalid)?;
         self.release_captures(job)?;
@@ -1013,6 +1038,101 @@ impl ExecutionService {
     }
 }
 
+/// The mutations a fault profile allows, on its targets (every machine but
+/// the oracle when it names none). No profile, no mutations.
+fn mutations(
+    profile: Option<&seedbox_spec::fault_profile::FaultProfile>,
+    machines: &[String],
+    oracle: &str,
+) -> plan::Mutations {
+    use seedbox_spec::fault_profile::FaultKind;
+    let Some(profile) = profile else {
+        return plan::Mutations::default();
+    };
+    let mut kinds = Vec::new();
+    for fault in &profile.faults {
+        let kind = match fault {
+            FaultKind::Crash { .. } => plan::MutationKind::Crash,
+            FaultKind::Partition { .. } => plan::MutationKind::Isolate,
+            FaultKind::Pause { .. } => plan::MutationKind::Pause,
+            _ => continue,
+        };
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    let mut all: Vec<String> = machines.to_vec();
+    if !oracle.is_empty() && !all.iter().any(|m| m == oracle) {
+        all.push(oracle.into());
+    }
+    let targets = if profile.targets.is_empty() {
+        machines.iter().filter(|m| *m != oracle).cloned().collect()
+    } else {
+        profile.targets.clone()
+    };
+    plan::Mutations {
+        kinds,
+        targets,
+        machines: all,
+    }
+}
+
+/// What a member did that a trigger can select: its first SDK events and
+/// state values, and its machines' crashes and reboots.
+fn moments(
+    ledger: Option<&Ledger>,
+    faults: &[seedbox_artifacts::execution::FaultEvent],
+) -> Vec<(seedbox_control::EventSelector, u64)> {
+    use seedbox_control::{EventSelector, Transition};
+    let mut out = Vec::new();
+    if let Some(ledger) = ledger {
+        for (name, origin) in &ledger.event_first {
+            out.push((
+                EventSelector::Event {
+                    name: name.clone(),
+                    machine: Some(origin.machine.clone()),
+                },
+                origin.time_ns,
+            ));
+        }
+        for (key, origin) in &ledger.states {
+            let Some((machine_name, value)) = key.split_once('=') else {
+                continue;
+            };
+            let Some((machine, name)) = machine_name.split_once('/') else {
+                continue;
+            };
+            out.push((
+                EventSelector::State {
+                    name: name.into(),
+                    value: Some(value.into()),
+                    machine: Some(machine.into()),
+                },
+                origin.time_ns,
+            ));
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for fault in faults {
+        let transition = match fault.action.as_str() {
+            "crash" => Transition::Crashed,
+            "reboot" => Transition::Rebooted,
+            _ => continue,
+        };
+        if fault.service.is_empty() || !seen.insert((fault.service.clone(), fault.action.clone())) {
+            continue;
+        }
+        out.push((
+            EventSelector::Lifecycle {
+                machine: fault.service.clone(),
+                transition,
+            },
+            fault.applied_at_ns,
+        ));
+    }
+    out
+}
+
 fn view(id: &str, job: &CampaignJob) -> Campaign {
     let members = job
         .members
@@ -1023,12 +1143,26 @@ fn view(id: &str, job: &CampaignJob) -> Campaign {
                 ordinal: m.plan.ordinal,
                 generation: m.plan.generation,
                 plan: match &m.plan.kind {
-                    plan::PlanKind::Root { seed } => MemberPlan::Root { seed: *seed },
+                    plan::PlanKind::Root { seed, kinds } => MemberPlan::Root {
+                        seed: *seed,
+                        kinds: kinds.clone(),
+                    },
                     plan::PlanKind::Branch(b) => MemberPlan::Branch {
                         parent: b.parent,
                         anchor: b.anchor.clone(),
                         reseed: b.reseed,
                         choices: b.choices.len() as u32,
+                        mutation: b.mutation.as_ref().map(|m| {
+                            format!(
+                                "{:?} {} {}ms after {}#{}",
+                                m.kind,
+                                m.target,
+                                m.delay_ns / 1_000_000,
+                                m.when.name(),
+                                m.nth
+                            )
+                            .to_lowercase()
+                        }),
                     },
                 },
                 simulation: m.simulation.clone(),
@@ -1465,15 +1599,19 @@ mod tests {
         faults: Vec<AppliedFault>,
     ) -> Member {
         let kind = match parent {
-            None => plan::PlanKind::Root { seed: 1 },
-            Some(parent) => plan::PlanKind::Branch(plan::Branch {
+            None => plan::PlanKind::Root {
+                seed: 1,
+                kinds: None,
+            },
+            Some(parent) => plan::PlanKind::Branch(Box::new(plan::Branch {
                 parent,
                 anchor: "a0".into(),
                 at_ns: 5,
                 reseed: 1,
                 identity: "c".into(),
                 choices: Vec::new(),
-            }),
+                mutation: None,
+            })),
         };
         Member {
             plan: plan::Plan {

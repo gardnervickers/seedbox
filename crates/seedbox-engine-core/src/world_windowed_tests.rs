@@ -3273,3 +3273,65 @@ fn a_choice_input_selects_its_occurrence_and_a_reseed_redraws_the_rest() {
     assert!(outcomes.iter().all(|o| o.0 == outcomes[0].0));
     assert!(outcomes.iter().any(|o| o.1 != outcomes[0].1));
 }
+
+#[test]
+fn a_teardown_trigger_follows_the_effect_it_undoes() {
+    use crate::input_program::TimedInput;
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    let rule = |key: &str, value: Value| TimedInput {
+        key: key.into(),
+        at_ns: 0,
+        action: serde_json::from_value(value).unwrap(),
+        timeout_ns: 1_000,
+    };
+    w.arm_input_program(
+        vec![
+            rule(
+                "crash-on-compaction",
+                json!({"action":"trigger","when":{"on":"state","name":"phase","value":"compacting","machine":"a"},"delay_ns":5,"then":{"action":"crash","machine":"b"}}),
+            ),
+            rule(
+                "reboot-after",
+                json!({"action":"trigger","when":{"on":"fired","trigger":"crash-on-compaction"},"delay_ns":20,"then":{"action":"reboot","machine":"b"}}),
+            ),
+        ],
+        u64::MAX,
+        0,
+    )
+    .unwrap();
+    let sdk = |seq: u64, record: Value| {
+        let hex: String = serde_json::to_vec(&record)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("SBX_PROP1 1 {seq} {hex}").into_bytes()
+    };
+    for (seq, (at, value)) in [(8, "serving"), (12, "compacting")].into_iter().enumerate() {
+        let mut step = Step::new(at, Stop::Control);
+        step.properties = vec![sdk(
+            seq as u64 + 1,
+            json!({"state":{"name":"phase","value":value}}),
+        )];
+        w.machines[0].steps.push_back(step);
+    }
+    run(&mut w, 100, None).unwrap();
+    let records = &w.control.triggers.records;
+    // Matched at 12, crashed at 12 + 10 + 5; the reboot follows that fire.
+    assert_eq!(
+        (records[0].matched_at_ns, records[0].effect_at_ns),
+        (Some(12), Some(27))
+    );
+    assert_eq!(
+        (records[1].matched_at_ns, records[1].effect_at_ns),
+        (Some(27), Some(57))
+    );
+    assert_eq!(
+        cold_statuses(
+            &serde_json::to_value(w.faults.log.iter().map(|r| r.json()).collect::<Vec<_>>())
+                .unwrap()
+        ),
+        [("crash", "applied"), ("reboot", "applied")]
+    );
+}

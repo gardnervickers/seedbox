@@ -51,7 +51,7 @@ impl InputAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RuleAction {
-    Trigger(TriggerSpec),
+    Trigger(Box<TriggerSpec>),
     Choice(ChoiceOverride),
 }
 /// Select one choice occurrence's alternative instead of drawing it. Once

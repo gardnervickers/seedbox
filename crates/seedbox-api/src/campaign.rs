@@ -68,12 +68,18 @@ pub enum CampaignCompletion {
 pub enum MemberPlan {
     Root {
         seed: u64,
+        /// The fault profile entries a swarm root kept, when it sampled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kinds: Option<Vec<u32>>,
     },
     Branch {
         parent: u32,
         anchor: String,
         reseed: u64,
         choices: u32,
+        /// The fault it placed after something its parent did, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mutation: Option<String>,
     },
 }
 
