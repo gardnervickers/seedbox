@@ -81,9 +81,84 @@ pub struct Block {
     // Application counters stay disabled and are not part of retained state.
     stats: Stats,
     errors: Option<InjectedErrors>,
+    latency: Option<Box<InjectedLatency>>,
+    /// Admitted requests not yet completed, in submission order.
+    pending: std::collections::VecDeque<Pending>,
     hold: Option<Hold>,
     /// A request was held: the device processes nothing more.
     held: Option<u32>,
+}
+
+/// A request admitted from the queue and due to complete at `due_ns`. It is
+/// decoded again on completion; the driver may not touch its buffers before.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pending {
+    chain: crate::virtqueue::Chain,
+    due_ns: u64,
+}
+
+/// An active `disk_latency` fault: which requests it delays, by how much,
+/// its own seeded jitter stream, and what it has done so far.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InjectedLatency {
+    op: seedbox_control::DiskOp,
+    latency_ns: u64,
+    jitter_ns: u64,
+    rng: crate::rng::Rng,
+    counts: LatencyCounts,
+}
+
+/// Requests a `disk_latency` fault delayed, and the most it held at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LatencyCounts {
+    pub delayed: u64,
+    pub deepest: u64,
+}
+
+impl std::fmt::Debug for InjectedLatency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InjectedLatency")
+            .field("op", &self.op)
+            .field("latency_ns", &self.latency_ns)
+            .field("jitter_ns", &self.jitter_ns)
+            .field("draws", &self.rng.counter())
+            .field("counts", &self.counts)
+            .finish()
+    }
+}
+
+impl InjectedLatency {
+    pub fn new(
+        op: seedbox_control::DiskOp,
+        latency_ns: u64,
+        jitter_ns: u64,
+        rng: crate::rng::Rng,
+    ) -> Result<Self> {
+        seedbox_control::validate_disk_latency(latency_ns, jitter_ns)?;
+        Ok(Self {
+            op,
+            latency_ns,
+            jitter_ns,
+            rng,
+            counts: LatencyCounts::default(),
+        })
+    }
+    /// One request's delay; only matching requests draw jitter.
+    fn delay(&mut self, kind: u32) -> u64 {
+        if !disk_op_matches(self.op, kind) {
+            return 0;
+        }
+        self.counts.delayed += 1;
+        let jitter = if self.jitter_ns > 0 {
+            self.rng.below(self.jitter_ns + 1)
+        } else {
+            0
+        };
+        self.latency_ns + jitter
+    }
 }
 
 /// An active `disk_error` fault: which requests it fails, how often, its own
@@ -152,6 +227,10 @@ pub struct Snapshot {
     errors: Option<InjectedErrors>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hold: Option<Hold>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latency: Option<InjectedLatency>,
+    #[serde(default, skip_serializing_if = "std::collections::VecDeque::is_empty")]
+    pending: std::collections::VecDeque<Pending>,
 }
 
 struct Request {
@@ -231,6 +310,8 @@ impl Block {
             disk_digest: self.disk.digest(),
             errors: self.errors.clone(),
             hold: self.hold,
+            latency: self.latency.as_deref().cloned(),
+            pending: self.pending.clone(),
         })
     }
 
@@ -246,6 +327,8 @@ impl Block {
         self.stats = snapshot.stats;
         self.errors = snapshot.errors;
         self.hold = snapshot.hold;
+        self.latency = snapshot.latency.map(Box::new);
+        self.pending = snapshot.pending;
         Ok(self)
     }
 
@@ -255,6 +338,8 @@ impl Block {
             policy,
             stats: Stats::default(),
             errors: None,
+            latency: None,
+            pending: std::collections::VecDeque::new(),
             hold: None,
             held: None,
         }
@@ -287,6 +372,25 @@ impl Block {
     pub fn set_errors(&mut self, errors: Option<InjectedErrors>) -> Option<ErrorCounts> {
         std::mem::replace(&mut self.errors, errors).map(|old| old.counts)
     }
+    /// Remove the injected latency with its stream and counts, so a device
+    /// rebuilt on reset can keep it. Pending requests go with the old device.
+    pub fn take_latency(&mut self) -> Option<InjectedLatency> {
+        self.latency.take().map(|latency| *latency)
+    }
+    /// Start or end injected latency; ending returns what it did. Requests
+    /// already pending keep their due times, and later ones still queue
+    /// behind them.
+    pub fn set_latency(&mut self, latency: Option<InjectedLatency>) -> Option<LatencyCounts> {
+        std::mem::replace(&mut self.latency, latency.map(Box::new)).map(|old| old.counts)
+    }
+    /// When the earliest pending request completes.
+    pub fn next_due(&self) -> Option<u64> {
+        self.pending.front().map(|p| p.due_ns)
+    }
+    /// Pending requests and their due times, for state projections.
+    pub fn pending_due(&self) -> Vec<u64> {
+        self.pending.iter().map(|p| p.due_ns).collect()
+    }
     pub fn into_disk(self) -> Disk {
         self.disk
     }
@@ -302,11 +406,15 @@ impl Block {
 
     /// The adapter supplies the one-queue transport and handles register resets.
     /// A reset retains this model: disk layers and KVM statistics survive it.
+    /// Without injected latency or pending requests, every request completes
+    /// here; otherwise each queues behind earlier ones until its due time,
+    /// and those due by `now_ns` complete before this returns.
     pub fn notify(
         &mut self,
         transport: &mut Transport,
         memory: &mut [u8],
         base: u64,
+        now_ns: u64,
         mut dirty: impl FnMut(usize, usize),
     ) -> Result<Notified> {
         let mut out = Notified::default();
@@ -332,79 +440,138 @@ impl Block {
                     break;
                 }
             }
-            let mut data = Vec::new();
-            // An injected error fails a valid request before any disk effect.
-            let injected = self
-                .errors
-                .as_mut()
-                .is_some_and(|errors| errors.fails(request.kind));
-            let status = match request.kind {
-                T_IN | T_OUT | T_FLUSH if injected => S_IOERR,
-                T_IN => {
-                    data = vec![0; request.room];
-                    if self.disk.read(request.sector, &mut data).is_ok() {
-                        if self.policy == Policy::Block {
-                            self.stats.reads += 1;
-                            self.stats.sectors_read += (request.room / SECTOR) as u64;
-                        }
-                        S_OK
-                    } else {
-                        data.clear();
-                        S_IOERR
-                    }
-                }
-                T_OUT => {
-                    if self.disk.write(request.sector, &request.input).is_ok() {
-                        if self.policy == Policy::Block {
-                            self.stats.writes += 1;
-                            self.stats.sectors_written += (request.input.len() / SECTOR) as u64;
-                        }
-                        S_OK
-                    } else {
-                        S_IOERR
-                    }
-                }
-                T_FLUSH => {
-                    let n = self.disk.flush();
-                    out.flushed += n;
-                    if self.policy == Policy::Block {
-                        self.stats.flushes += 1;
-                        self.stats.sectors_flushed += n;
-                    }
-                    S_OK
-                }
-                T_GET_ID => {
-                    data = ID[..request.room.min(ID.len())].to_vec();
-                    S_OK
-                }
-                _ => S_UNSUPP,
-            };
-            if self.policy == Policy::Block && status != S_OK {
-                self.stats.errors += 1;
+            if self.latency.is_none() && self.pending.is_empty() {
+                self.finish(transport, memory, &chain, request, &mut dirty, &mut out);
+                transport.queues[0].consume();
+                continue;
             }
-            let mut done = 0;
-            for (offset, len) in request.output {
-                let n = len.min(data.len().saturating_sub(done));
-                if n > 0 {
-                    memory[offset..offset + n].copy_from_slice(&data[done..done + n]);
-                    dirty(offset, n);
-                    done += n;
-                }
+            transport.queues[0].consume();
+            let delay = self.latency.as_mut().map_or(0, |l| l.delay(request.kind));
+            let after = self.pending.back().map_or(0, |p| p.due_ns);
+            let due_ns = now_ns.saturating_add(delay).max(after);
+            self.pending.push_back(Pending { chain, due_ns });
+            if let Some(latency) = &mut self.latency {
+                latency.counts.deepest = latency.counts.deepest.max(self.pending.len() as u64);
             }
-            memory[request.status] = status;
-            dirty(request.status, 1);
-            transport.queues[0].complete_chain(memory, &chain, done + 1, &mut dirty);
-            out.irq = true;
-            transport.isr |= 1;
-            if self.policy == Policy::Block {
-                out.completed += 1;
-                out.log.push((request.kind, request.sector, status));
-            }
+        }
+        if out.held.is_none() {
+            self.complete_into(transport, memory, now_ns, &mut dirty, &mut out)?;
         }
         if out.irq {
             transport.isr |= 1;
         }
         Ok(out)
+    }
+
+    /// Complete every pending request due by `now_ns`, in submission order.
+    pub fn complete_due(
+        &mut self,
+        transport: &mut Transport,
+        memory: &mut [u8],
+        now_ns: u64,
+        mut dirty: impl FnMut(usize, usize),
+    ) -> Result<Notified> {
+        let mut out = Notified::default();
+        if self.held.is_none() {
+            self.complete_into(transport, memory, now_ns, &mut dirty, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    fn complete_into(
+        &mut self,
+        transport: &mut Transport,
+        memory: &mut [u8],
+        now_ns: u64,
+        dirty: &mut impl FnMut(usize, usize),
+        out: &mut Notified,
+    ) -> Result<()> {
+        while self.pending.front().is_some_and(|p| p.due_ns <= now_ns) {
+            let pending = self.pending.pop_front().expect("checked front");
+            let request = Request::decode(memory, &pending.chain)?;
+            self.finish(transport, memory, &pending.chain, request, dirty, out);
+        }
+        Ok(())
+    }
+
+    /// One request's disk effect, data, status, used entry and interrupt.
+    fn finish(
+        &mut self,
+        transport: &mut Transport,
+        memory: &mut [u8],
+        chain: &crate::virtqueue::Chain,
+        request: Request,
+        dirty: &mut impl FnMut(usize, usize),
+        out: &mut Notified,
+    ) {
+        let mut data = Vec::new();
+        // An injected error fails a valid request before any disk effect.
+        let injected = self
+            .errors
+            .as_mut()
+            .is_some_and(|errors| errors.fails(request.kind));
+        let status = match request.kind {
+            T_IN | T_OUT | T_FLUSH if injected => S_IOERR,
+            T_IN => {
+                data = vec![0; request.room];
+                if self.disk.read(request.sector, &mut data).is_ok() {
+                    if self.policy == Policy::Block {
+                        self.stats.reads += 1;
+                        self.stats.sectors_read += (request.room / SECTOR) as u64;
+                    }
+                    S_OK
+                } else {
+                    data.clear();
+                    S_IOERR
+                }
+            }
+            T_OUT => {
+                if self.disk.write(request.sector, &request.input).is_ok() {
+                    if self.policy == Policy::Block {
+                        self.stats.writes += 1;
+                        self.stats.sectors_written += (request.input.len() / SECTOR) as u64;
+                    }
+                    S_OK
+                } else {
+                    S_IOERR
+                }
+            }
+            T_FLUSH => {
+                let n = self.disk.flush();
+                out.flushed += n;
+                if self.policy == Policy::Block {
+                    self.stats.flushes += 1;
+                    self.stats.sectors_flushed += n;
+                }
+                S_OK
+            }
+            T_GET_ID => {
+                data = ID[..request.room.min(ID.len())].to_vec();
+                S_OK
+            }
+            _ => S_UNSUPP,
+        };
+        if self.policy == Policy::Block && status != S_OK {
+            self.stats.errors += 1;
+        }
+        let mut done = 0;
+        for (offset, len) in request.output {
+            let n = len.min(data.len().saturating_sub(done));
+            if n > 0 {
+                memory[offset..offset + n].copy_from_slice(&data[done..done + n]);
+                dirty(offset, n);
+                done += n;
+            }
+        }
+        memory[request.status] = status;
+        dirty(request.status, 1);
+        transport.queues[0].complete_used(memory, chain, done + 1, &mut *dirty);
+        out.irq = true;
+        transport.isr |= 1;
+        if self.policy == Policy::Block {
+            out.completed += 1;
+            out.log.push((request.kind, request.sector, status));
+        }
     }
 }
 

@@ -208,6 +208,28 @@ pub(crate) fn preview(
                 "Fail the machine's disk {op} with an I/O error, {ppm} per million, until healed."
             )
         }
+        Action::DiskLatency {
+            op,
+            latency_ns,
+            jitter_ns,
+            ..
+        } => {
+            result.preconditions.push(
+                "The machine must be up, have a retained disk and no active disk latency.".into(),
+            );
+            result.limitations.push(
+                "Requests complete in submission order, so later requests also wait behind delayed ones; a crash loses requests still pending.".into(),
+            );
+            let op = match op {
+                seedbox_control::DiskOp::Read => "reads",
+                seedbox_control::DiskOp::Write => "writes",
+                seedbox_control::DiskOp::Flush => "flushes",
+                seedbox_control::DiskOp::Any => "reads, writes and flushes",
+            };
+            format!(
+                "Complete the machine's disk {op} {latency_ns} ns late, plus a seeded draw up to {jitter_ns} ns, until healed."
+            )
+        }
         Action::Throttle { speed_hz, .. } => {
             result
                 .preconditions
@@ -269,6 +291,7 @@ fn healable_handle(action: &Action) -> Option<&str> {
         | Action::ClockDrift { handle, .. }
         | Action::Throttle { handle, .. }
         | Action::DiskError { handle, .. }
+        | Action::DiskLatency { handle, .. }
         | Action::DropConnection { handle, .. } => Some(handle),
         _ => None,
     }

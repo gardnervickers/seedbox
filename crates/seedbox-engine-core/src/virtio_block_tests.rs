@@ -88,10 +88,84 @@ impl Guest {
         (d, s)
     }
     fn notify(&mut self) -> Result<Notified> {
-        self.b.notify(&mut self.t, &mut self.m, self.base, |a, n| {
+        self.notify_at(0)
+    }
+    fn notify_at(&mut self, now: u64) -> Result<Notified> {
+        self.b
+            .notify(&mut self.t, &mut self.m, self.base, now, |a, n| {
+                self.dirty.push((a, n))
+            })
+    }
+    fn complete_at(&mut self, now: u64) -> Result<Notified> {
+        self.b.complete_due(&mut self.t, &mut self.m, now, |a, n| {
             self.dirty.push((a, n))
         })
     }
+    fn used_idx(&self) -> u16 {
+        u16::from_le_bytes(self.m[8194..8196].try_into().unwrap())
+    }
+}
+
+#[test]
+fn injected_latency_completes_in_order_at_due_times_with_deferred_effects() {
+    let mut g = Guest::new(Policy::Block);
+    let rng = crate::rng::Rng::new(7, "disk-latency/test");
+    let latency = InjectedLatency::new(seedbox_control::DiskOp::Write, 5_000, 2_000, rng).unwrap();
+    assert!(g.b.set_latency(Some(latency)).is_none());
+    let (_, write_status) = g.request(1, 1, &[9; 512], false);
+    let (_, flush_status) = g.request(4, 0, &[], false);
+    let out = g.notify_at(100).unwrap();
+    // Nothing is due yet: no effect, status, used entry or interrupt.
+    assert_eq!((out.completed, out.irq, g.t.isr), (0, false, 0));
+    assert_eq!(
+        (g.m[write_status], g.m[flush_status], g.used_idx()),
+        (0xff, 0xff, 0)
+    );
+    assert_eq!(g.b.disk().volatile_sectors(), 0);
+    let dues = g.b.pending_due();
+    assert_eq!(dues.len(), 2);
+    assert!((5_100..=7_100).contains(&dues[0]));
+    // The flush is not delayed itself, but never overtakes the write.
+    assert_eq!(dues[1], dues[0]);
+    // Checkpoints keep pending requests and the jitter stream.
+    let saved = serde_json::to_string(&g.b.snapshot().unwrap()).unwrap();
+    assert!(saved.contains("pending"));
+    let out = g.complete_at(dues[0] - 1).unwrap();
+    assert_eq!(out.completed, 0);
+    let out = g.complete_at(dues[0]).unwrap();
+    assert_eq!((out.completed, out.irq), (2, true));
+    assert_eq!(
+        (g.m[write_status], g.m[flush_status], g.used_idx()),
+        (0, 0, 2)
+    );
+    assert_eq!(g.b.disk().stable_sectors(), 1);
+    assert_eq!(g.b.next_due(), None);
+    // Healing reports what it did; later requests complete at once again.
+    let counts = g.b.set_latency(None).unwrap();
+    assert_eq!((counts.delayed, counts.deepest), (1, 2));
+    g.request(0, 1, &[0; 512], true);
+    assert_eq!(g.notify_at(dues[0] + 1).unwrap().completed, 1);
+}
+
+#[test]
+fn a_rebuilt_device_loses_pending_requests_but_keeps_its_latency() {
+    let mut g = Guest::new(Policy::Block);
+    let rng = crate::rng::Rng::new(1, "disk-latency/test");
+    let latency = InjectedLatency::new(seedbox_control::DiskOp::Any, 1_000, 0, rng).unwrap();
+    g.b.set_latency(Some(latency));
+    g.request(1, 0, &[3; 512], false);
+    g.notify_at(10).unwrap();
+    assert_eq!(g.b.next_due(), Some(1_010));
+    // A reset (or a crash) rebuilds the device from its disk.
+    let latency = g.b.take_latency();
+    let mut rebuilt = Block::new(g.b.clone().into_disk(), Policy::Block);
+    rebuilt.set_latency(latency);
+    assert_eq!(rebuilt.next_due(), None);
+    assert_eq!(
+        rebuilt.disk().volatile_sectors() + rebuilt.disk().stable_sectors(),
+        0
+    );
+    assert!(rebuilt.take_latency().is_some());
 }
 #[test]
 fn successful_disk_operations_and_snapshot_restore_keep_layers_and_stats() {

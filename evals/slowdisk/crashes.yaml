@@ -1,0 +1,9 @@
+# Crash the store at random while the oracle writes. On an instant disk an
+# fsync never outlasts the acknowledgement bound, so this alone never loses
+# an acknowledged write.
+start: 1s
+end: 18s
+interval: 2s
+faults:
+  - kind: crash
+    downtime: {min: 900ms, max: 1100ms}

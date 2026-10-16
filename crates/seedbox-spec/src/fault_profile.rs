@@ -81,6 +81,11 @@ fn weight() -> u32 {
 fn every_request() -> u32 {
     1_000_000
 }
+fn any_request() -> DiskOp {
+    DiskOp::Any
+}
+/// The engine's disk latency bounds, in nanoseconds (`seedbox_control::DISK_LATENCY_NS`).
+const DISK_LATENCY_NS: (u64, u64) = (1_000, 1_000_000_000);
 
 /// Which disk requests a generated disk error fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +158,22 @@ pub enum FaultKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<String>,
     },
+    /// Complete one target's disk requests of kind `op` late, by a latency
+    /// drawn from `latency` plus a seeded draw up to `jitter` per request,
+    /// then heal. Only machines with a retained disk can take it; `targets`
+    /// narrows the profile's targets to those.
+    DiskLatency {
+        #[serde(default = "weight")]
+        weight: u32,
+        duration: DurationRange,
+        latency: DurationRange,
+        #[serde(default = "any_request")]
+        op: DiskOp,
+        #[serde(default = "Duration::zero")]
+        jitter: Duration,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<String>,
+    },
     /// Step one target's wall clock by up to `maxOffset` either way.
     #[serde(rename_all = "camelCase")]
     ClockSkew {
@@ -173,6 +194,7 @@ impl FaultKind {
             | Self::PauseProcess { weight, .. }
             | Self::Stop { weight, .. }
             | Self::DiskError { weight, .. }
+            | Self::DiskLatency { weight, .. }
             | Self::ClockSkew { weight, .. } => *weight,
         }
     }
@@ -202,6 +224,23 @@ impl FaultKind {
                 duration.validate("duration")?;
                 if *ppm == 0 || *ppm > 1_000_000 {
                     return Err("fault profile disk_error ppm must be 1 to 1000000".into());
+                }
+                Ok(())
+            }
+            Self::DiskLatency {
+                duration,
+                latency,
+                jitter,
+                ..
+            } => {
+                duration.validate("duration")?;
+                latency.validate("latency")?;
+                let bounds = DISK_LATENCY_NS;
+                if latency.min.0 < bounds.0 || latency.max.0 > bounds.1 || jitter.0 > bounds.1 {
+                    return Err(format!(
+                        "fault profile disk_latency latency must be {}ns to {}ns, jitter at most {}ns",
+                        bounds.0, bounds.1, bounds.1
+                    ));
                 }
                 Ok(())
             }

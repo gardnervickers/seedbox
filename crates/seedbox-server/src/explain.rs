@@ -165,7 +165,11 @@ pub(crate) fn project(
             format!(
                 "{} {}: {}",
                 fault.action,
-                fault.machine.as_deref().unwrap_or("network"),
+                fault
+                    .machine
+                    .as_deref()
+                    .or_else(|| fault.plan.as_ref()?.get("handle")?.as_str())
+                    .unwrap_or("network"),
                 word(&fault.status)
             ),
         );

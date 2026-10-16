@@ -696,6 +696,20 @@ impl WorldMachine for ArmMachine {
             .ok_or("missing stopped ARM observation")?;
         Ok(counts)
     }
+    fn disk_latency(
+        &mut self,
+        latency: Option<seedbox_engine_core::virtio_block::InjectedLatency>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::LatencyCounts>> {
+        let Answer::DiskLatency(counts) = self.worker.call(Operation::DiskLatency(latency))? else {
+            return self.reject("invalid ARM disk latency response".into());
+        };
+        self.physical = self
+            .worker
+            .observation()
+            .cloned()
+            .ok_or("missing stopped ARM observation")?;
+        Ok(counts)
+    }
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<()> {
         Err("ARM machine speed reseeding is unsupported".into())
     }

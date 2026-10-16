@@ -88,10 +88,12 @@ impl VirtioBlk {
     }
     pub fn write(&mut self, m: &mut [u8], off: u64, v: u32) -> Result<Notified, String> {
         match self.transport.write(off, v)? {
+            // x86 injects no disk latency, so every request completes at
+            // notify and its time never matters.
             Effect::Notify(_) => {
                 let dirty = &mut self.dirty;
                 self.model
-                    .notify(&mut self.transport, m, 0, |a, n| dirty.push((a, n)))
+                    .notify(&mut self.transport, m, 0, 0, |a, n| dirty.push((a, n)))
             }
             // The transport reset has completed; disk, stats and dirty journal survive.
             Effect::Reset | Effect::None => Ok(Notified::default()),

@@ -583,6 +583,25 @@ incarnation. The heal row records how many requests it matched and failed. A
 supervisor that cannot read, format or mount a failing retained disk exits 125,
 like a container runtime, rather than reporting an infrastructure failure.
 
+A `disk_latency` fault makes the block model complete requests later instead
+of at their notification. Each admitted request is consumed from the avail
+ring and queued with a due time: the guest time of the notification plus the
+fault's latency and a draw up to its jitter (on its own
+`disk-latency/<machine>/<incarnation>/<id>` stream) for matching requests,
+and never before the request ahead of it, so completion order is submission
+order. At its due time the request is decoded again from guest memory (the
+driver may not touch its buffers before completion), then has its disk
+effect, data, status, used entry and interrupt exactly as an immediate
+completion would; a FLUSH therefore completes after the writes before it.
+On ARM the PV clock carries the earliest due time as a device deadline
+beside the guest timer and the world horizon: the guest stops there, an idle
+guest wakes there, and stopped observations report it as the machine's next
+event. Checkpoints carry the queue and the clock's deadline. A crash or guest
+device reset drops pending requests, which were never acknowledged; healing
+leaves queued requests to complete at their times. Without the fault, and
+with nothing pending, requests complete at notification as before. x86 does
+not support disk latency yet.
+
 Each completed request publishes its interrupt state before the next request
 is validated. Earlier payload, status, used-ring writes and backlog removals
 survive a later failure; the failing request is not completed. MMIO rejects

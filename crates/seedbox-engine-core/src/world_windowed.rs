@@ -189,12 +189,17 @@ fn validate_host_action<M: WorldMachine>(
             }
         }
     }
-    if let seedbox_control::Action::DiskError { machine, .. } = action {
+    if let seedbox_control::Action::DiskError { machine, .. }
+    | seedbox_control::Action::DiskLatency { machine, .. } = action
+    {
         if guests
             .iter()
             .any(|guest| guest.m.name == *machine && !guest.m.has_disk())
         {
-            return Err(format!("{machine}: disk_error needs a retained disk"));
+            return Err(format!(
+                "{machine}: {} needs a retained disk",
+                action.name()
+            ));
         }
     }
     if let seedbox_control::Action::Throttle { machine, .. } = action {
@@ -1072,8 +1077,11 @@ impl<M: WorldMachine> Coord<'_, M> {
                     if let Some(speed_hz) = self.faults.throttle(m) {
                         guests[m].m.throttle(Some(speed_hz))?;
                     }
-                    if let Some(op) = self.faults.disk_errors(m) {
-                        world::apply_disk_errors(
+                    for op in [self.faults.disk_errors(m), self.faults.disk_latency(m)]
+                        .into_iter()
+                        .flatten()
+                    {
+                        world::apply_disk_fault(
                             &mut *guests[m].m,
                             self.faults,
                             self.run_seed,
@@ -1094,8 +1102,11 @@ impl<M: WorldMachine> Coord<'_, M> {
             faults::Lifecycle::Throttle(speed_hz) => {
                 applied_speed_hz = guests[m].m.throttle(speed_hz)?;
             }
-            faults::Lifecycle::DiskErrors { .. } | faults::Lifecycle::HealDiskErrors { .. } => {
-                world::apply_disk_errors(
+            faults::Lifecycle::DiskErrors { .. }
+            | faults::Lifecycle::HealDiskErrors { .. }
+            | faults::Lifecycle::DiskLatency { .. }
+            | faults::Lifecycle::HealDiskLatency { .. } => {
+                world::apply_disk_fault(
                     &mut *guests[m].m,
                     self.faults,
                     self.run_seed,
@@ -1154,7 +1165,10 @@ impl<M: WorldMachine> Coord<'_, M> {
                 faults::Lifecycle::Throttle(_) => MachineTransition::Throttled {
                     speed_hz: applied_speed_hz,
                 },
-                faults::Lifecycle::DiskErrors { .. } | faults::Lifecycle::HealDiskErrors { .. } => {
+                faults::Lifecycle::DiskErrors { .. }
+                | faults::Lifecycle::HealDiskErrors { .. }
+                | faults::Lifecycle::DiskLatency { .. }
+                | faults::Lifecycle::HealDiskLatency { .. } => {
                     return Ok(());
                 }
             };

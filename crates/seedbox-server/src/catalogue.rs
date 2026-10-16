@@ -463,6 +463,16 @@ impl Catalogue {
                 .and_then(|seed| seed.checked_add(u64::from(range.count - 1)))
                 .ok_or_else(|| Error::Invalid("seed range overflows u64".into()))?;
         }
+        // Store actions as the engine reads and writes them, so a consumed
+        // input compares equal to its override whatever defaults it omitted.
+        for input in &mut spec.program {
+            input.action = canonical_action(&input.action)?;
+        }
+        if let InputSource::Resolved { definition } = &mut spec.inputs {
+            for input in &mut definition.overrides {
+                input.action = canonical_action(&input.action)?;
+            }
+        }
         let reference = match &spec.inputs {
             InputSource::Project | InputSource::Resolved { .. } => None,
             InputSource::Retained { simulation }
@@ -1124,4 +1134,12 @@ pub(crate) fn resolve_program(
     seedbox_application::engine_adapter::validate_input_program(&spec.configuration, &program)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     Ok(program)
+}
+
+/// An input action in its typed form's serialization.
+fn canonical_action(action: &serde_json::Value) -> Result<serde_json::Value> {
+    let typed: seedbox_engine_protocol::input_program::InputAction =
+        serde_json::from_value(action.clone())
+            .map_err(|e| Error::Invalid(format!("invalid input action: {e}")))?;
+    serde_json::to_value(typed).map_err(|e| Error::Invalid(e.to_string()))
 }

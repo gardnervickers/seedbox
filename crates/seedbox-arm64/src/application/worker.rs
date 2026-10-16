@@ -168,6 +168,7 @@ pub enum Operation {
         factor_permille: u64,
     },
     DiskErrors(Option<seedbox_engine_core::virtio_block::InjectedErrors>),
+    DiskLatency(Option<seedbox_engine_core::virtio_block::InjectedLatency>),
     HoldBlock(Option<seedbox_engine_core::virtio_block::Hold>),
     ReseedGuest {
         entropy: [u32; 8],
@@ -213,6 +214,7 @@ pub enum Answer {
     },
     Accepted(bool),
     DiskErrors(Option<seedbox_engine_core::virtio_block::ErrorCounts>),
+    DiskLatency(Option<seedbox_engine_core::virtio_block::LatencyCounts>),
     Evidence(Evidence),
     Crashed {
         evidence: Evidence,
@@ -536,6 +538,9 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                     Ok(Answer::Ready)
                 }
                 Operation::DiskErrors(errors) => Ok(Answer::DiskErrors(vm.disk_errors(errors)?)),
+                Operation::DiskLatency(latency) => {
+                    Ok(Answer::DiskLatency(vm.disk_latency(latency)?))
+                }
                 Operation::HoldBlock(hold) => {
                     vm.hold_block(hold)?;
                     Ok(Answer::Ready)
@@ -911,6 +916,7 @@ impl OwnedWorker {
             ) | (Operation::Advance { .. }, Answer::Advanced { .. })
                 | (Operation::Frame(_), Answer::Accepted(_))
                 | (Operation::DiskErrors(_), Answer::DiskErrors(_))
+                | (Operation::DiskLatency(_), Answer::DiskLatency(_))
                 | (Operation::Evidence { .. }, Answer::Evidence(_))
                 | (Operation::CrashExport { .. }, Answer::Crashed { .. })
                 | (Operation::InstallSuccession(_), Answer::Installed { .. })
@@ -1031,6 +1037,7 @@ impl OwnedWorker {
                             | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
                             | Operation::DiskErrors(_)
+                            | Operation::DiskLatency(_)
                             | Operation::HoldBlock(_)
                             | Operation::ReseedGuest { .. }
                             | Operation::Evidence { .. }
@@ -1042,6 +1049,7 @@ impl OwnedWorker {
                             | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
                             | Operation::DiskErrors(_)
+                            | Operation::DiskLatency(_)
                             | Operation::HoldBlock(_)
                             | Operation::ReseedGuest { .. }
                             | Operation::Evidence { .. }

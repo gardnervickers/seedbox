@@ -77,6 +77,9 @@ pub struct FaultRow {
     /// What a healed `disk_error` fault matched and failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_error_counts: Option<crate::virtio_block::ErrorCounts>,
+    /// What a healed `disk_latency` fault delayed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_latency_counts: Option<crate::virtio_block::LatencyCounts>,
     pub status: RowStatus,
 }
 impl FaultRow {
@@ -85,6 +88,7 @@ impl FaultRow {
         let row = self.json();
         let counts: serde_json::Map<String, Value> = [
             "disk_error_counts",
+            "disk_latency_counts",
             "network_fault_counts",
             "queue_counts",
             "selection_counts",
@@ -193,6 +197,17 @@ pub enum Lifecycle {
     HealDiskErrors {
         row: u32,
     },
+    /// Start delaying disk requests for the `disk_latency` fault with this ID.
+    DiskLatency {
+        id: u32,
+        op: seedbox_control::DiskOp,
+        latency_ns: u64,
+        jitter_ns: u64,
+    },
+    /// End disk latency; its counts belong to the healing row.
+    HealDiskLatency {
+        row: u32,
+    },
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 enum Event {
@@ -228,6 +243,9 @@ pub struct Faults {
     /// Active disk error handles: machine, fault ID, operation and ppm.
     #[serde(default)]
     disk_errors: BTreeMap<String, (usize, u32, seedbox_control::DiskOp, u32)>,
+    /// Active disk latency handles: machine, fault ID, operation, latency and jitter.
+    #[serde(default)]
+    disk_latencies: BTreeMap<String, (usize, u32, seedbox_control::DiskOp, u64, u64)>,
     #[serde(with = "crate::checkpoint::ordered_map")]
     cuts: BTreeMap<(usize, usize), usize>,
     names: Vec<String>,
@@ -280,6 +298,7 @@ impl Faults {
             clocks: BTreeMap::new(),
             throttles: BTreeMap::new(),
             disk_errors: BTreeMap::new(),
+            disk_latencies: BTreeMap::new(),
             cuts: BTreeMap::new(),
             names,
             changed_network: vec![],
@@ -364,7 +383,20 @@ impl Faults {
             | Action::Crash { machine }
             | Action::Reboot { machine }
             | Action::Throttle { machine, .. }
-            | Action::DiskError { machine, .. } => {
+            | Action::DiskError { machine, .. }
+            | Action::DiskLatency { machine, .. } => {
+                if let Action::DiskLatency {
+                    handle,
+                    latency_ns,
+                    jitter_ns,
+                    ..
+                } = &plan.action
+                {
+                    if handle.is_empty() {
+                        return Err("invalid disk_latency handle".into());
+                    }
+                    seedbox_control::validate_disk_latency(*latency_ns, *jitter_ns)?;
+                }
                 if let Action::Throttle {
                     handle, speed_hz, ..
                 } = &plan.action
@@ -536,6 +568,7 @@ impl Faults {
             requested_at_ns: entry.plan.at_ns,
             selection_counts: None,
             disk_error_counts: None,
+            disk_latency_counts: None,
             status: RowStatus::Unrequested,
         });
         self.boundaries.insert((entry.plan.at_ns, id, Event::Apply));
@@ -604,6 +637,7 @@ impl Faults {
         handles.extend(self.clocks.keys().cloned());
         handles.extend(self.throttles.keys().cloned());
         handles.extend(self.disk_errors.keys().cloned());
+        handles.extend(self.disk_latencies.keys().cloned());
         handles.sort();
         handles
     }
@@ -614,6 +648,31 @@ impl Faults {
             .values()
             .find(|(machine, ..)| *machine == m)
             .map(|&(_, id, op, ppm)| Lifecycle::DiskErrors { id, op, ppm })
+    }
+    /// Machine `m`'s active disk latency, if any, as the lifecycle that
+    /// starts it. A rebooted incarnation takes it on again.
+    pub fn disk_latency(&self, m: usize) -> Option<Lifecycle> {
+        self.disk_latencies
+            .values()
+            .find(|(machine, ..)| *machine == m)
+            .map(
+                |&(_, id, op, latency_ns, jitter_ns)| Lifecycle::DiskLatency {
+                    id,
+                    op,
+                    latency_ns,
+                    jitter_ns,
+                },
+            )
+    }
+    /// Record what healed disk latency did on the row that healed it.
+    pub fn record_disk_latency_counts(
+        &mut self,
+        row: u32,
+        counts: crate::virtio_block::LatencyCounts,
+    ) {
+        if let Some(row) = self.log.get_mut(row as usize) {
+            row.disk_latency_counts = Some(counts);
+        }
     }
     /// Record what healed disk errors did on the row that healed them.
     pub fn record_disk_error_counts(&mut self, row: u32, counts: crate::virtio_block::ErrorCounts) {
@@ -721,6 +780,12 @@ impl Faults {
             }
             Action::DiskError { .. } if self.disk_errors(index).is_some() => {
                 Some("target machine already has disk errors")
+            }
+            Action::DiskLatency { .. } if self.life[index] == Life::Down => {
+                Some("target machine is down")
+            }
+            Action::DiskLatency { .. } if self.disk_latency(index).is_some() => {
+                Some("target machine already has disk latency")
             }
             _ => None,
         }
@@ -1041,6 +1106,13 @@ impl Faults {
             Action::DiskError {
                 handle, op, ppm, ..
             } => self.apply_disk_error(i, now, handle, op, ppm),
+            Action::DiskLatency {
+                handle,
+                op,
+                latency_ns,
+                jitter_ns,
+                ..
+            } => self.apply_disk_latency(i, now, handle, op, latency_ns, jitter_ns),
             Action::Heal { handle } => self.heal(i, now, handle),
             action @ (Action::Pause { .. }
             | Action::Resume { .. }
@@ -1271,6 +1343,44 @@ impl Faults {
         self.lifecycle
             .push((m, Lifecycle::DiskErrors { id, op, ppm }));
     }
+    fn apply_disk_latency(
+        &mut self,
+        i: usize,
+        now: u64,
+        handle: String,
+        op: seedbox_control::DiskOp,
+        latency_ns: u64,
+        jitter_ns: u64,
+    ) {
+        let m = self.entries[i].target.expect("a disk latency has a target");
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        if self.disk_latency(m).is_some() {
+            return self.fail(i, "target machine already has disk latency".into());
+        }
+        let id = self.entries[i].plan.id;
+        self.disk_latencies
+            .insert(handle.clone(), (m, id, op, latency_ns, jitter_ns));
+        let op_name = serde_json::to_value(op).expect("a disk op is a JSON string");
+        self.applied(
+            i,
+            now,
+            format!(
+                "handle={handle}; op={}; latency_ns={latency_ns}; jitter_ns={jitter_ns}",
+                op_name.as_str().unwrap_or("?")
+            ),
+        );
+        self.lifecycle.push((
+            m,
+            Lifecycle::DiskLatency {
+                id,
+                op,
+                latency_ns,
+                jitter_ns,
+            },
+        ));
+    }
     /// Heal a throttle, disk errors, connection selector, shape layer or partition.
     fn heal(&mut self, i: usize, now: u64, handle: String) {
         if let Some((m, _)) = self.throttles.remove(&handle) {
@@ -1282,6 +1392,12 @@ impl Faults {
             self.applied(i, now, format!("handle={handle}; disk errors ended"));
             self.lifecycle
                 .push((m, Lifecycle::HealDiskErrors { row: i as u32 }));
+            return;
+        }
+        if let Some((m, ..)) = self.disk_latencies.remove(&handle) {
+            self.applied(i, now, format!("handle={handle}; disk latency ended"));
+            self.lifecycle
+                .push((m, Lifecycle::HealDiskLatency { row: i as u32 }));
             return;
         }
         if let Some(selection) = self.connections.selections.remove(&handle) {
@@ -1631,6 +1747,7 @@ mod link_tests {
             request: json!({"id": 2, "action": "shape"}),
             requested_at_ns: 7,
             disk_error_counts: None,
+            disk_latency_counts: None,
             selection_counts: Some(SelectionCounts {
                 dropped: 1,
                 matched: 4,

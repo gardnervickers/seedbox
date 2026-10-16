@@ -120,6 +120,11 @@ impl Virtio {
         let model = match &self.model {
             Model::Net(net) => net.projection(),
             Model::Console(console) => console.projection(),
+            Model::Block(disk) if disk.next_due().is_some() => serde_json::json!({
+                "kind": "block",
+                "disk": disk.disk().digest(),
+                "pending_due": disk.pending_due(),
+            }),
             Model::Block(disk) => serde_json::json!({"kind":"block","disk":disk.disk().digest()}),
         };
         let bytes =
@@ -167,19 +172,22 @@ impl Virtio {
                 .unwrap_or(0),
         }
     }
+    /// `now` is the guest time of the write: when a delayed block request
+    /// becomes due.
     pub fn write(
         &mut self,
         memory: &mut [u8],
         offset: u64,
         width: u8,
         value: u64,
+        now: u64,
     ) -> Result<Vec<Event>> {
         if width != 4 || !offset.is_multiple_of(4) || value > u32::MAX as u64 {
             return Err("virtio transport requires aligned 32-bit writes".into());
         }
         match self.transport.write(offset, value as u32)? {
             MmioEffect::None => (),
-            MmioEffect::Notify(index) => return self.notify(memory, index),
+            MmioEffect::Notify(index) => return self.notify(memory, index, now),
             MmioEffect::Reset => {
                 let old = std::mem::replace(self, Self::console());
                 *self = match old.model {
@@ -187,12 +195,15 @@ impl Virtio {
                     Model::Console(_) => Self::console(),
                     // Injected disk errors are a world fault, not device state:
                     // they outlive a guest reset like the disk itself.
+                    // Pending requests go with the old device, unanswered.
                     Model::Block(mut block) => {
                         let errors = block.take_errors();
+                        let latency = block.take_latency();
                         let hold = block.take_hold();
                         let mut device = Self::block(block.into_disk());
                         if let Model::Block(rebuilt) = &mut device.model {
                             rebuilt.set_errors(errors);
+                            rebuilt.set_latency(latency);
                             rebuilt.set_hold(hold)?;
                         }
                         device
@@ -202,7 +213,7 @@ impl Virtio {
         }
         Ok(Vec::new())
     }
-    fn notify(&mut self, memory: &mut [u8], index: usize) -> Result<Vec<Event>> {
+    fn notify(&mut self, memory: &mut [u8], index: usize, now: u64) -> Result<Vec<Event>> {
         if index >= self.transport.queues.len() {
             return Err("virtio notification queue out of range".into());
         }
@@ -211,7 +222,7 @@ impl Virtio {
             return Ok(output.payloads.into_iter().map(Event::Control).collect());
         }
         if let Model::Block(block) = &mut self.model {
-            let notified = block.notify(&mut self.transport, memory, RAM_BASE, |_, _| {})?;
+            let notified = block.notify(&mut self.transport, memory, RAM_BASE, now, |_, _| {})?;
             return Ok(notified
                 .held
                 .map(|trigger| Event::Held { trigger })
@@ -239,6 +250,32 @@ impl Virtio {
         match &self.model {
             Model::Block(block) => block.held(),
             _ => None,
+        }
+    }
+    /// Complete a block device's delayed requests due by `now`; whether any did.
+    pub fn complete_due(&mut self, memory: &mut [u8], now: u64) -> Result<bool> {
+        match &mut self.model {
+            Model::Block(block) => Ok(block
+                .complete_due(&mut self.transport, memory, now, |_, _| {})?
+                .irq),
+            _ => Ok(false),
+        }
+    }
+    /// When a block device's earliest delayed request is due.
+    pub fn next_due(&self) -> Option<u64> {
+        match &self.model {
+            Model::Block(block) => block.next_due(),
+            _ => None,
+        }
+    }
+    /// Start or end injected latency on a block device; ending returns counts.
+    pub fn set_disk_latency(
+        &mut self,
+        latency: Option<seedbox_engine_core::virtio_block::InjectedLatency>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::LatencyCounts>> {
+        match &mut self.model {
+            Model::Block(block) => Ok(block.set_latency(latency)),
+            _ => Err("disk latency needs a block device".into()),
         }
     }
     /// Start or end injected errors on a block device; ending returns counts.
@@ -318,7 +355,7 @@ mod tests {
             (0xa0, RAM_BASE as u32 + USED as u32),
             (0x44, 1),
         ] {
-            device.write(memory, offset, 4, value as u64).unwrap();
+            device.write(memory, offset, 4, value as u64, 0).unwrap();
         }
         wr16(memory, AVAIL + 2, 1);
     }
@@ -335,14 +372,14 @@ mod tests {
             wr16(&mut control, DATA + 4, event);
             wr16(&mut control, DATA + 6, 1);
             wr16(&mut control, AVAIL + 2, i as u16 + 1);
-            device.write(&mut control, 0x50, 4, 3).unwrap();
+            device.write(&mut control, 0x50, 4, 3, 0).unwrap();
         }
         device.transport.queues[3].ready = false;
         descriptor(&mut tx, 0, DATA, 5, 0, 0);
         tx[DATA..DATA + 5].copy_from_slice(b"hello");
         setup(&mut device, &mut tx, 1);
         assert_eq!(
-            device.write(&mut tx, 0x50, 4, 1).unwrap(),
+            device.write(&mut tx, 0x50, 4, 1, 0).unwrap(),
             vec![Event::Control(b"hello".to_vec())]
         );
         let mut rx = vec![0; 0x4000];
@@ -353,13 +390,13 @@ mod tests {
         assert_eq!(device.control_channel().unwrap().tx_bytes, 5);
         assert_eq!(device.control_channel().unwrap().rx_dma_bytes, 0);
         wr16(&mut rx, AVAIL + 2, 1);
-        device.write(&mut rx, 0x50, 4, 0).unwrap();
+        device.write(&mut rx, 0x50, 4, 0, 0).unwrap();
         assert_eq!(&rx[DATA..DATA + 3], b"rep");
         assert_eq!(device.control_channel().unwrap().rx_dma_bytes, 3);
         descriptor(&mut rx, 1, DATA + 16, 10, 2, 0);
         wr16(&mut rx, AVAIL + 6, 1);
         wr16(&mut rx, AVAIL + 2, 2);
-        device.write(&mut rx, 0x50, 4, 0).unwrap();
+        device.write(&mut rx, 0x50, 4, 0, 0).unwrap();
         assert_eq!(&rx[DATA + 16..DATA + 18], b"ly");
         assert_eq!(device.control_channel().unwrap().rx_dma_bytes, 5);
     }
@@ -372,13 +409,13 @@ mod tests {
         m[DATA + NET_HEADER..DATA + NET_HEADER + packet.len()].copy_from_slice(packet);
         setup(&mut device, &mut m, 1);
         assert_eq!(
-            device.write(&mut m, 0x50, 4, 1).unwrap(),
+            device.write(&mut m, 0x50, 4, 1, 0).unwrap(),
             vec![Event::Frame(packet.to_vec())]
         );
         assert_eq!(u16_at(&m, USED + 2), 1);
         assert_eq!(u32_at(&m, USED + 8), 0);
         assert!(device.irq());
-        device.write(&mut m, 0x64, 4, 1).unwrap();
+        device.write(&mut m, 0x64, 4, 1, 0).unwrap();
         assert!(!device.irq());
     }
     #[test]
@@ -391,7 +428,7 @@ mod tests {
         assert!(device.receive(&mut m, b"frame").unwrap());
         assert!(!device.irq());
         wr16(&mut m, AVAIL + 2, 1);
-        device.write(&mut m, 0x50, 4, 0).unwrap();
+        device.write(&mut m, 0x50, 4, 0, 0).unwrap();
         assert!(device.irq());
         assert_eq!(&m[DATA + NET_HEADER..DATA + NET_HEADER + 5], b"frame");
         assert_eq!(u32_at(&m, USED + 8), 17);
@@ -405,7 +442,7 @@ mod tests {
             wr64(&mut m, 0, address);
             setup(&mut device, &mut m, 1);
             let before = m.clone();
-            assert!(device.write(&mut m, 0x50, 4, 1).is_err());
+            assert!(device.write(&mut m, 0x50, 4, 1, 0).is_err());
             assert_eq!(m, before);
         }
         let mut m = vec![0; 0x4000];
@@ -414,7 +451,7 @@ mod tests {
         setup(&mut device, &mut m, 1);
         let before = m.clone();
         assert!(device
-            .write(&mut m, 0x50, 4, 1)
+            .write(&mut m, 0x50, 4, 1, 0)
             .unwrap_err()
             .contains("cyclic"));
         assert_eq!(m, before);
@@ -431,7 +468,7 @@ mod tests {
         wr16(&mut m, AVAIL + 2, 9);
         let before = m.clone();
         assert!(device
-            .write(&mut m, 0x50, 4, 0)
+            .write(&mut m, 0x50, 4, 0, 0)
             .unwrap_err()
             .contains("overrun"));
         assert_eq!(m, before);
@@ -447,7 +484,7 @@ mod tests {
         wr64(&mut m, DATA + 8, 1);
         m[DATA + 512..DATA + 1024].fill(0xab);
         setup(&mut device, &mut m, 0);
-        device.write(&mut m, 0x50, 4, 0).unwrap();
+        device.write(&mut m, 0x50, 4, 0, 0).unwrap();
         assert_eq!(m[DATA + 1024], 0);
         assert_eq!(device.disk().unwrap().volatile_sectors(), 1);
         let (before_flush, lost) = device.disk().unwrap().crashed();
@@ -458,7 +495,7 @@ mod tests {
         wr32(&mut m, DATA, 4);
         wr16(&mut m, DESC + 14, 2);
         wr16(&mut m, AVAIL + 2, 2);
-        device.write(&mut m, 0x50, 4, 0).unwrap();
+        device.write(&mut m, 0x50, 4, 0, 0).unwrap();
         assert_eq!(device.disk().unwrap().stable_sectors(), 1);
         let (after_flush, lost) = device.disk().unwrap().crashed();
         assert_eq!(lost, 0);
@@ -469,7 +506,7 @@ mod tests {
         wr16(&mut m, DESC + 16 + 12, 3);
         m[DATA + 512..DATA + 1024].fill(0);
         wr16(&mut m, AVAIL + 2, 3);
-        device.write(&mut m, 0x50, 4, 0).unwrap();
+        device.write(&mut m, 0x50, 4, 0, 0).unwrap();
         assert_eq!(&m[DATA + 512..DATA + 1024], &[0xab; 512]);
         assert_eq!(u32_at(&m, USED + 4 + 2 * 8 + 4), 513);
     }
@@ -484,7 +521,7 @@ mod tests {
         setup(&mut device, &mut m, 0);
         let before = m.clone();
         let disk = device.disk().unwrap().digest();
-        assert!(device.write(&mut m, 0x50, 4, 0).is_err());
+        assert!(device.write(&mut m, 0x50, 4, 0, 0).is_err());
         assert_eq!(m, before);
         assert_eq!(device.disk().unwrap().digest(), disk);
     }

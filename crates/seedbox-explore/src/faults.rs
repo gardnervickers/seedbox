@@ -58,6 +58,7 @@ pub fn generate(
     let mut lifecycle_free: BTreeMap<&str, u64> = BTreeMap::new();
     let mut clock_free: BTreeMap<&str, u64> = BTreeMap::new();
     let mut disk_free: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut latency_free: BTreeMap<&str, u64> = BTreeMap::new();
     for fault in &profile.faults {
         if let FaultKind::Partition { from, .. } = fault {
             if let Some(machine) = from.iter().find(|m| !machines.contains(m)) {
@@ -68,12 +69,15 @@ pub fn generate(
         }
         if let FaultKind::DiskError {
             targets: narrowed, ..
+        }
+        | FaultKind::DiskLatency {
+            targets: narrowed, ..
         } = fault
         {
             for target in narrowed {
                 if !targets.contains(&target.as_str()) {
                     return Err(format!(
-                        "fault profile disk_error target {target:?} is not a profile target"
+                        "fault profile disk fault target {target:?} is not a profile target"
                     ));
                 }
             }
@@ -110,10 +114,14 @@ pub fn generate(
             | FaultKind::Stop { .. } => Some(&mut lifecycle_free),
             FaultKind::ClockSkew { .. } => Some(&mut clock_free),
             FaultKind::DiskError { .. } => Some(&mut disk_free),
+            FaultKind::DiskLatency { .. } => Some(&mut latency_free),
             FaultKind::Partition { .. } | FaultKind::Shape { .. } => None,
         };
         let candidates: Vec<&str> = match kind {
             FaultKind::DiskError {
+                targets: narrowed, ..
+            }
+            | FaultKind::DiskLatency {
                 targets: narrowed, ..
             } if !narrowed.is_empty() => narrowed.iter().map(String::as_str).collect(),
             _ => targets.clone(),
@@ -232,6 +240,30 @@ pub fn generate(
                         SpecDiskOp::Any => DiskOp::Any,
                     },
                     ppm: *ppm,
+                },
+                Action::Heal {
+                    handle: handle.clone(),
+                },
+                rng.within(duration),
+            ),
+            FaultKind::DiskLatency {
+                duration,
+                latency,
+                op,
+                jitter,
+                ..
+            } => (
+                Action::DiskLatency {
+                    handle: handle.clone(),
+                    machine: target.into(),
+                    op: match op {
+                        SpecDiskOp::Read => DiskOp::Read,
+                        SpecDiskOp::Write => DiskOp::Write,
+                        SpecDiskOp::Flush => DiskOp::Flush,
+                        SpecDiskOp::Any => DiskOp::Any,
+                    },
+                    latency_ns: rng.within(latency),
+                    jitter_ns: jitter.0,
                 },
                 Action::Heal {
                     handle: handle.clone(),

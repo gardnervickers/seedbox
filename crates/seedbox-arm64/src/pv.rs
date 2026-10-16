@@ -14,6 +14,10 @@ pub struct PvClock {
     deadline: Option<u64>,
     horizon: Option<u64>,
     pending: bool,
+    /// When a device next completes work on its own, such as a delayed disk
+    /// request: the guest stops there, and an idle guest wakes there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device: Option<u64>,
 }
 impl PvClock {
     /// Set the external bound while the guest is stopped. None retains the
@@ -32,10 +36,20 @@ impl PvClock {
         Ok(())
     }
     fn bound(&self) -> Option<u64> {
-        match (self.deadline, self.horizon) {
-            (Some(timer), Some(horizon)) => Some(timer.min(horizon)),
-            (timer, horizon) => timer.or(horizon),
-        }
+        [self.deadline, self.horizon, self.device]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+    /// Set the next device completion while the guest is stopped. A device
+    /// deadline already passed is due at the next judgement.
+    pub fn set_device(&mut self, device: Option<u64>) {
+        self.device = device.map(|d| d.max(self.now));
+    }
+    /// The earliest of the guest timer and the next device completion: when
+    /// this machine next has work of its own.
+    pub fn next_event(&self) -> Option<u64> {
+        [self.deadline, self.device].into_iter().flatten().min()
     }
     pub fn ack(&mut self) {
         self.pending = false;
@@ -97,6 +111,10 @@ impl Timebase for PvClock {
                 .now
                 .max(self.bound().ok_or("idle without an armed PV timer")?);
         }
+        if self.device.is_some_and(|d| d <= self.now) {
+            // The machine completes the device's work at this stop.
+            self.device = None;
+        }
         if self.deadline.is_some_and(|d| d <= self.now) {
             self.deadline = None;
             self.pending = true;
@@ -136,6 +154,31 @@ mod tests {
         c.now = u64::MAX;
         assert!(c.clock_read().is_err());
         assert!(c.read(u64::MAX).is_err());
+    }
+}
+
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+    #[test]
+    fn an_idle_guest_wakes_at_a_device_completion_before_its_timer() {
+        let mut c = PvClock::default();
+        c.read(100).unwrap();
+        c.arm(10_000).unwrap();
+        c.set_device(Some(600));
+        assert_eq!(c.prepare().bound, 600);
+        assert_eq!(c.next_event(), Some(600));
+        // Waking for the device is no timer expiry.
+        assert!(!c.judge(true).unwrap());
+        assert_eq!(c.now(), 600);
+        assert_eq!(c.prepare().bound, 10_000);
+        // Idle with no timer: the device alone bounds the wait.
+        c.arm(0).unwrap();
+        c.set_device(Some(900));
+        assert!(!c.judge(true).unwrap());
+        assert_eq!(c.now(), 900);
+        c.set_device(Some(10));
+        assert_eq!(c.next_event(), Some(900));
     }
 }
 

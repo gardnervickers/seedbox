@@ -612,6 +612,20 @@ pub enum Action {
         #[serde(default = "every_request")]
         ppm: u32,
     },
+    /// Complete the machine's disk requests late, until the handle is
+    /// healed: each request of kind `op` takes `latency_ns` plus a seeded
+    /// draw up to `jitter_ns`, and requests complete in submission order, so
+    /// none overtakes an earlier one. A request's disk effect happens when it
+    /// completes; a crash first loses what is still pending.
+    DiskLatency {
+        handle: String,
+        machine: String,
+        #[serde(default = "any_request")]
+        op: DiskOp,
+        latency_ns: u64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        jitter_ns: u64,
+    },
     /// Freeze the machine's CPU and devices; the world goes on.
     Pause {
         machine: String,
@@ -644,6 +658,7 @@ impl Action {
             Self::ClockDrift { .. } => "clock_drift",
             Self::Throttle { .. } => "throttle",
             Self::DiskError { .. } => "disk_error",
+            Self::DiskLatency { .. } => "disk_latency",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
@@ -663,7 +678,8 @@ impl Action {
             | Self::ClockSkew { machine, .. }
             | Self::ClockDrift { machine, .. }
             | Self::Throttle { machine, .. }
-            | Self::DiskError { machine, .. } => Some(machine),
+            | Self::DiskError { machine, .. }
+            | Self::DiskLatency { machine, .. } => Some(machine),
             _ => None,
         }
     }
@@ -728,6 +744,24 @@ pub enum DiskOp {
 pub const DISK_ERROR_PPM: std::ops::RangeInclusive<u32> = 1..=1_000_000;
 fn every_request() -> u32 {
     *DISK_ERROR_PPM.end()
+}
+fn any_request() -> DiskOp {
+    DiskOp::Any
+}
+/// Disk request latencies, in nanoseconds: from a fast SSD (1 µs) to a
+/// stalled device (1 s). Jitter is bounded the same way.
+pub const DISK_LATENCY_NS: std::ops::RangeInclusive<u64> = 1_000..=1_000_000_000;
+/// Latency and jitter within [`DISK_LATENCY_NS`] (jitter may be zero).
+pub fn validate_disk_latency(latency_ns: u64, jitter_ns: u64) -> Result<(), String> {
+    if !DISK_LATENCY_NS.contains(&latency_ns) || jitter_ns > *DISK_LATENCY_NS.end() {
+        return Err(format!(
+            "disk_latency latency_ns must be {} to {} and jitter_ns at most {}",
+            DISK_LATENCY_NS.start(),
+            DISK_LATENCY_NS.end(),
+            DISK_LATENCY_NS.end()
+        ));
+    }
+    Ok(())
 }
 
 /// Throttled CPU speeds, in Hz: from a thousandth of the slowest configured CPU

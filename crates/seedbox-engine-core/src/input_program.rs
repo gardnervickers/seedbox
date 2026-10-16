@@ -373,7 +373,8 @@ pub(crate) fn validate_override_state(faults: &Faults, action: &Action) -> Resul
         | Action::ClockSkew { handle, .. }
         | Action::ClockDrift { handle, .. }
         | Action::Throttle { handle, .. }
-        | Action::DiskError { handle, .. } => Some(handle),
+        | Action::DiskError { handle, .. }
+        | Action::DiskLatency { handle, .. } => Some(handle),
         _ => None,
     };
     if handle.is_some_and(|handle| faults.active_handles().contains(handle)) {

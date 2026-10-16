@@ -334,6 +334,17 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
             self.name
         ))
     }
+    /// Start (`Some`) or end (`None`) injected disk latency on the machine's
+    /// retained disk, from its next request. Ending returns its counts.
+    fn disk_latency(
+        &mut self,
+        _latency: Option<crate::virtio_block::InjectedLatency>,
+    ) -> Result<Option<crate::virtio_block::LatencyCounts>, String> {
+        Err(format!(
+            "{}: disk latency is unsupported by this backend",
+            self.name
+        ))
+    }
     fn exits(&self) -> u64;
     fn exit_witness(&mut self) -> Result<String, String>;
     /// Idempotently poison, close and reap owned worker transport without another
@@ -983,15 +994,16 @@ impl<M: WorldMachine> World<M> {
             faults::Lifecycle::Throttle(speed_hz) => {
                 self.machines[m].throttle(speed_hz).map(|_| ())
             }
-            faults::Lifecycle::DiskErrors { .. } | faults::Lifecycle::HealDiskErrors { .. } => {
-                apply_disk_errors(
-                    &mut self.machines[m],
-                    &mut self.faults,
-                    self.run_seed,
-                    self.branch_identity.as_deref(),
-                    op,
-                )
-            }
+            faults::Lifecycle::DiskErrors { .. }
+            | faults::Lifecycle::HealDiskErrors { .. }
+            | faults::Lifecycle::DiskLatency { .. }
+            | faults::Lifecycle::HealDiskLatency { .. } => apply_disk_fault(
+                &mut self.machines[m],
+                &mut self.faults,
+                self.run_seed,
+                self.branch_identity.as_deref(),
+                op,
+            ),
         }
     }
 
@@ -1024,8 +1036,11 @@ impl<M: WorldMachine> World<M> {
         if let Some(speed_hz) = self.faults.throttle(m) {
             self.machines[m].throttle(Some(speed_hz))?;
         }
-        if let Some(op) = self.faults.disk_errors(m) {
-            apply_disk_errors(
+        for op in [self.faults.disk_errors(m), self.faults.disk_latency(m)]
+            .into_iter()
+            .flatten()
+        {
+            apply_disk_fault(
                 &mut self.machines[m],
                 &mut self.faults,
                 self.run_seed,
@@ -1735,10 +1750,10 @@ impl<M: WorldMachine> WorldSnapshot<M> {
     }
 }
 
-/// Start or end a machine's injected disk errors. Each incarnation draws on
-/// its own stream, so a rebooted machine's errors do not repeat the last
-/// incarnation's choices.
-pub(crate) fn apply_disk_errors<M: WorldMachine>(
+/// Start or end a machine's injected disk errors or latency. Each
+/// incarnation draws on its own stream, so a rebooted machine's draws do not
+/// repeat the last incarnation's choices.
+pub(crate) fn apply_disk_fault<M: WorldMachine>(
     machine: &mut M,
     faults: &mut faults::Faults,
     run_seed: u64,
@@ -1758,7 +1773,29 @@ pub(crate) fn apply_disk_errors<M: WorldMachine>(
             }
             Ok(())
         }
-        _ => Err("not a disk error transition".into()),
+        faults::Lifecycle::DiskLatency {
+            id,
+            op,
+            latency_ns,
+            jitter_ns,
+        } => {
+            let domain = format!(
+                "disk-latency/{}/{}/{id}",
+                machine.name,
+                machine.incarnation()
+            );
+            let rng = crate::rng::Rng::branch(run_seed, branch_identity, &domain);
+            let latency =
+                crate::virtio_block::InjectedLatency::new(op, latency_ns, jitter_ns, rng)?;
+            machine.disk_latency(Some(latency)).map(drop)
+        }
+        faults::Lifecycle::HealDiskLatency { row } => {
+            if let Some(counts) = machine.disk_latency(None)? {
+                faults.record_disk_latency_counts(row, counts);
+            }
+            Ok(())
+        }
+        _ => Err("not a disk fault transition".into()),
     }
 }
 

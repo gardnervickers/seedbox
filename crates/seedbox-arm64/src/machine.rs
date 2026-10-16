@@ -247,7 +247,7 @@ impl<B: Backend> Machine<B> {
             pending_irq: self.clock.is_pending()
                 || !self.deferred_spis.is_empty()
                 || !self.asserted_spis.is_empty(),
-            next_deadline: self.clock.deadline().unwrap_or(u64::MAX),
+            next_deadline: self.clock.next_event().unwrap_or(u64::MAX),
             owed_io: None,
             abi: if self.ready { ABI } else { 0 },
             exits: self.trace.len() as u64,
@@ -376,6 +376,39 @@ impl<B: Backend> Machine<B> {
             .and_then(|devices| devices.block.as_mut())
             .ok_or("no retained disk for disk errors")?
             .set_disk_errors(errors)
+    }
+    /// Start or end injected latency on the retained disk, from its next
+    /// request. Requests already pending keep their due times.
+    pub fn disk_latency(
+        &mut self,
+        latency: Option<seedbox_engine_core::virtio_block::InjectedLatency>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::LatencyCounts>> {
+        self.application
+            .as_mut()
+            .and_then(|devices| devices.block.as_mut())
+            .ok_or("no retained disk for disk latency")?
+            .set_disk_latency(latency)
+    }
+    /// Complete delayed disk requests due by now, then publish the next one
+    /// as the clock's device deadline.
+    fn complete_device_work(&mut self) -> Result<()> {
+        let now = self.clock.now();
+        let Some(block) = self
+            .application
+            .as_mut()
+            .and_then(|devices| devices.block.as_mut())
+        else {
+            return Ok(());
+        };
+        if block.next_due().is_some_and(|due| due <= now) {
+            unsafe { self.ram.with_bytes_mut(|ram| block.complete_due(ram, now)) }?;
+            let next = block.next_due();
+            self.clock.set_device(next);
+            return self.sync_application_irqs();
+        }
+        let next = block.next_due();
+        self.clock.set_device(next);
+        Ok(())
     }
 
     /// Resume after a world pause, or boot a new incarnation at a lifecycle
@@ -856,6 +889,7 @@ impl<B: Backend> Machine<B> {
                     self.deferred_clock_read_spis += 1;
                 }
             }
+            self.complete_device_work()?;
             self.flush_spis()?;
             self.trace
                 .push(Record::new(&stop.exit, self.clock.now(), stop.pc, response));
@@ -927,6 +961,7 @@ impl<B: Backend> Machine<B> {
         value: u64,
     ) -> Result<Option<u64>> {
         use application::*;
+        let now = self.clock.now();
         let devices = self
             .application
             .as_mut()
@@ -972,7 +1007,7 @@ impl<B: Backend> Machine<B> {
         let response = if write {
             let events = unsafe {
                 self.ram
-                    .with_bytes_mut(|ram| device.write(ram, addr - base, width, value))
+                    .with_bytes_mut(|ram| device.write(ram, addr - base, width, value, now))
             }?;
             devices.events.extend(events);
             None
@@ -1397,7 +1432,7 @@ mod spi_regression {
                     (0xa0, RAM_BASE + 0x1100),
                     (0x44, 1),
                 ] {
-                    net.write(ram, offset, 4, value).unwrap();
+                    net.write(ram, offset, 4, value, 0).unwrap();
                 }
             });
         }

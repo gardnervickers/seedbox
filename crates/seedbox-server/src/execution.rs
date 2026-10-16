@@ -568,6 +568,7 @@ impl ExecutionService {
                 if let Err(error) = self.register_anchor_captures(&id) {
                     eprintln!("simulation {id}: anchor captures: {error}");
                 }
+                let lost = report.is_none() && run.record.error.is_some();
                 self.manager.update(&id, |s| {
                     merge_report_observation(
                         &mut s.status,
@@ -575,6 +576,11 @@ impl ExecutionService {
                         report.and_then(|r| r.simulated_time_ns),
                         report.and_then(|r| r.properties.as_ref()),
                     );
+                    if lost {
+                        // The final report, and any property evidence in it,
+                        // never arrived: a passing oracle proves nothing alone.
+                        s.status.properties = Some(lost_evidence());
+                    }
                     s.status.termination = Some(termination);
                     s.status.phase = Phase::Completed;
                     s.status.stage = None;
@@ -955,6 +961,19 @@ fn save_inputs(
 
 // Committed observations may be ahead of a late final report. Neither the
 // oracle's first exit nor the public timeline may move backwards during cleanup.
+/// The assessment of a run whose final report was lost.
+fn lost_evidence() -> seedbox_engine_protocol::property::Assessment {
+    seedbox_engine_protocol::property::Assessment {
+        status: seedbox_engine_protocol::property::AssessmentStatus::Incomplete,
+        violated: 0,
+        unmet: 0,
+        evidence_complete: false,
+        error_count: 1,
+        errors: Vec::new(),
+        properties: Vec::new(),
+    }
+}
+
 fn merge_report_observation(
     status: &mut seedbox_api::SimulationStatus,
     exit: Option<u8>,
@@ -974,6 +993,17 @@ fn merge_report_observation(
 mod tests {
     use super::*;
     use seedbox_api::{SimulationSpec, SubmitRequest, TestVerdict};
+
+    #[test]
+    fn a_passing_oracle_whose_report_was_lost_is_incomplete() {
+        let status = seedbox_api::SimulationStatus {
+            phase: Phase::Completed,
+            oracle_exit_code: Some(0),
+            properties: Some(lost_evidence()),
+            ..Default::default()
+        };
+        assert_eq!(status.verdict(), TestVerdict::Incomplete);
+    }
 
     struct WaitingProvider(AtomicBool);
     impl BackendProvider for WaitingProvider {

@@ -420,6 +420,8 @@ pub struct FaultRecord {
     pub selection_counts: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_error_counts: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_latency_counts: Option<Value>,
     pub status: RowStatus,
 }
 
