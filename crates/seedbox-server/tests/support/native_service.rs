@@ -11,11 +11,11 @@ pub use controller::{controller_checkpoint, controller_repeat};
 mod export;
 #[cfg(feature = "kvm-tests")]
 pub use export::pv_large_export_under_load;
-#[path = "native_held_checkpoint.rs"]
-mod held_checkpoint;
 #[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
 #[path = "native_disk.rs"]
 mod disk;
+#[path = "native_held_checkpoint.rs"]
+mod held_checkpoint;
 #[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
 pub use disk::{disk_checkpoint_continuation, disk_repeat_workers};
 pub use held_checkpoint::native_held_checkpoint;
