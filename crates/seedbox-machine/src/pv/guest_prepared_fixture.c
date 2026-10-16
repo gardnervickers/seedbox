@@ -1,5 +1,5 @@
 /* Native Linux fixture for common preparation. Build this source separately for
- * ARM64 and RV64; equal configuration shapes do not imply equal ELF bytes. */
+ * ARM64 and x86-64; equal configuration shapes do not imply equal ELF bytes. */
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>

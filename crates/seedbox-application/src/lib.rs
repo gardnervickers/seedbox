@@ -10,6 +10,8 @@ pub use seedbox_artifacts::bundle;
 pub mod config;
 pub mod container_images;
 pub mod definition;
+#[cfg(unix)]
+pub mod driver_world;
 pub use seedbox_artifacts::diff;
 pub use seedbox_artifacts::engine;
 pub mod engine_adapter;
@@ -30,6 +32,7 @@ pub mod oci;
 pub mod orchestration;
 pub mod preparation;
 mod preparation_command;
+pub mod runtime_assets;
 pub use seedbox_artifacts::store;
 pub mod templates;
 pub mod vmm;
@@ -42,3 +45,6 @@ pub use seedbox_artifacts::{Error, Result};
 
 #[cfg(test)]
 mod test_process;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod process_lifetime;

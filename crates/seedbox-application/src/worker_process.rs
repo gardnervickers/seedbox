@@ -140,6 +140,7 @@ pub(crate) struct WorkerLaunch {
     report: PathBuf,
     endpoint: Endpoint,
     spawn_fix: &'static str,
+    native_scratch: Option<PathBuf>,
 }
 
 /// Launch request beside `world.json` in the run output; the x86 worker reads it.
@@ -147,6 +148,10 @@ pub(crate) const WORKER_REQUEST_FILE: &str = "worker-request.json";
 
 impl WorkerLaunch {
     pub(crate) fn prepare(request: &ExecutionRequest<'_>) -> Result<Self> {
+        if crate::engine::recorded_launch(&request.prepared.profile)? == ExecutableKind::DriverWorld
+        {
+            return Self::prepare_driver(request);
+        }
         let engine = request
             .artifacts
             .get(&request.prepared.profile.engine)
@@ -190,6 +195,7 @@ impl WorkerLaunch {
             ExecutableKind::Standalone => "check the retained executable and host setup",
             ExecutableKind::InternalWorker => "use the retained CLI executable for this host",
             ExecutableKind::ArmWorld => "use the retained signed CLI",
+            ExecutableKind::DriverWorld => "use the retained Driver worker CLI",
         };
         let streams = request
             .prepared
@@ -262,12 +268,147 @@ impl WorkerLaunch {
             report,
             endpoint,
             spawn_fix,
+            native_scratch: None,
         })
     }
 
+    fn prepare_driver(request: &ExecutionRequest<'_>) -> Result<Self> {
+        Self::prepare_driver_impl(request, None, None)
+    }
+    pub(crate) fn prepare_driver_with_runtime(
+        request: &ExecutionRequest<'_>,
+        backend: crate::driver_world::DriverBackend,
+        runtime: Option<&crate::driver_world::binding::Binding>,
+    ) -> Result<Self> {
+        Self::prepare_driver_impl(request, Some(backend), runtime)
+    }
+    fn prepare_driver_impl(
+        request: &ExecutionRequest<'_>,
+        backend: Option<crate::driver_world::DriverBackend>,
+        runtime: Option<&crate::driver_world::binding::Binding>,
+    ) -> Result<Self> {
+        let engine = request
+            .artifacts
+            .get(&request.prepared.profile.engine)
+            .ok_or_else(|| Error::Integrity("missing retained Driver executable".into()))?;
+        if fs::metadata(engine)?.permissions().mode() & 0o7777 != 0o500 {
+            fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
+        }
+        let endpoint = Endpoint::new(request.output)?;
+        let worker =
+            crate::driver_world::retained::request(request, &endpoint.socket(), backend, runtime)?;
+        let path = request.output.join(WORKER_REQUEST_FILE);
+        fs::write(&path, serde_json::to_vec_pretty(&worker)?)?;
+        let report = request.output.join("vmm.json");
+        let mut command = crate::engine_adapter::engine_command(engine, &request.prepared.profile)?;
+        command
+            .arg("--owner-pipe")
+            .arg("--request")
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .env_clear()
+            .stdout(fs::File::create(&report)?)
+            .stderr(fs::File::create(request.output.join("vmm.stderr"))?)
+            .process_group(0);
+        Ok(Self {
+            command,
+            engine: engine.clone(),
+            report,
+            endpoint,
+            spawn_fix: "use the retained Driver worker CLI for this host",
+            native_scratch: Some(worker.output.join(crate::driver_world::NATIVE_SCRATCH)),
+        })
+    }
+
+    /// Launch through an explicit CLI monitor entry. The core adapter supplies
+    /// the monitor executable; this library never discovers launch environment.
+    /// Call `wait` in a blocking execution context. Dropping the result cancels
+    /// asynchronously and transfers monitor reaping to the owned reaper thread.
+    pub(crate) fn spawn_with_monitor(
+        self,
+        monitor: &std::path::Path,
+        session_lease: Option<&std::path::Path>,
+    ) -> Result<RunningWorker<crate::process_lifetime::OwnedExecution>> {
+        let started = seedbox_engine_protocol::host_clock::Instant::now()?;
+        let scratch = self
+            .native_scratch
+            .as_ref()
+            .map(|path| {
+                let parent = path.parent().expect("native scratch parent");
+                fs::create_dir_all(parent)?;
+                // A fixed name inside a fresh owned execution, never adoption of an
+                // old directory: create_new semantics reject collisions/symlinks.
+                tempfile::Builder::new()
+                    .prefix(crate::driver_world::NATIVE_SCRATCH)
+                    .rand_bytes(0)
+                    .tempdir_in(parent)
+            })
+            .transpose()?;
+        let mut arguments: Vec<_> = self
+            .command
+            .get_args()
+            .filter(|arg| *arg != "--owner-pipe")
+            .map(std::ffi::OsStr::to_owned)
+            .collect();
+        // A standalone historical VMM does not parse the CLI's private prefix;
+        // it still retains the inherited descriptor throughout its process life.
+        if arguments.first().is_some_and(|arg| arg == "__engine") {
+            arguments.insert(0, seedbox_machine::process_lease::ENTRY.into());
+        }
+        let environment: Vec<_> = self
+            .command
+            .get_envs()
+            .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
+            .collect();
+        // Drop Command's original stdio copies before starting the monitor.
+        drop(self.command);
+        let endpoint = std::sync::Arc::new(self.endpoint);
+        let mut process = crate::process_lifetime::OwnedExecution::spawn(
+            monitor,
+            &self.engine,
+            &arguments,
+            &environment,
+            fs::File::create(&self.report)?,
+            fs::File::create(self.report.with_file_name("vmm.stderr"))?,
+            crate::process_lifetime::LeasePaths {
+                execution: &self
+                    .report
+                    .with_file_name(crate::process_lifetime::EXECUTION_LEASE_FILE),
+                session: session_lease,
+            },
+        )
+        .map_err(|error| {
+            Error::Setup(format!(
+                "engine monitor {}: {error}; {}",
+                monitor.display(),
+                self.spawn_fix
+            ))
+        })?;
+        // Endpoint owns a scratch clock/socket directory as well as a session
+        // locator. Its destructor must follow the same monitor exit barrier.
+        process.retain_until_join(endpoint.clone());
+        if let Some(scratch) = scratch {
+            process.retain_until_join(scratch);
+        }
+        Ok(RunningWorker {
+            process,
+            report: self.report,
+            started,
+            _endpoint: endpoint,
+        })
+    }
+
+    /// Historical standalone-launch ownership, retained until all callers use
+    /// the explicit monitor boundary. The Driver adapter uses spawn_with_monitor.
     /// The caller must acquire any host lease before spawning. The returned
     /// worker stops and reaps its group before the caller releases its host guard.
     pub(crate) fn spawn(mut self) -> Result<RunningWorker> {
+        if self.native_scratch.is_some() {
+            return Err(Error::Setup(
+                "retained Driver workers require monitored launch for native scratch ownership"
+                    .into(),
+            ));
+        }
         let started = seedbox_engine_protocol::host_clock::Instant::now()?;
         let child = self.command.spawn().map_err(|error| {
             Error::Setup(format!(
@@ -280,7 +421,7 @@ impl WorkerLaunch {
             process: OwnedProcess(Some(child)),
             report: self.report,
             started,
-            _endpoint: self.endpoint,
+            _endpoint: std::sync::Arc::new(self.endpoint),
         })
     }
 }
@@ -304,15 +445,24 @@ fn worker_failure(report: &std::path::Path) -> String {
     }
 }
 
-pub(crate) struct RunningWorker {
-    // Field drop order keeps process cleanup ahead of endpoint removal.
-    process: OwnedProcess,
+pub(crate) struct RunningWorker<P = OwnedProcess> {
+    // Monitored cleanup retains its execution lease independently of endpoint
+    // removal, including when cancellation drops this handle on an async task.
+    process: P,
     report: PathBuf,
     started: seedbox_engine_protocol::host_clock::Instant,
-    _endpoint: Endpoint,
+    _endpoint: std::sync::Arc<Endpoint>,
 }
 
-impl RunningWorker {
+impl RunningWorker<crate::process_lifetime::OwnedExecution> {
+    /// Carry runtime/scratch deletion guards into the detached monitor join if
+    /// the caller drops this execution on an async cancellation path.
+    pub(crate) fn retain_until_join(mut self, guard: impl Send + 'static) -> Self {
+        self.process.retain_until_join(guard);
+        self
+    }
+}
+impl<P: ProcessLifetime> RunningWorker<P> {
     pub(crate) fn wait(
         mut self,
         cancellation: &CancellationToken,
@@ -387,9 +537,48 @@ fn finish_cleanup(
     }
 }
 
+pub(crate) trait ProcessLifetime {
+    fn exited(&mut self) -> Result<Option<bool>>;
+    fn stop(&mut self) -> Result<()>;
+}
+impl ProcessLifetime for crate::process_lifetime::OwnedExecution {
+    fn exited(&mut self) -> Result<Option<bool>> {
+        self.poll()?
+            .map(|completion| {
+                // Read any terminal oracle report before propagating cleanup
+                // failure from stop(), preserving an already observed verdict.
+                match &completion.worker {
+                    Some(exit) => Ok(*exit == crate::process_lifetime::WorkerExit::Code(0)),
+                    None => Err(Error::Execution(format!(
+                        "worker exit not observed: {completion:?}; execution files must be kept"
+                    ))),
+                }
+            })
+            .transpose()
+    }
+    fn stop(&mut self) -> Result<()> {
+        self.cancel();
+        let completion = self.finish()?;
+        if !completion.cleanup_authorized() {
+            return Err(Error::Execution(format!(
+                "engine cleanup failed: {completion:?}; execution files must be kept"
+            )));
+        }
+        Ok(())
+    }
+}
+impl ProcessLifetime for OwnedProcess {
+    fn exited(&mut self) -> Result<Option<bool>> {
+        OwnedProcess::exited(self)
+    }
+    fn stop(&mut self) -> Result<()> {
+        OwnedProcess::stop(self)
+    }
+}
+
 /// Keep the unreaped leader through the final group signal. Reaping it early
 /// could let a different process reuse the group ID before cleanup.
-struct OwnedProcess(Option<Child>);
+pub(crate) struct OwnedProcess(Option<Child>);
 impl OwnedProcess {
     fn exited(&self) -> Result<Option<bool>> {
         let child = self
@@ -587,6 +776,11 @@ mod tests {
                 ExecutableKind::Standalone => None,
                 ExecutableKind::InternalWorker => Some(internal.clone()),
                 ExecutableKind::ArmWorld => Some(crate::engine::arm_descriptor()),
+                ExecutableKind::DriverWorld => {
+                    let mut descriptor = internal.clone();
+                    descriptor.kind = ExecutableKind::DriverWorld;
+                    Some(descriptor)
+                }
             };
             let prepared = PreparedInputs {
                 wall_clock_epoch: None,
@@ -675,6 +869,7 @@ mod tests {
             let dispatch: &[&str] = match kind {
                 ExecutableKind::Standalone => &[],
                 ExecutableKind::InternalWorker => &["__engine", crate::engine::INTERNAL_WORKER_V1],
+                ExecutableKind::DriverWorld => &["__engine", crate::engine::DRIVER_WORLD_V1],
                 ExecutableKind::ArmWorld => {
                     &["__engine", crate::engine::ARM_WORLD_V1, "--owner-pipe"]
                 }
@@ -780,6 +975,7 @@ mod tests {
             report,
             endpoint: Endpoint::new(output).unwrap(),
             spawn_fix: "test worker",
+            native_scratch: None,
         }
         .spawn()
         .unwrap()

@@ -15,13 +15,11 @@
 //! Shared contract types belong at this module's top level. Internal submodules
 //! organize implementations as needed.
 
-pub(crate) mod bridge;
+pub mod bridge;
+pub mod ethernet;
 pub(crate) mod oracle;
 pub(crate) mod protocol;
-pub(crate) mod transport;
-
-#[cfg(all(test, unix))]
-mod guest_supervisor_tests;
+pub mod transport;
 
 use crate::machine::Timestamp;
 use std::{
@@ -54,7 +52,11 @@ pub enum Request {
     /// unchanged.
     Crash,
     /// Start a fresh boot, discarding old-boot work and pending shutdown, with
-    /// the machine's crash disk semantics. This is not snapshot restoration.
+    /// the machine's crash disk semantics. A boot forcibly ended by this
+    /// teardown is retired as [`crate::machine::EvidenceDisposition::Crashed`],
+    /// not graceful shutdown: it applies the legacy crash disk-loss semantics.
+    /// An already-ended boot is not reclassified or reported a second time.
+    /// This is not snapshot restoration.
     /// Existing snapshots and committed external effects remain unchanged.
     /// The caller clears any execution pause when admitting this request.
     /// Repeated requests perform distinct resets using the caller's RNG stream.
@@ -113,7 +115,32 @@ pub enum Request {
         /// Signed realtime step in nanoseconds.
         nanoseconds: NonZeroI64,
     },
+    // TODO: Re-evaluate: frames reuse the timed inbox so arrival shares the
+    // admission order of lifecycle requests and adopts the machine's time base;
+    // a separate delivery path would need its own ordering and snapshot rules.
+    /// Offer one Ethernet frame to the machine's NIC. The input's `at` is the
+    /// frame's simulation arrival time mapped into this receiver's time base
+    /// (see [`Input`]); the sender's time base never appears here.
+    /// The machine always takes an in-bounds frame. Taking transfers it to the NIC, not to the
+    /// guest: without a NIC, in an exited boot, or before the guest driver has
+    /// readied its receive queue, the frame is dropped. Otherwise it fills a
+    /// guest receive buffer, or waits in a NIC backlog of at most
+    /// [`RECEIVE_BACKLOG_FRAMES`] frames until the guest supplies one; a
+    /// frame arriving at a full backlog is dropped. The backlog belongs to
+    /// machine snapshots; device reset, crash and reboot clear it. A frame
+    /// outside [`MIN_FRAME_BYTES`]..=[`MAX_FRAME_BYTES`] is invalid caller
+    /// input: the machine fails the run with `Err`, with no rollback or
+    /// resumability guarantee. The Driver offers only frames it validated
+    /// when they were transmitted.
+    ReceiveFrame {
+        /// One Ethernet frame starting at the destination address, without
+        /// FCS or a virtio-net header. The EtherType and payload are opaque.
+        bytes: Vec<u8>,
+    },
 }
+
+pub use ethernet::frame_in_bounds;
+pub use ethernet::{MAX_FRAME_BYTES, MIN_FRAME_BYTES, RECEIVE_BACKLOG_FRAMES};
 
 /// Operations on the application process group; its kernel keeps running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +169,31 @@ pub enum ApplicationCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Response {
+    /// One ended logical boot, emitted only under configured service policy.
+    ///
+    /// `ended_boot` is the committed boot that ended, including logical boot
+    /// zero before any native startup. It is authoritative for this payload:
+    /// a surrounding Driver output may carry a prospective new boot during
+    /// Reboot admission. Consumers must not substitute that carrier identity.
+    /// `native_booted = false` explicitly means no native RAM ever existed;
+    /// its retired digest must be absent. Otherwise an absent retired digest
+    /// means full-state capture was not requested. Surviving disk state is
+    /// after loss selection; any retired state digest is before loss/teardown.
+    /// Reboot's forced teardown retires the ended boot as `Crashed` and applies
+    /// crash disk loss; it does not turn an earlier natural exit into a second
+    /// retirement. Without a disk, lost sectors is zero and the surviving
+    /// digest is None.
+    // TODO: Re-evaluate: reboot output carriers name the prospective boot;
+    // retired state needs its own validated committed ordinal. A typed output
+    // preserves identity without rewriting every other response's stamping.
+    BootEnded {
+        ended_boot: u64,
+        disposition: crate::machine::EvidenceDisposition,
+        native_booted: bool,
+        disk_lost_sectors: u64,
+        surviving_disk: Option<String>,
+        retired_state_digest: Option<String>,
+    },
     /// A complete guest simulation-control call observed through its final byte.
     /// Machine association belongs to the caller. Publishing this request
     /// transfers ownership of the call to the caller without executing its
@@ -190,6 +242,20 @@ pub enum Response {
         id: NonZeroU32,
         /// Guest-observed operation result.
         result: CommandResult,
+    },
+    /// One Ethernet frame the guest transmitted. The output's `at` is the
+    /// guest's transmit notification in the sender's own time base; the Driver
+    /// maps it to simulation time before routing. Frames are emitted in guest
+    /// transmission order. No checksum, segmentation or VLAN offload is
+    /// offered. The NIC drops guest frames outside
+    /// [`MIN_FRAME_BYTES`]..=[`MAX_FRAME_BYTES`] or whose device header
+    /// requests an offload; guest payload never causes `Err`, while a
+    /// malformed descriptor ring remains a machine error. Only a machine whose
+    /// definition has a NIC may emit this; the Driver rejects anything else.
+    TransmitFrame {
+        /// One Ethernet frame starting at the destination address, without
+        /// FCS or a virtio-net header. The EtherType and payload are opaque.
+        bytes: Vec<u8>,
     },
 }
 
@@ -325,122 +391,4 @@ impl<'a> Outbox<'a> {
 }
 
 #[cfg(test)]
-mod queue_tests {
-    use super::*;
-    fn at(n: u64) -> Timestamp {
-        Timestamp::from_nanos(n)
-    }
-    fn input(n: u64, id: u32) -> Input {
-        Input {
-            at: at(n),
-            payload: Request::Application {
-                id: NonZeroU32::new(id).unwrap(),
-                command: ApplicationCommand::Start,
-            },
-        }
-    }
-    #[test]
-    fn take_transfers_only_due_prefix_in_admission_order() {
-        let a = input(2, 1);
-        let b = input(2, 2);
-        let future = input(7, 3);
-        let mut pending = VecDeque::from([a.clone(), b.clone(), future.clone()]);
-        {
-            let mut inbox = Inbox::new(&mut pending, at(2));
-            assert_eq!(inbox.front(), Some(&a));
-            assert_eq!(inbox.front(), Some(&a)); // Inspection does not accept.
-            assert_eq!(inbox.take(), Some(a));
-            assert_eq!(inbox.take(), Some(b));
-            assert_eq!(inbox.front(), None);
-            assert_eq!(inbox.take(), None);
-        }
-        assert_eq!(pending, VecDeque::from([future.clone()]));
-        assert_eq!(Inbox::new(&mut pending, at(7)).take(), Some(future));
-    }
-    #[test]
-    fn dropped_view_preserves_unaccepted_work_and_next_view_sees_new_admissions() {
-        let first = input(0, 1);
-        let after_action = input(0, 2);
-        let mut pending = VecDeque::from([first.clone()]);
-        {
-            let inbox = Inbox::new(&mut pending, at(0));
-            assert_eq!(inbox.front(), Some(&first));
-        }
-        assert_eq!(pending.pop_front(), Some(first)); // Caller owns unaccepted work.
-                                                      // Caller processes intervening lifecycle action before this admission.
-        pending.push_back(after_action.clone());
-        assert_eq!(Inbox::new(&mut pending, at(0)).take(), Some(after_action));
-    }
-    #[test]
-    fn outbox_rejects_outside_interval_without_changing_staging() {
-        let mut staged = Vec::new();
-        {
-            let mut outbox = Outbox::new(&mut staged, at(5), at(8));
-            assert_eq!(
-                outbox.emit(Output {
-                    at: at(4),
-                    payload: Response::Ready
-                }),
-                Err(InvalidOutputTime)
-            );
-            outbox
-                .emit(Output {
-                    at: at(5),
-                    payload: Response::Ready,
-                })
-                .unwrap();
-            outbox
-                .emit(Output {
-                    at: at(8),
-                    payload: Response::ApplicationOutput {
-                        stream: Stream::Stdout,
-                        bytes: vec![0, 255],
-                    },
-                })
-                .unwrap();
-            assert_eq!(
-                outbox.emit(Output {
-                    at: at(9),
-                    payload: Response::Ready
-                }),
-                Err(InvalidOutputTime)
-            );
-        }
-        assert_eq!(staged.len(), 2);
-        assert_eq!(staged[0].at, at(5));
-        assert_eq!(staged[1].at, at(8));
-        assert_eq!(
-            staged[1].payload,
-            Response::ApplicationOutput {
-                stream: Stream::Stdout,
-                bytes: vec![0, 255]
-            }
-        );
-    }
-    #[test]
-    fn zero_budget_outbox_keeps_same_time_emission_order() {
-        let mut staged = Vec::new();
-        {
-            let mut outbox = Outbox::new(&mut staged, at(3), at(3));
-            outbox
-                .emit(Output {
-                    at: at(3),
-                    payload: Response::Ready,
-                })
-                .unwrap();
-            outbox
-                .emit(Output {
-                    at: at(3),
-                    payload: Response::ApplicationOutcome { code: 7 },
-                })
-                .unwrap();
-        }
-        assert_eq!(
-            staged
-                .iter()
-                .map(|event| &event.payload)
-                .collect::<Vec<_>>(),
-            [&Response::Ready, &Response::ApplicationOutcome { code: 7 }]
-        );
-    }
-}
+mod queue_tests;

@@ -38,6 +38,177 @@ pub struct Connections {
     pub used: bool,
     pub selections: BTreeMap<String, Selection>,
 }
+
+/// Plain stopped classifier state for an owner-local closed codec. No RNG,
+/// scheduler or native resources are represented. Sessions and selections keep
+/// their canonical sorted keys; import checks identities before publication.
+// TODO: Re-evaluate: Driver must persist this canonical policy without serde
+// collection parsing or moving it across standalone workspace type boundaries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionState {
+    pub sessions: BTreeMap<Tuple, SessionState>,
+    pub next: u64,
+    pub evicted: u64,
+    pub used: bool,
+    pub selections: BTreeMap<String, SelectionState>,
+}
+/// One classified TCP incarnation, including closed sessions retained for reuse.
+// TODO: Re-evaluate: this is owned plain data, not a shared serialized ABI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionState {
+    pub id: u64,
+    pub syn: [Option<u32>; 2],
+    pub fin: [bool; 2],
+    pub closed: bool,
+}
+/// A selected direction, retained even after closure or tuple reincarnation.
+// TODO: Re-evaluate: stale selectors remain meaningful independently of sessions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionState {
+    pub fault_id: u32,
+    pub connection: Connection,
+    pub identity: Identity,
+    pub matched: u64,
+    pub dropped: u64,
+}
+impl Connections {
+    /// Export independently owned plain state without changing classification.
+    /// This trusted operation allocates copies; an importing codec separately
+    /// accounts its own element and ownership storage before constructing maps.
+    // TODO: Re-evaluate: a concrete plain-data seam preserves one tracker policy
+    // while allowing the Driver's bounded binary format rather than private serde.
+    pub fn export_state(&self) -> ConnectionState {
+        ConnectionState {
+            sessions: self
+                .sessions
+                .iter()
+                .map(|(&k, s)| {
+                    (
+                        k,
+                        SessionState {
+                            id: s.id,
+                            syn: s.syn,
+                            fin: s.fin,
+                            closed: s.closed,
+                        },
+                    )
+                })
+                .collect(),
+            next: self.next,
+            evicted: self.evicted,
+            used: self.used,
+            selections: self
+                .selections
+                .iter()
+                .map(|(k, s)| {
+                    (
+                        k.clone(),
+                        SelectionState {
+                            fault_id: s.fault_id,
+                            connection: s.connection.clone(),
+                            identity: s.identity,
+                            matched: s.matched,
+                            dropped: s.dropped,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+    /// Validate and consume plain state against exact machine identity order.
+    /// This creates no external effects. Both maps are bounded by CAPACITY;
+    /// incarnations/keys, endpoint names, directed selection identity and counts
+    /// are checked. A selected older incarnation need not remain in sessions:
+    /// the same tuple can legitimately have opened a newer incarnation.
+    /// Logical allocation admission belongs to the caller, not this constructor.
+    // TODO: Re-evaluate: the owner of classification must validate private
+    // relations without exposing mutable tracker fields or accepting serde maps.
+    pub fn from_state(state: ConnectionState, names: &[String]) -> Result<Self, String> {
+        if state.sessions.len() > CAPACITY || state.selections.len() > CAPACITY {
+            return Err("connection capacity".into());
+        }
+        if (state.next == 0) != state.sessions.is_empty()
+            || state.evicted > state.next.saturating_sub(state.sessions.len() as u64)
+        {
+            return Err("connection lifetime counters".into());
+        }
+        let endpoint = |e: Endpoint| e.0 < names.len() && e.2 != 0;
+        for (tuple, s) in &state.sessions {
+            if !endpoint(tuple.0)
+                || !endpoint(tuple.1)
+                || tuple.0 >= tuple.1
+                || tuple.0 .0 == tuple.1 .0
+                || s.id == 0
+                || s.id > state.next
+                || s.syn == [None, None]
+                || (s.fin == [true, true] && !s.closed)
+                || state
+                    .sessions
+                    .iter()
+                    .any(|(other, x)| other != tuple && x.id == s.id)
+            {
+                return Err("connection session identity".into());
+            }
+        }
+        for (handle, s) in &state.selections {
+            let ((a, b), id) = s.identity;
+            if handle.is_empty()
+                || !endpoint(a)
+                || !endpoint(b)
+                || a.0 == b.0
+                || id == 0
+                || id > state.next
+                || s.connection.from != names[a.0]
+                || s.connection.to != names[b.0]
+                || s.connection.src_addr.octets() != a.1
+                || s.connection.dst_addr.octets() != b.1
+                || s.connection.src_port != a.2
+                || s.connection.dst_port != b.2
+                || s.connection.incarnation != id
+                || s.dropped > s.matched
+            {
+                return Err("connection selection identity".into());
+            }
+        }
+        // observe alone creates sessions; used becomes true only on selection.
+        if !state.used && !state.selections.is_empty() {
+            return Err("connection used marker".into());
+        }
+        let mut sessions = BTreeMap::new();
+        for (k, s) in state.sessions {
+            sessions.insert(
+                k,
+                Session {
+                    id: s.id,
+                    syn: s.syn,
+                    fin: s.fin,
+                    closed: s.closed,
+                },
+            );
+        }
+        let mut selections = BTreeMap::new();
+        for (k, s) in state.selections {
+            selections.insert(
+                k,
+                Selection {
+                    fault_id: s.fault_id,
+                    connection: s.connection,
+                    identity: s.identity,
+                    matched: s.matched,
+                    dropped: s.dropped,
+                },
+            );
+        }
+        Ok(Self {
+            sessions,
+            selections,
+            next: state.next,
+            evicted: state.evicted,
+            used: state.used,
+        })
+    }
+}
+
 struct Packet {
     src: [u8; 4],
     dst: [u8; 4],
@@ -384,5 +555,137 @@ mod reset_tests {
         for n in 0..frame.len() {
             assert!(reset_frame(&frame[..n]).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    fn frame(port: u16, seq: u32, flags: u8) -> Vec<u8> {
+        let mut b = vec![0; 54];
+        b[0] = 2;
+        b[12..14].copy_from_slice(&[8, 0]);
+        b[14] = 0x45;
+        b[16..18].copy_from_slice(&40u16.to_be_bytes());
+        b[23] = 6;
+        b[26..34].copy_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
+        b[34..36].copy_from_slice(&port.to_be_bytes());
+        b[36..38].copy_from_slice(&80u16.to_be_bytes());
+        b[38..42].copy_from_slice(&seq.to_be_bytes());
+        b[46] = 0x50;
+        b[47] = flags;
+        b
+    }
+    fn names() -> Vec<String> {
+        vec!["a".into(), "b".into()]
+    }
+    #[test]
+    fn plain_state_roundtrips_closed_and_reused_selected_incarnations() {
+        let mut c = Connections::default();
+        let old = c.observe(0, 1, &frame(1234, 7, SYN)).unwrap();
+        let selector = c.list("a", "b", 0, &names()).remove(0);
+        c.select(
+            0,
+            "zero-is-owner-metadata".into(),
+            selector.clone(),
+            &names(),
+        )
+        .unwrap();
+        c.observe(0, 1, &frame(1234, 8, RST));
+        assert!(!c.available(&selector, &names()));
+        let fresh = c.observe(0, 1, &frame(1234, 9, SYN)).unwrap();
+        assert_ne!(old.1, fresh.1);
+        assert!(!c.drops(Some(fresh), false, |_| {}));
+        let saved = c.export_state();
+        let mut restored = Connections::from_state(saved.clone(), &names()).unwrap();
+        assert_eq!(restored.export_state(), saved);
+        let mut callbacks = 0;
+        assert!(!restored.drops(Some(old), true, |s| {
+            callbacks += 1;
+            assert_eq!((s.matched, s.dropped), (1, 0));
+        }));
+        assert_eq!(callbacks, 1);
+    }
+    #[test]
+    fn paging_is_sorted_bounded_and_read_only() {
+        let mut c = Connections::default();
+        for i in 0..35 {
+            c.observe(0, 1, &frame(1000 + i, i as u32, SYN));
+        }
+        let before = c.export_state();
+        let first = c.list("a", "b", 0, &names());
+        assert_eq!(first.len(), 32);
+        assert_eq!(
+            first.iter().map(|x| x.incarnation).collect::<Vec<_>>(),
+            (1..=32).collect::<Vec<_>>()
+        );
+        let second = c.list("a", "b", 32, &names());
+        assert_eq!(
+            second.iter().map(|x| x.incarnation).collect::<Vec<_>>(),
+            [33, 34, 35]
+        );
+        assert!(c.list("a", "b", u64::MAX, &names()).is_empty());
+        assert_eq!(c.export_state(), before);
+    }
+    #[test]
+    fn capacity_never_evicts_a_selected_session_and_import_retains_it() {
+        let mut c = Connections::default();
+        for i in 0..CAPACITY {
+            c.observe(0, 1, &frame(1000 + i as u16, i as u32, SYN));
+            let connection = Connection {
+                from: "a".into(),
+                to: "b".into(),
+                src_addr: [10, 0, 0, 1].into(),
+                dst_addr: [10, 0, 0, 2].into(),
+                src_port: 1000 + i as u16,
+                dst_port: 80,
+                incarnation: i as u64 + 1,
+            };
+            c.select(i as u32 + 1, format!("s{i}"), connection, &names())
+                .unwrap();
+        }
+        let before = c.export_state();
+        assert!(c.observe(0, 1, &frame(6000, 1, SYN)).is_none());
+        assert_eq!(c.export_state(), before);
+        let mut restored = Connections::from_state(before, &names()).unwrap();
+        restored.selections.remove("s0");
+        assert_eq!(
+            restored.observe(0, 1, &frame(6000, 1, SYN)).unwrap().1,
+            CAPACITY as u64 + 1
+        );
+        let state = restored.export_state();
+        assert_eq!(state.evicted, 1);
+        assert_eq!(state.sessions.len(), CAPACITY);
+        assert_eq!(state.selections.len(), CAPACITY - 1);
+        Connections::from_state(state, &names()).unwrap();
+    }
+    #[test]
+    fn malformed_plain_state_identities_and_counters_reject_before_publication() {
+        let mut c = Connections::default();
+        c.observe(0, 1, &frame(1234, 7, SYN));
+        let selector = c.list("a", "b", 0, &names()).remove(0);
+        c.select(9, "selected".into(), selector, &names()).unwrap();
+        let base = c.export_state();
+        for kind in 0..9 {
+            let mut s = base.clone();
+            match kind {
+                0 => s.sessions.values_mut().next().unwrap().id = 0,
+                1 => s.sessions.values_mut().next().unwrap().id = 2,
+                2 => s.sessions.values_mut().next().unwrap().fin = [true, true],
+                3 => s.selections.get_mut("selected").unwrap().identity.1 = 2,
+                4 => s.selections.get_mut("selected").unwrap().connection.from = "wrong".into(),
+                5 => s.selections.get_mut("selected").unwrap().dropped = 1,
+                6 => s.used = false,
+                7 => s.evicted = 1,
+                _ => {
+                    let mut key = *s.sessions.keys().next().unwrap();
+                    key.0 .2 += 1;
+                    let session = s.sessions.values().next().unwrap().clone();
+                    s.sessions.insert(key, session);
+                }
+            }
+            assert!(Connections::from_state(s, &names()).is_err(), "case {kind}");
+        }
+        assert_eq!(c.export_state(), base);
     }
 }

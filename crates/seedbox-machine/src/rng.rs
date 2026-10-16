@@ -43,5 +43,5 @@ pub trait RngStreamExt: RngStream {
     }
 }
 
-mod seeded;
-pub(crate) use seeded::{Domain as RngDomain, SeededRng};
+#[cfg(any(test, feature = "test-support"))]
+pub use crate::test_support::SeededRng;

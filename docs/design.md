@@ -73,8 +73,9 @@ may differ. Logs and events are observations, not instructions to inject again.
 
 [`seedbox-machine`](../crates/seedbox-machine/src/lib.rs) is a separate Linux-kernel
 execution stack for tests and examples. It is not connected to the production
-CLI, server or UI. Its TCG backend runs an RV64 Linux kernel under software
-emulation; PV runs a cooperating Linux kernel on the host architecture.
+CLI, server or UI. Its TCG backend targets x86-64 Linux on QEMU’s `microvm`
+board under software emulation; PV runs a cooperating Linux kernel on the host
+architecture.
 
 [`Machine`](../crates/seedbox-machine/src/machine.rs) exposes bounded, stopped
 execution and machine snapshots. Each run borrows worker resources, a clock,
@@ -82,6 +83,9 @@ continuing entropy, execution pricing and ordered input/output queues. Requests,
 responses and stop reasons are part of this contract, not backend transport types.
 Concrete factories own boot assets and construct machines from one complete
 prepared definition; construction performs no implicit build or asset search.
+The bundled PV and TCG assets use `ramfs` for the initramfs root, avoiding a
+separate tmpfs quota during unpacking. Its files still consume the VM's physical
+RAM; this does not change the capacity or durability of attached disks.
 
 The Driver owns scheduling, canonical time, dependency state and control policy.
 Machines report guest termination as values and execution failures as errors.
@@ -89,16 +93,27 @@ Guest reset ends a boot; only an explicit caller request starts another one.
 Application exit and whole-kernel termination are distinct. Machine snapshots own
 accepted guest work, but do not capture the Driver or the external environment.
 
-Networking, injected storage, whole-Driver restoration and the legacy UI/API bridge
-remain outside this stack's current scope. Guest Inspect is explicitly unsupported;
-the host event stream is not a complete world-state projection. Backend mechanics
-and Linux test inputs are described in [internals](internals.md#reference-tcg-machine).
+A complete definition may attach one owned disk image and one network interface
+on either PV or TCG.
+Disk writes become durable through guest FLUSH; ending a boot loses unflushed
+writes, while snapshots preserve both layers without promoting either. Network
+interfaces have explicit MAC and IPv4 addresses. The Driver owns simulated frame
+delivery, isolated loss/jitter streams and link partitions; host networking never
+determines delivery. Positive minimum latency bounds concurrent execution so a
+receiver cannot run past a newly emitted frame's arrival.
+
+Machine snapshots include attached device state, not frames still in flight or
+routing policy state. Whole-Driver restoration and the legacy UI/API bridge remain
+outside this stack's scope. Guest Inspect is explicitly unsupported; the host
+event stream is not a complete world-state projection. Backend mechanics and
+Linux test inputs are described in [internals](internals.md#reference-tcg-machine).
 
 ## Code boundaries
 
 | Package | Responsibility |
 | --- | --- |
-| `seedbox` | CLI, native worker dispatch, process environment |
+| `seedbox` | Default executable, native worker dispatch and signing |
+| `seedbox-cli` | Command parsing, process environment and CLI output |
 | `seedbox-tui`, `seedbox-client` | Interactive UI and HTTP client |
 | `seedbox-api`, `seedbox-spec` | Resource types and simulation definitions |
 | `seedbox-server` | Catalogue, API, execution ownership |

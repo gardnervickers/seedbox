@@ -60,10 +60,27 @@ fn main() {
         }
         None => "pub static EMBEDDED_KERNEL: Option<&[u8]> = None;\n".to_owned(),
     };
-    std::fs::write(
-        PathBuf::from(env::var_os("OUT_DIR").expect("Cargo build output directory"))
-            .join("guest-helpers.rs"),
-        helpers + &kernel,
-    )
-    .expect("write embedded helper declaration");
+    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo build output directory"));
+    std::fs::write(output.join("guest-helpers.rs"), helpers + &kernel)
+        .expect("write embedded helper declaration");
+    println!("cargo::rerun-if-env-changed=SEEDBOX_BUILD_DRIVER_RUNTIME");
+    let driver = env::var_os("SEEDBOX_BUILD_DRIVER_RUNTIME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            assets
+                .exists()
+                .then(|| assets.join("driver-runtime.tar.gz"))
+        });
+    let declaration = match driver {
+        Some(path) => {
+            println!("cargo::rerun-if-changed={}", path.display());
+            let path = std::fs::canonicalize(&path).unwrap_or_else(|error| {
+                panic!("driver runtime {}: {error}; run cargo xtask build-assets to prepare complete runtime inputs", path.display())
+            });
+            format!("pub static EMBEDDED: Option<&[u8]> = Some(include_bytes!({path:?}));\n")
+        }
+        None => "pub static EMBEDDED: Option<&[u8]> = None;\n".to_owned(),
+    };
+    std::fs::write(output.join("driver-runtime.rs"), declaration)
+        .expect("write embedded Driver runtime declaration");
 }

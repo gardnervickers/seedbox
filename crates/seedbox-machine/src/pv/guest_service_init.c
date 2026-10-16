@@ -3,6 +3,9 @@
 #define _GNU_SOURCE
 #include "guest_service.h"
 #include "guest_application.h"
+#include "guest_network.h"
+#include "guest_environment.h"
+#include "guest_policy.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -23,6 +26,7 @@ static int diagnostic = -1;
 static const char *failure_phase = "initialize";
 static const char *failure_path = "init";
 static struct sbx_oracle oracle;
+static struct sbx_guest_environment environment;
 static sigset_t application_mask;
 static void changed(int signal) { (void)signal; }
 static int write_all(void *sink, const void *opaque, size_t length) {
@@ -51,6 +55,10 @@ __attribute__((noreturn)) static void poweroff(void) {
 }
 __attribute__((noreturn)) static void failed(void) {
     int error = errno;
+    /* Idempotent after successful setup; also releases owned recipe storage
+     * for root-transition/working-directory failures outside setup helpers.
+     * failure_path's fixed environment buffer and scalar diagnostics survive. */
+    sbx_env_release(&environment);
     dprintf(STDERR_FILENO, "seedbox init: %s %s: %s\n", failure_phase, failure_path, strerror(error));
     char frame[64];
     int length = snprintf(frame, sizeof(frame), "SBX_ERROR1 errno=%d\n", error);
@@ -110,13 +118,45 @@ static int launch(void *opaque, int error_fd) {
     }
     if (management >= 0) close(management);
     sbx_oracle_close(&oracle);
+    if (sbx_env_application_limits(&environment)) {
+        int error=errno;
+        dprintf(diagnostic,"seedbox init: application nofile limit: %s\n",strerror(error));
+        return error;
+    }
     int error = sbx_application_exec(application);
     dprintf(diagnostic, "seedbox init: exec %s: %s\n", application->arguments[0], strerror(error));
     return error;
 }
+/* A networked machine's kernel command line carries its static IPv4 address
+ * (guest_network.h). Its absence leaves every interface untouched. */
+static void configure_network(void) {
+    failure_phase = "configure network"; failure_path = "/proc/cmdline";
+    char line[4096];
+    int fd = open(failure_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) failed();
+    size_t length = 0;
+    for (;;) {
+        ssize_t count = read(fd, line + length, sizeof(line) - 1 - length);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { close(fd); failed(); }
+        if (!count) break;
+        length += (size_t)count;
+        if (length == sizeof(line) - 1) { close(fd); errno = EINVAL; failed(); }
+    }
+    close(fd);
+    line[length] = 0;
+    struct sbx_ipv4 config;
+    int found = sbx_network_parse(line, &config);
+    if (found < 0) failed();
+    if (!found) return;
+    module("virtio_net");
+    failure_phase = "configure network"; failure_path = "lo";
+    if (sbx_network_up(failure_path)) failed();
+    failure_path = "eth0";
+    if (sbx_network_configure(&config, failure_path)) failed();
+}
 /* Machine counter in nanoseconds of this machine's time base. PV kernels
- * present the counter at 1 GHz (x86 RDTSC and arm64 CNTVCT are emulated);
- * RISC-V reads the time CSR at the device tree's timebase frequency. */
+ * present the counter at 1 GHz (x86 RDTSC and arm64 CNTVCT are emulated). */
 static int counter_ns(uint64_t *out) {
 #if defined(__x86_64__)
     uint32_t lo, hi;
@@ -130,23 +170,8 @@ static int counter_ns(uint64_t *out) {
     if (!frequency) { errno = EINVAL; return -1; }
     *out = (uint64_t)((unsigned __int128)ticks * 1000000000u / frequency);
     return 0;
-#elif defined(__riscv)
-    static uint64_t frequency;
-    if (!frequency) {
-        unsigned char bytes[4];
-        int fd = open("/sys/firmware/devicetree/base/cpus/timebase-frequency", O_RDONLY | O_CLOEXEC);
-        if (fd < 0) return -1;
-        ssize_t count = read(fd, bytes, sizeof(bytes)); close(fd);
-        if (count != (ssize_t)sizeof(bytes)) { errno = EINVAL; return -1; }
-        frequency = (uint64_t)bytes[0] << 24 | (uint64_t)bytes[1] << 16 | (uint64_t)bytes[2] << 8 | bytes[3];
-        if (!frequency) { errno = EINVAL; return -1; }
-    }
-    uint64_t ticks;
-    __asm__ volatile("rdtime %0" : "=r"(ticks) :: "memory");
-    *out = (uint64_t)((unsigned __int128)ticks * 1000000000u / frequency);
-    return 0;
 #else
-#error seedbox guest clock requires x86-64, AArch64 or RISC-V
+#error seedbox guest clock requires x86-64 or AArch64
 #endif
 }
 /* Every boot starts CLOCK_REALTIME at the simulation epoch plus the machine
@@ -194,17 +219,38 @@ int main(void) {
     sigset_t blocked;
     sigemptyset(&blocked); sigaddset(&blocked, SIGCHLD);
     if (sigprocmask(SIG_BLOCK, &blocked, &application_mask)) failed();
+    configure_network();
     /* Kernel arguments never select or modify the retained application recipe. */
     struct sbx_application application;
     failure_phase = "read launch recipe"; failure_path = "/seedbox/application.bin";
     if (sbx_application_load(&application, failure_path)) failed();
+    failure_phase="read guest environment"; failure_path="/seedbox/environment.bin";
+    if (sbx_env_load(&environment,failure_path)<0) failed();
+    /* Read the explicit named factory selector while host-independent proc is
+     * still available, before entering the retained application root. */
+    int control_enabled = sbx_env_control_enabled(&environment);
+    failure_phase = "read controller selector"; failure_path = "/proc/cmdline";
+    FILE *command_file = fopen(failure_path, "re");
+    if (!command_file) failed();
+    char *command = NULL; size_t command_capacity = 0;
+    ssize_t command_length = getline(&command, &command_capacity, command_file);
+    if (command_length < 0) { if (!errno) errno = EIO; failed(); }
+    if (fclose(command_file) || sbx_control_mode(command, control_enabled, &control_enabled)) failed();
+    free(command);
     set_realtime();
+    if (sbx_env_before_root(&environment,management)) {
+        failure_phase=environment.failure_phase;failure_path=environment.failure_path;failed();
+    }
     failure_phase = "enter application root"; failure_path = "/rootfs";
     if (mount("/rootfs", "/rootfs", NULL, MS_BIND | MS_REC, NULL) ||
         chdir("/rootfs") || mount(".", "/", NULL, MS_MOVE, NULL) ||
         chroot(".") || chdir("/")) failed();
-    mount_fs("devtmpfs", "/dev"); mount_fs("proc", "/proc"); mount_fs("sysfs", "/sys");
+    if (!environment.configured) mount_fs("devtmpfs", "/dev");
+    mount_fs("proc", "/proc"); mount_fs("sysfs", "/sys");
     if (mkdir("/tmp", 01777) && errno != EEXIST) failed();
+    if (sbx_env_after_root(&environment)) {
+        failure_phase=environment.failure_phase;failure_path=environment.failure_path;failed();
+    }
     /* Image working directories are created before dropping credentials, as in
      * the existing launch path. Their components resolve inside the image root. */
     char *working = strdup(application.working_directory);
@@ -217,14 +263,19 @@ int main(void) {
         *part = saved; if (!saved) break;
     }
     free(working);
+    /* Only configured scalar limits/socket state is needed by later Starts. */
+    sbx_env_release(&environment);
     struct sbx_service service;
     sbx_service_init(&service, launch, &application, write_all, &management);
-    /* Every machine exposes the simulation-control channel before app start. */
-    failure_phase = "open control socket"; failure_path = "/run/seedbox/control.sock";
-    if (mkdir("/run", 0755) && errno != EEXIST) failed();
-    if (mkdir("/run/seedbox", 0755) && errno != EEXIST) failed();
-    if (chmod("/run", 0755) || chmod("/run/seedbox", 0755)) failed();
-    if (sbx_oracle_open(&oracle, "/run/seedbox/control.sock")) failed();
+    /* Generic factories keep their all-machine channel. Configured service
+     * guests explicitly choose the listener; host authorization is separate. */
+    if (control_enabled) {
+        failure_phase = "open control socket"; failure_path = "/run/seedbox/control.sock";
+        if (mkdir("/run", 0755) && errno != EEXIST) failed();
+        if (mkdir("/run/seedbox", 0755) && errno != EEXIST) failed();
+        if (chmod("/run", 0755) || chmod("/run/seedbox", 0755)) failed();
+        if (sbx_oracle_open(&oracle, "/run/seedbox/control.sock")) failed();
+    }
     service.oracle = &oracle;
     failure_phase = "launch prepared application"; failure_path = application.arguments[0];
     if (sbx_service_start(&service)) failed();

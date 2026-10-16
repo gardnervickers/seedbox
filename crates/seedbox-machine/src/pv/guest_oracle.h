@@ -17,7 +17,7 @@ struct sbx_oracle {
     void *sink;
 };
 void sbx_oracle_init(struct sbx_oracle *, sbx_oracle_write, void *);
-/* Every machine exposes this control relay; caller owns parent directories. */
+/* Caller selects listener exposure and owns its parent directories. */
 int sbx_oracle_open(struct sbx_oracle *, const char *path);
 int sbx_oracle_accept(struct sbx_oracle *);
 /* Nonblocking read: disconnect abandons local partial/reply state and permits

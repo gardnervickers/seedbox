@@ -7,3 +7,7 @@ publish.workspace = true
 [dependencies]
 tempfile.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tar.workspace = true

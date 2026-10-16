@@ -5,7 +5,7 @@ let
     url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${source.version}.tar.xz";
     sha256 = source.sha256;
   };
-in pkgs.runCommand "seedbox-tcg-kernel-riscv64-${source.version}" {
+in pkgs.runCommand "seedbox-tcg-kernel-x86_64-${source.version}" {
   HOST_CC = "${pkgs.stdenv.cc}/bin/cc";
   HOST_CXX = "${pkgs.stdenv.cc}/bin/c++";
   nativeBuildInputs = with pkgs; [
@@ -14,5 +14,5 @@ in pkgs.runCommand "seedbox-tcg-kernel-riscv64-${source.version}" {
   ];
 } ''
   bash ${../crates/seedbox-machine/guest/kernel/build.sh} \
-    ${archive} ${../crates/seedbox-machine/guest/kernel/riscv64.config} "$out"
+    ${archive} ${../crates/seedbox-machine/guest/kernel/tcg-x86_64.config} "$out"
 ''

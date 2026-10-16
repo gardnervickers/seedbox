@@ -33,16 +33,11 @@ let
           zig cc -target ${triple} -std=c11 -O2 -Wall -Wextra -Werror -static \
             guest_service_init.c libseedbox-guest.a -o init
           # Check the linked target and reject accidental dynamic libc inputs.
-          readelf -h init | grep -q "Machine:.*${machine}"
-          readelf -h init | grep -q "Class:.*ELF64"
-          ! readelf -l init | grep -q INTERP
-          ! readelf -d init | grep -q NEEDED
+          bash ${./guest-static-elf.sh} init '${machine}'
         '' + lib.optionalString withFixture ''
           zig cc -target ${triple} -std=c11 -O2 -Wall -Wextra -Werror -static \
             guest_service_fixture.c -o application
-          readelf -h application | grep -q "Machine:.*${machine}"
-          ! readelf -l application | grep -q INTERP
-          ! readelf -d application | grep -q NEEDED
+          bash ${./guest-static-elf.sh} application '${machine}'
         '' + ''
           runHook postBuild
         '';
@@ -73,6 +68,5 @@ let
     in helper;
 in {
   aarch64 = make "aarch64" "aarch64-linux-musl" "AArch64";
-  riscv64 = make "riscv64" "riscv64-linux-musl" "RISC-V";
   x86_64 = make "x86_64" "x86_64-linux-musl" "X86-64";
 }

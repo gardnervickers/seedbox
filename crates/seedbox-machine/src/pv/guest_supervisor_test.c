@@ -1,4 +1,4 @@
-/* Host POSIX mechanism test, not ARM64PV/RV64TCG native acceptance.
+/* Host POSIX mechanism test, not PV or TCG native acceptance.
  * Build together with guest_supervisor.c; no guest libc artifacts required. */
 #define _GNU_SOURCE
 #include "guest_supervisor.h"

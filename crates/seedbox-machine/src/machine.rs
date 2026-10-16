@@ -21,38 +21,16 @@ pub struct RunContext<'a, C> {
     pub outbox: crate::pv::Outbox<'a>,
 }
 
-#[cfg(test)]
-mod test_environment;
-
-/// Documented nonzero realtime epoch of this crate's tests: 2000-01-01T00:00:00Z.
-/// It is a test choice, not a library default; factories have no default.
-#[cfg(test)]
-pub(crate) const TEST_EPOCH_SECONDS: u32 = 946_684_800;
-
-#[cfg(all(test, unix))]
-mod clock_fault_tests;
-#[cfg(all(test, unix))]
-mod control_snapshot_tests;
-#[cfg(all(test, unix))]
-mod driver_input_snapshot_tests;
-#[cfg(all(test, unix))]
-mod driver_sleep_trigger_tests;
-#[cfg(all(test, unix))]
-mod guest_service_snapshot_tests;
-#[cfg(all(test, unix))]
-mod kernel_terminal_tests;
-#[cfg(all(test, unix))]
-mod prepared_application_tests;
-#[cfg(all(test, unix))]
-mod prepared_fixture;
-
 #[cfg(unix)]
-pub mod tcg;
+pub mod assets;
+// Canonical sector storage shared by the backend adapters.
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod disk;
 
-#[cfg(unix)]
-mod assets;
-#[cfg(seedbox_pv)]
-pub mod pv;
+mod evidence;
+pub use evidence::{EvidenceDisposition, RamRegion, StateEvidence};
+pub mod execution_evidence;
+pub use execution_evidence::ExecutionEvidence;
 
 /// A position in nanoseconds. The boundary that carries it fixes its time
 /// domain: Driver APIs, events and host inputs use simulation time; values
@@ -165,14 +143,17 @@ pub trait Machine {
     // TODO: Re-evaluate: guest termination is an outcome within this contract;
     // `Err` means the contract could not be fulfilled. Requiring the caller's
     // explicit Reboot keeps every new boot visible to the caller, with no
-    // hidden reset or change to its boot accounting.
+    // hidden reset or change to its boot accounting. A halted CPU alone is not
+    // a portable power-off signal; this contract does not require detecting
+    // that an OS halt can never resume.
     /// A guest's own termination is a machine outcome, not a failure: guest
-    /// power-off or halt ends execution as [`ExitReason::Shutdown`], and a guest
+    /// power-off ends execution as [`ExitReason::Shutdown`], and a guest
     /// reset request, including the restart after a kernel panic, as
     /// [`ExitReason::Crashed`]. The machine never starts a new boot by itself;
     /// only an accepted Reboot request does. Initialization, simulator,
     /// hypervisor or protocol failures that prevent satisfying this contract
-    /// are errors. An idle guest that can still be woken is `Blocked`.
+    /// are errors. An idle guest that can still be woken is `Blocked`. A direct
+    /// OS halt is not required to signal power-off and may remain `Blocked`.
     fn run(
         &mut self,
         context: &mut RunContext<'_, Self::Context>,
@@ -226,6 +207,40 @@ pub trait Machine {
     /// invalid state by an earlier execution error must reject capture; calling
     /// `snapshot` does not recover it.
     fn snapshot(&mut self) -> Result<Self::Snapshot, Self::Error>;
+
+    /// Read actual stopped state of the live or most recently ended boot.
+    ///
+    /// Requires a valid stopped machine, including after normal termination.
+    /// This must not execute instructions, adopt time, consume RNG, drain
+    /// outputs, deliver inputs, or change disk durability. Reading evidence
+    /// never recovers a machine invalidated by a prior execution error.
+    /// Ended evidence is captured before native teardown and disk loss; its
+    /// pages and any unpublished boot-end evidence are snapshot state.
+    ///
+    /// `None` means evidence is unavailable (not configured, unsupported, or
+    /// never booted). It is not successful full-state evidence: a caller
+    /// requiring full state must fail, naming the machine and whether it has
+    /// booted and whether capture was configured. Backend errors add context
+    /// when a configured capture fails. Digests of snapshots are not evidence.
+    // TODO: Re-evaluate: evidence needs a stopped mutable backend transport,
+    // but exposing arbitrary mutable machine access would permit execution.
+    fn state_evidence(&mut self) -> Result<Option<StateEvidence>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Read the actual stopped native interaction witness, independently of
+    /// optional full-RAM diagnostics. Getter observation has no execution,
+    /// RNG/time, output-drain, timer or disk-durability effects. Retain actual
+    /// ended evidence before loss/close and across source-free continuation;
+    /// current surviving disk is separate from cached pre-loss native witness.
+    /// `None` is no native boot ever observed (or unsupported generic Machine),
+    /// never a successful substitute for a required native witness. Read errors
+    /// are errors, not cached success. Never reset history merely on restore.
+    // TODO: Re-evaluate: one specific stopped read avoids a general inspection
+    // framework or forcing RAM collection while full-state mode is disabled.
+    fn execution_evidence(&mut self) -> Result<Option<ExecutionEvidence>, Self::Error> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

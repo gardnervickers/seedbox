@@ -6,6 +6,9 @@
 #   bin/driver-simulation-control    SEEDBOX_PV_DRIVER_CONTROL_APPLICATION
 #   bin/clock-faults                 SEEDBOX_PV_CLOCK_APPLICATION
 #   bin/kernel-terminal              SEEDBOX_PV_TERMINAL_APPLICATION
+#   bin/network-probe                SEEDBOX_PV_NETWORK_APPLICATION
+#   bin/disk-probe                   SEEDBOX_PV_DISK_PROBE
+#   disk/ext4.img                    SEEDBOX_PV_DISK_IMAGE
 #   service-initrd                   SEEDBOX_PV_SERVICE_INITRD
 #   control-initrd                   SEEDBOX_PV_CONTROL_INITRD
 { pkgs, guest }:
@@ -22,6 +25,7 @@ let
       ./tests/fixtures/driver-simulation-control.c
       ./tests/fixtures/clock-faults.c
       ./tests/fixtures/kernel-terminal.c
+      ./tests/fixtures/network-probe.c
     ];
   };
   programs = pkgs.stdenvNoCC.mkDerivation {
@@ -41,17 +45,20 @@ let
       build tests/fixtures/driver-simulation-control.c driver-simulation-control
       build tests/fixtures/clock-faults.c clock-faults
       build tests/fixtures/kernel-terminal.c kernel-terminal
+      build tests/fixtures/network-probe.c network-probe
     '';
     installPhase = ''
       mkdir -p "$out/bin"
-      cp cpu-loop prepared-fixture simulation-control driver-simulation-control clock-faults kernel-terminal "$out/bin/"
+      cp cpu-loop prepared-fixture simulation-control driver-simulation-control clock-faults kernel-terminal network-probe "$out/bin/"
     '';
   };
+  disk = import ./disk-test-fixtures.nix { inherit pkgs triple; };
   service = guest.mkInitramfs { application = "${guest}/bin/application"; };
   control = guest.mkInitramfs { application = "${programs}/bin/simulation-control"; };
 in pkgs.runCommand "seedbox-machine-pv-test-fixtures" { } ''
-  mkdir -p "$out"
-  ln -s ${programs}/bin "$out/bin"
+  mkdir -p "$out/bin"
+  ln -s ${programs}/bin/* ${disk}/bin/* "$out/bin/"
+  ln -s ${disk}/disk "$out/disk"
   ln -s ${service} "$out/service-initrd"
   ln -s ${control} "$out/control-initrd"
 ''

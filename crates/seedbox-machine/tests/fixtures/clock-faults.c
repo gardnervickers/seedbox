@@ -3,7 +3,7 @@
  *               counter, sleeps, and arms absolute realtime timerfds.
  *   controller  applies drift, a realtime step, crash/reboot and heals to the
  *               machine named "clock" at fixed simulation times, then exits 0.
- *   idle        an oracle for host-driven runs: sleeps 6.5 s, then exits 0.
+ *   idle        an oracle for host-driven runs: sleeps 12.5 s, then exits 0.
  * Every line is "<TAG> rt=<ns> mono=<ns> raw=<ns> cnt=<ns>". */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -46,18 +46,8 @@ static uint64_t counter(void) {
     __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(ticks) :: "memory");
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
     return (uint64_t)((unsigned __int128)ticks * 1000000000u / frequency);
-#elif defined(__riscv)
-    static uint64_t frequency;
-    if (!frequency) {
-        unsigned char bytes[4];
-        int fd = open("/sys/firmware/devicetree/base/cpus/timebase-frequency", O_RDONLY);
-        if (fd < 0 || read(fd, bytes, 4) != 4) fail("timebase");
-        close(fd);
-        frequency = (uint64_t)bytes[0] << 24 | (uint64_t)bytes[1] << 16 | (uint64_t)bytes[2] << 8 | bytes[3];
-    }
-    uint64_t ticks;
-    __asm__ volatile("rdtime %0" : "=r"(ticks) :: "memory");
-    return (uint64_t)((unsigned __int128)ticks * 1000000000u / frequency);
+#else
+#error clock-faults requires x86-64 or AArch64
 #endif
 }
 static void line(const char *tag) {
@@ -128,11 +118,14 @@ static const char *call(int fd, const char *operation) {
     put(STDOUT_FILENO, "RPC_REPLY ", 10); put(STDOUT_FILENO, reply, used);
     return reply;
 }
-/* Wait until simulation time `at` through the service's own clock. */
-static void until(int fd, uint64_t at) {
+static uint64_t simulation_now(int fd) {
     const char *now = strstr(call(fd, "\"op\":\"now\""), "\"now_ns\":");
     if (!now) fail("now_ns");
-    uint64_t current = strtoull(now + 9, NULL, 10);
+    return strtoull(now + 9, NULL, 10);
+}
+/* Wait through the service clock, anchored to actual userspace readiness. */
+static void until(int fd, uint64_t at) {
+    uint64_t current = simulation_now(fd);
     if (current >= at) return;
     char operation[64];
     snprintf(operation, sizeof(operation), "\"op\":\"sleep\",\"duration_ns\":%llu",
@@ -149,18 +142,21 @@ static void controller_role(void) {
     char operation[256];
     snprintf(operation, sizeof(operation), "\"op\":\"clock_drift\",%s,\"rate_ppb\":100000000", target);
     call(fd, operation);
-    until(fd, 2500000000ull);
+    /* Kernel boot is not a fixed part of the observation window. In
+     * particular, x86 TCG can enter userspace well after simulation1s. */
+    uint64_t origin = simulation_now(fd);
+    until(fd, origin + 2500000000ull);
     snprintf(operation, sizeof(operation), "\"op\":\"clock_skew\",%s,\"offset_ns\":2000000000", target);
     call(fd, operation);
-    until(fd, 4000000000ull);
+    until(fd, origin + 4000000000ull);
     snprintf(operation, sizeof(operation), "\"op\":\"crash\",%s", target);
     call(fd, operation);
     snprintf(operation, sizeof(operation), "\"op\":\"reboot\",%s", target);
     call(fd, operation);
-    until(fd, 5000000000ull);
+    until(fd, origin + 6500000000ull);
     call(fd, "\"op\":\"heal\",\"handle\":\"p2\"");
     call(fd, "\"op\":\"heal\",\"handle\":\"p1\"");
-    until(fd, 6500000000ull);
+    until(fd, origin + 8000000000ull);
     put(STDOUT_FILENO, "CONTROLLER_DONE\n", 16);
 }
 int main(int argc, char **argv) {
@@ -168,7 +164,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "clock")) clock_role();
     else if (!strcmp(argv[1], "controller")) controller_role();
     else if (!strcmp(argv[1], "idle")) {
-        struct timespec rest = {.tv_sec = 6, .tv_nsec = 500000000};
+        struct timespec rest = {.tv_sec = 12, .tv_nsec = 500000000};
         while (nanosleep(&rest, &rest)) if (errno != EINTR) fail("idle");
     }
     else fail("unknown role");

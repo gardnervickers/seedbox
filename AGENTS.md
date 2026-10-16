@@ -16,6 +16,7 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
 ## Workspace
 
 - `crates/seedbox` is the default executable package: `cargo run -- <command>` runs the CLI.
+  `crates/seedbox-cli` owns command parsing, process environment and CLI output.
   `crates/seedbox-application` owns configuration, preparation and orchestration.
   `seedbox-api` and `seedbox-spec` own transport-independent public types;
   `seedbox-client` owns the local HTTP client; `seedbox-server` owns the catalogue,
@@ -181,9 +182,15 @@ every feature-gated test with `--no-run` and executes only portable tests; it
 opens no KVM/HVF device and needs no root or registry access. It always runs
 first and must pass before hardware execution. A named suite whose host
 requirements are missing exits 2 before any build. `--list` checks requirements
-without building.
+without building. The pinned development shell provisions the compiled Rust
+checker automatically; cold shell realization may build development tools before
+the checker is invoked. Checker wrappers never compile/download a tool or fall
+back to Cargo. Outside that environment a missing tool exits 2 with
+`nix develop` guidance; no manual tool installation is needed.
 
-See `harness/check.py` for suite requirements, discovery and fixture inputs.
+See `crates/seedbox-test/src/bin/seedbox-check/` for suite requirements, discovery
+and fixture inputs. `harness/acceptance.sh portable` is a compatibility entry for
+the same Rust-owned portable stage, without the outer fmt/clippy checks.
 Keep VMM engine tests compiled by default; conditional `ignore` attributes enable
 hardware execution through features. Other feature-gated tests must be built by
 the portable `--no-run` checks. Add no per-test registration lists. The runner
@@ -209,9 +216,9 @@ reader and must not expand the native authoring surface.
 
 ## CLI
 
-The CLI lives in `crates/seedbox/src/cli/`:
+The CLI lives in `crates/seedbox-cli/src/`:
 
-- `mod.rs`: argument definitions and one function per command.
+- `lib.rs`: process entry, argument definitions and one function per command.
 - `output.rs`: status lines, `key: value` fields and their value formats.
 - `defaults.rs`: how each runtime input is found when no flag is given.
 - `backends.rs`: platform backend selection and guest-asset lookup.
@@ -222,11 +229,11 @@ The CLI lives in `crates/seedbox/src/cli/`:
 - `faults.rs`: bounded YAML/JSON fault input before connecting to the server.
 - `playback_args.rs`: positional playback-control arguments and rate validation.
 
-`src/main.rs` dispatches the private retained worker before calling `cli::main()`.
-`engine_worker.rs` is a process boundary alongside the public CLI. The library
-(everything else in `src/`)
-never parses arguments or reads environment variables, and prints only cleanup
-failures from `Drop` that it cannot return. The CLI is that boundary.
+`crates/seedbox/src/main.rs` dispatches the private retained worker before calling
+`seedbox_cli::main()`. Its `engine_worker.rs`, native dependencies and executable
+signing stay in `seedbox`. The dedicated CLI library is the public process
+arguments/environment/output boundary; application and server libraries keep
+explicit inputs rather than parsing process arguments or reading CLI environment.
 
 Follow these rules when you change the CLI, and update this section if you
 deliberately change one.
@@ -317,7 +324,7 @@ deliberately change one.
 
 ### Errors and exit status
 
-- CLI code returns `seedbox::Error`. It never panics, calls `unwrap`, or calls
+- CLI code returns `seedbox_application::Error`. It never panics, calls `unwrap`, or calls
   `process::exit`. `main` prints `error: <message>` and exits 2.
 - Use `Error::Setup` for a problem the user can fix (a missing file, a missing
   tool, the wrong host, a permission). It prints without a category prefix.

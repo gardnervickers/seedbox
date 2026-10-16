@@ -28,6 +28,9 @@ pub(crate) fn engine_command(
         crate::engine::ExecutableKind::ArmWorld => {
             command.args(["__engine", crate::engine::ARM_WORLD_V1]);
         }
+        crate::engine::ExecutableKind::DriverWorld => {
+            command.args(["__engine", crate::engine::DRIVER_WORLD_V1]);
+        }
     }
     Ok(command)
 }

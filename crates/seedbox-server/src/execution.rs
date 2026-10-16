@@ -79,6 +79,28 @@ pub struct ExecutionService {
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
 }
 
+// A started spawn_blocking task cannot be aborted with its JoinSet. The loop
+// owner must request cooperative cancellation even when its future is dropped
+// at an await point; those blocking tasks then join their owned processes before
+// returning. Do not kill monitors or remove their inputs from this destructor.
+struct CancelExecutionsOnDrop {
+    manager: Arc<Manager>,
+    shutdown: CancellationToken,
+    armed: bool,
+}
+impl Drop for CancelExecutionsOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.shutdown.cancel();
+            // cancel_active broadcasts every token before fallible catalogue
+            // updates. A dropped owner cannot return persistence errors; the
+            // normal graceful path still reports them. Cleanup authority stays
+            // with each backend's receipt, including on a persistence failure.
+            let _ = self.manager.cancel_active();
+        }
+    }
+}
+
 impl ExecutionService {
     pub fn new(
         manager: Arc<Manager>,
@@ -116,8 +138,7 @@ impl ExecutionService {
         // mutex. Retirement prevents already cloned handles from starting later.
         for target in &targets {
             if let Some(worker) = &target.worker {
-                worker
-                    .lock()
+                crate::worker::lock_for_retirement(worker)
                     .map_err(|_| Error::Catalogue(catalogue::Error::StorageFailed))?
                     .retire();
             }
@@ -323,13 +344,21 @@ impl ExecutionService {
     }
 
     /// The owner waits for every active task during graceful shutdown. Dropping
-    /// a CLI connection has no path to this cancellation token.
+    /// this owning future also cancels active executions: started blocking tasks
+    /// must observe cancellation and finish their owned cleanup before returning.
+    /// Dropping a CLI connection has no path to this cancellation token.
     pub async fn run(
         self: Arc<Self>,
         mut queue: mpsc::Receiver<SimulationId>,
         capacity: NonZeroUsize,
         shutdown: CancellationToken,
     ) -> Result<(), Error> {
+        // Establish ownership before recovery or any other await can suspend.
+        let mut cancel_on_drop = CancelExecutionsOnDrop {
+            manager: self.manager.clone(),
+            shutdown: shutdown.clone(),
+            armed: true,
+        };
         self.admission
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?
@@ -360,6 +389,9 @@ impl ExecutionService {
                 }
             }
             if stopping && tasks.is_empty() {
+                // Graceful cancellation was requested above and every blocking
+                // task has joined. No destructor-time persistence is needed.
+                cancel_on_drop.armed = false;
                 return failure.map_or(Ok(()), Err);
             }
             tokio::select! {
@@ -645,7 +677,7 @@ impl ExecutionService {
         // Source paths, image transport manifests and human metadata never enter experiment identity.
         let inputs = seedbox_application::definition::prepared(&definition, &self.store)?;
         definition.runtime.execution =
-            seedbox_application::definition::execution_settings(&inputs.profile)?;
+            seedbox_application::definition::execution_settings_with_inputs(&inputs)?;
         for (name, machine) in &mut definition.machines {
             machine.boot_archive =
                 seedbox_spec::definition::Asset(format!("sha256:{}", inputs.guests[name].hex()));
@@ -1014,24 +1046,25 @@ mod tests {
         let (finished, completion) = std::sync::mpsc::channel();
         let owner = service.clone();
         let deleting_id = id.clone();
+        let (blocked, entered) = std::sync::mpsc::channel();
         let deletion = std::thread::spawn(move || {
+            crate::worker::observe_retirement_blocked(blocked);
             finished.send(owner.delete(&deleting_id)).unwrap();
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !manager.describe(&id).unwrap().status.stop_requested {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "deletion never requested stop"
-            );
-            std::thread::yield_now();
-        }
+        // Hang guard only: correctness follows from the failed acquisition of
+        // the actual gate, which active_operation still owns below.
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(manager.describe(&id).unwrap().status.stop_requested);
         // Execution can complete before the held control operation finishes.
         manager
             .update(&id, |resource| {
                 resource.status.phase = Phase::Completed;
             })
             .unwrap();
-        assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(matches!(
+            completion.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
         assert!(attempt.is_dir());
         fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
         drop(active_operation);
@@ -1111,7 +1144,9 @@ mod tests {
         let (finished, completion) = std::sync::mpsc::channel();
         let owner = manager.clone();
         let completing_id = id.clone();
+        let (blocked, entered) = std::sync::mpsc::channel();
         let finalization = std::thread::spawn(move || {
+            crate::worker::observe_retirement_blocked(blocked);
             // ExecutionService::execute uses this order after its receiver drains.
             owner.retire_worker(&completing_id).unwrap();
             owner
@@ -1121,7 +1156,13 @@ mod tests {
                 .unwrap();
             finished.send(()).unwrap();
         });
-        assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
+        // Hang guard only; the probe establishes actual retirement contention
+        // while the test retains the control-I/O gate.
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            completion.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
         assert_eq!(manager.describe(&id).unwrap().status.phase, Phase::Running);
         fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
         drop(active_operation);

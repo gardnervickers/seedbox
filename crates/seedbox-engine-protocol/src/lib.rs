@@ -1,6 +1,7 @@
 //! Engine requests and retained evidence formats, independent of execution.
 pub mod application_log;
 pub mod disk;
+pub mod driver_world;
 #[cfg(unix)]
 pub mod host_clock;
 pub mod host_control;

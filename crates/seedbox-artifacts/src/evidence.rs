@@ -3,14 +3,20 @@ use crate::{store::ContentDigest, Error, Result};
 use seedbox_engine_protocol::report::MachineOutcome;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+mod state;
+pub(crate) use state::region_layout;
+pub use state::{RamRegion, StateCapture, StateDisposition, StateReport, STATE_REPORT};
 /// State parts emitted by `Machine::state_digest`: `events` is descriptive
 /// text, while every other part is a lowercase SHA-256 digest. Keep unknown
 /// part names digest-checked too, so new hashed parts remain safe to compare.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "BTreeMap<String, String>")]
 pub struct StateDigestParts(BTreeMap<String, String>);
 
 impl StateDigestParts {
+    pub(crate) fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
     pub fn ram_only_difference(&self, other: &Self) -> bool {
         self.0
             .get("ram")

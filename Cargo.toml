@@ -11,6 +11,11 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
+seedbox-cli = { path = "crates/seedbox-cli" }
+seedbox-machine = { path = "crates/seedbox-machine" }
+seedbox-machine-pv = { path = "crates/seedbox-machine-pv" }
+seedbox-machine-tcg = { path = "crates/seedbox-machine-tcg" }
+seedbox-driver = { path = "crates/seedbox-driver" }
 bollard = { version = "0.21", features = ["buildkit", "chrono"] }
 hex = "0.4"
 seedbox-artifacts = { path = "crates/seedbox-artifacts" }

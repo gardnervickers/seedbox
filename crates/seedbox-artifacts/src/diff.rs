@@ -2,7 +2,10 @@
 
 pub use crate::comparison::*;
 use crate::{
-    evidence::{page_hash_log, ReportMachines, StateDigestParts},
+    evidence::{
+        page_hash_log, RamRegion, ReportMachines, StateDigestParts, StateDisposition, StateReport,
+        STATE_REPORT,
+    },
     limits::{exceeds, read_bounded},
     record::{self as orchestration, RunRecord},
     retained,
@@ -97,6 +100,10 @@ pub struct DiffReport {
 struct Machine {
     witness: Option<ContentDigest>,
     state_digest: Option<ContentDigest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    regions: Option<Vec<RamRegion>>,
+    #[serde(skip)]
+    page_log: Option<String>,
     #[serde(flatten)]
     end: Terminal,
 }
@@ -111,6 +118,10 @@ struct Terminal {
     infrastructure_error: Option<bool>,
     pending_io: Option<PendingIo>,
     state_digest_parts: Option<StateDigestParts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_boot: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_disposition: Option<StateDisposition>,
 }
 
 impl Terminal {
@@ -122,6 +133,8 @@ impl Terminal {
             && self.infrastructure_error.is_none()
             && self.pending_io.is_none()
             && self.state_digest_parts.is_none()
+            && self.state_boot.is_none()
+            && self.state_disposition.is_none()
     }
 }
 
@@ -131,6 +144,8 @@ impl TryFrom<MachineOutcome> for Machine {
     fn try_from(report: MachineOutcome) -> Result<Self> {
         Ok(Self {
             witness: Some(ContentDigest::try_from(report.witness)?),
+            regions: None,
+            page_log: None,
             state_digest: report
                 .state_digest
                 .map(ContentDigest::try_from)
@@ -146,6 +161,8 @@ impl TryFrom<MachineOutcome> for Machine {
                     .state_digest_parts
                     .map(StateDigestParts::try_from)
                     .transpose()?,
+                state_boot: None,
+                state_disposition: None,
             },
         })
     }
@@ -190,7 +207,12 @@ fn load(directory: &Path) -> Result<Evidence> {
             .engine
             .as_ref()
             .is_some_and(|engine| engine.engine_timebase == "counter-pv-v1");
-    if let Some(file) = log(directory, &record, "vmm.json")? {
+    let driver = profile
+        .semantic_parameters
+        .engine
+        .as_ref()
+        .is_some_and(|engine| engine.kind == crate::engine::ExecutableKind::DriverWorld);
+    if let Some(file) = log(directory, &record, "vmm.json")?.filter(|_| !driver) {
         let path = directory.join("output/vmm.json");
         let bytes = read_bounded(file, REPORT_LIMIT, "report").map_err(|e| bad(&path, e))?;
         let profile = &record.identity.inputs.profile;
@@ -229,6 +251,68 @@ fn load(directory: &Path) -> Result<Evidence> {
             if machines.insert(name, machine).is_some() {
                 return Err(bad(&path, "duplicate machine name"));
             }
+        }
+    }
+    if let Some(file) = log(directory, &record, STATE_REPORT)? {
+        let path = directory.join("output").join(STATE_REPORT);
+        let bytes = read_bounded(file, REPORT_LIMIT, "stopped-state report")
+            .map_err(|error| bad(&path, error))?;
+        let state: StateReport =
+            serde_json::from_slice(&bytes).map_err(|error| bad(&path, error))?;
+        state.validate().map_err(|error| bad(&path, error))?;
+        if let Some(expected) = record
+            .report
+            .as_ref()
+            .and_then(|report| report.full_state.as_ref())
+        {
+            if expected.len() != state.machines.len()
+                || state
+                    .machines
+                    .iter()
+                    .any(|(name, capture)| expected.get(name) != Some(&capture.digest))
+            {
+                return Err(bad(
+                    &path,
+                    "stopped-state inventory/digests disagree with manifest",
+                ));
+            }
+        }
+        for (name, capture) in state.machines {
+            let machine = machines.entry(name).or_insert_with(Machine::default);
+            if machine
+                .state_digest
+                .as_ref()
+                .is_some_and(|digest| digest != &capture.digest)
+            {
+                return Err(bad(
+                    &path,
+                    "stopped-state digest disagrees with machine report",
+                ));
+            }
+            machine.state_digest = Some(capture.digest);
+            machine.regions = Some(capture.regions);
+            machine.page_log = Some(capture.page_log);
+            machine.end.state_boot = Some(capture.boot);
+            machine.end.state_disposition = Some(capture.disposition);
+            let parts = StateDigestParts::try_from(
+                capture
+                    .parts
+                    .into_iter()
+                    .map(|(name, digest)| (name, digest.hex().to_owned()))
+                    .collect::<BTreeMap<_, _>>(),
+            )?;
+            if machine
+                .end
+                .state_digest_parts
+                .as_ref()
+                .is_some_and(|old| old != &parts)
+            {
+                return Err(bad(
+                    &path,
+                    "stopped-state parts disagree with machine report",
+                ));
+            }
+            machine.end.state_digest_parts = Some(parts);
         }
     }
     // Full state remains available in the manifest even when vmm.json was omitted.
@@ -632,29 +716,76 @@ fn ram_only(a: &Machine, b: &Machine) -> bool {
             .is_some_and(|(a, b)| a.ram_only_difference(b))
 }
 
-fn page_file(directory: &Path, evidence: &Evidence, name: &str) -> Result<Option<File>> {
+struct PageFile {
+    file: File,
+    regions: Vec<RamRegion>,
+    physical_metadata: bool,
+}
+fn page_file(
+    directory: &Path,
+    evidence: &Evidence,
+    machine: &Machine,
+    name: &str,
+) -> Result<Option<PageFile>> {
     let Some(file) = log(directory, &evidence.record, name)? else {
         return Ok(None);
     };
-    let memory_mb = evidence
-        .record
-        .identity
-        .inputs
-        .profile
-        .semantic_parameters
-        .memory_mb;
-    if memory_mb == 0 {
-        return Err(bad(directory, "page hashes require recorded memory_mb"));
-    }
-    // One 8-byte hash per 4 KiB page.
-    let expected = u64::from(memory_mb) * 2048;
+    let (regions, expected, physical_metadata) = if let Some(regions) = &machine.regions {
+        let (digest, bytes) =
+            crate::evidence::region_layout(regions).map_err(|error| bad(directory, error))?;
+        if machine
+            .end
+            .state_digest_parts
+            .as_ref()
+            .and_then(|parts| parts.get("ram_regions"))
+            != Some(digest.hex())
+        {
+            return Err(bad(
+                directory,
+                "RAM-region metadata disagrees with state parts",
+            ));
+        }
+        (regions.clone(), bytes, true)
+    } else {
+        if machine
+            .end
+            .state_digest_parts
+            .as_ref()
+            .and_then(|parts| parts.get("ram_regions"))
+            .is_some()
+        {
+            return Err(bad(directory, "physical RAM-region metadata is missing"));
+        }
+        let memory_mb = evidence
+            .record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .memory_mb;
+        if memory_mb == 0 {
+            return Err(bad(directory, "page hashes require recorded memory_mb"));
+        }
+        let regions = vec![RamRegion {
+            base: 0,
+            length: u64::from(memory_mb) << 20,
+        }];
+        (regions, u64::from(memory_mb) * 2048, false)
+    };
     if file.metadata().map_err(|e| bad(directory, e))?.len() != expected {
         return Err(bad(
             &directory.join("output").join(name),
-            format!("page hash length must be {expected} bytes for recorded RAM"),
+            format!(
+                "page hash length must be {expected} bytes for recorded {}RAM",
+                if physical_metadata { "mapped " } else { "" }
+            ),
         ));
     }
-    Ok(Some(file))
+    Ok(Some(PageFile {
+        file,
+        regions,
+        physical_metadata,
+    }))
 }
 
 fn ram_pages(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<RamPageReport> {
@@ -666,12 +797,21 @@ fn ram_pages(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<Ra
         if !ram_only(x, y) {
             continue;
         }
-        let name = page_hash_log(machine);
-        let x = page_file(a, left, &name)?;
-        let y = page_file(b, right, &name)?;
+        let name = x.page_log.clone().unwrap_or_else(|| page_hash_log(machine));
+        let other_name = y.page_log.clone().unwrap_or_else(|| page_hash_log(machine));
+        let x = page_file(a, left, x, &name)?;
+        let y = page_file(b, right, y, &other_name)?;
         if let (Some(x), Some(y)) = (x, y) {
-            let pages = compare_pages(x, y)
-                .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?;
+            if x.regions != y.regions {
+                return Err(bad(a, "compared page-hash physical RAM layouts differ"));
+            }
+            let pages = compare_pages(
+                x.file,
+                y.file,
+                &x.regions,
+                x.physical_metadata || y.physical_metadata,
+            )
+            .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?;
             report.machines.insert(machine.clone(), pages);
         } else {
             report.limitations.push(format!(
@@ -682,14 +822,23 @@ fn ram_pages(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<Ra
     Ok(report)
 }
 
-fn compare_pages(a: impl Read, b: impl Read) -> Result<PageHashDiff> {
+fn compare_pages(
+    a: impl Read,
+    b: impl Read,
+    regions: &[RamRegion],
+    physical_metadata: bool,
+) -> Result<PageHashDiff> {
     let mut a = BufReader::new(a);
     let mut b = BufReader::new(b);
     let mut result = PageHashDiff {
         differing_pfns: 0,
         first_pfns: vec![],
+        first_gpas: vec![],
     };
-    let mut pfn = 0;
+    crate::evidence::region_layout(regions)?;
+    let mut addresses = regions.iter().flat_map(|region| {
+        (0..region.length.div_ceil(4096)).map(move |page| region.base + page * 4096)
+    });
     loop {
         let mut x = [0; 8];
         let mut y = [0; 8];
@@ -698,13 +847,23 @@ fn compare_pages(a: impl Read, b: impl Read) -> Result<PageHashDiff> {
         }
         a.read_exact(&mut x)?;
         b.read_exact(&mut y)?;
+        let gpa = addresses
+            .next()
+            .ok_or_else(|| Error::Integrity("page hashes exceed mapped RAM regions".into()))?;
         if u64::from_le_bytes(x) != u64::from_le_bytes(y) {
             result.differing_pfns += 1;
             if result.first_pfns.len() < 8 {
-                result.first_pfns.push(pfn);
+                result.first_pfns.push(gpa / 4096);
+                if physical_metadata {
+                    result.first_gpas.push(gpa);
+                }
             }
         }
-        pfn += 1;
+    }
+    if addresses.next().is_some() {
+        return Err(Error::Integrity(
+            "page hashes do not cover mapped RAM regions".into(),
+        ));
     }
     Ok(result)
 }

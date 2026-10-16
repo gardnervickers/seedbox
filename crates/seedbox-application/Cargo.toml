@@ -11,6 +11,10 @@ hex.workspace = true
 seedbox-artifacts.workspace = true
 seedbox-spec.workspace = true
 seedbox-engine-protocol.workspace = true
+seedbox-driver.workspace = true
+seedbox-machine.workspace = true
+seedbox-machine-pv.workspace = true
+seedbox-machine-tcg.workspace = true
 serde.workspace = true
 seedbox-control.workspace = true
 seedbox-engine-core.workspace = true
@@ -38,9 +42,20 @@ seedbox-vmm = { path = "../seedbox-vmm" }
 seedbox-arm64 = { path = "../seedbox-arm64" }
 
 
+[dev-dependencies]
+seedbox-machine = { workspace = true, features = ["test-support"] }
+
 [features]
+test-support = []
 oci-tests = []
 
 [[test]]
 name = "oci_engine"
 required-features = ["oci-tests"]
+
+[[bin]]
+name = "seedbox-lifetime-fixture"
+path = "tests/support/lifetime_fixture.rs"
+required-features = ["test-support"]
+test = false
+bench = false

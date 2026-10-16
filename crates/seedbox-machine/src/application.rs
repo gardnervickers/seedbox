@@ -1,20 +1,24 @@
 //! Shared archive preparation. Linux paths remain archive bytes; guest files
 //! are never extracted on the host. Backend derivation does not mutate inputs.
+// TODO: Re-evaluate: separate backends consume this canonical helper.
+// Crate-private access cannot cross packages; representation remains private.
 use crate::definition::{DefinitionError, FilesystemArchive, Launch, PreparedApplication};
+mod environment;
+pub use environment::{GuestEnvironment, GuestLimits, NamedVolume};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
 };
 /// Kernel image and its complete caller-supplied argument string.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Kernel {
+pub struct Kernel {
     pub image: Vec<u8>,
     /// Passed verbatim; the backend does not inject or override arguments.
     pub command_line: String,
 }
 /// Guest bootstrap assets supplied separately from application configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GuestBootstrap {
+pub struct GuestBootstrap {
     pub kernel: Kernel,
     pub init: Vec<u8>,
     /// Optional base archive, represented by an empty vector when absent.
@@ -81,7 +85,187 @@ fn directory() -> Node {
         kind: Kind::Directory,
     }
 }
+// tar::Archive allocates GNU long-name/link and local PAX bodies before
+// yielding entries. Bound physical extension framing first, without copies.
+fn archive_preflight(
+    bytes: &[u8],
+    limits: crate::definition::ArchiveValidationLimits,
+) -> Result<(u64, u64), DefinitionError> {
+    let mut offset = 0usize;
+    let mut records = 0u64;
+    let mut extensions = 0u64;
+    let mut metadata = 0u64;
+    let mut pax_size = None;
+    let mut path_override = false;
+    loop {
+        if offset >= bytes.len() {
+            return Ok((extensions, metadata));
+        }
+        let header_end = offset
+            .checked_add(512)
+            .ok_or_else(|| invalid("tar offset overflow"))?;
+        let block = bytes
+            .get(offset..header_end)
+            .ok_or_else(|| invalid("truncated tar header"))?;
+        if block.iter().all(|b| *b == 0) {
+            return Ok((extensions, metadata));
+        }
+        records = records
+            .checked_add(1)
+            .ok_or_else(|| invalid("tar entry count overflow"))?;
+        if records > limits.entries {
+            return Err(invalid("archive entry validation limit exceeded"));
+        }
+        let header = tar::Header::from_byte_slice(block);
+        let kind = header.entry_type();
+        if kind.is_gnu_sparse() {
+            return Err(invalid("unsupported filesystem tar entry type"));
+        }
+        let extension = kind.is_gnu_longname()
+            || kind.is_gnu_longlink()
+            || kind.is_pax_local_extensions()
+            || kind.is_pax_global_extensions();
+        let size = if extension {
+            header.entry_size()
+        } else {
+            match pax_size.take() {
+                Some(n) => Ok(n),
+                None => header.entry_size(),
+            }
+        }
+        .map_err(|e| invalid(format!("filesystem tar size: {e}")))?;
+        let data_end = header_end
+            .checked_add(usize::try_from(size).map_err(|_| invalid("tar size host range"))?)
+            .ok_or_else(|| invalid("tar data offset overflow"))?;
+        let data = bytes
+            .get(header_end..data_end)
+            .ok_or_else(|| invalid("truncated tar data"))?;
+        if !extension && !path_override {
+            let name = header.as_bytes()[..100]
+                .iter()
+                .position(|b| *b == 0)
+                .unwrap_or(100);
+            let prefix = header
+                .as_ustar()
+                .map(|h| {
+                    h.prefix
+                        .iter()
+                        .position(|b| *b == 0)
+                        .unwrap_or(h.prefix.len())
+                })
+                .unwrap_or(0);
+            let length = name + prefix + usize::from(prefix > 0);
+            if length as u64 > limits.path_bytes {
+                return Err(invalid("archive header path limit exceeded"));
+            }
+            // Header::path_bytes joins a ustar prefix into a Cow<Vec> before
+            // yielding it. Reserve this bounded temporary before tar parses.
+            if prefix > 0 {
+                metadata = metadata
+                    .checked_add(length as u64)
+                    .ok_or_else(|| invalid("tar prefix accounting overflow"))?;
+            }
+            if metadata > limits.metadata_bytes {
+                return Err(invalid("archive header metadata limit exceeded"));
+            }
+        }
+        if !extension {
+            path_override = false;
+        }
+        if extension {
+            extensions = extensions
+                .checked_add(1)
+                .ok_or_else(|| invalid("tar extension count overflow"))?;
+            metadata = metadata
+                .checked_add(size)
+                .ok_or_else(|| invalid("tar extension size overflow"))?;
+            if metadata > limits.metadata_bytes {
+                return Err(invalid("archive extension metadata limit exceeded"));
+            }
+            if kind.is_gnu_longname() || kind.is_gnu_longlink() {
+                let length = data.strip_suffix(&[0]).unwrap_or(data).len() as u64;
+                if length > limits.path_bytes {
+                    return Err(invalid("archive extension path limit exceeded"));
+                }
+                if kind.is_gnu_longname() {
+                    path_override = true;
+                }
+            }
+            if kind.is_pax_local_extensions()
+                && (header.as_gnu().is_some() || header.as_ustar().is_some())
+            {
+                let mut size_seen = false;
+                for attr in tar::PaxExtensions::new(data) {
+                    let attr = attr.map_err(|e| invalid(format!("filesystem attributes: {e}")))?;
+                    if attr.key_bytes() == b"size" && !size_seen {
+                        pax_size = attr.value().ok().and_then(|v| v.parse::<u64>().ok());
+                        size_seen = true;
+                    }
+                    if attr.key_bytes() == b"path" || attr.key_bytes() == b"linkpath" {
+                        if attr.value_bytes().len() as u64 > limits.path_bytes {
+                            return Err(invalid("archive extension path limit exceeded"));
+                        }
+                        if attr.key_bytes() == b"path" {
+                            path_override = true;
+                        }
+                    }
+                }
+            }
+        }
+        let padded = size
+            .checked_add(511)
+            .map(|n| n & !511)
+            .ok_or_else(|| invalid("tar padding overflow"))?;
+        offset = header_end
+            .checked_add(usize::try_from(padded).map_err(|_| invalid("tar padding host range"))?)
+            .ok_or_else(|| invalid("tar next offset overflow"))?;
+    }
+}
 fn filesystem(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Node>, DefinitionError> {
+    filesystem_mode(
+        bytes,
+        true,
+        crate::definition::ArchiveValidationLimits::UNLIMITED,
+    )
+}
+fn filesystem_mode(
+    bytes: &[u8],
+    retain_data: bool,
+    limits: crate::definition::ArchiveValidationLimits,
+) -> Result<BTreeMap<Vec<u8>, Node>, DefinitionError> {
+    let (mut count, extension_bytes) = archive_preflight(bytes, limits)?;
+    let limits = crate::definition::ArchiveValidationLimits {
+        metadata_bytes: limits
+            .metadata_bytes
+            .checked_sub(extension_bytes)
+            .ok_or_else(|| invalid("archive extension metadata limit exceeded"))?,
+        ..limits
+    };
+    let mut paths = 0u64;
+    let mut expanded = 0u64;
+    fn budget(total: &mut u64, n: u64, max: u64) -> Result<(), DefinitionError> {
+        *total = total
+            .checked_add(n)
+            .ok_or_else(|| invalid("archive validation accounting overflow"))?;
+        if *total > max {
+            Err(invalid("archive validation limit exceeded"))
+        } else {
+            Ok(())
+        }
+    }
+    fn metadata(count: u64, paths: u64, limit: u64) -> Result<(), DefinitionError> {
+        let per_entry = (std::mem::size_of::<Node>() + 3 * std::mem::size_of::<Vec<u8>>()) as u64;
+        let used = count
+            .checked_mul(per_entry)
+            .and_then(|n| paths.checked_mul(2).and_then(|p| n.checked_add(p)))
+            .ok_or_else(|| invalid("archive metadata accounting overflow"))?;
+        if used > limit {
+            Err(invalid("archive metadata validation limit exceeded"))
+        } else {
+            Ok(())
+        }
+    }
+    let entry_limit = limits.entries;
     let mut nodes = BTreeMap::new();
     let mut archive = tar::Archive::new(bytes);
     for entry in archive
@@ -89,6 +273,14 @@ fn filesystem(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Node>, DefinitionError> 
         .map_err(|e| invalid(format!("filesystem tar: {e}")))?
     {
         let mut entry = entry.map_err(|e| invalid(format!("filesystem tar entry: {e}")))?;
+        budget(&mut count, 1, entry_limit)?;
+        metadata(count, paths, limits.metadata_bytes)?;
+        budget(
+            &mut paths,
+            entry.path_bytes().len() as u64,
+            limits.path_bytes,
+        )?;
+        metadata(count, paths, limits.metadata_bytes)?;
         if let Some(attributes) = entry
             .pax_extensions()
             .map_err(|e| invalid(format!("filesystem attributes: {e}")))?
@@ -138,27 +330,44 @@ fn filesystem(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Node>, DefinitionError> 
                 .map_err(|e| invalid(format!("filesystem size: {e}")))?;
             narrow(size, "filesystem file")?;
             let mut data = vec![];
-            entry
-                .read_to_end(&mut data)
-                .map_err(|e| invalid(format!("filesystem contents: {e}")))?;
+            if retain_data {
+                entry
+                    .read_to_end(&mut data)
+                    .map_err(|e| invalid(format!("filesystem contents: {e}")))?;
+                budget(&mut expanded, data.len() as u64, limits.expanded_bytes)?;
+            } else {
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let n = entry
+                        .read(&mut chunk)
+                        .map_err(|e| invalid(format!("filesystem contents: {e}")))?;
+                    if n == 0 {
+                        break;
+                    }
+                    budget(&mut expanded, n as u64, limits.expanded_bytes)?;
+                }
+            }
             (0o100000 | permissions, Kind::File(data))
         } else if kind.is_dir() {
             (0o40000 | permissions, Kind::Directory)
         } else if kind.is_symlink() {
             let link = entry
                 .link_name_bytes()
-                .ok_or_else(|| invalid("symlink target missing"))?
-                .to_vec();
+                .ok_or_else(|| invalid("symlink target missing"))?;
+            budget(&mut paths, link.len() as u64, limits.path_bytes)?;
+            metadata(count, paths, limits.metadata_bytes)?;
+            let link = link.to_vec();
             if link.is_empty() || link.contains(&0) {
                 return Err(invalid("invalid symlink target"));
             }
             (0o120000 | permissions, Kind::Symlink(link))
         } else if kind.is_hard_link() {
-            let link = path(
-                &entry
-                    .link_name_bytes()
-                    .ok_or_else(|| invalid("hardlink target missing"))?,
-            )?;
+            let link = entry
+                .link_name_bytes()
+                .ok_or_else(|| invalid("hardlink target missing"))?;
+            budget(&mut paths, link.len() as u64, limits.path_bytes)?;
+            metadata(count, paths, limits.metadata_bytes)?;
+            let link = path(&link)?;
             (0o100000 | permissions, Kind::Hardlink(link))
         } else if kind.is_character_special() || kind.is_block_special() {
             let major = header
@@ -203,6 +412,10 @@ fn filesystem(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Node>, DefinitionError> 
             ));
         }
     }
+    if !nodes.contains_key(&Vec::new()) {
+        budget(&mut count, 1, entry_limit)?;
+    }
+    metadata(count, paths, limits.metadata_bytes)?;
     nodes.entry(vec![]).or_insert_with(directory);
     let names: Vec<_> = nodes.keys().cloned().collect();
     for name in names {
@@ -210,13 +423,16 @@ fn filesystem(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Node>, DefinitionError> 
             if byte != b'/' {
                 continue;
             }
-            let parent = name[..i].to_vec();
-            match nodes.get(&parent) {
+            let parent = &name[..i];
+            match nodes.get(parent) {
                 Some(n) if !matches!(n.kind, Kind::Directory) => {
                     return Err(invalid("filesystem entry traverses a non-directory"));
                 }
                 None => {
-                    nodes.insert(parent, directory());
+                    budget(&mut count, 1, entry_limit)?;
+                    budget(&mut paths, parent.len() as u64, limits.path_bytes)?;
+                    metadata(count, paths, limits.metadata_bytes)?;
+                    nodes.insert(parent.to_vec(), directory());
                 }
                 _ => {}
             }
@@ -249,7 +465,13 @@ fn resolve<'a>(
     }
 }
 pub(crate) fn validate_filesystem(bytes: &[u8]) -> Result<(), DefinitionError> {
-    filesystem(bytes).map(|_| ())
+    validate_filesystem_bounded(bytes, crate::definition::ArchiveValidationLimits::UNLIMITED)
+}
+pub(crate) fn validate_filesystem_bounded(
+    bytes: &[u8],
+    limits: crate::definition::ArchiveValidationLimits,
+) -> Result<(), DefinitionError> {
+    filesystem_mode(bytes, false, limits).map(|_| ())
 }
 fn text(output: &mut Vec<u8>, value: &str) -> Result<(), DefinitionError> {
     if value.len() > FIELD_LIMIT || value.as_bytes().contains(&0) {
@@ -349,17 +571,35 @@ impl Newc {
         )
     }
 }
-pub(crate) fn boot_archive(
+/// Build an owned newc boot archive from the supplied prepared workload and bootstrap.
+/// Inputs remain unchanged; guest paths are packaged as bytes, never extracted on
+/// the host. An empty init, invalid archive/launch recipe, or unrepresentable
+/// newc metadata returns a DefinitionError without publishing a partial archive.
+/// No guest instructions, host builders, clock reads or RNG draws occur.
+// TODO: Re-evaluate: separate factories need the same archive preparation.
+// Keeping it crate-private would force copies or a reverse dependency.
+pub fn boot_archive(
     application: &PreparedApplication,
     bootstrap: &GuestBootstrap,
 ) -> Result<Vec<u8>, DefinitionError> {
-    package(application, bootstrap, &[])
+    package(application, bootstrap, &[], None, None)
 }
-pub(crate) struct DerivedApplication {
-    pub(crate) application: PreparedApplication,
-    pub(crate) execution_prefix: Vec<String>,
+/// Owned workload/runtime tree and execution prefix derived for boot packaging.
+/// The original prepared application remains independent and reusable. The
+/// prefix is passed to the guest launch recipe, not executed on the host;
+/// boot_derived validates and packages these supplied values when called.
+// TODO: Re-evaluate: both derivation and packaging cross the factory boundary.
+// One owned result keeps the existing archive and prefix paired without mutation.
+pub struct DerivedApplication {
+    pub application: PreparedApplication,
+    pub execution_prefix: Vec<String>,
 }
-pub(crate) fn boot_derived(
+/// Package the owned derived workload and its prefix with the explicit bootstrap.
+/// Has boot_archive ownership, validation and error behavior, adding the stored
+/// prefix to the guest launch recipe. No input is mutated or host program run.
+// TODO: Re-evaluate: PV factories derive a runtime before common packaging.
+// An implementation-private function cannot serve that separate crate.
+pub fn boot_derived(
     application: &DerivedApplication,
     bootstrap: &GuestBootstrap,
 ) -> Result<Vec<u8>, DefinitionError> {
@@ -367,13 +607,78 @@ pub(crate) fn boot_derived(
         &application.application,
         bootstrap,
         &application.execution_prefix,
+        None,
+        None,
+    )
+}
+/// Package explicit configured setup alongside the unchanged launch recipe.
+/// Named volumes require a separate static formatter matching the bootstrap
+/// init's ELF architecture. No formatter is included or required without them.
+/// This owns boot_archive's no-execution/source-immutability contract, validates
+/// the closed environment recipe, and never extracts Linux paths on the host.
+// TODO: Re-evaluate: setup is service-owned boot input, not an obligatory field
+// on every MachineDefinition or a generic machine inspection/serialization API.
+pub fn boot_archive_configured(
+    application: &PreparedApplication,
+    bootstrap: &GuestBootstrap,
+    environment: &GuestEnvironment,
+    formatter: Option<&[u8]>,
+) -> Result<Vec<u8>, DefinitionError> {
+    package(application, bootstrap, &[], Some(environment), formatter)
+}
+/// Package a derived runtime and explicit setup, without mutating either.
+/// The canonical private DynamoRIO prefix reserves 96 descriptors in addition
+/// to the environment's visible nofile limit and is mounted read-only at boot;
+/// other prefixes do not imply this reserve or runtime mount. Formatter rules
+/// and no-host-execution guarantees are those of boot_archive_configured.
+// TODO: Re-evaluate: the concrete derived prefix is already the guest launch
+// contract; duplicating backend/Driver configuration would hide its boot bytes.
+pub fn boot_derived_configured(
+    application: &DerivedApplication,
+    bootstrap: &GuestBootstrap,
+    environment: &GuestEnvironment,
+    formatter: Option<&[u8]>,
+) -> Result<Vec<u8>, DefinitionError> {
+    package(
+        &application.application,
+        bootstrap,
+        &application.execution_prefix,
+        Some(environment),
+        formatter,
     )
 }
 fn package(
     application: &PreparedApplication,
     bootstrap: &GuestBootstrap,
     prefix: &[String],
+    environment: Option<&GuestEnvironment>,
+    formatter: Option<&[u8]>,
 ) -> Result<Vec<u8>, DefinitionError> {
+    let setup = environment
+        .map(|e| environment::recipe(e, prefix))
+        .transpose()?;
+    let protected_runtime = environment.is_some()
+        && prefix
+            .first()
+            .is_some_and(|p| p == "/seedbox/progress/bin64/drrun");
+    let formatter = if environment.is_some_and(|e| !e.named_volumes.is_empty()) {
+        let bytes = formatter.ok_or_else(|| {
+            invalid("named guest volumes require the guest mke2fs bootstrap asset")
+        })?;
+        let machine = bootstrap
+            .init
+            .get(18..20)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .filter(|m| matches!(m, 62 | 183))
+            .ok_or_else(|| invalid("guest formatter requires a supported static ELF init"))?;
+        crate::machine::assets::elf(&bootstrap.init, machine, true)
+            .map_err(|e| invalid(format!("guest init: {e}")))?;
+        crate::machine::assets::elf(bytes, machine, true)
+            .map_err(|e| invalid(format!("guest formatter: {e}")))?;
+        Some(bytes)
+    } else {
+        None
+    };
     if bootstrap.init.is_empty() {
         return Err(invalid("guest bootstrap init is empty"));
     }
@@ -403,6 +708,12 @@ fn package(
     )?;
     archive.owned(b"init", 0o100755, &bootstrap.init)?;
     archive.owned(b"seedbox/application.bin", 0o100400, &recipe)?;
+    if let Some(setup) = setup {
+        archive.owned(b"seedbox/environment.bin", 0o100400, &setup)?;
+    }
+    if let Some(bytes) = formatter {
+        archive.owned(b"seedbox/mke2fs", 0o100755, bytes)?;
+    }
     // Realtime epoch for every boot; the shared PID 1 sets CLOCK_REALTIME
     // to epoch plus the machine counter from it before Ready.
     let mut clock = b"SBXCLK1\0".to_vec();
@@ -422,11 +733,21 @@ fn package(
     let mut written = BTreeSet::new();
     for name in nodes.keys() {
         let (key, node) = resolve(&nodes, name)?;
-        let mut path = b"rootfs".to_vec();
-        if !name.is_empty() {
-            path.push(b'/');
-            path.extend(name);
-        }
+        // Configured PV keeps its protected runtime outside the application
+        // tree until the guest bind-mounts it read-only, after named volumes.
+        // Otherwise a /seedbox volume could hide the instrumented bootstrap.
+        let path = if protected_runtime
+            && (name == b"seedbox/progress" || name.starts_with(b"seedbox/progress/"))
+        {
+            name.clone()
+        } else {
+            let mut path = b"rootfs".to_vec();
+            if !name.is_empty() {
+                path.push(b'/');
+                path.extend(name);
+            }
+            path
+        };
         let (inode, nlink, data) = match &node.kind {
             Kind::File(data) => {
                 let group = groups.get_mut(key).unwrap();
@@ -468,7 +789,7 @@ fn package(
 /// The caller supplies every runtime file (loader/libraries/client), not just a
 /// binary. Original workload inputs remain reusable. Read-only guest mounting
 /// and actual architecture-specific instrumentation are separate backend work.
-pub(crate) fn with_runtime(
+pub fn with_runtime(
     application: &PreparedApplication,
     runtime: &FilesystemArchive,
     prefix: &[String],
@@ -568,5 +889,8 @@ pub(crate) fn with_runtime(
         execution_prefix: prefix.to_vec(),
     })
 }
+#[cfg(test)]
+mod environment_parity_tests;
+
 #[cfg(test)]
 mod tests;

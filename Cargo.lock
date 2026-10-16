@@ -1866,24 +1866,18 @@ dependencies = [
 name = "seedbox"
 version = "0.1.0"
 dependencies = [
- "bollard",
- "clap",
- "futures-util",
  "libc",
  "seedbox-api",
  "seedbox-application",
  "seedbox-arm64",
+ "seedbox-cli",
  "seedbox-client",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
+ "seedbox-machine-pv",
  "seedbox-server",
- "seedbox-spec",
- "seedbox-tui",
  "seedbox-vmm",
- "serde",
  "serde_json",
- "serde_yaml_ng",
- "signal-hook",
  "tar",
  "tempfile",
  "tokio",
@@ -1915,8 +1909,12 @@ dependencies = [
  "seedbox-arm64",
  "seedbox-artifacts",
  "seedbox-control",
+ "seedbox-driver",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
+ "seedbox-machine",
+ "seedbox-machine-pv",
+ "seedbox-machine-tcg",
  "seedbox-spec",
  "seedbox-vmm",
  "serde",
@@ -1999,6 +1997,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-cli"
+version = "0.1.0"
+dependencies = [
+ "bollard",
+ "clap",
+ "futures-util",
+ "libc",
+ "seedbox-api",
+ "seedbox-application",
+ "seedbox-client",
+ "seedbox-engine-protocol",
+ "seedbox-server",
+ "seedbox-spec",
+ "seedbox-tui",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "signal-hook",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "seedbox-client"
 version = "0.1.0"
 dependencies = [
@@ -2018,6 +2039,23 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "seedbox-driver"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rayon",
+ "seedbox-control",
+ "seedbox-engine-core",
+ "seedbox-machine",
+ "seedbox-machine-pv",
+ "seedbox-machine-tcg",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
 ]
 
 [[package]]
@@ -2048,12 +2086,40 @@ dependencies = [
 name = "seedbox-machine"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
+name = "seedbox-machine-pv"
+version = "0.1.0"
+dependencies = [
  "cc",
  "hex",
  "kvm-bindings",
  "kvm-ioctls 0.24.0",
  "libc",
- "rayon",
+ "seedbox-machine",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
+name = "seedbox-machine-tcg"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "libc",
+ "seedbox-machine",
+ "seedbox-machine-tcg",
  "serde",
  "serde_json",
  "sha2",
@@ -2075,9 +2141,13 @@ dependencies = [
  "seedbox-client",
  "seedbox-control",
  "seedbox-engine-protocol",
+ "seedbox-machine",
+ "seedbox-machine-pv",
+ "seedbox-machine-tcg",
  "seedbox-spec",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2090,6 +2160,23 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+]
+
+[[package]]
+name = "seedbox-test"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "libc",
+ "seedbox-driver",
+ "seedbox-machine",
+ "seedbox-machine-pv",
+ "seedbox-machine-tcg",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
 ]
 
 [[package]]
@@ -3042,6 +3129,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "serde_json",
+ "tar",
  "tempfile",
 ]
 

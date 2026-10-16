@@ -5,30 +5,49 @@ Each section links to the code that owns it.
 
 ## Reference TCG machine
 
-`seedbox-machine` has a diskless, single-CPU RV64 reference backend using QEMU
-software emulation. Its example uses `SEEDBOX_TCG_QEMU` and
-`SEEDBOX_TCG_ASSETS` for the explicit patched executable and prepared backend
-asset directory. Run `cargo run -p seedbox-machine --example tcg` inside the
-project development environment after preparing those inputs. Factories load
-owned guest assets; runtime construction does not build them.
+`seedbox-machine` targets a single x86-64 `qemu64` CPU on QEMU’s `microvm`
+board. Its owned qboot firmware loads the kernel, initramfs and ACPI tables
+without external option ROMs. The asset command line states the emulated
+TSC’s exact 1 GHz frequency with `tsc_early_khz=1000000`. Factories load owned
+guest assets; runtime construction does not build them. Examples take the
+explicit executable and asset directory through `SEEDBOX_TCG_QEMU` and
+`SEEDBOX_TCG_ASSETS`.
+The CPU advertises ARAT for LAPIC one-shot/NOHZ without a broadcast clockevent;
+pre-ARAT TCG witnesses are not comparable.
 
-The example runs two applications with seeded sleeps from one through four
-seconds, plus an oracle that ends the run. Application outcomes are distinct
+The TCG backend no longer supports RISC-V; its build targets and guest assets
+are x86-64. Shared guest helpers also support AArch64 PV. Raw instruction tests
+boot 64 KiB x86 BIOS images (`raw_program_data.rs`): a fixed 12-instruction
+stub enters 32-bit flat protected mode before the program, so exact times
+count the stub. The board's PIT and RTC run from reset; a program that needs an
+idle CPU with no pending timer stops them first.
+
+The example is intended to run two applications with seeded sleeps from one
+through four seconds, plus an oracle that ends the run. Application outcomes are distinct
 from kernel shutdown. It is separate from the production `seedbox run` backends.
 
 The driver repeatedly calls `Machine::run`. A private QMP command limits QEMU's
-native instruction budget. At nominal execution cost, one instruction costs one
-nanosecond in the machine's time base; execution pricing and the Driver's clock
-mapping determine its simulation-time cost. QEMU stops at that budget or when the CPU becomes idle; it cannot
-automatically jump forward through idle time. `Blocked` reports the next virtual
+icount steps, not hardware retirement. An ordinary instruction costs one step;
+REP string I/O costs one per iteration plus a final zero-count check. At nominal
+execution cost, one step costs one nanosecond in the machine's time base;
+execution pricing and the Driver's clock mapping determine its simulation-time
+cost. QEMU stops at that budget or when the CPU becomes idle; it cannot
+automatically jump forward through idle time. A run ends at its budget however
+long the host takes (code fetched outside RAM is translated one instruction at
+a time), so the adapter waits for it without a host timeout. Builds with the
+`test-support` feature, which every native TCG test enables, instead kill QEMU
+when one run exceeds 600 s of host time, so a livelocked QEMU fails its test. `Blocked` reports the next virtual
 timer deadline. The [driver](../crates/seedbox-machine/src/driver.rs)
 tracks each machine's execution position and next timer, advancing the shared
 clock only when no eligible runnable work or timer remains before it. Each round
 brings active machines to its boundary, a blocked state, or exit. The machine observes the
 read-only clock borrowed through its run context on its next `run`, delivering due timers before executing
-more instructions. Guest power-off and halt return `Exited` with `Shutdown`; a
-guest reset, including a kernel panic restart, returns `Exited` with `Crashed`
-(see `Machine::run`). Only an accepted Reboot request starts a new boot. The driver runs ready machines
+more instructions. Guest power-off returns `Exited` with `Shutdown`; a guest
+reset, including a kernel panic restart, returns `Exited` with `Crashed`
+(see `Machine::run`). Direct OS halt is not a portable power-off request and
+may remain `Blocked`. No new kernel change is added for this: the existing
+ARM PV kernel's halt-to-SYSTEM_OFF routing is unchanged. Only an accepted
+Reboot request starts a new boot. The driver runs ready machines
 on a persistent thread pool, holding the shared simulation clock and each machine's
 mapped clock view fixed until every call in the batch returns. Each worker creates
 and retains its own host execution resources, which may be thread-affine. Every
@@ -43,6 +62,32 @@ Worker count does not change simulation results. Machine access, additions and
 host controls go through barrier callbacks. `Barrier::schedule` enqueues a keyed
 `Action`; due inputs use the same admission and settlement policy as guest controls.
 The Driver retains only live keys, while the caller owns input history.
+
+With configured guest-control latency, a call joins the existing timeline at
+`observed + latency`; its reply is due at `effect + latency`, or at the rejection
+decision time plus latency when no effect occurred. These are exact due times,
+not delays rounded to a later quantum. Host inputs keep their existing timing.
+Replies remain owned by the calling boot and are discarded after that boot ends,
+never delivered to its successor. The controller setting, pending calls and due
+replies survive Driver checkpoints without readmission or repeated RNG draws.
+Omitting the setting retains the SDK's commit-time admission and effect-time
+reply behavior. See [Driver control](../crates/seedbox-driver/src/driver.rs).
+
+Timer jitter remains a supported resolved simulation input. A timer delivers at
+its exact selected deadline within the configured jitter window. Stop tolerance
+is passed to the backend unchanged: it is not another jitter draw, timer delay,
+or offset added to authored input delivery. Retained service policy disables
+eager `BootEnded` reports; stopped witness/state getters remain
+independent of those optional SDK outputs.
+
+At a round boundary, committed outputs publish before timeline items due there.
+A matched trigger therefore admits its fault policy at that commit before a
+prequeued host input takes its turn; policy admission does not prove dispatch.
+Same-time timeline items retain FIFO order. Plans created while admitting an
+item append behind items already queued, so an existing reply can be admitted
+before a host input's newly created effect plan at the same timestamp. Frames
+follow the due timeline items, then timer wakeups; delayed control adds no second
+ordering pass.
 
 An individually paused machine receives no positive execution budget while
 other machines advance. Due requests still receive zero-budget admission runs:
@@ -83,16 +128,18 @@ active `Machine::run`; callers service controls and cancellation between steps.
 The quantum is fixed at construction, with boundaries anchored at the initial
 time. Each step respects both its requested time limit and the next quantum
 boundary; intermediate barriers do not shift that boundary. Both examples use
-two workers and a one-millisecond quantum. Packet
-routing is not implemented. Console and lifecycle output preserve their native
-occurrence timestamps and cross-channel order, then publish at committed barriers.
+two workers and a one-millisecond quantum. Attached interfaces use the
+[Driver's causal network rounds](#machine-network-delivery). Console, lifecycle
+and frame output preserve native occurrence timestamps and cross-channel order,
+then publish at committed barriers.
 GDB is used only by tests to inspect stopped register and RAM state.
 
 Snapshots own their boot inputs and QEMU migration state, including RAM, CPU,
 devices, virtual timers, and pending lifecycle transitions. Machine snapshots
-exclude driver-owned clock/RNG, worker resources, other machines, and networking.
-Full simulation capture must preserve those dependencies and driver scheduling
-state consistently; that capture API remains deferred. The QEMU process and control connection are recreated
+exclude driver-owned clock/RNG, worker resources, other machines, and network
+routing state. Attached device queues are machine state; frames in flight,
+pair RNG cursors, FIFO clocks, sender sequences and active cuts are not. Full simulation capture must preserve those dependencies and driver
+scheduling state consistently; that capture API remains deferred. The QEMU process and control connection are recreated
 on restore. Serial output already emitted by an instance is external observation
 and is not emitted again by restoring its snapshot.
 
@@ -123,6 +170,102 @@ console; the x86 platform is described in its
 
 Code: [PV example](../crates/seedbox-machine/examples/pv.rs),
 [shared example RNG](../crates/seedbox-machine/examples/support/mod.rs).
+
+## Machine disk ownership
+
+`MachineDefinition.disk` is an optional `DiskImage`: an immutable owned byte image
+or a zeroed capacity, nonzero and sector-aligned. Both backends expose one
+`/dev/vda`; attaching it neither mounts nor formats it. The shared store keeps
+separate durable and unflushed overlays over the immutable base. Completed writes
+are immediately readable; guest FLUSH promotes completed writes. Requests finish
+synchronously at the device kick, not according to host I/O completion. Malformed
+requests fail after retaining any already completed prefix.
+
+The PV worker or QEMU process owns mutable disk state during a boot. On accepted
+Crash, guest power-off/reset, or teardown for Reboot, the stopped process exports
+its overlays before termination. The Machine discards the unflushed layer once
+and retains the durable layer for the next boot. Repeated Crash does not discard
+again. Device reset preserves both layers. Shutdown requests guest cleanup;
+only the guest's sync/FLUSH makes its writes durable. Filesystem writes without
+fsync need not all disappear: the guest may already have flushed some of them.
+
+A live snapshot captures both overlays without promoting or discarding writes;
+a terminal snapshot captures boot-end policy already applied. Snapshots retain
+the immutable base independently of the source machine's lifetime. TCG migration
+carries live overlays, while between-boot captures carry the shared overlay codec.
+A disk-attached TCG machine therefore terminates QEMU at boot end; a diskless one
+retains its existing stopped-process behavior. The QEMU device uses the shared
+Rust request/store implementation, not a QEMU BlockBackend or asynchronous I/O.
+
+Code: [disk image](../crates/seedbox-machine/src/definition.rs),
+[shared store and requests](../crates/seedbox-machine/src/machine/disk.rs),
+[PV ownership](../crates/seedbox-machine/src/machine/pv.rs),
+[TCG ownership](../crates/seedbox-machine/src/machine/tcg.rs),
+[QEMU device](../crates/seedbox-machine/qemu/seedbox-disk.patch).
+
+## Machine network delivery
+
+`MachineDefinition.network` optionally names one interface with a nonzero unicast
+MAC and an explicit IPv4 address/prefix. The Driver checks MAC uniqueness across
+initial and spawnable definitions before constructing machines. Guest bootstrap
+configures loopback and `eth0` before Ready, with no DHCP, gateway or host network
+attachment. PV uses its native MMIO NIC; TCG uses the synchronous
+`seedbox-net-device` on an explicitly legacy virtio-mmio transport. Its frames
+cross stopped QMP commands, not QEMU's host network queues. Receive and transmit
+transport chunks do not impose a simulated delivery or aggregate output limit.
+TCG merges transmitted frames with console and lifecycle output before publishing;
+its minimum instruction cost of one nanosecond keeps distinct output-producing
+instructions' timestamps strictly ordered.
+
+`ReceiveFrame` and `TransmitFrame` use the existing timed inbox/outbox. Frames are
+opaque Ethernet bytes, 14 through 1514 bytes excluding FCS; VLAN tags receive no
+extra allowance. Devices do not offer checksum or segmentation offloads. Each NIC
+holds at most 256 pending receive frames, dropping new arrivals when full. Valid
+frames offered to an absent, exited or unready NIC are consumed and dropped;
+invalid direct input lengths are errors. A short valid receive chain completes
+with used length zero and no payload DMA. Malformed rings are errors, retaining
+the completed prefix. NIC snapshots capture queues, interrupts and accepted
+receive backlog, distinct from the external network's frames in flight.
+
+The Driver's `NetworkConfig` supplies positive latency, additional nonnegative
+jitter smaller than that latency, and loss in parts per million. Its default is
+1 ms with no jitter or loss. All interfaces share one simulated L2 segment:
+broadcast reaches other admitted peers with NICs in identity order, unicast reaches the
+matching peer, and other destinations reach nobody. Each ordered pair has isolated
+loss/jitter streams derived from the sender's seed and receiver's stable name.
+Disabled policies consume no draws; a lost candidate still consumes enabled
+jitter. Pair arrival times are strictly increasing. Arrival/FIFO overflow and
+sender sequence exhaustion fail the Driver rather than silently dropping work.
+
+Let `F` be the earliest next eligible execution time of an attached machine and
+`L` the minimum latency. A round ends no later than `F + L`, in addition to its
+existing bounds. Thus a frame emitted by that round cannot arrive before its
+boundary. Known arrivals create exact barriers; there are no periodic network
+ticks when idle. At a barrier, due lifecycle/control items precede frame delivery,
+which precedes timer wakeups. Frame admission uses a zero-budget run, so even a
+paused receiver can accept it without executing instructions. An idle guest with
+new device work becomes runnable. Machine times use the same floor/ceil mapping
+as other inputs and outputs.
+
+Partitions cut the bidirectional cross-product of two nonempty, disjoint sets of
+admitted NIC members, including down machines. Cuts stack; healing one handle
+removes only its cuts. They survive boots and do not erase frames already in
+flight. Cuts are checked before RNG draws or FIFO reservation, at routing's turn
+in publication order: a frame stamped `T` by the round ending at `T` routes before
+a partition/heal due at `T`, while an admission-run frame after that effect sees
+the changed policy. Link faults report their actual member sets, never a fake
+machine/boot anchor. Guest and triggered partitions use the same admission rules.
+
+PV transports frame bytes in binary trailers alongside ordered console/lifecycle
+records, not JSON payload arrays. The receiver recognizes an END or invalid tag
+before reading a record header, so it cannot wait for bytes the peer will never
+send. Host transport chunking and worker count do not change simulated ordering.
+
+Code: [interface definition](../crates/seedbox-machine/src/definition/network.rs),
+[network policy](../crates/seedbox-machine/src/driver/network.rs),
+[Driver](../crates/seedbox-machine/src/driver.rs),
+[PV NIC](../crates/seedbox-machine/src/machine/pv/worker/net.rs),
+[PV wire protocol](../crates/seedbox-machine/src/machine/pv/wire.rs).
 
 ## Machine time bases and clock faults
 
@@ -479,12 +622,14 @@ The runner reports missing host requirements before building. Reports are writte
 under `target/check-reports/`; they are local output, not documentation.
 The VMM and ARM backends have separate Cargo workspaces and lockfiles; use the
 root Cargo aliases when building them directly. ARM guest fixtures read
-`SEEDBOX_ARM64_KERNEL` and `SEEDBOX_ARM64_INITRD`; `harness/check.py` defines
-their checkout defaults and the other suite requirements.
+`SEEDBOX_ARM64_KERNEL` and `SEEDBOX_ARM64_INITRD`; the Rust coordinator
+[policy](../crates/seedbox-test/src/bin/seedbox-check/policy.rs) defines their
+checkout defaults and the other suite requirements.
 
 Unit tests live beside their component under `src/`. Integration tests live in
 the owning crate's `tests/` and exercise public boundaries. Give each scenario
 one owner. Check determinism with independent fresh runs as well as replay;
 use identical resolved inputs, including the initial clock.
 
-Code: [test runner](../harness/check.py), [Cargo aliases](../.cargo/config.toml).
+Code: [Rust test coordinator](../crates/seedbox-test/src/bin/seedbox-check/main.rs),
+[Cargo aliases](../.cargo/config.toml).

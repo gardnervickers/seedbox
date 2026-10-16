@@ -8,6 +8,40 @@ use std::{path::PathBuf, time::Duration};
 
 const ATTEMPT: Duration = Duration::from_millis(250);
 
+/// The connection gate must drain before retirement can publish completion or
+/// permit deletion of files still owned by control I/O.
+pub(crate) fn lock_for_retirement(
+    worker: &std::sync::Mutex<Worker>,
+) -> std::sync::LockResult<std::sync::MutexGuard<'_, Worker>> {
+    #[cfg(test)]
+    if let Some(blocked) = RETIREMENT_BLOCKED.with(|probe| probe.borrow_mut().take()) {
+        match worker.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(error)) => return Err(error),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                // This is an observed failed acquisition of the actual gate,
+                // not a thread-start notification or elapsed-silence inference.
+                blocked.send(()).expect("retirement probe receiver dropped");
+            }
+        }
+    }
+    worker.lock()
+}
+
+#[cfg(test)]
+thread_local! {
+    static RETIREMENT_BLOCKED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Observe contention on this thread's next retirement only. Per-thread probes
+/// cannot interfere with concurrent simulations or tests.
+#[cfg(test)]
+pub(crate) fn observe_retirement_blocked(blocked: std::sync::mpsc::Sender<()>) {
+    RETIREMENT_BLOCKED.with(|probe| {
+        assert!(probe.borrow_mut().replace(blocked).is_none());
+    });
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
     #[error("worker control connection is retired")]
@@ -32,6 +66,8 @@ pub(crate) struct Worker {
     client: Option<Client>,
     journal: Option<Journal>,
     fault: Option<FaultTransaction>,
+    #[cfg(test)]
+    failure_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
 impl Worker {
@@ -42,6 +78,27 @@ impl Worker {
             client: None,
             journal: None,
             fault: None,
+            #[cfg(test)]
+            failure_gate: None,
+        }
+    }
+
+    /// Pause after real protocol failure, while the caller still owns this
+    /// connection gate. A transport timeout cannot release this explicit gate.
+    #[cfg(test)]
+    pub(crate) fn gate_failure_publication(
+        &mut self,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        assert!(self.failure_gate.replace((entered, release)).is_none());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn await_failure_publication(&mut self) {
+        if let Some((entered, release)) = self.failure_gate.take() {
+            entered.send(()).expect("failure observer dropped");
+            release.recv().expect("failure publication gate dropped");
         }
     }
 
@@ -139,35 +196,59 @@ impl Worker {
         request: &ControlRequest,
         action: seedbox_api::FaultAction,
     ) -> Result<ControlState, Error> {
-        if let Some(transaction) = &self.fault {
+        self.client()?;
+        let Self {
+            run,
+            client,
+            journal,
+            fault,
+            ..
+        } = self;
+        Self::inject_transaction(run, journal, fault, request, action, |command| {
+            client
+                .as_mut()
+                .ok_or_else(|| ClientError::Protocol("missing worker connection".into()))?
+                .execute(command, ATTEMPT)
+        })
+    }
+
+    // Keep the transaction's durable ordering independent of transport timing.
+    // The production executor is the same serialized Client and attempt budget;
+    // tests can explicitly choose which phase times out without racing a peer.
+    fn inject_transaction(
+        run: &std::path::Path,
+        journal: &mut Option<Journal>,
+        fault: &mut Option<FaultTransaction>,
+        request: &ControlRequest,
+        action: seedbox_api::FaultAction,
+        mut execute: impl FnMut(Command) -> Result<Reply, ClientError>,
+    ) -> Result<ControlState, Error> {
+        if let Some(transaction) = fault.as_ref() {
             if &transaction.request != request {
                 return Err(Error::Fatal(
                     "fault request changed during admission".into(),
                 ));
             }
         } else {
-            if self.journal.is_none() {
-                self.journal = Some(
-                    Journal::open(&self.run.join("interventions.json"))
+            if journal.is_none() {
+                *journal = Some(
+                    Journal::open(&run.join("interventions.json"))
                         .map_err(|e| Error::Fatal(e.to_string()))?,
                 );
             }
-            self.fault = Some(FaultTransaction {
+            *fault = Some(FaultTransaction {
                 request: request.clone(),
                 retained: None,
             });
         }
-        if self.fault.as_ref().is_some_and(|t| t.retained.is_none()) {
-            let reply = self.client()?.execute(
-                Command::PrepareFault {
-                    request_id: request.request_id.clone(),
-                    action: action.clone(),
-                    timeout_ns: seedbox_control::PROCESS_EFFECT_TIMEOUT_NS,
-                },
-                ATTEMPT,
-            )?;
+        if fault.as_ref().is_some_and(|t| t.retained.is_none()) {
+            let reply = execute(Command::PrepareFault {
+                request_id: request.request_id.clone(),
+                action: action.clone(),
+                timeout_ns: seedbox_control::PROCESS_EFFECT_TIMEOUT_NS,
+            })?;
             if reply.error.is_some() {
-                self.fault = None;
+                *fault = None;
                 return Ok(receipt(reply));
             }
             let record = reply
@@ -187,22 +268,19 @@ impl Worker {
                     "worker fault proposal differs from the accepted request".into(),
                 ));
             }
-            self.journal
+            journal
                 .as_mut()
                 .ok_or_else(|| Error::Fatal("missing intervention journal".into()))?
                 .append(record.clone())
                 .map_err(|e| Error::Fatal(e.to_string()))?;
-            self.fault
+            fault
                 .as_mut()
                 .ok_or_else(|| Error::Fatal("missing fault transaction".into()))?
                 .retained = Some(record);
         }
-        let committed = self.client()?.execute(
-            Command::CommitFault {
-                request_id: request.request_id.clone(),
-            },
-            ATTEMPT,
-        );
+        let committed = execute(Command::CommitFault {
+            request_id: request.request_id.clone(),
+        });
         let reply = match committed {
             Ok(reply) => reply,
             Err(
@@ -216,8 +294,7 @@ impl Worker {
             }
             Err(error) => return Err(error.into()),
         };
-        let retained = self
-            .fault
+        let retained = fault
             .as_ref()
             .and_then(|t| t.retained.as_ref())
             .ok_or_else(|| Error::Fatal("fault commit preceded retention".into()))?;
@@ -227,7 +304,7 @@ impl Worker {
                 reply.error
             )));
         }
-        self.fault = None;
+        *fault = None;
         Ok(receipt(reply))
     }
 
@@ -272,7 +349,7 @@ mod tests {
     use seedbox_engine_protocol::host_control::{
         BoundaryPosition, PlaybackRate, Request, MAX_DATAGRAM,
     };
-    use std::{fs, os::unix::net::UnixDatagram, path::Path, sync::mpsc};
+    use std::{fs, os::unix::net::UnixDatagram, path::Path};
 
     fn fixture() -> (tempfile::TempDir, UnixDatagram, Worker) {
         let directory = tempfile::tempdir().unwrap();
@@ -400,51 +477,137 @@ mod tests {
         );
     }
 
+    fn transaction(
+        worker: &mut Worker,
+        execute: impl FnMut(Command) -> Result<Reply, ClientError>,
+    ) -> Result<ControlState, Error> {
+        let request = request();
+        let ControlCommand::InjectFault { action } = &request.command else {
+            unreachable!()
+        };
+        Worker::inject_transaction(
+            &worker.run,
+            &mut worker.journal,
+            &mut worker.fault,
+            &request,
+            action.clone(),
+            execute,
+        )
+    }
+
+    fn prepare() -> Command {
+        let ControlCommand::InjectFault { action } = request().command else {
+            unreachable!()
+        };
+        Command::PrepareFault {
+            request_id: "cut".into(),
+            action,
+            timeout_ns: seedbox_control::PROCESS_EFFECT_TIMEOUT_NS,
+        }
+    }
+    fn commit() -> Command {
+        Command::CommitFault {
+            request_id: "cut".into(),
+        }
+    }
+
     #[test]
     fn commit_follows_durable_retention_and_a_timeout_retries_the_same_transaction() {
-        let (directory, socket, mut worker) = fixture();
+        let (directory, _socket, mut worker) = fixture();
         let path = directory.path().join("interventions.json");
-        let (resume, resumed) = mpsc::channel();
-        std::thread::scope(|scope| {
-            let path = path.clone();
-            let engine = scope.spawn(move || {
-                let (prepare, peer) = receive(&socket);
-                assert!(matches!(prepare.command, Command::PrepareFault { .. }));
-                send(&socket, &peer, &proposal(prepare.id));
-                let (commit, peer) = receive(&socket);
-                assert_eq!(
-                    commit.command,
-                    Command::CommitFault {
-                        request_id: "cut".into()
-                    }
-                );
-                // This read occurs when commit first arrives, not after the test finishes.
-                let history = seedbox_artifacts::interventions::read(&path).unwrap();
-                assert_eq!(
-                    history.entries,
-                    [proposal(prepare.id).intervention.unwrap()]
-                );
-                resumed.recv_timeout(Duration::from_secs(2)).unwrap();
-                let (retry, _) = receive(&socket);
-                assert_eq!(retry, commit);
-                send(&socket, &peer, &proposal(commit.id));
-            });
-            assert!(matches!(
-                worker.apply(&request()),
-                Err(Error::Transport(ClientError::Timeout { .. }))
-            ));
-            resume.send(()).unwrap();
-            let result = worker.apply(&request()).unwrap();
-            assert!(matches!(
-                result,
-                ControlState::Acknowledged {
-                    error: None,
-                    intervention: Some(_),
-                    ..
-                }
-            ));
-            engine.join().unwrap();
+        let retained = proposal(1).intervention.unwrap();
+        let mut commands = Vec::new();
+        let first = transaction(&mut worker, |command| {
+            commands.push(command.clone());
+            if command == prepare() {
+                return Ok(proposal(1));
+            }
+            assert_eq!(command, commit());
+            // Check at the exact transport call, before reporting its timeout.
+            assert_eq!(
+                seedbox_artifacts::interventions::read(&path)
+                    .unwrap()
+                    .entries
+                    .as_slice(),
+                std::slice::from_ref(&retained)
+            );
+            Err(ClientError::Timeout { id: 2 })
         });
+        assert!(matches!(
+            first,
+            Err(Error::Transport(ClientError::Timeout { id: 2 }))
+        ));
+        let pending = worker.fault.as_ref().unwrap();
+        assert_eq!(pending.request, request());
+        assert_eq!(pending.retained.as_ref(), Some(&retained));
+        let result = transaction(&mut worker, |command| {
+            commands.push(command.clone());
+            assert_eq!(command, commit());
+            assert_eq!(
+                seedbox_artifacts::interventions::read(&path)
+                    .unwrap()
+                    .entries
+                    .as_slice(),
+                std::slice::from_ref(&retained)
+            );
+            Ok(proposal(2))
+        })
+        .unwrap();
+        assert!(
+            matches!(result, ControlState::Acknowledged { error: None, intervention: Some(ref record), .. } if **record == retained)
+        );
+        assert!(worker.fault.is_none());
+        assert_eq!(commands, [prepare(), commit(), commit()]);
+        assert_eq!(
+            seedbox_artifacts::interventions::read(&path)
+                .unwrap()
+                .entries,
+            [retained]
+        );
+    }
+
+    #[test]
+    fn a_prepare_timeout_retries_prepare_before_retaining_or_committing() {
+        let (directory, _socket, mut worker) = fixture();
+        let path = directory.path().join("interventions.json");
+        let mut commands = Vec::new();
+        assert!(matches!(
+            transaction(&mut worker, |command| {
+                commands.push(command.clone());
+                assert_eq!(command, prepare());
+                Err(ClientError::Timeout { id: 1 })
+            }),
+            Err(Error::Transport(ClientError::Timeout { id: 1 }))
+        ));
+        assert_eq!(worker.fault.as_ref().unwrap().request, request());
+        assert!(worker.fault.as_ref().unwrap().retained.is_none());
+        assert!(!path.exists());
+        let result = transaction(&mut worker, |command| {
+            commands.push(command.clone());
+            if command == prepare() {
+                assert!(!path.exists());
+                return Ok(proposal(1));
+            }
+            assert_eq!(command, commit());
+            assert_eq!(
+                seedbox_artifacts::interventions::read(&path)
+                    .unwrap()
+                    .entries,
+                [proposal(1).intervention.unwrap()]
+            );
+            Ok(proposal(2))
+        })
+        .unwrap();
+        assert!(matches!(
+            result,
+            ControlState::Acknowledged {
+                error: None,
+                intervention: Some(_),
+                ..
+            }
+        ));
+        assert!(worker.fault.is_none());
+        assert_eq!(commands, [prepare(), prepare(), commit()]);
         assert_eq!(
             seedbox_artifacts::interventions::read(&path)
                 .unwrap()
@@ -455,29 +618,75 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_prepare_and_commit_keep_the_exact_client_request() {
+        // Zero budget establishes a pending real Client request without any
+        // send/read race. Re-entry must retain its full wire identity and refuse
+        // an overtaking command, independently of host scheduling.
+        for command in [prepare(), commit()] {
+            let (_directory, _socket, mut worker) = fixture();
+            let client = worker.client().unwrap();
+            assert!(matches!(
+                client.execute(command.clone(), Duration::ZERO),
+                Err(ClientError::Timeout { id: 1 })
+            ));
+            let pending = client.pending().unwrap().clone();
+            assert_eq!(
+                pending,
+                Request {
+                    id: 1,
+                    command: command.clone()
+                }
+            );
+            assert!(matches!(
+                client.execute(command, Duration::ZERO),
+                Err(ClientError::Timeout { id: 1 })
+            ));
+            assert_eq!(client.pending(), Some(&pending));
+            assert!(matches!(
+                client.execute(Command::Status, Duration::ZERO),
+                Err(ClientError::Pending { id: 1 })
+            ));
+            assert_eq!(client.pending(), Some(&pending));
+        }
+    }
+
+    #[test]
     fn a_failed_journal_write_never_sends_commit() {
-        let (directory, socket, mut worker) = fixture();
+        let (directory, _socket, mut worker) = fixture();
         let path = directory.path().join("interventions.json");
-        std::thread::scope(|scope| {
-            let path = path.clone();
-            let engine = scope.spawn(move || {
-                let (prepare, peer) = receive(&socket);
-                // The journal was opened already; now make atomic replacement fail.
-                fs::create_dir(&path).unwrap();
-                send(&socket, &peer, &proposal(prepare.id));
-                socket
-                    .set_read_timeout(Some(Duration::from_millis(300)))
-                    .unwrap();
-                let mut bytes = [0; MAX_DATAGRAM + 1];
-                let error = socket.recv(&mut bytes).unwrap_err();
-                assert!(matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ));
-            });
-            assert!(matches!(worker.apply(&request()), Err(Error::Fatal(_))));
-            engine.join().unwrap();
+        let mut commands = Vec::new();
+        let result = transaction(&mut worker, |command| {
+            commands.push(command.clone());
+            assert_eq!(command, prepare());
+            // Journal::open has acquired its real lock, but the first admission
+            // has not been persisted. Fail atomic replacement at this exact
+            // transaction boundary, independently of transport retransmission.
+            assert!(path.with_file_name("interventions.json.lock").is_file());
+            assert!(!path.exists());
+            fs::create_dir(&path).unwrap();
+            Ok(proposal(1))
         });
+        let Err(Error::Fatal(error)) = result else {
+            panic!("failed journal replacement must be fatal: {result:?}");
+        };
+        assert!(error.contains("persist intervention history"), "{error}");
+        // A queued Prepare retransmission is legal transport behavior, not a
+        // Commit. Observe every transaction command instead of timing a socket
+        // receive and incorrectly requiring that no datagram at all arrives.
+        assert!(commands
+            .iter()
+            .all(|command| !matches!(command, Command::CommitFault { .. })));
+        assert_eq!(commands, [prepare()]);
         assert!(path.is_dir());
+        assert!(worker
+            .journal
+            .as_ref()
+            .unwrap()
+            .history()
+            .entries
+            .is_empty());
+        let pending = worker.fault.as_ref().unwrap();
+        assert_eq!(pending.request, request());
+        assert!(pending.retained.is_none());
     }
 }

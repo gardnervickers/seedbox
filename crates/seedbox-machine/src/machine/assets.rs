@@ -1,6 +1,11 @@
 //! Explicit, offline-built guest inputs. Loading never builds or searches.
+// TODO: Re-evaluate: separate backends consume this canonical helper.
+// Crate-private access cannot cross packages; representation remains private.
 use std::{fs, io, path::Path};
-pub(super) fn read(root: &Path, name: &str) -> io::Result<Vec<u8>> {
+/// Read and own all bytes at root.join(name), without search or building.
+/// Missing/unreadable files retain their IO error kind with path context; an
+/// empty file is rejected. The path is supplied by the caller, not sandboxed.
+pub fn read(root: &Path, name: &str) -> io::Result<Vec<u8>> {
     let path = root.join(name);
     let bytes = fs::read(&path)
         .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
@@ -12,7 +17,10 @@ pub(super) fn read(root: &Path, name: &str) -> io::Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-pub(super) fn executable(path: &Path) -> io::Result<()> {
+/// Require that the supplied path resolves to a file, following symlinks.
+/// Returns an error naming the path otherwise. Does not execute the file or
+/// check executable permissions, architecture, contents or protocol support.
+pub fn executable(path: &Path) -> io::Result<()> {
     if !path.is_file() {
         return Err(io::Error::other(format!(
             "{}: executable file not found",
@@ -21,7 +29,10 @@ pub(super) fn executable(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
-pub(super) fn arguments(root: &Path, limit: usize) -> io::Result<String> {
+/// Read root/command-line as owned UTF-8, rejecting NUL or a byte length >= limit.
+/// IO failures include the path; contents are returned verbatim without trimming,
+/// search or execution. The caller must supply a positive limit.
+pub fn arguments(root: &Path, limit: usize) -> io::Result<String> {
     let path = root.join("command-line");
     let bytes = fs::read(&path)
         .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
@@ -35,7 +46,11 @@ pub(super) fn arguments(root: &Path, limit: usize) -> io::Result<String> {
     }
     Ok(text)
 }
-pub(super) fn elf(bytes: &[u8], machine: u16, static_program: bool) -> io::Result<()> {
+/// Validate a supplied little-endian 64-bit ELF for the requested machine ID.
+/// Checks supported headers and bounded load segments, requiring loadable memory;
+/// static_program additionally rejects PT_INTERP. Returns an error for malformed
+/// or incompatible bytes without modifying them; does not load or execute ELF.
+pub fn elf(bytes: &[u8], machine: u16, static_program: bool) -> io::Result<()> {
     let invalid = || io::Error::other("invalid or incompatible guest ELF asset");
     if bytes.len() < 64
         || &bytes[..4] != b"\x7fELF"
@@ -90,14 +105,11 @@ pub(super) fn elf(bytes: &[u8], machine: u16, static_program: bool) -> io::Resul
     }
     Ok(())
 }
-pub(super) fn kernel(bytes: &[u8], arm: bool) -> io::Result<()> {
-    let valid = if arm {
-        bytes.get(56..60) == Some(b"ARM\x64".as_slice())
-    } else {
-        bytes.get(48..56) == Some(b"RISCV\0\0\0".as_slice())
-            && bytes.get(56..60) == Some(b"RSC\x05".as_slice())
-    };
-    if !valid {
+/// Check an arm64 Linux Image header, for the arm64 PV factory; TCG checks
+/// an x86-64 bzImage with [`bzimage`].
+#[cfg(target_arch = "aarch64")]
+pub fn kernel(bytes: &[u8]) -> io::Result<()> {
+    if bytes.get(56..60) != Some(b"ARM\x64".as_slice()) {
         return Err(io::Error::other(
             "invalid or incompatible guest Linux Image",
         ));
@@ -105,56 +117,38 @@ pub(super) fn kernel(bytes: &[u8], arm: bool) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    pub(crate) fn image(machine: u16) -> Vec<u8> {
-        let mut bytes = vec![0; 120];
-        bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
-        bytes[16..18].copy_from_slice(&2_u16.to_le_bytes());
-        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
-        bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
-        bytes[32..40].copy_from_slice(&64_u64.to_le_bytes());
-        bytes[52..54].copy_from_slice(&64_u16.to_le_bytes());
-        bytes[54..56].copy_from_slice(&56_u16.to_le_bytes());
-        bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
-        bytes[64..68].copy_from_slice(&1_u32.to_le_bytes());
-        bytes[96..104].copy_from_slice(&120_u64.to_le_bytes());
-        bytes[104..112].copy_from_slice(&120_u64.to_le_bytes());
-        bytes
+/// Check an x86-64 Linux bzImage, independent of the host architecture: the
+/// `HdrS` header, boot protocol 2.12 or later, a kernel loaded high with a
+/// 64-bit entry (`XLF_KERNEL_64`), and a protected-mode payload after setup.
+pub fn bzimage(bytes: &[u8]) -> io::Result<()> {
+    let invalid = || io::Error::other("invalid or incompatible guest x86-64 bzImage");
+    if bytes.len() < 0x268 || &bytes[0x202..0x206] != b"HdrS" {
+        return Err(invalid());
     }
-    #[test]
-    fn command_line_is_verbatim_including_empty_and_rejects_nul_or_byte_overflow() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("command-line");
-        for text in ["", "  console=x\n", "a=b a=c"] {
-            fs::write(&path, text).unwrap();
-            assert_eq!(arguments(directory.path(), 1024).unwrap(), text);
-        }
-        for text in ["\0".to_owned(), "é".repeat(512)] {
-            fs::write(&path, text).unwrap();
-            assert!(arguments(directory.path(), 1024).is_err());
-        }
+    let protocol = u16::from_le_bytes([bytes[0x206], bytes[0x207]]);
+    let xloadflags = u16::from_le_bytes([bytes[0x236], bytes[0x237]]);
+    // A zero setup sector count means the historical four.
+    let sectors = match bytes[0x1f1] {
+        0 => 4,
+        sectors => usize::from(sectors),
+    };
+    let setup = (sectors + 1) * 512;
+    if protocol < 0x020c || bytes[0x211] & 1 == 0 || xloadflags & 1 == 0 || setup >= bytes.len() {
+        return Err(invalid());
     }
-    #[test]
-    fn elf_requires_correct_architecture_and_bounded_loadable_segments() {
-        let valid = image(183);
-        elf(&valid, 183, true).unwrap();
-        assert!(elf(&valid, 243, true).is_err());
-        let mut invalid = valid.clone();
-        invalid[56..58].copy_from_slice(&0_u16.to_le_bytes());
-        assert!(elf(&invalid, 183, true).is_err());
-        let mut invalid = valid.clone();
-        invalid[96..104].copy_from_slice(&121_u64.to_le_bytes());
-        assert!(elf(&invalid, 183, true).is_err());
-        let mut invalid = valid.clone();
-        invalid[104..112].copy_from_slice(&119_u64.to_le_bytes());
-        assert!(elf(&invalid, 183, true).is_err());
-        let mut invalid = valid.clone();
-        invalid[64..68].copy_from_slice(&3_u32.to_le_bytes());
-        assert!(elf(&invalid, 183, true).is_err());
-        let mut invalid = valid.clone();
-        invalid[16..18].copy_from_slice(&1_u16.to_le_bytes());
-        assert!(elf(&invalid, 183, false).is_err());
-    }
+    Ok(())
 }
+
+/// Check an x86 BIOS image: QEMU maps a nonzero whole number of 64 KiB
+/// blocks ending at 4 GiB, with its reset vector 16 bytes from the end.
+pub fn bios(bytes: &[u8]) -> io::Result<()> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(64 * 1024) {
+        return Err(io::Error::other(
+            "guest firmware must be an x86 BIOS image of whole 64 KiB blocks",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests;

@@ -1,0 +1,854 @@
+diff --git a/include/exec/icount.h b/include/exec/icount.h
+index b3d67a59..588761e2 100644
+--- a/include/exec/icount.h
++++ b/include/exec/icount.h
+@@ -86,4 +86,8 @@ void seedbox_icount_console(uint8_t byte);
+  * Every later seedbox-run is refused. Shared by all Seedbox devices. */
+ void seedbox_icount_device_error(void);
+ 
++/* Actual guest native interactions only; the x86 witness installs this sink.
++ * Not a QMP/window event stream. Callers retain existing completion semantics. */
++void seedbox_native_record(uint8_t kind, uint8_t size, uint64_t a, uint64_t b);
++void seedbox_native_set_sink(void (*sink)(uint8_t, uint8_t, uint64_t, uint64_t));
+ #endif /* EXEC_ICOUNT_H */
+diff --git a/accel/tcg/icount-common.c b/accel/tcg/icount-common.c
+index 0bf136e6..7019f4e1 100644
+--- a/accel/tcg/icount-common.c
++++ b/accel/tcg/icount-common.c
+@@ -55,6 +55,17 @@ bool icount_align_option;
+ ICountMode use_icount = ICOUNT_DISABLED;
+ 
+ /* Seedbox owns idle-time advancement once it starts bounded execution. */
++static void (*native_sink)(uint8_t, uint8_t, uint64_t, uint64_t);
++void seedbox_native_set_sink(void (*sink)(uint8_t, uint8_t, uint64_t, uint64_t))
++{
++    native_sink = sink;
++}
++void seedbox_native_record(uint8_t kind, uint8_t size, uint64_t a, uint64_t b)
++{
++    if (native_sink) {
++        native_sink(kind, size, a, b);
++    }
++}
+ static bool seedbox_controlled;
+ static bool seedbox_active;
+ static int64_t seedbox_end;
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index 7f7c208b..fd7e003e 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "exec/icount.h"
+ #include "qemu/main-loop.h"
+ #include "qemu/target-info.h"
+ #include "accel/tcg/cpu-loop.h"
+@@ -1950,6 +1951,10 @@ static uint64_t int_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
+         this_size = 1 << this_mop;
+         this_mop |= MO_BE;
+ 
++        if (type == MMU_DATA_LOAD) {
++            seedbox_native_record('r', this_size,
++                                  full->phys_addr | (addr & ~TARGET_PAGE_MASK), 0);
++        }
+         r = memory_region_dispatch_read(mr, mr_offset, &val,
+                                         this_mop, full->attrs);
+         if (unlikely(r != MEMTX_OK)) {
+@@ -2463,6 +2468,10 @@ static uint64_t int_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
+         this_size = 1 << this_mop;
+         this_mop |= MO_LE;
+ 
++        seedbox_native_record('w', this_size,
++                              full->phys_addr | (addr & ~TARGET_PAGE_MASK),
++                              this_size == 8 ? val_le :
++                              val_le & ((UINT64_C(1) << (this_size * 8)) - 1));
+         r = memory_region_dispatch_write(mr, mr_offset, val_le,
+                                          this_mop, full->attrs);
+         if (unlikely(r != MEMTX_OK)) {
+diff --git a/target/i386/tcg/system/misc_helper.c b/target/i386/tcg/system/misc_helper.c
+index 2998b1aa..73a75aea 100644
+--- a/target/i386/tcg/system/misc_helper.c
++++ b/target/i386/tcg/system/misc_helper.c
+@@ -28,39 +28,46 @@
+ #include "exec/cputlb.h"
+ #include "tcg/helper-tcg.h"
+ #include "hw/i386/apic.h"
++#include "exec/icount.h"
+ 
+ void helper_outb(CPUX86State *env, uint32_t port, uint32_t data)
+ {
++    seedbox_native_record('O', 1, port, data & 0xff);
+     address_space_stb(&address_space_io, port, data,
+                       cpu_get_mem_attrs(env), NULL);
+ }
+ 
+ target_ulong helper_inb(CPUX86State *env, uint32_t port)
+ {
++    seedbox_native_record('i', 1, port, 0);
+     return address_space_ldub(&address_space_io, port,
+                               cpu_get_mem_attrs(env), NULL);
+ }
+ 
+ void helper_outw(CPUX86State *env, uint32_t port, uint32_t data)
+ {
++    seedbox_native_record('O', 2, port, data & 0xffff);
+     address_space_stw_le(&address_space_io, port, data,
+                          cpu_get_mem_attrs(env), NULL);
+ }
+ 
+ target_ulong helper_inw(CPUX86State *env, uint32_t port)
+ {
++    seedbox_native_record('i', 2, port, 0);
+     return address_space_lduw_le(&address_space_io, port,
+                                  cpu_get_mem_attrs(env), NULL);
+ }
+ 
+ void helper_outl(CPUX86State *env, uint32_t port, uint32_t data)
+ {
++    seedbox_native_record('O', 4, port, data & 0xffffffff);
+     address_space_stl_le(&address_space_io, port, data,
+                          cpu_get_mem_attrs(env), NULL);
+ }
+ 
+ target_ulong helper_inl(CPUX86State *env, uint32_t port)
+ {
++    seedbox_native_record('i', 4, port, 0);
+     return address_space_ldl_le(&address_space_io, port,
+                                 cpu_get_mem_attrs(env), NULL);
+ }
+@@ -512,6 +519,7 @@ G_NORETURN void helper_hlt(CPUX86State *env)
+     CPUState *cs = env_cpu(env);
+ 
+     do_end_instruction(env);
++    seedbox_native_record('H', 0, 0, 0);
+     cs->halted = 1;
+     cs->exception_index = EXCP_HLT;
+     cpu_loop_exit(cs);
+diff --git a/target/i386/tcg/system/seg_helper.c b/target/i386/tcg/system/seg_helper.c
+index 8c7856be..bab7c806 100644
+--- a/target/i386/tcg/system/seg_helper.c
++++ b/target/i386/tcg/system/seg_helper.c
+@@ -19,6 +19,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "exec/icount.h"
+ #include "qemu/log.h"
+ #include "qemu/main-loop.h"
+ #include "cpu.h"
+@@ -194,10 +195,12 @@ bool x86_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
+         cpu_svm_check_intercept_param(env, SVM_EXIT_NMI, 0, 0);
+         cpu_reset_interrupt(cs, CPU_INTERRUPT_NMI);
+         env->hflags2 |= HF2_NMI_MASK;
++        seedbox_native_record('I', 0, EXCP02_NMI, 0);
+         do_interrupt_x86_hardirq(env, EXCP02_NMI, 1);
+         break;
+     case CPU_INTERRUPT_MCE:
+         cpu_reset_interrupt(cs, CPU_INTERRUPT_MCE);
++        seedbox_native_record('I', 0, EXCP12_MCHK, 0);
+         do_interrupt_x86_hardirq(env, EXCP12_MCHK, 0);
+         break;
+     case CPU_INTERRUPT_HARD:
+@@ -206,6 +209,7 @@ bool x86_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
+         intno = cpu_get_pic_interrupt(env);
+         qemu_log_mask(CPU_LOG_INT,
+                       "Servicing hardware INT=0x%02x\n", intno);
++        seedbox_native_record('I', 0, intno, 0);
+         do_interrupt_x86_hardirq(env, intno, 1);
+         break;
+     case CPU_INTERRUPT_VIRQ:
+@@ -214,6 +218,7 @@ bool x86_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
+                              + offsetof(struct vmcb, control.int_vector));
+         qemu_log_mask(CPU_LOG_INT,
+                       "Servicing virtual hardware INT=0x%02x\n", intno);
++        seedbox_native_record('I', 0, intno, 0);
+         do_interrupt_x86_hardirq(env, intno, 1);
+         cpu_reset_interrupt(cs, CPU_INTERRUPT_VIRQ);
+         env->int_ctl &= ~V_IRQ_MASK;
+diff --git a/target/i386/tcg/emit.c.inc b/target/i386/tcg/emit.c.inc
+index 473f4157..85a3aac5 100644
+--- a/target/i386/tcg/emit.c.inc
++++ b/target/i386/tcg/emit.c.inc
+@@ -2054,6 +2054,7 @@ static void gen_HLT(DisasContext *s, X86DecodedInsn *decode)
+ #ifdef CONFIG_SYSTEM_ONLY
+     gen_update_cc_op(s);
+     gen_update_eip_next(s);
++    translator_io_start(&s->base);
+     gen_helper_hlt(tcg_env);
+     s->base.is_jmp = DISAS_NORETURN;
+ #endif
+diff --git a/target/i386/tcg/translate.c b/target/i386/tcg/translate.c
+index 2115c5cd..51c6815d 100644
+--- a/target/i386/tcg/translate.c
++++ b/target/i386/tcg/translate.c
+@@ -2852,6 +2852,7 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
+             }
+             gen_update_cc_op(s);
+             gen_update_eip_cur(s);
++            translator_io_start(&s->base);
+             gen_helper_mwait(tcg_env, cur_insn_len_i32(s));
+             s->base.is_jmp = DISAS_NORETURN;
+             break;
+diff --git a/target/i386/meson.build b/target/i386/meson.build
+index e1f506d0..3854ed02 100644
+--- a/target/i386/meson.build
++++ b/target/i386/meson.build
+@@ -23,6 +23,8 @@ i386_system_ss.add(files(
+   'seedbox-evidence.c',
+   'seedbox-evidence-pages.c',
+   'seedbox-policy.c',
++  'seedbox-witness.c',
++  'seedbox-witness-chain.c',
+   'seedbox-timer-rng.c',
+   'cpu-apic.c',
+   'cpu-system.c',
+diff --git a/target/i386/seedbox-witness-chain.c b/target/i386/seedbox-witness-chain.c
+new file mode 100644
+index 00000000..6408e5d0
+--- /dev/null
++++ b/target/i386/seedbox-witness-chain.c
+@@ -0,0 +1,75 @@
++/* Exactly the approved common Rust chain format. Compare within a backend,
++ * not with legacy streaming SHA state. Record62bytes => two SHA256 blocks;
++ * all record storage is stack32/62bytes, no allocation or unbounded history.
++ */
++#include "qemu/osdep.h"
++#include "qemu/bswap.h"
++#include "qapi/error.h"
++#include "crypto/hash.h"
++#include "seedbox-witness-chain.h"
++
++static bool hashv(const struct iovec *iov, size_t count, uint8_t out[32],
++                  Error **errp)
++{
++    uint8_t *result = out;
++    size_t length = 32;
++    return qcrypto_hash_bytesv(QCRYPTO_HASH_ALGO_SHA256, iov, count,
++                               &result, &length, errp) == 0;
++}
++
++bool seedbox_witness_initial(uint8_t out[32], Error **errp)
++{
++    static const char domain[] = "seedbox-execution-witness-v1\0";
++    const struct iovec v = { .iov_base = (void *)domain,
++                            .iov_len = sizeof(domain) - 1 };
++    return hashv(&v, 1, out, errp);
++}
++
++bool seedbox_witness_record_hash(const uint8_t h[32], uint8_t kind, uint8_t size,
++                                 uint64_t time, uint64_t a, uint64_t b,
++                                 uint8_t out[32], Error **errp)
++{
++    uint8_t bytes[62];
++    const struct iovec v = { .iov_base = bytes, .iov_len = sizeof(bytes) };
++    memcpy(bytes, h, 32);
++    memcpy(bytes + 32, "rec\0", 4);
++    bytes[36] = kind;
++    bytes[37] = size;
++    stq_le_p(bytes + 38, time);
++    stq_le_p(bytes + 46, a);
++    stq_le_p(bytes + 54, b);
++    return hashv(&v, 1, out, errp);
++}
++
++bool seedbox_witness_read_hash(const uint8_t h[32], const uint8_t *pending,
++                               size_t length, uint8_t out[32], Error **errp)
++{
++    uint8_t size[8];
++    const struct iovec v[] = {
++        { .iov_base = (void *)h, .iov_len = 32 },
++        { .iov_base = (void *)"read\0", .iov_len = 5 },
++        { .iov_base = size, .iov_len = sizeof(size) },
++        { .iov_base = (void *)pending, .iov_len = length },
++    };
++    stq_le_p(size, length);
++    return hashv(v, G_N_ELEMENTS(v), out, errp);
++}
++
++bool seedbox_witness_boot_hash(const uint8_t old[32], uint8_t mark, uint64_t time,
++                               uint8_t out[32], Error **errp)
++{
++    uint8_t bytes[78];
++    const struct iovec v = { .iov_base = bytes, .iov_len = sizeof(bytes) };
++    if (mark < 1 || mark > 3) {
++        error_setg(errp, "seedbox execution witness: invalid successor mark");
++        return false;
++    }
++    if (!seedbox_witness_initial(bytes, errp)) {
++        return false;
++    }
++    memcpy(bytes + 32, "boot\0", 5);
++    memcpy(bytes + 37, old, 32);
++    bytes[69] = mark;
++    stq_le_p(bytes + 70, time);
++    return hashv(&v, 1, out, errp);
++}
+diff --git a/target/i386/seedbox-witness-chain.h b/target/i386/seedbox-witness-chain.h
+new file mode 100644
+index 00000000..ee81b8c7
+--- /dev/null
++++ b/target/i386/seedbox-witness-chain.h
+@@ -0,0 +1,13 @@
++/* Canonical native interaction witness, new-engine schema v1. No live hasher. */
++#ifndef TARGET_I386_SEEDBOX_WITNESS_CHAIN_H
++#define TARGET_I386_SEEDBOX_WITNESS_CHAIN_H
++#include "qemu/typedefs.h"
++bool seedbox_witness_initial(uint8_t out[32], Error **errp);
++bool seedbox_witness_record_hash(const uint8_t h[32], uint8_t kind, uint8_t size,
++                                 uint64_t time, uint64_t a, uint64_t b,
++                                 uint8_t out[32], Error **errp);
++bool seedbox_witness_read_hash(const uint8_t h[32], const uint8_t *pending,
++                               size_t length, uint8_t out[32], Error **errp);
++bool seedbox_witness_boot_hash(const uint8_t old[32], uint8_t mark, uint64_t time,
++                               uint8_t out[32], Error **errp);
++#endif
+diff --git a/target/i386/seedbox-witness.c b/target/i386/seedbox-witness.c
+new file mode 100644
+index 00000000..e95e2489
+--- /dev/null
++++ b/target/i386/seedbox-witness.c
+@@ -0,0 +1,114 @@
++/* Actual native interaction chain, independent of full-state/RAM diagnostics.
++ * Single vCPU. Guest I/O and synchronous completions run under the BQL.
++ * Query does not read a clock, run a timer, drain a device or hash RAM.
++ */
++#include "qemu/osdep.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include "qapi/error.h"
++#include "qapi/qapi-commands-misc-i386.h"
++#include "migration/vmstate.h"
++#include "system/runstate.h"
++#include "exec/icount.h"
++#include "seedbox-witness-chain.h"
++
++typedef struct SeedboxWitness {
++    bool configured;
++    bool failed;
++    uint8_t chain[32];
++} SeedboxWitness;
++static SeedboxWitness witness;
++
++static void native_record(uint8_t kind, uint8_t size, uint64_t a, uint64_t b)
++{
++    uint8_t next[32];
++    Error *error = NULL;
++    if (!witness.configured || witness.failed) {
++        return;
++    }
++    if (!seedbox_witness_record_hash(witness.chain, kind, size,
++                                     qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
++                                     a, b, next, &error)) {
++        witness.failed = true;
++        error_report_err(error);
++        seedbox_icount_device_error();
++        return;
++    }
++    memcpy(witness.chain, next, sizeof(next));
++}
++
++static char *hex32(const uint8_t bytes[32])
++{
++    char *s = g_malloc(65);
++    for (unsigned i = 0; i < 32; i++) {
++        g_snprintf(s + 2 * i, 3, "%02x", bytes[i]);
++    }
++    return s;
++}
++
++/* Invoked by fresh physical construction ONLY. Incoming migration restores
++ * configured/chain without invoking this command. No native entropy record:
++ * qemu64 exposes neither RDRAND nor RDSEED; this board has no virtio-rng or
++ * fw_cfg RNG-seed provider. -seed initializes a host PRNG, not guest delivery.
++ */
++void qmp_seedbox_witness_start(const char *chain, uint64_t boot, bool forced,
++                             Error **errp)
++{
++    uint8_t initial[32];
++    if (runstate_is_running() || witness.configured || strlen(chain) != 64) {
++        error_setg(errp, "seedbox witness start needs an unconfigured stopped physical boot");
++        return;
++    }
++    for (unsigned i = 0; i < 32; i++) {
++        int hi = g_ascii_xdigit_value(chain[2 * i]);
++        int lo = g_ascii_xdigit_value(chain[2 * i + 1]);
++        if (hi < 0 || lo < 0 || g_ascii_isupper(chain[2 * i]) ||
++            g_ascii_isupper(chain[2 * i + 1])) {
++            error_setg(errp, "seedbox witness chain must be lowercase SHA256");
++            return;
++        }
++        initial[i] = (hi << 4) | lo;
++    }
++    memcpy(witness.chain, initial, sizeof(initial));
++    witness.configured = true;
++    if (forced) {
++        native_record('C', 0, 0, 0);
++    }
++    native_record('N', 0, boot, 0);
++    if (witness.failed) {
++        error_setg(errp, "seedbox witness initialization failed");
++    }
++}
++
++SeedboxNativeChain *qmp_seedbox_witness_chain(Error **errp)
++{
++    if (runstate_is_running() || !witness.configured || witness.failed) {
++        error_setg(errp, "seedbox witness query needs a healthy configured stopped machine");
++        return NULL;
++    }
++    /* No owed CPU I/O: all guest PIO/MMIO completes synchronously before
++     * stopping. Device and Rust frontend pending state is observed separately.
++     * Return h, not observe(h, empty): the frontend appends canonical pending.
++     */
++    SeedboxNativeChain *result = g_new0(SeedboxNativeChain, 1);
++    result->chain = hex32(witness.chain);
++    return result;
++}
++
++static const VMStateDescription vmstate_witness = {
++    .name = "seedbox-native-witness",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_BOOL(configured, SeedboxWitness),
++        VMSTATE_BOOL(failed, SeedboxWitness),
++        VMSTATE_UINT8_ARRAY(chain, SeedboxWitness, 32),
++        VMSTATE_END_OF_LIST()
++    }
++};
++static void register_witness(void)
++{
++    vmstate_register(NULL, 0, &vmstate_witness, &witness);
++    seedbox_native_set_sink(native_record);
++}
++type_init(register_witness)
+diff --git a/hw/block/seedbox-blk.c b/hw/block/seedbox-blk.c
+index b0125fef..9873d231 100644
+--- a/hw/block/seedbox-blk.c
++++ b/hw/block/seedbox-blk.c
+@@ -13,6 +13,8 @@
+  * SEG_MAX only, without indirect descriptors or event index.
+  */
+ #include "qemu/osdep.h"
++#include "qemu/bswap.h"
++#include "qemu/iov.h"
+ #include "qapi/error.h"
+ #include "qapi/qapi-commands-run-state.h"
+ #include "hw/virtio/virtio.h"
+@@ -79,15 +81,21 @@ static void seedbox_blk_handle(VirtIODevice *vdev, VirtQueue *vq)
+         VirtQueueElement *elem = virtqueue_pop(vq, sizeof(VirtQueueElement));
+         uint32_t written;
+         uint8_t status;
++        uint8_t request[16] = { 0 };
++        bool have_header;
+ 
+         if (!elem) {
+             break;
+         }
+-        if (!seedbox_blk_in_ram(vdev, elem->out_addr, elem->out_sg,
+-                                elem->out_num, false) ||
+-            !seedbox_blk_in_ram(vdev, elem->in_addr, elem->in_sg,
+-                                elem->in_num, true) ||
+-            !seedbox_disk_execute(s->disk, elem->out_sg, elem->out_num,
++        bool accessible = seedbox_blk_in_ram(vdev, elem->out_addr, elem->out_sg,
++                                             elem->out_num, false) &&
++                          seedbox_blk_in_ram(vdev, elem->in_addr, elem->in_sg,
++                                             elem->in_num, true);
++        /* Read only admitted guest RAM; save before writable DMA can alias. */
++        have_header = accessible &&
++            iov_to_buf(elem->out_sg, elem->out_num, 0,
++                       request, sizeof(request)) == sizeof(request);
++        if (!accessible || !seedbox_disk_execute(s->disk, elem->out_sg, elem->out_num,
+                                   elem->in_sg, elem->in_num,
+                                   &written, &status)) {
+             virtqueue_detach_element(vq, elem, 0);
+@@ -99,6 +107,10 @@ static void seedbox_blk_handle(VirtIODevice *vdev, VirtQueue *vq)
+             return;
+         }
+         virtqueue_push(vq, elem, written);
++        /* execute rejects malformed headers; retain full request kind. */
++        assert(have_header);
++        seedbox_native_record('d', 0, ldq_le_p(request + 8),
++                              ldl_le_p(request) | ((uint64_t)status << 32));
+         g_free(elem);
+         completed = true;
+     }
+diff --git a/hw/net/seedbox-net.c b/hw/net/seedbox-net.c
+index a7090723..8d916a57 100644
+--- a/hw/net/seedbox-net.c
++++ b/hw/net/seedbox-net.c
+@@ -661,3 +661,36 @@ static void seedbox_net_register_types(void)
+ }
+ 
+ type_init(seedbox_net_register_types)
++
++/* FIFO order, retained guest frame bytes and retained TX timestamps only.
++ * No draining, DMA, model mutation or clock read. Delimiters and lengths make
++ * this canonical even for empty queues. Disk survival is observed separately.
++ */
++SeedboxNativePending *qmp_seedbox_net_pending(Error **errp)
++{
++    SeedboxFrame *frame;
++    GString *out = g_string_new("net-v1:");
++    if (!seedbox_net || runstate_is_running()) {
++        error_setg(errp, "seedbox net pending requires a stopped device");
++        g_string_free(out, true);
++        return NULL;
++    }
++    QSIMPLEQ_FOREACH(frame, &seedbox_net->backlog, next) {
++        g_string_append_printf(out, "%u:", frame->length);
++        for (unsigned i = 0; i < frame->length; i++) {
++            g_string_append_printf(out, "%02x", frame->bytes[i]);
++        }
++        g_string_append_c(out, ':');
++    }
++    g_string_append_c(out, '|');
++    QSIMPLEQ_FOREACH(frame, &seedbox_net->outbox, next) {
++        g_string_append_printf(out, "%" PRId64 ":%u:", frame->time, frame->length);
++        for (unsigned i = 0; i < frame->length; i++) {
++            g_string_append_printf(out, "%02x", frame->bytes[i]);
++        }
++        g_string_append_c(out, ':');
++    }
++    SeedboxNativePending *result = g_new0(SeedboxNativePending, 1);
++    result->bytes = g_string_free(out, false);
++    return result;
++}
+diff --git a/hw/char/seedbox-lifecycle.c b/hw/char/seedbox-lifecycle.c
+index 963c34d8..44382f08 100644
+--- a/hw/char/seedbox-lifecycle.c
++++ b/hw/char/seedbox-lifecycle.c
+@@ -259,3 +259,26 @@ static void lifecycle_register_types(void)
+     type_register_static(&lifecycle_info);
+ }
+ type_init(lifecycle_register_types)
++
++/* Read-only logical pending input/output, not migration or RAM state. */
++SeedboxNativePending *qmp_seedbox_lifecycle_pending(Error **errp)
++{
++    GString *out = g_string_new("lifecycle-v1:");
++    if (!lifecycle || runstate_is_running()) {
++        error_setg(errp, "seedbox lifecycle pending requires a stopped device");
++        g_string_free(out, true);
++        return NULL;
++    }
++    g_string_append_printf(out, "%u:", lifecycle->requested);
++    g_string_append_printf(out, "%u:", lifecycle->input_size - lifecycle->cursor);
++    for (uint32_t i = lifecycle->cursor; i < lifecycle->input_size; i++) {
++        g_string_append_printf(out, "%02x", lifecycle->input[i]);
++    }
++    g_string_append_printf(out, ":%u:", lifecycle->output_size);
++    for (uint32_t i = 0; i < lifecycle->output_size; i++) {
++        g_string_append_printf(out, "%02x", lifecycle->output[i]);
++    }
++    SeedboxNativePending *result = g_new0(SeedboxNativePending, 1);
++    result->bytes = g_string_free(out, false);
++    return result;
++}
+diff --git a/qapi/misc-i386.json b/qapi/misc-i386.json
+index e954a28f..c80b966f 100644
+--- a/qapi/misc-i386.json
++++ b/qapi/misc-i386.json
+@@ -136,8 +136,10 @@
+ # .. qmp-example::
+ #
+ #     -> { "execute": "query-sev" }
+-#     <- { "return": { "enabled": true, "api-major" : 0, "api-minor" : 0,
+-#                      "build-id" : 0, "policy" : 0, "state" : "running",
++#     <- { "return": { "enabled": true, "api-major" : 0, "api-minor" :
++# 0,
++#                      "build-id" : 0, "policy" : 0, "state" :
++# "running",
+ #                      "handle" : 1 } }
+ ##
+ { 'command': 'query-sev', 'returns': 'SevInfo' }
+@@ -219,7 +221,8 @@
+ # .. qmp-example::
+ #
+ #     -> { "execute": "query-sev-capabilities" }
+-#     <- { "return": { "pdh": "8CCDD8DDD", "cert-chain": "888CCCDDDEE",
++#     <- { "return": { "pdh": "8CCDD8DDD", "cert-chain":
++# "888CCCDDDEE",
+ #                      "cpu0-id": "2lvmGwo+...61iEinw==",
+ #                      "cbitpos": 47, "reduced-phys-bits": 1}}
+ ##
+@@ -546,3 +549,39 @@
+ ##
+ { 'command': 'seedbox-timer-policy',
+   'data': { 'seed': 'uint64', 'domain': 'str', 'jitter': 'uint64' } }
++
++##
++# @SeedboxNativeChain:
++#
++# @chain: Canonical persisted native SHA256 in lowercase hexadecimal.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxNativeChain', 'data': { 'chain': 'str' } }
++
++##
++# @seedbox-witness-start:
++#
++# Initialize the native chain before a fresh physical boot, never on
++# restore.
++#
++# @chain: Initial or predecessor-folded SHA256, lowercase hex.
++#
++# @boot: Physical boot ordinal.
++#
++# @forced: Record actual forced replacement before physical boot.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-witness-start',
++  'data': { 'chain': 'str', 'boot': 'uint64', 'forced': 'bool' } }
++
++##
++# @seedbox-witness-chain:
++#
++# Copy the stopped native chain without reading RAM, advancing time or
++# draining.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-witness-chain', 'returns': 'SeedboxNativeChain' }
+diff --git a/qapi/run-state.json b/qapi/run-state.json
+index 3075bd03..43f8c369 100644
+--- a/qapi/run-state.json
++++ b/qapi/run-state.json
+@@ -156,7 +156,8 @@
+ #
+ #     <- { "event": "SHUTDOWN",
+ #          "data": { "guest": true, "reason": "guest-shutdown" },
+-#          "timestamp": { "seconds": 1267040730, "microseconds": 682951 } }
++#          "timestamp": { "seconds": 1267040730, "microseconds":
++# 682951 } }
+ ##
+ { 'event': 'SHUTDOWN', 'data': { 'guest': 'bool', 'reason': 'ShutdownCause' } }
+ 
+@@ -171,7 +172,8 @@
+ # .. qmp-example::
+ #
+ #     <- { "event": "POWERDOWN",
+-#          "timestamp": { "seconds": 1267040730, "microseconds": 682951 } }
++#          "timestamp": { "seconds": 1267040730, "microseconds":
++# 682951 } }
+ ##
+ { 'event': 'POWERDOWN' }
+ 
+@@ -193,7 +195,8 @@
+ #
+ #     <- { "event": "RESET",
+ #          "data": { "guest": false, "reason": "guest-reset" },
+-#          "timestamp": { "seconds": 1267041653, "microseconds": 9518 } }
++#          "timestamp": { "seconds": 1267041653, "microseconds": 9518
++# } }
+ ##
+ { 'event': 'RESET', 'data': { 'guest': 'bool', 'reason': 'ShutdownCause' } }
+ 
+@@ -207,7 +210,8 @@
+ # .. qmp-example::
+ #
+ #     <- { "event": "STOP",
+-#          "timestamp": { "seconds": 1267041730, "microseconds": 281295 } }
++#          "timestamp": { "seconds": 1267041730, "microseconds":
++# 281295 } }
+ ##
+ { 'event': 'STOP' }
+ 
+@@ -221,7 +225,8 @@
+ # .. qmp-example::
+ #
+ #     <- { "event": "RESUME",
+-#          "timestamp": { "seconds": 1271770767, "microseconds": 582542 } }
++#          "timestamp": { "seconds": 1271770767, "microseconds":
++# 582542 } }
+ ##
+ { 'event': 'RESUME' }
+ 
+@@ -236,7 +241,8 @@
+ # .. qmp-example::
+ #
+ #     <- { "event": "SUSPEND",
+-#          "timestamp": { "seconds": 1344456160, "microseconds": 309119 } }
++#          "timestamp": { "seconds": 1344456160, "microseconds":
++# 309119 } }
+ ##
+ { 'event': 'SUSPEND' }
+ 
+@@ -255,7 +261,8 @@
+ # .. qmp-example::
+ #
+ #     <- { "event": "SUSPEND_DISK",
+-#          "timestamp": { "seconds": 1344456160, "microseconds": 309119 } }
++#          "timestamp": { "seconds": 1344456160, "microseconds":
++# 309119 } }
+ ##
+ { 'event': 'SUSPEND_DISK' }
+ 
+@@ -270,7 +277,8 @@
+ # .. qmp-example::
+ #
+ #     <- { "event": "WAKEUP",
+-#          "timestamp": { "seconds": 1344522075, "microseconds": 745528 } }
++#          "timestamp": { "seconds": 1344522075, "microseconds":
++# 745528 } }
+ ##
+ { 'event': 'WAKEUP' }
+ 
+@@ -293,7 +301,8 @@
+ #
+ #     <- { "event": "WATCHDOG",
+ #          "data": { "action": "reset" },
+-#          "timestamp": { "seconds": 1267061043, "microseconds": 959568 } }
++#          "timestamp": { "seconds": 1267061043, "microseconds":
++# 959568 } }
+ ##
+ { 'event': 'WATCHDOG',
+   'data': { 'action': 'WatchdogAction' } }
+@@ -438,7 +447,8 @@
+ #
+ #     <- { "event": "GUEST_PANICKED",
+ #          "data": { "action": "pause" },
+-#          "timestamp": { "seconds": 1648245231, "microseconds": 900001 } }
++#          "timestamp": { "seconds": 1648245231, "microseconds":
++# 900001 } }
+ ##
+ { 'event': 'GUEST_PANICKED',
+   'data': { 'action': 'GuestPanicAction', '*info': 'GuestPanicInformation' } }
+@@ -458,7 +468,8 @@
+ #
+ #     <- { "event": "GUEST_CRASHLOADED",
+ #          "data": { "action": "run" },
+-#          "timestamp": { "seconds": 1648245259, "microseconds": 893771 } }
++#          "timestamp": { "seconds": 1648245259, "microseconds":
++# 893771 } }
+ ##
+ { 'event': 'GUEST_CRASHLOADED',
+   'data': { 'action': 'GuestPanicAction', '*info': 'GuestPanicInformation' } }
+@@ -473,7 +484,8 @@
+ # .. qmp-example::
+ #
+ #     <- { "event": "GUEST_PVSHUTDOWN",
+-#          "timestamp": { "seconds": 1648245259, "microseconds": 893771 } }
++#          "timestamp": { "seconds": 1648245259, "microseconds":
++# 893771 } }
+ ##
+ { 'event': 'GUEST_PVSHUTDOWN' }
+ 
+@@ -664,7 +676,8 @@
+ #                    "action": "fatal",
+ #                    "flags": { "action-required": false,
+ #                               "recursive": false } },
+-#          "timestamp": { "seconds": 1267061043, "microseconds": 959568 } }
++#          "timestamp": { "seconds": 1267061043, "microseconds":
++# 959568 } }
+ ##
+ { 'event': 'MEMORY_FAILURE',
+   'data': { 'recipient': 'MemoryFailureRecipient',
+@@ -929,3 +942,31 @@
+ ##
+ { 'command': 'seedbox-input-lifecycle', 'data': { 'bytes': ['uint8'] },
+   'returns': 'SeedboxShutdownResult', 'if': 'CONFIG_TCG' }
++
++##
++# @SeedboxNativePending:
++#
++# @bytes: Canonical read-only versioned pending native I/O bytes.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxNativePending', 'data': { 'bytes': 'str' } }
++
++##
++# @seedbox-lifecycle-pending:
++#
++# Read the canonical pending lifecycle bytes without draining them.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-lifecycle-pending', 'returns': 'SeedboxNativePending' }
++
++##
++# @seedbox-net-pending:
++#
++# Read the canonical pending network frame queues without draining
++# them.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-net-pending', 'returns': 'SeedboxNativePending' }
+diff --git a/tests/unit/meson.build b/tests/unit/meson.build
+index 408af9fb..5e532a5e 100644
+--- a/tests/unit/meson.build
++++ b/tests/unit/meson.build
+@@ -79,6 +79,7 @@ if have_block
+     'test-block-iothread': [testblock],
+     'test-write-threshold': [testblock],
+     'test-crypto-hash': [crypto],
++    'test-seedbox-witness-chain': [crypto, '../../target/i386/seedbox-witness-chain.c'],
+     'test-seedbox-timer-rng': [crypto, '../../target/i386/seedbox-timer-rng.c'],
+     'test-seedbox-evidence-pages': [crypto, '../../target/i386/seedbox-evidence-pages.c'],
+     'test-crypto-hmac': [crypto],
+diff --git a/tests/unit/test-seedbox-witness-chain.c b/tests/unit/test-seedbox-witness-chain.c
+new file mode 100644
+index 00000000..b4c977f6
+--- /dev/null
++++ b/tests/unit/test-seedbox-witness-chain.c
+@@ -0,0 +1,54 @@
++/* Host-only production SHA helper tests. Never constructs a CPU or guest. */
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "target/i386/seedbox-witness-chain.h"
++
++static void equal_hex(const uint8_t value[32], const char *expected)
++{
++    for (unsigned i = 0; i < 32; i++) {
++        g_assert_cmpint(value[i] >> 4, ==, g_ascii_xdigit_value(expected[2*i]));
++        g_assert_cmpint(value[i] & 15, ==, g_ascii_xdigit_value(expected[2*i+1]));
++    }
++}
++static void goldens(void)
++{
++    uint8_t h[32], record[32], read[32], next[32], again[32];
++    const uint8_t pending[] = { 0, 1, 255 };
++    g_assert_true(seedbox_witness_initial(h, &error_abort));
++    equal_hex(h, "c2e5a8555ad36cf11fe81749aaac6c14897cefbeaeaaac525a6628add49d99b0");
++    g_assert_true(seedbox_witness_record_hash(h, 'w', 4, 123, 0x0b010020,
++                                             0x11223344, record, &error_abort));
++    equal_hex(record, "e45af213d61d286d545a619fd321c2a22bc57baa603596864aadde9f113abffd");
++    g_assert_true(seedbox_witness_read_hash(record, pending, 3, read, &error_abort));
++    equal_hex(read, "9593674b03604b7e2a8460597c2d5086d4bbf57784c603ce9116abf6b9ada009");
++    g_assert_true(seedbox_witness_boot_hash(read, 1, 456, next, &error_abort));
++    equal_hex(next, "93b23986012485c3ef98ff3f88c544342bf13f474368300d0d4d181cf60cd5f0");
++    /* Reading is idempotent and leaves the persisted chain untouched. */
++    g_assert_true(seedbox_witness_read_hash(record, pending, 3, again, &error_abort));
++    g_assert_cmpmem(read, 32, again, 32);
++    equal_hex(record, "e45af213d61d286d545a619fd321c2a22bc57baa603596864aadde9f113abffd");
++    /* A copied persisted 32-byte chain continues identically. */
++    memcpy(again, record, 32);
++    g_assert_true(seedbox_witness_record_hash(record, 'H', 0, 200, 0, 0, next, &error_abort));
++    g_assert_true(seedbox_witness_record_hash(again, 'H', 0, 200, 0, 0, again, &error_abort));
++    g_assert_cmpmem(next, 32, again, 32);
++    /* Every record field participates; do not accidentally hash a struct. */
++    const uint8_t kinds[] = { 'r','w','w','w','w' };
++    const uint8_t sizes[] = { 4,8,4,4,4 };
++    for (unsigned i = 0; i < 5; i++) {
++        g_assert_true(seedbox_witness_record_hash(h, kinds[i], sizes[i],
++            123 + (i == 2), 0x0b010020 + (i == 3),
++            0x11223344 + (i == 4), next, &error_abort));
++        g_assert_cmpint(memcmp(record, next, 32), !=, 0);
++    }
++    Error *err = NULL;
++    g_assert_false(seedbox_witness_boot_hash(read, 0, 456, next, &err));
++    g_assert_nonnull(err);
++    error_free(err);
++}
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    g_test_add_func("/seedbox/witness/common-goldens", goldens);
++    return g_test_run();
++}

@@ -525,7 +525,9 @@ impl Manager {
     /// The manager mutex is released before waiting for the worker connection.
     pub(crate) fn retire_worker(&self, id: &SimulationId) -> Result<(), Error> {
         if let Some(worker) = self.worker(id)? {
-            worker.lock().map_err(|_| Error::StorageFailed)?.retire();
+            crate::worker::lock_for_retirement(&worker)
+                .map_err(|_| Error::StorageFailed)?
+                .retire();
         }
         Ok(())
     }

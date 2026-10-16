@@ -2,16 +2,10 @@
 //!
 //! A read-only view of time owned by the caller. The Driver gives each machine
 //! its own view: that machine's time base, which the Driver maps to simulation
-//! time (see [`crate::driver::Driver`]). Without a rate change the mapping is
+//! time (see the driver contract). Without a rate change the mapping is
 //! the identity.
 
-use std::{
-    fmt,
-    sync::atomic::{AtomicU64, Ordering},
-};
-
-mod projection;
-pub(crate) use projection::Projection;
+use std::fmt;
 
 pub trait Clock {
     /// Returns the current time in nanoseconds of the observing machine's time
@@ -20,36 +14,6 @@ pub trait Clock {
     /// The owner advances time monotonically at simulation barriers. Machines
     /// observe this clock; their execution progress does not advance it.
     fn now(&self) -> u64;
-}
-
-/// Shared simulation time controlled by the driver.
-pub(crate) struct SimulationClock(AtomicU64);
-
-impl SimulationClock {
-    pub(crate) fn new(nanos: u64) -> Self {
-        Self(AtomicU64::new(nanos))
-    }
-
-    /// Set the time after the driver has established the scheduling position.
-    pub(crate) fn set(&self, nanos: u64) {
-        self.0.store(nanos, Ordering::Relaxed);
-    }
-}
-
-impl Clock for SimulationClock {
-    fn now(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-/// One machine's view of a fixed barrier, already mapped to its time base.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct FixedClock(pub(crate) u64);
-
-impl Clock for FixedClock {
-    fn now(&self) -> u64 {
-        self.0
-    }
 }
 
 /// Rate error of a machine's time base relative to simulation time, in parts
@@ -102,17 +66,7 @@ impl fmt::Display for InvalidClockRate {
 impl std::error::Error for InvalidClockRate {}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    #[test]
-    fn rate_bounds_are_exact() {
-        for ppb in [-100_000_000, -1, 0, 1, 100_000_000] {
-            assert_eq!(ClockRate::new(ppb).unwrap().ppb() as i64, ppb);
-        }
-        for ppb in [-100_000_001, 100_000_001, i64::MIN, i64::MAX] {
-            assert_eq!(ClockRate::new(ppb), Err(InvalidClockRate { ppb }));
-        }
-        assert_eq!(ClockRate::default(), ClockRate::NOMINAL);
-    }
-}
+#[cfg(any(test, feature = "test-support"))]
+pub use crate::test_support::SimulationClock;

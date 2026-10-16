@@ -90,6 +90,8 @@ impl Client {
     /// Retry exactly the same wire request until acknowledged or the host
     /// deadline expires. Protocol rejections are successful deliveries and are
     /// returned in Reply.error. Transport errors retain the pending request.
+    /// Queued replies are read before each (re)send: a worker may answer and
+    /// then exit, removing its endpoint, before a retransmission is due.
     pub fn execute(&mut self, command: Command, timeout: Duration) -> Result<Reply, ClientError> {
         if let Some((request, _)) = &self.pending {
             if request.command != command {
@@ -120,18 +122,6 @@ impl Client {
             if elapsed >= timeout {
                 return Err(ClientError::Timeout { id: request.id });
             }
-            if elapsed >= next_send {
-                match self.socket.send(bytes) {
-                    Ok(_) => {}
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                        ) => {}
-                    Err(error) => return Err(error.into()),
-                }
-                next_send = elapsed.saturating_add(Duration::from_millis(20));
-            }
             // Bound stale-reply draining so a peer cannot starve the deadline.
             for _ in 0..64 {
                 let size = match self.socket.recv(&mut buffer) {
@@ -159,11 +149,116 @@ impl Client {
                 self.pending = None;
                 return Ok(reply);
             }
+            if elapsed >= next_send {
+                match self.socket.send(bytes) {
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                next_send = elapsed.saturating_add(Duration::from_millis(20));
+            }
             std::thread::sleep(
                 timeout
                     .saturating_sub(started.elapsed())
                     .min(Duration::from_millis(2)),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seedbox_engine_protocol::host_control::{BoundaryPosition, PlaybackRate};
+
+    fn reply(id: u64) -> Reply {
+        Reply {
+            id,
+            position: BoundaryPosition {
+                boundary_index: id,
+                ..Default::default()
+            },
+            terminal: false,
+            application_ready: false,
+            rate: PlaybackRate::Unlimited,
+            achieved_rate: None,
+            stepping: false,
+            error: None,
+            intervention: None,
+            checkpoint: None,
+            detail: None,
+        }
+    }
+
+    fn queue(peer: &UnixDatagram, client: &Client, reply: &Reply) {
+        let address = client.socket.local_addr().unwrap();
+        peer.send_to(
+            &serde_json::to_vec(reply).unwrap(),
+            address.as_pathname().unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn skips_older_queued_replies_and_rejects_newer_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("control");
+        let peer = UnixDatagram::bind(&endpoint).unwrap();
+        let mut client = Client::connect(&endpoint).unwrap();
+        let budget = Duration::from_millis(250);
+
+        // Zero budget assigns each real request's ID without sending/waiting.
+        // All replies are already queued before execute, with no racing peer.
+        assert!(matches!(
+            client.execute(Command::Status, Duration::ZERO),
+            Err(ClientError::Timeout { id: 1 })
+        ));
+        queue(&peer, &client, &reply(1));
+        assert_eq!(client.execute(Command::Status, budget).unwrap(), reply(1));
+
+        assert!(matches!(
+            client.execute(Command::Status, Duration::ZERO),
+            Err(ClientError::Timeout { id: 2 })
+        ));
+        queue(&peer, &client, &reply(1));
+        queue(&peer, &client, &reply(2));
+        assert_eq!(client.execute(Command::Status, budget).unwrap(), reply(2));
+        assert!(client.pending().is_none());
+
+        assert!(matches!(
+            client.execute(Command::Status, Duration::ZERO),
+            Err(ClientError::Timeout { id: 3 })
+        ));
+        let pending = client.pending().unwrap().clone();
+        queue(&peer, &client, &reply(4));
+        assert!(
+            matches!(client.execute(Command::Status, budget), Err(ClientError::Protocol(message)) if message == "unexpected request ID")
+        );
+        assert_eq!(client.pending(), Some(&pending));
+    }
+
+    // A worker can reply and then exit, removing its endpoint, before the
+    // client's retransmission is due. The queued reply must win over the
+    // failed resend; under load this used to surface as ECONNREFUSED.
+    #[test]
+    fn a_queued_reply_wins_over_a_resend_to_a_vanished_endpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("control");
+        let peer = UnixDatagram::bind(&endpoint).unwrap();
+        let mut client = Client::connect(&endpoint).unwrap();
+        assert!(matches!(
+            client.execute(Command::Status, Duration::ZERO),
+            Err(ClientError::Timeout { id: 1 })
+        ));
+        queue(&peer, &client, &reply(1));
+        drop(peer);
+        std::fs::remove_file(&endpoint).unwrap();
+        let budget = Duration::from_millis(250);
+        assert_eq!(client.execute(Command::Status, budget).unwrap(), reply(1));
+        assert!(client.pending().is_none());
     }
 }

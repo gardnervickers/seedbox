@@ -1,4 +1,4 @@
-/* Private guest process mechanism, shared by the ARM64 and RV64 init helpers.
+/* Private guest process mechanism, shared by the ARM64 and x86-64 init helpers.
  * This is not the host inbox/outbox contract or a management wire protocol. */
 #ifndef SBX_GUEST_SUPERVISOR_H
 #define SBX_GUEST_SUPERVISOR_H

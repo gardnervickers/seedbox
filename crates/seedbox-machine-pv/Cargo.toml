@@ -1,0 +1,40 @@
+[package]
+name = "seedbox-machine-pv"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+test-support = ["seedbox-machine/test-support"]
+
+[dependencies]
+seedbox-machine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+libc.workspace = true
+sha2.workspace = true
+tar.workspace = true
+
+[dev-dependencies]
+seedbox-machine = { workspace = true, features = ["test-support"] }
+hex.workspace = true
+
+[[bin]]
+name = "seedbox-pv-scratch-fixture"
+path = "tests/support/scratch_fixture.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+harness = false
+
+[build-dependencies]
+cc = "1"
+
+[target.'cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), target_os = "linux"))'.dependencies]
+kvm-bindings = "0.14"
+kvm-ioctls = "0.24"
+
+[[test]]
+name = "native_machine"
+path = "tests/native_machine/mod.rs"

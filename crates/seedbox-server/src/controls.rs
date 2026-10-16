@@ -71,6 +71,8 @@ fn drive(
     }
     match drive_worker(manager, id, request, &mut worker) {
         Err(Error::WorkerControl(message)) => {
+            #[cfg(test)]
+            worker.await_failure_publication();
             // Keep the worker gate until failure is durable. Completion and
             // deletion cannot retire this connection and overtake the error.
             manager.record_worker_control_failure(id, message)?;
@@ -254,17 +256,49 @@ mod tests {
                 code: 0,
             },
         );
+        let (failure_entered, failure_observed) = std::sync::mpsc::channel();
+        let (publish_failure, failure_gate) = std::sync::mpsc::channel();
+        manager
+            .worker(broken)
+            .unwrap()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .gate_failure_publication(failure_entered, failure_gate);
         let driver = tokio::spawn(run(manager.clone(), shutdown.clone()));
         tokio::task::spawn_blocking(move || seen.recv_timeout(Duration::from_secs(2)).unwrap())
             .await
             .unwrap();
+        release_reply.send(()).unwrap();
+        // Wait for actual malformed-wire decoding, not merely request dispatch.
+        // This timeout is only a hang guard. Once observed, no RPC deadline can
+        // release the gate before the test explicitly permits publication.
+        tokio::task::spawn_blocking(move || {
+            failure_observed
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(manager
+            .describe(broken)
+            .unwrap()
+            .status
+            .termination
+            .is_none());
         let (retired_tx, retired_rx) = std::sync::mpsc::channel();
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
         let owner = manager.clone();
         let completing = broken.clone();
         let cleanup = std::thread::spawn(move || {
+            crate::worker::observe_retirement_blocked(blocked_tx);
             owner.retire_worker(&completing).unwrap();
-            retired_tx.send(()).unwrap();
+            // Capture the error at retirement, rather than inferring its order
+            // from a later observation after the error eventually appears.
+            retired_tx
+                .send(owner.describe(&completing).unwrap().status.termination)
+                .unwrap();
             finish_rx.recv_timeout(Duration::from_secs(2)).unwrap();
             owner
                 .update(&completing, |resource| {
@@ -273,9 +307,14 @@ mod tests {
                 })
                 .unwrap();
         });
-        // Completion is trying to retire the very connection awaiting this reply.
-        assert!(retired_rx.recv_timeout(Duration::from_millis(30)).is_err());
-        release_reply.send(()).unwrap();
+        // Hang guard only: this signal follows a failed acquisition of the
+        // actual gate held at failure publication, under explicit test control.
+        blocked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            retired_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+        publish_failure.send(()).unwrap();
 
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -316,7 +355,8 @@ mod tests {
             .any(|(id, _)| id == broken));
         // Execution retains ownership through cleanup and completion. Its ordinary
         // cancellation reason must not overwrite the observed operational error.
-        retired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let retired_termination = retired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(retired_termination, failed.status.termination);
         // Retirement cannot finish until the error was durably recorded under
         // the same worker gate, even if execution cleanup raced the reply.
         assert_eq!(

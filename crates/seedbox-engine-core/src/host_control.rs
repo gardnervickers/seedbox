@@ -765,6 +765,7 @@ mod tests {
         let mut control = HostControl::bind_paused(&endpoint).unwrap();
         let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
         client.connect(endpoint).unwrap();
+        // Hang guard only: a correct run never waits this long.
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -782,19 +783,29 @@ mod tests {
                 done.send(()).unwrap();
             });
             let release = Resume(&client);
-            let request = Request {
-                id: 1,
-                command: Command::Status,
+            // Only the held boundary answers requests, so each reply proves
+            // the boundary thread was still inside it when it replied.
+            let status = |id| {
+                let request = Request {
+                    id,
+                    command: Command::Status,
+                };
+                client.send(&serde_json::to_vec(&request).unwrap()).unwrap();
+                let mut bytes = [0; MAX_DATAGRAM];
+                let count = client.recv(&mut bytes).unwrap();
+                serde_json::from_slice::<Reply>(&bytes[..count]).unwrap()
             };
-            client.send(&serde_json::to_vec(&request).unwrap()).unwrap();
-            let mut bytes = [0; MAX_DATAGRAM];
-            let count = client.recv(&mut bytes).unwrap();
-            let status: Reply = serde_json::from_slice(&bytes[..count]).unwrap();
-            assert_eq!(status.rate, PlaybackRate::Paused);
-            assert_eq!(status.position.completed_rounds, 0);
-            assert_eq!(status.position.simulated_time_ns, 0);
-            assert!(completed.recv_timeout(Duration::from_millis(50)).is_err());
+            for id in [1, 2] {
+                let status = status(id);
+                assert_eq!(status.rate, PlaybackRate::Paused);
+                assert_eq!(status.position.completed_rounds, 0);
+                assert_eq!(status.position.simulated_time_ns, 0);
+            }
+            // The boundary was still held at the second reply, and nothing
+            // has resumed it since: it cannot have returned.
+            assert_eq!(completed.try_recv(), Err(mpsc::TryRecvError::Empty));
             drop(release);
+            // Hang guard only: Resume releases the boundary.
             completed.recv_timeout(Duration::from_secs(2)).unwrap();
         });
     }

@@ -1,0 +1,968 @@
+//! Native public-service acceptance, not a fixture executor or protocol model.
+//! Uses the normal release CLI/runtime package and existing finite CPU fixture.
+
+use futures_util::StreamExt;
+use seedbox_api::{
+    ComparisonStatus, ExecutionTermination, Phase, SimulationSpec, SubmitRequest, TestVerdict,
+};
+pub use seedbox_application::driver_world::DriverBackend;
+use seedbox_application::{
+    driver_world::{self, DriverExecutor},
+    execution::{
+        Backend, CancellationToken, ExecutionBackend, ExecutionProfile, PreparedImage,
+        PreparedInputs, SemanticParameters, WitnessMode,
+    },
+    image::Launch,
+    process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE, SESSION_LEASE_FILE},
+    runtime_assets::{self, Runtime},
+    store::{ContentDigest, ContentStore},
+};
+use seedbox_client::Client;
+use seedbox_engine_protocol::driver_world as wire;
+use seedbox_machine::{
+    application::GuestEnvironment,
+    definition::{
+        FilesystemArchive, Launch as GuestLaunch, MachineDefinition, PreparedApplication, Resources,
+    },
+};
+use seedbox_server::{
+    catalogue::Catalogue,
+    execution::{BackendProvider, Backends, ExecutionService},
+    manager::Manager,
+};
+use std::{
+    collections::BTreeMap,
+    fs,
+    num::{NonZeroU32, NonZeroUsize},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+// A failed assertion requests service stop but never deletes inputs beneath
+// an execution whose ownership barriers have not yet been established.
+struct TestDirectory(Option<tempfile::TempDir>);
+impl TestDirectory {
+    fn path(&self) -> &Path {
+        self.0.as_ref().unwrap().path()
+    }
+    fn close(mut self) {
+        self.0.take().unwrap().close().unwrap();
+    }
+}
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        if let Some(directory) = self.0.take() {
+            eprintln!(
+                "native service failure retained inputs at {}",
+                directory.keep().display()
+            );
+        }
+    }
+}
+struct CancelServer(CancellationToken, Arc<Manager>);
+impl Drop for CancelServer {
+    fn drop(&mut self) {
+        // Runtime teardown may abort serve before it polls global shutdown.
+        // Cancel blocking work now; normal receipt/reap owns native cleanup.
+        let result = self.1.cancel_active();
+        self.0.cancel();
+        if let Err(error) = result {
+            eprintln!("native fixture cancellation failed; inputs retained: {error}");
+        }
+    }
+}
+
+struct NativeProvider {
+    backend: DriverBackend,
+    session: PathBuf,
+    runtimes: Arc<Mutex<Vec<PathBuf>>>,
+    workers: Arc<AtomicUsize>,
+}
+impl BackendProvider for NativeProvider {
+    fn project(
+        &self,
+        _: &seedbox_application::config::Simulation,
+        _: &ContentStore,
+        _: &CancellationToken,
+    ) -> seedbox_application::Result<Backends> {
+        panic!("resolved native submissions must not prepare OCI images")
+    }
+    fn retained(
+        &self,
+        inputs: &PreparedInputs,
+        store: &ContentStore,
+    ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
+        let digest = driver_world::runtime_digest(inputs, store)?;
+        let runtime = Runtime::from_store(store, &digest, &self.session)?;
+        let selected = runtime.select(
+            runtime_backend(self.backend),
+            seedbox_spec::definition::Architecture::X86_64,
+        )?;
+        self.runtimes
+            .lock()
+            .unwrap()
+            .push(selected.archive().parent().unwrap().to_owned());
+        Ok(Box::new(
+            DriverExecutor::new(
+                inputs.profile.clone(),
+                self.backend,
+                self.workers.load(Ordering::SeqCst),
+            )?
+            .with_runtime(selected)?
+            .with_launch_context(vec![], Some(self.session.join(SESSION_LEASE_FILE))),
+        ))
+    }
+}
+
+fn artifact(path: &Path) -> wire::Artifact {
+    let bytes = fs::read(path).unwrap();
+    wire::Artifact {
+        sha256: ContentDigest::of(&bytes).hex().into(),
+        length: bytes.len() as u64,
+        artifact: path.to_str().unwrap().into(),
+    }
+}
+fn directories(root: &Path) -> Vec<PathBuf> {
+    let mut found = vec![];
+    let mut pending = vec![root.to_owned()];
+    while let Some(at) = pending.pop() {
+        let entries = match fs::read_dir(at) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("inspect owned directories: {error}"),
+        };
+        for entry in entries {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                let path = entry.path();
+                pending.push(path.clone());
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+fn submission(
+    backend: DriverBackend,
+    root: &Path,
+    store: &ContentStore,
+    iterations: u64,
+    seed: u64,
+) -> SubmitRequest {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let executable = checkout.join("target/release/seedbox");
+    let archive = checkout.join("build/assets/driver-runtime.tar.gz");
+    assert!(
+        executable.is_file() && archive.is_file(),
+        "run cargo xtask build-assets and cargo build --release first"
+    );
+    // Both backends run the exact same static x86 cpu-loop ELF. The input's
+    // historical PV fixture-package name does not select a backend or need KVM.
+    let binary = fs::read(
+        std::env::var_os("SEEDBOX_PV_PROGRESS_FIXTURE")
+            .expect("machinePvTestFixtures/bin/cpu-loop fixture"),
+    )
+    .unwrap();
+    let mut tar = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_mode(0o755);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_size(binary.len() as u64);
+    header.set_cksum();
+    tar.append_data(&mut header, "application", binary.as_slice())
+        .unwrap();
+    let filesystem = root.join("application.tar");
+    fs::write(&filesystem, tar.into_inner().unwrap()).unwrap();
+    let launch = GuestLaunch {
+        argv: vec!["/application".into(), iterations.to_string()],
+        environment: BTreeMap::new(),
+        working_directory: "/".into(),
+        user: "0:0".into(),
+    };
+    let mut definition = MachineDefinition {
+        name: "oracle".into(),
+        resources: Resources { memory_bytes: 0 },
+        application: PreparedApplication {
+            filesystem: FilesystemArchive::new(fs::read(&filesystem).unwrap()).unwrap(),
+            launch: launch.clone(),
+        },
+        disk: None,
+        network: None,
+    };
+    let runtime = Runtime::from_archive(&archive, root).unwrap();
+    let selected = runtime
+        .select(
+            runtime_backend(backend),
+            seedbox_spec::definition::Architecture::X86_64,
+        )
+        .unwrap();
+    eprintln!(
+        "native backend={}; fixture={:?}; executable={}; runtime_archive={}; selected_guest_assets={}; retained_qemu={:?}",
+        label(backend),
+        std::env::var_os("SEEDBOX_PV_PROGRESS_FIXTURE"),
+        executable.display(),
+        archive.display(),
+        selected.guest_assets.display(),
+        selected.qemu,
+    );
+    let environment = GuestEnvironment::new("oracle", "127.0.0.1 localhost\n", false);
+    let boot = match backend {
+        DriverBackend::Pv => seedbox_machine_pv::machine::pv::Factory::new(
+            &executable,
+            &selected.guest_assets,
+            946_684_800,
+        )
+        .unwrap()
+        .with_blocks_per_progress_call(NonZeroU32::new(32).unwrap())
+        .boot_archive_configured(&definition, &environment)
+        .unwrap(),
+        DriverBackend::Tcg => seedbox_machine_tcg::machine::tcg::Factory::new(
+            selected
+                .qemu
+                .as_ref()
+                .expect("TCG runtime must include its QEMU"),
+            &selected.guest_assets,
+            946_684_800,
+        )
+        .unwrap()
+        .boot_archive_configured(&definition, &environment)
+        .unwrap(),
+    };
+    let floor = u64::try_from(boot.len())
+        .unwrap()
+        .checked_mul(3)
+        .unwrap()
+        .checked_add(128 << 20)
+        .unwrap();
+    let memory_mb = u32::try_from(floor.div_ceil(1 << 20)).unwrap();
+    definition.resources.memory_bytes = u64::from(memory_mb) << 20;
+    eprintln!(
+        "native service cpu-loop: {} boot bytes, {} MiB RAM",
+        boot.len(),
+        memory_mb
+    );
+    let assets = &selected.guest_assets;
+    let filesystem_digest = store.put_file(&filesystem).unwrap();
+    let mut semantic = SemanticParameters::new(memory_mb);
+    semantic.engine = Some(DriverExecutor::descriptor(backend, "x86_64"));
+    let mut inputs = PreparedInputs {
+        wall_clock_epoch: Some(946_684_800),
+        kernel: store.put_file(&assets.join("kernel")).unwrap(),
+        images: BTreeMap::from([(
+            "oracle".into(),
+            PreparedImage {
+                manifest: filesystem_digest.clone(),
+                config: filesystem_digest.clone(),
+                layers: vec![],
+                launch: Launch {
+                    argv: launch.argv.clone(),
+                    environment: launch.environment.clone(),
+                    working_dir: launch.working_directory.clone(),
+                    user: launch.user.clone(),
+                    volumes: vec![],
+                    disk_volumes: vec![],
+                },
+            },
+        )]),
+        guests: BTreeMap::from([("oracle".into(), filesystem_digest)]),
+        placement: BTreeMap::from([("oracle".into(), "oracle".into())]),
+        profile: ExecutionProfile {
+            backend: Backend::Other(format!("driver-{}", label(backend))),
+            engine: store.put_file(&executable).unwrap(),
+            witness_mode: WitnessMode::Exits,
+            semantic_parameters: semantic,
+        },
+        auxiliary: BTreeMap::new(),
+        provenance: BTreeMap::new(),
+    };
+    let environments = BTreeMap::from([(
+        "oracle".into(),
+        wire::Environment {
+            hostname: environment.hostname.clone(),
+            hosts: environment.hosts.clone(),
+            anonymous_volumes: vec![],
+            named_volumes: vec![],
+            configs: BTreeMap::new(),
+            limits: wire::GuestLimits {
+                max_map_count: environment.limits.max_map_count,
+                nofile: environment.limits.nofile,
+            },
+            control_socket: false,
+        },
+    )]);
+    let inventory = match backend {
+        DriverBackend::Pv => wire::Inventory::Pv {
+            policy: None,
+            kernel: artifact(&assets.join("kernel")),
+            init: artifact(&assets.join("init")),
+            command_line: artifact(&assets.join("command-line")),
+            runtime: artifact(&archive),
+            formatter: Some(artifact(&assets.join("mke2fs"))),
+            environments,
+            boot_archives: BTreeMap::new(),
+            epoch_seconds: 946_684_800,
+            executable: artifact(&executable),
+            progress: artifact(&assets.join("progress.tar")),
+            blocks_per_progress_call: NonZeroU32::new(32).unwrap(),
+        },
+        DriverBackend::Tcg => wire::Inventory::Tcg {
+            policy: None,
+            kernel: artifact(&assets.join("kernel")),
+            init: artifact(&assets.join("init")),
+            command_line: artifact(&assets.join("command-line")),
+            runtime: artifact(&archive),
+            formatter: Some(artifact(&assets.join("mke2fs"))),
+            environments,
+            boot_archives: BTreeMap::new(),
+            epoch_seconds: 946_684_800,
+            executable: artifact(selected.qemu.as_ref().expect("retained TCG QEMU")),
+            firmware: artifact(&assets.join("firmware")),
+        },
+    };
+    let prepared = wire::Prepared {
+        inventory,
+        oracle: wire::Machine {
+            name: "oracle".into(),
+            memory_bytes: definition.resources.memory_bytes,
+            filesystem: artifact(&filesystem),
+            process: wire::Process {
+                argv: launch.argv,
+                environment: launch.environment,
+                working_directory: launch.working_directory,
+                user: launch.user,
+            },
+            disk: None,
+            interface: None,
+        },
+        machines: vec![],
+        spawnable: vec![],
+        quantum_ns: 1_000_000,
+        network: wire::Network::default(),
+    };
+    driver_world::retain_prepared(&mut inputs, &prepared, store).unwrap();
+    let mut configuration = seedbox_application::config::parse(
+        &format!(
+            "name: native-{}-service\nservices:\n  oracle:\n    image: fixture/cpu-loop\n",
+            label(backend)
+        ),
+        Path::new("/fixture/compose.yaml"),
+        &Default::default(),
+    )
+    .unwrap();
+    configuration.machine.memory_mb = memory_mb;
+    configuration.control = None;
+    let definition =
+        seedbox_application::definition::resolve(&configuration, &inputs, seed, vec![]).unwrap();
+    assert!(!definition.simulator.oracle_control);
+    let mut request = SubmitRequest {
+        metadata: Default::default(),
+        options: Default::default(),
+        request_id: format!("cpu-{iterations}"),
+        spec: SimulationSpec::resolved(definition),
+    };
+    request.metadata.name = format!("native-{}-service", label(backend));
+    request
+}
+
+// A fresh public-service session per scenario; the Driver manifest is hand-built
+// for this native slice, not proof of the production authoring/provider path.
+struct NativeSession {
+    backend: DriverBackend,
+    cancel: CancelServer,
+    server: Option<tokio::task::JoinHandle<Result<(), seedbox_server::execution::Error>>>,
+    root: TestDirectory,
+    session: TestDirectory,
+    store: ContentStore,
+    execution_root: PathBuf,
+    runtime_paths: Arc<Mutex<Vec<PathBuf>>>,
+    workers: Arc<AtomicUsize>,
+    client: Client,
+    submitted: usize,
+}
+impl NativeSession {
+    fn new(backend: DriverBackend) -> Self {
+        let root = TestDirectory(Some(tempfile::tempdir().unwrap()));
+        let store = ContentStore::new(root.path().join("store"));
+        let session = TestDirectory(Some(
+            tempfile::Builder::new()
+                .prefix("session-")
+                .tempdir_in(root.path())
+                .unwrap(),
+        ));
+        fs::write(session.path().join(SESSION_LEASE_FILE), []).unwrap();
+        let runtime_paths = Arc::new(Mutex::new(Vec::new()));
+        let workers = Arc::new(AtomicUsize::new(1));
+        let manager = Arc::new(Manager::new(Catalogue::in_memory()));
+        let execution_root = session.path().join("execution");
+        let service = Arc::new(
+            ExecutionService::new(
+                manager.clone(),
+                execution_root.clone(),
+                store.clone(),
+                Arc::new(NativeProvider {
+                    backend,
+                    session: session.path().to_owned(),
+                    runtimes: runtime_paths.clone(),
+                    workers: workers.clone(),
+                }),
+            )
+            .unwrap(),
+        );
+        let cancellation = CancellationToken::default();
+        let socket = root.path().join("api.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(seedbox_server::serve(
+            listener,
+            manager.clone(),
+            service,
+            NonZeroUsize::new(1).unwrap(),
+            cancellation.clone(),
+        ));
+        Self {
+            backend,
+            cancel: CancelServer(cancellation, manager),
+            server: Some(server),
+            root,
+            session,
+            store,
+            execution_root,
+            runtime_paths,
+            workers,
+            client: Client::connect_to(&socket).unwrap(),
+            submitted: 0,
+        }
+    }
+    async fn submit(
+        &mut self,
+        mut request: SubmitRequest,
+        workers: usize,
+    ) -> seedbox_api::SimulationId {
+        self.workers.store(workers, Ordering::SeqCst);
+        request.request_id = format!("native-run-{}", self.submitted);
+        request.metadata.name = format!("native-pv-service-{}", self.submitted);
+        let accepted = self.client.submit(&request).await.unwrap();
+        self.submitted += 1;
+        accepted.metadata.id
+    }
+    async fn worker(&self, id: &seedbox_api::SimulationId) -> PathBuf {
+        loop {
+            if let Some(path) = directories(self.session.path()).into_iter().find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(scratch_prefix(self.backend))
+            }) {
+                return path;
+            }
+            let state = self.client.describe(id).await.unwrap();
+            assert_ne!(
+                state.status.phase,
+                Phase::Completed,
+                "native worker never started: {:?}",
+                state.status
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    async fn guest_start(&self, id: &seedbox_api::SimulationId) {
+        let mut logs = self.client.logs_with(id, "oracle", true).await.unwrap();
+        let mut bytes = vec![];
+        while let Some(delivery) = logs.next().await {
+            if let seedbox_api::LogDelivery::Entry {
+                entry: seedbox_api::LogEntry::Bytes { bytes: data, .. },
+                ..
+            } = delivery.unwrap()
+            {
+                bytes.extend(data);
+            }
+            if bytes.windows(6).any(|part| part == b"START=") {
+                return;
+            }
+        }
+        panic!("operation must occur after real guest application output");
+    }
+    async fn output(&self, id: &seedbox_api::SimulationId) -> Vec<u8> {
+        let mut logs = self.client.logs_with(id, "oracle", false).await.unwrap();
+        let mut bytes = Vec::new();
+        while let Some(delivery) = logs.next().await {
+            if let seedbox_api::LogDelivery::Entry {
+                entry: seedbox_api::LogEntry::Bytes { bytes: data, .. },
+                ..
+            } = delivery.unwrap()
+            {
+                bytes.extend(data);
+            }
+        }
+        bytes
+    }
+    fn launch_request(&self, id: &seedbox_api::SimulationId) -> wire::Request {
+        let requests = directories(&self.execution_root.join("runs").join(id.as_str()))
+            .into_iter()
+            .map(|path| path.join("worker-request.json"))
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 1);
+        let request: wire::Request =
+            serde_json::from_reader(fs::File::open(&requests[0]).unwrap()).unwrap();
+        request
+    }
+    async fn complete(
+        &self,
+        id: &seedbox_api::SimulationId,
+        stopped: bool,
+        workers: usize,
+        seed: u64,
+    ) -> Option<String> {
+        let mut watch = self.client.watch(id).await.unwrap();
+        let completed = loop {
+            let state = watch
+                .next()
+                .await
+                .expect("watch closed before completion")
+                .unwrap();
+            if state.status.phase == Phase::Completed {
+                break state;
+            }
+        };
+        let witness = if stopped {
+            assert_eq!(
+                completed.status.termination,
+                Some(ExecutionTermination::Stopped)
+            );
+            None
+        } else {
+            assert_eq!(
+                completed.status.verdict(),
+                TestVerdict::Passed,
+                "{:?}",
+                completed.status
+            );
+            assert_eq!(
+                completed.status.termination,
+                Some(ExecutionTermination::OracleExited)
+            );
+            let reports = directories(&self.execution_root.join("runs").join(id.as_str()))
+                .into_iter()
+                .filter_map(|path| seedbox_application::orchestration::inspect(&path).ok())
+                .collect::<Vec<_>>();
+            assert_eq!(reports.len(), 1);
+            let witness = reports[0]
+                .report
+                .as_ref()
+                .unwrap()
+                .witness
+                .as_ref()
+                .expect("native getter must supply final witness")
+                .hex();
+            assert_eq!(witness.len(), 64);
+            assert!(!witness.is_empty());
+            eprintln!("native witness: id={id} workers={workers} witness={witness}");
+            Some(witness.to_owned())
+        };
+        // Verify the actual launched Driver request, not just the test setting.
+        let request = self.launch_request(id);
+        assert_eq!(request.machine_workers, workers);
+        assert_eq!(request.seed, seed);
+        assert_eq!(self.runtime_paths.lock().unwrap().len(), self.submitted);
+        let _barriers = self.assert_cleanup();
+        witness
+    }
+    fn assert_cleanup(&self) -> Vec<fs::File> {
+        let session = self.session.path();
+        let mut barriers =
+            vec![reclaim_barrier(&session.join(SESSION_LEASE_FILE), Duration::ZERO).unwrap()];
+        let leases = directories(session)
+            .into_iter()
+            .map(|path| path.join(EXECUTION_LEASE_FILE))
+            .filter(|path| path.exists())
+            .collect::<Vec<_>>();
+        barriers.extend(
+            leases
+                .iter()
+                .map(|path| reclaim_barrier(path, Duration::ZERO).unwrap()),
+        );
+        let remaining = directories(session)
+            .into_iter()
+            .filter(|path| {
+                let name = path.file_name().unwrap().to_string_lossy();
+                name.starts_with("native-scratch")
+                    || name.starts_with("seedbox-pv-")
+                    || name.starts_with("seedbox-tcg-")
+                    || name.starts_with("driver-runtime-")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            remaining.is_empty(),
+            "native directories survive before close: {remaining:?}"
+        );
+        assert!(self
+            .runtime_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| !path.exists()));
+        eprintln!("pre-close native scratch/runtime absence verified with session and execution lease barriers");
+        barriers
+    }
+    async fn close(mut self) {
+        self.cancel.0.cancel();
+        self.server.take().unwrap().await.unwrap().unwrap();
+        let _barriers = self.assert_cleanup();
+        let session_path = self.session.path().to_owned();
+        self.session.close();
+        assert!(!session_path.exists());
+        self.root.close();
+    }
+    async fn control(
+        &self,
+        id: &seedbox_api::SimulationId,
+        name: &str,
+        command: seedbox_api::ControlCommand,
+    ) -> seedbox_api::ControlReceipt {
+        use seedbox_api::{ControlRequest, ControlState};
+        let diagnostic = matches!(name, "verify-paused-restore" | "continue");
+        let began = Instant::now();
+        if diagnostic {
+            eprintln!("restore control phase: id={id} name={name} elapsed_ms=0 request_send command={command:?}");
+        }
+        self.client
+            .request_control(
+                id,
+                &ControlRequest {
+                    request_id: name.into(),
+                    command,
+                },
+            )
+            .await
+            .unwrap();
+        if diagnostic {
+            eprintln!(
+                "restore control phase: id={id} name={name} elapsed_ms={} request_accepted",
+                began.elapsed().as_millis()
+            );
+        }
+        let mut last_diagnostic = Instant::now();
+        loop {
+            let receipt = self.client.control_receipt(id, name).await.unwrap();
+            if diagnostic
+                && (receipt.state != ControlState::Accepted
+                    || last_diagnostic.elapsed() >= Duration::from_secs(2))
+            {
+                eprintln!(
+                    "restore control phase: id={id} name={name} elapsed_ms={} receipt={receipt:?}",
+                    began.elapsed().as_millis()
+                );
+                last_diagnostic = Instant::now();
+            }
+            if receipt.state != ControlState::Accepted {
+                assert!(
+                    matches!(
+                        receipt.state,
+                        ControlState::Acknowledged { error: None, .. }
+                    ),
+                    "{receipt:?}"
+                );
+                return receipt;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NativeRun {
+    iterations: u64,
+    seed: u64,
+    workers: usize,
+}
+impl NativeRun {
+    fn cpu(iterations: u64) -> Self {
+        Self {
+            iterations,
+            seed: 123,
+            workers: 1,
+        }
+    }
+}
+async fn native_runs(
+    backend: DriverBackend,
+    runs: &[NativeRun],
+    cancelled: bool,
+    expected_match: Option<bool>,
+) {
+    let mut session = NativeSession::new(backend);
+    let mut ids = Vec::new();
+    let mut witnesses = Vec::new();
+    let mut original: Option<SubmitRequest> = None;
+    for (index, run) in runs.iter().enumerate() {
+        let request = if index == 1 && expected_match == Some(true) {
+            original.as_ref().unwrap().clone()
+        } else {
+            submission(
+                backend,
+                session.root.path(),
+                &session.store,
+                run.iterations,
+                run.seed,
+            )
+        };
+        if index == 0 {
+            original = Some(request.clone());
+        }
+        let id = session.submit(request, run.workers).await;
+        assert!(
+            !ids.contains(&id),
+            "fresh submission reused an old execution"
+        );
+        let worker = session.worker(&id).await;
+        if cancelled {
+            session.guest_start(&id).await;
+            assert_ne!(
+                session.client.describe(&id).await.unwrap().status.phase,
+                Phase::Completed
+            );
+            session.client.stop(&id).await.unwrap();
+        }
+        let witness = session
+            .complete(&id, cancelled, run.workers, run.seed)
+            .await;
+        assert!(!worker.exists());
+        if let Some(witness) = witness {
+            eprintln!(
+                "native run: id={id} seed={} workers={} iterations={} witness={witness}",
+                run.seed, run.workers, run.iterations
+            );
+            if index == 1 {
+                let comparison = session.client.compare(&ids[0], &id).await.unwrap();
+                let raw_equal = witnesses[0] == witness;
+                if let Some(expected) = expected_match {
+                    assert_eq!(raw_equal, expected, "raw native witness comparison");
+                    assert_eq!(comparison.witness_matches, Some(expected));
+                    if expected {
+                        assert_eq!(comparison.status, ComparisonStatus::Match);
+                    } else {
+                        assert_ne!(comparison.status, ComparisonStatus::Match);
+                    }
+                }
+                eprintln!(
+                    "native comparison: raw_equal={raw_equal} status={:?} witness_matches={:?}",
+                    comparison.status, comparison.witness_matches
+                );
+            }
+            witnesses.push(witness);
+        }
+        ids.push(id);
+    }
+    session.close().await;
+}
+pub async fn native_session(
+    backend: DriverBackend,
+    iterations: &[u64],
+    cancelled: bool,
+    expected_match: Option<bool>,
+) {
+    let runs = iterations
+        .iter()
+        .map(|n| NativeRun::cpu(*n))
+        .collect::<Vec<_>>();
+    native_runs(backend, &runs, cancelled, expected_match).await;
+}
+
+pub async fn pv_worker_counts() {
+    tokio::time::timeout(
+        Duration::from_secs(180),
+        native_runs(
+            DriverBackend::Pv,
+            &[
+                NativeRun::cpu(200_000),
+                NativeRun {
+                    workers: 4,
+                    ..NativeRun::cpu(200_000)
+                },
+            ],
+            false,
+            Some(true),
+        ),
+    )
+    .await
+    .expect("worker-count pair exceeded 180-second native budget");
+}
+pub async fn pv_seed_report() {
+    // CPU-only input need not consume seed-dependent randomness. Report raw
+    // equality/inequality honestly; the changed-input W1 test requires inequality.
+    tokio::time::timeout(
+        Duration::from_secs(180),
+        native_runs(
+            DriverBackend::Pv,
+            &[
+                NativeRun::cpu(200_000),
+                NativeRun {
+                    seed: 124,
+                    ..NativeRun::cpu(200_000)
+                },
+            ],
+            false,
+            None,
+        ),
+    )
+    .await
+    .expect("seed-report pair exceeded 180-second native budget");
+}
+pub async fn pv_checkpoint_continuation() {
+    use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
+    let began = Instant::now();
+    let phase = |name: &str| {
+        eprintln!(
+            "checkpoint phase: elapsed_ms={} unix_ms={} {name}",
+            began.elapsed().as_millis(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        )
+    };
+    phase("case_begin");
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let mut session = NativeSession::new(DriverBackend::Pv);
+        // More than one virtual window of CPU work, still a finite stock fixture.
+        let request = submission(DriverBackend::Pv, session.root.path(), &session.store, 2_000_000, 123);
+        phase("baseline_submit_begin");
+        let baseline = session.submit(request.clone(), 1).await;
+        phase("baseline_submitted");
+        session.worker(&baseline).await;
+        let uninterrupted = session.complete(&baseline, false, 1, 123).await.unwrap();
+        phase("baseline_completed");
+        let final_ns = session.client.describe(&baseline).await.unwrap().status.simulated_time_ns;
+        let target_ns = final_ns.div_ceil(2);
+        assert!(target_ns > 1_000_000 && target_ns < final_ns,
+            "CPU fixture must span multiple committed windows");
+        let mut capture_request = request;
+        capture_request.options.start_paused = true;
+        let source = session.submit(capture_request, 1).await;
+        session.worker(&source).await;
+        session.control(&source, "verify-paused-source", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
+        let mut step = 0u64;
+        let source_output = loop {
+            let before = session.client.playback(&source).await.unwrap().state.position.completed_rounds;
+            session.control(&source, &format!("midloop-step-{step}"), ControlCommand::Step).await;
+            step += 1;
+            let status = loop {
+                let status = session.client.playback(&source).await.unwrap().state;
+                assert!(!status.terminal, "fixture ended before mid-workload capture");
+                if !status.stepping && status.position.completed_rounds > before { break status; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            };
+            let bytes = session.output(&source).await;
+            let started = bytes.windows(6).any(|part| part == b"START=");
+            assert!(!bytes.windows(4).any(|part| part == b"END="), "source finished before capture");
+            if started && status.position.simulated_time_ns >= target_ns {
+                assert!(status.application_ready);
+                assert!(status.position.simulated_time_ns < final_ns);
+                break bytes;
+            }
+        };
+        assert_eq!(source_output.windows(6).filter(|part| *part == b"START=").count(), 1);
+        let captured = session.control(&source, "saved", ControlCommand::Checkpoint).await;
+        assert!(matches!(&captured.state, ControlState::Acknowledged { checkpoint: Some(c), error: None, .. }
+            if c.state == CheckpointState::Captured && c.position.completed_rounds > 0));
+        eprintln!("public checkpoint receipt: {captured:?}");
+        let (captured_rounds, captured_ns) = match &captured.state {
+            ControlState::Acknowledged { checkpoint: Some(checkpoint), .. } =>
+                (checkpoint.position.completed_rounds, checkpoint.position.simulated_time_ns),
+            _ => unreachable!("captured receipt asserted above"),
+        };
+        assert!(captured_rounds > 0 && captured_ns > 0);
+        assert!(captured_ns >= target_ns && captured_ns < final_ns);
+        eprintln!("C2 mid-workload capture: final_ns={final_ns} target_ns={target_ns} captured_ns={captured_ns} captured_rounds={captured_rounds} source_START_count=1 source_END_count=0");
+        phase("export_begin");
+        let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
+        phase("export_done");
+        let InputSource::Resolved { definition } = &exported.spec.inputs else { panic!("resolved export required") };
+        let seedbox_spec::definition::Start::Checkpoint { assets, .. } = &definition.start else { panic!("checkpoint export required") };
+        assert!(!assets.is_empty());
+        phase("source_stop_begin");
+        session.client.stop(&source).await.unwrap();
+        session.complete(&source, true, 1, 123).await;
+        phase("source_stopped_reaped");
+        // Import must use the exported content closure, not the source paths.
+        phase("source_delete_begin");
+        session.client.delete_checkpoint(&source, "saved").await.unwrap();
+        session.client.delete(&source).await.unwrap();
+        assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
+        phase("source_deleted_import_begin");
+        let import_began = Instant::now();
+        session.workers.store(4, Ordering::SeqCst);
+        let restored = session.client.submit_definition(&serde_json::to_value(exported).unwrap(), true).await.unwrap().metadata.id;
+        session.submitted += 1;
+        assert_ne!(restored, source);
+        phase("import_submit_returned");
+        session.worker(&restored).await;
+        phase("import_scratch_seen_not_yet_paused_ack");
+        // C1: equal final evidence alone cannot distinguish restore from a
+        // silent fresh start. Check the real launch and a fresh paused status.
+        let launch = session.launch_request(&restored);
+        let resume = launch.resume_checkpoint.as_ref().expect("restore launch must name its checkpoint");
+        assert!(resume.is_file());
+        phase("paused_restore_control_begin");
+        session.control(&restored, "verify-paused-restore", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
+        phase("paused_restore_control_ack");
+        eprintln!("import to paused ack: elapsed_ms={}", import_began.elapsed().as_millis());
+        phase("paused_restore_status_query_begin");
+        let paused = session.client.playback(&restored).await.unwrap().state;
+        phase("paused_restore_status_query_returned");
+        eprintln!("restore position BEFORE continue: {paused:?}");
+        assert_eq!(paused.rate, PlaybackRate::Paused);
+        assert!(!paused.stepping && !paused.terminal);
+        assert!(paused.position.completed_rounds > 0 && paused.position.simulated_time_ns > 0);
+        assert_eq!(paused.position.completed_rounds, captured_rounds);
+        assert_eq!(paused.position.simulated_time_ns, captured_ns);
+        eprintln!("C1 restore verified BEFORE continue: resume={} captured_rounds={captured_rounds} restored_rounds={} captured_ns={captured_ns} restored_ns={}", resume.display(), paused.position.completed_rounds, paused.position.simulated_time_ns);
+        phase("continue_begin");
+        session.control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
+        phase("continue_ack");
+        phase("post_continue_status_query_begin");
+        let after_continue = session.client.playback(&restored).await.unwrap().state;
+        eprintln!("restore position AFTER continue: {after_continue:?}");
+        phase("post_continue_status_query_returned");
+        let continued = session.complete(&restored, false, 4, 123).await.unwrap();
+        phase("restored_completed");
+        eprintln!("restore final simulated_time_ns={}", session.client.describe(&restored).await.unwrap().status.simulated_time_ns);
+        let continued_output = session.output(&restored).await;
+        assert!(!continued_output.windows(6).any(|part| part == b"START="),
+            "restored workload printed START again (fresh restart)");
+        assert_eq!(continued_output.windows(4).filter(|part| *part == b"END=").count(), 1);
+        eprintln!("C2 restored output: START_count=0 END_count=1; CPU-only loop has no timers or devices in flight across capture");
+        assert_eq!(uninterrupted, continued, "raw uninterrupted/continued native witnesses differ");
+        let comparison = session.client.compare(&baseline, &restored).await.unwrap();
+        assert_eq!(comparison.witness_matches, Some(true));
+        eprintln!("public native checkpoint continuation: raw_equal=true witness_matches={:?} baseline={baseline} restored={restored} witness={continued}", comparison.witness_matches);
+        session.close().await;
+    }).await.expect("checkpoint roundtrip exceeded 180-second native budget");
+}
+fn runtime_backend(backend: DriverBackend) -> runtime_assets::Backend {
+    match backend {
+        DriverBackend::Pv => runtime_assets::Backend::Pv,
+        DriverBackend::Tcg => runtime_assets::Backend::Tcg,
+    }
+}
+fn label(backend: DriverBackend) -> &'static str {
+    match backend {
+        DriverBackend::Pv => "pv",
+        DriverBackend::Tcg => "tcg",
+    }
+}
+fn scratch_prefix(backend: DriverBackend) -> &'static str {
+    match backend {
+        DriverBackend::Pv => "seedbox-pv-",
+        DriverBackend::Tcg => "seedbox-tcg-",
+    }
+}

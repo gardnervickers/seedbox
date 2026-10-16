@@ -1,4 +1,5 @@
 //! Offline manifest, report and retained-log integration.
+mod physical_ram;
 use sb::diff::*;
 use sb::store::ContentDigest;
 use seedbox_artifacts as sb;

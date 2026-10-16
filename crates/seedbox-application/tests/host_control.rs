@@ -2,7 +2,21 @@
 #![cfg(unix)]
 use seedbox_engine_core::host_control as engine;
 
+use seedbox_engine_protocol::host_clock;
 use std::{fs, os::unix::net::UnixDatagram, sync::mpsc, time::Duration};
+
+/// Two wait-clock samples around an interval the test measures with the same
+/// monotonic clock: (growth of the accounted wait, the measured interval).
+/// The interval is strictly positive, and an open wait grows by at least it:
+/// the first sample precedes the interval and the second follows it.
+fn bracket(clock: &host_clock::Reader) -> (Duration, Duration) {
+    let first = clock.waited().unwrap();
+    let start = host_clock::Instant::now().unwrap();
+    while start.elapsed().unwrap().is_zero() {}
+    let interval = start.elapsed().unwrap();
+    let second = clock.waited().unwrap();
+    (second.checked_sub(first).unwrap(), interval)
+}
 
 #[test]
 fn pause_acknowledges_a_boundary_and_repeated_requests_preserve_the_gate() {
@@ -18,10 +32,14 @@ fn pause_acknowledges_a_boundary_and_repeated_requests_preserve_the_gate() {
     let mut control = engine::HostControl::bind(&socket).unwrap();
     let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
     client.connect(&socket).unwrap();
+    // Hang guard only: a correct run never waits this long.
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     // Queue before entering the boundary, then prove no simulated work follows it.
+    // Only the boundary loop answers, so each reply below proves the worker
+    // was still inside the held boundary when it replied; nothing resumes it
+    // before `set_paused(false)`, so it cannot have returned in between.
     client.send(b"pause").unwrap();
     let (progress, observed) = mpsc::channel();
     std::thread::scope(|scope| {
@@ -33,7 +51,7 @@ fn pause_acknowledges_a_boundary_and_repeated_requests_preserve_the_gate() {
         let mut reply = [0; 32];
         let n = client.recv(&mut reply).unwrap();
         assert_eq!(&reply[..n], b"paused");
-        assert!(observed.recv_timeout(Duration::from_millis(30)).is_err());
+        assert!(observed.try_recv().is_err());
         seedbox_application::host_control::set_paused(&run, true).unwrap();
         assert!(observed.try_recv().is_err());
         client.send(b"invalid").unwrap();
@@ -47,6 +65,7 @@ fn pause_acknowledges_a_boundary_and_repeated_requests_preserve_the_gate() {
         drop(lost);
         fs::remove_file(lost_path).unwrap();
         seedbox_application::host_control::set_paused(&run, false).unwrap();
+        // Hang guard only: the resume releases the boundary.
         observed.recv_timeout(Duration::from_secs(2)).unwrap();
         let mut control = worker.join().unwrap();
         // Resume is also idempotent when already running.
@@ -66,10 +85,8 @@ fn typed_controls_resolve_a_timeout_before_admitting_a_step() {
     use seedbox_application::host_control::{Client, ClientError};
     let directory = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     let endpoint = directory.path().join("engine");
-    let clock = seedbox_engine_protocol::host_clock::Reader::create(
-        &endpoint.with_file_name(seedbox_engine_protocol::host_clock::FILE_NAME),
-    )
-    .unwrap();
+    let clock =
+        host_clock::Reader::create(&endpoint.with_file_name(host_clock::FILE_NAME)).unwrap();
     let mut gate = engine::HostControl::bind(&endpoint).unwrap();
     let mut client = Client::connect(&endpoint).unwrap();
     let pause = Command::SetRate {
@@ -114,13 +131,22 @@ fn typed_controls_resolve_a_timeout_before_admitting_a_step() {
         assert_eq!(paused.id, 1);
         assert_eq!(paused.rate, PlaybackRate::Paused);
         assert!(client.pending().is_none());
-        std::thread::sleep(Duration::from_millis(30));
-        assert!(clock.waited().unwrap() >= Duration::from_millis(20));
+        // The paused gate opens its accounted wait after replying, before it
+        // first sleeps; it stays open until resumed. Wait for that transition
+        // (the deadline is a hang guard), then prove the open wait accrues
+        // host time across a further measured interval.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while bracket(&clock).0.is_zero() {
+            assert!(std::time::Instant::now() < deadline, "wait never opened");
+        }
+        let (grown, interval) = bracket(&clock);
+        assert!(grown >= interval, "{grown:?} < {interval:?}");
         let step = client
             .execute(Command::Step, Duration::from_secs(2))
             .unwrap();
         assert_eq!(step.error, None);
         assert!(step.stepping);
+        // Hang guard only: the admitted step completes one round.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             let status = client
@@ -142,8 +168,9 @@ fn typed_controls_resolve_a_timeout_before_admitting_a_step() {
             )
             .unwrap();
         worker.join().unwrap();
-        let waited = clock.waited().unwrap();
-        std::thread::sleep(Duration::from_millis(10));
-        assert_eq!(clock.waited().unwrap(), waited);
+        // Once released, the wait is closed: it no longer grows across a
+        // strictly positive interval.
+        assert!(clock.waited().unwrap() > Duration::ZERO);
+        assert_eq!(bracket(&clock).0, Duration::ZERO);
     });
 }

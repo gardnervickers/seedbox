@@ -5,6 +5,23 @@ use std::{
     process::{Command, Stdio},
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+mod runtime;
+
+// Unit tests share one fd table. Coordinate executable writes/copies and ALL
+// subprocess users: CLOEXEC closes fork copies only at exec, not at parent
+// close (nor temp-file rename). Production build-assets is single-threaded;
+// separate integration-test processes cannot inherit these test-process fds.
+#[cfg(test)]
+fn fork_write_scope() -> std::sync::MutexGuard<'static, ()> {
+    static FORK_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    FORK_WRITE.lock().unwrap_or_else(|poisoned| {
+        eprintln!("xtask fork/write scope: stateless coordination lock re-acquired");
+        FORK_WRITE.clear_poison();
+        poisoned.into_inner()
+    })
+}
+#[cfg(all(test, target_os = "linux"))]
+mod fork_write_tests;
 
 fn run(command: &mut Command) -> Result<()> {
     let status = command
@@ -48,6 +65,7 @@ fn linux(root: &Path, output: &Path) -> Result<()> {
     };
     fs::copy(Path::new(&kernel).join(image), output.join("kernel"))?;
     fs::copy(runtime, output.join("runtime.tar.gz"))?;
+    runtime::guest(root, &output.join("driver"), env::consts::ARCH)?;
     Ok(())
 }
 fn mac(root: &Path, output: &Path) -> Result<()> {
@@ -115,6 +133,15 @@ sandbox = false"
  runtime=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#runtimeArchive)
  cp "$kernel/Image" /output/kernel
  cp "$runtime" /output/runtime.tar.gz
+ pv=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machinePvAssets)
+ tcg=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineTcgAssets)
+ formatter=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineGuestFormatter)
+ formatter_x86=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineGuestFormatterX86)
+ mkdir -p /output/driver/pv/aarch64 /output/driver/tcg/x86_64
+ cp "$pv/kernel" "$pv/init" "$pv/command-line" "$pv/progress.tar" /output/driver/pv/aarch64/
+ cp "$tcg/kernel" "$tcg/init" "$tcg/command-line" "$tcg/firmware" /output/driver/tcg/x86_64/
+ cp "$formatter/bin/mke2fs" /output/driver/pv/aarch64/mke2fs
+ cp "$formatter_x86/bin/mke2fs" /output/driver/tcg/x86_64/mke2fs
 "#;
     let container = capture(command(&client, root).args([
         "create",
@@ -144,10 +171,29 @@ sandbox = false"
     result.and(cleanup)
 }
 fn build(root: &Path) -> Result<PathBuf> {
-    publish(root, |output| match (env::consts::OS, env::consts::ARCH) {
-        ("linux", "x86_64" | "aarch64") => linux(root, output),
-        ("macos", "aarch64") => mac(root, output),
-        _ => Err("requires Linux x86-64/AArch64 or Apple Silicon macOS".into()),
+    publish(root, |output| {
+        match (env::consts::OS, env::consts::ARCH) {
+            ("linux", "x86_64" | "aarch64") => linux(root, output)?,
+            ("macos", "aarch64") => mac(root, output)?,
+            _ => return Err("requires Linux x86-64/AArch64 or Apple Silicon macOS".into()),
+        }
+        let driver = output.join("driver");
+        runtime::host(root, &driver)?;
+        fs::write(
+            driver.join("host-system"),
+            format!(
+                "{}-{}",
+                env::consts::ARCH,
+                if cfg!(target_os = "macos") {
+                    "darwin"
+                } else {
+                    "linux"
+                }
+            ),
+        )?;
+        runtime::archive(root, &driver, &output.join("driver-runtime.tar.gz"))?;
+        fs::remove_dir_all(driver)?;
+        Ok(())
     })
 }
 
@@ -198,6 +244,7 @@ mod tests {
 
     #[test]
     fn failed_assets_preserve_previous_publication_and_success_replaces_it() {
+        let _scope = fork_write_scope();
         let root = tempfile::tempdir().unwrap();
         let first = publish(root.path(), |out| {
             fs::write(out.join("kernel"), b"old")?;

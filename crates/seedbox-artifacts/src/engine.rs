@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub const INTERNAL_WORKER_V1: &str = "seedbox-internal-worker-v1";
 /// `__engine` contract of the ARM world worker linked into the Mac CLI.
 pub const ARM_WORLD_V1: &str = "arm64-world-v1";
+/// Whole-world Driver worker, distinct from both retained legacy schedulers.
+pub const DRIVER_WORLD_V1: &str = seedbox_engine_protocol::driver_world::CONTRACT;
 /// Timebase the ARM world worker reports.
 pub const ARM_REPORT_TIMEBASE: &str = "arm64-pv-world-v1";
 pub const SIMULATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -26,6 +28,8 @@ pub enum ExecutableKind {
     InternalWorker,
     #[serde(rename = "arm64-world-v1")]
     ArmWorld,
+    #[serde(rename = "driver-world-v1")]
+    DriverWorld,
 }
 
 impl ExecutableKind {
@@ -35,6 +39,7 @@ impl ExecutableKind {
             Self::Standalone => None,
             Self::InternalWorker => Some(INTERNAL_WORKER_V1),
             Self::ArmWorld => Some(ARM_WORLD_V1),
+            Self::DriverWorld => Some(DRIVER_WORLD_V1),
         }
     }
 }

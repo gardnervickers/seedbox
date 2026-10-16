@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+kvm-tests = []
+tcg-tests = []
+
 [dependencies]
 seedbox-control.workspace = true
 seedbox-artifacts.workspace = true
@@ -24,3 +28,7 @@ seedbox-spec.workspace = true
 
 [dev-dependencies]
 seedbox-client.workspace = true
+seedbox-machine.workspace = true
+seedbox-machine-pv.workspace = true
+seedbox-machine-tcg.workspace = true
+tar.workspace = true

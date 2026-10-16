@@ -508,16 +508,24 @@ fn explicit_inputs_must_exist() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn missing_helpers_explain_the_asset_build_without_searching_path() {
-    let (directory, args) = runtime_project();
-    let args: Vec<_> = args.iter().map(String::as_str).collect();
-    let output = seedbox(&args, directory.path());
+fn explicit_missing_helpers_never_fall_back_to_embedded_assets() {
+    let (directory, mut args) = runtime_project();
     let archive = directory
         .path()
         .join("assets")
         .join(std::env::consts::ARCH)
         .join("runtime.tar.gz");
-    assert_eq!(stderr(&output), format!("error: --runtime-assets {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass --runtime-assets PATH\n", archive.display()));
+    // Explicit selection must not fall back to embedded helpers. This setup
+    // error is exercised in every build; defaults.rs separately always tests
+    // the implicit bundled and unbundled lookup branches.
+    args.extend(["--runtime-assets".into(), archive.to_str().unwrap().into()]);
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let output = seedbox(&args, directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        format!("error: --runtime-assets {}: not found\n", archive.display())
+    );
 }
 
 #[cfg(target_os = "linux")]

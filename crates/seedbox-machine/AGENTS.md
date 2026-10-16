@@ -38,3 +38,18 @@ not authorize changing an interface. If a task requires an additional interface
 change, explain the exact change and the implementation-only alternatives to the
 coordinator before making it. Outside this delegated completion, explicit user
 authorization remains required.
+
+# Test layout
+
+Private unit tests live alongside the implementation they test under `src/`,
+using ordinary Rust module declarations. Tests spanning components exercise their
+public APIs from the owning crate's `tests/` integration targets. Do not expose
+internals or include another crate's source to make an integration test work.
+Reusable feature-gated specification and test-support libraries live under
+`src/test_support/`; integration-only helpers live in `tests/support/`.
+Shared PV/TCG scenarios take a machine or factory from a thin backend entrypoint;
+keep architecture-specific behavior in its backend. Never add a `main.rs` below
+`tests/`, because Cargo treats it as another test target. The guest C sources in
+`src/pv/` stay there for now, including their `*_test.c` drivers and fixtures.
+`guest.nix` takes every `.c`/`.h` file in that directory as its source, and the
+Rust tests compile those files by path from there.
