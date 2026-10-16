@@ -1619,16 +1619,18 @@ fn marker_time((text, times): &(String, Vec<(usize, u64)>), marker: &str) -> u64
 /// reach the uninterrupted raw witness and output.
 pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
+    // test-time: allow(measurement) -- Phase elapsed time is printed for diagnosis only; capture and success use guest evidence.
     let began = Instant::now();
     let phase = |name: &str| {
+        // test-time: allow(measurement) -- Report phase duration, never a functional deadline or ordering assertion.
         eprintln!(
             "in-flight checkpoint phase: backend={} elapsed_ms={} {name}",
             label(backend),
             began.elapsed().as_millis()
         )
     };
-    // Hang guard only: every decision below is taken from guest events.
-    tokio::time::timeout(HANG_GUARD, async {
+    // test-time: allow(hang-guard) -- Preserve the native proof's 600s infrastructure bound; success uses simulated capture position, output and witness, never elapsed host time.
+    tokio::time::timeout(Duration::from_secs(600), async {
         let seed = 123;
         let mut session = NativeSession::new(backend);
         let request = network_submission(backend, session.root.path(), &session.store, seed);
@@ -1689,7 +1691,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
             if status.rate == PlaybackRate::Paused && !status.stepping {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
         // Capture at an ordinary paused boundary: one public step applies the
         // marker and commits one round, still inside the transfer. Capture at
@@ -1702,7 +1704,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
             if !status.stepping && status.position.completed_rounds > before {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
         let captured = session.control(&source, "saved", ControlCommand::Checkpoint).await;
         let (captured_rounds, captured_ns) = match &captured.state {
@@ -1834,8 +1836,8 @@ fn scheduled(frames: &[seedbox_api::Frame], from: &str, to: &str) -> (u64, u64) 
 pub async fn pv_network_frames_are_observation_only() {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, PlaybackRate};
     let backend = DriverBackend::Pv;
-    // Hang guard only: every decision below is taken from guest events.
-    tokio::time::timeout(HANG_GUARD, async {
+    // test-time: allow(hang-guard) -- Preserve the native proof's 900s infrastructure bound; frame payloads, counters and equal witnesses alone decide success.
+    tokio::time::timeout(Duration::from_secs(900), async {
         let seed = 123;
         let mut session = NativeSession::new(backend);
         let request = network_submission(backend, session.root.path(), &session.store, seed);
@@ -1916,7 +1918,7 @@ pub async fn pv_network_frames_are_observation_only() {
             if status.rate == PlaybackRate::Paused && !status.stepping {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
         let before = session.client.playback(&source).await.unwrap().state.position.completed_rounds;
         session.control(&source, "apply-marker", ControlCommand::Step).await;
@@ -1926,7 +1928,7 @@ pub async fn pv_network_frames_are_observation_only() {
             if !status.stepping && status.position.completed_rounds > before {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
         let captured = session.control(&source, "saved", ControlCommand::Checkpoint).await;
         let captured_ns = match &captured.state {
