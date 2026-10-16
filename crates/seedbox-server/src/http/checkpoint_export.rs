@@ -1,4 +1,6 @@
 //! A bounded, request-owned export: dropping the body cancels its blocking work.
+mod heartbeat;
+
 use super::HttpError;
 use axum::response::{
     sse::{Event, Sse},
@@ -81,14 +83,7 @@ pub(super) fn response(
         };
         let _ = sender.send(update).await;
     });
-    let stream =
-        futures_util::stream::unfold((receiver, guard), |(mut receiver, guard)| async move {
-            let update = receiver.recv().await?;
-            let event = Event::default()
-                .json_data(update)
-                .expect("export update is JSON serializable");
-            Some((Ok::<_, Infallible>(event), (receiver, guard)))
-        });
+    let stream = heartbeat::stream(receiver, guard, heartbeat::ticks());
     Sse::new(stream).into_response()
 }
 

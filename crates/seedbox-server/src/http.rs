@@ -2,6 +2,7 @@
 //! IDs from the supplied queue; it must recover queued resources on startup.
 
 mod checkpoint_export;
+mod export_accept;
 
 use crate::{catalogue::Error as CatalogueError, manager::Manager};
 use axum::{
@@ -777,11 +778,14 @@ async fn checkpoint_definition(
     let execution = state
         .execution
         .ok_or_else(|| HttpError::invalid("execution evidence is unavailable"))?;
-    if headers
-        .get(axum::http::header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        == Some("text/event-stream")
-    {
+    let representation = export_accept::negotiate(&headers).ok_or_else(|| {
+        HttpError::new(
+            StatusCode::NOT_ACCEPTABLE,
+            ErrorCode::InvalidRequest,
+            "checkpoint export requires application/json or text/event-stream",
+        )
+    })?;
+    if representation == export_accept::Representation::Stream {
         return Ok(checkpoint_export::response(
             state.shutdown,
             move |progress| {

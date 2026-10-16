@@ -100,7 +100,8 @@ impl Client {
     }
 
     /// Export a checkpoint as a complete simulation definition with binary assets.
-    /// Export has no total-duration deadline. Dropping this future cancels its
+    /// Export has no total-duration deadline, but fails after 30 seconds without
+    /// a complete progress event or keepalive. Dropping this future cancels its
     /// request-owned work without changing the source simulation/checkpoint.
     pub async fn checkpoint_definition(
         &self,
@@ -128,7 +129,8 @@ impl Client {
 
     /// Observe a request-owned checkpoint export, with bounded/coalesced progress
     /// and a terminal completed definition or structured error. There is no total
-    /// duration deadline. Dropping the stream cancels only this export.
+    /// duration deadline; 30 seconds without a complete event or keepalive fails
+    /// with a stalled-export error. Dropping the stream cancels only this export.
     pub async fn checkpoint_export(
         &self,
         id: &SimulationId,

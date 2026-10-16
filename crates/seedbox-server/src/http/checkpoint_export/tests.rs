@@ -115,7 +115,7 @@ async fn public_definition_preserves_structured_errors_and_rejects_truncation() 
 }
 
 #[tokio::test]
-async fn public_export_stream_survives_injected_time_and_peer_drop_cancels_work() {
+async fn public_export_stream_peer_drop_cancels_work() {
     {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("api.sock");
@@ -165,11 +165,8 @@ async fn public_export_stream_survives_injected_time_and_peer_drop_cancels_work(
             updates.next().await.unwrap().unwrap(),
             CheckpointExport::Progress { bytes_processed: 0 }
         ));
-        tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(3_600)).await;
-        // Polling after advancing an hour must remain pending, not time out.
-        assert!(futures_util::poll!(updates.next()).is_pending());
-        tokio::time::resume();
+        // Duration/reset behavior is tested against the shared controlled clock
+        // in seedbox-client; this real connection test owns peer-drop cleanup.
         drop(updates);
         // test-time: allow(hang-guard) -- Positive exporter cancellation acknowledgement after peer drop; 5s allows loaded-runtime dispatch, never timed absence.
         tokio::time::timeout(Duration::from_secs(5), finished)

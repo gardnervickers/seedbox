@@ -549,6 +549,11 @@ lifecycle transition.
 Checkpoint definition export negotiates a request-owned SSE response with byte-work
 progress and a terminal definition or structured error. The public client has no
 total export deadline; its header/connection guards do not bound hashing or copying.
+The server schedules an SSE-comment keepalive every 10 seconds when progress
+is unavailable. The client fails with a stalled-export error after 30 seconds
+without a complete progress event or keepalive; every such event resets that
+inactivity deadline. Partial lines/frames do not renew it. These are liveness
+semantics, not a total work budget: healthy exports can run indefinitely.
 Dropping the export stream cancels its blocking work, as does server shutdown.
 Hash, copy and verification passes check cancellation at 64 KiB boundaries;
 synchronous filesystem calls finish before cancellation is observed. Unpublished

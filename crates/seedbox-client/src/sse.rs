@@ -2,7 +2,10 @@
 //! have no relationship to event, line or UTF-8 boundaries.
 
 use crate::{Error, RESPONSE_LIMIT};
-use futures_util::Stream;
+mod activity;
+
+use activity::{Clock, TokioClock};
+use futures_util::{Stream, StreamExt};
 use seedbox_api::{EventDelivery, Phase, Simulation};
 use serde::de::DeserializeOwned;
 use std::{collections::VecDeque, pin::Pin};
@@ -21,6 +24,12 @@ pub fn logs(response: reqwest::Response) -> LogStream {
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Frame {
+    Data(Vec<u8>),
+    Keepalive,
+}
+
 #[derive(Default)]
 struct Decoder {
     line: Vec<u8>,
@@ -30,7 +39,7 @@ struct Decoder {
 }
 
 impl Decoder {
-    fn push(&mut self, byte: u8) -> Result<Option<Vec<u8>>, Error> {
+    fn push(&mut self, byte: u8) -> Result<Option<Frame>, Error> {
         if self.after_cr && byte == b'\n' {
             self.after_cr = false;
             return Ok(None);
@@ -41,7 +50,10 @@ impl Decoder {
             if line.is_empty() && self.has_data {
                 self.has_data = false;
                 self.data.pop(); // SSE joins data fields with LF; omit the final LF.
-                return Ok(Some(std::mem::take(&mut self.data)));
+                return Ok(Some(Frame::Data(std::mem::take(&mut self.data))));
+            }
+            if line.starts_with(b":") {
+                return Ok(Some(Frame::Keepalive));
             }
             if line == b"data" || line.starts_with(b"data:") {
                 let value = line.get(5..).unwrap_or_default();
@@ -73,9 +85,16 @@ pub fn frames(response: reqwest::Response) -> FrameStream {
 }
 
 pub(crate) fn checkpoint_exports(response: reqwest::Response) -> CheckpointExportStream {
-    decode(response, |update: &seedbox_api::CheckpointExport| {
-        !matches!(update, seedbox_api::CheckpointExport::Progress { .. })
-    })
+    decode_chunks(
+        response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(Error::from)),
+        |update: &seedbox_api::CheckpointExport| {
+            !matches!(update, seedbox_api::CheckpointExport::Progress { .. })
+        },
+        Some(activity::LIMIT),
+        TokioClock::default(),
+    )
 }
 
 pub fn events(response: reqwest::Response) -> EventStream {
@@ -88,50 +107,88 @@ fn decode<T: DeserializeOwned + Send + 'static>(
     response: reqwest::Response,
     terminal: fn(&T) -> bool,
 ) -> Pin<Box<dyn Stream<Item = Result<T, Error>> + Send>> {
-    let state = Some((response, Decoder::default(), VecDeque::new()));
-    Box::pin(futures_util::stream::unfold(
-        state,
-        move |state| async move {
-            let (mut response, mut decoder, mut pending) = state?;
+    decode_chunks(
+        response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(Error::from)),
+        terminal,
+        None,
+        TokioClock::default(),
+    )
+}
+
+fn decode_chunks<T, S, B, C>(
+    chunks: S,
+    terminal: fn(&T) -> bool,
+    idle: Option<std::time::Duration>,
+    clock: C,
+) -> Pin<Box<dyn Stream<Item = Result<T, Error>> + Send>>
+where
+    T: DeserializeOwned + Send + 'static,
+    S: Stream<Item = Result<B, Error>> + Send + 'static,
+    B: AsRef<[u8]> + Send + 'static,
+    C: Clock,
+{
+    let deadline = idle.map(|limit| clock.now().saturating_add(limit));
+    let state = Some((
+        Box::pin(chunks),
+        Decoder::default(),
+        VecDeque::new(),
+        deadline,
+    ));
+    Box::pin(futures_util::stream::unfold(state, move |state| {
+        let clock = clock.clone();
+        async move {
+            let (mut chunks, mut decoder, mut pending, mut deadline) = state?;
             loop {
+                // Decode bytes already received before consulting the read timer;
+                // caller backpressure must not invalidate an already buffered event.
                 while let Some(byte) = pending.pop_front() {
-                    let data = match decoder.push(byte) {
-                        Ok(Some(data)) => data,
+                    let frame = match decoder.push(byte) {
+                        Ok(Some(frame)) => frame,
                         Ok(None) => continue,
-                        Err(e) => return Some((Err(e), None)),
+                        Err(error) => return Some((Err(error), None)),
                     };
-                    let simulation: T = match serde_json::from_slice(&data) {
-                        Ok(s) => s,
-                        Err(e) => return Some((Err(e.into()), None)),
+                    deadline = idle.map(|limit| clock.now().saturating_add(limit));
+                    let Frame::Data(data) = frame else {
+                        continue;
                     };
-                    let terminal = terminal(&simulation);
+                    let value: T = match serde_json::from_slice(&data) {
+                        Ok(value) => value,
+                        Err(error) => return Some((Err(error.into()), None)),
+                    };
+                    let done = terminal(&value);
                     return Some((
-                        Ok(simulation),
-                        if terminal {
+                        Ok(value),
+                        if done {
                             None
                         } else {
-                            Some((response, decoder, pending))
+                            Some((chunks, decoder, pending, deadline))
                         },
                     ));
                 }
-                match response.chunk().await {
-                Ok(Some(chunk)) if chunk.len() <= RESPONSE_LIMIT => pending.extend(chunk),
-                Ok(Some(_)) => return Some((Err(Error::ResponseTooLarge), None)),
-                Ok(None) => {
-                    return Some((
-                        Err(Error::Stream(
-                            "stream ended without its terminal record; inspect the simulation and reconnect"
-                                .into(),
-                        )),
-                        None,
-                    ))
+                let chunk = if let Some(deadline) = deadline {
+                    tokio::select! {
+                        biased;
+                        _ = clock.sleep_until(deadline) => return Some((Err(Error::Stream(activity::STALLED.into())), None)),
+                        chunk = chunks.next() => chunk,
+                    }
+                } else {
+                    chunks.next().await
+                };
+                match chunk {
+                    Some(Ok(chunk)) if chunk.as_ref().len() <= RESPONSE_LIMIT => pending.extend(chunk.as_ref().iter().copied()),
+                    Some(Ok(_)) => return Some((Err(Error::ResponseTooLarge), None)),
+                    Some(Err(error)) => return Some((Err(error), None)),
+                    None => return Some((Err(Error::Stream("stream ended without its terminal record; inspect the simulation and reconnect".into())), None)),
                 }
-                Err(e) => return Some((Err(e.into()), None)),
             }
-            }
-        },
-    ))
+        }
+    }))
 }
+
+#[cfg(test)]
+mod activity_tests;
 
 #[cfg(test)]
 mod tests {
@@ -142,7 +199,7 @@ mod tests {
         let mut decoder = Decoder::default();
         let mut records = vec![];
         for byte in b": heartbeat\r\nevent: simulation\rdata: {\n data: ignored\ndata: \"x\":1}\r\n\r\ndata\n\n" {
-            if let Some(record) = decoder.push(*byte).unwrap() { records.push(record); }
+            if let Some(Frame::Data(record)) = decoder.push(*byte).unwrap() { records.push(record); }
         }
         assert_eq!(records, [b"{\n\"x\":1}".to_vec(), vec![]]);
     }
