@@ -51,8 +51,10 @@ async fn assert_unapplied(session: &NativeSession, id: &seedbox_api::SimulationI
 }
 
 pub async fn native_held_checkpoint(backend: DriverBackend) {
+    // test-time: allow(measurement) -- Anchor report-only held-phase elapsed diagnostics; fault identity, exact paused state and witness equality are the assertions, never host speed.
     let began = Instant::now();
     let phase = |name: &str| {
+        // test-time: allow(measurement) -- Print phase timing only; elapsed_ms is never a deadline, simulated-time bound or ordering witness.
         eprintln!(
             "held phase backend={} elapsed_ms={} phase={name}",
             label(backend),
@@ -60,6 +62,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         )
     };
     phase("begin");
+    // test-time: allow(hang-guard) -- The documented 1200s HANG_GUARD only prevents infrastructure hangs on the loaded host; check_bound limits simulated progress and actual fault events certify the hold.
     tokio::time::timeout(HANG_GUARD, async {
         let mut session = NativeSession::new(backend);
         let mut request = submission(backend, session.root.path(), &session.store, 2_000_000, 123);
@@ -114,6 +117,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
             assert!(!state.terminal, "source finished before held fault");
             let mark = (state.position, state.rate, state.application_ready, state.stepping);
             if previous.as_ref() != Some(&mark) {
+                // test-time: allow(measurement) -- Emit elapsed diagnostics only when the observed state changes; event/state predicates, not elapsed time, establish the held boundary.
                 eprintln!("held wait elapsed_ms={} state={state:?}", began.elapsed().as_millis());
                 previous = Some(mark);
             }
@@ -127,6 +131,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
                     break state;
                 }
             }
+            // test-time: allow(hang-guard) -- Yield between positive held-state polls; check_bound supplies the independent simulated cap and the actual paused/requested event is the completion witness, not this 5ms delay.
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
         phase("held_observed");

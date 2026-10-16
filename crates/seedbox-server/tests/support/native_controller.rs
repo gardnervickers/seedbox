@@ -107,6 +107,7 @@ fn occurrences(bytes: &[u8], marker: &[u8]) -> usize {
 }
 
 pub async fn pv_controller_repeat() {
+    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
     tokio::time::timeout(HANG_GUARD, async {
         let mut session = NativeSession::new(DriverBackend::Pv);
         let request = request(&session);
@@ -136,6 +137,7 @@ pub async fn pv_controller_repeat() {
 }
 
 pub async fn pv_controller_checkpoint() {
+    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
     tokio::time::timeout(HANG_GUARD, async {
         let mut session = NativeSession::new(DriverBackend::Pv);
         let request = request(&session);

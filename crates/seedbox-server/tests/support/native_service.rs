@@ -979,6 +979,7 @@ pub async fn native_session(
 }
 
 pub async fn pv_worker_counts() {
+    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
     tokio::time::timeout(
         HANG_GUARD,
         native_runs(
@@ -1000,6 +1001,7 @@ pub async fn pv_worker_counts() {
 pub async fn pv_seed_report() {
     // CPU-only input need not consume seed-dependent randomness. Report raw
     // equality/inequality honestly; the changed-input W1 test requires inequality.
+    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
     tokio::time::timeout(
         HANG_GUARD,
         native_runs(
@@ -1032,6 +1034,7 @@ pub async fn pv_checkpoint_continuation() {
         )
     };
     phase("case_begin");
+    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
     tokio::time::timeout(HANG_GUARD, async {
         let mut session = NativeSession::new(DriverBackend::Pv);
         // More than one virtual window of CPU work, still a finite stock fixture.

@@ -10,6 +10,7 @@ use native_service::{native_session, DriverBackend, HANG_GUARD};
 async fn retained_driver_pv_guest_completes_and_cancellation_reaps_owned_inputs() {
     // Each execution fails at its simulated bound (support/native_service.rs);
     // HANG_GUARD only catches one that stops making simulated progress.
+    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
     tokio::time::timeout(HANG_GUARD, async {
         native_session(DriverBackend::Pv, &[200_000], false, None).await;
         native_session(DriverBackend::Pv, &[2_000_000_000], true, None).await;
@@ -20,6 +21,7 @@ async fn retained_driver_pv_guest_completes_and_cancellation_reaps_owned_inputs(
 
 #[tokio::test]
 async fn fresh_native_pv_same_submission_witnesses_match() {
+    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
     tokio::time::timeout(
         HANG_GUARD,
         native_session(DriverBackend::Pv, &[200_000, 200_000], false, Some(true)),
@@ -30,6 +32,7 @@ async fn fresh_native_pv_same_submission_witnesses_match() {
 
 #[tokio::test]
 async fn fresh_native_pv_different_input_witnesses_do_not_match() {
+    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
     tokio::time::timeout(
         HANG_GUARD,
         native_session(DriverBackend::Pv, &[200_000, 400_000], false, Some(false)),
