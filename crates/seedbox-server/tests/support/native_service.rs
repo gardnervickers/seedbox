@@ -52,6 +52,47 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Simulated time by which an execution must finish, or, when it is cancelled,
+/// show its application's `START=` output. This is the failure condition: a
+/// guest that keeps running without getting there fails at the same simulated
+/// point on any host. Measured with the cpu-loop fixture: TCG finishes 200k
+/// and 400k iterations, and prints `START=`, by 1.962 s; PV finishes 200k by
+/// 21 ms and the checkpoint scenario's 2M by 133 ms. The bounds are about 20
+/// times the largest of those.
+pub fn simulated_bound(backend: DriverBackend) -> u64 {
+    match backend {
+        DriverBackend::Pv => 3_000_000_000,
+        DriverBackend::Tcg => 40_000_000_000,
+    }
+}
+
+/// Host-time hang guard for one test case, not its failure condition: it
+/// catches only an execution that stops making simulated progress, which
+/// [`simulated_bound`] cannot see. Unloaded, three TCG cases take about 185 s
+/// and three PV cases 291 s (serial); the checkpoint case's own phases take
+/// about 150 s. 20 minutes per case leaves room for a heavily shared host.
+pub const HANG_GUARD: Duration = Duration::from_secs(1200);
+
+/// Fail, after stopping the execution, once it has run past its simulated
+/// bound without reaching `goal`.
+async fn check_bound(
+    client: &Client,
+    id: &seedbox_api::SimulationId,
+    backend: DriverBackend,
+    simulated_ns: u64,
+    goal: &str,
+) {
+    let bound = simulated_bound(backend);
+    if simulated_ns > bound {
+        let _ = client.stop(id).await;
+        panic!(
+            "{} execution {id} reached simulated {simulated_ns} ns, past its {bound} ns bound, \
+             before {goal}",
+            label(backend)
+        );
+    }
+}
+
 // A failed assertion requests service stop but never deletes inputs beneath
 // an execution whose ownership barriers have not yet been established.
 struct TestDirectory(Option<tempfile::TempDir>);
@@ -570,22 +611,49 @@ impl NativeSession {
                 "native worker never started: {:?}",
                 state.status
             );
+            check_bound(
+                &self.client,
+                id,
+                self.backend,
+                state.status.simulated_time_ns,
+                "its worker started",
+            )
+            .await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
     async fn guest_start(&self, id: &seedbox_api::SimulationId) {
         let mut logs = self.client.logs_with(id, "oracle", true).await.unwrap();
+        let mut progress = self.client.watch(id).await.unwrap();
         let mut bytes = vec![];
-        while let Some(delivery) = logs.next().await {
-            if let seedbox_api::LogDelivery::Entry {
-                entry: seedbox_api::LogEntry::Bytes { bytes: data, .. },
-                ..
-            } = delivery.unwrap()
-            {
-                bytes.extend(data);
-            }
-            if bytes.windows(6).any(|part| part == b"START=") {
-                return;
+        // Wait for the output while watching simulated progress, so a guest
+        // that never prints fails at its bound instead of waiting forever.
+        loop {
+            tokio::select! {
+                delivery = logs.next() => {
+                    let Some(delivery) = delivery else { break };
+                    if let seedbox_api::LogDelivery::Entry {
+                        entry: seedbox_api::LogEntry::Bytes { bytes: data, .. },
+                        ..
+                    } = delivery.unwrap()
+                    {
+                        bytes.extend(data);
+                    }
+                    if bytes.windows(6).any(|part| part == b"START=") {
+                        return;
+                    }
+                }
+                state = progress.next() => {
+                    let state = state.expect("watch closed before START=").unwrap();
+                    check_bound(
+                        &self.client,
+                        id,
+                        self.backend,
+                        state.status.simulated_time_ns,
+                        "its application printed START=",
+                    )
+                    .await;
+                }
             }
         }
         panic!("operation must occur after real guest application output");
@@ -632,6 +700,14 @@ impl NativeSession {
             if state.status.phase == Phase::Completed {
                 break state;
             }
+            check_bound(
+                &self.client,
+                id,
+                self.backend,
+                state.status.simulated_time_ns,
+                "it completed",
+            )
+            .await;
         };
         let witness = if stopped {
             assert_eq!(
@@ -879,7 +955,7 @@ pub async fn native_session(
 
 pub async fn pv_worker_counts() {
     tokio::time::timeout(
-        Duration::from_secs(180),
+        HANG_GUARD,
         native_runs(
             DriverBackend::Pv,
             &[
@@ -894,13 +970,13 @@ pub async fn pv_worker_counts() {
         ),
     )
     .await
-    .expect("worker-count pair exceeded 180-second native budget");
+    .expect("worker-count pair hit the host hang guard without finishing");
 }
 pub async fn pv_seed_report() {
     // CPU-only input need not consume seed-dependent randomness. Report raw
     // equality/inequality honestly; the changed-input W1 test requires inequality.
     tokio::time::timeout(
-        Duration::from_secs(180),
+        HANG_GUARD,
         native_runs(
             DriverBackend::Pv,
             &[
@@ -915,7 +991,7 @@ pub async fn pv_seed_report() {
         ),
     )
     .await
-    .expect("seed-report pair exceeded 180-second native budget");
+    .expect("seed-report pair hit the host hang guard without finishing");
 }
 pub async fn pv_checkpoint_continuation() {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
@@ -931,7 +1007,7 @@ pub async fn pv_checkpoint_continuation() {
         )
     };
     phase("case_begin");
-    tokio::time::timeout(Duration::from_secs(180), async {
+    tokio::time::timeout(HANG_GUARD, async {
         let mut session = NativeSession::new(DriverBackend::Pv);
         // More than one virtual window of CPU work, still a finite stock fixture.
         let request = submission(DriverBackend::Pv, session.root.path(), &session.store, 2_000_000, 123);
@@ -1046,7 +1122,7 @@ pub async fn pv_checkpoint_continuation() {
         assert_eq!(comparison.witness_matches, Some(true));
         eprintln!("public native checkpoint continuation: raw_equal=true witness_matches={:?} baseline={baseline} restored={restored} witness={continued}", comparison.witness_matches);
         session.close().await;
-    }).await.expect("checkpoint roundtrip exceeded 180-second native budget");
+    }).await.expect("checkpoint roundtrip hit the host hang guard without finishing");
 }
 fn runtime_backend(backend: DriverBackend) -> runtime_assets::Backend {
     match backend {
