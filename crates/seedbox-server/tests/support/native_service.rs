@@ -1535,11 +1535,10 @@ fn marker_time((text, times): &(String, Vec<(usize, u64)>), marker: &str) -> u64
     times.iter().find(|(offset, _)| *offset >= end).unwrap().1
 }
 /// Checkpoint, export and import a world captured while the oracle's sleep is
-/// pending and the client's TCP stream is mid-transfer; the continuation must reach the uninterrupted raw witness and output.
+/// pending and the client's TCP stream is mid-transfer; the continuation must
+/// reach the uninterrupted raw witness and output.
 pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
-    use seedbox_api::{
-        CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate,
-    };
+    use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
     let began = Instant::now();
     let phase = |name: &str| {
         eprintln!(
