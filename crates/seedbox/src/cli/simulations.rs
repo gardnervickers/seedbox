@@ -8,6 +8,7 @@ use seedbox_api::{
 };
 use seedbox_application::{execution::CancellationToken, Error, Result};
 use seedbox_client::Client;
+use seedbox_spec::fault_profile::FaultProfile;
 use std::{io::Read, time::Duration};
 
 pub(super) fn capacity(json: bool) -> Result<u8> {
@@ -166,10 +167,12 @@ pub(super) fn run(
     paused: bool,
     detach: bool,
     json: bool,
+    fault_profile: Option<FaultProfile>,
     wall_time_ns: Option<u64>,
 ) -> Result<u8> {
     let (spec, metadata) = load_spec(compose, seed)?;
-    submit(
+    submit_with_profile(
+        fault_profile,
         spec,
         seedbox_api::ExecutionOptions {
             start_paused: paused,
@@ -185,10 +188,10 @@ pub(super) fn explore(
     compose: &ComposeArg,
     seed: Option<u64>,
     count: u32,
-    paused: bool,
+    options: seedbox_api::ExecutionOptions,
     detach: bool,
     json: bool,
-    wall_time_ns: Option<u64>,
+    fault_profile: Option<FaultProfile>,
 ) -> Result<u8> {
     let (spec, metadata) = load_spec(compose, seed)?;
     if spec
@@ -200,14 +203,12 @@ pub(super) fn explore(
     }
     super::defaults::warn_dirty_build();
     let request = seedbox_api::SeedRangeRequest {
-        options: seedbox_api::ExecutionOptions {
-            start_paused: paused,
-            wall_time_ns,
-        },
+        options,
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
         spec,
         count,
+        fault_profile,
     };
     let client = daemon::connect(None)?;
     let cancellation = CancellationToken::default();
@@ -444,10 +445,33 @@ fn submit(
     detach: bool,
     json: bool,
 ) -> Result<u8> {
-    submit_with_comparison(spec, options, metadata, detach, json, None)
+    submit_with_profile(None, spec, options, metadata, detach, json)
+}
+
+fn submit_with_profile(
+    fault_profile: Option<FaultProfile>,
+    spec: SimulationSpec,
+    options: seedbox_api::ExecutionOptions,
+    metadata: seedbox_spec::definition::Metadata,
+    detach: bool,
+    json: bool,
+) -> Result<u8> {
+    submit_request(fault_profile, spec, options, metadata, detach, json, None)
 }
 
 fn submit_with_comparison(
+    spec: SimulationSpec,
+    options: seedbox_api::ExecutionOptions,
+    metadata: seedbox_spec::definition::Metadata,
+    detach: bool,
+    json: bool,
+    baseline: Option<&SimulationId>,
+) -> Result<u8> {
+    submit_request(None, spec, options, metadata, detach, json, baseline)
+}
+
+fn submit_request(
+    fault_profile: Option<FaultProfile>,
     spec: SimulationSpec,
     options: seedbox_api::ExecutionOptions,
     metadata: seedbox_spec::definition::Metadata,
@@ -460,6 +484,7 @@ fn submit_with_comparison(
         options,
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
+        fault_profile,
         spec,
     };
     let client = daemon::connect(None)?;

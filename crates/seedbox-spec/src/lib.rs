@@ -1,5 +1,6 @@
 //! Resolved configuration retained in run identities.
 pub mod definition;
+pub mod fault_profile;
 pub mod project;
 
 use serde::{Deserialize, Serialize};

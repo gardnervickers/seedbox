@@ -11,6 +11,7 @@ seedbox-artifacts.workspace = true
 seedbox-application.workspace = true
 seedbox-api.workspace = true
 seedbox-engine-protocol.workspace = true
+seedbox-explore.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 serde.workspace = true

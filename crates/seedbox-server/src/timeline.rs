@@ -126,6 +126,7 @@ pub(crate) fn derive(
         metadata,
         options,
         request_id: request.request_id,
+        fault_profile: None,
         spec,
     })
 }

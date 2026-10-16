@@ -145,6 +145,8 @@ enum Command {
         #[arg(long)]
         json: bool,
         #[command(flatten)]
+        faults: FaultProfileArg,
+        #[command(flatten)]
         execution: ExecutionArgs,
     },
     /// Compare deterministic results of two completed simulations.
@@ -263,6 +265,8 @@ enum Command {
         /// Print one seed-range status document as JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        faults: FaultProfileArg,
         #[command(flatten)]
         execution: ExecutionArgs,
     },
@@ -429,6 +433,14 @@ impl ComposeArg {
         };
         config::load_for_architecture(&path, &std::env::vars().collect(), architecture)
     }
+}
+
+#[derive(Args)]
+struct FaultProfileArg {
+    /// Generate faults from this YAML profile with the simulation's seed; the
+    /// generated faults join its program, and rerun and replay keep them.
+    #[arg(long, value_name = "FILE")]
+    fault_profile: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -681,8 +693,20 @@ fn run(cli: Cli) -> Result<u8> {
             paused,
             detach,
             json,
+            faults,
             execution,
-        } => simulations::run(&compose, seed, paused, detach, json, execution.wall_time),
+        } => {
+            let profile = faults::profile(faults.fault_profile.as_deref())?;
+            simulations::run(
+                &compose,
+                seed,
+                paused,
+                detach,
+                json,
+                profile,
+                execution.wall_time,
+            )
+        }
         Command::Branch {
             id,
             checkpoint,
@@ -752,15 +776,19 @@ fn run(cli: Cli) -> Result<u8> {
             paused,
             detach,
             json,
+            faults,
             execution,
         } => simulations::explore(
             &compose,
             seed,
             count,
-            paused,
+            seedbox_api::ExecutionOptions {
+                start_paused: paused,
+                wall_time_ns: execution.wall_time,
+            },
             detach,
             json,
-            execution.wall_time,
+            faults::profile(faults.fault_profile.as_deref())?,
         ),
         Command::Delete {
             resource: DeleteArg::Simulation { id },

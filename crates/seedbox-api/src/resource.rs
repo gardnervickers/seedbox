@@ -201,6 +201,10 @@ pub struct SubmitRequest {
     pub metadata: seedbox_spec::definition::Metadata,
     pub request_id: String,
     pub spec: SimulationSpec,
+    /// Faults to generate, once, into the simulation's program. Rerun and
+    /// replay execute the generated program and never sample this again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_profile: Option<seedbox_spec::fault_profile::FaultProfile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

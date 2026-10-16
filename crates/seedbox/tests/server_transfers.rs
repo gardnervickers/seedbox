@@ -324,6 +324,7 @@ fn request() -> SubmitRequest {
         metadata: Default::default(),
         options: Default::default(),
         request_id: "submit-123".into(),
+        fault_profile: None,
         spec: SimulationSpec {
             program: Vec::new(),
             start_paused: false,

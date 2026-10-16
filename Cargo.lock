@@ -2052,6 +2052,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-explore"
+version = "0.1.0"
+dependencies = [
+ "seedbox-control",
+ "seedbox-spec",
+ "serde_json",
+]
+
+[[package]]
 name = "seedbox-sdk"
 version = "0.1.0"
 dependencies = [
@@ -2075,6 +2084,7 @@ dependencies = [
  "seedbox-client",
  "seedbox-control",
  "seedbox-engine-protocol",
+ "seedbox-explore",
  "seedbox-spec",
  "serde",
  "serde_json",

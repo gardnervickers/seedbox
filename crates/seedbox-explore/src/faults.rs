@@ -1,0 +1,266 @@
+//! Sample a fault profile into keyed program inputs.
+//!
+//! Sampling is a pure function of the profile, the machine names and the seed,
+//! using integer arithmetic only, so a seed yields the same schedule on every
+//! host. Lifecycle faults (crash, pause, process pause and stop) never overlap
+//! on one machine; neither do clock faults. Network faults may overlap freely.
+use seedbox_control::Action;
+use seedbox_spec::fault_profile::{DurationRange, FaultKind, FaultProfile};
+use std::collections::BTreeMap;
+
+/// A generated input. Keys and handles share the `gen-<n>` prefix: a fault's
+/// start is `gen-<n>`, its teardown `gen-<n>-end`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Generated {
+    pub key: String,
+    pub at_ns: u64,
+    pub action: Action,
+}
+
+/// Every generated key starts with this; user program keys must not.
+pub const KEY_PREFIX: &str = "gen-";
+
+/// Sample `profile` for one simulation. `machines` lists every machine
+/// including the oracle; `limit_ns` is the simulated time limit, which every
+/// input must precede.
+pub fn generate(
+    profile: &FaultProfile,
+    seed: u64,
+    machines: &[String],
+    oracle: &str,
+    limit_ns: u64,
+) -> Result<Vec<Generated>, String> {
+    profile.validate()?;
+    let targets: Vec<&str> = if profile.targets.is_empty() {
+        machines
+            .iter()
+            .map(String::as_str)
+            .filter(|m| *m != oracle)
+            .collect()
+    } else {
+        for target in &profile.targets {
+            if target == oracle {
+                return Err("fault profile cannot target the oracle".into());
+            }
+            if !machines.contains(target) {
+                return Err(format!("fault profile target {target:?} is not a machine"));
+            }
+        }
+        profile.targets.iter().map(String::as_str).collect()
+    };
+    if targets.is_empty() {
+        return Err("fault profile has no machine to target".into());
+    }
+    let mut rng = Rng::new(seed);
+    let total_weight: u64 = profile.faults.iter().map(|f| u64::from(f.weight())).sum();
+    let mut lifecycle_free: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut clock_free: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut inputs = Vec::new();
+    let mut at = profile.start.0;
+    let mut faults = 0;
+    while faults < profile.max_faults {
+        // Uniform gap in [interval/2, 3*interval/2]: mean `interval`.
+        let interval = profile.interval.0;
+        at = at.saturating_add(interval / 2 + rng.below(interval.saturating_add(1)));
+        if at >= profile.end.0 || at >= limit_ns {
+            break;
+        }
+        let kind = {
+            let mut pick = rng.below(total_weight);
+            profile
+                .faults
+                .iter()
+                .find(|f| {
+                    let weight = u64::from(f.weight());
+                    pick < weight || {
+                        pick -= weight;
+                        false
+                    }
+                })
+                .expect("pick is below the total weight")
+        };
+        let busy = match kind {
+            FaultKind::Crash { .. }
+            | FaultKind::Pause { .. }
+            | FaultKind::PauseProcess { .. }
+            | FaultKind::Stop { .. } => Some(&mut lifecycle_free),
+            FaultKind::ClockSkew { .. } => Some(&mut clock_free),
+            FaultKind::Partition { .. } | FaultKind::Shape { .. } => None,
+        };
+        // Draw a target, then take the first free one from there, so a busy
+        // machine shifts the choice instead of skipping the fault.
+        let first = rng.below(targets.len() as u64) as usize;
+        let target = (0..targets.len())
+            .map(|i| targets[(first + i) % targets.len()])
+            .find(|t| {
+                busy.as_ref()
+                    .is_none_or(|b| b.get(t).is_none_or(|free| *free <= at))
+            });
+        let Some(target) = target else {
+            continue;
+        };
+        let handle = format!("{KEY_PREFIX}{faults}");
+        let (start, end, length) = match kind {
+            FaultKind::Partition { duration, .. } => {
+                let right = machines
+                    .iter()
+                    .filter(|m| m.as_str() != target)
+                    .cloned()
+                    .collect();
+                (
+                    Action::Partition {
+                        handle: handle.clone(),
+                        left: vec![target.into()],
+                        right,
+                    },
+                    Action::Heal {
+                        handle: handle.clone(),
+                    },
+                    rng.within(duration),
+                )
+            }
+            FaultKind::Shape {
+                duration,
+                latency,
+                loss_ppm,
+                ..
+            } => {
+                let to = machines
+                    .iter()
+                    .filter(|m| m.as_str() != target)
+                    .cloned()
+                    .collect();
+                (
+                    Action::Shape {
+                        handle: handle.clone(),
+                        from: vec![target.into()],
+                        to,
+                        latency_ns: rng.within(latency),
+                        jitter_ns: 0,
+                        loss_ppm: *loss_ppm,
+                        bandwidth_bps: None,
+                        queue_bound_ns: None,
+                        network_faults: Default::default(),
+                    },
+                    Action::Heal {
+                        handle: handle.clone(),
+                    },
+                    rng.within(duration),
+                )
+            }
+            FaultKind::Crash { downtime, .. } => (
+                Action::Crash {
+                    machine: target.into(),
+                },
+                Action::Reboot {
+                    machine: target.into(),
+                },
+                rng.within(downtime),
+            ),
+            FaultKind::Pause { duration, .. } => (
+                Action::Pause {
+                    machine: target.into(),
+                },
+                Action::Resume {
+                    machine: target.into(),
+                },
+                rng.within(duration),
+            ),
+            FaultKind::PauseProcess { duration, .. } => (
+                Action::PauseProcess {
+                    machine: target.into(),
+                },
+                Action::ResumeProcess {
+                    machine: target.into(),
+                },
+                rng.within(duration),
+            ),
+            FaultKind::Stop { downtime, .. } => (
+                Action::Stop {
+                    machine: target.into(),
+                },
+                Action::Restart {
+                    machine: target.into(),
+                },
+                rng.within(downtime),
+            ),
+            FaultKind::ClockSkew {
+                duration,
+                max_offset,
+                ..
+            } => {
+                let span = max_offset.0.saturating_mul(2).saturating_add(1);
+                let offset = rng.below(span) as i64 - max_offset.0 as i64;
+                (
+                    Action::ClockSkew {
+                        handle: handle.clone(),
+                        machine: target.into(),
+                        offset_ns: Some(offset),
+                        max_offset_ns: None,
+                    },
+                    Action::Heal {
+                        handle: handle.clone(),
+                    },
+                    rng.within(duration),
+                )
+            }
+        };
+        // A teardown past the limit would be rejected; end the fault there.
+        let end_at = at.saturating_add(length).min(limit_ns.saturating_sub(1));
+        if end_at <= at {
+            break;
+        }
+        if let Some(busy) = busy {
+            busy.insert(target, end_at.saturating_add(1));
+        }
+        inputs.push(Generated {
+            key: handle.clone(),
+            at_ns: at,
+            action: start,
+        });
+        inputs.push(Generated {
+            key: format!("{handle}-end"),
+            at_ns: end_at,
+            action: end,
+        });
+        faults += 1;
+    }
+    // Stable: at equal times a fault's own order and generation order hold.
+    inputs.sort_by_key(|input| input.at_ns);
+    Ok(inputs)
+}
+
+/// splitmix64: small, fast and fully specified, so schedules never depend on
+/// a library's generator choice.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        // Separate the profile's stream from every other use of the seed.
+        Self(seed ^ 0x6661_756c_7470_726f)
+    }
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    /// Uniform in `0..bound` by rejection; `bound` must be positive.
+    fn below(&mut self, bound: u64) -> u64 {
+        let zone = u64::MAX - u64::MAX % bound;
+        loop {
+            let value = self.next();
+            if value < zone {
+                return value % bound;
+            }
+        }
+    }
+    fn within(&mut self, range: &DurationRange) -> u64 {
+        range.min.0 + self.below(range.max.0 - range.min.0 + 1)
+    }
+}
+
+#[cfg(test)]
+#[path = "faults_tests.rs"]
+mod tests;

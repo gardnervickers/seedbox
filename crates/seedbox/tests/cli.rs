@@ -1284,3 +1284,35 @@ simulated time: 1s
 "
     );
 }
+
+#[test]
+fn fault_profiles_are_checked_before_connecting() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.yaml");
+    let output = seedbox(
+        &["run", "--fault-profile", missing.to_str().unwrap()],
+        directory.path(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        format!("error: --fault-profile {}: not found\n", missing.display())
+    );
+    let invalid = directory.path().join("profile.yaml");
+    std::fs::write(&invalid, "end: 1s\ninterval: 1s\nfaults: []\n").unwrap();
+    for command in ["run", "explore"] {
+        let output = seedbox(
+            &[command, "--fault-profile", invalid.to_str().unwrap()],
+            directory.path(),
+        );
+        assert_eq!(output.status.code(), Some(2), "{command}");
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "error: --fault-profile {}: fault profile needs at least one fault kind with positive weight\n",
+                invalid.display()
+            ),
+            "{command}"
+        );
+    }
+}

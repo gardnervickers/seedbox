@@ -1233,6 +1233,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "world-logs".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,
@@ -1293,6 +1294,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "oversized-events".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,
@@ -1439,6 +1441,7 @@ mod tests {
                     metadata: Default::default(),
                     options: Default::default(),
                     request_id: "oracle-observation".into(),
+                    fault_profile: None,
                     spec: SimulationSpec {
                         program: Vec::new(),
                         start_paused: false,
@@ -1524,6 +1527,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "readiness".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,

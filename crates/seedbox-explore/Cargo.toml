@@ -1,0 +1,10 @@
+[package]
+name = "seedbox-explore"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seedbox-control.workspace = true
+seedbox-spec.workspace = true
+serde_json.workspace = true

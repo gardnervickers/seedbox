@@ -20,6 +20,7 @@ seedbox-api = { path = "crates/seedbox-api" }
 seedbox-client = { path = "crates/seedbox-client" }
 seedbox-tui = { path = "crates/seedbox-tui" }
 seedbox-spec = { path = "crates/seedbox-spec" }
+seedbox-explore = { path = "crates/seedbox-explore" }
 tokio = { version = "1", features = ["rt", "time", "fs", "macros", "sync"] }
 thiserror = "2"
 futures-util = "0.3"

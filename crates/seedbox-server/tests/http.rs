@@ -478,6 +478,7 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
             metadata: Default::default(),
             options: Default::default(),
             request_id: "recorded-definition".into(),
+            fault_profile: None,
             spec: exported.spec,
         })
         .await

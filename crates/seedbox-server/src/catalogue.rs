@@ -370,6 +370,7 @@ impl Catalogue {
         resource.status.playback = None;
         let request = SubmitRequest {
             request_id: format!("import-{id}"),
+            fault_profile: None,
             options: resource.options.clone(),
             metadata: seedbox_spec::definition::Metadata {
                 name: resource.metadata.name.clone(),
@@ -450,6 +451,9 @@ impl Catalogue {
                 u64::from_le_bytes(bytes)
             }
         });
+        if let Some(profile) = &request.fault_profile {
+            generate_faults(&mut spec, profile)?;
+        }
         spec = serde_json::from_value(
             serde_json::to_value(&spec).map_err(|e| Error::Invalid(e.to_string()))?,
         )
@@ -1002,6 +1006,52 @@ fn validate_submission_request_id(id: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Sample a fault profile with the submission's seed into its program. The
+/// generated inputs then belong to the simulation like any authored ones.
+fn generate_faults(
+    spec: &mut seedbox_api::SimulationSpec,
+    profile: &seedbox_spec::fault_profile::FaultProfile,
+) -> Result<()> {
+    use seedbox_explore::faults::{generate, KEY_PREFIX};
+    if matches!(spec.inputs, InputSource::Checkpoint { .. }) {
+        return Err(Error::Invalid(
+            "fault profiles need a fresh start, not a checkpoint".into(),
+        ));
+    }
+    if let Some(input) = spec.program.iter().find(|i| i.key.starts_with(KEY_PREFIX)) {
+        return Err(Error::Invalid(format!(
+            "program {}: keys starting with {KEY_PREFIX} are reserved for generated faults",
+            input.key
+        )));
+    }
+    let config = &spec.configuration;
+    let machines: Vec<String> = config.services.keys().cloned().collect();
+    let seed = spec.seed.ok_or(Error::StorageFailed)?;
+    let generated = generate(
+        profile,
+        seed,
+        &machines,
+        &config.check.service,
+        config.limits.simulated_time_ns,
+    )
+    .map_err(Error::Invalid)?;
+    let mut program = std::mem::take(&mut spec.program);
+    for input in generated {
+        program.push(seedbox_api::ProgramInput {
+            key: input.key,
+            at_ns: input.at_ns,
+            action: serde_json::to_value(&input.action)
+                .map_err(|e| Error::Invalid(e.to_string()))?,
+            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+        });
+    }
+    // Stable: authored inputs keep their order and precede generated ones at
+    // equal times.
+    program.sort_by_key(|input| input.at_ns);
+    spec.program = program;
+    resolve_program(spec).map(drop)
 }
 
 pub(crate) fn resolve_program(

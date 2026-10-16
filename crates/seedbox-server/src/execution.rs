@@ -951,6 +951,7 @@ mod tests {
             metadata: Default::default(),
             options: Default::default(),
             request_id: name.into(),
+            fault_profile: None,
             spec: SimulationSpec {
                 program: Vec::new(),
                 start_paused: false,
@@ -1147,6 +1148,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "mixed-memory".into(),
+                fault_profile: None,
                 spec,
             })
             .unwrap()
@@ -1184,6 +1186,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "late-report".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,
@@ -1251,6 +1254,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "delete-control-io".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,
@@ -1348,6 +1352,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "delete-control-io".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,
@@ -1445,6 +1450,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "timeout".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,

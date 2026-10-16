@@ -317,6 +317,7 @@ fn seed_range_waits_for_frozen_inputs_and_continues_once_after_restart() {
         metadata: Default::default(),
         options: Default::default(),
         request_id: base.request_id,
+        fault_profile: None,
         spec: base.spec,
         count: 3,
     };

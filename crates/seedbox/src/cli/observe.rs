@@ -402,10 +402,14 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
 /// The fault timeline: recorded and scheduled faults with what became of each.
 pub(super) fn timeline(id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(None)?;
-    let (timeline, world) = super::simulations::runtime()?.block_on(async {
+    let (timeline, world, completed) = super::simulations::runtime()?.block_on(async {
         let timeline = client.timeline(id).await;
         let world = client.world(id).await.ok();
-        (timeline, world)
+        let completed = client
+            .describe(id)
+            .await
+            .is_ok_and(|r| r.status.phase == seedbox_api::Phase::Completed);
+        (timeline, world, completed)
     });
     let timeline = timeline.map_err(super::simulations::client_error)?;
     if json {
@@ -427,7 +431,8 @@ pub(super) fn timeline(id: &SimulationId, json: bool) -> Result<u8> {
             .fault_id
             .and_then(|id| world.faults.iter().find(|f| f.id == id))
             .map_or_else(
-                || "upcoming".into(),
+                // A finished run never reaches entries it had not admitted.
+                || if completed { "not reached" } else { "upcoming" }.into(),
                 |fault| output::word(&fault.status).to_lowercase(),
             )
     };
