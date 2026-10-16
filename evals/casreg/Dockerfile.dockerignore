@@ -1,0 +1,6 @@
+*
+!Cargo.toml
+!crates/seedbox-sdk
+!crates/seedbox-check
+!evals/casreg
+evals/casreg/target

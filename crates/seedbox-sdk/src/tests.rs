@@ -179,3 +179,45 @@ fn a_choice_waits_for_its_reply() {
     assert_eq!(client.choose("pick", &["a", "b", "c"]).unwrap(), 2);
     replier.join().unwrap();
 }
+
+#[test]
+fn recovery_obligations_pass_once_the_probe_succeeds_and_fail_at_the_deadline() {
+    let mut calls = 0;
+    assert!(recovers_within("healthy", Duration::from_secs(5), || {
+        calls += 1;
+        calls == 3
+    }));
+    assert_eq!(calls, 3);
+    assert!(!recovers_within("never", Duration::from_millis(30), || {
+        false
+    }));
+}
+
+#[test]
+fn workload_decisions_take_the_first_alternative_outside_seedbox() {
+    let decisions = workload::Decisions::with_socket("client-1", "/nonexistent/sdk.sock");
+    assert_eq!(*decisions.pick("op", &[("read", 'r'), ("write", 'w')]), 'r');
+    assert_eq!(decisions.index("key", 1000), 0);
+    assert!(!decisions.flag("retry"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn workload_sites_name_their_client() {
+    let (_directory, path, listener) = server();
+    let decisions = workload::Decisions::with_socket("client-2", &path);
+    let replier = std::thread::spawn(move || {
+        let server = listener.accept();
+        let mut buffer = [0u8; MAX_RECORD_BYTES];
+        let n = server.recv(&mut buffer).unwrap();
+        let Record::Choice { site, alternatives } = Record::parse(&buffer[..n]).unwrap() else {
+            panic!("not a choice");
+        };
+        assert_eq!((site.as_str(), alternatives.len()), ("client-2/key", 3));
+        server
+            .send(br#"{"choice":{"index":2,"occurrence":1,"site":"client-2/key"}}"#)
+            .unwrap();
+    });
+    assert_eq!(decisions.index("key", 3), 2);
+    replier.join().unwrap();
+}

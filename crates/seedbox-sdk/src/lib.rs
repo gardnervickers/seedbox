@@ -23,6 +23,7 @@ use std::io;
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 /// The supervisor's socket inside every Seedbox machine.
 pub const SOCKET: &str = "/run/seedbox/sdk.sock";
@@ -187,6 +188,13 @@ impl Client {
         self.emit(json!({ "event": with_details(json!({"name": name}), details) }));
     }
 
+    /// Report that a named piece of workload state took a value, such as a
+    /// role or a recovery phase. Keep values to a few short labels: the
+    /// planner treats each new value and each new transition as progress.
+    pub fn state(&self, name: &str, value: &str) {
+        self.emit(json!({"state": {"name": name, "value": value}}));
+    }
+
     /// Mark the workload on this machine as set up.
     pub fn setup_complete(&self, details: Value) {
         self.emit(json!({ "setup_complete": with_details(json!({}), details) }));
@@ -286,6 +294,10 @@ pub fn unreachable(id: &str, details: Value) {
 pub fn event(name: &str, details: Value) {
     CLIENT.event(name, details);
 }
+/// Report a named piece of workload state's new value; see [`Client::state`].
+pub fn state(name: &str, value: &str) {
+    CLIENT.state(name, value);
+}
 /// Mark the workload on this machine as set up.
 pub fn setup_complete(details: Value) {
     CLIENT.setup_complete(details);
@@ -306,7 +318,30 @@ pub fn flush() -> io::Result<()> {
     CLIENT.flush()
 }
 
+/// A recovery obligation, judged as an `always` property: `probe` must
+/// succeed within `deadline` of guest time from now, polled every 20ms.
+/// Start it once the system should be able to recover, for example after
+/// [`control::quiet`]; a host timeout ending the run first leaves the
+/// property unevaluated, never passed.
+pub fn recovers_within(id: &str, deadline: Duration, mut probe: impl FnMut() -> bool) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if probe() {
+            let waited = start.elapsed().as_millis() as u64;
+            always(id, true, json!({"waited_ms": waited}));
+            return true;
+        }
+        if start.elapsed() >= deadline {
+            let deadline_ms = deadline.as_millis() as u64;
+            always(id, false, json!({"deadline_ms": deadline_ms}));
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 pub mod control;
+pub mod workload;
 
 #[cfg(test)]
 mod tests;

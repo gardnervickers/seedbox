@@ -1,0 +1,9 @@
+# Crash the store at random while the oracle writes; it compacts on restart.
+# Downtime near the shortest gap (half the interval) lets a later crash land
+# soon after a reboot, rarely inside the brief compaction there.
+start: 1s
+end: 18s
+interval: 2s
+faults:
+  - kind: crash
+    downtime: {min: 900ms, max: 1100ms}

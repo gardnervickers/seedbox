@@ -1,0 +1,5 @@
+*
+!Cargo.toml
+!crates/seedbox-sdk
+!evals/compact
+evals/compact/target

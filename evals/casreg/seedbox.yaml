@@ -1,0 +1,16 @@
+name: casreg-eval
+machines:
+  register:
+    build:
+      context: ../..
+      dockerfile: evals/casreg/Dockerfile
+    entrypoint: [/casreg-server]
+    environment:
+      CASREG_BUG: "1"
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/casreg/Dockerfile
+  entrypoint: [/casreg-oracle]
+network:
+  latency: 1ms

@@ -1,0 +1,9 @@
+[package]
+name = "seedbox-check"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Pure history checkers for guest oracles: no dependencies, so workload
+# images can build it beside the SDK.
+[dependencies]

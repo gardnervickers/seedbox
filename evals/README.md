@@ -12,6 +12,23 @@ the repository root so they can use the SDK crate.
 | [kvlog](kvlog) | Writes are acknowledged before they are fsynced; a timer flushes every 50ms. | Crashes: `--fault-profile kvlog/crashes.yaml` | 1 of 10 seeds (100–109) on Apple Silicon |
 | [replog](replog) | Any replica answers reads from its own copy; a follower cut off from the leader misses writes. | Leader–follower partitions: `--fault-profile replog/partitions.yaml` | 5 of 20 seeds (100–119); none without faults; the fixed variant (reads via the leader) never |
 | [kvlog](kvlog) fixed | None: the negative control. | Flush errors and crashes: `--fault-profile kvlog/disk-errors.yaml` | Never; a store whose disk keeps failing stops, which the oracle reports as unverified rather than lost |
+| [compact](compact) | Restart compaction empties the log before the new snapshot is installed. | A crash during the brief compaction after a restart: `--fault-profile compact/crashes.yaml` | 1 of 48 seeds (1000–1047); a sweep with gaps longer than the downtime never can |
+| [casreg](casreg) | Compare-and-set releases its lock between comparing and setting. | Two concurrent compare-and-sets interleaved inside the window | 3 of 48 seeds (4000–4047); only the operation history shows it, through [`seedbox-check`](../crates/seedbox-check) |
+
+Each new eval's checker was validated before its rate was measured: a
+known failing schedule fails the buggy variant and passes the fixed one.
+For compact, a typed trigger crashes the store on its `compacting` event
+after an earlier crash; for casreg, `CASREG_YIELD=1` pauses between compare
+and set (8 of 8 buggy runs violate, 0 of 8 fixed). `CASREG_WORK` widens the
+race window (5000 rounds by default; 7000 gives 4 of 32 seeds).
+
+`seedbox-bench` compares strategies through the CLI on a running server,
+censoring runs that find nothing at the budget:
+
+```sh
+cargo build --release -p seedbox-bench
+target/release/seedbox-bench evals/compact --fault-profile evals/compact/crashes.yaml --budget 24
+```
 
 ```sh
 seedbox explore evals/kvlog --count 10 --fault-profile evals/kvlog/crashes.yaml

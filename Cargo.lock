@@ -2003,6 +2003,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-bench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "seedbox-api",
+ "seedbox-engine-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "seedbox-check"
+version = "0.1.0"
+
+[[package]]
 name = "seedbox-client"
 version = "0.1.0"
 dependencies = [
