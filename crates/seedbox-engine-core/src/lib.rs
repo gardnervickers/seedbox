@@ -12,6 +12,7 @@ pub mod links;
 pub mod log_index;
 pub mod network_counters;
 pub mod playback;
+pub mod properties;
 pub use seedbox_engine_protocol::output_layout;
 pub mod rng;
 pub use seedbox_engine_protocol::trace;

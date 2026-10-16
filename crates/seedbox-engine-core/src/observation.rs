@@ -3,6 +3,7 @@
 use seedbox_engine_protocol::{
     application_log,
     observation::{Kind, Observation, MAX_DATAGRAM_BYTES},
+    property,
 };
 use std::{
     os::unix::net::UnixDatagram,
@@ -155,6 +156,12 @@ pub struct Decoder {
 
 const MAX_LINE: usize = 16_384 + 64;
 
+enum Line {
+    Log(Kind),
+    /// A complete `SBX_PROP1` line, or `None` when it exceeded [`MAX_LINE`].
+    Property(Option<Vec<u8>>),
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DecoderState {
@@ -195,34 +202,55 @@ impl Decoder {
         time_ns: u64,
         bytes: &[u8],
     ) {
-        self.receive(bytes, |kind| {
-            if state.observe_console {
-                if let Kind::Log(chunk) = &kind {
-                    state.committed_output.push((time_ns, chunk.bytes.clone()));
+        self.receive_lines(bytes, |line| match line {
+            Line::Log(kind) => {
+                if state.observe_console {
+                    if let Kind::Log(chunk) = &kind {
+                        state.committed_output.push((time_ns, chunk.bytes.clone()));
+                    }
+                }
+                if publisher.is_some() {
+                    state.observations.push(Entry {
+                        time_ns,
+                        incarnation: state.incarnation(),
+                        kind,
+                    });
                 }
             }
-            if publisher.is_some() {
-                state.observations.push(Entry {
-                    time_ns,
-                    incarnation: state.incarnation(),
-                    kind,
-                });
+            // Property evidence is always retained, independent of observers.
+            Line::Property(frame) => {
+                let incarnation = state.incarnation();
+                state
+                    .committed_properties
+                    .push((time_ns, incarnation, frame));
             }
         });
     }
 
     pub fn receive(&mut self, bytes: &[u8], mut emit: impl FnMut(Kind)) {
+        self.receive_lines(bytes, |line| {
+            if let Line::Log(kind) = line {
+                emit(kind);
+            }
+        });
+    }
+
+    fn receive_lines(&mut self, bytes: &[u8], mut emit: impl FnMut(Line)) {
         for &byte in bytes {
             if byte == b'\n' {
-                if self.oversized {
+                if self.line.starts_with(property::PREFIX) {
+                    // An oversized property line is reported, never truncated
+                    // into something that might decode.
+                    emit(Line::Property((!self.oversized).then(|| self.line.clone())));
+                } else if self.oversized {
                     if self.line.starts_with(application_log::PREFIX) {
-                        emit(Kind::MalformedLog);
+                        emit(Line::Log(Kind::MalformedLog));
                     }
                 } else {
                     match application_log::decode(&self.line) {
-                        Ok(Some(chunk)) => emit(Kind::Log(chunk)),
+                        Ok(Some(chunk)) => emit(Line::Log(Kind::Log(chunk))),
                         Ok(None) => {}
-                        Err(_) => emit(Kind::MalformedLog),
+                        Err(_) => emit(Line::Log(Kind::MalformedLog)),
                     }
                 }
                 self.line.clear();
@@ -359,6 +387,36 @@ mod tests {
             decoder.commit(&mut state, sink, 5, b"SBX_LOG1 2 00ff\n");
             assert!(state.committed_output.is_empty());
         }
+    }
+
+    #[test]
+    fn property_lines_are_always_retained_and_never_published_as_logs() {
+        let mut decoder = Decoder::default();
+        let mut state = crate::world::MachineState::new("n1".into());
+        decoder.commit(
+            &mut state,
+            None,
+            3,
+            b"SBX_PROP1 1 1 7b7d\nSBX_LOG1 1 61\nSBX_PROP1 1 2 7b",
+        );
+        assert_eq!(
+            state.committed_properties,
+            vec![(3, 0, Some(b"SBX_PROP1 1 1 7b7d".to_vec()))]
+        );
+        assert!(state.committed_output.is_empty() && state.observations.is_empty());
+        decoder.commit(&mut state, None, 4, b"7d\n");
+        assert_eq!(
+            state.committed_properties[1],
+            (4, 0, Some(b"SBX_PROP1 1 2 7b7d".to_vec()))
+        );
+        let mut oversized = b"SBX_PROP1 1 3 ".to_vec();
+        oversized.resize(MAX_LINE + 10, b'a');
+        oversized.push(b'\n');
+        decoder.commit(&mut state, None, 5, &oversized);
+        assert_eq!(state.committed_properties[2], (5, 0, None));
+        let mut logs = Vec::new();
+        decoder.receive(b"SBX_PROP1 1 4 7b7d\n", |kind| logs.push(kind));
+        assert!(logs.is_empty());
     }
 
     #[test]

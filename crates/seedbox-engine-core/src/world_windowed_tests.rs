@@ -2547,3 +2547,69 @@ fn checkpoint_continuation_schedules_edited_inputs_before_the_first_resumed_roun
         assert_eq!(w.faults.log[2].applied_at_ns, Some(at + 1));
     }
 }
+
+fn property_line(session: u32, seq: u64, record: Value) -> Vec<u8> {
+    let hex: String = serde_json::to_vec(&record)
+        .unwrap()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("SBX_PROP1 {session} {seq} {hex}").into_bytes()
+}
+
+fn property_steps(w: &mut World<Mock>) {
+    let assert = |id: &str, condition: bool| json!({"assert": {"id": id, "kind": "always", "condition": condition}});
+    // Equal times on both machines: absorb order is machine index, then
+    // channel order, regardless of which worker finishes first.
+    for (m, at, seq, condition) in [(1, 5, 1, true), (0, 5, 1, true), (0, 30, 2, false)] {
+        let mut step = Step::new(at, Stop::Control);
+        step.properties = vec![property_line(1, seq, assert("p", condition))];
+        w.machines[m].steps.push_back(step);
+    }
+    let mut step = Step::new(30, Stop::Control);
+    step.properties = vec![b"SBX_PROP1 1 2 zz".to_vec()];
+    w.machines[1].steps.push_back(step);
+}
+
+#[test]
+fn property_frames_reduce_in_commit_order_across_worker_counts_and_checkpoints() {
+    use seedbox_engine_protocol::property::{AssessmentStatus, PropertyStatus};
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = world(&["a", "b"]);
+        property_steps(&mut w);
+        run_with(&mut w, 100, None, workers, Duration::from_micros(10)).unwrap();
+        let ledger = w.properties().clone();
+        let p = &ledger.properties["p"];
+        assert_eq!((p.passes, p.failures), (2, 1));
+        assert_eq!(p.status(), PropertyStatus::Violated);
+        let first_pass = &p.first_pass.as_ref().unwrap().origin;
+        assert_eq!((first_pass.machine.as_str(), first_pass.time_ns), ("a", 5));
+        assert_eq!(p.first_failure.as_ref().unwrap().origin.time_ns, 30);
+        assert_eq!(ledger.error_count, 1, "{:?}", ledger.errors);
+        assert_eq!(ledger.errors[0].origin.as_ref().unwrap().machine, "b");
+        assert_eq!(ledger.assessment().status, AssessmentStatus::Violated);
+        assert!(w.machines.iter().all(|m| m.committed_properties.is_empty()));
+        match &reference {
+            None => reference = Some(ledger),
+            Some(reference) => assert_eq!(&ledger, reference, "workers {workers}"),
+        }
+    }
+
+    // A checkpoint between records carries the reduced state and sequencing.
+    let mut w = world(&["a", "b"]);
+    property_steps(&mut w);
+    assert_eq!(
+        segment(&mut w, 100, None, None, Some(20), true).unwrap(),
+        "checkpoint"
+    );
+    let snapshot = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    assert_eq!(w.properties().records, 2);
+    run(&mut w, 100, None).unwrap();
+    let continued = w.properties().clone();
+    snapshot.restore(&mut w).unwrap();
+    assert_eq!(w.properties().records, 2);
+    run(&mut w, 100, None).unwrap();
+    assert_eq!(w.properties(), &continued);
+    assert_eq!(Some(continued), reference);
+}

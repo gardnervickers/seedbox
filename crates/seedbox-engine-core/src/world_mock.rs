@@ -27,6 +27,9 @@ pub(crate) struct Step {
     pub(crate) requests: Vec<Vec<u8>>,
     pub(crate) effects: Vec<(u32, bool)>,
     pub(crate) frames: Vec<Vec<u8>>,
+    /// Committed property lines, as the shared decoder produces them.
+    #[serde(default)]
+    pub(crate) properties: Vec<Vec<u8>>,
 }
 impl Step {
     pub(crate) fn new(at: u64, stop: Stop) -> Self {
@@ -39,6 +42,7 @@ impl Step {
             requests: vec![],
             effects: vec![],
             frames: vec![],
+            properties: vec![],
         }
     }
 }
@@ -321,6 +325,12 @@ impl WorldMachine for Mock {
         self.common
             .control_requests
             .extend(step.requests.into_iter().map(|bytes| (step.at, bytes)));
+        let incarnation = self.common.incarnation();
+        self.common.committed_properties.extend(
+            step.properties
+                .into_iter()
+                .map(|line| (step.at, incarnation, Some(line))),
+        );
         self.common
             .fault_effects
             .extend(step.effects.into_iter().map(|(id, ok)| (id, step.at, ok)));
@@ -402,5 +412,6 @@ pub(crate) fn world(names: &[&str]) -> World<Mock> {
         semantic_counts: network_counters::NetworkCounters::default(),
         slices: 0,
         boundaries: 0,
+        properties: Default::default(),
     }
 }

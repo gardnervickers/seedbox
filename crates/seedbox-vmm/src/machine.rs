@@ -841,6 +841,7 @@ impl Machine {
             || !self.world.control_requests.is_empty()
             || self.world.committed_console.is_some()
             || !self.world.committed_output.is_empty()
+            || !self.world.committed_properties.is_empty()
         {
             return Err(format!("{}: not at a fork point", self.world.name));
         }

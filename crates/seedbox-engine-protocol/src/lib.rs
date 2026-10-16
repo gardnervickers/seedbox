@@ -11,6 +11,7 @@ pub mod log_index;
 pub mod network_counters;
 pub mod observation;
 pub mod output_layout;
+pub mod property;
 pub mod report;
 pub mod trace;
 pub mod world_config;

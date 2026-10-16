@@ -163,6 +163,8 @@ struct Guest<'a, M> {
     console: Vec<(u64, u8)>,
     /// Times a control reply reached the controller.
     replies: Vec<u64>,
+    /// Committed property frames: (time, incarnation, line).
+    properties: Vec<(u64, u32, Option<Vec<u8>>)>,
     observations: crate::observation::Buffer,
     /// Exited in the last round.
     exited_now: bool,
@@ -209,6 +211,7 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
             requests: Vec::new(),
             console: Vec::new(),
             replies: Vec::new(),
+            properties: Vec::new(),
             observations: crate::observation::Buffer::default(),
             exited_now: false,
         }
@@ -256,6 +259,8 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
         for (at, line) in std::mem::take(&mut self.m.control_requests) {
             self.requests.push((at, line));
         }
+        self.properties
+            .append(&mut std::mem::take(&mut self.m.committed_properties));
         if let Some((at, byte)) = self.m.committed_console.take() {
             self.console.push((at, byte));
         }
@@ -502,6 +507,7 @@ struct Coord<'a, M: WorldMachine> {
     published_rejections: usize,
     /// Routed frames not yet published; empty without an observation socket.
     frames: Vec<Frame>,
+    properties: &'a mut seedbox_engine_protocol::property::Ledger,
 }
 
 impl<M: WorldMachine> Coord<'_, M> {
@@ -662,7 +668,14 @@ impl<M: WorldMachine> Coord<'_, M> {
         let mut console = Vec::new();
         let mut replies = Vec::new();
         let mut requests = Vec::new();
+        let mut properties = Vec::new();
         for (m, g) in guests.iter_mut().enumerate() {
+            properties.extend(
+                g.properties
+                    .drain(..)
+                    .enumerate()
+                    .map(|(j, (at, incarnation, line))| (at, m, j, incarnation, line)),
+            );
             received.extend(g.received.drain(..).map(|(at, from, ok)| (at, from, m, ok)));
             effects.extend(
                 g.effects
@@ -714,6 +727,10 @@ impl<M: WorldMachine> Coord<'_, M> {
             } else {
                 self.faults.effect(m, id, at, success);
             }
+        }
+        properties.sort();
+        for (at, m, _, incarnation, line) in properties {
+            crate::properties::commit(self.properties, &self.names[m], incarnation, at, line);
         }
         console.sort();
         for (at, m, _, byte) in console {
@@ -1477,6 +1494,7 @@ where
         slices,
         boundaries,
         scheduler_continuation,
+        properties,
         ..
     } = world;
     if let Some(plan) = scheduler_continuation.as_ref() {
@@ -1548,6 +1566,7 @@ where
         application_ready,
         fault_statuses,
         frames: Vec::new(),
+        properties,
         observations: observations.as_deref(),
         run,
         names,

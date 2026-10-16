@@ -77,6 +77,10 @@ pub struct MachineState {
     pub committed_console: Option<(u64, u8)>,
     /// Complete application frames, committed at their terminating transport byte.
     pub committed_output: Vec<(u64, Vec<u8>)>,
+    /// Complete property frames: (time, incarnation, line). `None` marks an
+    /// oversized line. Unlike application output, these are always retained.
+    #[serde(default)]
+    pub committed_properties: Vec<(u64, u32, Option<Vec<u8>>)>,
     #[serde(with = "crate::observation::empty_checkpoint")]
     pub(crate) observations: crate::observation::Buffer,
 }
@@ -111,6 +115,7 @@ impl MachineState {
             observe_console: false,
             committed_console: None,
             committed_output: Vec::new(),
+            committed_properties: Vec::new(),
             observations: crate::observation::Buffer::default(),
         }
     }
@@ -178,6 +183,7 @@ impl MachineState {
         self.control_requests.clear();
         self.committed_console = None;
         self.committed_output.clear();
+        self.committed_properties.clear();
         self.observations.clear();
     }
     pub fn restore_lifecycle(&mut self) {
@@ -328,6 +334,7 @@ impl SliceObservation {
             || !m.control_requests.is_empty()
             || m.committed_console.is_some()
             || !m.committed_output.is_empty()
+            || !m.committed_properties.is_empty()
             || !m.observations.is_empty()
         {
             return Err(format!("{}: undrained effects before slice", m.name));
@@ -401,7 +408,15 @@ impl SliceObservation {
             m.control_requests.iter().map(|(at, _)| *at),
             self.time,
             m.time,
-        ) {
+        ) || !ordered(
+            m.committed_properties.iter().map(|(at, _, _)| *at),
+            self.time,
+            m.time,
+        ) || m
+            .committed_properties
+            .iter()
+            .any(|(_, incarnation, _)| *incarnation != m.incarnation)
+        {
             return Err(error("effect timestamps outside committed channel order"));
         }
         Ok(())
@@ -486,6 +501,8 @@ pub struct World<M: WorldMachine> {
     pub(crate) semantic_counts: network_counters::NetworkCounters,
     pub(crate) slices: u64,
     pub(crate) boundaries: u64,
+    /// Reduced property evidence, in commit order.
+    pub(crate) properties: seedbox_engine_protocol::property::Ledger,
 }
 
 impl<M: WorldMachine> World<M> {
@@ -539,6 +556,7 @@ impl<M: WorldMachine> World<M> {
             semantic_counts: network_counters::NetworkCounters::default(),
             slices: 0,
             boundaries: 0,
+            properties: Default::default(),
         };
         world.validate()?;
         Ok(world)
@@ -592,6 +610,9 @@ impl<M: WorldMachine> World<M> {
     }
     pub fn control(&self) -> &control::Control {
         &self.control
+    }
+    pub fn properties(&self) -> &seedbox_engine_protocol::property::Ledger {
+        &self.properties
     }
     pub fn boot_inputs(&self) -> &[M::Boot] {
         &self.boot
@@ -1366,6 +1387,8 @@ pub struct WorldSnapshot<M: WorldMachine> {
     branch_identity: Option<String>,
     incarnations: Vec<Vec<Value>>,
     paused_ingress: Vec<u64>,
+    #[serde(default)]
+    properties: seedbox_engine_protocol::property::Ledger,
 }
 
 impl<M: WorldMachine> WorldSnapshot<M> {
@@ -1424,6 +1447,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             branch_identity: world.branch_identity.clone(),
             incarnations: world.incarnations.clone(),
             paused_ingress: world.paused_ingress.clone(),
+            properties: world.properties.clone(),
         })
     }
 
@@ -1546,6 +1570,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         world.semantic_counts = self.semantic_counts.clone();
         world.slices = self.slices;
         world.boundaries = self.boundaries;
+        world.properties = self.properties.clone();
         if self.boot_snapshot && self.control.triggers.records.is_empty() {
             let names: Vec<_> = world.machines.iter().map(|m| m.name.clone()).collect();
             world.input_program = Default::default();
@@ -1601,6 +1626,10 @@ pub fn drain_machine_messages<M: WorldMachine>(
                 max_time,
             )?;
         }
+    }
+    for (at, incarnation, line) in std::mem::take(&mut world.machines[m].committed_properties) {
+        let name = world.machines[m].name.clone();
+        crate::properties::commit(&mut world.properties, &name, incarnation, at, line);
     }
     for (id, at, success) in world.machines[m].fault_effects.drain(..) {
         if id == 0 && success {
