@@ -14,3 +14,8 @@ proc-macro2 = { workspace = true, features = ["span-locations"] }
 [dev-dependencies]
 seedbox-test-time.workspace = true
 tempfile.workspace = true
+
+# Development-only coordinator moved out of seedbox-test: it never runs inside
+# a Seedbox server or worker, so its subprocesses cannot race their exec writes.
+[lints.clippy]
+disallowed_methods = "allow"

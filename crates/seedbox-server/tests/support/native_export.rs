@@ -49,6 +49,7 @@ impl Drop for CpuLoad {
 pub async fn pv_large_export_under_load() {
     // New size/load scenario: 600 seconds is only a failure/hang guard, not an
     // expected duration or completion oracle. Existing native budgets unchanged.
+    // test-time: allow(hang-guard) -- Outer failure-only budget for the finite three-machine checkpoint transfer and cleanup; 600s accommodates the 500MB native closure under load, never selects a simulated outcome.
     tokio::time::timeout(Duration::from_secs(600), async {
         let mut session = NativeSession::new(DriverBackend::Pv);
         let mut request = submission_with_machines(DriverBackend::Pv, session.root.path(), &session.store, 2_000_000, 123, vec!["export-one", "export-two"]);
@@ -79,10 +80,12 @@ pub async fn pv_large_export_under_load() {
             }
             count
         });
+        // test-time: allow(measurement) -- Anchor report-only export_elapsed_ms diagnostics; exact closure contents, byte counts and retained witnesses decide success.
         let began = Instant::now();
         let exported = session.client.checkpoint_definition(&source, "saved").await;
         load.stop.store(true, Ordering::Release);
         let probes = probes.await.unwrap();
+        // test-time: allow(measurement) -- Elapsed time is printed only, never compared with a deadline or speed threshold.
         let elapsed = began.elapsed();
         let cpu_work = load.work.load(Ordering::Acquire);
         drop(load);
