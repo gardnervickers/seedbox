@@ -13,15 +13,19 @@
  *                  writes dirty without any sync.
  *   volume DIR N   files on an already-mounted volume (a named volume backed
  *                  by the disk): reports the previous count, then for each of
- *                  N rounds writes a 64 KiB file without sync, sleeps 1 s of
- *                  guest time, and fsyncs it and DIR. Finally fsyncs count,
- *                  reads every round file back and exits 0. It never waits.
+ *                  N rounds writes a 64 KiB file, submits its data to the
+ *                  device and waits for completion without any FLUSH
+ *                  (sync_file_range), sleeps 1 s of guest time, then fsyncs it
+ *                  and DIR. Finally fsyncs count, reads every round file back
+ *                  with O_DIRECT, so from the device rather than the page
+ *                  cache, and exits 0. It never waits.
  *
  * Report lines:
  *   DISK raw boot=N a=XX b=XX base=XX bytes=N
  *   DISK ext4 boot=N synced=S dirty=S          (S is "-" when absent)
- *   DISK volume boot=N, DISK volume wrote R, DISK volume synced R,
- *   DISK volume done count=N sum=HEX           (FNV-1a over all round files)
+ *   DISK volume boot=N, DISK volume wrote R, DISK volume submitted R,
+ *   DISK volume synced R,
+ *   DISK volume done count=N direct sum=HEX    (FNV-1a over all round files)
  * Failures print "DISK error <step>: <errno text>" and exit 70. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -155,15 +159,20 @@ static int volume(const char *dir, int rounds) {
     slurp(path, count_text, sizeof(count_text));
     unsigned long long count = strcmp(count_text, "-") ? strtoull(count_text, NULL, 10) : 0;
     marker("DISK volume boot=%llu\n", count);
-    static unsigned char data[ROUND_BYTES];
+    unsigned char *data;
+    if (posix_memalign((void **)&data, 4096, ROUND_BYTES)) fail("allocate");
     for (int round = 1; round <= rounds; ++round) {
-        for (size_t i = 0; i < sizeof(data); ++i)
+        for (size_t i = 0; i < ROUND_BYTES; ++i)
             data[i] = (unsigned char)(i * 31u + (unsigned)round * 7u + count);
         snprintf(path, sizeof(path), "%s/round-%d", dir, round);
         int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        if (fd < 0 || write(fd, data, sizeof(data)) != (ssize_t)sizeof(data) || close(fd))
-            fail(path);
+        if (fd < 0 || write(fd, data, ROUND_BYTES) != (ssize_t)ROUND_BYTES) fail(path);
         marker("DISK volume wrote %llu\n", (unsigned long long)round);
+        /* Completed device writes, still unflushed: no FLUSH or FUA. */
+        if (sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER)
+            || close(fd))
+            fail(path);
+        marker("DISK volume submitted %llu\n", (unsigned long long)round);
         struct timespec delay = {1, 0};
         while (nanosleep(&delay, &delay) && errno == EINTR) {}
         fsync_path(path, O_RDONLY);
@@ -176,14 +185,14 @@ static int volume(const char *dir, int rounds) {
     uint64_t sum = 1469598103934665603ull;
     for (int round = 1; round <= rounds; ++round) {
         snprintf(path, sizeof(path), "%s/round-%d", dir, round);
-        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        int fd = open(path, O_RDONLY | O_DIRECT | O_CLOEXEC);
         if (fd < 0) fail(path);
         ssize_t length;
-        while ((length = read(fd, data, sizeof(data))) > 0)
+        while ((length = read(fd, data, ROUND_BYTES)) > 0)
             for (ssize_t i = 0; i < length; ++i) sum = (sum ^ data[i]) * 1099511628211ull;
         if (length < 0 || close(fd)) fail(path);
     }
-    printf("DISK volume done count=%llu sum=%016llx\n", count + 1, (unsigned long long)sum);
+    printf("DISK volume done count=%llu direct sum=%016llx\n", count + 1, (unsigned long long)sum);
     fflush(stdout);
     return 0;
 }

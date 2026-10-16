@@ -1,8 +1,11 @@
 //! Driver service machines with a named volume backed by their retained disk.
 //! The oracle is the stock `disk-probe volume` role: each round writes a file
-//! on the volume without sync, sleeps one second of guest time, then fsyncs
-//! it; it finally fsyncs a count, reads everything back and exits 0. Its
-//! output therefore depends on the disk's contents surviving every step.
+//! on the volume, submits it to the device and waits for completion without a
+//! FLUSH, sleeps one second of guest time, then fsyncs it; it finally fsyncs a
+//! count, reads everything back with O_DIRECT (from the device, not the page
+//! cache) and exits 0. Its output depends on the disk's contents surviving
+//! every step. The raw witness also covers them: each machine contributes the
+//! digest of its disk's durable sectors and unflushed layer.
 use super::*;
 use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
 
@@ -11,8 +14,8 @@ const SEED: u64 = 123;
 const ROUNDS: &str = "2";
 /// FNV-1a of both 64 KiB rounds on a fresh volume (count 0); see
 /// tests/fixtures/disk-probe.c. Any lost or misplaced block changes it.
-const DONE: &str = "DISK volume done count=1 sum=2d1131fc008c0383\n";
-const WROTE_FIRST: &str = "DISK volume wrote 1\n";
+const DONE: &str = "DISK volume done count=1 direct sum=2d1131fc008c0383\n";
+const SUBMITTED_FIRST: &str = "DISK volume submitted 1\n";
 const SYNCED_FIRST: &str = "DISK volume synced 1\n";
 
 fn probe(backend: DriverBackend) -> Vec<u8> {
@@ -112,8 +115,8 @@ pub async fn disk_repeat_workers(backend: DriverBackend) {
     .expect("host hang guard: disk repeat never completed");
 }
 
-/// Capture while the first round's write is still unflushed and its sleep
-/// pending, export, delete the source, import on four workers and continue:
+/// Capture while the first round's completed device write is still unflushed
+/// and its sleep pending, export, delete the source, import on four workers and continue:
 /// output and raw witness equal the uninterrupted run.
 pub async fn disk_checkpoint_continuation(backend: DriverBackend) {
     // test-time: allow(hang-guard) -- Shared HANG_GUARD only catches an execution that stops making simulated progress; check_bound limits the capture search in simulated time and witnesses decide success.
@@ -175,7 +178,7 @@ pub async fn disk_checkpoint_continuation(backend: DriverBackend) {
                 !output.contains(SYNCED_FIRST),
                 "capture point passed: {output:?}"
             );
-            if output.contains(WROTE_FIRST) {
+            if output.contains(SUBMITTED_FIRST) {
                 break output;
             }
         };
