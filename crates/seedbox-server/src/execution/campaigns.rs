@@ -109,10 +109,51 @@ struct CampaignJob {
     baseline: Option<BTreeSet<String>>,
 }
 
+/// A failure's identity: an oracle target keeps the oracle's exit code and
+/// every property the source violated, so a probe cannot drift into an
+/// unrelated failure (a setup error exiting the same way, say).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FailureIdentity {
+    exit_code: Option<u8>,
+    violated: BTreeSet<String>,
+}
+
+impl FailureIdentity {
+    fn of(target: &str, status: &seedbox_api::SimulationStatus) -> Self {
+        if target != "oracle" {
+            return Self {
+                exit_code: None,
+                violated: BTreeSet::from([target.to_owned()]),
+            };
+        }
+        Self {
+            exit_code: status.oracle_exit_code,
+            violated: violated(status),
+        }
+    }
+    fn matches(&self, status: &seedbox_api::SimulationStatus) -> bool {
+        self.exit_code
+            .is_none_or(|code| status.oracle_exit_code == Some(code))
+            && self.violated.is_subset(&violated(status))
+    }
+}
+
+fn violated(status: &seedbox_api::SimulationStatus) -> BTreeSet<String> {
+    status.properties.as_ref().map_or_else(BTreeSet::new, |a| {
+        a.properties
+            .iter()
+            .filter(|p| p.status == PropertyStatus::Violated)
+            .map(|p| p.id.clone())
+            .collect()
+    })
+}
+
 struct ShrinkJob {
     source: SimulationId,
     request: ShrinkRequest,
     target: String,
+    /// What a probe must show to fail the same way.
+    identity: FailureIdentity,
     spec: seedbox_api::SimulationSpec,
     inputs: Vec<ProgramInput>,
     removable: u32,
@@ -428,6 +469,7 @@ impl ExecutionService {
             source: source.clone(),
             shrinker: Shrinker::new(candidates, request.max_probes),
             request: request.clone(),
+            identity: FailureIdentity::of(&target, &resource.status),
             target,
             spec: resource.spec.clone(),
             inputs,
@@ -922,15 +964,7 @@ impl ExecutionService {
             if resource.status.phase != Phase::Completed {
                 return Ok(());
             }
-            let reproduced = if job.target == "oracle" {
-                resource.status.oracle_verdict() == TestVerdict::Failed
-            } else {
-                resource.status.properties.as_ref().is_some_and(|a| {
-                    a.properties
-                        .iter()
-                        .any(|p| p.id == job.target && p.status == PropertyStatus::Violated)
-                })
-            };
+            let reproduced = job.identity.matches(&resource.status);
             if let Some((probe, _)) = job.probes.last_mut() {
                 probe.reproduced = Some(reproduced);
             }
@@ -1352,6 +1386,46 @@ fn read_index(dir: &Path) -> Result<BTreeSet<String>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_oracle_shrink_keeps_its_exit_code_and_violations() {
+        let status = |code: Option<u8>, violated: &[&str]| -> seedbox_api::SimulationStatus {
+            let mut status: seedbox_api::SimulationStatus =
+                serde_json::from_value(serde_json::json!({
+                    "phase": "completed", "stage": null, "simulatedTimeNs": 0, "playback": null,
+                    "stageTimings": {}, "oracleExitCode": code, "termination": null,
+                    "stopRequested": false, "engine": null, "properties": null
+                }))
+                .unwrap();
+            let mut ledger = Ledger::default();
+            for id in violated {
+                ledger.properties.insert(
+                    (*id).into(),
+                    seedbox_engine_protocol::property::Property {
+                        kind: Kind::Always,
+                        message: None,
+                        declared: true,
+                        passes: 0,
+                        failures: 1,
+                        first_pass: None,
+                        first_failure: None,
+                    },
+                );
+            }
+            status.properties = Some(ledger.assessment());
+            status
+        };
+        let source = status(Some(1), &["lost writes"]);
+        let identity = FailureIdentity::of("oracle", &source);
+        assert!(identity.matches(&source));
+        // The same exit code from a setup failure is a different failure.
+        assert!(!identity.matches(&status(Some(1), &[])));
+        assert!(!identity.matches(&status(Some(2), &["lost writes"])));
+        assert!(identity.matches(&status(Some(1), &["lost writes", "other"])));
+        let property = FailureIdentity::of("lost writes", &source);
+        assert!(property.matches(&status(Some(0), &["lost writes"])));
+        assert!(!property.matches(&status(Some(1), &[])));
+    }
     use seedbox_engine_protocol::property::{Example, Origin, Property};
 
     fn ledger(passes: u64, failures: u64, failed_at: u64) -> Ledger {

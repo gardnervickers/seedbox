@@ -393,8 +393,10 @@ oracle calls are never in the program. A generated fault and its teardown are
 one atom; removing an anchor removes its reseeds, and removing a fault removes
 the heals of its handle. The unchanged program runs first to confirm the
 failure, then every probe reruns the whole simulation and its oracle and
-counts as reproducing only when the same property is violated (or the oracle
-fails again). The result is "1-minimal under these transformations" only when
+counts as reproducing only when it fails the same way: the target property is
+violated again or, for an oracle failure, the oracle exits with the same code
+and every property the source violated is violated again, so a probe cannot
+drift into an unrelated failure. The result is "1-minimal under these transformations" only when
 ddmin finished at single-atom granularity; otherwise it is "reduced".
 
 ## Property records
