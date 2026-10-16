@@ -280,13 +280,13 @@ pub(crate) fn request(
             .cloned()
             .unwrap_or_else(|| control.service.clone())
     });
-    if controller.as_ref().is_some_and(|name| {
-        !std::iter::once(&prepared.oracle)
-            .chain(&prepared.machines)
-            .chain(&prepared.spawnable)
-            .any(|machine| &machine.name == name)
-    }) {
-        return Err(bad("Driver controller does not name a retained machine; resolve the configured controller before execution"));
+    if controller
+        .as_ref()
+        .is_some_and(|name| name != &prepared.oracle.name)
+    {
+        return Err(bad(
+            "Driver controller must name the retained oracle, not another retained machine",
+        ));
     }
     {
         let policy = match &mut prepared.inventory {

@@ -62,7 +62,7 @@ fn malformed_report_or_digest_is_not_accepted_as_native_evidence() {
     assert!(decode_report(&serde_json::to_vec(&report).unwrap()).is_err());
 }
 #[test]
-fn fresh_pv_is_x86_only_and_guest_control_remains_refused_before_worker_spawn() {
+fn pv_controller_scope_is_linux_x86_only_and_tcg_control_is_refused() {
     let mut pv = profile();
     pv.backend = crate::execution::Backend::Other("driver-pv".into());
     pv.semantic_parameters.engine = Some(DriverExecutor::descriptor(DriverBackend::Pv, "x86_64"));
@@ -78,7 +78,10 @@ fn fresh_pv_is_x86_only_and_guest_control_remains_refused_before_worker_spawn() 
         );
         assert!(pv.admit_execution(false).is_err());
     }
-    assert!(pv.admit_execution(true).is_err());
+    assert_eq!(
+        pv.admit_execution(true).is_ok(),
+        cfg!(all(target_os = "linux", target_arch = "x86_64"))
+    );
     let tcg = DriverExecutor::new(profile(), DriverBackend::Tcg, 1).unwrap();
     let error = tcg.admit_execution(true).unwrap_err().to_string();
     assert!(

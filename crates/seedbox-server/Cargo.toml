@@ -28,7 +28,7 @@ seedbox-spec.workspace = true
 
 [dev-dependencies]
 seedbox-client.workspace = true
-seedbox-machine.workspace = true
+seedbox-machine = { workspace = true, features = ["test-support"] }
 seedbox-machine-pv.workspace = true
 seedbox-machine-tcg.workspace = true
 tar.workspace = true

@@ -164,14 +164,14 @@ fn codec3_ordinary_none_is_not_explicit_default_and_closed_body_is_checked() {
 }
 
 #[test]
-fn pv_controller_restore_has_a_separate_admission_gate() {
+fn pv_controller_restore_remains_scoped_to_linux_x86() {
     let policy = wire::BackendPolicy {
         controller: Some("oracle".into()),
         ..Default::default()
     };
-    let error = crate::driver_world::policy::admit_restore(&inventory(Some(policy))).unwrap_err();
-    assert!(
-        error.contains("controller checkpoint continuation"),
-        "{error}"
+    let admitted = crate::driver_world::policy::admit_restore(&inventory(Some(policy)));
+    assert_eq!(
+        admitted.is_ok(),
+        cfg!(all(target_os = "linux", target_arch = "x86_64"))
     );
 }

@@ -13,6 +13,7 @@ mod executor;
 mod inventory;
 mod results;
 pub use executor::{DriverBackend, DriverExecutor};
+mod controller;
 mod native;
 mod policy;
 pub(crate) mod retained;

@@ -1,6 +1,8 @@
 use super::*;
 #[path = "codec_v3_tests.rs"]
 mod codec_v3_tests;
+#[path = "controller_tests.rs"]
+mod controller_tests;
 #[path = "lazy_restore_tests.rs"]
 mod lazy_restore_tests;
 #[path = "metadata_roundtrip_tests.rs"]

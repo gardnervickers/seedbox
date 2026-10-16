@@ -1,6 +1,11 @@
 //! Native public-service acceptance, not a fixture executor or protocol model.
 //! Uses the normal release CLI/runtime package and existing finite CPU fixture.
 
+#[cfg(feature = "kvm-tests")]
+#[path = "native_controller.rs"]
+mod controller;
+#[cfg(feature = "kvm-tests")]
+pub use controller::{pv_controller_checkpoint, pv_controller_repeat};
 use futures_util::StreamExt;
 use seedbox_api::{
     ComparisonStatus, ExecutionTermination, Phase, SimulationSpec, SubmitRequest, TestVerdict,
@@ -188,8 +193,49 @@ fn submission(
         working_directory: "/".into(),
         user: "0:0".into(),
     };
+    fixture_submission(
+        backend,
+        root,
+        store,
+        seed,
+        NativeFixture {
+            name: "oracle",
+            filesystem,
+            launch,
+            control: false,
+            request_id: format!("cpu-{iterations}"),
+        },
+    )
+}
+struct NativeFixture {
+    name: &'static str,
+    filesystem: PathBuf,
+    launch: GuestLaunch,
+    control: bool,
+    request_id: String,
+}
+fn fixture_submission(
+    backend: DriverBackend,
+    root: &Path,
+    store: &ContentStore,
+    seed: u64,
+    fixture: NativeFixture,
+) -> SubmitRequest {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let executable = checkout.join("target/release/seedbox");
+    let archive = checkout.join("build/assets/driver-runtime.tar.gz");
+    assert!(
+        executable.is_file() && archive.is_file(),
+        "build normal release assets first"
+    );
+    let oracle = fixture.name;
+    let filesystem = fixture.filesystem;
+    let launch = fixture.launch;
     let mut definition = MachineDefinition {
-        name: "oracle".into(),
+        name: oracle.into(),
         resources: Resources { memory_bytes: 0 },
         application: PreparedApplication {
             filesystem: FilesystemArchive::new(fs::read(&filesystem).unwrap()).unwrap(),
@@ -214,7 +260,7 @@ fn submission(
         selected.guest_assets.display(),
         selected.qemu,
     );
-    let environment = GuestEnvironment::new("oracle", "127.0.0.1 localhost\n", false);
+    let environment = GuestEnvironment::new(oracle, "127.0.0.1 localhost\n", fixture.control);
     let boot = match backend {
         DriverBackend::Pv => seedbox_machine_pv::machine::pv::Factory::new(
             &executable,
@@ -258,7 +304,7 @@ fn submission(
         wall_clock_epoch: Some(946_684_800),
         kernel: store.put_file(&assets.join("kernel")).unwrap(),
         images: BTreeMap::from([(
-            "oracle".into(),
+            oracle.into(),
             PreparedImage {
                 manifest: filesystem_digest.clone(),
                 config: filesystem_digest.clone(),
@@ -273,8 +319,8 @@ fn submission(
                 },
             },
         )]),
-        guests: BTreeMap::from([("oracle".into(), filesystem_digest)]),
-        placement: BTreeMap::from([("oracle".into(), "oracle".into())]),
+        guests: BTreeMap::from([(oracle.into(), filesystem_digest)]),
+        placement: BTreeMap::from([(oracle.into(), oracle.into())]),
         profile: ExecutionProfile {
             backend: Backend::Other(format!("driver-{}", label(backend))),
             engine: store.put_file(&executable).unwrap(),
@@ -285,7 +331,7 @@ fn submission(
         provenance: BTreeMap::new(),
     };
     let environments = BTreeMap::from([(
-        "oracle".into(),
+        oracle.into(),
         wire::Environment {
             hostname: environment.hostname.clone(),
             hosts: environment.hosts.clone(),
@@ -296,7 +342,7 @@ fn submission(
                 max_map_count: environment.limits.max_map_count,
                 nofile: environment.limits.nofile,
             },
-            control_socket: false,
+            control_socket: fixture.control,
         },
     )]);
     let inventory = match backend {
@@ -331,7 +377,7 @@ fn submission(
     let prepared = wire::Prepared {
         inventory,
         oracle: wire::Machine {
-            name: "oracle".into(),
+            name: oracle.into(),
             memory_bytes: definition.resources.memory_bytes,
             filesystem: artifact(&filesystem),
             process: wire::Process {
@@ -349,9 +395,14 @@ fn submission(
         network: wire::Network::default(),
     };
     driver_world::retain_prepared(&mut inputs, &prepared, store).unwrap();
+    let image = if fixture.control {
+        "fixture/prepared-fixture"
+    } else {
+        "fixture/cpu-loop"
+    };
     let mut configuration = seedbox_application::config::parse(
         &format!(
-            "name: native-{}-service\nservices:\n  oracle:\n    image: fixture/cpu-loop\n",
+            "name: native-{}-service\nservices:\n  {oracle}:\n    image: {image}\n",
             label(backend)
         ),
         Path::new("/fixture/compose.yaml"),
@@ -359,14 +410,16 @@ fn submission(
     )
     .unwrap();
     configuration.machine.memory_mb = memory_mb;
-    configuration.control = None;
+    configuration.control = fixture.control.then(|| seedbox_spec::Control {
+        service: oracle.into(),
+    });
     let definition =
         seedbox_application::definition::resolve(&configuration, &inputs, seed, vec![]).unwrap();
-    assert!(!definition.simulator.oracle_control);
+    assert_eq!(definition.simulator.oracle_control, fixture.control);
     let mut request = SubmitRequest {
         metadata: Default::default(),
         options: Default::default(),
-        request_id: format!("cpu-{iterations}"),
+        request_id: fixture.request_id,
         spec: SimulationSpec::resolved(definition),
     };
     request.metadata.name = format!("native-{}-service", label(backend));

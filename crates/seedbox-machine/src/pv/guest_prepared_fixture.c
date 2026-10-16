@@ -42,6 +42,32 @@ static int private_launch_state_closed(const char *executable) {
     closedir(directory);
     return 0;
 }
+/* Optional native-service acceptance mode. Rust validates the actual reply
+ * objects, identities and exact admission/reply latency from these log lines.
+ * This guest only frames requests and requires a complete newline reply. */
+static int control_call(int fd, const char *request, int pending_sleep) {
+    size_t left = strlen(request);
+    while (left) {
+        ssize_t n = write(fd, request, left);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return failure("control request write");
+        request += n; left -= (size_t)n;
+    }
+    if (pending_sleep) { puts("ORACLE_SLEEP_SENT"); fflush(stdout); }
+    char reply[4096];
+    size_t used = 0;
+    while (used + 1 < sizeof(reply)) {
+        ssize_t n = read(fd, reply + used, 1);
+        if (n < 0 && errno == EINTR) continue;
+        if (n != 1) return failure("control reply read");
+        if (reply[used++] == '\n') {
+            reply[used] = 0;
+            printf("ORACLE_REPLY %s", reply); fflush(stdout);
+            return 0;
+        }
+    }
+    return failure("control reply length");
+}
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--wrapper")) {
         if (argc < 5 || strcmp(argv[2], "--")) return failure("wrapper argv");
@@ -52,6 +78,7 @@ int main(int argc, char **argv) {
         execvp(argv[3], argv + 3); return failure("wrapper exec");
     }
     int script = strstr(argv[0], "interpreter") != NULL;
+    int probe = !script && argc == 4 && !strcmp(argv[3], "--control-probe");
     const char *first, *empty;
     if (script) {
         if (argc != 5 || strcmp(argv[1], "--script-option") || strcmp(argv[2], "/opt/bin/script")) return failure("script argv");
@@ -63,7 +90,7 @@ int main(int argc, char **argv) {
         if (!strstr(source, "fixture-script\n")) return failure("script contents");
         first = argv[3]; empty = argv[4];
     } else {
-        if (argc != 3) return failure("program argv");
+        if (argc != 3 && !probe) return failure("program argv");
         first = argv[1]; empty = argv[2];
     }
     if (strcmp(first, "one two") || *empty) return failure("argument boundaries");
@@ -87,6 +114,15 @@ int main(int argc, char **argv) {
     struct sockaddr_un address = {.sun_family = AF_UNIX};
     strcpy(address.sun_path, "/run/seedbox/control.sock");
     if (control < 0 || connect(control, (struct sockaddr *)&address, sizeof(address))) return failure("control socket in image root");
+    if (probe) {
+        int result = control_call(control, "{\"version\":1,\"id\":1,\"op\":\"now\"}\n", 0);
+        if (result) return result;
+        result = control_call(control, "{\"version\":1,\"id\":2,\"op\":\"sleep\",\"duration_ns\":20000000}\n", 1);
+        if (result) return result;
+        result = control_call(control, "{\"version\":1,\"id\":3,\"op\":\"now\"}\n", 0);
+        if (result) return result;
+        puts("ORACLE_CONTROL_DONE"); fflush(stdout);
+    }
     close(control);
     printf("MODE=%s\nARGV0=%s\nUID=1234 GID=2345\nCWD=%s\nVALUE=%s\nFILE=retained payload\nLINKS=ok\nCONTROL=ok\n", script ? "SCRIPT" : "ELF", argv[0], cwd, value);
     return 0;

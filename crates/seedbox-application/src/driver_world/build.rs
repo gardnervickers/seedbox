@@ -31,20 +31,11 @@ pub(super) fn open(request: &wire::Request) -> Result<Worker<Native>> {
         return Err(bad("Driver worker count must be positive"));
     }
     super::policy::decode_optional(request.prepared.inventory.backend_policy()).map_err(bad)?;
-    if let Some(controller) = request
-        .prepared
-        .inventory
-        .backend_policy()
-        .and_then(|policy| policy.controller.as_ref())
-    {
-        if !std::iter::once(&request.prepared.oracle)
-            .chain(&request.prepared.machines)
-            .chain(&request.prepared.spawnable)
-            .any(|machine| &machine.name == controller)
-        {
-            return Err(bad("Driver backend policy controller does not name a retained machine; resolve the controller before execution"));
-        }
-    }
+    super::controller::resolve(
+        &request.prepared.inventory,
+        &request.prepared.oracle.name,
+        request.prepared.network.latency_ns,
+    )?;
     super::policy::admit(&request.prepared.inventory).map_err(bad)?;
     fs::create_dir_all(request.output.join(super::NATIVE_SCRATCH))?;
     if let Some(path) = &request.resume_checkpoint {
@@ -116,6 +107,12 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
             .collect(),
     )
     .map_err(bad)?;
+    let network = super::controller::resolve(
+        &request.prepared.inventory,
+        &request.prepared.oracle.name,
+        request.prepared.network.latency_ns,
+    )?
+    .configure(network)?;
     let mut driver = Driver::new_seeded_with_network(
         Timestamp::from_nanos(0),
         Duration::from_nanos(request.prepared.quantum_ns),
@@ -232,6 +229,15 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
         .input_program
         .validate_at(envelope.state.world.position.simulated_time_ns)
         .map_err(bad)?;
+    // Bind the codec4 controller/latency before extracting a factory runtime
+    // or restoring even the first native machine. Saved queues stay in Driver.
+    let retained = checkpoint::open(&envelope, driver_limits(envelope.driver.length)?)?;
+    super::controller::resolve(
+        &request.prepared.inventory,
+        &request.prepared.oracle.name,
+        request.prepared.network.latency_ns,
+    )?
+    .validate_saved(retained.controller_setup())?;
     let assets = materialize_factory(
         &envelope.inventory,
         &request.output,
@@ -248,7 +254,6 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     let constructed: Constructed = Arc::new(Mutex::new(VecDeque::new()));
     let ledger = constructed.clone();
     // Only verified open descriptors accumulate here, not decoded RAM images.
-    let retained = checkpoint::open(&envelope, driver_limits(envelope.driver.length)?)?;
     let retained = retained.try_map_snapshots(|file| Ok::<_, Error>(Snapshot::Retained(file)))?;
     let mut names = envelope.state.world.machine_names.iter();
     let native_limits = native_limits(

@@ -85,19 +85,32 @@ fn native_invalid_wire_policy_is_rejected_before_materialization_and_restore_bin
     validate_policy_binding(&valid, &valid).unwrap();
 }
 #[test]
-fn unfinished_pv_and_tcg_controller_requests_fail_closed_before_effects() {
+fn controller_must_be_the_dedicated_oracle_before_any_host_effects() {
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("must-not-exist");
+    let inventory = inventory(Some(wire::BackendPolicy {
+        controller: Some("retained-worker".into()),
+        ..Default::default()
+    }));
+    let mut request = request(inventory, output.clone());
+    let mut peer = request.prepared.oracle.clone();
+    peer.name = "retained-worker".into();
+    request.prepared.machines.push(peer);
+    let error = open(&request)
+        .err()
+        .expect("a retained peer is not the oracle")
+        .to_string();
+    assert!(error.contains("must name the retained oracle"), "{error}");
+    assert!(!output.exists());
+}
+#[test]
+fn unfinished_tcg_controller_requests_fail_closed_before_effects() {
     let root = tempfile::tempdir().unwrap();
     let tcg = inventory(Some(wire::BackendPolicy {
         controller: Some("oracle".into()),
         ..Default::default()
     }));
-    let mut pv = serde_json::to_value(tcg.clone()).unwrap();
-    pv["backend"] = "pv".into();
-    pv["progress"] = pv["kernel"].clone();
-    pv["blocks_per_progress_call"] = 1.into();
-    pv.as_object_mut().unwrap().remove("firmware");
-    let pv: Inventory = serde_json::from_value(pv).unwrap();
-    for (index, inventory) in [pv, tcg].into_iter().enumerate() {
+    for (index, inventory) in [tcg].into_iter().enumerate() {
         let output = root.path().join(index.to_string());
         let request = request(inventory, output.clone());
         let error = open(&request)

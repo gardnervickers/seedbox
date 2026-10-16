@@ -79,10 +79,13 @@ impl DriverExecutor {
         self.runtime = Some(super::binding::Binding::new(inputs)?);
         Ok(self)
     }
-    // Fresh non-controller x86 PV is exercised through the public service.
-    // Other PV hosts and guest control remain explicit unproven paths.
+    // Controller mapping and continuation are scoped to Linux x86 PV.
+    // Other PV hosts and TCG guest control remain explicit unproven paths.
     fn admit_execution(&self, controller: bool) -> Result<()> {
-        if controller {
+        if controller
+            && !(self.backend == DriverBackend::Pv
+                && cfg!(all(target_os = "linux", target_arch = "x86_64")))
+        {
             return Err(Error::Setup(super::policy::CONTROLLER_INCOMPLETE.into()));
         }
         if self.backend == DriverBackend::Pv

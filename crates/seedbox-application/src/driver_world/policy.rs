@@ -38,13 +38,15 @@ pub(super) fn encode(value: &BackendPolicy) -> Result<wire::BackendPolicy, Strin
     })
 }
 /// Admit the proven native path without changing backend selection.
-// TODO: Re-evaluate: ARM PV requires its own native proof. Guest control stays
-// refused until service name/Driver authority agree.
+// TODO: Re-evaluate: ARM PV requires its own native proof. Guest control is
+// scoped to Linux x86 PV; build binds the service name to Driver authority.
 pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
     let policy = decode_optional(inventory.backend_policy())?;
     if policy
         .as_ref()
         .is_some_and(|policy| policy.controller.is_some())
+        && !(matches!(inventory, wire::Inventory::Pv { .. })
+            && cfg!(all(target_os = "linux", target_arch = "x86_64")))
     {
         return Err(CONTROLLER_INCOMPLETE.into());
     }
@@ -55,14 +57,16 @@ pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
     }
     Ok(())
 }
-/// PV continuation is independently limited to non-controller worlds. A future
-/// fresh-controller admission change must not silently broaden restore.
+/// Keep PV controller continuation scoped independently of fresh admission.
+/// build::restore must bind the saved Driver controller and latency before any
+/// factory or native restoration; only Linux x86-64 continuation is exercised.
 pub(super) fn admit_restore(inventory: &wire::Inventory) -> Result<(), String> {
     let policy = decode_optional(inventory.backend_policy())?;
     if matches!(inventory, wire::Inventory::Pv { .. })
         && policy
             .as_ref()
             .is_some_and(|policy| policy.controller.is_some())
+        && !cfg!(all(target_os = "linux", target_arch = "x86_64"))
     {
         return Err("Driver PV controller checkpoint continuation is incomplete; only non-controller x86-64 Linux restore is proven".into());
     }
