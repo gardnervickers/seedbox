@@ -161,6 +161,9 @@ fn test_machine_etcd_requires_release_cli_and_accessible_image_engine() {
     let binary = root.join("executable");
     fs::write(&binary, "fixture").unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let runtime = root.join(SERVICE_RUNTIME);
+    fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+    fs::write(runtime, "runtime fixture").unwrap();
     let not_executable = root.join("not-executable");
     fs::write(&not_executable, "fixture").unwrap();
     fs::set_permissions(&not_executable, fs::Permissions::from_mode(0o644)).unwrap();

@@ -367,6 +367,7 @@ pub fn run(backend: Backend) {
         .await
         .map_err(|_| "infrastructure hang reaping etcd test server".to_owned())
         .and_then(|status| status.map_err(|e| e.to_string()));
+        eprintln!("etcd server cleanup result: {reaped:?}");
         result?;
         shutdown?;
         let status = reaped?;
