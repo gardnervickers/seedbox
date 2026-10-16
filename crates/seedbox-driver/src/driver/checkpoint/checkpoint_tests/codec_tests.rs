@@ -1,4 +1,5 @@
 //! Driver-owned binary persistence with a deliberately separate mock artifact codec.
+mod frame_capacity_tests;
 mod streaming_tests;
 use super::*;
 use crate::driver::fixture::owned::network_fixture::{initial, net, policy, setup};

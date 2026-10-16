@@ -477,7 +477,7 @@ fn malformed_layer_and_observation_relations_do_not_enter_continuation() {
         NetworkFaults::default(),
     );
     n.route(MachineId(0), 0, &plain(0, 1, 1)).unwrap();
-    for case in 0..4 {
+    for case in 0..5 {
         let mut bad = n.clone();
         match case {
             0 => bad.layers.get_mut(&1).unwrap().queue.matched = 1,
@@ -489,7 +489,8 @@ fn malformed_layer_and_observation_relations_do_not_enter_continuation() {
                     .burst
                     .insert((MachineId(0), MachineId(1)), 0);
             }
-            _ => bad.frames[0].due = Some(Timestamp::from_nanos(0)),
+            3 => bad.frames[0].due = Some(Timestamp::from_nanos(0)),
+            _ => bad.frame_capacity = 0,
         }
         assert!(
             bad.check_persist(3, 0, &[])

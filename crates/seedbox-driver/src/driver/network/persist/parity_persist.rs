@@ -249,10 +249,10 @@ impl Wire for Network {
         let frame_capacity: usize = Wire::get(d)?;
         let frames: std::collections::VecDeque<FrameFact> = Wire::get(d)?;
         let omitted = Wire::get(d)?;
-        require(
-            frame_capacity as u64 <= d.limits.collection_items && frames.len() <= frame_capacity,
-            "frame observation capacity",
-        )?;
+        // Capacity is a scalar retention setting, not a decoded allocation.
+        // Wire::get already bounds the actual frame collection; a small capture
+        // may legitimately have more unused capacity than encoded bytes.
+        require(frames.len() <= frame_capacity, "frame observation capacity")?;
         Ok(Self {
             config,
             members,
