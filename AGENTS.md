@@ -51,15 +51,13 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
   Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
   so it would also move standalone crate builds and break their scripts.
-- The default Nix development shell uses shared `~/.cache/sccache` storage
-  with a bounded size and `CARGO_INCREMENTAL=0`. Keep Cargo target directories
-  private per agent; they are outputs, not the shared cache. For a local
-  incremental edit loop, use `RUSTC_WRAPPER= CARGO_INCREMENTAL=1 cargo ...`
-  inside the shell; sccache rejects explicit incremental mode. Rust cache keys
-  retain checkout paths and Cargo environment, so hits are not universal; do not
-  erase the build-only `SEEDBOX_BUILD_ROOT` checkout invalidation. A running
-  cache server retains its startup settings; do not reset or restart a shared
-  server while other builds are using it.
+- The default Nix development shell provides sccache without overriding Cargo
+  wrapper, cache or incremental settings. It preserves a developer's existing
+  Cargo wrapper configuration and normal incremental edit loop. Keep target
+  directories private per agent; they are outputs, not the shared cache. Rust
+  cache keys retain checkout paths and Cargo environment, including target
+  directory settings, so hits are not universal. Do not erase the build-only
+  `SEEDBOX_BUILD_ROOT` checkout invalidation or reset a shared cache server.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.

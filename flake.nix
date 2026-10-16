@@ -46,13 +46,6 @@
         in {
           default = pkgs.mkShell ({
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-            RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
-            SCCACHE_CACHE_SIZE = "20G";
-            # Rust incremental outputs cannot be shared through sccache.
-            CARGO_INCREMENTAL = "0";
-            shellHook = ''
-              export SCCACHE_DIR="$HOME/.cache/sccache"
-            '';
             # Provisioned before invocation: wrappers never compile or download.
             SEEDBOX_CHECK = "${checker}/bin/seedbox-check";
             SEEDBOX_MINIO_PYTHONPATH = "${minioPythonFixture pkgs}";
