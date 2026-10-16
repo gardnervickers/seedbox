@@ -121,8 +121,22 @@ barriers and completes at the next fixed quantum boundary. Status distinguishes
 committed boundary positions from completed quanta. `pause_before_next_fault`
 holds the next effective fault just before dispatch, whether requested by a guest,
 a trigger or a host input. Rejected or stale effects do not consume the arm.
-Resuming applies the held effect exactly once; ordinary timer wakeups are not faults. Permanent stop prevents further
-execution without crashing machines. The driver never sleeps or preempts an
+Resuming applies the held effect exactly once; ordinary timer wakeups are not
+faults. A paused pre-effect hold can be checkpointed. Its admitted fault identity,
+resolved pending effect, FIFO order, playback hold and input cursor are captured
+as deterministic Driver state, not reconstructed from observation events. Restore
+keeps the same position paused before the effect; importing or reading status does
+not release it. Step releases due effects in their existing order, completes one
+quantum, then remains paused. Continue releases the hold and runs at the selected
+rate. These Step/Continue semantics match legacy playback; held checkpoint support
+does not depend on legacy's pre-effect checkpoint restriction.
+
+The service refuses capture while running (`NotPaused`), before application
+readiness (`NotReady`), or during a prepared but uncommitted intervention
+(`FaultPending`). A held, already-admitted effect is not that prepared transaction.
+Invalid request identities and an outstanding capture keep their corresponding
+checkpoint errors. Snapshot/publication failures retain their existing failure
+handling. Permanent stop prevents further execution without crashing machines. The driver never sleeps or preempts an
 active `Machine::run`; callers service controls and cancellation between steps.
 
 The quantum is fixed at construction, with boundaries anchored at the initial

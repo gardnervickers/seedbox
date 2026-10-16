@@ -1,3 +1,4 @@
+mod held_checkpoint;
 mod public_actions;
 mod run;
 mod state_results;
@@ -14,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Data {
     name: String,
     at: u64,
@@ -132,6 +133,12 @@ fn inventory(root: &Path) -> Inventory {
     }
 }
 fn worker(workers: usize) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
+    worker_with_network(workers, false)
+}
+fn worker_with_network(
+    workers: usize,
+    network: bool,
+) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
     let root = tempfile::tempdir().unwrap();
     let inventory = inventory(root.path());
     let output = root.path().join("output");
@@ -140,14 +147,29 @@ fn worker(workers: usize) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>)
     let spy = runs.clone();
     let constructed: Constructed = Arc::default();
     let ledger = constructed.clone();
+    let mut oracle = definition("oracle");
+    let mut peer = definition("n1");
+    if network {
+        use seedbox_machine::definition::{MacAddress, NetworkInterface};
+        for (index, definition) in [&mut oracle, &mut peer].into_iter().enumerate() {
+            definition.network = Some(
+                NetworkInterface::new(
+                    MacAddress::new([2, 0, 0, 0, 0, index as u8 + 1]).unwrap(),
+                    std::net::Ipv4Addr::new(10, 0, 0, index as u8 + 1),
+                    24,
+                )
+                .unwrap(),
+            );
+        }
+    }
     let driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
         workers,
         42,
         || Ok(()),
-        definition("oracle"),
-        vec![definition("n1")],
+        oracle,
+        vec![peer],
         vec![],
         NetworkConfig::default(),
         move |definition| {
