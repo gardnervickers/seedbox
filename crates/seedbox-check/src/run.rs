@@ -530,7 +530,8 @@ pub fn machine_suite_runs(suites: &[Suite], environment: &Environment, root: &Pa
         }
         // Public-service acceptance is feature-gated rather than ignored:
         // build with the suite's feature and run the whole target unfiltered.
-        if let Some((feature, target)) = service_target(suite) {
+        let (feature, targets) = service_targets(suite);
+        for &target in targets {
             result.push(Job::new(
                 &format!("{}/seedbox-server/--test/{target}", suite.name()),
                 words(&[

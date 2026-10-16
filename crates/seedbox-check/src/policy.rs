@@ -208,13 +208,18 @@ pub const CPU_LOOP_FIXTURE: &str = "SEEDBOX_CPU_LOOP_FIXTURE";
 /// The normal runtime package the public-service tests submit through, from
 /// `cargo xtask build-assets`.
 pub const SERVICE_RUNTIME: &str = "build/assets/driver-runtime.tar.gz";
-/// The feature and `seedbox-server` integration target of a machine suite's
+/// The feature and `seedbox-server` integration targets of a machine suite's
 /// public-service acceptance. These tests are feature-gated, not ignored.
-pub fn service_target(suite: Suite) -> Option<(&'static str, &'static str)> {
+/// The controller target runs the PV prepared fixture's oracle socket calls.
+/// Other suites have none.
+pub fn service_targets(suite: Suite) -> (&'static str, &'static [&'static str]) {
     match suite {
-        Suite::MachineTcg => Some(("tcg-tests", "native_tcg_service")),
-        Suite::MachinePv => Some(("kvm-tests", "native_pv_service")),
-        _ => None,
+        Suite::MachineTcg => ("tcg-tests", &["native_tcg_service"]),
+        Suite::MachinePv => (
+            "kvm-tests",
+            &["native_pv_service", "native_controller_service"],
+        ),
+        _ => ("", &[]),
     }
 }
 pub fn machine_inputs(suite: Suite) -> Vec<String> {

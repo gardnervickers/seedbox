@@ -592,6 +592,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
         "cargo test -p seedbox-test --locked --test prepared_application -- --ignored pv",
         "cargo test -p seedbox-test --locked --test simulation_control -- --ignored pv",
         "cargo test -p seedbox-server --locked --features kvm-tests --test native_pv_service --",
+        "cargo test -p seedbox-server --locked --features kvm-tests --test native_controller_service --",
     ]
     .map(|line| {
         line.split_whitespace()
@@ -607,7 +608,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
             .map(|job| job.args.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        19
+        20
     );
     assert_eq!(
         runs.iter().map(|job| job.name.as_str()).collect::<Vec<_>>(),
@@ -630,7 +631,8 @@ fn test_machine_suites_do_not_force_serial_execution() {
             "machine-pv-x86/seedbox-test/--test/guest_services",
             "machine-pv-x86/seedbox-test/--test/prepared_application",
             "machine-pv-x86/seedbox-test/--test/simulation_control",
-            "machine-pv-x86/seedbox-server/--test/native_pv_service"
+            "machine-pv-x86/seedbox-server/--test/native_pv_service",
+            "machine-pv-x86/seedbox-server/--test/native_controller_service"
         ]
     );
     for job in runs {
@@ -639,9 +641,13 @@ fn test_machine_suites_do_not_force_serial_execution() {
 }
 #[test]
 fn test_machine_suites_schedule_feature_gated_public_service_targets_unfiltered() {
-    for (suite, feature, target) in [
-        ("machine-tcg", "tcg-tests", "native_tcg_service"),
-        ("machine-pv-x86", "kvm-tests", "native_pv_service"),
+    for (suite, feature, targets) in [
+        ("machine-tcg", "tcg-tests", &["native_tcg_service"][..]),
+        (
+            "machine-pv-x86",
+            "kvm-tests",
+            &["native_pv_service", "native_controller_service"][..],
+        ),
     ] {
         let runs = machine_suite_runs(
             &suites(&[suite]),
@@ -652,31 +658,29 @@ fn test_machine_suites_schedule_feature_gated_public_service_targets_unfiltered(
             .iter()
             .filter(|job| job.args.iter().any(|a| a == "seedbox-server"))
             .collect();
-        assert_eq!(service.len(), 1, "{suite}");
-        let args = &service[0].args;
-        assert_eq!(
-            args,
-            &strings(&[
-                "cargo",
-                "test",
-                "-p",
-                "seedbox-server",
-                "--locked",
-                "--features",
-                feature,
-                "--test",
-                target,
-                "--",
-            ])
-        );
-        // Feature-gated, not ignored: no --ignored and no libtest filter, so
-        // run_machine's --list counts and then runs the whole target.
-        assert!(!args.iter().any(|a| a == "--ignored"));
-        assert_eq!(args.last().unwrap(), "--");
-        assert_eq!(
-            service[0].name,
-            format!("{suite}/seedbox-server/--test/{target}")
-        );
+        assert_eq!(service.len(), targets.len(), "{suite}");
+        for (job, target) in service.iter().zip(targets) {
+            assert_eq!(
+                job.args,
+                strings(&[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "seedbox-server",
+                    "--locked",
+                    "--features",
+                    feature,
+                    "--test",
+                    target,
+                    "--",
+                ])
+            );
+            // Feature-gated, not ignored: no --ignored and no libtest filter,
+            // so run_machine's --list counts and then runs the whole target.
+            assert!(!job.args.iter().any(|a| a == "--ignored"));
+            assert_eq!(job.args.last().unwrap(), "--");
+            assert_eq!(job.name, format!("{suite}/seedbox-server/--test/{target}"));
+        }
     }
 }
 #[test]
