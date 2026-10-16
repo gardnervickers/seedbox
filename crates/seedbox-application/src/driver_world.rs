@@ -20,7 +20,9 @@ pub(crate) mod retained;
 pub use retained::retain_prepared;
 pub use retained::runtime_digest;
 mod transport;
+mod volumes;
 mod worker;
+pub use volumes::{volume_setup, VolumeSetup};
 
 // Parent-owned beneath the execution's machine output. A killed worker cannot
 // run TempDir destructors; the monitor join owns removal of this subtree only.
