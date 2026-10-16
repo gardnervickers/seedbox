@@ -266,6 +266,14 @@ again.
 Code: [input program](../crates/seedbox-engine-core/src/input_program.rs),
 [coordinator](../crates/seedbox-engine-core/src/world.rs).
 
+A fault profile (`--fault-profile`) is a request option, never part of a
+definition. The server samples it once, after choosing the seed, into keyed
+`gen-<n>` and `gen-<n>-end` program inputs, so describe, rerun and replay carry
+the generated faults and never sample again. Each seed-range member samples
+the profile with its own seed. Sampling uses integer arithmetic only, keeps
+lifecycle and clock faults from overlapping on one machine, and never targets
+the oracle. Code: [sampler](../crates/seedbox-explore/src/faults.rs).
+
 ## Property records
 
 Guest properties travel the same committed path as application output. Every
