@@ -10,7 +10,7 @@ async fn fault_events(
     session: &NativeSession,
     id: &seedbox_api::SimulationId,
 ) -> Vec<(u32, FaultStatus)> {
-    let mut stream = session.client.events(id).await.unwrap();
+    let mut stream = session.client.events_with(id, false).await.unwrap();
     let mut faults = vec![];
     while let Some(delivery) = stream.next().await {
         match delivery.unwrap() {
@@ -70,7 +70,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         session.worker(&calibration).await;
         session.complete(&calibration, false, 1, 123).await;
         let finish = session.client.describe(&calibration).await.unwrap().status.simulated_time_ns;
-        let mut stream = session.client.events(&calibration).await.unwrap();
+        let mut stream = session.client.events_with(&calibration, false).await.unwrap();
         let mut ready = None;
         while let Some(delivery) = stream.next().await {
             if let EventDelivery::Event { observation, .. } = delivery.unwrap() {
