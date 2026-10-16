@@ -99,6 +99,20 @@ async fn complete_events_reset_the_idle_deadline_without_a_total_limit() {
 }
 
 #[tokio::test]
+async fn ready_non_event_chunks_cannot_starve_the_silence_deadline() {
+    let (clock, sender, mut decoded) = subject();
+    pending(&mut decoded);
+    for _ in 0..29 {
+        clock.advance(Duration::from_secs(1));
+        send(&sender, b"event: no-data\n\n");
+        pending(&mut decoded);
+    }
+    clock.advance(Duration::from_secs(1));
+    send(&sender, b"event: still-no-data\n\n");
+    expired(&mut decoded);
+}
+
+#[tokio::test]
 async fn completed_keepalives_reset_but_partial_bytes_do_not() {
     let (clock, sender, mut decoded) = subject();
     pending(&mut decoded);
@@ -136,6 +150,39 @@ async fn caller_backpressure_does_not_expire_an_already_received_terminal_event(
     assert!(
         matches!(futures_util::poll!(decoded.next()), Poll::Ready(Some(Ok(value))) if value["done"] == true)
     );
+}
+
+#[tokio::test]
+async fn slow_consumer_can_receive_a_terminal_in_separate_chunks() {
+    let (clock, sender, mut decoded) = subject();
+    send(&sender, b"data: {\"done\":false}\n\n");
+    assert!(
+        matches!(futures_util::poll!(decoded.next()), Poll::Ready(Some(Ok(value))) if value["done"] == false)
+    );
+    clock.advance(Duration::from_secs(3600));
+    send(&sender, b"data: {\"done\":");
+    send(&sender, b"true}\n\n");
+    assert!(
+        matches!(futures_util::poll!(decoded.next()), Poll::Ready(Some(Ok(value))) if value["done"] == true)
+    );
+}
+
+#[tokio::test]
+async fn slow_consumer_resumes_keepalives_then_a_full_silence_budget() {
+    let (clock, sender, mut decoded) = subject();
+    send(&sender, b"data: {\"done\":false}\n\n");
+    assert!(matches!(
+        futures_util::poll!(decoded.next()),
+        Poll::Ready(Some(Ok(_)))
+    ));
+    clock.advance(Duration::from_secs(3600));
+    send(&sender, b": keep");
+    send(&sender, b"alive\n\n");
+    pending(&mut decoded);
+    clock.advance(activity::LIMIT - Duration::from_nanos(1));
+    pending(&mut decoded);
+    clock.advance(Duration::from_nanos(1));
+    expired(&mut decoded);
 }
 
 #[tokio::test]

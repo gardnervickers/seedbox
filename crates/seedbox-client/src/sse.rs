@@ -129,17 +129,15 @@ where
     B: AsRef<[u8]> + Send + 'static,
     C: Clock,
 {
-    let deadline = idle.map(|limit| clock.now().saturating_add(limit));
-    let state = Some((
-        Box::pin(chunks),
-        Decoder::default(),
-        VecDeque::new(),
-        deadline,
-    ));
+    let state = Some((Box::pin(chunks), Decoder::default(), VecDeque::new()));
     Box::pin(futures_util::stream::unfold(state, move |state| {
         let clock = clock.clone();
         async move {
-            let (mut chunks, mut decoder, mut pending, mut deadline) = state?;
+            let (mut chunks, mut decoder, mut pending) = state?;
+            // Only charge time while a caller is waiting for the next event.
+            // After yielding data, consumer work must not consume this budget.
+            // Within this pull, partial bytes never renew it; complete frames do.
+            let mut deadline = idle.map(|limit| clock.now().saturating_add(limit));
             loop {
                 // Decode bytes already received before consulting the read timer;
                 // caller backpressure must not invalidate an already buffered event.
@@ -163,7 +161,7 @@ where
                         if done {
                             None
                         } else {
-                            Some((chunks, decoder, pending, deadline))
+                            Some((chunks, decoder, pending))
                         },
                     ));
                 }
