@@ -57,6 +57,7 @@ impl PreparationBackend for OciPreparer {
                 progress: |_| {},
                 export_cache: Some(self.profile.engine.clone()),
             },
+            None,
         )
     }
     fn prepare_cancellable(
@@ -77,6 +78,7 @@ impl PreparationBackend for OciPreparer {
                 progress: |_| {},
                 export_cache: Some(self.profile.engine.clone()),
             },
+            None,
         )
     }
 }
@@ -91,7 +93,20 @@ impl OciPreparer {
         transport: &dyn crate::oci::ImageTransport,
     ) -> Result<PreparedInputs> {
         self.validate_runtime_inputs()?;
-        self.prepare_inner(simulation, store, Some(context), transport)
+        self.prepare_inner(simulation, store, Some(context), transport, None)
+    }
+    /// Share normal image resolution/retention while the selected native SDK
+    /// alone packages Driver boot bytes. Runtime formats are not interchangeable.
+    pub fn prepare_driver_with_transport(
+        &self,
+        simulation: &Simulation,
+        store: &ContentStore,
+        context: &PreparationContext,
+        transport: &dyn crate::oci::ImageTransport,
+        runtime: &crate::runtime_assets::Inputs,
+    ) -> Result<PreparedInputs> {
+        crate::driver_world::validate_oci_runtime(self, runtime)?;
+        self.prepare_inner(simulation, store, Some(context), transport, Some(runtime))
     }
     fn prepare_inner(
         &self,
@@ -99,6 +114,7 @@ impl OciPreparer {
         store: &ContentStore,
         context: Option<&PreparationContext>,
         transport: &dyn crate::oci::ImageTransport,
+        driver_runtime: Option<&crate::runtime_assets::Inputs>,
     ) -> Result<PreparedInputs> {
         let architecture = crate::guest::Architecture::from_profile(&self.profile)?;
         for (name, service) in &simulation.services {
@@ -177,7 +193,9 @@ impl OciPreparer {
             &auxiliary["guest-progress"],
             &temporary.path().join("progress.tar"),
         )?;
-        crate::guest::validate_progress(&progress, architecture)?;
+        if driver_runtime.is_none() {
+            crate::guest::validate_progress(&progress, architecture)?;
+        }
         let mke2fs = auxiliary
             .get("guest-mke2fs")
             .map(|digest| store.materialize(digest, &temporary.path().join("mke2fs")))
@@ -246,36 +264,68 @@ impl OciPreparer {
                 })?
             }
         };
+        let driver_factory = driver_runtime
+            .map(|runtime| {
+                crate::driver_world::preparation::OciBootFactory::new(
+                    &self.engine,
+                    runtime,
+                    wall_clock_epoch,
+                    simulation.simulator.blocks_per_progress_call,
+                )
+            })
+            .transpose()?;
         for (name, service, mounts, imported) in launches {
             if let Some(context) = context {
                 context.progress(name, PreparationStage::Guest);
+                context.check()?;
             }
-            let recipe = launch_recipe_with_progress(
-                &imported.image.launch,
-                &format!("{}/24", addresses[name]),
-                &hosts,
-                name,
-                &mounts,
-                wall_clock_epoch,
-                simulation.simulator.blocks_per_progress_call,
-            )?;
             let archive = temporary.path().join(format!("{name}.cpio"));
-            // Package only retained bootstrap bytes. The source paths may be
-            // replaced by another build while an image is being downloaded.
-            let mke2fs = mke2fs.as_deref().filter(|_| !service.volumes.is_empty());
-            match &imported.rootfs {
-                crate::oci::RootFilesystem::Directory(root) => {
-                    build_initramfs_with(root, &init, mke2fs, Some(&progress), &recipe, &archive)?
-                }
-                crate::oci::RootFilesystem::Archive(root) => {
-                    crate::guest::build_initramfs_from_tar(
+            if let Some(factory) = &driver_factory {
+                let boot = factory.boot(
+                    crate::driver_world::preparation::OciBoot {
+                        name,
+                        image: &imported,
+                        simulation,
+                        configs: &mounts,
+                        hosts: &hosts,
+                    },
+                    store,
+                )?;
+                auxiliary.insert(
+                    format!("{}{name}", crate::driver_world::preparation::FILESYSTEM),
+                    boot.filesystem,
+                );
+                fs::write(&archive, boot.bytes)?;
+            } else {
+                let recipe = launch_recipe_with_progress(
+                    &imported.image.launch,
+                    &format!("{}/24", addresses[name]),
+                    &hosts,
+                    name,
+                    &mounts,
+                    wall_clock_epoch,
+                    simulation.simulator.blocks_per_progress_call,
+                )?;
+                let mke2fs = mke2fs.as_deref().filter(|_| !service.volumes.is_empty());
+                match &imported.rootfs {
+                    crate::oci::RootFilesystem::Directory(root) => build_initramfs_with(
                         root,
                         &init,
                         mke2fs,
                         Some(&progress),
                         &recipe,
                         &archive,
-                    )?
+                    )?,
+                    crate::oci::RootFilesystem::Archive(root) => {
+                        crate::guest::build_initramfs_from_tar(
+                            root,
+                            &init,
+                            mke2fs,
+                            Some(&progress),
+                            &recipe,
+                            &archive,
+                        )?
+                    }
                 }
             }
             let memory_mb = self.profile.semantic_parameters.memory_mb;

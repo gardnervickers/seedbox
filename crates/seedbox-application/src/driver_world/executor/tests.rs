@@ -135,3 +135,28 @@ fn driver_constructor_validates_contract_and_worker_range_without_running_tools(
         "4"
     );
 }
+
+#[test]
+fn non_oracle_legacy_controller_refuses_before_retaining_engine_or_preparing_images() {
+    let root = tempfile::tempdir().unwrap();
+    let store_root = root.path().join("untouched-store");
+    let store = crate::store::ContentStore::new(&store_root);
+    let mut simulation = crate::config::parse("name: authority\nservices:\n  app: {image: example/app}\n  other: {image: example/other}\nx-seedbox:\n  version: 1\n  check: {service: app}\n", std::path::Path::new("/project/compose.yaml"), &Default::default()).unwrap();
+    simulation.control = Some(crate::config::Control {
+        service: "other".into(),
+    });
+    let error = DriverExecutor::for_preparation(
+        &root.path().join("missing-engine"),
+        &store,
+        &simulation,
+        crate::execution::WitnessMode::Exits,
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(
+        error.contains("controller must also be the check service"),
+        "{error}"
+    );
+    assert!(!store_root.exists());
+}

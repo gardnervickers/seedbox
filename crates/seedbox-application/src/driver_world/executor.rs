@@ -48,6 +48,48 @@ impl DriverExecutor {
             session_lease: None,
         })
     }
+    /// Select the normal fresh Linux PV profile before OCI preparation. Runtime
+    /// bytes remain explicit; legacy retained profiles are never rewritten.
+    pub fn for_preparation(
+        engine: &std::path::Path,
+        store: &crate::store::ContentStore,
+        simulation: &crate::config::Simulation,
+        witness_mode: crate::execution::WitnessMode,
+    ) -> Result<Self> {
+        if simulation
+            .control
+            .as_ref()
+            .is_some_and(|control| control.service != simulation.check.service)
+        {
+            return Err(Error::Validation {
+                path: "$.x-seedbox.control.service".into(),
+                message: "controller must also be the check service".into(),
+            });
+        }
+        let memory_mb = simulation.machine.memory_mb;
+        if !(64..=65536).contains(&memory_mb) {
+            return Err(Error::Execution(
+                "guest memory must be 64..65536 MiB".into(),
+            ));
+        }
+        let mut semantic = crate::execution::SemanticParameters::new(memory_mb);
+        semantic.page_timer = simulation.machine.page_timer;
+        semantic.deferred_tx = simulation.machine.deferred_tx;
+        semantic.torn_writes = simulation.disk.torn_writes;
+        semantic.engine = Some(Self::descriptor(DriverBackend::Pv, "x86_64"));
+        let executor = Self::new(
+            ExecutionProfile {
+                backend: crate::execution::Backend::Other("driver-pv".into()),
+                engine: store.put_file(engine)?,
+                witness_mode,
+                semantic_parameters: semantic,
+            },
+            DriverBackend::Pv,
+            1,
+        )?;
+        executor.admit_execution(simulation.control.is_some())?;
+        Ok(executor)
+    }
     /// Set this host launch's exact environment and optional existing session
     /// lease. Server callers supply the path from their actual session owner;
     /// `None` is only for sessionless/offline callers. No path is inferred or

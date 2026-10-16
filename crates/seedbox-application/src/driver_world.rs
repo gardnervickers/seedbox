@@ -17,6 +17,8 @@ mod controller;
 mod native;
 mod policy;
 pub(crate) mod preflight;
+pub(crate) mod preparation;
+pub use preparation::{retain_oci_prepared, validate_oci_runtime};
 pub(crate) mod retained;
 pub use retained::retain_prepared;
 pub use retained::runtime_digest;
