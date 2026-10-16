@@ -37,14 +37,37 @@ pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
     spawn(command)?.wait()
 }
 
-/// `Command::output` through the process-wide scope. Like std, stdin defaults
-/// to null and stdout/stderr are captured unless the command sets them.
+/// `Command::output` through the process-wide scope. Unlike std, stdin is
+/// always null and stdout/stderr are always captured, even if the command set
+/// them; use [`spawn`] for other stdio.
 pub fn output(command: &mut Command) -> io::Result<Output> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     spawn(command)?.wait_with_output()
+}
+
+/// The guarded spawn helpers as `Command` methods, for builder chains:
+/// `Command::new(x).arg(y).guarded_status()`.
+pub trait Guarded {
+    /// [`spawn`].
+    fn guarded_spawn(&mut self) -> io::Result<Child>;
+    /// [`status`].
+    fn guarded_status(&mut self) -> io::Result<ExitStatus>;
+    /// [`output`]: stdin null, stdout and stderr captured.
+    fn guarded_output(&mut self) -> io::Result<Output>;
+}
+impl Guarded for Command {
+    fn guarded_spawn(&mut self) -> io::Result<Child> {
+        spawn(self)
+    }
+    fn guarded_status(&mut self) -> io::Result<ExitStatus> {
+        status(self)
+    }
+    fn guarded_output(&mut self) -> io::Result<Output> {
+        output(self)
+    }
 }
 
 /// How a held child is started.

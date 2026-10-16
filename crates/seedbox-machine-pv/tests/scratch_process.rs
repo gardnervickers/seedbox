@@ -1,9 +1,5 @@
 //! Real host workers with an explicit fake protocol, never KVM/HVF or guests.
 #![cfg(all(unix, feature = "test-support"))]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use seedbox_machine::{
     definition::DiskImage,
     execution::ExecutionConfig,
@@ -13,6 +9,7 @@ use seedbox_machine::{
     test_support::{assets, factory_definition, FixedClock},
 };
 use seedbox_machine_pv::machine::pv::{Factory, PVMachine, Snapshot};
+use seedbox_test::process::Guarded;
 use serde_json::Value;
 use std::{
     collections::VecDeque,
@@ -223,7 +220,7 @@ fn abrupt_cold_owner_death_leaves_only_session_reclaimable_files() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .spawn()
+            .guarded_spawn()
             .unwrap(),
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -298,7 +295,7 @@ fn non_utf8_absolute_and_effective_relative_or_default_roots_fail_without_side_e
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .status()
+            .guarded_status()
             .unwrap();
         assert!(status.success(), "encoding probe failed, case {case}");
         let message = fs::read_to_string(result).unwrap();
@@ -377,7 +374,7 @@ fn all_valid_utf8_absolute_relative_and_default_spellings_remain_supported() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .status()
+            .guarded_status()
             .unwrap();
         assert!(status.success(), "valid path probe failed, case {case}");
         assert_eq!(fs::read_to_string(result).unwrap(), "ok");
@@ -450,7 +447,7 @@ fn tempfile_override_is_default_authority_but_explicit_root_still_wins() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .status()
+            .guarded_status()
             .unwrap();
         assert!(
             status.success(),
@@ -485,7 +482,7 @@ fn fixture_without_explicit_mode_is_benign() {
         let result = Command::new(CHILD)
             .args(args)
             .stdin(Stdio::null())
-            .output()
+            .guarded_output()
             .unwrap();
         assert!(result.status.success());
         assert!(result.stdout.is_empty());

@@ -1,8 +1,4 @@
 //! Real host children, fake QMP/RSP only: never QEMU or native guest execution.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use super::*;
 use seedbox_machine::{
     execution::ExecutionConfig,
@@ -11,6 +7,7 @@ use seedbox_machine::{
     rng::RngStream,
     test_support::FixedClock,
 };
+use seedbox_test::process::Guarded;
 use serde_json::Value;
 use std::{
     collections::VecDeque,
@@ -156,7 +153,7 @@ fn abrupt_cold_owner_death_leaves_only_session_reclaimable_files() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .spawn()
+            .guarded_spawn()
             .unwrap(),
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -229,7 +226,7 @@ fn non_utf8_absolute_and_effective_relative_or_default_roots_fail_without_side_e
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .status()
+            .guarded_status()
             .unwrap();
         assert!(status.success(), "encoding probe failed, case {case}");
         let message = fs::read_to_string(result).unwrap();
@@ -306,7 +303,7 @@ fn all_valid_utf8_absolute_relative_and_default_spellings_remain_supported() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .status()
+            .guarded_status()
             .unwrap();
         assert!(status.success(), "valid path probe failed, case {case}");
         assert_eq!(fs::read_to_string(result).unwrap(), "ok");
@@ -377,7 +374,7 @@ fn tempfile_override_is_default_authority_but_explicit_root_still_wins() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .status()
+            .guarded_status()
             .unwrap();
         assert!(
             status.success(),
@@ -412,7 +409,7 @@ fn fixture_without_explicit_mode_is_benign_and_produces_no_protocol_output() {
         let output = Command::new(CHILD)
             .args(args)
             .stdin(Stdio::null())
-            .output()
+            .guarded_output()
             .unwrap();
         assert!(output.status.success());
         assert!(output.stdout.is_empty());
