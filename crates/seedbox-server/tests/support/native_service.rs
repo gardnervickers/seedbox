@@ -739,6 +739,14 @@ impl NativeSession {
                 }
                 state = progress.next() => {
                     let state = state.expect("watch closed before START=").unwrap();
+                    // Log and progress streams are delivered independently. Before
+                    // failing, read the retained output: START= printed within the
+                    // bound is in it even if its delivery lags this snapshot.
+                    if state.status.simulated_time_ns > self.bound
+                        && self.output(id).await.windows(6).any(|part| part == b"START=")
+                    {
+                        return;
+                    }
                     check_bound_at(
                         &self.client,
                         id,
@@ -848,35 +856,41 @@ impl NativeSession {
         seed: u64,
     ) -> Option<String> {
         let mut watch = self.client.watch(id).await.unwrap();
+        // A stopped execution keeps running until its stop takes effect, so
+        // its bound counts from the simulated time it had when stop was
+        // requested (the first state observed here), not from zero.
+        let mut base_ns = None;
+        let goal = if stopped {
+            "its requested stop took effect"
+        } else {
+            "it completed"
+        };
         let completed = loop {
             let state = watch
                 .next()
                 .await
                 .expect("watch closed before completion")
                 .unwrap();
-            if state.status.phase == Phase::Completed {
-                // A completion observed without any earlier over-bound state
-                // still fails if it finished past the bound.
-                check_bound_at(
-                    &self.client,
-                    id,
-                    self.backend,
-                    self.bound,
-                    state.status.simulated_time_ns,
-                    "it completed",
-                )
-                .await;
-                break state;
-            }
+            let base = *base_ns.get_or_insert(if stopped {
+                state.status.simulated_time_ns
+            } else {
+                0
+            });
+            // Every state is checked, including the final Completed one: a
+            // completion observed without an earlier over-bound state still
+            // fails if it finished past the bound.
             check_bound_at(
                 &self.client,
                 id,
                 self.backend,
-                self.bound,
+                base.saturating_add(self.bound),
                 state.status.simulated_time_ns,
-                "it completed",
+                goal,
             )
             .await;
+            if state.status.phase == Phase::Completed {
+                break state;
+            }
         };
         let witness = if stopped {
             assert_eq!(
@@ -1019,6 +1033,17 @@ impl NativeSession {
                 );
                 return receipt;
             }
+            // An execution that keeps running while its request stays
+            // Accepted fails at its simulated bound, not at the hang guard.
+            let position = self.client.playback(id).await.unwrap().state.position;
+            check_bound(
+                &self.client,
+                id,
+                self.backend,
+                position.simulated_time_ns,
+                &format!("its {name} control request was acknowledged"),
+            )
+            .await;
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
