@@ -87,7 +87,9 @@ impl VirtioBlk {
         }
     }
     pub fn write(&mut self, m: &mut [u8], off: u64, v: u32) -> Result<Notified, String> {
-        match self.transport.write(off, v)? {
+        let effect = self.transport.write(off, v)?;
+        self.model.queue_changed(&self.transport);
+        match effect {
             // x86 injects no disk latency, so every request completes at
             // notify and its time never matters.
             Effect::Notify(_) => {

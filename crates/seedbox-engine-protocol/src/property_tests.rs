@@ -413,4 +413,14 @@ fn states_keep_first_positions_of_values_and_transitions() {
     assert_eq!(ledger.error_count, 0);
     let bad = super::Record::parse(br#"{"state":{"name":"","value":"x"}}"#);
     assert!(bad.is_err());
+    // Labels that would make keys ambiguous are rejected; others pass.
+    for (name, value) in [("a=b", "c"), ("a/b", "c"), ("a:b", "c"), ("a", "b>c")] {
+        let record = json!({"state": {"name": name, "value": value}}).to_string();
+        assert!(
+            super::Record::parse(record.as_bytes()).is_err(),
+            "{name} {value}"
+        );
+    }
+    let record = json!({"state": {"name": "a", "value": "b=c:d"}}).to_string();
+    assert!(super::Record::parse(record.as_bytes()).is_ok());
 }

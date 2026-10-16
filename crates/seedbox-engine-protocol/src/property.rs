@@ -194,7 +194,10 @@ impl Record {
             let bad = |s: &str| {
                 s.is_empty() || s.len() > MAX_STATE_BYTES || s.chars().any(char::is_control)
             };
-            if bad(name) || bad(value) {
+            // Keys read `machine/name=value` and `machine/name:from>to`, so
+            // a name may not hold a separator and a value no `>`.
+            if bad(name) || bad(value) || name.contains(['/', '=', ':', '>']) || value.contains('>')
+            {
                 return Err("invalid state name or value".into());
             }
         }

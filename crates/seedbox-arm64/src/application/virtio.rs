@@ -185,7 +185,11 @@ impl Virtio {
         if width != 4 || !offset.is_multiple_of(4) || value > u32::MAX as u64 {
             return Err("virtio transport requires aligned 32-bit writes".into());
         }
-        match self.transport.write(offset, value as u32)? {
+        let effect = self.transport.write(offset, value as u32)?;
+        if let Model::Block(block) = &mut self.model {
+            block.queue_changed(&self.transport);
+        }
+        match effect {
             MmioEffect::None => (),
             MmioEffect::Notify(index) => return self.notify(memory, index, now),
             MmioEffect::Reset => {

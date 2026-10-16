@@ -163,8 +163,10 @@ struct ShrinkJob {
     /// Edits the kept inputs once removal is done.
     simplifier: Option<shrink::Simplifier>,
     /// The checkpoint form of a branched source, should its full program
-    /// not reproduce from a fresh start.
-    fallback: Option<(seedbox_api::SimulationSpec, usize)>,
+    /// not reproduce from a fresh start: its spec, consumed inputs and time.
+    fallback: Option<(seedbox_api::SimulationSpec, usize, u64)>,
+    /// No probe input may move before this time (a checkpoint's).
+    floor_ns: u64,
     from_checkpoint: bool,
     probes: Vec<(ShrinkProbe, Vec<String>)>,
     running: Option<SimulationId>,
@@ -361,12 +363,24 @@ impl ExecutionService {
                 .views
                 .get(id)
                 .ok_or_else(|| invalid(format!("campaign not found: {id}")))?;
+            // Running members, and the cold reruns of findings: once
+            // stopped, a rerun no longer matches and its representative is
+            // exported instead.
             let members = view
                 .campaign
                 .members
                 .iter()
                 .filter(|m| m.verdict.is_none() && m.error.is_none())
                 .filter_map(|m| m.simulation.clone())
+                .chain(
+                    view.campaign
+                        .findings
+                        .iter()
+                        .filter_map(|f| match &f.export {
+                            ExportState::Reproducing { simulation } => Some(simulation.clone()),
+                            _ => None,
+                        }),
+                )
                 .collect();
             jobs.stops.insert(id.into());
             members
@@ -465,11 +479,15 @@ impl ExecutionService {
                     .pointer("/state/world/input_program/next")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0) as usize;
+                let at_ns = manifest
+                    .pointer("/state/position/simulatedTimeNs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
                 let mut cold = resource.spec.clone();
                 if let InputSource::Resolved { definition } = &mut cold.inputs {
                     definition.start = seedbox_spec::definition::Start::Fresh;
                 }
-                (cold, Some((resource.spec.clone(), pending)))
+                (cold, Some((resource.spec.clone(), pending, at_ns)))
             }
             seedbox_spec::definition::Start::Fresh => (resource.spec.clone(), None),
         };
@@ -492,6 +510,7 @@ impl ExecutionService {
             inputs,
             removable,
             pending: 0,
+            floor_ns: 0,
             simplifier: None,
             fallback,
             from_checkpoint: false,
@@ -639,6 +658,23 @@ impl ExecutionService {
             .values()
             .any(|e| matches!(e, ExportState::Reproducing { .. }));
         if job.stop_requested {
+            // Reconcile against the job itself: a member or cold rerun
+            // submitted while the stop was being recorded is stopped here.
+            let active = job
+                .members
+                .values()
+                .filter(|m| m.verdict.is_none() && m.error.is_none())
+                .filter_map(|m| m.simulation.clone())
+                .chain(job.exports.values().filter_map(|e| match e {
+                    ExportState::Reproducing { simulation } => Some(simulation.clone()),
+                    _ => None,
+                }));
+            for simulation in active.collect::<Vec<_>>() {
+                let status = self.manager.describe(&simulation)?.status;
+                if status.phase != Phase::Completed && !status.stop_requested {
+                    self.manager.stop(&simulation)?;
+                }
+            }
             if !reproducing
                 && job
                     .members
@@ -965,7 +1001,10 @@ impl ExecutionService {
                         .members
                         .get(&finding.ordinal)
                         .is_some_and(|m| matches!(m.plan.kind, plan::PlanKind::Branch(_)));
-                    match branched.then(|| self.submit_cold(id, job, finding)) {
+                    // A stopped campaign starts no cold reruns; a branched
+                    // representative then exports with its checkpoint.
+                    let rerun = branched && !job.stop_requested;
+                    match rerun.then(|| self.submit_cold(id, job, finding)) {
                         Some(Ok((simulation, is_queued))) => {
                             if is_queued {
                                 queued.push(simulation.clone());
@@ -976,7 +1015,7 @@ impl ExecutionService {
                             return Err(Error::Catalogue(catalogue::Error::Unavailable));
                         }
                         Some(Err(_)) => self.export(job, finding, &finding.representative, true),
-                        None => self.export(job, finding, &finding.representative, false),
+                        None => self.export(job, finding, &finding.representative, branched),
                     }
                 }
                 Some(ExportState::Reproducing { simulation }) => {
@@ -1126,7 +1165,7 @@ impl ExecutionService {
         let spent = job.probes.len() as u32;
         let remaining = job.request.max_probes.saturating_sub(spent);
         if job.shrinker.result() == Some(&shrink::Result::NotReproduced) && remaining > 0 {
-            if let Some((spec, pending)) = job.fallback.take() {
+            if let Some((spec, pending, floor_ns)) = job.fallback.take() {
                 // The fresh start did not reproduce: shrink from the checkpoint.
                 let timed: Vec<TimedInput> =
                     job.inputs.iter().map(timed).collect::<Result<_, _>>()?;
@@ -1135,6 +1174,7 @@ impl ExecutionService {
                 job.shrinker = Shrinker::new(candidates, remaining);
                 job.spec = spec;
                 job.pending = pending;
+                job.floor_ns = floor_ns;
                 job.from_checkpoint = true;
             }
         }
@@ -1148,7 +1188,12 @@ impl ExecutionService {
                     .filter(|i| keep.contains(&i.key))
                     .map(timed)
                     .collect::<Result<_, _>>()?;
-                job.simplifier = Some(shrink::Simplifier::new(program, job.pending, remaining));
+                job.simplifier = Some(shrink::Simplifier::new(
+                    program,
+                    job.pending,
+                    job.floor_ns,
+                    remaining,
+                ));
             }
         }
         let (program, edit) = match &mut job.simplifier {

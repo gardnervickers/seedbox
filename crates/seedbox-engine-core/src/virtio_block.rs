@@ -96,6 +96,12 @@ pub struct Block {
 struct Pending {
     chain: crate::virtqueue::Chain,
     due_ns: u64,
+    /// The queue layout it was admitted under: size and ring addresses.
+    queue: (u16, u64, u64, u64),
+}
+
+fn layout(queue: &crate::virtqueue::Queue) -> (u16, u64, u64, u64) {
+    (queue.num, queue.desc, queue.avail, queue.used)
 }
 
 /// An active `disk_latency` fault: which requests it delays, by how much,
@@ -383,6 +389,13 @@ impl Block {
     pub fn set_latency(&mut self, latency: Option<InjectedLatency>) -> Option<LatencyCounts> {
         std::mem::replace(&mut self.latency, latency.map(Box::new)).map(|old| old.counts)
     }
+    /// The driver stopped the queue: the device gives up its pending
+    /// requests, unanswered. Adapters call this after every transport write.
+    pub fn queue_changed(&mut self, transport: &Transport) {
+        if !transport.queues[0].ready {
+            self.pending.clear();
+        }
+    }
     /// When the earliest pending request completes.
     pub fn next_due(&self) -> Option<u64> {
         self.pending.front().map(|p| p.due_ns)
@@ -445,11 +458,24 @@ impl Block {
                 transport.queues[0].consume();
                 continue;
             }
+            // A driver cannot have more requests outstanding than queue
+            // entries, nor reuse a chain the device still owns.
+            if self.pending.len() >= usize::from(transport.queues[0].num) {
+                return Err("more pending block requests than queue entries".into());
+            }
+            if self.pending.iter().any(|p| p.chain.head == chain.head) {
+                return Err("block descriptor chain reused while pending".into());
+            }
             transport.queues[0].consume();
             let delay = self.latency.as_mut().map_or(0, |l| l.delay(request.kind));
             let after = self.pending.back().map_or(0, |p| p.due_ns);
             let due_ns = now_ns.saturating_add(delay).max(after);
-            self.pending.push_back(Pending { chain, due_ns });
+            let queue = layout(&transport.queues[0]);
+            self.pending.push_back(Pending {
+                chain,
+                due_ns,
+                queue,
+            });
             if let Some(latency) = &mut self.latency {
                 latency.counts.deepest = latency.counts.deepest.max(self.pending.len() as u64);
             }
@@ -488,6 +514,12 @@ impl Block {
     ) -> Result<()> {
         while self.pending.front().is_some_and(|p| p.due_ns <= now_ns) {
             let pending = self.pending.pop_front().expect("checked front");
+            // A queue the driver stopped (or reconfigured) no longer belongs
+            // to its pending requests: they are dropped unanswered.
+            let queue = &transport.queues[0];
+            if !queue.ready || layout(queue) != pending.queue {
+                continue;
+            }
             let request = Request::decode(memory, &pending.chain)?;
             self.finish(transport, memory, &pending.chain, request, dirty, out);
         }

@@ -471,3 +471,52 @@ fn a_hold_completes_earlier_requests_and_leaves_the_selected_one_untouched() {
     assert!(g.notify().is_err());
     assert!(g.b.set_hold(None).is_err());
 }
+
+#[test]
+fn a_stopped_queue_drops_pending_requests_and_a_reused_chain_is_rejected() {
+    let latency = |seed| {
+        let rng = crate::rng::Rng::new(seed, "disk-latency/test");
+        InjectedLatency::new(seedbox_control::DiskOp::Any, 1_000, 0, rng).unwrap()
+    };
+    // The driver stops the queue: the request is dropped without any DMA.
+    let mut g = Guest::new(Policy::Block);
+    g.b.set_latency(Some(latency(1)));
+    let (_, status) = g.request(1, 0, &[5; 512], false);
+    g.notify_at(0).unwrap();
+    g.t.queues[0].ready = false;
+    let out = g.complete_at(1_000).unwrap();
+    assert_eq!((out.completed, g.m[status], g.used_idx()), (0, 0xff, 0));
+    assert_eq!(
+        g.b.disk().volatile_sectors() + g.b.disk().stable_sectors(),
+        0
+    );
+    assert_eq!(g.b.next_due(), None);
+
+    // Disabling then re-enabling the same layout still loses the request,
+    // and the reused head is no longer pending.
+    let mut g = Guest::new(Policy::Block);
+    g.b.set_latency(Some(latency(3)));
+    let (_, status) = g.request(1, 0, &[5; 512], false);
+    g.notify_at(0).unwrap();
+    g.t.queues[0].ready = false;
+    g.b.queue_changed(&g.t);
+    g.t.queues[0].ready = true;
+    g.b.queue_changed(&g.t);
+    assert_eq!(g.b.next_due(), None);
+    let out = g.complete_at(1_000).unwrap();
+    assert_eq!((out.completed, g.m[status], g.used_idx()), (0, 0xff, 0));
+
+    // Publishing a chain the device still holds is a driver error.
+    let mut g = Guest::new(Policy::Block);
+    g.b.set_latency(Some(latency(2)));
+    g.request(1, 0, &[5; 512], false);
+    g.notify_at(0).unwrap();
+    let a = 4096 + 4 + g.avail as usize * 2;
+    g.m[a..a + 2].copy_from_slice(&0u16.to_le_bytes());
+    g.avail += 1;
+    g.m[4098..4100].copy_from_slice(&g.avail.to_le_bytes());
+    assert!(g
+        .notify_at(10)
+        .unwrap_err()
+        .contains("reused while pending"));
+}

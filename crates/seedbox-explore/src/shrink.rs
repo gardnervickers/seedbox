@@ -276,12 +276,13 @@ pub struct Edit {
 }
 
 /// The simplifying edits of a program, from input `fixed` on, most
-/// simplifying first for each input. No edit moves an input before the
-/// fixed prefix's last input.
-pub fn simplifications(program: &[TimedInput], fixed: usize) -> Vec<Edit> {
+/// simplifying first for each input. No edit moves an input before
+/// `floor_ns` (a checkpoint's time) or the fixed prefix's last input.
+pub fn simplifications(program: &[TimedInput], fixed: usize, floor_ns: u64) -> Vec<Edit> {
     let floor = program[..fixed.min(program.len())]
         .last()
-        .map_or(0, |i| i.at_ns);
+        .map_or(0, |i| i.at_ns)
+        .max(floor_ns);
     let mut edits = Vec::new();
     let mut starts: BTreeMap<&str, u64> = BTreeMap::new();
     let mut handles: BTreeMap<String, u64> = BTreeMap::new();
@@ -385,6 +386,7 @@ pub fn apply(program: &[TimedInput], edit: &Edit) -> Vec<TimedInput> {
 pub struct Simplifier {
     program: Vec<TimedInput>,
     fixed: usize,
+    floor_ns: u64,
     max_probes: u32,
     probes: u32,
     queue: Vec<Edit>,
@@ -395,12 +397,14 @@ pub struct Simplifier {
 }
 
 impl Simplifier {
-    /// Simplify `program`; its first `fixed` inputs stay as they are.
-    pub fn new(program: Vec<TimedInput>, fixed: usize, max_probes: u32) -> Self {
-        let queue = simplifications(&program, fixed);
+    /// Simplify `program`; its first `fixed` inputs stay as they are and no
+    /// input moves before `floor_ns`.
+    pub fn new(program: Vec<TimedInput>, fixed: usize, floor_ns: u64, max_probes: u32) -> Self {
+        let queue = simplifications(&program, fixed, floor_ns);
         Self {
             program,
             fixed,
+            floor_ns,
             max_probes,
             probes: 0,
             queue,
@@ -443,7 +447,7 @@ impl Simplifier {
         if failed {
             self.program = apply(&self.program, &edit);
             self.accepted.push((edit.key, edit.summary));
-            self.queue = simplifications(&self.program, self.fixed);
+            self.queue = simplifications(&self.program, self.fixed, self.floor_ns);
         } else {
             self.rejected.insert(Self::fingerprint(&edit));
         }

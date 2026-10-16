@@ -125,7 +125,7 @@ fn simplification_shortens_faults_and_drops_delays_while_the_failure_persists() 
         let at = |k: &str| p.iter().find(|i| i.key == k).unwrap().at_ns;
         at("heal") - at("cut") >= 40 * MS && at("gen-0-end") - at("gen-0") >= 20 * MS
     };
-    let mut simplifier = Simplifier::new(program.clone(), 1, 64);
+    let mut simplifier = Simplifier::new(program.clone(), 1, 0, 64);
     while let Some((probe, _)) = simplifier.next_probe() {
         assert_eq!(probe[0].key, "prefix", "the fixed prefix stays");
         assert!(probe.windows(2).all(|w| w[0].at_ns <= w[1].at_ns));
@@ -143,4 +143,23 @@ fn simplification_shortens_faults_and_drops_delays_while_the_failure_persists() 
     assert_eq!(action("pick")["select"], 0);
     assert_eq!(simplifier.accepted().len(), 4, "one final edit per input");
     assert!(simplifier.done());
+}
+
+#[test]
+fn simplification_never_moves_an_input_before_the_checkpoint() {
+    const MS: u64 = 1_000_000;
+    // A fault started at 2ms in the consumed prefix; the checkpoint is at
+    // 10ms and the heal pending at 12ms. Halving towards 2ms would land in
+    // the checkpoint's past: the edit clamps to 10ms instead.
+    let program = vec![
+        input(
+            "cut",
+            2 * MS,
+            json!({"action":"partition","handle":"cut","left":["a"],"right":["b"]}),
+        ),
+        input("heal", 12 * MS, json!({"action":"heal","handle":"cut"})),
+    ];
+    let edits = simplifications(&program, 1, 10 * MS);
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].input.at_ns, 10 * MS);
 }

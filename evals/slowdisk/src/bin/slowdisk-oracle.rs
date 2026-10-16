@@ -125,7 +125,15 @@ fn main() {
         json!({"acknowledged": acknowledged.len()}),
     );
     if !available {
-        // Nothing can be said about durability without reading back.
+        // A partial read-back proves nothing, except a write already
+        // found lost.
+        if !lost.is_empty() {
+            seedbox_sdk::always(
+                "acknowledged writes survive crashes",
+                false,
+                json!({"lost": lost.len(), "acknowledged": acknowledged.len(), "first": lost.first(), "partial": true}),
+            );
+        }
         seedbox_sdk::flush().expect("flush properties");
         println!(
             "store unavailable; acknowledged {}, interrupted {interrupted}",

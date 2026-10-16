@@ -440,6 +440,8 @@ impl<B: Backend> Machine<B> {
         if self.clock.judge(false)? {
             self.inject_spi(TIMER_SPI, true)?;
         }
+        // Device work that fell due while paused completes at the resume.
+        self.complete_device_work()?;
         self.publish()
     }
 

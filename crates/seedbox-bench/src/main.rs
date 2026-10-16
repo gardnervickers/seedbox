@@ -4,8 +4,8 @@
 //! comparison exercises exactly what users run. A run that finds nothing is
 //! censored at the budget, never counted as a success.
 use clap::{Parser, ValueEnum};
-use seedbox_api::{Campaign, SeedRangeStatus, TestVerdict};
-use seedbox_engine_protocol::property::PropertyStatus;
+use seedbox_api::{Campaign, SeedRangeStatus, Simulation, SimulationStatus, TestVerdict};
+use seedbox_engine_protocol::property::{Kind, PropertyStatus};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Command;
@@ -56,11 +56,35 @@ struct Run {
     members: u32,
     failing: u32,
     incomplete: u32,
+    /// Passing members that never evaluated a declared `always` property,
+    /// such as a history check that ran out of search budget: not evidence
+    /// of correctness.
+    unchecked: u32,
     /// Members up to and including the first failure; None is censored.
     first_failure: Option<u32>,
     /// Distinct failure groups (property IDs, or the oracle).
     groups: Vec<String>,
     host_seconds: f64,
+}
+
+/// A passing member whose declared `always` property was never evaluated.
+fn unchecked(status: &SimulationStatus) -> bool {
+    status.verdict() == TestVerdict::Passed
+        && status.properties.as_ref().is_some_and(|a| {
+            a.properties
+                .iter()
+                .any(|p| p.kind == Kind::Always && p.status == PropertyStatus::Unmet)
+        })
+}
+
+fn member_status(args: &Args, id: &str) -> Result<SimulationStatus, String> {
+    let output = Command::new(&args.seedbox)
+        .args(["get", "simulation", id, "--json"])
+        .output()
+        .map_err(|e| format!("{}: {e}", args.seedbox.display()))?;
+    let simulation: Simulation =
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("simulation {id}: {e}"))?;
+    Ok(simulation.status)
 }
 
 fn run(args: &Args, strategy: Strategy, seed: u64) -> Result<Run, String> {
@@ -96,6 +120,7 @@ fn run(args: &Args, strategy: Strategy, seed: u64) -> Result<Run, String> {
         .map_err(|e| format!("{}: {e}", args.seedbox.display()))?;
     let host_seconds = started.elapsed().as_secs_f64();
     let text = String::from_utf8_lossy(&output.stdout);
+    let mut unchecked_members = 0;
     let (verdicts, groups): (Vec<Option<TestVerdict>>, Vec<String>) = match strategy {
         Strategy::Campaign => {
             let campaign: Campaign = serde_json::from_str(&text).map_err(|e| {
@@ -106,6 +131,14 @@ fn run(args: &Args, strategy: Strategy, seed: u64) -> Result<Run, String> {
             })?;
             let mut members = campaign.members;
             members.sort_by_key(|m| m.ordinal);
+            for member in &members {
+                if member.verdict != Some(TestVerdict::Passed) {
+                    continue;
+                }
+                if let Some(id) = &member.simulation {
+                    unchecked_members += u32::from(unchecked(&member_status(args, id.as_str())?));
+                }
+            }
             (
                 members.iter().map(|m| m.verdict).collect(),
                 campaign.findings.into_iter().map(|f| f.group).collect(),
@@ -120,6 +153,7 @@ fn run(args: &Args, strategy: Strategy, seed: u64) -> Result<Run, String> {
             })?;
             let mut groups = std::collections::BTreeSet::new();
             for member in &range.members {
+                unchecked_members += u32::from(unchecked(&member.status));
                 if let Some(assessment) = &member.status.properties {
                     for p in &assessment.properties {
                         if p.status == PropertyStatus::Violated {
@@ -159,6 +193,7 @@ fn run(args: &Args, strategy: Strategy, seed: u64) -> Result<Run, String> {
         members: verdicts.len() as u32,
         failing,
         incomplete,
+        unchecked: unchecked_members,
         first_failure,
         groups,
         host_seconds,
@@ -197,13 +232,16 @@ fn main() {
         );
         return;
     }
-    println!("STRATEGY  RUNS  FOUND  FAILING  INCOMPLETE  FIRST-FAILURE (censored as >budget)");
+    println!(
+        "STRATEGY  RUNS  FOUND  FAILING  INCOMPLETE  UNCHECKED  FIRST-FAILURE (censored as >budget)"
+    );
     for &strategy in &args.strategies {
         let mine: Vec<&Run> = runs.iter().filter(|r| r.strategy == strategy).collect();
         let found = mine.iter().filter(|r| r.first_failure.is_some()).count();
         let failing: u32 = mine.iter().map(|r| r.failing).sum();
         let members: u32 = mine.iter().map(|r| r.members).sum();
         let incomplete: u32 = mine.iter().map(|r| r.incomplete).sum();
+        let unchecked: u32 = mine.iter().map(|r| r.unchecked).sum();
         let firsts: Vec<String> = mine
             .iter()
             .map(|r| {
@@ -212,12 +250,13 @@ fn main() {
             })
             .collect();
         println!(
-            "{:<9} {:<5} {:<6} {:<8} {:<11} {}",
+            "{:<9} {:<5} {:<6} {:<8} {:<11} {:<10} {}",
             format!("{strategy:?}").to_lowercase(),
             mine.len(),
             found,
             format!("{failing}/{members}"),
             incomplete,
+            unchecked,
             firsts.join(", ")
         );
     }

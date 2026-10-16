@@ -191,6 +191,8 @@ impl Client {
     /// Report that a named piece of workload state took a value, such as a
     /// role or a recovery phase. Keep values to a few short labels: the
     /// planner treats each new value and each new transition as progress.
+    /// A name may not contain `/`, `=`, `:` or `>`, nor a value `>`; such a
+    /// report is an evidence error.
     pub fn state(&self, name: &str, value: &str) {
         self.emit(json!({"state": {"name": name, "value": value}}));
     }
@@ -323,20 +325,35 @@ pub fn flush() -> io::Result<()> {
 /// Start it once the system should be able to recover, for example after
 /// [`control::quiet`]; a host timeout ending the run first leaves the
 /// property unevaluated, never passed.
-pub fn recovers_within(id: &str, deadline: Duration, mut probe: impl FnMut() -> bool) -> bool {
-    let start = std::time::Instant::now();
+pub fn recovers_within(id: &str, deadline: Duration, probe: impl FnMut() -> bool) -> bool {
+    let (recovered, details) = poll_recovery(deadline, probe, std::time::Instant::now);
+    always(id, recovered, details);
+    recovered
+}
+
+/// Poll until `probe` succeeds within `deadline` or the deadline passes. A
+/// success counts only when the probe returned before the deadline, and no
+/// sleep runs past it.
+fn poll_recovery(
+    deadline: Duration,
+    mut probe: impl FnMut() -> bool,
+    now: impl Fn() -> std::time::Instant,
+) -> (bool, Value) {
+    let start = now();
     loop {
-        if probe() {
-            let waited = start.elapsed().as_millis() as u64;
-            always(id, true, json!({"waited_ms": waited}));
-            return true;
+        let succeeded = probe();
+        let waited = now().duration_since(start);
+        if succeeded && waited <= deadline {
+            return (true, json!({"waited_ms": waited.as_millis() as u64}));
         }
-        if start.elapsed() >= deadline {
+        if waited >= deadline {
             let deadline_ms = deadline.as_millis() as u64;
-            always(id, false, json!({"deadline_ms": deadline_ms}));
-            return false;
+            return (
+                false,
+                json!({"deadline_ms": deadline_ms, "waited_ms": waited.as_millis() as u64}),
+            );
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(20).min(deadline - waited));
     }
 }
 

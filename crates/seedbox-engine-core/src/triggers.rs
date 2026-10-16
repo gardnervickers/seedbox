@@ -546,10 +546,33 @@ impl Triggers {
         faults: &mut crate::faults::Faults,
         now: u64,
     ) -> Result<Vec<String>, String> {
+        self.apply_boundary_gated(faults, now, 0)
+    }
+    /// As [`Self::apply_boundary`], skipping the effects of campaign
+    /// mutations due before `quiet_until`; their teardowns still run.
+    pub fn apply_boundary_gated(
+        &mut self,
+        faults: &mut crate::faults::Faults,
+        now: u64,
+        quiet_until: u64,
+    ) -> Result<Vec<String>, String> {
+        use seedbox_engine_protocol::input_program::{GENERATED_END_SUFFIX, MUTATION_PREFIX};
         let mut fired = Vec::new();
         for r in &mut self.records {
             if r.status == TriggerStatus::Armed && r.match_deadline_ns == now {
                 r.status = TriggerStatus::Expired;
+            }
+            let mutation = r.key.as_deref().is_some_and(|k| {
+                k.starts_with(MUTATION_PREFIX) && !k.ends_with(GENERATED_END_SUFFIX)
+            });
+            if r.status == TriggerStatus::Matched
+                && r.effect_at_ns == Some(now)
+                && mutation
+                && now < quiet_until
+            {
+                r.status = TriggerStatus::Rejected;
+                r.rejection_reason = Some("skipped: generated during a quiet period".into());
+                continue;
             }
             if r.status == TriggerStatus::Matched && r.effect_at_ns == Some(now) {
                 // Typed effects meet the same state checks as timed inputs.

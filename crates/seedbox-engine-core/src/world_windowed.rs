@@ -1393,10 +1393,11 @@ impl<M: WorldMachine> Coord<'_, M> {
                 if guests.iter().any(|g| g.m.time > trigger_boundary) {
                     return Err("trigger boundary is in committed machine past".into());
                 }
-                let fired = self
-                    .control
-                    .triggers
-                    .apply_boundary(self.faults, trigger_boundary)?;
+                let fired = self.control.triggers.apply_boundary_gated(
+                    self.faults,
+                    trigger_boundary,
+                    self.control.quiet_until(),
+                )?;
                 // A teardown can follow the effect it undoes.
                 for key in fired {
                     let event = Observed::Fired { key };

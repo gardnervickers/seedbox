@@ -323,3 +323,43 @@ fn triggered_partition_dominates_live_shape_and_heal_reveals_it() {
     assert_eq!(f.links.policy((0, 1)).latency_ns, 30);
     assert!(f.error.is_none());
 }
+
+#[test]
+fn quiet_skips_mutation_effects_but_not_their_teardowns() {
+    use seedbox_control::{EventSelector, TriggerSpec};
+    use triggers::Observed;
+    let spec = |when: EventSelector, then: Action| TriggerSpec {
+        when,
+        nth: 1,
+        delay_ns: 0,
+        within_ns: None,
+        then,
+    };
+    let event = Observed::Event {
+        machine: "a".into(),
+        name: "commit".into(),
+    };
+    let on_commit = EventSelector::Event {
+        name: "commit".into(),
+        machine: None,
+    };
+    // A mutation's effect due inside the quiet period is skipped.
+    let mut t = Triggers::default();
+    t.arm_typed("mutate-3", &spec(on_commit.clone(), action("m")), 100)
+        .unwrap();
+    t.observe(&event, 110, 10, 110).unwrap();
+    let mut f = faults();
+    assert!(t.apply_boundary_gated(&mut f, 120, 500).unwrap().is_empty());
+    assert_eq!(t.records[0].status, "rejected");
+    assert!(f.log.is_empty());
+    // Authored triggers and teardowns are never skipped.
+    let mut t = Triggers::default();
+    t.arm_typed("authored", &spec(on_commit.clone(), action("x")), 100)
+        .unwrap();
+    t.arm_typed("mutate-3-end", &spec(on_commit, action("y")), 100)
+        .unwrap();
+    t.observe(&event, 110, 10, 110).unwrap();
+    let mut f = faults();
+    let fired = t.apply_boundary_gated(&mut f, 120, 500).unwrap();
+    assert_eq!(fired, ["authored", "mutate-3-end"]);
+}

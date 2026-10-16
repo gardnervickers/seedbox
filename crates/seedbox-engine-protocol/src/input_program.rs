@@ -142,6 +142,10 @@ pub struct BranchReceipt {
 /// down. Generated starts are skipped before the applications are ready and
 /// during quiet periods, and a skipped start's teardown is skipped with it.
 pub const GENERATED_PREFIX: &str = "gen-";
+/// Campaign mutations: generated trigger inputs. Their effects, though not
+/// their `-end` teardowns, are skipped during a quiet period, like other
+/// generated faults.
+pub const MUTATION_PREFIX: &str = "mutate-";
 pub const GENERATED_END_SUFFIX: &str = "-end";
 pub const fn default_timeout_ns() -> u64 {
     PROCESS_EFFECT_TIMEOUT_NS

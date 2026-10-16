@@ -221,3 +221,39 @@ fn workload_sites_name_their_client() {
     assert_eq!(decisions.index("key", 3), 2);
     replier.join().unwrap();
 }
+
+#[test]
+fn recovery_seen_after_the_deadline_fails() {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+    let base = Instant::now();
+    // Each probe takes 30ms of (fake) time; the first fails, the second succeeds.
+    let clock = Cell::new(base);
+    let calls = Cell::new(0);
+    let probe = || {
+        clock.set(clock.get() + Duration::from_millis(30));
+        calls.set(calls.get() + 1);
+        calls.get() > 1
+    };
+    let (recovered, details) = poll_recovery(Duration::from_millis(10), probe, || clock.get());
+    assert!(!recovered);
+    assert_eq!(calls.get(), 1);
+    assert_eq!(details["deadline_ms"], 10);
+    // A probe that succeeds, but only after the deadline, fails.
+    let clock = Cell::new(base);
+    let probe = || {
+        clock.set(clock.get() + Duration::from_millis(30));
+        true
+    };
+    let (recovered, _) = poll_recovery(Duration::from_millis(10), probe, || clock.get());
+    assert!(!recovered);
+    // Within the deadline it passes.
+    let clock = Cell::new(base);
+    let probe = || {
+        clock.set(clock.get() + Duration::from_millis(3));
+        true
+    };
+    let (recovered, details) = poll_recovery(Duration::from_millis(10), probe, || clock.get());
+    assert!(recovered);
+    assert_eq!(details["waited_ms"], 3);
+}

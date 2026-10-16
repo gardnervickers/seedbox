@@ -659,7 +659,10 @@ fn mutation_inputs(
 ) -> Result<Vec<seedbox_engine_protocol::input_program::TimedInput>, String> {
     use seedbox_control::{Action, EventSelector, TriggerSpec};
     use seedbox_engine_protocol::input_program::{InputAction, RuleAction, TimedInput};
-    let key = format!("mutate-{ordinal}");
+    let key = format!(
+        "{}{ordinal}",
+        seedbox_engine_protocol::input_program::MUTATION_PREFIX
+    );
     let (fault, undo) = match m.kind {
         MutationKind::Crash => (
             Action::Crash {

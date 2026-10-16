@@ -588,6 +588,11 @@ impl ExecutionService {
             }
             Err(error) => {
                 self.manager.update(&id, |s| {
+                    // An oracle that exited before the error left no final
+                    // report: its property evidence is lost too.
+                    if s.status.oracle_exit_code.is_some() && s.status.properties.is_none() {
+                        s.status.properties = Some(lost_evidence());
+                    }
                     s.status.phase = Phase::Completed;
                     s.status.stage = None;
                     s.status.termination = Some(if cancellation.is_cancelled() {

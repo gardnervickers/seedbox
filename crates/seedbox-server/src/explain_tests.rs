@@ -142,3 +142,38 @@ fn a_missing_report_is_an_omission() {
     assert!(explained.entries.is_empty());
     assert_eq!(explained.omissions.len(), 1);
 }
+
+#[test]
+fn a_reached_unreachable_property_is_the_violation() {
+    let id: SimulationId = "k7m2p9qx".parse().unwrap();
+    let world: WorldState = serde_json::from_value(json!({
+        "simulation": "k7m2p9qx", "revision": 1, "simulatedTimeNs": 0,
+        "machines": [], "links": [], "faults": []
+    }))
+    .unwrap();
+    let mut ledger = Ledger::default();
+    ledger.properties.insert(
+        "bad path".into(),
+        serde_json::from_value(json!({
+            "kind": "unreachable", "declared": true, "passes": 1, "failures": 0,
+            "firstPass": {"origin": origin("db", 0, 70)}
+        }))
+        .unwrap(),
+    );
+    let report = ExecutionReport {
+        host_wait_ns: 0,
+        simulated_time_ns: Some(100),
+        reason: StopReason::Completed,
+        workload_exit: None,
+        witness: None,
+        full_state: None,
+        faults: Vec::new(),
+        detail: None,
+        properties: Some(ledger),
+        choices: None,
+    };
+    let explained = project(&id, &[], &world, &[], 0, Some(&report));
+    let entry = &explained.entries[0];
+    assert!(entry.violation);
+    assert_eq!(entry.detail, "first reached");
+}

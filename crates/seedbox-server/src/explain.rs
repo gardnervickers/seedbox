@@ -6,7 +6,7 @@ use seedbox_api::{
     ProgramInput, SimulationEvent, SimulationId, WorldState,
 };
 use seedbox_artifacts::execution::ExecutionReport;
-use seedbox_engine_protocol::property::{Origin, PropertyStatus};
+use seedbox_engine_protocol::property::{Kind as PropKind, Origin, PropertyStatus};
 use serde_json::Value;
 
 /// Longest detail kept from guest-supplied JSON.
@@ -394,13 +394,27 @@ pub(crate) fn project(
                 property.passes, property.failures
             ));
         }
+        // A reachability property's encounter is a reach, and reaching an
+        // unreachable one is its violation.
+        let reach = matches!(property.kind, PropKind::Reachable | PropKind::Unreachable);
         if let Some(example) = &property.first_pass {
-            entries.push(at(
+            let mut e = at(
                 &example.origin,
                 Kind::Property,
                 format!("property:{id}"),
-                format!("first passed{}", details(&example.details)),
-            ));
+                format!(
+                    "{}{}",
+                    if reach {
+                        "first reached"
+                    } else {
+                        "first passed"
+                    },
+                    details(&example.details)
+                ),
+            );
+            e.violation = property.kind == PropKind::Unreachable
+                && property.status() == PropertyStatus::Violated;
+            entries.push(e);
         }
         if let Some(example) = &property.first_failure {
             let mut e = at(
@@ -409,7 +423,8 @@ pub(crate) fn project(
                 format!("property:{id}"),
                 format!("first failed{}", details(&example.details)),
             );
-            e.violation = property.status() == PropertyStatus::Violated;
+            e.violation = property.kind != PropKind::Unreachable
+                && property.status() == PropertyStatus::Violated;
             entries.push(e);
         }
     }

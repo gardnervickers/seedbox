@@ -2060,10 +2060,12 @@ fn simulate_stopped<M: WorldMachine>(
             if world.machines.iter().any(|m| m.time > trigger_boundary) {
                 return Err("trigger boundary is in committed machine past".into());
             }
-            world
-                .control
-                .triggers
-                .apply_boundary(&mut world.faults, trigger_boundary)?;
+            let quiet_until = world.control.quiet_until();
+            world.control.triggers.apply_boundary_gated(
+                &mut world.faults,
+                trigger_boundary,
+                quiet_until,
+            )?;
             continue;
         }
         let fault_boundary = world.faults.next_boundary();
