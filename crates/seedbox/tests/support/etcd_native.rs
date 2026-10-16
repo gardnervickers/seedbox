@@ -1,5 +1,7 @@
-//! The same normal CLI/service acceptance flow for either backend.
-//! No BackendProvider, prepared guest manifest, substituted oracle or image.
+//! Fast preparation smoke through the normal CLI/service, not bd-207 acceptance.
+//! Canonical acceptance must run examples/etcd unchanged. No BackendProvider,
+//! prepared guest manifest, substituted oracle or image. TCG stays unscheduled
+//! until its real user route lands.
 use super::etcd_project::*;
 use seedbox_api::{InputSource, Simulation, SimulationComparison};
 use seedbox_test_time::HangGuard;
@@ -92,7 +94,7 @@ impl Cli {
         seed: u64,
         label: &str,
     ) -> Result<Simulation> {
-        let mut args = submit_arguments(project, seed, backend);
+        let mut args = submit_arguments(project, seed, backend)?;
         // This request budget diagnoses a host hang; the actual oracle's write
         // count and simulated duration determine its result, not host speed.
         args.extend(words(&["--json", "--wall-time", "20m"]));
@@ -301,18 +303,31 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
 }
 
 pub fn run(backend: Backend) {
-    let executable = std::env::var_os("SEEDBOX_ETCD_CLI")
+    let executable = std::env::var_os("SEEDBOX_TEST_CLI")
         .map(PathBuf::from)
-        .expect("set SEEDBOX_ETCD_CLI to the normal release CLI with prepared runtime assets");
+        .expect("set SEEDBOX_TEST_CLI to the normal release CLI with prepared runtime assets");
     assert!(
         executable.is_file(),
         "missing release CLI {}",
         executable.display()
     );
     let executable = executable.canonicalize().unwrap();
+    let report_root = std::env::var_os("SEEDBOX_TEST_REPORT_DIR")
+        .map(PathBuf::from)
+        .expect("set SEEDBOX_TEST_REPORT_DIR to a caller-owned report directory");
+    // Reports may live under a long checkout path. Keep the API socket's state
+    // in the caller-owned short TMPDIR so Linux's sockaddr_un limit is respected.
+    let scratch_root =
+        std::env::var_os("TMPDIR").expect("set TMPDIR to a short caller-owned scratch directory");
+    let state_directory = tempfile::Builder::new()
+        .prefix(&format!("etcd-state-{}-", backend.name()))
+        .tempdir_in(scratch_root)
+        .unwrap();
+    // Keep only small command reports. The large native cache/state is a
+    // separate RAII directory created by this test and removed after shutdown.
     let directory = tempfile::Builder::new()
-        .prefix(&format!("seedbox-etcd-{}-", backend.name()))
-        .tempdir_in("/tmp")
+        .prefix(&format!("etcd-smoke-{}-", backend.name()))
+        .tempdir_in(&report_root)
         .unwrap()
         .keep();
     eprintln!(
@@ -322,7 +337,7 @@ pub fn run(backend: Backend) {
     );
     let cli = Cli {
         executable,
-        state: directory.join("state"),
+        state: state_directory.path().join("state"),
         directory,
     };
     // Resolve/write all host-only inputs before starting any owned server.

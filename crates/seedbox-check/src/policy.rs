@@ -51,8 +51,8 @@ impl Suite {
     pub fn description(self) -> &'static str {
         match self {
         Self::Portable=>"Any host: fmt, clippy, discovered portable tests and workload validation.",
-        Self::MachineTcg=>"Linux x86-64, explicit machineTcgAssets/test fixtures, patched QEMU, release CLI and OCI engine; no KVM.",
-        Self::MachinePv=>"Linux x86-64, KVM, native PV worker, explicit machinePvAssets/test fixtures, release CLI and OCI engine.",
+        Self::MachineTcg=>"Linux x86-64, explicit machineTcgAssets/test fixtures and patched QEMU; no KVM.",
+        Self::MachinePv=>"Linux x86-64, KVM, native PV worker and explicit machinePvAssets/test fixtures.",
         Self::LinuxKvm=>"Linux x86-64 or ARM64 KVM primitives; no root required.",
         Self::LinuxGuests=>"Linux KVM with architecture-matched kernel and initrd fixtures.",
         Self::LinuxOci=>"Linux x86-64 with a Docker-compatible engine; no KVM required.",
@@ -263,7 +263,7 @@ pub fn machine_inputs(suite: Suite) -> Vec<String> {
     suffixes
         .into_iter()
         .map(|s| format!("SEEDBOX_{backend}_{s}"))
-        .chain([CPU_LOOP_FIXTURE.to_string(), "SEEDBOX_ETCD_CLI".to_owned()])
+        .chain([CPU_LOOP_FIXTURE.to_string()])
         .collect()
 }
 pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -> Vec<String> {
@@ -291,14 +291,6 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
         if suite == Suite::MachinePv {
             need(kvm, kvm_reason);
         }
-        need(
-            host.engine(env),
-            "etcd service acceptance requires a Docker-compatible engine".into(),
-        );
-        need(
-            !host.engine_needs_root(env),
-            "etcd service acceptance requires an engine socket writable by this user".into(),
-        );
         for key in machine_inputs(suite) {
             let path = env.get(&key).map(Path::new);
             let dir = key.ends_with("_ASSETS");
@@ -311,7 +303,7 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
                 ),
             );
             if valid
-                && ["_QEMU", "_WORKER", "_CLANG", "_LD", "_CLI"]
+                && ["_QEMU", "_WORKER", "_CLANG", "_LD"]
                     .iter()
                     .any(|s| key.ends_with(s))
             {
@@ -405,6 +397,7 @@ pub fn features_for(package: &str, machine: &str, suites: &[Suite]) -> Vec<Strin
         "seedbox-application" => &[(Suite::LinuxOci, "oci-tests")],
         "seedbox" => &[
             (Suite::LinuxApps, "application-tests"),
+            (Suite::LinuxApps, "etcd-prep-tests"),
             (Suite::MacApps, "application-tests"),
             (Suite::LinuxPause, "retained-run-tests"),
         ],

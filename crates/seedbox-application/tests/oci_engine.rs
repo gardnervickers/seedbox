@@ -82,18 +82,24 @@ fn registry_images_export_the_expected_files() {
     }
 }
 /// Real image preparation only: no container application or guest is started.
-/// Keep the exported closures for inspecting/reusing the acceptance inputs.
+/// Export into a fresh child of the caller-owned report root and remove only
+/// that exact child on success or failure; do not retain large OCI scratch.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn canonical_etcd_member_and_go_oracle_export_real_image_closures() {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/etcd/seedbox.yaml");
     let simulation = config::load(&project, &BTreeMap::new()).unwrap();
-    let directory = tempfile::Builder::new()
-        .prefix("seedbox-etcd-oci-")
-        .tempdir()
-        .unwrap()
-        .keep();
-    eprintln!("retained etcd OCI fixture inputs: {}", directory.display());
+    let report_root = std::env::var_os("SEEDBOX_TEST_REPORT_DIR")
+        .expect("set SEEDBOX_TEST_REPORT_DIR to a caller-owned directory");
+    let export_directory = tempfile::Builder::new()
+        .prefix("etcd-oci-")
+        .tempdir_in(report_root)
+        .unwrap();
+    let directory = export_directory.path();
+    eprintln!(
+        "temporary etcd OCI fixture inputs (RAII cleanup): {}",
+        directory.display()
+    );
     let store = ContentStore::new(directory.join("store"));
     // All members share the immutable image, but retain distinct launch/data-dir
     // and volume declarations for the subsequent end-to-end service proof.

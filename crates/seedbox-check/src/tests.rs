@@ -154,63 +154,49 @@ fn test_machine_suites_are_explicit_and_require_inputs() {
     }
 }
 #[test]
-fn test_machine_etcd_requires_release_cli_and_accessible_image_engine() {
-    use std::os::unix::fs::PermissionsExt;
+fn test_raw_machine_requirements_do_not_acquire_etcd_oci_or_cli_inputs() {
     let temp = fixture();
-    let root = &temp.0;
-    let binary = root.join("executable");
-    fs::write(&binary, "fixture").unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
-    let runtime = root.join(SERVICE_RUNTIME);
+    let runtime = temp.0.join(SERVICE_RUNTIME);
     fs::create_dir_all(runtime.parent().unwrap()).unwrap();
     fs::write(runtime, "runtime fixture").unwrap();
-    let not_executable = root.join("not-executable");
-    fs::write(&not_executable, "fixture").unwrap();
-    fs::set_permissions(&not_executable, fs::Permissions::from_mode(0o644)).unwrap();
+    let binary = temp.0.join("native-fixture");
+    fs::write(&binary, "fixture").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut no_engine = host();
+    no_engine.tools.remove("podman");
+    assert!(!no_engine.engine(&Environment::new()));
     for suite in [Suite::MachinePv, Suite::MachineTcg] {
-        let mut inputs: Environment = machine_inputs(suite)
+        let inputs: Environment = machine_inputs(suite)
             .into_iter()
             .map(|key| {
+                assert_ne!(key, "SEEDBOX_ETCD_CLI");
                 let path = if key.ends_with("_ASSETS") {
-                    root
+                    &temp.0
                 } else {
                     &binary
                 };
                 (key, path.to_string_lossy().into_owned())
             })
             .collect();
-        let valid = host();
-        assert!(requirements(suite, &valid, &inputs, root).is_empty());
-        inputs.remove("SEEDBOX_ETCD_CLI");
+        assert!(requirements(suite, &no_engine, &inputs, &temp.0).is_empty());
+    }
+}
+
+#[test]
+fn test_etcd_smoke_target_is_discovered_only_by_oci_linux_apps_feature() {
+    let metadata = json!({"packages": [{"name":"seedbox", "targets":[
+        {"name":"etcd_service_native", "kind":["test"], "required-features":["etcd-prep-tests"]}
+    ]}]});
+    for (names, expected) in [
+        (vec!["linux-apps"], vec!["etcd_service_native"]),
+        (vec!["machine-pv-x86", "machine-tcg"], vec![]),
+        (vec!["mac-apps"], vec![]),
+    ] {
+        let features = features_for("seedbox", "x86_64", &suites(&names));
         assert_eq!(
-            requirements(suite, &valid, &inputs, root),
-            ["set SEEDBOX_ETCD_CLI to an existing file"]
-        );
-        inputs.insert(
-            "SEEDBOX_ETCD_CLI".into(),
-            not_executable.to_string_lossy().into_owned(),
-        );
-        assert_eq!(
-            requirements(suite, &valid, &inputs, root),
-            ["SEEDBOX_ETCD_CLI is not executable"]
-        );
-        inputs.insert(
-            "SEEDBOX_ETCD_CLI".into(),
-            binary.to_string_lossy().into_owned(),
-        );
-        let mut no_engine = valid.clone();
-        no_engine.tools.remove("podman");
-        assert_eq!(
-            requirements(suite, &no_engine, &inputs, root),
-            ["etcd service acceptance requires a Docker-compatible engine"]
-        );
-        let mut inaccessible = valid.clone();
-        inaccessible
-            .sockets
-            .push(("/var/run/docker.sock".into(), false));
-        assert_eq!(
-            requirements(suite, &inaccessible, &inputs, root),
-            ["etcd service acceptance requires an engine socket writable by this user"]
+            feature_test_targets(&metadata, "seedbox", &features).unwrap(),
+            strings(&expected)
         );
     }
 }
@@ -265,6 +251,24 @@ fn test_groups_and_implied_suites_expand_in_documented_order() {
 #[test]
 fn test_features_follow_suites_not_host_probes() {
     for (package, machine, names, expected) in [
+        (
+            "seedbox",
+            "x86_64",
+            vec!["linux-apps"],
+            vec!["application-tests", "etcd-prep-tests"],
+        ),
+        (
+            "seedbox",
+            "arm64",
+            vec!["mac-apps"],
+            vec!["application-tests"],
+        ),
+        (
+            "seedbox",
+            "x86_64",
+            vec!["machine-pv-x86", "machine-tcg"],
+            vec![],
+        ),
         (
             "seedbox-vmm",
             "x86_64",
@@ -643,7 +647,6 @@ fn test_machine_suites_do_not_force_serial_execution() {
         "cargo test -p seedbox-test --locked --test guest_services -- --ignored tcg",
         "cargo test -p seedbox-test --locked --test prepared_application -- --ignored tcg",
         "cargo test -p seedbox-test --locked --test simulation_control -- --ignored tcg",
-        "cargo test -p seedbox --locked --test etcd_service -- --ignored tcg",
         "cargo test -p seedbox-server --locked --features tcg-tests --test native_tcg_service --",
         "cargo test -p seedbox-machine-pv --locked --lib -- --ignored",
         "cargo test -p seedbox-machine-pv --locked --test native_machine -- --ignored",
@@ -654,7 +657,6 @@ fn test_machine_suites_do_not_force_serial_execution() {
         "cargo test -p seedbox-test --locked --test guest_services -- --ignored pv",
         "cargo test -p seedbox-test --locked --test prepared_application -- --ignored pv",
         "cargo test -p seedbox-test --locked --test simulation_control -- --ignored pv",
-        "cargo test -p seedbox --locked --test etcd_service -- --ignored pv",
         "cargo test -p seedbox-server --locked --features kvm-tests --test native_pv_service --",
         "cargo test -p seedbox-server --locked --features kvm-tests --test native_controller_service --",
     ]
@@ -672,7 +674,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
             .map(|job| job.args.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        22
+        20
     );
     assert_eq!(
         runs.iter().map(|job| job.name.as_str()).collect::<Vec<_>>(),
@@ -685,7 +687,6 @@ fn test_machine_suites_do_not_force_serial_execution() {
             "machine-tcg/seedbox-test/--test/guest_services",
             "machine-tcg/seedbox-test/--test/prepared_application",
             "machine-tcg/seedbox-test/--test/simulation_control",
-            "machine-tcg/seedbox/--test/etcd_service",
             "machine-tcg/seedbox-server/--test/native_tcg_service",
             "machine-pv-x86/seedbox-machine-pv/--lib/",
             "machine-pv-x86/seedbox-machine-pv/--test/native_machine",
@@ -696,7 +697,6 @@ fn test_machine_suites_do_not_force_serial_execution() {
             "machine-pv-x86/seedbox-test/--test/guest_services",
             "machine-pv-x86/seedbox-test/--test/prepared_application",
             "machine-pv-x86/seedbox-test/--test/simulation_control",
-            "machine-pv-x86/seedbox/--test/etcd_service",
             "machine-pv-x86/seedbox-server/--test/native_pv_service",
             "machine-pv-x86/seedbox-server/--test/native_controller_service"
         ]

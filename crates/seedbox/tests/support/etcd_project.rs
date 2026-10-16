@@ -1,4 +1,5 @@
-//! Acceptance inputs derived from the real example, never a replacement oracle.
+//! Fast preparation-smoke inputs, never canonical etcd acceptance evidence.
+//! bd-207 must run the checked-in examples/etcd unchanged.
 use seedbox_api::{
     ComparisonStatus, ExecutionTermination, Phase, SimulationComparison, SimulationStatus,
     TestVerdict,
@@ -34,21 +35,25 @@ pub const EXTRA_SEEDS: [u64; 2] = [124, 125];
 pub const WRITES_PER_WORKER: usize = 4;
 pub const CONCURRENCY: usize = 1;
 
-/// Explicit CLI inputs: seed is never inherited from the process environment.
-/// Pause lets acceptance inspect the retained Driver definition before release.
-// Selector spelling is isolated here pending bd-736/bd-e9e. This test harness
-// does not implement or approve a CLI interface; native execution waits on them.
-pub fn submit_arguments(project: &Path, seed: u64, backend: Backend) -> Vec<std::ffi::OsString> {
-    vec![
+/// PV uses the existing default. TCG has no normal user route yet, so it must
+/// not produce a command that silently runs PV or assumes a future flag.
+/// Seed is explicit, and pause permits inspecting retained inputs before release.
+pub fn submit_arguments(
+    project: &Path,
+    seed: u64,
+    backend: Backend,
+) -> Result<Vec<std::ffi::OsString>, String> {
+    if backend == Backend::Tcg {
+        return Err("normal TCG CLI selection is unavailable; scheduling waits on bd-e9e".into());
+    }
+    Ok(vec![
         "run".into(),
         project.as_os_str().to_owned(),
         "--seed".into(),
         seed.to_string().into(),
-        "--backend".into(),
-        backend.name().into(),
         "--paused".into(),
         "--detach".into(),
-    ]
+    ])
 }
 
 pub fn example_directory() -> PathBuf {
@@ -60,8 +65,9 @@ pub fn canonical_project() -> Project {
         .unwrap()
 }
 
-/// A deliberately small, explicit acceptance variant. The checked-in example
-/// remains untouched; every member, disk, image and the actual Go checker stay
+/// A deliberately small preparation/fast-test variant, NOT bd-207 acceptance.
+/// Canonical acceptance must run examples/etcd unchanged. The checked-in example
+/// remains byte-identical; every member, disk, image and the actual Go checker stay
 /// the same. Fixed writes still require every requested acknowledgement and
 /// cross-member value/revision/HashKV agreement, not merely a live cluster.
 pub fn acceptance_project() -> Project {

@@ -26,23 +26,28 @@ policy, including the requested controller when a resolved definition is edited;
 there is no separate parent copy of host/controller eligibility rules.
 Native body and saved-authority validation still precede native restoration.
 
-## Etcd acceptance inputs
+## Etcd preparation smoke and canonical acceptance
 
-The [etcd service integration target](../crates/seedbox/tests/etcd_service.rs)
-uses the normal CLI and service for both backends, with one backend parameter.
-The machine suites select its corresponding native case. They require
-`SEEDBOX_ETCD_CLI` to name a complete release CLI with prepared runtime assets,
-and a Docker-compatible engine accessible to the test user, in addition to the
-ordinary backend fixtures. Portable checks compile the native cases without
-executing them.
+The [native preparation-smoke target](../crates/seedbox/tests/etcd_service_native.rs)
+uses the normal CLI/service with one backend parameter. Cargo feature discovery
+includes its PV case in the OCI-requiring `linux-apps` suite. That suite supplies
+`SEEDBOX_TEST_CLI` and a caller-owned `SEEDBOX_TEST_REPORT_DIR`; the existing raw
+machine suites acquire no new OCI or CLI requirement. TCG is compiled but not
+scheduled until a real normal user route is implemented; no future flag or PV
+fallback is assumed. Portable checks compile native cases without executing them.
 
-The test derives an explicit bounded variant of `examples/etcd`: four writes
-from one writer with a 180-second simulated oracle deadline. The checked-in
-example is untouched. All three real members, independent `/data` volumes and
-the original Go oracle remain. The checker still requires every requested
-acknowledgement, reads on every settled member, and matching revision and HashKV.
-A separate OCI-engine test exports the actual etcd and Go-oracle image closures;
-it never starts an application container or a guest.
+This prep/fast test derives a bounded variant: four writes from one writer with
+a 180-second guest-time write deadline. It is **not canonical acceptance**.
+Acceptance must run the checked-in `examples/etcd` unchanged, with its original
+workload arguments. The prep variant leaves those files byte-identical and keeps
+all three real members, independent `/data` volumes and the original Go checker.
+It still requires every requested acknowledgement, reads on every settled
+member, and matching revision and HashKV. A separate OCI-engine test exports the
+actual etcd and Go-oracle image closures without starting applications or guests.
+Its large export scratch is a fresh child of the caller-owned report directory,
+removed by that test's RAII guard. Native state/cache uses a separate scoped
+child of the caller-owned short `TMPDIR`, avoiding the Unix API socket path
+limit; it is removed after server shutdown. Only small command reports remain.
 
 Seed 123 is submitted twice and replayed from retained inputs. Comparisons
 require matching outcome, witness, full state and fault history, independently

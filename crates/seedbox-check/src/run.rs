@@ -512,7 +512,6 @@ pub fn machine_suite_runs(suites: &[Suite], environment: &Environment, root: &Pa
         ] {
             selections.push(("seedbox-test", "--test", target, Some(selector)));
         }
-        selections.push(("seedbox", "--test", "etcd_service", Some(selector)));
         for (package, kind, target, filter) in selections {
             let mut args = words(&["cargo", "test", "-p", package, "--locked", kind]);
             if !target.is_empty() {

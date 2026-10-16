@@ -1,24 +1,8 @@
-//! Normal CLI/service etcd acceptance inputs and strict comparison checks.
-//! Native execution belongs to bd-207 after Driver preparation and disks land.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[path = "support/etcd_native.rs"]
-mod etcd_native;
+//! Host checks for preparation smoke inputs and strict comparison helpers.
+//! The 4-write/1-worker/180-second variant is ONLY a prep/fast test.
+//! bd-207 acceptance must run canonical examples/etcd unchanged.
 #[path = "support/etcd_project.rs"]
 mod etcd_project;
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[test]
-#[ignore = "native PV, OCI engine and normal release CLI; end-to-end runs belong to bd-207"]
-fn pv_etcd_through_normal_cli_service() {
-    etcd_native::run(Backend::Pv);
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[test]
-#[ignore = "native TCG, OCI engine and normal release CLI; requires bd-e9e/bd-16c, run in bd-207"]
-fn tcg_etcd_through_normal_cli_service() {
-    etcd_native::run(Backend::Tcg);
-}
 
 use etcd_project::*;
 use seedbox_api::{ComparisonStatus, SimulationComparison};
@@ -142,11 +126,12 @@ fn forged_wire_verdict_cannot_replace_missing_oracle_exit() {
 #[test]
 fn backend_parameter_is_explicit_and_rejects_legacy_or_wrong_backend() {
     let path = std::path::Path::new("project.yaml");
+    let pv_args = submit_arguments(path, BASELINE_SEED, Backend::Pv).unwrap();
+    assert!(!pv_args.iter().any(|arg| arg == "--backend"));
+    assert!(submit_arguments(path, BASELINE_SEED, Backend::Tcg)
+        .unwrap_err()
+        .contains("unavailable"));
     for backend in [Backend::Pv, Backend::Tcg] {
-        let args = submit_arguments(path, BASELINE_SEED, backend);
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == [std::ffi::OsString::from("--backend"), backend.name().into()]));
         let valid = serde_json::json!({"backend": backend.profile(), "driver_world": {}});
         assert!(require_backend(&valid, backend).is_ok());
         for invalid in [
@@ -236,7 +221,7 @@ fn seed_plan_keeps_repeat_identity_without_demanding_distinct_seed_witnesses() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project with spaces.yaml");
     let seeds = [BASELINE_SEED, BASELINE_SEED, EXTRA_SEEDS[0], EXTRA_SEEDS[1]];
-    let commands = seeds.map(|seed| submit_arguments(&project, seed, Backend::Pv));
+    let commands = seeds.map(|seed| submit_arguments(&project, seed, Backend::Pv).unwrap());
     assert_eq!(commands[0], commands[1]);
     for (command, seed) in commands.iter().zip(["123", "123", "124", "125"]) {
         assert_eq!(
@@ -246,8 +231,6 @@ fn seed_plan_keeps_repeat_identity_without_demanding_distinct_seed_witnesses() {
                 project.as_os_str().to_owned(),
                 "--seed".into(),
                 seed.into(),
-                "--backend".into(),
-                "pv".into(),
                 "--paused".into(),
                 "--detach".into(),
             ]

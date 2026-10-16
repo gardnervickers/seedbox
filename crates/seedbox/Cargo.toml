@@ -35,11 +35,16 @@ tokio = { workspace = true, features = ["process"] }
 
 [features]
 application-tests = []
+etcd-prep-tests = []
 retained-run-tests = []
 
 [[test]]
 name = "applications"
 required-features = ["application-tests"]
+
+[[test]]
+name = "etcd_service_native"
+required-features = ["etcd-prep-tests"]
 
 [[test]]
 name = "host_pause"
