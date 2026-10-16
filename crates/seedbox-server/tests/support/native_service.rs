@@ -85,7 +85,25 @@ async fn check_bound(
     simulated_ns: u64,
     goal: &str,
 ) {
-    let bound = simulated_bound(backend);
+    check_bound_at(
+        client,
+        id,
+        backend,
+        simulated_bound(backend),
+        simulated_ns,
+        goal,
+    )
+    .await
+}
+/// As [`check_bound`], against an explicit workload bound.
+async fn check_bound_at(
+    client: &Client,
+    id: &seedbox_api::SimulationId,
+    backend: DriverBackend,
+    bound: u64,
+    simulated_ns: u64,
+    goal: &str,
+) {
     if simulated_ns > bound {
         let _ = client.stop(id).await;
         panic!(
@@ -587,6 +605,9 @@ struct NativeSession {
     observed: Arc<AtomicBool>,
     client: Client,
     submitted: usize,
+    /// Simulated bound of this session's workload; the CPU-fixture
+    /// [`simulated_bound`] unless a longer workload sets its own.
+    bound: u64,
 }
 impl NativeSession {
     fn new(backend: DriverBackend) -> Self {
@@ -640,6 +661,7 @@ impl NativeSession {
             runtime_paths,
             workers,
             observed,
+            bound: simulated_bound(backend),
             client: Client::connect_to(&socket).unwrap(),
             submitted: 0,
         }
@@ -673,10 +695,11 @@ impl NativeSession {
                 "native worker never started: {:?}",
                 state.status
             );
-            check_bound(
+            check_bound_at(
                 &self.client,
                 id,
                 self.backend,
+                self.bound,
                 state.status.simulated_time_ns,
                 "its worker started",
             )
@@ -707,10 +730,11 @@ impl NativeSession {
                 }
                 state = progress.next() => {
                     let state = state.expect("watch closed before START=").unwrap();
-                    check_bound(
+                    check_bound_at(
                         &self.client,
                         id,
                         self.backend,
+                        self.bound,
                         state.status.simulated_time_ns,
                         "its application printed START=",
                     )
@@ -824,20 +848,22 @@ impl NativeSession {
             if state.status.phase == Phase::Completed {
                 // A completion observed without any earlier over-bound state
                 // still fails if it finished past the bound.
-                check_bound(
+                check_bound_at(
                     &self.client,
                     id,
                     self.backend,
+                    self.bound,
                     state.status.simulated_time_ns,
                     "it completed",
                 )
                 .await;
                 break state;
             }
-            check_bound(
+            check_bound_at(
                 &self.client,
                 id,
                 self.backend,
+                self.bound,
                 state.status.simulated_time_ns,
                 "it completed",
             )
@@ -1278,6 +1304,12 @@ pub async fn pv_checkpoint_continuation() {
 const PROBE_PORT: &str = "7000";
 const PROBE_BYTES: &str = "262144";
 const IDLE_SLEEP_NS: u64 = 12_500_000_000;
+/// Simulated bound of the network world: the oracle's sleep, which alone ends
+/// the run, plus the CPU-fixture allowance for boot, the exchange and drain.
+/// Measured: PV completes at 12.508 s and TCG at 14.461 s.
+fn network_bound(backend: DriverBackend) -> u64 {
+    IDLE_SLEEP_NS + simulated_bound(backend)
+}
 const PROBE_READY: &str = "NETPROBE ready port=7000\n";
 const PROBE_TCP_DONE: &str = "NETPROBE tcp ok bytes=262144 connects=";
 const PROBE_CLIENT_MID: &str = "NETPROBE arp ok ";
@@ -1633,6 +1665,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
     tokio::time::timeout(Duration::from_secs(600), async {
         let seed = 123;
         let mut session = NativeSession::new(backend);
+        session.bound = network_bound(backend);
         let request = network_submission(backend, session.root.path(), &session.store, seed);
         // An unmarked run only locates the transfer in simulated time.
         let plain = session.submit(request.clone(), 1).await;
@@ -1840,6 +1873,7 @@ pub async fn pv_network_frames_are_observation_only() {
     tokio::time::timeout(Duration::from_secs(900), async {
         let seed = 123;
         let mut session = NativeSession::new(backend);
+        session.bound = network_bound(backend);
         let request = network_submission(backend, session.root.path(), &session.store, seed);
         let plain = session.submit(request.clone(), 1).await;
         session.worker(&plain).await;
