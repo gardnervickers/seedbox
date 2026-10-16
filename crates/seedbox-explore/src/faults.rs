@@ -4,8 +4,8 @@
 //! using integer arithmetic only, so a seed yields the same schedule on every
 //! host. Lifecycle faults (crash, pause, process pause and stop) never overlap
 //! on one machine; neither do clock faults. Network faults may overlap freely.
-use seedbox_control::Action;
-use seedbox_spec::fault_profile::{DurationRange, FaultKind, FaultProfile};
+use seedbox_control::{Action, DiskOp};
+use seedbox_spec::fault_profile::{DiskOp as SpecDiskOp, DurationRange, FaultKind, FaultProfile};
 use std::collections::BTreeMap;
 
 /// A generated input. Keys and handles share the `gen-<n>` prefix: a fault's
@@ -55,6 +55,21 @@ pub fn generate(
     let total_weight: u64 = profile.faults.iter().map(|f| u64::from(f.weight())).sum();
     let mut lifecycle_free: BTreeMap<&str, u64> = BTreeMap::new();
     let mut clock_free: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut disk_free: BTreeMap<&str, u64> = BTreeMap::new();
+    for fault in &profile.faults {
+        if let FaultKind::DiskError {
+            targets: narrowed, ..
+        } = fault
+        {
+            for target in narrowed {
+                if !targets.contains(&target.as_str()) {
+                    return Err(format!(
+                        "fault profile disk_error target {target:?} is not a profile target"
+                    ));
+                }
+            }
+        }
+    }
     let mut inputs = Vec::new();
     let mut at = profile.start.0;
     let mut faults = 0;
@@ -85,13 +100,20 @@ pub fn generate(
             | FaultKind::PauseProcess { .. }
             | FaultKind::Stop { .. } => Some(&mut lifecycle_free),
             FaultKind::ClockSkew { .. } => Some(&mut clock_free),
+            FaultKind::DiskError { .. } => Some(&mut disk_free),
             FaultKind::Partition { .. } | FaultKind::Shape { .. } => None,
+        };
+        let candidates: Vec<&str> = match kind {
+            FaultKind::DiskError {
+                targets: narrowed, ..
+            } if !narrowed.is_empty() => narrowed.iter().map(String::as_str).collect(),
+            _ => targets.clone(),
         };
         // Draw a target, then take the first free one from there, so a busy
         // machine shifts the choice instead of skipping the fault.
-        let first = rng.below(targets.len() as u64) as usize;
-        let target = (0..targets.len())
-            .map(|i| targets[(first + i) % targets.len()])
+        let first = rng.below(candidates.len() as u64) as usize;
+        let target = (0..candidates.len())
+            .map(|i| candidates[(first + i) % candidates.len()])
             .find(|t| {
                 busy.as_ref()
                     .is_none_or(|b| b.get(t).is_none_or(|free| *free <= at))
@@ -183,6 +205,25 @@ pub fn generate(
                     machine: target.into(),
                 },
                 rng.within(downtime),
+            ),
+            FaultKind::DiskError {
+                duration, op, ppm, ..
+            } => (
+                Action::DiskError {
+                    handle: handle.clone(),
+                    machine: target.into(),
+                    op: match op {
+                        SpecDiskOp::Read => DiskOp::Read,
+                        SpecDiskOp::Write => DiskOp::Write,
+                        SpecDiskOp::Flush => DiskOp::Flush,
+                        SpecDiskOp::Any => DiskOp::Any,
+                    },
+                    ppm: *ppm,
+                },
+                Action::Heal {
+                    handle: handle.clone(),
+                },
+                rng.within(duration),
             ),
             FaultKind::ClockSkew {
                 duration,

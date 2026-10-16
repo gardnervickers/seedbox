@@ -393,6 +393,15 @@ static void configure_network(const char *cidr) {
     interface_up(fd, "eth0");
     if (close(fd)) die("close guest network control");
 }
+/* A retained disk that returns I/O errors (an injected disk fault, say) keeps
+ * the container from starting, as a failing disk would. Report that as the
+ * application's exit status 125, like a container runtime, rather than a
+ * supervisor or VMM failure. Other errors remain setup failures. */
+static void disk_failure(const char *what) {
+    if (errno != EIO && errno != EUCLEAN && errno != EROFS) die(what);
+    dprintf(diagnostic_fd, "SEEDBOX_DISK_ERROR %s: %s\n", what, strerror(errno));
+    finish(125, 0);
+}
 /* ext4 on the retained disk, formatted on the machine's first boot. Fixed
  * UUID and hash seed; the disk starts zeroed, so inode tables and the journal
  * need no initialization. */
@@ -400,7 +409,7 @@ static void format_disk(const char *device) {
     int fd = open(device, O_RDONLY|O_CLOEXEC);
     if (fd < 0) die("open retained disk");
     unsigned char magic[2];
-    if (pread(fd, magic, 2, 1024 + 56) != 2) die("read retained disk superblock");
+    if (pread(fd, magic, 2, 1024 + 56) != 2) disk_failure("read retained disk superblock");
     close(fd);
     if (magic[0] == 0x53 && magic[1] == 0xef) return;
     pid_t pid = fork();
@@ -414,7 +423,7 @@ static void format_disk(const char *device) {
     }
     int status;
     while (waitpid(pid, &status, 0) < 0) { if (errno != EINTR) die("wait mke2fs"); }
-    if (!WIFEXITED(status) || WEXITSTATUS(status)) { errno = EIO; die("format retained disk"); }
+    if (!WIFEXITED(status) || WEXITSTATUS(status)) { errno = EIO; disk_failure("format retained disk"); }
 }
 /* Refuse a target reached through a symlink in the image: resolved here,
  * before the chroot, it could point outside the image root. */
@@ -441,7 +450,7 @@ static void mount_volumes(char **volumes) {
     if (mount("proc", "/proc", "proc", 0, NULL)) die("mount bootstrap proc");
     format_disk("/dev/vda");
     directories("/seedbox/disk", 0700);
-    if (mount("/dev/vda", "/seedbox/disk", "ext4", 0, "noinit_itable")) die("mount retained disk");
+    if (mount("/dev/vda", "/seedbox/disk", "ext4", 0, "noinit_itable")) disk_failure("mount retained disk");
     int created = 0;
     for (char **volume = volumes; volume[0] && volume[1]; volume += 2) {
         char source[PATH_MAX], target[PATH_MAX];
@@ -451,15 +460,15 @@ static void mount_volumes(char **volumes) {
         struct stat image = {.st_mode = S_IFDIR|0755};
         if (stat(target, &image) == 0 && !S_ISDIR(image.st_mode)) { errno = ENOTDIR; die(target); }
         if (mkdir(source, image.st_mode & 07777) == 0) {
-            if (chown(source, image.st_uid, image.st_gid) || chmod(source, image.st_mode & 07777)) die(source);
+            if (chown(source, image.st_uid, image.st_gid) || chmod(source, image.st_mode & 07777)) disk_failure(source);
             created = 1;
-        } else if (errno != EEXIST) die(source);
+        } else if (errno != EEXIST) disk_failure(source);
         directories(target, 0755);
         if (mount(source, target, NULL, MS_BIND, NULL)) die("bind volume");
     }
     if (created) {
         int root = open("/seedbox/disk", O_RDONLY|O_DIRECTORY|O_CLOEXEC);
-        if (root < 0 || fsync(root)) die("sync volume directories");
+        if (root < 0 || fsync(root)) disk_failure("sync volume directories");
         close(root);
     }
 }

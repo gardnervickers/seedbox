@@ -296,6 +296,21 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     /// next slice. Returns the effective nominal speed after backend rounding
     /// and clamping, or `None` when healed.
     fn throttle(&mut self, speed_hz: Option<u64>) -> Result<Option<u64>, String>;
+    /// Whether the machine has a retained disk that disk errors can target.
+    fn has_disk(&self) -> bool {
+        false
+    }
+    /// Start (`Some`) or end (`None`) injected disk errors on the machine's
+    /// retained disk, from its next request. Ending returns their counts.
+    fn disk_errors(
+        &mut self,
+        _errors: Option<crate::virtio_block::InjectedErrors>,
+    ) -> Result<Option<crate::virtio_block::ErrorCounts>, String> {
+        Err(format!(
+            "{}: disk errors are unsupported by this backend",
+            self.name
+        ))
+    }
     fn exits(&self) -> u64;
     fn exit_witness(&mut self) -> Result<String, String>;
     /// Idempotently poison, close and reap owned worker transport without another
@@ -876,6 +891,15 @@ impl<M: WorldMachine> World<M> {
             faults::Lifecycle::Throttle(speed_hz) => {
                 self.machines[m].throttle(speed_hz).map(|_| ())
             }
+            faults::Lifecycle::DiskErrors { .. } | faults::Lifecycle::HealDiskErrors { .. } => {
+                apply_disk_errors(
+                    &mut self.machines[m],
+                    &mut self.faults,
+                    self.run_seed,
+                    self.branch_identity.as_deref(),
+                    op,
+                )
+            }
         }
     }
 
@@ -907,6 +931,15 @@ impl<M: WorldMachine> World<M> {
         }
         if let Some(speed_hz) = self.faults.throttle(m) {
             self.machines[m].throttle(Some(speed_hz))?;
+        }
+        if let Some(op) = self.faults.disk_errors(m) {
+            apply_disk_errors(
+                &mut self.machines[m],
+                &mut self.faults,
+                self.run_seed,
+                self.branch_identity.as_deref(),
+                op,
+            )?;
         }
         Ok(())
     }
@@ -1590,6 +1623,33 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         world.run_seed = self.run_seed;
         world.branch_identity = self.branch_identity.clone();
         Ok(pages)
+    }
+}
+
+/// Start or end a machine's injected disk errors. Each incarnation draws on
+/// its own stream, so a rebooted machine's errors do not repeat the last
+/// incarnation's choices.
+pub(crate) fn apply_disk_errors<M: WorldMachine>(
+    machine: &mut M,
+    faults: &mut faults::Faults,
+    run_seed: u64,
+    branch_identity: Option<&str>,
+    op: faults::Lifecycle,
+) -> Result<(), String> {
+    match op {
+        faults::Lifecycle::DiskErrors { id, op, ppm } => {
+            let domain = format!("disk-error/{}/{}/{id}", machine.name, machine.incarnation());
+            let rng = crate::rng::Rng::branch(run_seed, branch_identity, &domain);
+            let errors = crate::virtio_block::InjectedErrors::new(op, ppm, rng)?;
+            machine.disk_errors(Some(errors)).map(drop)
+        }
+        faults::Lifecycle::HealDiskErrors { row } => {
+            if let Some(counts) = machine.disk_errors(None)? {
+                faults.record_disk_error_counts(row, counts);
+            }
+            Ok(())
+        }
+        _ => Err("not a disk error transition".into()),
     }
 }
 

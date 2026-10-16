@@ -49,6 +49,70 @@ pub struct Block {
     policy: Policy,
     // Application counters stay disabled and are not part of retained state.
     stats: Stats,
+    errors: Option<InjectedErrors>,
+}
+
+/// An active `disk_error` fault: which requests it fails, how often, its own
+/// seeded draw stream, and what it has done so far.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InjectedErrors {
+    op: seedbox_control::DiskOp,
+    ppm: u32,
+    rng: crate::rng::Rng,
+    counts: ErrorCounts,
+}
+
+/// Requests a `disk_error` fault matched, and how many of them it failed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErrorCounts {
+    pub matched: u64,
+    pub failed: u64,
+}
+
+impl std::fmt::Debug for InjectedErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InjectedErrors")
+            .field("op", &self.op)
+            .field("ppm", &self.ppm)
+            .field("draws", &self.rng.counter())
+            .field("counts", &self.counts)
+            .finish()
+    }
+}
+
+impl InjectedErrors {
+    pub fn new(op: seedbox_control::DiskOp, ppm: u32, rng: crate::rng::Rng) -> Result<Self> {
+        if !seedbox_control::DISK_ERROR_PPM.contains(&ppm) {
+            return Err("invalid disk error probability".into());
+        }
+        Ok(Self {
+            op,
+            ppm,
+            rng,
+            counts: ErrorCounts::default(),
+        })
+    }
+    /// Draw for one request; only matching requests consume the stream.
+    fn fails(&mut self, kind: u32) -> bool {
+        use seedbox_control::DiskOp;
+        let matches = matches!(
+            (self.op, kind),
+            (DiskOp::Any, T_IN | T_OUT | T_FLUSH)
+                | (DiskOp::Read, T_IN)
+                | (DiskOp::Write, T_OUT)
+                | (DiskOp::Flush, T_FLUSH)
+        );
+        if !matches {
+            return false;
+        }
+        self.counts.matched += 1;
+        let fail = self.ppm == *seedbox_control::DISK_ERROR_PPM.end()
+            || self.rng.below(1_000_000) < u64::from(self.ppm);
+        self.counts.failed += u64::from(fail);
+        fail
+    }
 }
 
 /// Device metadata paired with the separate streaming disk checkpoint.
@@ -58,6 +122,8 @@ pub struct Snapshot {
     policy: Policy,
     stats: Stats,
     disk_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    errors: Option<InjectedErrors>,
 }
 
 struct Request {
@@ -131,6 +197,7 @@ impl Block {
             policy: self.policy,
             stats: self.stats.clone(),
             disk_digest: self.disk.digest(),
+            errors: self.errors.clone(),
         }
     }
 
@@ -144,6 +211,7 @@ impl Block {
             return Err("block snapshot policy, disk or counters mismatch".into());
         }
         self.stats = snapshot.stats;
+        self.errors = snapshot.errors;
         Ok(self)
     }
 
@@ -152,7 +220,18 @@ impl Block {
             disk,
             policy,
             stats: Stats::default(),
+            errors: None,
         }
+    }
+    /// Remove the injected errors with their stream and counts, so a device
+    /// rebuilt on reset can keep them.
+    pub fn take_errors(&mut self) -> Option<InjectedErrors> {
+        self.errors.take()
+    }
+    /// Start or end injected disk errors; ending returns what they did.
+    /// Takes effect from the next request the device processes.
+    pub fn set_errors(&mut self, errors: Option<InjectedErrors>) -> Option<ErrorCounts> {
+        std::mem::replace(&mut self.errors, errors).map(|old| old.counts)
     }
     pub fn into_disk(self) -> Disk {
         self.disk
@@ -186,7 +265,13 @@ impl Block {
         while let Some(chain) = transport.queues[0].validated_chain(memory, base, policy)? {
             let request = Request::decode(memory, &chain)?;
             let mut data = Vec::new();
+            // An injected error fails a valid request before any disk effect.
+            let injected = self
+                .errors
+                .as_mut()
+                .is_some_and(|errors| errors.fails(request.kind));
             let status = match request.kind {
+                T_IN | T_OUT | T_FLUSH if injected => S_IOERR,
                 T_IN => {
                     data = vec![0; request.room];
                     if self.disk.read(request.sector, &mut data).is_ok() {

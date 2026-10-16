@@ -29,7 +29,8 @@ pub enum FaultCategory {
     Machine,
     Application,
     Clock,
-    /// Heal can restore a network, machine or clock policy.
+    Storage,
+    /// Heal can restore a network, machine, clock or storage policy.
     Recovery,
 }
 
@@ -40,6 +41,7 @@ impl FaultCategory {
             Self::Machine => "Machine",
             Self::Application => "Application",
             Self::Clock => "Clock",
+            Self::Storage => "Storage",
             Self::Recovery => "Recovery",
         }
     }

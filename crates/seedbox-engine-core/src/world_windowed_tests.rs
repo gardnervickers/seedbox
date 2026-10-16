@@ -2613,3 +2613,63 @@ fn property_frames_reduce_in_commit_order_across_worker_counts_and_checkpoints()
     assert_eq!(w.properties(), &continued);
     assert_eq!(Some(continued), reference);
 }
+
+#[test]
+fn disk_errors_apply_at_their_boundary_survive_reboot_and_record_heal_counts() {
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = world(&["a", "b"]);
+        for (at, action) in [
+            (
+                10,
+                json!({"action":"disk_error","handle":"d","machine":"b","op":"write","ppm":250000}),
+            ),
+            (20, json!({"action":"crash","machine":"b"})),
+            (25, json!({"action":"reboot","machine":"b"})),
+            (30, json!({"action":"heal","handle":"d"})),
+            (31, json!({"action":"heal","handle":"d"})),
+        ] {
+            let mut action = action;
+            action["id"] = json!(0);
+            action["at_ns"] = json!(at);
+            action["deadline_ns"] = json!(at);
+            w.faults
+                .append(serde_json::from_value(action).unwrap())
+                .unwrap();
+        }
+        for at in [5, 15, 27, 35] {
+            w.machines[1].steps.push_back(Step::new(at, Stop::Sent));
+        }
+        run_with(&mut w, 60, None, workers, Duration::from_micros(3)).unwrap();
+        let changes: Vec<String> = machine_trace(&w, "b")
+            .into_iter()
+            .filter(|line| line.contains(":disk_errors/"))
+            .collect();
+        // The rebooted incarnation takes the active errors on again.
+        assert_eq!(
+            changes,
+            [
+                "b:disk_errors/on:10",
+                "b:disk_errors/on:20",
+                "b:disk_errors/off:30"
+            ]
+        );
+        let statuses: Vec<_> = w.faults.log.iter().map(|row| row.status).collect();
+        assert_eq!(&statuses[..4], [RowStatus::Applied; 4]);
+        // Healing an unknown handle fails like any other heal.
+        assert_eq!(statuses[4], RowStatus::Failed);
+        assert_eq!(
+            w.faults.log[3].disk_error_counts,
+            Some(crate::virtio_block::ErrorCounts {
+                matched: 3,
+                failed: 2
+            })
+        );
+        assert!(w.faults.log[0].detail.contains("op=write; ppm=250000"));
+        let observed = (changes, w.faults.log.clone());
+        match &reference {
+            None => reference = Some(observed),
+            Some(want) => assert_eq!(&observed, want),
+        }
+    }
+}

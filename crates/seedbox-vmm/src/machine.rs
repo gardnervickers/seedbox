@@ -836,6 +836,21 @@ impl Machine {
     }
 
     /// Capture at a committed scheduler boundary, including unpaid I/O cost.
+    pub fn has_disk(&self) -> bool {
+        self.blk.is_some()
+    }
+    /// Start or end injected errors on the retained disk, from its next request.
+    pub fn disk_errors(
+        &mut self,
+        errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::ErrorCounts>, String> {
+        let name = self.world.name.clone();
+        self.blk
+            .as_mut()
+            .map(|blk| blk.set_errors(errors))
+            .ok_or_else(|| format!("{name}: no retained disk for disk errors"))
+    }
+
     pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
         if !self.world.fault_effects.is_empty()
             || !self.world.control_requests.is_empty()

@@ -191,6 +191,23 @@ pub(crate) fn preview(
                 None => format!("Change clock rate by a seeded amount within ±{} ppb. The draw occurs only during execution; heal restores the nominal rate.", max_rate_ppb.unwrap_or(0)),
             }
         }
+        Action::DiskError { op, ppm, .. } => {
+            result.preconditions.push(
+                "The machine must be up, have a retained disk and no active disk errors.".into(),
+            );
+            result.limitations.push(
+                "Only requests the guest issues while active can fail; cached reads and unflushed writes may never reach the disk.".into(),
+            );
+            let op = match op {
+                seedbox_control::DiskOp::Read => "reads",
+                seedbox_control::DiskOp::Write => "writes",
+                seedbox_control::DiskOp::Flush => "flushes",
+                seedbox_control::DiskOp::Any => "reads, writes and flushes",
+            };
+            format!(
+                "Fail the machine's disk {op} with an I/O error, {ppm} per million, until healed."
+            )
+        }
         Action::Throttle { speed_hz, .. } => {
             result
                 .preconditions
@@ -251,6 +268,7 @@ fn healable_handle(action: &Action) -> Option<&str> {
         | Action::ClockSkew { handle, .. }
         | Action::ClockDrift { handle, .. }
         | Action::Throttle { handle, .. }
+        | Action::DiskError { handle, .. }
         | Action::DropConnection { handle, .. } => Some(handle),
         _ => None,
     }

@@ -189,3 +189,39 @@ fn invalid_targets_are_rejected() {
     p.targets = vec![];
     assert!(generate(&p, 1, &["oracle".to_string()], "oracle", u64::MAX).is_err());
 }
+
+#[test]
+fn disk_errors_target_their_narrowed_machines_one_at_a_time() {
+    use seedbox_spec::fault_profile::DiskOp as SpecDiskOp;
+    let mut p = profile(vec![FaultKind::DiskError {
+        weight: 1,
+        duration: range(1000, 3000),
+        op: SpecDiskOp::Flush,
+        ppm: 500_000,
+        targets: vec!["n2".into()],
+    }]);
+    p.interval = Duration(500_000_000);
+    let inputs = generate(&p, 9, &machines(), "oracle", u64::MAX).unwrap();
+    let mut active = false;
+    for input in &inputs {
+        match &input.action {
+            Action::DiskError {
+                machine, op, ppm, ..
+            } => {
+                assert_eq!(
+                    (machine.as_str(), *op, *ppm),
+                    ("n2", seedbox_control::DiskOp::Flush, 500_000)
+                );
+                assert!(!active, "{} overlaps", input.key);
+                active = true;
+            }
+            Action::Heal { .. } => active = false,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(inputs.len() >= 4);
+    if let FaultKind::DiskError { targets, .. } = &mut p.faults[0] {
+        *targets = vec!["oracle".into()];
+    }
+    assert!(generate(&p, 9, &machines(), "oracle", u64::MAX).is_err());
+}

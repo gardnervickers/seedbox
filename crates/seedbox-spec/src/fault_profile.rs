@@ -78,6 +78,20 @@ fn weight() -> u32 {
     1
 }
 
+fn every_request() -> u32 {
+    1_000_000
+}
+
+/// Which disk requests a generated disk error fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskOp {
+    Read,
+    Write,
+    Flush,
+    Any,
+}
+
 /// One kind of generated fault. Each fault with a duration is followed by
 /// its teardown: a heal, resume, reboot or restart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +137,19 @@ pub enum FaultKind {
         weight: u32,
         downtime: DurationRange,
     },
+    /// Fail one target's disk requests of kind `op`, each with probability
+    /// `ppm` per million, then heal. Only machines with a retained disk can
+    /// take it; `targets` narrows the profile's targets to those.
+    DiskError {
+        #[serde(default = "weight")]
+        weight: u32,
+        duration: DurationRange,
+        op: DiskOp,
+        #[serde(default = "every_request")]
+        ppm: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<String>,
+    },
     /// Step one target's wall clock by up to `maxOffset` either way.
     #[serde(rename_all = "camelCase")]
     ClockSkew {
@@ -142,6 +169,7 @@ impl FaultKind {
             | Self::Pause { weight, .. }
             | Self::PauseProcess { weight, .. }
             | Self::Stop { weight, .. }
+            | Self::DiskError { weight, .. }
             | Self::ClockSkew { weight, .. } => *weight,
         }
     }
@@ -166,6 +194,13 @@ impl FaultKind {
             }
             Self::Crash { downtime, .. } | Self::Stop { downtime, .. } => {
                 downtime.validate("downtime")
+            }
+            Self::DiskError { duration, ppm, .. } => {
+                duration.validate("duration")?;
+                if *ppm == 0 || *ppm > 1_000_000 {
+                    return Err("fault profile disk_error ppm must be 1 to 1000000".into());
+                }
+                Ok(())
             }
             Self::ClockSkew {
                 duration,

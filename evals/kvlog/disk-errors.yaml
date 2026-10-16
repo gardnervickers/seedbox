@@ -1,0 +1,13 @@
+# Fail some of the store's flushes, and crash it, while the oracle writes.
+start: 1s
+end: 18s
+interval: 2s
+faults:
+  - kind: disk_error
+    weight: 2
+    op: flush
+    ppm: 500000
+    duration: {min: 500ms, max: 3s}
+    targets: [kv]
+  - kind: crash
+    downtime: {min: 200ms, max: 1s}

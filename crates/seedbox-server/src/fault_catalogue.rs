@@ -11,6 +11,7 @@ pub(crate) fn category(name: &str) -> FaultCategory {
         "partition" | "shape" | "drop_connection" => FaultCategory::Network,
         "stop" | "restart" | "pause_process" | "resume_process" => FaultCategory::Application,
         "clock_skew" | "clock_drift" => FaultCategory::Clock,
+        "disk_error" => FaultCategory::Storage,
         "heal" => FaultCategory::Recovery,
         _ => FaultCategory::Machine,
     }
@@ -245,6 +246,7 @@ pub(crate) fn discover(world: &WorldState, minimum_latency_ns: u64) -> FaultCata
         faults.push(fault);
     }
     faults.push(descriptor("throttle","Throttle CPU","Run the machine's CPU at a lower speed than the machine's configured until healed. A speed at or above the machine's configured leaves it at full speed; one below a thousandth of it runs at a thousandth.",json!({"handle":handle,"machine":machine,"speed_hz":integer("CPU speed in Hz",*THROTTLE_SPEED_HZ.start() as i128,*THROTTLE_SPEED_HZ.end(),Some(500_000_000),"Hz")}),&["handle","machine","speed_hz"]));
+    faults.push(descriptor("disk_error","Fail disk requests","Fail the machine's retained-disk requests of one kind with an I/O error until healed, each with the given probability. A failed write changes nothing on disk; a failed flush makes nothing durable.",json!({"handle":handle,"machine":machine,"op":{"type":"string","description":"Requests to fail","enum":["read","write","flush","any"],"default":"write"},"ppm":integer("Failure probability per request",*seedbox_control::DISK_ERROR_PPM.start() as i128,u64::from(*seedbox_control::DISK_ERROR_PPM.end()),Some(1_000_000),"ppm")}),&["handle","machine","op"]));
     faults.push(descriptor("drop_connection", "Drop TCP connection", "Drop future packets in one direction of an observed IPv4 TCP incarnation until healed. Supply the exact addresses, ports and incarnation from connection observations; this world view does not enumerate live connections.", json!({"handle":handle, "connection":{
         "type":"object", "description":"Exact directed TCP connection identity", "additionalProperties":false,
         "properties":{
@@ -281,6 +283,7 @@ mod tests {
             | Action::ClockSkew { .. }
             | Action::ClockDrift { .. }
             | Action::Throttle { .. }
+            | Action::DiskError { .. }
             | Action::Pause { .. }
             | Action::Resume { .. }
             | Action::Crash { .. }
@@ -341,7 +344,7 @@ mod tests {
             faults: vec![],
         };
         let catalogue = discover(&world, 1_000_000);
-        assert_eq!(catalogue.faults.len(), 15);
+        assert_eq!(catalogue.faults.len(), 16);
         let mut names = BTreeSet::new();
         for descriptor in &catalogue.faults {
             assert!(names.insert(&descriptor.name));

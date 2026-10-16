@@ -266,3 +266,94 @@ fn get_id_zero_short_room_and_unsupported_requests_keep_used_lengths() {
         );
     }
 }
+#[test]
+fn injected_errors_fail_matching_requests_without_disk_effects() {
+    use seedbox_control::DiskOp;
+    let errors = |op, ppm| InjectedErrors::new(op, ppm, crate::rng::Rng::new(1, "test")).unwrap();
+    for policy in [Policy::Application, Policy::Block] {
+        let mut g = Guest::new(policy);
+        // A durable sector to read back, then writes fail and leave no trace.
+        g.request(1, 1, &[7; 512], false);
+        g.request(4, 0, &[], false);
+        g.notify().unwrap();
+        let before = g.b.disk().digest();
+        assert!(g
+            .b
+            .set_errors(Some(errors(DiskOp::Write, 1_000_000)))
+            .is_none());
+        let (_, write) = g.request(1, 2, &[9; 512], false);
+        let (data, read) = g.request(0, 1, &[0; 512], true);
+        g.notify().unwrap();
+        assert_eq!((g.m[write], g.m[read]), (1, 0));
+        assert_eq!(&g.m[data..data + 512], &[7; 512]);
+        assert_eq!(g.b.disk().digest(), before);
+        let counts =
+            g.b.set_errors(Some(errors(DiskOp::Flush, 1_000_000)))
+                .unwrap();
+        assert_eq!(
+            counts,
+            ErrorCounts {
+                matched: 1,
+                failed: 1
+            }
+        );
+        // A failed flush makes nothing durable.
+        g.request(1, 3, &[4; 512], false);
+        let (_, flush) = g.request(4, 0, &[], false);
+        g.notify().unwrap();
+        assert_eq!(g.m[flush], 1);
+        assert_eq!(g.b.disk().volatile_sectors(), 1);
+        // Reads fail without writing data into guest memory.
+        g.b.set_errors(Some(errors(DiskOp::Read, 1_000_000)));
+        let (data, read) = g.request(0, 1, &[0xee; 512], true);
+        g.notify().unwrap();
+        assert_eq!(g.m[read], 1);
+        assert_eq!(&g.m[data..data + 512], &[0xee; 512]);
+        // Healing restores normal service; GET_ID never matches.
+        g.b.set_errors(Some(errors(DiskOp::Any, 1_000_000)));
+        let (_, id) = g.request(8, 0, &[0; 20], true);
+        g.notify().unwrap();
+        assert_eq!(g.m[id], 0);
+        assert_eq!(g.b.set_errors(None), Some(ErrorCounts::default()));
+        let (_, flush) = g.request(4, 0, &[], false);
+        g.notify().unwrap();
+        assert_eq!(g.m[flush], 0);
+        assert_eq!(g.b.disk().volatile_sectors(), 0);
+    }
+}
+#[test]
+fn partial_injected_errors_are_seeded_and_survive_snapshots() {
+    use seedbox_control::DiskOp;
+    let run = |snapshot_after: Option<usize>| {
+        let mut g = Guest::new(Policy::Block);
+        let rng = crate::rng::Rng::new(5, "disk-error/n1/0/1");
+        g.b.set_errors(Some(
+            InjectedErrors::new(DiskOp::Write, 500_000, rng).unwrap(),
+        ));
+        let mut statuses = Vec::new();
+        // Three descriptors each: stay within the 64-entry test queue.
+        for i in 0..20 {
+            if snapshot_after == Some(i) {
+                let snapshot: Snapshot =
+                    serde_json::from_slice(&serde_json::to_vec(&g.b.snapshot()).unwrap()).unwrap();
+                let disk = g.b.clone().into_disk();
+                g.b = Block::new(disk, Policy::Block)
+                    .restore_snapshot(snapshot)
+                    .unwrap();
+            }
+            let (_, s) = g.request(1, i as u64 % 8, &[i as u8; 512], false);
+            g.notify().unwrap();
+            statuses.push(g.m[s]);
+        }
+        (statuses, g.b.set_errors(None).unwrap())
+    };
+    let (statuses, counts) = run(None);
+    assert_eq!(counts.matched, 20);
+    assert!(counts.failed > 2 && counts.failed < 18, "{counts:?}");
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 1).count() as u64,
+        counts.failed
+    );
+    assert_eq!(run(Some(9)), (statuses, counts));
+    assert!(InjectedErrors::new(DiskOp::Any, 0, crate::rng::Rng::new(1, "x")).is_err());
+}

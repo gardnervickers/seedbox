@@ -366,6 +366,15 @@ chain rather than per notification. Network offloads that were not advertised
 are rejected, received frames are limited to 64 KiB, and an undersized receive
 chain retains the frame without writing a truncated payload.
 
+A `disk_error` fault fails matching read, write or flush requests with IOERR
+before any disk effect: a failed write changes nothing, a failed flush makes
+nothing durable, and a failed read writes no data. Each fault draws on its own
+`disk-error/<machine>/<incarnation>/<id>` stream, which checkpoints carry with
+the device; it survives a guest device reset and is reapplied to a rebooted
+incarnation. The heal row records how many requests it matched and failed. A
+supervisor that cannot read, format or mount a failing retained disk exits 125,
+like a container runtime, rather than reporting an infrastructure failure.
+
 Each completed request publishes its interrupt state before the next request
 is validated. Earlier payload, status, used-ring writes and backlog removals
 survive a later failure; the failing request is not completed. MMIO rejects

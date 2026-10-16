@@ -74,6 +74,9 @@ pub struct FaultRow {
     pub requested_at_ns: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_counts: Option<SelectionCounts>,
+    /// What a healed `disk_error` fault matched and failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_error_counts: Option<crate::virtio_block::ErrorCounts>,
     pub status: RowStatus,
 }
 impl FaultRow {
@@ -166,6 +169,16 @@ pub enum Lifecycle {
     Reboot,
     /// Run the CPU at this speed in Hz, or at the machine's configured speed again.
     Throttle(Option<u64>),
+    /// Start failing disk requests for the `disk_error` fault with this ID.
+    DiskErrors {
+        id: u32,
+        op: seedbox_control::DiskOp,
+        ppm: u32,
+    },
+    /// End disk errors; their counts belong to the healing row.
+    HealDiskErrors {
+        row: u32,
+    },
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 enum Event {
@@ -198,6 +211,9 @@ pub struct Faults {
     clocks: BTreeMap<String, Clock>,
     /// Active throttle handles: machine and requested CPU speed in Hz.
     throttles: BTreeMap<String, (usize, u64)>,
+    /// Active disk error handles: machine, fault ID, operation and ppm.
+    #[serde(default)]
+    disk_errors: BTreeMap<String, (usize, u32, seedbox_control::DiskOp, u32)>,
     #[serde(with = "crate::checkpoint::ordered_map")]
     cuts: BTreeMap<(usize, usize), usize>,
     names: Vec<String>,
@@ -249,6 +265,7 @@ impl Faults {
             handles: BTreeMap::new(),
             clocks: BTreeMap::new(),
             throttles: BTreeMap::new(),
+            disk_errors: BTreeMap::new(),
             cuts: BTreeMap::new(),
             names,
             changed_network: vec![],
@@ -329,13 +346,19 @@ impl Faults {
             | Action::Resume { machine }
             | Action::Crash { machine }
             | Action::Reboot { machine }
-            | Action::Throttle { machine, .. } => {
+            | Action::Throttle { machine, .. }
+            | Action::DiskError { machine, .. } => {
                 if let Action::Throttle {
                     handle, speed_hz, ..
                 } = &plan.action
                 {
                     if handle.is_empty() || !seedbox_control::THROTTLE_SPEED_HZ.contains(speed_hz) {
                         return Err("invalid throttle handle/speed".into());
+                    }
+                }
+                if let Action::DiskError { handle, ppm, .. } = &plan.action {
+                    if handle.is_empty() || !seedbox_control::DISK_ERROR_PPM.contains(ppm) {
+                        return Err("invalid disk_error handle/ppm".into());
                     }
                 }
                 target = Some(self.machine_index(machine, "unknown fault machine")?);
@@ -495,6 +518,7 @@ impl Faults {
             request: json!(entry.plan),
             requested_at_ns: entry.plan.at_ns,
             selection_counts: None,
+            disk_error_counts: None,
             status: RowStatus::Unrequested,
         });
         self.boundaries.insert((entry.plan.at_ns, id, Event::Apply));
@@ -562,8 +586,23 @@ impl Faults {
         handles.extend(self.connections.selections.keys().cloned());
         handles.extend(self.clocks.keys().cloned());
         handles.extend(self.throttles.keys().cloned());
+        handles.extend(self.disk_errors.keys().cloned());
         handles.sort();
         handles
+    }
+    /// Machine `m`'s active disk errors, if any, as the lifecycle that starts
+    /// them. A rebooted incarnation takes them on again.
+    pub fn disk_errors(&self, m: usize) -> Option<Lifecycle> {
+        self.disk_errors
+            .values()
+            .find(|(machine, ..)| *machine == m)
+            .map(|&(_, id, op, ppm)| Lifecycle::DiskErrors { id, op, ppm })
+    }
+    /// Record what healed disk errors did on the row that healed them.
+    pub fn record_disk_error_counts(&mut self, row: u32, counts: crate::virtio_block::ErrorCounts) {
+        if let Some(row) = self.log.get_mut(row as usize) {
+            row.disk_error_counts = Some(counts);
+        }
     }
     /// The speed of machine `m`'s active throttle, if any. A rebooted
     /// incarnation takes it on again.
@@ -659,6 +698,12 @@ impl Faults {
             }
             Action::Throttle { .. } if self.throttle(index).is_some() => {
                 Some("target machine is already throttled")
+            }
+            Action::DiskError { .. } if self.life[index] == Life::Down => {
+                Some("target machine is down")
+            }
+            Action::DiskError { .. } if self.disk_errors(index).is_some() => {
+                Some("target machine already has disk errors")
             }
             _ => None,
         }
@@ -972,6 +1017,9 @@ impl Faults {
             Action::Throttle {
                 handle, speed_hz, ..
             } => self.apply_throttle(i, now, handle, speed_hz),
+            Action::DiskError {
+                handle, op, ppm, ..
+            } => self.apply_disk_error(i, now, handle, op, ppm),
             Action::Heal { handle } => self.heal(i, now, handle),
             action @ (Action::Pause { .. }
             | Action::Resume { .. }
@@ -1173,11 +1221,46 @@ impl Faults {
         self.lifecycle
             .push((m, Lifecycle::Throttle(Some(speed_hz))));
     }
-    /// Heal a throttle, connection selector, shape layer or partition.
+    fn apply_disk_error(
+        &mut self,
+        i: usize,
+        now: u64,
+        handle: String,
+        op: seedbox_control::DiskOp,
+        ppm: u32,
+    ) {
+        let m = self.entries[i].target.expect("a disk error has a target");
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        if self.disk_errors(m).is_some() {
+            return self.fail(i, "target machine already has disk errors".into());
+        }
+        let id = self.entries[i].plan.id;
+        self.disk_errors.insert(handle.clone(), (m, id, op, ppm));
+        let op_name = serde_json::to_value(op).expect("a disk op is a JSON string");
+        self.applied(
+            i,
+            now,
+            format!(
+                "handle={handle}; op={}; ppm={ppm}",
+                op_name.as_str().unwrap_or("?")
+            ),
+        );
+        self.lifecycle
+            .push((m, Lifecycle::DiskErrors { id, op, ppm }));
+    }
+    /// Heal a throttle, disk errors, connection selector, shape layer or partition.
     fn heal(&mut self, i: usize, now: u64, handle: String) {
         if let Some((m, _)) = self.throttles.remove(&handle) {
             self.applied(i, now, format!("handle={handle}; project speed restored"));
             self.lifecycle.push((m, Lifecycle::Throttle(None)));
+            return;
+        }
+        if let Some((m, ..)) = self.disk_errors.remove(&handle) {
+            self.applied(i, now, format!("handle={handle}; disk errors ended"));
+            self.lifecycle
+                .push((m, Lifecycle::HealDiskErrors { row: i as u32 }));
             return;
         }
         if let Some(selection) = self.connections.selections.remove(&handle) {
@@ -1526,6 +1609,7 @@ mod link_tests {
             rate_ppb: None,
             request: json!({"id": 2, "action": "shape"}),
             requested_at_ns: 7,
+            disk_error_counts: None,
             selection_counts: Some(SelectionCounts {
                 dropped: 1,
                 matched: 4,

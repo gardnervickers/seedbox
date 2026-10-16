@@ -21,7 +21,10 @@ impl Connection {
         let stream = TcpStream::connect(address)?;
         // Guest time: a crashed server never answers, so give up and reconnect.
         stream.set_read_timeout(Some(Duration::from_millis(500)))?;
-        Ok(Self { writer: stream.try_clone()?, reader: BufReader::new(stream) })
+        Ok(Self {
+            writer: stream.try_clone()?,
+            reader: BufReader::new(stream),
+        })
     }
     fn request(&mut self, line: &str) -> std::io::Result<String> {
         self.writer.write_all(format!("{line}\n").as_bytes())?;
@@ -33,24 +36,38 @@ impl Connection {
     }
 }
 
-fn connect(address: &str) -> Connection {
-    loop {
+/// Reconnect for up to about five seconds of guest time. A store whose disk
+/// keeps failing may stop for good; that is fail-stop, not lost data.
+fn connect(address: &str) -> Option<Connection> {
+    for _ in 0..250 {
         match Connection::open(address) {
-            Ok(connection) => return connection,
+            Ok(connection) => return Some(connection),
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
         }
     }
+    None
 }
 
 fn main() {
     let address = std::env::var("KVLOG_ADDRESS").unwrap_or_else(|_| format!("kv:{PORT}"));
-    seedbox_sdk::declare("acknowledged writes survive crashes", seedbox_sdk::Kind::Always);
+    seedbox_sdk::declare(
+        "acknowledged writes survive crashes",
+        seedbox_sdk::Kind::Always,
+    );
     seedbox_sdk::declare("a write was interrupted", seedbox_sdk::Kind::Sometimes);
-    let mut connection = connect(&address);
+    seedbox_sdk::declare(
+        "acknowledged writes were verified",
+        seedbox_sdk::Kind::Sometimes,
+    );
+    let Some(mut connection) = connect(&address) else {
+        eprintln!("kvlog-oracle: store never became reachable");
+        std::process::exit(1);
+    };
     seedbox_sdk::setup_complete(serde_json::Value::Null);
     let mut acknowledged = BTreeMap::new();
     let mut interrupted = 0;
-    for burst in 0..BURSTS {
+    let mut available = true;
+    'bursts: for burst in 0..BURSTS {
         for i in 0..BURST {
             let key = format!("k{burst}-{i}");
             let value = format!("v{burst}-{i}");
@@ -61,24 +78,56 @@ fn main() {
                 _ => {
                     // Unacknowledged: it may or may not have been applied.
                     interrupted += 1;
-                    connection = connect(&address);
+                    match connect(&address) {
+                        Some(next) => connection = next,
+                        None => {
+                            available = false;
+                            break 'bursts;
+                        }
+                    }
                 }
             }
         }
         std::thread::sleep(Duration::from_millis(400));
     }
-    seedbox_sdk::sometimes("a write was interrupted", interrupted > 0, json!({"interrupted": interrupted}));
+    seedbox_sdk::sometimes(
+        "a write was interrupted",
+        interrupted > 0,
+        json!({"interrupted": interrupted}),
+    );
     let mut lost = Vec::new();
     for (key, value) in &acknowledged {
         let reply = loop {
+            if !available {
+                break None;
+            }
             match connection.request(&format!("GET {key}")) {
-                Ok(reply) => break reply,
-                Err(_) => connection = connect(&address),
+                Ok(reply) => break Some(reply),
+                Err(_) => match connect(&address) {
+                    Some(next) => connection = next,
+                    None => available = false,
+                },
             }
         };
-        if &reply != value {
-            lost.push(key.clone());
+        match reply {
+            Some(reply) if &reply != value => lost.push(key.clone()),
+            Some(_) => {}
+            None => break,
         }
+    }
+    seedbox_sdk::sometimes(
+        "acknowledged writes were verified",
+        available,
+        json!({"acknowledged": acknowledged.len()}),
+    );
+    if !available {
+        // Nothing can be said about durability without reading back.
+        seedbox_sdk::flush().expect("flush properties");
+        println!(
+            "store unavailable; acknowledged {}, interrupted {interrupted}",
+            acknowledged.len()
+        );
+        return;
     }
     seedbox_sdk::always(
         "acknowledged writes survive crashes",
@@ -86,5 +135,9 @@ fn main() {
         json!({"lost": lost.len(), "acknowledged": acknowledged.len(), "first": lost.first()}),
     );
     seedbox_sdk::flush().expect("flush properties");
-    println!("acknowledged {}, lost {}, interrupted {interrupted}", acknowledged.len(), lost.len());
+    println!(
+        "acknowledged {}, lost {}, interrupted {interrupted}",
+        acknowledged.len(),
+        lost.len()
+    );
 }

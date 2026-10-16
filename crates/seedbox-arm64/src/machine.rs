@@ -314,6 +314,17 @@ impl<B: Backend> Machine<B> {
     pub fn time_ns(&self) -> u64 {
         self.clock.now()
     }
+    /// Start or end injected errors on the retained disk, from its next request.
+    pub fn disk_errors(
+        &mut self,
+        errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::ErrorCounts>> {
+        self.application
+            .as_mut()
+            .and_then(|devices| devices.block.as_mut())
+            .ok_or("no retained disk for disk errors")?
+            .set_disk_errors(errors)
+    }
 
     /// Resume after a world pause, or boot a new incarnation at a lifecycle
     /// boundary. Expired timers coalesce at this deterministic time.

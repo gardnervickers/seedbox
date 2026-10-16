@@ -248,6 +248,25 @@ impl WorldMachine for Mock {
             )
         }))
     }
+    fn has_disk(&self) -> bool {
+        true
+    }
+    fn disk_errors(
+        &mut self,
+        errors: Option<crate::virtio_block::InjectedErrors>,
+    ) -> Result<Option<crate::virtio_block::ErrorCounts>, String> {
+        self.record(if errors.is_some() {
+            "disk_errors/on"
+        } else {
+            "disk_errors/off"
+        });
+        Ok(errors
+            .is_none()
+            .then_some(crate::virtio_block::ErrorCounts {
+                matched: 3,
+                failed: 2,
+            }))
+    }
     fn exits(&self) -> u64 {
         0
     }

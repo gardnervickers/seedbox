@@ -388,6 +388,17 @@ pub enum Action {
         machine: String,
         speed_hz: u64,
     },
+    /// Fail the machine's disk requests of kind `op` with an I/O error, each
+    /// with probability `ppm` per million drawn on a seeded stream, until the
+    /// handle is healed. A failed write changes nothing on disk and a failed
+    /// flush makes nothing durable.
+    DiskError {
+        handle: String,
+        machine: String,
+        op: DiskOp,
+        #[serde(default = "every_request")]
+        ppm: u32,
+    },
     /// Freeze the machine's CPU and devices; the world goes on.
     Pause {
         machine: String,
@@ -419,6 +430,7 @@ impl Action {
             Self::ClockSkew { .. } => "clock_skew",
             Self::ClockDrift { .. } => "clock_drift",
             Self::Throttle { .. } => "throttle",
+            Self::DiskError { .. } => "disk_error",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
@@ -437,7 +449,8 @@ impl Action {
             | Self::Reboot { machine }
             | Self::ClockSkew { machine, .. }
             | Self::ClockDrift { machine, .. }
-            | Self::Throttle { machine, .. } => Some(machine),
+            | Self::Throttle { machine, .. }
+            | Self::DiskError { machine, .. } => Some(machine),
             _ => None,
         }
     }
@@ -486,6 +499,22 @@ pub fn validate_clock_drift(
             "clock_drift needs exactly one of a nonzero rate_ppb or a positive max_rate_ppb, each at most {MAX_CLOCK_RATE_PPB}"
         )),
     }
+}
+
+/// Which disk requests a `disk_error` fault fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskOp {
+    Read,
+    Write,
+    Flush,
+    /// Reads, writes and flushes.
+    Any,
+}
+/// Disk error probabilities, in parts per million: from rare to every request.
+pub const DISK_ERROR_PPM: std::ops::RangeInclusive<u32> = 1..=1_000_000;
+fn every_request() -> u32 {
+    *DISK_ERROR_PPM.end()
 }
 
 /// Throttled CPU speeds, in Hz: from a thousandth of the slowest configured CPU

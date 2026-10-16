@@ -167,6 +167,7 @@ pub enum Operation {
     Throttle {
         factor_permille: u64,
     },
+    DiskErrors(Option<seedbox_engine_core::virtio_block::InjectedErrors>),
     Evidence {
         full_state: bool,
         #[serde(default)]
@@ -205,6 +206,7 @@ pub enum Answer {
         log_chunks: Vec<super::log_capture::Chunk>,
     },
     Accepted(bool),
+    DiskErrors(Option<seedbox_engine_core::virtio_block::ErrorCounts>),
     Evidence(Evidence),
     Crashed {
         evidence: Evidence,
@@ -435,6 +437,7 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                     vm.throttle(factor_permille)?;
                     Ok(Answer::Ready)
                 }
+                Operation::DiskErrors(errors) => Ok(Answer::DiskErrors(vm.disk_errors(errors)?)),
                 Operation::Evidence {
                     full_state,
                     ram_pages,
@@ -775,6 +778,7 @@ impl OwnedWorker {
                 Answer::Ready
             ) | (Operation::Advance { .. }, Answer::Advanced { .. })
                 | (Operation::Frame(_), Answer::Accepted(_))
+                | (Operation::DiskErrors(_), Answer::DiskErrors(_))
                 | (Operation::Evidence { .. }, Answer::Evidence(_))
                 | (Operation::CrashExport { .. }, Answer::Crashed { .. })
                 | (Operation::InstallSuccession(_), Answer::Installed { .. })
@@ -894,6 +898,7 @@ impl OwnedWorker {
                             | Operation::SeedTimer { .. }
                             | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
+                            | Operation::DiskErrors(_)
                             | Operation::Evidence { .. }
                     );
                     let preserves_irq = matches!(
@@ -902,6 +907,7 @@ impl OwnedWorker {
                             | Operation::SeedTimer { .. }
                             | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
+                            | Operation::DiskErrors(_)
                             | Operation::Evidence { .. }
                     );
                     if (preserves_deadline && observation.next_deadline != old.next_deadline)

@@ -185,7 +185,16 @@ impl Virtio {
                 *self = match old.model {
                     Model::Net(net) => Self::net(net.mac()),
                     Model::Console(_) => Self::console(),
-                    Model::Block(disk) => Self::block(disk.into_disk()),
+                    // Injected disk errors are a world fault, not device state:
+                    // they outlive a guest reset like the disk itself.
+                    Model::Block(mut block) => {
+                        let errors = block.take_errors();
+                        let mut device = Self::block(block.into_disk());
+                        if let Model::Block(rebuilt) = &mut device.model {
+                            rebuilt.set_errors(errors);
+                        }
+                        device
+                    }
                 };
             }
         }
@@ -208,6 +217,16 @@ impl Virtio {
             return Ok(output.frames.into_iter().map(Event::Frame).collect());
         }
         unreachable!("all device models handled")
+    }
+    /// Start or end injected errors on a block device; ending returns counts.
+    pub fn set_disk_errors(
+        &mut self,
+        errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::ErrorCounts>> {
+        match &mut self.model {
+            Model::Block(block) => Ok(block.set_errors(errors)),
+            _ => Err("disk errors need a block device".into()),
+        }
     }
     pub fn receive(&mut self, memory: &mut [u8], bytes: &[u8]) -> Result<bool> {
         match &mut self.model {

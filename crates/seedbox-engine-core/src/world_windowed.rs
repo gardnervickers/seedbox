@@ -185,6 +185,14 @@ fn validate_host_action<M: WorldMachine>(
             }
         }
     }
+    if let seedbox_control::Action::DiskError { machine, .. } = action {
+        if guests
+            .iter()
+            .any(|guest| guest.m.name == *machine && !guest.m.has_disk())
+        {
+            return Err(format!("{machine}: disk_error needs a retained disk"));
+        }
+    }
     if let seedbox_control::Action::Throttle { machine, .. } = action {
         if guests
             .iter()
@@ -859,6 +867,15 @@ impl<M: WorldMachine> Coord<'_, M> {
                     if let Some(speed_hz) = self.faults.throttle(m) {
                         guests[m].m.throttle(Some(speed_hz))?;
                     }
+                    if let Some(op) = self.faults.disk_errors(m) {
+                        world::apply_disk_errors(
+                            &mut *guests[m].m,
+                            self.faults,
+                            self.run_seed,
+                            self.branch_identity.as_deref(),
+                            op,
+                        )?;
+                    }
                     Ok(())
                 });
                 if let Err(mut error) = result {
@@ -869,6 +886,17 @@ impl<M: WorldMachine> Coord<'_, M> {
             }
             faults::Lifecycle::Throttle(speed_hz) => {
                 applied_speed_hz = guests[m].m.throttle(speed_hz)?;
+            }
+            faults::Lifecycle::DiskErrors { .. } | faults::Lifecycle::HealDiskErrors { .. } => {
+                world::apply_disk_errors(
+                    &mut *guests[m].m,
+                    self.faults,
+                    self.run_seed,
+                    self.branch_identity.as_deref(),
+                    op,
+                )?;
+                // A device policy change is no machine lifecycle transition.
+                return Ok(());
             }
             faults::Lifecycle::Reboot => {
                 // Frames that reached it before `t` belonged to the dead
@@ -901,6 +929,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                 faults::Lifecycle::Throttle(_) => MachineTransition::Throttled {
                     speed_hz: applied_speed_hz,
                 },
+                faults::Lifecycle::DiskErrors { .. } | faults::Lifecycle::HealDiskErrors { .. } => {
+                    return Ok(());
+                }
             };
             let incarnation = if op == faults::Lifecycle::Crash {
                 previous_incarnation

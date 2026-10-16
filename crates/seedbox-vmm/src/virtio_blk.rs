@@ -60,6 +60,13 @@ impl VirtioBlk {
     pub fn stats(&self) -> &Stats {
         self.model.stats()
     }
+    /// Start or end injected disk errors; ending returns their counts.
+    pub fn set_errors(
+        &mut self,
+        errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,
+    ) -> Option<seedbox_engine_core::virtio_block::ErrorCounts> {
+        self.model.set_errors(errors)
+    }
     fn config(&self, off: u64) -> u8 {
         match off {
             0..=7 => self.disk().capacity().to_le_bytes()[off as usize],

@@ -43,7 +43,11 @@ fn serve(store: Arc<Store>, stream: TcpStream) -> std::io::Result<()> {
                 if !store.buggy {
                     log.sync_data()?;
                 }
-                store.values.lock().unwrap().insert(key.to_string(), value.to_string());
+                store
+                    .values
+                    .lock()
+                    .unwrap()
+                    .insert(key.to_string(), value.to_string());
                 "OK".to_string()
             }
             ["GET", key] => store

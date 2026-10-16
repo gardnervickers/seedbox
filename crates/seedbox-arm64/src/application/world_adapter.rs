@@ -291,6 +291,8 @@ pub struct ArmMachine {
     ram_pages: u64,
     /// The machine's configured CPU speed, which a throttle is a fraction of.
     cpu_speed_hz: u64,
+    /// Booted with a retained disk, which disk errors can target.
+    has_disk: bool,
 }
 impl Deref for ArmMachine {
     type Target = MachineState;
@@ -417,6 +419,7 @@ impl WorldMachine for ArmMachine {
             .progress
             .as_ref()
             .map_or(0, |progress| progress.speed_hz);
+        let has_disk = boot.disk_sectors.is_some() || boot.disk_image.is_some();
         let mut boot = boot.clone();
         boot.seed = u64::from_le_bytes(
             entropy[..8]
@@ -452,6 +455,7 @@ impl WorldMachine for ArmMachine {
             snapshot_sequence: 0,
             ram_pages,
             cpu_speed_hz,
+            has_disk,
         })
     }
     fn has_pending_irq(&self) -> bool {
@@ -644,6 +648,23 @@ impl WorldMachine for ArmMachine {
         self.ready(Operation::Throttle { factor_permille })?;
         Ok(speed_hz
             .map(|_| seedbox_control::effective_throttle_speed(self.cpu_speed_hz, factor_permille)))
+    }
+    fn has_disk(&self) -> bool {
+        self.has_disk
+    }
+    fn disk_errors(
+        &mut self,
+        errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::ErrorCounts>> {
+        let Answer::DiskErrors(counts) = self.worker.call(Operation::DiskErrors(errors))? else {
+            return self.reject("invalid ARM disk error response".into());
+        };
+        self.physical = self
+            .worker
+            .observation()
+            .cloned()
+            .ok_or("missing stopped ARM observation")?;
+        Ok(counts)
     }
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<()> {
         Err("ARM machine speed reseeding is unsupported".into())
