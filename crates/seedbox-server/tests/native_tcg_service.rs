@@ -42,3 +42,8 @@ async fn fresh_native_tcg_different_input_witnesses_do_not_match() {
     .await
     .expect("fresh differing witness pair hit the host hang guard without finishing");
 }
+
+#[tokio::test]
+async fn native_tcg_checkpoint_with_pending_sleep_and_network_continues() {
+    native_service::checkpoint_in_flight_continuation(DriverBackend::Tcg).await;
+}

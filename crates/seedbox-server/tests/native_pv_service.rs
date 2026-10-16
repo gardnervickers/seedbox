@@ -58,3 +58,7 @@ async fn native_pv_large_checkpoint_export_through_public_client_under_load() {
 async fn native_pv_public_checkpoint_export_import_matches_uninterrupted() {
     native_service::pv_checkpoint_continuation().await;
 }
+#[tokio::test]
+async fn native_pv_checkpoint_with_pending_sleep_and_network_continues() {
+    native_service::checkpoint_in_flight_continuation(DriverBackend::Pv).await;
+}
