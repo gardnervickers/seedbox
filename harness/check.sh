@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The required pinned dev shell provisions this tool before checker invocation.
 set -euo pipefail
+export CARGO_INCREMENTAL=0
 script=${BASH_SOURCE[0]}
 [[ $script == */* ]] || script=./$script
 cd -- "${script%/*}/.."

@@ -263,7 +263,10 @@ pub struct Checks<C: Commands> {
     pub environment: Environment,
 }
 impl<C: Commands> Checks<C> {
-    pub fn new(commands: C, root: PathBuf, environment: Environment) -> Self {
+    pub fn new(commands: C, root: PathBuf, mut environment: Environment) -> Self {
+        // Direct coordinator invocation has the same bounded-output policy as
+        // harness/check.sh, without changing the caller's interactive shell.
+        environment.insert("CARGO_INCREMENTAL".into(), "0".into());
         Self {
             commands,
             #[cfg(test)]

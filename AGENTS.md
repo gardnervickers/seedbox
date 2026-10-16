@@ -171,6 +171,8 @@ the canonical crate; do not restore sibling source inclusion for these policies.
 
 ## Checks
 
+Check runs disable Cargo incremental compilation to bound build output; the dev shell's normal incremental edit loop is unchanged.
+
 ### Test time and ordering
 
 Functional assertions must not depend on host speed. Use `seedbox-test-time`

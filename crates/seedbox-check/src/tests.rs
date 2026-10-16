@@ -12,6 +12,23 @@ impl Commands for Spy {
         Ok(self.replies.pop_front().unwrap_or_default())
     }
 }
+#[test]
+fn check_runs_disable_incremental_without_mutating_caller_settings() {
+    for setting in [None, Some("0"), Some("1")] {
+        let mut environment = env(&[("CARGO_TARGET_DIR", "/agent-cache")]);
+        if let Some(value) = setting {
+            environment.insert("CARGO_INCREMENTAL".into(), value.into());
+        }
+        let c = Checks::new(Spy::default(), "/fixture".into(), environment.clone());
+        let job = c.job("build", words(&["cargo", "build", "--locked"]));
+        assert_eq!(job.environment["CARGO_INCREMENTAL"], "0");
+        assert_eq!(job.environment["CARGO_TARGET_DIR"], "/agent-cache");
+        assert_eq!(
+            environment.get("CARGO_INCREMENTAL").map(String::as_str),
+            setting
+        );
+    }
+}
 fn strings(values: &[&str]) -> Vec<String> {
     words(values)
 }
@@ -1275,19 +1292,21 @@ fn compatibility_wrappers_only_exec_the_supplied_tool_and_preserve_arguments() {
     let tool = t.0.join("coordinator with spaces");
     fs::write(
         &tool,
-        "#!/bin/sh\nprintf 'arg:%s\\n' \"$@\"\nprintf 'cwd:%s\\n' \"$PWD\"\n",
+        "#!/bin/sh\nprintf 'arg:%s\\n' \"$@\"\nprintf 'cwd:%s\\n' \"$PWD\"\nprintf 'incremental:%s\\n' \"${CARGO_INCREMENTAL-unset}\"\n",
     )
     .unwrap();
     fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
     let e = env(&[
         ("PATH", "/no-tools"),
         ("SEEDBOX_CHECK", tool.to_str().unwrap()),
+        ("CARGO_INCREMENTAL", "1"),
     ]);
     let result = Real
         .execute(&wrapper_job(&t.0, "check.sh", &["portable", "--list"], &e))
         .unwrap();
     assert_eq!(result.code, 0);
     assert!(result.stdout.starts_with("arg:portable\narg:--list\n"));
+    assert!(result.stdout.contains("incremental:0\n"));
     let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -1303,6 +1322,7 @@ fn compatibility_wrappers_only_exec_the_supplied_tool_and_preserve_arguments() {
         assert!(result
             .stdout
             .starts_with("arg:--portable-stage\narg:portable\n"));
+        assert!(result.stdout.contains("incremental:0\n"));
     }
 }
 #[test]
