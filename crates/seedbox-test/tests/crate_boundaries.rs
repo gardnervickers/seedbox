@@ -157,6 +157,11 @@ fn verify(graph: &Graph) -> Result<(), String> {
                 .get(&path)
                 .ok_or_else(|| format!("uninspected local dependency {}", path.display()))?;
             for (next, kind) in &package.edges {
+                // Cargo builds a package's dev-dependencies only for that
+                // package itself, never for its dependents.
+                if *kind == Kind::Dev && &path != source {
+                    continue;
+                }
                 let next_package = graph
                     .get(next)
                     .ok_or_else(|| format!("uninspected local dependency {}", next.display()))?;
@@ -353,6 +358,24 @@ fn policy_rejects_indirect_dev_dependency() {
         .push((PathBuf::from("seedbox-driver"), Kind::Normal));
     let error = verify(&graph).unwrap_err();
     assert!(error.contains("outside-workspace-helper --Normal--> seedbox-driver"));
+}
+
+#[test]
+fn policy_ignores_dev_dependencies_of_dependencies() {
+    // seedbox-machine-pv dev-depends on a test helper that itself
+    // dev-depends on the driver: cargo never builds that second edge.
+    let mut graph = fixture();
+    graph
+        .get_mut(Path::new("seedbox-machine-pv"))
+        .unwrap()
+        .edges
+        .push((PathBuf::from("outside-workspace-helper"), Kind::Dev));
+    graph
+        .get_mut(Path::new("outside-workspace-helper"))
+        .unwrap()
+        .edges
+        .push((PathBuf::from("seedbox-driver"), Kind::Dev));
+    verify(&graph).unwrap();
 }
 
 #[test]

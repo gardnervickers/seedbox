@@ -17,7 +17,6 @@ use serde_json::Value;
 use std::{
     collections::VecDeque,
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -28,17 +27,21 @@ fn quote(s: &str) -> String {
 fn wrapper(root: &Path, mode: &str) -> (PathBuf, PathBuf) {
     let record = root.join(format!("{mode}-records.ndjson"));
     let executable = root.join(format!("{mode}-exec-wrapper"));
-    fs::write(
+    // Written and closed while forks are excluded: another thread of this
+    // test binary (or the library's own worker spawn) can't copy a writable
+    // descriptor and make the wrapper's exec fail with ETXTBSY.
+    seedbox_test::process::install_executable(
         &executable,
         format!(
             "#!/bin/sh\nexec {} --scratch-fixture --scratch-mode {} --scratch-record {} \"$@\"\n",
             quote(CHILD),
             quote(mode),
             quote(record.to_str().unwrap())
-        ),
+        )
+        .as_bytes(),
+        0o700,
     )
     .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     (executable, record)
 }
 fn events(record: &Path) -> Vec<Value> {
@@ -577,5 +580,75 @@ fn restore_and_capture_and_export_errors_remove_partial_bodies_then_reap() {
         assert!(owned_dirs(&root).is_empty());
         assert!(root.is_dir());
         reaped(&record);
+    }
+}
+
+/// bd-7bd, deterministically: a fork held before exec while the wrapper is
+/// still open for writing in this process makes the PV worker launch fail;
+/// installed wrappers launch under concurrent held forks. Linux ETXTBSY only.
+#[cfg(target_os = "linux")]
+mod descriptor_probe {
+    use super::*;
+    use seedbox_test::process::{install_executable, HeldChildren, Spawn};
+    use std::io::Write;
+
+    /// A cold snapshot starts the worker on its first run.
+    fn launch(binary: &Path, saved: &Snapshot, root: &Path) -> Result<PVMachine, String> {
+        let mut m = PVMachine::from_snapshot_in(binary, saved, root).map_err(|e| e.to_string())?;
+        run(&mut m, &mut Entropy::default(), vec![]).map_err(|e| e.to_string())?;
+        Ok(m)
+    }
+    fn script(record: &Path) -> String {
+        format!(
+            "#!/bin/sh\nexec {} --scratch-fixture --scratch-mode ok --scratch-record {} \"$@\"\n",
+            quote(CHILD),
+            quote(record.to_str().unwrap())
+        )
+    }
+
+    #[test]
+    fn wrapper_written_in_process_cannot_start_while_a_fork_is_held() {
+        let saved = initial();
+        let source = tempfile::tempdir().unwrap();
+        let root = root(source.path());
+        let binary = root.join("ok-exec-wrapper");
+        // The helper's previous shape: an ordinary in-process write.
+        let mut file = fs::File::create(&binary).unwrap();
+        file.write_all(script(&root.join("records")).as_bytes())
+            .unwrap();
+        let mut held = HeldChildren::new();
+        held.hold(Spawn::GuardForkOnly).unwrap();
+        drop(file);
+        install_mode(&binary);
+        let error = match launch(&binary, &saved, &root) {
+            Ok(_) => panic!("launched while a held fork had a writable copy"),
+            Err(error) => error,
+        };
+        assert!(error.contains("os error 26"), "{error}");
+        held.release().unwrap();
+    }
+
+    #[test]
+    fn installed_wrapper_launches_while_guarded_forks_are_held() {
+        let saved = initial();
+        let source = tempfile::tempdir().unwrap();
+        let root = root(source.path());
+        let record = root.join("ok-records.ndjson");
+        let binary = root.join("ok-exec-wrapper");
+        install_executable(&binary, script(&record).as_bytes(), 0o700).unwrap();
+        let mut held = HeldChildren::new();
+        for _ in 0..4 {
+            held.hold(Spawn::GuardWhileHeld).unwrap();
+        }
+        // The worker spawn shares the guard with the held forks.
+        let m = launch(&binary, &saved, &root).unwrap();
+        held.release().unwrap();
+        drop(m);
+        reaped(&record);
+    }
+
+    fn install_mode(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

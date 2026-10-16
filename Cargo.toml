@@ -20,6 +20,7 @@ bollard = { version = "0.21", features = ["buildkit", "chrono"] }
 hex = "0.4"
 seedbox-artifacts = { path = "crates/seedbox-artifacts" }
 seedbox-exec = { path = "crates/seedbox-exec" }
+seedbox-test = { path = "crates/seedbox-test" }
 seedbox-application = { path = "crates/seedbox-application" }
 seedbox-server = { path = "crates/seedbox-server" }
 seedbox-api = { path = "crates/seedbox-api" }

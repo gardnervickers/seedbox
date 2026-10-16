@@ -19,6 +19,7 @@ tar.workspace = true
 
 [dev-dependencies]
 seedbox-machine = { workspace = true, features = ["test-support"] }
+seedbox-test.workspace = true
 hex.workspace = true
 
 [[bin]]

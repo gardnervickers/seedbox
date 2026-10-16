@@ -16,14 +16,14 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
-fn an_unguarded_fork_during_an_in_process_write_makes_the_file_busy() {
+fn a_fork_during_an_uncoordinated_write_makes_the_file_busy() {
     let _serial = serial();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("tool");
     let mut file = fs::File::create(&path).unwrap();
     file.write_all(SCRIPT).unwrap();
     let mut held = HeldChildren::new();
-    held.hold(Spawn::Unguarded).unwrap();
+    held.hold(Spawn::GuardForkOnly).unwrap();
     drop(file);
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     let error = status(&mut Command::new(&path)).unwrap_err();
@@ -41,7 +41,7 @@ fn installed_executables_run_while_guarded_forks_are_held() {
         install_executable(&path, SCRIPT, 0o700).unwrap();
         let mut held = HeldChildren::new();
         for _ in 0..4 {
-            held.hold(Spawn::Guarded).unwrap();
+            held.hold(Spawn::GuardWhileHeld).unwrap();
         }
         // Guarded forks exclude writers; probe without blocking.
         assert!(seedbox_exec::try_writing().is_none());
@@ -67,9 +67,9 @@ fn many_held_children_release_without_joining_one_at_a_time() {
         let mut held = HeldChildren::new();
         for index in 0..6 {
             let how = if index % 2 == 0 {
-                Spawn::Guarded
+                Spawn::GuardWhileHeld
             } else {
-                Spawn::Unguarded
+                Spawn::GuardForkOnly
             };
             held.hold(how).unwrap();
         }
@@ -83,8 +83,8 @@ fn a_panicking_test_still_releases_its_held_children() {
     let _serial = serial();
     let result = std::panic::catch_unwind(|| {
         let mut held = HeldChildren::new();
-        held.hold(Spawn::Guarded).unwrap();
-        held.hold(Spawn::Unguarded).unwrap();
+        held.hold(Spawn::GuardWhileHeld).unwrap();
+        held.hold(Spawn::GuardForkOnly).unwrap();
         panic!("assertion failure while children are held");
     });
     assert!(result.is_err());

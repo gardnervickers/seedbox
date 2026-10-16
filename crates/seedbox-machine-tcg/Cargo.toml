@@ -30,6 +30,7 @@ harness = false
 seedbox-machine-tcg = { workspace = true, features = ["test-support"] }
 tar.workspace = true
 seedbox-machine = { workspace = true, features = ["test-support"] }
+seedbox-test.workspace = true
 hex.workspace = true
 libc.workspace = true
 

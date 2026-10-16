@@ -54,9 +54,13 @@ pub enum Spawn {
     /// is held, as every real spawn does. A blocking executable write in this
     /// process would wait for it, so probe writers with
     /// `seedbox_exec::try_writing`, never [`install_executable`].
-    Guarded,
-    /// Bypassing the guard, to reproduce what an unguarded fork does.
-    Unguarded,
+    GuardWhileHeld,
+    /// The guard is held only across the fork and released once the child is
+    /// parked: the child copies no descriptor of a file being installed with
+    /// [`install_executable`] (so sibling tests are safe), but does copy any
+    /// file this process opened for writing some other way. Reproduces an
+    /// uncoordinated write, and lets the test write executables while it holds.
+    GuardForkOnly,
 }
 
 /// Children of this process held between fork and exec, each holding copies
@@ -109,22 +113,24 @@ impl HeldChildren {
                 }
             });
         }
+        let fork_guard = (how == Spawn::GuardForkOnly).then(seedbox_exec::spawning);
         let spawned = std::thread::spawn(move || {
             let _keep = (ready_write, release_read);
             match how {
-                Spawn::Guarded => spawn(&mut command),
+                Spawn::GuardWhileHeld => spawn(&mut command),
                 #[allow(
                     clippy::disallowed_methods,
-                    reason = "deliberately unguarded: reproduces an uncoordinated fork"
+                    reason = "the caller holds the shared guard across this fork only"
                 )]
-                Spawn::Unguarded => command.spawn(),
+                Spawn::GuardForkOnly => command.spawn(),
             }
         });
         self.held.push(Held { release, spawned });
         let mut byte = [0];
         // EOF here means the spawn failed before the child reached pre_exec.
-        ready.read_exact(&mut byte)?;
-        Ok(())
+        let parked = ready.read_exact(&mut byte);
+        drop(fork_guard);
+        parked
     }
 
     pub fn len(&self) -> usize {

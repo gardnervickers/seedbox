@@ -14,7 +14,6 @@ use seedbox_machine::{
 use serde_json::Value;
 use std::{
     collections::VecDeque,
-    os::unix::fs::PermissionsExt,
     process::{Command, Stdio},
 };
 const CHILD: &str = env!("CARGO_BIN_EXE_seedbox-tcg-scratch-fixture");
@@ -24,17 +23,21 @@ fn quote(s: &str) -> String {
 fn wrapper(root: &Path, mode: &str) -> (PathBuf, PathBuf) {
     let record = root.join(format!("{mode}-records.ndjson"));
     let executable = root.join(format!("{mode}-exec-wrapper"));
-    fs::write(
+    // Written and closed while forks are excluded: another thread of this
+    // test binary (or the library's own worker spawn) can't copy a writable
+    // descriptor and make the wrapper's exec fail with ETXTBSY.
+    seedbox_test::process::install_executable(
         &executable,
         format!(
             "#!/bin/sh\nexec {} --scratch-fixture --scratch-mode {} --scratch-record {} \"$@\"\n",
             quote(CHILD),
             quote(mode),
             quote(record.to_str().unwrap())
-        ),
+        )
+        .as_bytes(),
+        0o700,
     )
     .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     (executable, record)
 }
 fn events(record: &Path) -> Vec<Value> {
