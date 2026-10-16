@@ -710,6 +710,17 @@ impl WorldMachine for ArmMachine {
             .ok_or("missing stopped ARM observation")?;
         Ok(counts)
     }
+    fn preempt(&mut self, setting: Option<(u32, u64)>) -> Result<()> {
+        let Answer::Ready = self.worker.call(Operation::Preempt(setting))? else {
+            return self.reject("invalid ARM preempt response".into());
+        };
+        self.physical = self
+            .worker
+            .observation()
+            .cloned()
+            .ok_or("missing stopped ARM observation")?;
+        Ok(())
+    }
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<()> {
         Err("ARM machine speed reseeding is unsupported".into())
     }

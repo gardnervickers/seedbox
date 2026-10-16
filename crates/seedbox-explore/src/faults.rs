@@ -59,6 +59,7 @@ pub fn generate(
     let mut clock_free: BTreeMap<&str, u64> = BTreeMap::new();
     let mut disk_free: BTreeMap<&str, u64> = BTreeMap::new();
     let mut latency_free: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut preempt_free: BTreeMap<&str, u64> = BTreeMap::new();
     for fault in &profile.faults {
         if let FaultKind::Partition { from, .. } = fault {
             if let Some(machine) = from.iter().find(|m| !machines.contains(m)) {
@@ -115,6 +116,7 @@ pub fn generate(
             FaultKind::ClockSkew { .. } => Some(&mut clock_free),
             FaultKind::DiskError { .. } => Some(&mut disk_free),
             FaultKind::DiskLatency { .. } => Some(&mut latency_free),
+            FaultKind::Preempt { .. } => Some(&mut preempt_free),
             FaultKind::Partition { .. } | FaultKind::Shape { .. } => None,
         };
         let candidates: Vec<&str> = match kind {
@@ -264,6 +266,17 @@ pub fn generate(
                     },
                     latency_ns: rng.within(latency),
                     jitter_ns: jitter.0,
+                },
+                Action::Heal {
+                    handle: handle.clone(),
+                },
+                rng.within(duration),
+            ),
+            FaultKind::Preempt { duration, ppm, .. } => (
+                Action::Preempt {
+                    handle: handle.clone(),
+                    machine: target.into(),
+                    ppm: *ppm,
                 },
                 Action::Heal {
                     handle: handle.clone(),

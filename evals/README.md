@@ -13,8 +13,9 @@ the repository root so they can use the SDK crate.
 | [replog](replog) | Any replica answers reads from its own copy; a follower cut off from the leader misses writes. | Leader–follower partitions: `--fault-profile replog/partitions.yaml` | 5 of 20 seeds (100–119); none without faults; the fixed variant (reads via the leader) never |
 | [kvlog](kvlog) fixed | None: the negative control. | Flush errors and crashes: `--fault-profile kvlog/disk-errors.yaml` | Never; a store whose disk keeps failing stops, which the oracle reports as unverified rather than lost |
 | [compact](compact) | Restart compaction empties the log before the new snapshot is installed. | A crash during the brief compaction after a restart: `--fault-profile compact/crashes.yaml` | 1 of 48 seeds (1000–1047); a sweep with gaps longer than the downtime never can |
-| [casreg](casreg) | Compare-and-set releases its lock between comparing and setting. | Two concurrent compare-and-sets interleaved inside the window | 3 of 48 seeds (4000–4047); only the operation history shows it, through [`seedbox-check`](../crates/seedbox-check) |
+| [casreg](casreg) | Compare-and-set releases its lock between comparing and setting. | Two concurrent compare-and-sets interleaved inside the window | 3 of 48 seeds (4000–4047), 1 of 48 after a later image rebuild; only the operation history shows it, through [`seedbox-check`](../crates/seedbox-check) |
 | [slowdisk](slowdisk) | Group commit acknowledges a write once its fsync has waited 20 ms, assuming it will finish. | Disk latency and a crash before the slow fsync completes: `--fault-profile slowdisk/slow.yaml` | 11 of 24 seeds (100–123); 0 of 16 with crashes alone (`crashes.yaml`), so an instant disk never reaches it; the fixed variant 0 of 24 |
+| [lazyinit](lazyinit) | Threads lazily build shared state with an unlocked check-then-set, so two can both build it. | A thread switch inside the ~100 µs build, which one guest CPU rarely makes: a `preempt` fault on `app`: `--fault-profile lazyinit/preempt.yaml` | 0 of 48 seeds (5000–5047) without it; 4 of 48 at 1% of syscalls and progress calls, 33 of 48 at 10%; the fixed variant 0 of 48 at 10% |
 | [retry](retry) | The table of applied request IDs lives only in memory, so a restarted log applies a retried append again. | A crash after an append is durable but before its acknowledgement, then the client choosing to retry: `--fault-profile retry/crashes.yaml` | 2 of 48 seeds (4000–4047); the fixed variant 0 of 24 |
 
 Each new eval's checker was validated before its rate was measured: a
@@ -25,7 +26,9 @@ and set (8 of 8 buggy runs violate, 0 of 8 fixed). `CASREG_WORK` widens the
 race window (5000 rounds by default; 7000 gives 4 of 32 seeds). For retry,
 `RETRY_ACK_DELAY_MS=300` holds each acknowledgement after the append is
 durable and `RETRY_ALWAYS=1` makes the client always retry: 8 of 8 buggy runs
-apply an append twice, 0 of 8 fixed. For slowdisk, 50 ms disk latency with a crash 10 ms after the server's
+apply an append twice, 0 of 8 fixed. Scheduler perturbation does not help casreg (1 of 48 seeds without it and
+at 0.1% and 1%, 0 at 10%): its race needs two requests to arrive inside a
+20 µs window, which the network decides, not the scheduler. For slowdisk, 50 ms disk latency with a crash 10 ms after the server's
 `acknowledged before sync` event loses an acknowledged write in 4 of 4
 buggy runs; the fixed variant, crashed at a fixed time under the same
 latency, loses none in 4. Retry's client takes its pacing and its

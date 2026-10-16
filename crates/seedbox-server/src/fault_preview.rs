@@ -230,6 +230,17 @@ pub(crate) fn preview(
                 "Complete the machine's disk {op} {latency_ns} ns late, plus a seeded draw up to {jitter_ns} ns, until healed."
             )
         }
+        Action::Preempt { ppm, .. } => {
+            result
+                .preconditions
+                .push("The machine must be up and its scheduling not already perturbed.".into());
+            result.limitations.push(
+                "A yield only switches threads when another is runnable; single-threaded work is unaffected apart from timing.".into(),
+            );
+            format!(
+                "Yield the machine's CPU at {ppm} per million syscalls and progress calls, drawn on a seeded stream, until healed."
+            )
+        }
         Action::Throttle { speed_hz, .. } => {
             result
                 .preconditions
@@ -292,6 +303,7 @@ fn healable_handle(action: &Action) -> Option<&str> {
         | Action::Throttle { handle, .. }
         | Action::DiskError { handle, .. }
         | Action::DiskLatency { handle, .. }
+        | Action::Preempt { handle, .. }
         | Action::DropConnection { handle, .. } => Some(handle),
         _ => None,
     }

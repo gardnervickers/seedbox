@@ -208,6 +208,9 @@ pub enum Lifecycle {
     HealDiskLatency {
         row: u32,
     },
+    /// Perturb thread scheduling for the `preempt` fault with this ID, or
+    /// (`None`) stop.
+    Preempt(Option<(u32, u32)>),
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 enum Event {
@@ -246,6 +249,9 @@ pub struct Faults {
     /// Active disk latency handles: machine, fault ID, operation, latency and jitter.
     #[serde(default)]
     disk_latencies: BTreeMap<String, (usize, u32, seedbox_control::DiskOp, u64, u64)>,
+    /// Active scheduler perturbation handles: machine, fault ID and ppm.
+    #[serde(default)]
+    preempts: BTreeMap<String, (usize, u32, u32)>,
     #[serde(with = "crate::checkpoint::ordered_map")]
     cuts: BTreeMap<(usize, usize), usize>,
     names: Vec<String>,
@@ -299,6 +305,7 @@ impl Faults {
             throttles: BTreeMap::new(),
             disk_errors: BTreeMap::new(),
             disk_latencies: BTreeMap::new(),
+            preempts: BTreeMap::new(),
             cuts: BTreeMap::new(),
             names,
             changed_network: vec![],
@@ -384,7 +391,13 @@ impl Faults {
             | Action::Reboot { machine }
             | Action::Throttle { machine, .. }
             | Action::DiskError { machine, .. }
-            | Action::DiskLatency { machine, .. } => {
+            | Action::DiskLatency { machine, .. }
+            | Action::Preempt { machine, .. } => {
+                if let Action::Preempt { handle, ppm, .. } = &plan.action {
+                    if handle.is_empty() || !seedbox_control::PREEMPT_PPM.contains(ppm) {
+                        return Err("invalid preempt handle/ppm".into());
+                    }
+                }
                 if let Action::DiskLatency {
                     handle,
                     latency_ns,
@@ -638,6 +651,7 @@ impl Faults {
         handles.extend(self.throttles.keys().cloned());
         handles.extend(self.disk_errors.keys().cloned());
         handles.extend(self.disk_latencies.keys().cloned());
+        handles.extend(self.preempts.keys().cloned());
         handles.sort();
         handles
     }
@@ -663,6 +677,14 @@ impl Faults {
                     jitter_ns,
                 },
             )
+    }
+    /// Machine `m`'s active scheduler perturbation, if any: its fault ID and
+    /// ppm. A rebooted incarnation takes it on again.
+    pub fn preempt(&self, m: usize) -> Option<(u32, u32)> {
+        self.preempts
+            .values()
+            .find(|(machine, ..)| *machine == m)
+            .map(|&(_, id, ppm)| (id, ppm))
     }
     /// Record what healed disk latency did on the row that healed it.
     pub fn record_disk_latency_counts(
@@ -786,6 +808,12 @@ impl Faults {
             }
             Action::DiskLatency { .. } if self.disk_latency(index).is_some() => {
                 Some("target machine already has disk latency")
+            }
+            Action::Preempt { .. } if self.life[index] == Life::Down => {
+                Some("target machine is down")
+            }
+            Action::Preempt { .. } if self.preempt(index).is_some() => {
+                Some("target machine scheduling is already perturbed")
             }
             _ => None,
         }
@@ -1113,6 +1141,7 @@ impl Faults {
                 jitter_ns,
                 ..
             } => self.apply_disk_latency(i, now, handle, op, latency_ns, jitter_ns),
+            Action::Preempt { handle, ppm, .. } => self.apply_preempt(i, now, handle, ppm),
             Action::Heal { handle } => self.heal(i, now, handle),
             action @ (Action::Pause { .. }
             | Action::Resume { .. }
@@ -1381,6 +1410,22 @@ impl Faults {
             },
         ));
     }
+    fn apply_preempt(&mut self, i: usize, now: u64, handle: String, ppm: u32) {
+        let m = self.entries[i]
+            .target
+            .expect("a preempt fault has a target");
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        if self.preempt(m).is_some() {
+            return self.fail(i, "target machine scheduling is already perturbed".into());
+        }
+        let id = self.entries[i].plan.id;
+        self.preempts.insert(handle.clone(), (m, id, ppm));
+        self.applied(i, now, format!("handle={handle}; ppm={ppm}"));
+        self.lifecycle
+            .push((m, Lifecycle::Preempt(Some((id, ppm)))));
+    }
     /// Heal a throttle, disk errors, connection selector, shape layer or partition.
     fn heal(&mut self, i: usize, now: u64, handle: String) {
         if let Some((m, _)) = self.throttles.remove(&handle) {
@@ -1392,6 +1437,11 @@ impl Faults {
             self.applied(i, now, format!("handle={handle}; disk errors ended"));
             self.lifecycle
                 .push((m, Lifecycle::HealDiskErrors { row: i as u32 }));
+            return;
+        }
+        if let Some((m, ..)) = self.preempts.remove(&handle) {
+            self.applied(i, now, format!("handle={handle}; scheduling restored"));
+            self.lifecycle.push((m, Lifecycle::Preempt(None)));
             return;
         }
         if let Some((m, ..)) = self.disk_latencies.remove(&handle) {

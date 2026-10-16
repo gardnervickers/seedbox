@@ -626,6 +626,15 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "is_zero")]
         jitter_ns: u64,
     },
+    /// Perturb the machine's thread scheduling until the handle is healed:
+    /// the guest yields its CPU at `ppm` per million syscalls and progress
+    /// calls, drawn on a seeded stream, so other runnable threads run at
+    /// points a seed alone rarely reaches.
+    Preempt {
+        handle: String,
+        machine: String,
+        ppm: u32,
+    },
     /// Freeze the machine's CPU and devices; the world goes on.
     Pause {
         machine: String,
@@ -659,6 +668,7 @@ impl Action {
             Self::Throttle { .. } => "throttle",
             Self::DiskError { .. } => "disk_error",
             Self::DiskLatency { .. } => "disk_latency",
+            Self::Preempt { .. } => "preempt",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
@@ -679,7 +689,8 @@ impl Action {
             | Self::ClockDrift { machine, .. }
             | Self::Throttle { machine, .. }
             | Self::DiskError { machine, .. }
-            | Self::DiskLatency { machine, .. } => Some(machine),
+            | Self::DiskLatency { machine, .. }
+            | Self::Preempt { machine, .. } => Some(machine),
             _ => None,
         }
     }
@@ -748,6 +759,9 @@ fn every_request() -> u32 {
 fn any_request() -> DiskOp {
     DiskOp::Any
 }
+/// Scheduler perturbation rates, in parts per million of syscalls and
+/// progress calls: from rare to every one.
+pub const PREEMPT_PPM: std::ops::RangeInclusive<u32> = 1..=1_000_000;
 /// Disk request latencies, in nanoseconds: from a fast SSD (1 µs) to a
 /// stalled device (1 s). Jitter is bounded the same way.
 pub const DISK_LATENCY_NS: std::ops::RangeInclusive<u64> = 1_000..=1_000_000_000;

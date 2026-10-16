@@ -229,6 +229,52 @@ fn disk_errors_target_their_narrowed_machines_one_at_a_time() {
 }
 
 #[test]
+fn disk_latency_and_preempt_generate_healed_windows() {
+    let mut p = profile(vec![
+        FaultKind::DiskLatency {
+            weight: 1,
+            duration: range(1000, 2000),
+            latency: range(20, 40),
+            op: seedbox_spec::fault_profile::DiskOp::Any,
+            jitter: Duration(1_000_000),
+            targets: vec!["n1".into()],
+        },
+        FaultKind::Preempt {
+            weight: 1,
+            duration: range(1000, 2000),
+            ppm: 50_000,
+        },
+    ]);
+    p.interval = Duration(500_000_000);
+    let inputs = generate(&p, 3, &machines(), "oracle", u64::MAX).unwrap();
+    let (mut latencies, mut preempts, mut heals) = (0, 0, 0);
+    for input in &inputs {
+        match &input.action {
+            Action::DiskLatency {
+                machine,
+                latency_ns,
+                jitter_ns,
+                ..
+            } => {
+                assert_eq!(machine, "n1");
+                assert!((20_000_000..=40_000_000).contains(latency_ns));
+                assert_eq!(*jitter_ns, 1_000_000);
+                latencies += 1;
+            }
+            Action::Preempt { machine, ppm, .. } => {
+                assert_ne!(machine, "oracle");
+                assert_eq!(*ppm, 50_000);
+                preempts += 1;
+            }
+            Action::Heal { .. } => heals += 1,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(latencies > 0 && preempts > 0);
+    assert_eq!(heals, latencies + preempts);
+}
+
+#[test]
 fn partitions_can_cut_a_target_off_from_named_machines_only() {
     let mut p = profile(vec![FaultKind::Partition {
         weight: 1,

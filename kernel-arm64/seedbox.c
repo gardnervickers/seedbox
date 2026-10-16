@@ -8,6 +8,7 @@
 #include <linux/irq.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
+#include <linux/sched.h>
 #include <linux/sched_clock.h>
 #include <linux/sizes.h>
 #include <linux/string.h>
@@ -28,6 +29,10 @@ struct seedbox_page {
 	 * and then bumps the generation; random.c mixes them in once. */
 	u64 entropy_gen;
 	u8 entropy[32];
+	/* Seeded scheduler perturbation: the parts per million of syscalls and
+	 * progress calls that yield the CPU (0 is off), and the VMM-seeded
+	 * stream those draws come from. */
+	u64 preempt_ppm, preempt_seed;
 };
 /* Nominal virtual time one syscall costs; the page's syscall_ns is 1000 unthrottled. */
 #define SYSCALL_NS 1000ULL
@@ -171,6 +176,28 @@ static void seedbox_charge(u64 ns)
 	}
 }
 
+/* Yield the CPU at a seeded fraction of syscalls and progress calls, so
+ * another runnable thread can run here: interleavings a seed would not
+ * otherwise reach. The stream is separate from progress jitter and lives in
+ * guest RAM, so a snapshot continues it; the VMM reseeds it per fault and
+ * incarnation. One guest CPU, syscall context only. */
+static void seedbox_perturb(void)
+{
+	static u64 state, seeded;
+	u64 ppm = READ_ONCE(page->preempt_ppm);
+	u64 seed;
+
+	if (!ppm)
+		return;
+	seed = READ_ONCE(page->preempt_seed);
+	if (seed != seeded) {
+		state = seed;
+		seeded = seed;
+	}
+	if (jitter_next(&state) % 1000000 < ppm)
+		yield();
+}
+
 /* Charge syscall work through the bounded clock rendezvous. Load the charge
  * once: throttle/heal changes at a rendezvous affect the next syscall, while
  * the remaining charge survives in guest registers or stack. A progress call
@@ -183,6 +210,8 @@ void seedbox_syscall_progress(struct pt_regs *regs, int scno)
 	if (page && scno == SEEDBOX_PROGRESS_NR && regs->regs[0] == SEEDBOX_PROGRESS_MARK)
 		ns = progress_charge(ns);
 	seedbox_charge(ns);
+	if (page)
+		seedbox_perturb();
 }
 
 static u64 cs_read(struct clocksource *cs) { return seedbox_read(); }

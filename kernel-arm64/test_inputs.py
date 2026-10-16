@@ -295,17 +295,21 @@ typedef uint64_t u64;
 #define notrace
 #define unlikely(x) (x)
 #define panic(...) abort()
+typedef uint8_t u8;
 struct pt_regs { unsigned long regs[31]; };
 """ + page + r"""
 _Static_assert(offsetof(struct seedbox_page, syscall_ns) == 48, "PV syscall cost ABI");
 _Static_assert(offsetof(struct seedbox_page, progress_ns) == 56, "progress charge ABI");
 _Static_assert(offsetof(struct seedbox_page, progress_jitter_ns) == 64, "progress jitter ABI");
 _Static_assert(offsetof(struct seedbox_page, progress_jitter_seed) == 72, "progress jitter ABI");
+_Static_assert(offsetof(struct seedbox_page, preempt_ppm) == 120, "scheduler perturbation ABI");
+_Static_assert(offsetof(struct seedbox_page, preempt_seed) == 128, "scheduler perturbation ABI");
 static struct seedbox_page storage, *page = &storage;
 static struct pt_regs regs;
 static u64 early_last, next_cost, window;
 static unsigned long irq_flags;
-static unsigned int writes;
+static unsigned int writes, yields;
+static void yield(void) { assert(irq_flags == 0); ++yields; }
 static char registers[64];
 static void *event = registers;
 #define local_irq_save(saved) do { (saved) = irq_flags; irq_flags |= 128; } while (0)
@@ -316,7 +320,9 @@ static void *event = registers;
 #define isb() ((void)0)
 #define READ_ONCE(x) (assert(&(x) == &page->syscall_ns || &(x) == &page->progress_ns \
                              || &(x) == &page->progress_jitter_ns \
-                             || &(x) == &page->progress_jitter_seed || (irq_flags & 128)), (x))
+                             || &(x) == &page->progress_jitter_seed \
+                             || &(x) == &page->preempt_ppm || &(x) == &page->preempt_seed \
+                             || (irq_flags & 128)), (x))
 #define likely(x) (x)
 #define WRITE_ONCE(x, v) do { assert(irq_flags & 128); (x) = (v); } while (0)
 static void writeq(unsigned long value, void *address) {
@@ -420,6 +426,32 @@ int main(void) {
         seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
         assert(page->last - before <= 50000);
     }
+
+    /* Scheduler perturbation yields at its rate on its own seeded stream: never
+     * when off, at every call at a million per million, and a changed seed
+     * restarts the stream. It charges no time. */
+    reset(1000, UINT64_MAX, 0, 0);
+    yields = 0;
+    for (int i = 0; i != 100; ++i) seedbox_syscall_progress(&regs, 1);
+    assert(yields == 0 && page->last == 100000);
+    page->preempt_ppm = 1000000;
+    page->preempt_seed = 3;
+    for (int i = 0; i != 100; ++i) seedbox_syscall_progress(&regs, 1);
+    assert(yields == 100 && page->last == 200000);
+    page->preempt_ppm = 250000;
+    page->preempt_seed = 11;
+    yields = 0;
+    for (int i = 0; i != 1000; ++i) seedbox_syscall_progress(&regs, 1);
+    unsigned int quarter = yields;
+    assert(quarter > 150 && quarter < 350);
+    page->preempt_seed = 12;
+    yields = 0;
+    for (int i = 0; i != 1000; ++i) seedbox_syscall_progress(&regs, 1);
+    page->preempt_seed = 11;
+    yields = 0;
+    for (int i = 0; i != 1000; ++i) seedbox_syscall_progress(&regs, 1);
+    assert(yields == quarter);
+    page->preempt_ppm = 0;
 
     /* Preserve the pre-initialization syscall behavior. */
     page = NULL;

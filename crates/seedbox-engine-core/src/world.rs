@@ -345,6 +345,14 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
             self.name
         ))
     }
+    /// Start (`Some((ppm, seed))`) or stop (`None`) seeded scheduler
+    /// perturbation in the guest, from its next syscall.
+    fn preempt(&mut self, _setting: Option<(u32, u64)>) -> Result<(), String> {
+        Err(format!(
+            "{}: scheduler perturbation is unsupported by this backend",
+            self.name
+        ))
+    }
     fn exits(&self) -> u64;
     fn exit_witness(&mut self) -> Result<String, String>;
     /// Idempotently poison, close and reap owned worker transport without another
@@ -997,7 +1005,8 @@ impl<M: WorldMachine> World<M> {
             faults::Lifecycle::DiskErrors { .. }
             | faults::Lifecycle::HealDiskErrors { .. }
             | faults::Lifecycle::DiskLatency { .. }
-            | faults::Lifecycle::HealDiskLatency { .. } => apply_disk_fault(
+            | faults::Lifecycle::HealDiskLatency { .. }
+            | faults::Lifecycle::Preempt(_) => apply_disk_fault(
                 &mut self.machines[m],
                 &mut self.faults,
                 self.run_seed,
@@ -1036,9 +1045,15 @@ impl<M: WorldMachine> World<M> {
         if let Some(speed_hz) = self.faults.throttle(m) {
             self.machines[m].throttle(Some(speed_hz))?;
         }
-        for op in [self.faults.disk_errors(m), self.faults.disk_latency(m)]
-            .into_iter()
-            .flatten()
+        for op in [
+            self.faults.disk_errors(m),
+            self.faults.disk_latency(m),
+            self.faults
+                .preempt(m)
+                .map(|p| faults::Lifecycle::Preempt(Some(p))),
+        ]
+        .into_iter()
+        .flatten()
         {
             apply_disk_fault(
                 &mut self.machines[m],
@@ -1795,6 +1810,12 @@ pub(crate) fn apply_disk_fault<M: WorldMachine>(
             }
             Ok(())
         }
+        faults::Lifecycle::Preempt(Some((id, ppm))) => {
+            let domain = format!("preempt/{}/{}/{id}", machine.name, machine.incarnation());
+            let seed = crate::rng::Rng::branch(run_seed, branch_identity, &domain).next() | 1;
+            machine.preempt(Some((ppm, seed)))
+        }
+        faults::Lifecycle::Preempt(None) => machine.preempt(None),
         _ => Err("not a disk fault transition".into()),
     }
 }

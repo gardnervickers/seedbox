@@ -349,6 +349,7 @@ impl Tracker {
             | FaultAction::Throttle { handle, .. }
             | FaultAction::DiskError { handle, .. }
             | FaultAction::DiskLatency { handle, .. }
+            | FaultAction::Preempt { handle, .. }
             | FaultAction::DropConnection { handle, .. } => {
                 self.healable.insert(handle.clone(), id);
             }

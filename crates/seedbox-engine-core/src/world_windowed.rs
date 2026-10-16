@@ -1077,9 +1077,15 @@ impl<M: WorldMachine> Coord<'_, M> {
                     if let Some(speed_hz) = self.faults.throttle(m) {
                         guests[m].m.throttle(Some(speed_hz))?;
                     }
-                    for op in [self.faults.disk_errors(m), self.faults.disk_latency(m)]
-                        .into_iter()
-                        .flatten()
+                    for op in [
+                        self.faults.disk_errors(m),
+                        self.faults.disk_latency(m),
+                        self.faults
+                            .preempt(m)
+                            .map(|p| faults::Lifecycle::Preempt(Some(p))),
+                    ]
+                    .into_iter()
+                    .flatten()
                     {
                         world::apply_disk_fault(
                             &mut *guests[m].m,
@@ -1105,7 +1111,8 @@ impl<M: WorldMachine> Coord<'_, M> {
             faults::Lifecycle::DiskErrors { .. }
             | faults::Lifecycle::HealDiskErrors { .. }
             | faults::Lifecycle::DiskLatency { .. }
-            | faults::Lifecycle::HealDiskLatency { .. } => {
+            | faults::Lifecycle::HealDiskLatency { .. }
+            | faults::Lifecycle::Preempt(_) => {
                 world::apply_disk_fault(
                     &mut *guests[m].m,
                     self.faults,
@@ -1168,7 +1175,8 @@ impl<M: WorldMachine> Coord<'_, M> {
                 faults::Lifecycle::DiskErrors { .. }
                 | faults::Lifecycle::HealDiskErrors { .. }
                 | faults::Lifecycle::DiskLatency { .. }
-                | faults::Lifecycle::HealDiskLatency { .. } => {
+                | faults::Lifecycle::HealDiskLatency { .. }
+                | faults::Lifecycle::Preempt(_) => {
                     return Ok(());
                 }
             };

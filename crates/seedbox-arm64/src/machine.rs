@@ -24,6 +24,10 @@ const PROGRESS_JITTER_SEED_OFFSET: usize = 72;
 /// Branch entropy: a generation, then 32 bytes (kernel-arm64/seedbox.c).
 const ENTROPY_GEN_OFFSET: usize = 80;
 const ENTROPY_OFFSET: usize = 88;
+/// Seeded scheduler perturbation: yields per million syscalls and progress
+/// calls, and the stream they are drawn from (kernel-arm64/seedbox.c).
+const PREEMPT_PPM_OFFSET: usize = 120;
+const PREEMPT_SEED_OFFSET: usize = 128;
 
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -280,6 +284,20 @@ impl<B: Backend> Machine<B> {
         unsafe {
             self.page
                 .set_word(SYSCALL_NS_OFFSET, throttled_ns(SYSCALL_NS, factor_permille))
+        }
+    }
+
+    /// Start (`Some((ppm, seed))`) or stop seeded scheduler perturbation while
+    /// the vCPU is stopped; the guest kernel draws at its next syscall. The
+    /// page is part of snapshots, so a restored capture keeps it.
+    pub fn preempt(&mut self, setting: Option<(u32, u64)>) -> Result<()> {
+        let (ppm, seed) = setting.unwrap_or((0, 0));
+        if setting.is_some() && !seedbox_control::PREEMPT_PPM.contains(&ppm) {
+            return Err("invalid ARM preempt rate".into());
+        }
+        unsafe {
+            self.page.set_word(PREEMPT_SEED_OFFSET, seed)?;
+            self.page.set_word(PREEMPT_PPM_OFFSET, u64::from(ppm))
         }
     }
 

@@ -138,6 +138,24 @@ handled by binary instrumentation.
 Code: [x86 clock](../kernel/seedbox.c), [x86 patch sites](../kernel/apply.py),
 [ARM clock](../kernel-arm64/seedbox.c), [ARM patch sites](../kernel-arm64/apply.py).
 
+## Seeded scheduler perturbation
+
+One guest CPU with `PREEMPT_NONE` switches threads only when one blocks or a
+tick lands, so a race whose window is short and opens while other threads are
+runnable can be out of reach of every seed. A `preempt` fault sets two PV
+page words on its target, a rate in parts per million and a seed, and the ARM
+kernel draws once per syscall and progress call from a splitmix stream on
+that seed (separate from progress jitter) and calls `yield()` on a hit, at
+syscall entry in process context. Progress calls sit every 50,000
+application instructions, so yields land inside application code without
+charging any time. The coordinator derives the seed from
+`preempt/<machine>/<incarnation>/<id>`, reapplies the fault to a rebooted
+incarnation and clears the words on heal; the page and the stream state are
+guest memory, so checkpoints continue them. Zero words leave scheduling
+untouched. x86 does not support it yet.
+
+Code: [ARM kernel](../kernel-arm64/seedbox.c), [machine](../crates/seedbox-arm64/src/machine.rs).
+
 ## Observation without guest progress
 
 A host watchdog interrupts a long run so Seedbox can diagnose where it is stuck.

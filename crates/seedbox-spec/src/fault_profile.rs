@@ -174,6 +174,14 @@ pub enum FaultKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<String>,
     },
+    /// Perturb one target's thread scheduling: its guest yields the CPU at
+    /// `ppm` per million syscalls and progress calls, then heal.
+    Preempt {
+        #[serde(default = "weight")]
+        weight: u32,
+        duration: DurationRange,
+        ppm: u32,
+    },
     /// Step one target's wall clock by up to `maxOffset` either way.
     #[serde(rename_all = "camelCase")]
     ClockSkew {
@@ -195,6 +203,7 @@ impl FaultKind {
             | Self::Stop { weight, .. }
             | Self::DiskError { weight, .. }
             | Self::DiskLatency { weight, .. }
+            | Self::Preempt { weight, .. }
             | Self::ClockSkew { weight, .. } => *weight,
         }
     }
@@ -241,6 +250,13 @@ impl FaultKind {
                         "fault profile disk_latency latency must be {}ns to {}ns, jitter at most {}ns",
                         bounds.0, bounds.1, bounds.1
                     ));
+                }
+                Ok(())
+            }
+            Self::Preempt { duration, ppm, .. } => {
+                duration.validate("duration")?;
+                if *ppm == 0 || *ppm > 1_000_000 {
+                    return Err("fault profile preempt ppm must be 1 to 1000000".into());
                 }
                 Ok(())
             }

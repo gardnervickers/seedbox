@@ -248,6 +248,7 @@ pub(crate) fn discover(world: &WorldState, minimum_latency_ns: u64) -> FaultCata
     faults.push(descriptor("throttle","Throttle CPU","Run the machine's CPU at a lower speed than the machine's configured until healed. A speed at or above the machine's configured leaves it at full speed; one below a thousandth of it runs at a thousandth.",json!({"handle":handle,"machine":machine,"speed_hz":integer("CPU speed in Hz",*THROTTLE_SPEED_HZ.start() as i128,*THROTTLE_SPEED_HZ.end(),Some(500_000_000),"Hz")}),&["handle","machine","speed_hz"]));
     faults.push(descriptor("disk_error","Fail disk requests","Fail the machine's retained-disk requests of one kind with an I/O error until healed, each with the given probability. A failed write changes nothing on disk; a failed flush makes nothing durable.",json!({"handle":handle,"machine":machine,"op":{"type":"string","description":"Requests to fail","enum":["read","write","flush","any"],"default":"write"},"ppm":integer("Failure probability per request",*seedbox_control::DISK_ERROR_PPM.start() as i128,u64::from(*seedbox_control::DISK_ERROR_PPM.end()),Some(1_000_000),"ppm")}),&["handle","machine","op"]));
     faults.push(descriptor("disk_latency","Delay disk requests","Complete the machine's retained-disk requests of one kind late until healed: each takes the latency plus a seeded draw up to the jitter, and requests complete in submission order. A request's disk effect happens when it completes; a crash loses requests still pending.",json!({"handle":handle,"machine":machine,"op":{"type":"string","description":"Requests to delay","enum":["any","read","write","flush"],"default":"any"},"latency_ns":integer("Latency per request",*seedbox_control::DISK_LATENCY_NS.start() as i128,*seedbox_control::DISK_LATENCY_NS.end(),Some(10_000_000),"ns"),"jitter_ns":integer("Bound of the seeded extra latency",0,*seedbox_control::DISK_LATENCY_NS.end(),Some(0),"ns")}),&["handle","machine","latency_ns"]));
+    faults.push(descriptor("preempt","Perturb thread scheduling","Yield the machine's CPU at a seeded fraction of its syscalls and progress calls until healed, so other runnable threads run at points a seed alone rarely reaches.",json!({"handle":handle,"machine":machine,"ppm":integer("Yields per million syscalls and progress calls",*seedbox_control::PREEMPT_PPM.start() as i128,u64::from(*seedbox_control::PREEMPT_PPM.end()),Some(10_000),"ppm")}),&["handle","machine","ppm"]));
     faults.push(descriptor("drop_connection", "Drop TCP connection", "Drop future packets in one direction of an observed IPv4 TCP incarnation until healed. Supply the exact addresses, ports and incarnation from connection observations; this world view does not enumerate live connections.", json!({"handle":handle, "connection":{
         "type":"object", "description":"Exact directed TCP connection identity", "additionalProperties":false,
         "properties":{
@@ -286,6 +287,7 @@ mod tests {
             | Action::Throttle { .. }
             | Action::DiskError { .. }
             | Action::DiskLatency { .. }
+            | Action::Preempt { .. }
             | Action::Pause { .. }
             | Action::Resume { .. }
             | Action::Crash { .. }
@@ -348,7 +350,7 @@ mod tests {
             faults: vec![],
         };
         let catalogue = discover(&world, 1_000_000);
-        assert_eq!(catalogue.faults.len(), 17);
+        assert_eq!(catalogue.faults.len(), 18);
         let mut names = BTreeSet::new();
         for descriptor in &catalogue.faults {
             assert!(names.insert(&descriptor.name));

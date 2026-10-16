@@ -286,6 +286,34 @@ impl WorldMachine for Mock {
         self.hold = hold;
         Ok(())
     }
+    fn disk_latency(
+        &mut self,
+        latency: Option<crate::virtio_block::InjectedLatency>,
+    ) -> Result<Option<crate::virtio_block::LatencyCounts>, String> {
+        self.record(if latency.is_some() {
+            "disk_latency/on"
+        } else {
+            "disk_latency/off"
+        });
+        Ok(latency
+            .is_none()
+            .then_some(crate::virtio_block::LatencyCounts {
+                delayed: 4,
+                deepest: 2,
+            }))
+    }
+    fn preempt(&mut self, setting: Option<(u32, u64)>) -> Result<(), String> {
+        self.record(match setting {
+            Some((ppm, _)) => {
+                if ppm == 0 {
+                    return Err("zero preempt rate".into());
+                }
+                "preempt/on"
+            }
+            None => "preempt/off",
+        });
+        Ok(())
+    }
     fn disk_errors(
         &mut self,
         errors: Option<crate::virtio_block::InjectedErrors>,

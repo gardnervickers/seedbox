@@ -169,6 +169,7 @@ pub enum Operation {
     },
     DiskErrors(Option<seedbox_engine_core::virtio_block::InjectedErrors>),
     DiskLatency(Option<seedbox_engine_core::virtio_block::InjectedLatency>),
+    Preempt(Option<(u32, u64)>),
     HoldBlock(Option<seedbox_engine_core::virtio_block::Hold>),
     ReseedGuest {
         entropy: [u32; 8],
@@ -541,6 +542,10 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 Operation::DiskLatency(latency) => {
                     Ok(Answer::DiskLatency(vm.disk_latency(latency)?))
                 }
+                Operation::Preempt(setting) => {
+                    vm.preempt(setting)?;
+                    Ok(Answer::Ready)
+                }
                 Operation::HoldBlock(hold) => {
                     vm.hold_block(hold)?;
                     Ok(Answer::Ready)
@@ -911,6 +916,7 @@ impl OwnedWorker {
                     | Operation::SeedProgressJitter { .. }
                     | Operation::Throttle { .. }
                     | Operation::HoldBlock(_)
+                    | Operation::Preempt(_)
                     | Operation::ReseedGuest { .. },
                 Answer::Ready
             ) | (Operation::Advance { .. }, Answer::Advanced { .. })
@@ -1038,6 +1044,7 @@ impl OwnedWorker {
                             | Operation::Throttle { .. }
                             | Operation::DiskErrors(_)
                             | Operation::DiskLatency(_)
+                            | Operation::Preempt(_)
                             | Operation::HoldBlock(_)
                             | Operation::ReseedGuest { .. }
                             | Operation::Evidence { .. }
@@ -1050,6 +1057,7 @@ impl OwnedWorker {
                             | Operation::Throttle { .. }
                             | Operation::DiskErrors(_)
                             | Operation::DiskLatency(_)
+                            | Operation::Preempt(_)
                             | Operation::HoldBlock(_)
                             | Operation::ReseedGuest { .. }
                             | Operation::Evidence { .. }

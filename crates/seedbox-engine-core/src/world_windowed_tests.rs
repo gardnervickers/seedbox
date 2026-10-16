@@ -2680,6 +2680,71 @@ fn disk_errors_apply_at_their_boundary_survive_reboot_and_record_heal_counts() {
 }
 
 #[test]
+fn disk_latency_and_preempt_survive_reboot_and_heal() {
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = world(&["a", "b"]);
+        for (at, action) in [
+            (
+                10,
+                json!({"action":"disk_latency","handle":"slow","machine":"b","latency_ns":5000}),
+            ),
+            (
+                11,
+                json!({"action":"preempt","handle":"noise","machine":"b","ppm":20000}),
+            ),
+            (20, json!({"action":"crash","machine":"b"})),
+            (25, json!({"action":"reboot","machine":"b"})),
+            (30, json!({"action":"heal","handle":"slow"})),
+            (32, json!({"action":"heal","handle":"noise"})),
+        ] {
+            let mut action = action;
+            action["id"] = json!(0);
+            action["at_ns"] = json!(at);
+            action["deadline_ns"] = json!(at);
+            w.faults
+                .append(serde_json::from_value(action).unwrap())
+                .unwrap();
+        }
+        for at in [5, 15, 27, 35] {
+            w.machines[1].steps.push_back(Step::new(at, Stop::Sent));
+        }
+        run_with(&mut w, 60, None, workers, Duration::from_micros(3)).unwrap();
+        let changes: Vec<String> = machine_trace(&w, "b")
+            .into_iter()
+            .filter(|line| line.contains(":disk_latency/") || line.contains(":preempt/"))
+            .collect();
+        // The rebooted incarnation takes both on again.
+        assert_eq!(
+            changes,
+            [
+                "b:disk_latency/on:10",
+                "b:preempt/on:11",
+                "b:disk_latency/on:20",
+                "b:preempt/on:20",
+                "b:disk_latency/off:30",
+                "b:preempt/off:32"
+            ]
+        );
+        let statuses: Vec<_> = w.faults.log.iter().map(|row| row.status).collect();
+        assert_eq!(statuses, [RowStatus::Applied; 6]);
+        assert_eq!(
+            w.faults.log[4].disk_latency_counts,
+            Some(crate::virtio_block::LatencyCounts {
+                delayed: 4,
+                deepest: 2
+            })
+        );
+        assert!(w.faults.log[1].detail.contains("ppm=20000"));
+        let observed = (changes, w.faults.log.clone());
+        match &reference {
+            None => reference = Some(observed),
+            Some(want) => assert_eq!(&observed, want),
+        }
+    }
+}
+
+#[test]
 fn quiet_requests_extend_the_quiet_period_from_their_admission() {
     let mut w = world(&["a", "b"]);
     configure_control(&mut w);
