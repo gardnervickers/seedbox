@@ -1,0 +1,9 @@
+# Crash the log at random while clients append. A crash after an append is
+# durable but before its acknowledgement arrives leaves the outcome unknown;
+# only a client that then retries can apply it twice.
+start: 1s
+end: 12s
+interval: 5s
+faults:
+  - kind: crash
+    downtime: {min: 900ms, max: 1100ms}
