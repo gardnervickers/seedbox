@@ -1037,10 +1037,11 @@ impl NativeSession {
             // Accepted fails at its simulated bound, not at the hang guard.
             // describe() answers in every phase, unlike playback().
             let status = self.client.describe(id).await.unwrap().status;
-            check_bound(
+            check_bound_at(
                 &self.client,
                 id,
                 self.backend,
+                self.bound,
                 status.simulated_time_ns,
                 &format!("its {name} control request was acknowledged"),
             )
