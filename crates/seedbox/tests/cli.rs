@@ -2266,3 +2266,50 @@ fn capacity_help_explains_resident_slots_and_accepts_json() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("--unexpected"));
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn non_oracle_controller_refuses_before_image_preparation() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("compose.yaml");
+    fs::write(&source, "name: selection\nservices:\n  controller: {image: missing/controller}\n  check: {image: missing/check}\nx-seedbox:\n  version: 1\n  control: {service: controller}\n  check: {service: check}\n").unwrap();
+    let prepared = root.path().join("prepared.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .args([
+            "prepare",
+            source.to_str().unwrap(),
+            "--output",
+            prepared.to_str().unwrap(),
+        ])
+        .env_clear()
+        .env("HOME", root.path())
+        .env("TMPDIR", root.path())
+        .env("PATH", "")
+        .env("DOCKER_HOST", "unix:///not-an-image-engine")
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = stderr(&output);
+    assert!(
+        error.contains("$.x-seedbox.control.service")
+            && error.contains("controller must also be the check service"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("cannot connect to a Docker-compatible engine"),
+        "{error}"
+    );
+    assert!(!prepared.exists());
+}
+
+// Runs only in the explicit application suite, after normal assets/release and
+// portable checks. The helper invokes target/release/seedbox for every guest.
+#[cfg(all(
+    feature = "application-tests",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+#[path = "support/driver_preparation.rs"]
+mod driver_preparation_native;
