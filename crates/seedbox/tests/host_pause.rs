@@ -124,6 +124,7 @@ fn paused_start_and_resume_has_identical_witness_and_full_state() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let paused = set_rate(&client, id, PlaybackRate::Paused).await;
+        // test-time: pending(bd-dd9, host-pause-negative-position-window) -- Negative unchanged-position window needs a causal paused-boundary witness in bd-dd9.
         tokio::time::sleep(Duration::from_millis(100)).await;
         let observation = client.playback(id).await.unwrap();
         assert_eq!(observation.state.rate, PlaybackRate::Paused);

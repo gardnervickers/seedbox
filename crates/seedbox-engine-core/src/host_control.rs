@@ -631,7 +631,7 @@ mod tests {
                     rate: PlaybackRate::Unlimited,
                 },
             });
-            finished.recv_timeout(Duration::from_secs(2)).unwrap();
+            seedbox_test_time::HangGuard::new("host-control boundary completion after explicit resume on finished; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(2)).recv(&finished).unwrap();
             let faults = worker.join().unwrap();
             assert_eq!(faults.log.len(), 1);
             assert_eq!(faults.log[0].id, 1);
@@ -806,7 +806,7 @@ mod tests {
             assert_eq!(completed.try_recv(), Err(mpsc::TryRecvError::Empty));
             drop(release);
             // Hang guard only: Resume releases the boundary.
-            completed.recv_timeout(Duration::from_secs(2)).unwrap();
+            seedbox_test_time::HangGuard::new("host-control boundary completion after explicit resume on completed; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(2)).recv(&completed).unwrap();
         });
     }
 
@@ -895,6 +895,7 @@ mod tests {
         let accepted = control.request(step.clone(), initial);
         assert!(accepted.stepping);
         assert_eq!(accepted.error, None);
+        // test-time: allow(controlled-time) -- Caller-selected playback.delay argument; exact committed-boundary/stepping state decides the result, independent of elapsed host time.
         assert!(control
             .playback
             .delay(next.position, Instant::now())

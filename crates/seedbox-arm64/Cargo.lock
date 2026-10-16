@@ -417,6 +417,7 @@ dependencies = [
  "rayon",
  "seedbox-arm64-control",
  "seedbox-arm64-protocol",
+ "seedbox-test-time",
  "serde",
  "serde_json",
  "sha2",
@@ -435,6 +436,10 @@ dependencies = [
 
 [[package]]
 name = "seedbox-exec"
+version = "0.1.0"
+
+[[package]]
+name = "seedbox-test-time"
 version = "0.1.0"
 
 [[package]]

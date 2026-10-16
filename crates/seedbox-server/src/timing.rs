@@ -50,6 +50,7 @@ mod tests {
 
     #[test]
     fn reads_do_not_double_count_and_failure_closes_the_current_stage() {
+        // test-time: allow(controlled-time) -- Opaque stage-clock origin; the test supplies exact start-plus-nanosecond values for every transition and read.
         let start = Instant::now();
         let mut status = SimulationStatus {
             stage: Some(Stage::Preparing),

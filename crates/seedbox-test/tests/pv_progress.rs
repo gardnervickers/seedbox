@@ -68,8 +68,10 @@ fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
     let mut rng = TestRng;
     let mut inbox = VecDeque::new();
     let mut outputs = Vec::new();
+    // test-time: pending(bd-dd9, pv-progress-measured-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = Instant::now();
     loop {
+        // test-time: pending(bd-dd9, pv-progress-measured-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             started.elapsed() < Duration::from_secs(120),
             "CPU fixture timed out"
@@ -241,9 +243,11 @@ fn instruction_run(
         move |definition| factory.create(definition),
     )
     .unwrap();
+    // test-time: pending(bd-dd9, pv-progress-instruction-run-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = Instant::now();
     let mut outputs = Vec::new();
     loop {
+        // test-time: pending(bd-dd9, pv-progress-instruction-run-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(started.elapsed() < Duration::from_secs(180), "{outputs:?}");
         let now = driver
             .with_barrier(|b| Ok(b.playback().position.at))

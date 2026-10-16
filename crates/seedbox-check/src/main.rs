@@ -2,6 +2,7 @@
 mod policy;
 mod process;
 mod run;
+mod test_time_policy;
 #[cfg(test)]
 mod tests;
 

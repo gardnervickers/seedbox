@@ -12,6 +12,9 @@ publish = false
 
 [workspace.dependencies]
 seedbox-test-time = { path = "crates/seedbox-test-time" }
+# Parser features are activated only by the seedbox-check consumer.
+syn = "2"
+proc-macro2 = "1"
 seedbox-cli = { path = "crates/seedbox-cli" }
 seedbox-machine = { path = "crates/seedbox-machine" }
 seedbox-machine-pv = { path = "crates/seedbox-machine-pv" }

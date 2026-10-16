@@ -738,6 +738,29 @@ fn failed_signing_never_executes_the_copy() {
     assert_eq!(fs::read_to_string(p).unwrap(), "original");
 }
 #[test]
+fn test_time_policy_failure_blocks_backend_execution() {
+    let t = fixture();
+    let file = t.0.join("crates/example/src/lib.rs");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(
+        file,
+        "#[cfg(test)] fn not_a_guard(){std::time::Instant::now();}",
+    )
+    .unwrap();
+    let mut c = checks(&t.0);
+    portable(&mut c, &host()).unwrap();
+    assert!(c.failed);
+    assert_eq!(
+        c.commands
+            .jobs
+            .iter()
+            .map(|job| job.name.as_str())
+            .collect::<Vec<_>>(),
+        ["shell-discovery"]
+    );
+    assert_eq!(c.timings.len(), 2);
+}
+#[test]
 fn portable_order_is_single_owned_and_preserves_standalone_isolation() {
     let t = fixture();
     fs::create_dir_all(t.0.join("harness/acceptance/workloads")).unwrap();
@@ -788,6 +811,7 @@ fn portable_order_is_single_owned_and_preserves_standalone_isolation() {
     );
     let labels = [
         "shell-syntax",
+        "test-time-policy",
         "vmm-feature-build",
         "vmm-tests",
         "arm64-feature-build",
@@ -861,11 +885,10 @@ fn process_interruption_cleans_group_and_does_not_start_later_commands() {
         let ready = root.clone();
         let pid = std::process::id();
         let waiter = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            while !ready.join("worker").is_file() {
-                assert!(std::time::Instant::now() < deadline);
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            seedbox_test_time::HangGuard::new(
+                "positive worker publication before signal readiness; retain 2s for contended shell startup",
+                Duration::from_secs(2),
+            ).wait_for(|| ready.join("worker").is_file().then_some(())).unwrap();
             publish_ready_file(&ready.join("ready"), pid.to_string().as_bytes(), |_| {});
         });
         let mut real = Real::install_signals().unwrap();
@@ -913,18 +936,18 @@ fn process_interruption_cleans_group_and_does_not_start_later_commands() {
     }
     let t = fixture();
     let ready = t.0.clone();
-    let sender = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while !ready.join("ready").is_file() {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let pid: libc::pid_t = fs::read_to_string(ready.join("ready"))
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
-    });
+    let sender =
+        std::thread::spawn(move || {
+            seedbox_test_time::HangGuard::new(
+            "positive atomic checker readiness before SIGTERM; retain 3s loaded-host startup room",
+            Duration::from_secs(3),
+        ).wait_for(|| ready.join("ready").is_file().then_some(())).unwrap();
+            let pid: libc::pid_t = fs::read_to_string(ready.join("ready"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        });
     let mut e: Environment = std::env::vars().collect();
     e.insert(
         "SEEDBOX_CHECK_SIGNAL_CHILD".into(),

@@ -162,6 +162,55 @@ the canonical crate; do not restore sibling source inclusion for these policies.
 
 ## Checks
 
+### Test time and ordering
+
+Functional assertions must not depend on host speed. Use `seedbox-test-time`
+only as a dev-dependency: `ControlledClock` for injected time, `handshake` for
+observed entered/proceed ordering, and `GuestProgress` for workload-derived
+simulated deadlines and finite same-instant rounds. Never prove ordering with
+a sleep or a timed absence. Keep the subject's payload/outcome assertions.
+
+Real time normally belongs only in a reasoned `HangGuard`, whose expiration
+is an infrastructure failure, not an application result. Constructing the guard
+and using its positive waits requires no exemption. The leaf crate is std-only,
+spawns nothing, and must never depend on another Seedbox crate.
+
+The portable checker scans unit-test scopes, test-support-gated modules,
+integration tests and helpers in the main, VMM and ARM workspaces. A genuine raw
+boundary needs an annotation immediately before its smallest statement or
+expression, for example:
+
+```rust
+// test-time: allow(hang-guard) -- Bound this positive socket reply, not the simulated outcome.
+peer.set_read_timeout(Some(guard.remaining()?))?;
+```
+
+Other categories are `controlled-time` (caller-selected logical time),
+`measurement` (report only, never a speed assertion), and `host-time-subject`
+(the subject being tested is itself a host-time mechanism).
+`host-timing-perturbation` means deliberate host delay/jitter proving that results
+do not depend on it: assertions must compare deterministic outputs across
+perturbations, never speed or ordering inferred from time. Each category needs a
+nonempty site-specific explanation. File/module/function blanket exemptions
+and stale annotations are rejected. An annotation on a timeout or spawn never\nexempts its async/closure/loop body; annotate each raw boundary inside it.\nMacro-body inspection is best effort.
+
+Approved existing progress/readiness debt is separate:
+`// test-time: pending(bd-dd9, <registered-site-id>) -- <reason>`.
+Only the current path/function/operation entries in the checker's finite
+pending registry are accepted. Every policy run prints the pending count;
+unknown, duplicate or expanded sites fail. Do not add entries, relabel debt as
+a hang guard, or exclude native code without explicit parent disposition.
+
+The initial unclassified sites are exact debt records in
+`crates/seedbox-check/test-time-baseline.jsonl`, owned by parked bd-d98.
+Identity includes source path, enclosing function, operation, normalized smallest
+statement/field and occurrence; formatting or unrelated line insertions do not
+refresh an entry. The active ratchet rejects new sites, duplicate records and
+stale records (including deleted files). Classify a site and remove its record
+together. Never add records or regenerate this baseline. Policy runs print both
+baseline and pending registered/validated counts; baseline records cannot suppress
+policy/annotation errors or new primitives inside an existing guarded body.
+
 Engine changes need relevant native hardware checks as well as portable tests.
 
 Run the suites for your platform inside `nix develop` before committing:
@@ -188,7 +237,7 @@ the checker is invoked. Checker wrappers never compile/download a tool or fall
 back to Cargo. Outside that environment a missing tool exits 2 with
 `nix develop` guidance; no manual tool installation is needed.
 
-See `crates/seedbox-test/src/bin/seedbox-check/` for suite requirements, discovery
+See `crates/seedbox-check/src/` for suite requirements, discovery
 and fixture inputs. `harness/acceptance.sh portable` is a compatibility entry for
 the same Rust-owned portable stage, without the outer fmt/clippy checks.
 Keep VMM engine tests compiled by default; conditional `ignore` attributes enable

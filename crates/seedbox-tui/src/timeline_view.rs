@@ -417,14 +417,8 @@ mod tests {
 
     #[test]
     fn save_failure_remains_visible_without_claiming_saved() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-timeline-view-save-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory_owner = tempfile::tempdir().unwrap();
+        let directory = directory_owner.path().join("timeline");
         std::fs::write(&directory, b"block directory creation").unwrap();
         let mut draft = TimelineDraft::new("k7m2p9qx".parse().unwrap(), 123);
         assert!(draft.save(&directory).is_err());

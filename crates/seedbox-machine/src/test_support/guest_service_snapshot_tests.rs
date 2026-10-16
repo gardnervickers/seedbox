@@ -33,11 +33,13 @@ where
             inbox: VecDeque::new(),
             events: Vec::new(),
             exited: false,
+            // test-time: pending(bd-dd9, guest-service-snapshot-tests-session-new-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
             started: Instant::now(),
         }
     }
     fn run(&mut self, budget: u64) {
         assert!(!self.exited);
+        // test-time: pending(bd-dd9, guest-service-snapshot-tests-session-run-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             self.started.elapsed() < Duration::from_secs(120),
             "snapshot continuation timed out"

@@ -582,14 +582,8 @@ mod tests {
     }
     #[test]
     fn persistence_and_failed_save_retry_preserve_unknown_actions_and_metadata() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-timeline-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory_owner = tempfile::tempdir().unwrap();
+        let directory = directory_owner.path().join("timeline");
         fs::write(&directory, b"blocked").unwrap();
         let mut draft = draft();
         draft.merge(&[entry(1)]).unwrap();

@@ -266,7 +266,10 @@ fn pad_left(text: &str, width: usize) -> String {
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    let now = Instant::now();
+    draw_at(frame, app, Instant::now());
+}
+
+fn draw_at(frame: &mut Frame, app: &App, now: Instant) {
     app.hitboxes.borrow_mut().clear();
     app.map_bottom.set(None);
     let area = frame.area();
@@ -3487,8 +3490,17 @@ mod tests {
     };
 
     fn render(app: &App) -> String {
+        render_with_time(app, None)
+    }
+
+    fn render_with_time(app: &App, now: Option<Instant>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
-        terminal.draw(|frame| draw(frame, app)).unwrap();
+        terminal
+            .draw(|frame| match now {
+                Some(now) => draw_at(frame, app, now),
+                None => draw(frame, app),
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer().clone();
         let mut text = String::new();
         for y in 0..buffer.area.height {
@@ -3787,10 +3799,11 @@ mod tests {
             request: "raw-payload-secret-to-operator-view".into(),
             result: "connection lost".into(),
             ok: false,
+            // test-time: allow(controlled-time) -- Opaque Inspector timestamp; render_with_time receives this exact same instant, so snapshot visibility cannot depend on host passage or the five-second TTL.
             at: Instant::now(),
         });
         app.details = false;
-        let failed = render(&app);
+        let failed = render_with_time(&app, Some(app.inspector.as_ref().unwrap().at));
         assert!(failed.contains("connection lost"));
         assert!(!failed.contains("raw-payload-secret-to-operator-view"));
     }

@@ -651,7 +651,7 @@ under `target/check-reports/`; they are local output, not documentation.
 The VMM and ARM backends have separate Cargo workspaces and lockfiles; use the
 root Cargo aliases when building them directly. ARM guest fixtures read
 `SEEDBOX_ARM64_KERNEL` and `SEEDBOX_ARM64_INITRD`; the Rust coordinator
-[policy](../crates/seedbox-test/src/bin/seedbox-check/policy.rs) defines their
+[policy](../crates/seedbox-check/src/policy.rs) defines their
 checkout defaults and the other suite requirements.
 
 Unit tests live beside their component under `src/`. Integration tests live in
@@ -659,5 +659,5 @@ the owning crate's `tests/` and exercise public boundaries. Give each scenario
 one owner. Check determinism with independent fresh runs as well as replay;
 use identical resolved inputs, including the initial clock.
 
-Code: [Rust test coordinator](../crates/seedbox-test/src/bin/seedbox-check/main.rs),
+Code: [Rust test coordinator](../crates/seedbox-check/src/main.rs),
 [Cargo aliases](../.cargo/config.toml).

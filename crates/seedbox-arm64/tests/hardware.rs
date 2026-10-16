@@ -134,6 +134,7 @@ mod guest {
                 rng ^= rng << 13;
                 rng ^= rng >> 7;
                 rng ^= rng << 17;
+                // test-time: allow(host-timing-perturbation) -- Seeded host jitter perturbs native execution; same() compares exact deterministic witnesses, not elapsed speed or assumed ordering.
                 std::thread::sleep(Duration::from_micros(rng % 5001));
             })
             .unwrap();
@@ -293,19 +294,9 @@ fn hvf_checkpoint_continues_an_entered_guest() {
 #[test]
 fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
     use seedbox_arm64::{application::worker::*, backend::hvf::Hvf};
-    use std::{
-        fs,
-        os::unix::net::UnixStream,
-        time::{Duration, SystemTime, UNIX_EPOCH},
-    };
-    let root = std::env::temp_dir().join(format!(
-        "seedbox-worker-checkpoint-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    use std::{fs, os::unix::net::UnixStream, time::Duration};
+    let root_owner = tempfile::tempdir().unwrap();
+    let root = root_owner.path().join("checkpoint");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("kernel"), checkpoint_guest()).unwrap();
     fs::write(root.join("initrd"), b"initrd").unwrap();

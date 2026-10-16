@@ -66,7 +66,7 @@ fn pause_acknowledges_a_boundary_and_repeated_requests_preserve_the_gate() {
         fs::remove_file(lost_path).unwrap();
         seedbox_application::host_control::set_paused(&run, false).unwrap();
         // Hang guard only: the resume releases the boundary.
-        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        seedbox_test_time::HangGuard::new("host-control boundary completion after explicit resume on observed; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(2)).recv(&observed).unwrap();
         let mut control = worker.join().unwrap();
         // Resume is also idempotent when already running.
         client.send(b"resume").unwrap();

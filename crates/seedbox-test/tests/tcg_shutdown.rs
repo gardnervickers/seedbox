@@ -147,12 +147,14 @@ fn advance(driver: &mut Harness, id: MachineId, now: Timestamp) -> Timestamp {
     step(driver, upto)
 }
 fn finish(driver: &mut Harness, id: MachineId, mut now: Timestamp) -> Timestamp {
+    // test-time: pending(bd-dd9, tcg-shutdown-finish-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = Instant::now();
     loop {
         if let StopReason::Exited { reached, reason } = stopped(driver, id) {
             assert_eq!(reason, ExitReason::Shutdown);
             return reached;
         }
+        // test-time: pending(bd-dd9, tcg-shutdown-finish-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             started.elapsed() < Duration::from_secs(120),
             "shutdown timed out: {}",
@@ -219,9 +221,11 @@ fn early_queued_request_after_restore_runs_real_guest_cleanup() {
 fn paused_shutdown_stays_pending_until_resume_and_restores_without_duplicate() {
     let mut driver = driver(false);
     let id = machine_id(&mut driver);
+    // test-time: pending(bd-dd9, tcg-shutdown-paused-shutdown-stays-pending-until-resume-and-restores-without-duplicate-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = Instant::now();
     let mut now = at(0);
     loop {
+        // test-time: pending(bd-dd9, tcg-shutdown-paused-shutdown-stays-pending-until-resume-and-restores-without-duplicate-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             started.elapsed() < Duration::from_secs(120),
             "Linux boot timed out: {}",

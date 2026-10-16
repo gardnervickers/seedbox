@@ -43,6 +43,7 @@ seedbox-arm64 = { path = "../seedbox-arm64" }
 
 
 [dev-dependencies]
+seedbox-test-time.workspace = true
 seedbox-machine = { workspace = true, features = ["test-support"] }
 
 [features]

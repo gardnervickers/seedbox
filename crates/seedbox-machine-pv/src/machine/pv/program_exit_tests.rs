@@ -141,9 +141,11 @@ fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
             replace_application(&archive, &application(code as u32)),
         )
         .unwrap();
+        // test-time: pending(bd-dd9, program-exit-tests-native-linux-program-exit-zero-and-nonzero-survive-snapshot-and-zero-runs-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         let start = Instant::now();
         let mut now = 0;
         loop {
+            // test-time: pending(bd-dd9, program-exit-tests-native-linux-program-exit-zero-and-nonzero-survive-snapshot-and-zero-runs-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
             assert!(start.elapsed() < Duration::from_secs(120));
             let (stop, outputs) = run(&mut machine, now, now + 5_000_000, &[]);
             assert!(!matches!(stop, StopReason::Exited { .. }));
@@ -189,6 +191,7 @@ fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
                     }
                 }
                 cursor += 5_000_000;
+                // test-time: pending(bd-dd9, program-exit-tests-native-linux-program-exit-zero-and-nonzero-survive-snapshot-and-zero-runs-elapsed-2) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
                 assert!(start.elapsed() < Duration::from_secs(120));
             }
             assert_eq!((ack, outcome), (1, 1));
@@ -204,6 +207,7 @@ fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
                     break;
                 }
                 cursor += 5_000_000;
+                // test-time: pending(bd-dd9, program-exit-tests-native-linux-program-exit-zero-and-nonzero-survive-snapshot-and-zero-runs-elapsed-3) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
                 assert!(start.elapsed() < Duration::from_secs(120));
             }
         }

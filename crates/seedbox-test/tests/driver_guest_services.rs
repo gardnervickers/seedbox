@@ -669,6 +669,7 @@ where
         ids: vec![peer],
         events: Vec::new(),
         all: Vec::new(),
+        // test-time: pending(bd-dd9, driver-guest-services-automatic-rpc-driver-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         started: Instant::now(),
     };
     session
@@ -683,6 +684,7 @@ where
     let mut saw_resumed = false;
     let mut saw_stopped = false;
     let finished = loop {
+        // test-time: pending(bd-dd9, driver-guest-services-automatic-rpc-driver-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             session.started.elapsed() < Duration::from_secs(180),
             "automatic native RPC timed out: {:?}",
@@ -1105,6 +1107,7 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
         ids: vec![],
         events: vec![],
         all: vec![],
+        // test-time: pending(bd-dd9, driver-guest-services-boot-epoch-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         started: Instant::now(),
     };
     loop {
@@ -1115,6 +1118,7 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
             assert_eq!(reason, ExitReason::ProgramExit { code: 0 });
             break;
         }
+        // test-time: pending(bd-dd9, driver-guest-services-boot-epoch-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(session.started.elapsed() < Duration::from_secs(180));
     }
     session.events

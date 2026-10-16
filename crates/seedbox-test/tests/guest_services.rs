@@ -64,10 +64,12 @@ where
             inbox: Default::default(),
             events: Vec::new(),
             exited: false,
+            // test-time: pending(bd-dd9, guest-services-session-new-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
             started: Instant::now(),
         }
     }
     fn pump(&mut self) {
+        // test-time: pending(bd-dd9, guest-services-session-pump-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             self.started.elapsed() < Duration::from_secs(120),
             "native service deadline: {:?}",

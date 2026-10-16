@@ -124,10 +124,12 @@ where
             Ok((ids[0], ids[1]))
         })
         .unwrap();
+    // test-time: pending(bd-dd9, driver-input-snapshot-tests-scenario-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = Instant::now();
     let mut events: Vec<Event> = Vec::new();
     let mut now = at(0);
     let step = |driver: &mut Driver<M>, events: &mut Vec<Event>, upto: Timestamp| {
+        // test-time: pending(bd-dd9, driver-input-snapshot-tests-scenario-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             started.elapsed() < Duration::from_secs(180),
             "native deadline"

@@ -75,10 +75,12 @@ impl Session {
             clock: SimulationClock::new(0),
             rng: SeededRng::new(17),
             events: Vec::new(),
+            // test-time: pending(bd-dd9, progress-tests-session-new-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
             started: Instant::now(),
         }
     }
     fn run(&mut self, budget: u64, factor: u32) {
+        // test-time: pending(bd-dd9, progress-tests-session-run-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             self.started.elapsed() < Duration::from_secs(120),
             "instrumentation fixture timed out: {:?}",
@@ -214,6 +216,7 @@ fn native_instrumented_cpu_loop_has_work_cost_rate_and_snapshot_continuation() {
         clock: SimulationClock::new(now),
         rng,
         events: prefix,
+        // test-time: pending(bd-dd9, progress-tests-native-instrumented-cpu-loop-has-work-cost-rate-and-snapshot-continuation-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         started: Instant::now(),
     };
     assert_eq!(restored.finish(137_000, 1000), expected);

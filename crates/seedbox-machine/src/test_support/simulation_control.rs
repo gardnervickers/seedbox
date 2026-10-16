@@ -71,10 +71,12 @@ where
             calls: Vec::new(),
             boot,
             exited: false,
+            // test-time: pending(bd-dd9, simulation-control-session-continued-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
             started: Instant::now(),
         }
     }
     pub fn run(&mut self, budget: u64) {
+        // test-time: pending(bd-dd9, simulation-control-session-run-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             self.started.elapsed() < Duration::from_secs(120),
             "control native timeout; calls={:?}; stdout={:?}",

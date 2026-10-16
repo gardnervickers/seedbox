@@ -13,7 +13,7 @@ use std::{
     fs,
     path::Path,
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 struct Server(Child);
 impl Drop for Server {
@@ -23,15 +23,15 @@ impl Drop for Server {
     }
 }
 fn wait(path: &Path) {
-    let start = Instant::now();
-    while !path.exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(7),
-            "missing {}",
+    seedbox_test_time::HangGuard::new(
+        format!(
+            "positive process-fixture readiness at {}; 7s retains loaded-host startup room",
             path.display()
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+        ),
+        Duration::from_secs(7),
+    )
+    .wait_for(|| path.exists().then_some(()))
+    .unwrap();
 }
 fn start(root: &Path, mode: &str) -> Server {
     fs::write(root.join("execution-data"), b"must survive uncertainty").unwrap();
@@ -50,18 +50,13 @@ fn start(root: &Path, mode: &str) -> Server {
     server
 }
 fn finish(server: &mut Server) {
-    let start = Instant::now();
-    loop {
-        if let Some(exit) = server.0.try_wait().unwrap() {
-            assert!(exit.success());
-            return;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(8),
-            "server did not finish"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let exit = seedbox_test_time::HangGuard::new(
+        "positive server exit; retain the 8s loaded-host process teardown guard",
+        Duration::from_secs(8),
+    )
+    .wait_for(|| server.0.try_wait().unwrap())
+    .unwrap();
+    assert!(exit.success());
 }
 #[test]
 fn worker_death_terminates_descendants_before_cleanup() {
@@ -107,14 +102,12 @@ fn stopped_worker_dies_when_server_dies() {
         .unwrap()
         .parse()
         .unwrap();
-    let started = Instant::now();
-    while !stopped(pid) {
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "worker never reached SIGSTOP"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    seedbox_test_time::HangGuard::new(
+        "positive SIGSTOP observation; preserve 2s for host scheduling, never timed absence",
+        Duration::from_secs(2),
+    )
+    .wait_for(|| stopped(pid).then_some(()))
+    .unwrap();
     server.0.kill().unwrap();
     server.0.wait().unwrap();
     reclaim_barrier(

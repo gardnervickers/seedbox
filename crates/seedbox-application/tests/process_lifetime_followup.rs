@@ -17,15 +17,15 @@ use std::{
     time::{Duration, Instant},
 };
 fn wait(path: &Path) {
-    let start = Instant::now();
-    while !path.exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(7),
-            "missing {}",
+    seedbox_test_time::HangGuard::new(
+        format!(
+            "positive process-fixture readiness at {}; 7s retains loaded-host startup room",
             path.display()
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+        ),
+        Duration::from_secs(7),
+    )
+    .wait_for(|| path.exists().then_some(()))
+    .unwrap();
 }
 fn worker(root: &Path, mode: &str, environment: &[(OsString, OsString)]) -> OwnedExecution {
     worker_with_session(root, mode, environment, None)

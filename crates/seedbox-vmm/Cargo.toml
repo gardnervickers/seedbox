@@ -16,6 +16,7 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
+seedbox-test-time = { path = "../seedbox-test-time" }
 hex = "0.4"
 tempfile = "3"
 clap = { version = "4", features = ["derive", "env"] }

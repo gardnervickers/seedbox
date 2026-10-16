@@ -160,6 +160,7 @@ impl Machine<Msg> for Script {
     type Context = ();
 
     fn run(&mut self, _: &mut (), a: &Assignment<Msg>) -> Result<Report<Msg>, String> {
+        // test-time: allow(host-timing-perturbation) -- Compare exact deterministic transcripts/checkpoints across delayed worker profiles; never infer completion order or speed from the delay.
         std::thread::sleep(self.host_delay);
         // Idle until the first possible action, as a halted guest is woken.
         if !self.lazy {

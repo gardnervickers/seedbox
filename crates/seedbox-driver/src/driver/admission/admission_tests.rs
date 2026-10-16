@@ -271,6 +271,7 @@ fn limited_waiting_bypassed_without_reanchor_but_armed_hold_uses_existing_semant
             numerator: nz(1),
             denominator: nz(1),
         };
+        // test-time: allow(controlled-time) -- Opaque pacing origin; step_at receives this caller-selected instant and exact offsets, never an elapsed-host oracle.
         let wall = Instant::now() + Duration::from_secs(60);
         d.playback.set_rate(rate, d.position(), wall);
         d.step_at(at(5), wall).unwrap();

@@ -243,6 +243,7 @@ where
     let clock = driver
         .with_barrier(|b| Ok(b.machines().nth(1).unwrap().0))
         .unwrap();
+    // test-time: pending(bd-dd9, driver-clock-fault-scenario-now-1) -- Native drift/fault progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = Instant::now();
     let mut events = driver.drain_events();
     let mut held = Vec::new();
@@ -302,6 +303,7 @@ where
                 .unwrap();
             migrated = true;
         }
+        // test-time: pending(bd-dd9, driver-clock-fault-scenario-elapsed-1) -- Native drift/fault progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             started.elapsed() < Duration::from_secs(900),
             "{backend} scenario too slow"

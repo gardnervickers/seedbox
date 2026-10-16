@@ -70,6 +70,7 @@ impl Machine for QueueMachine {
             return Err(std::io::Error::other("second batch failure"));
         }
         if self.delay {
+            // test-time: pending(bd-dd9, queue-output-order-delay) -- Hoped completion ordering needs an explicit entered/proceed witness in bd-dd9.
             std::thread::sleep(Duration::from_millis(10));
         }
         if self.consume {

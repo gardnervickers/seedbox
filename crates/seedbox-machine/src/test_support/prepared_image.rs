@@ -169,8 +169,10 @@ where
     let mut rng = FixtureRng(7);
     let mut inbox = VecDeque::new();
     let mut events = Vec::new();
+    // test-time: pending(bd-dd9, prepared-image-check-denied-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = Instant::now();
     loop {
+        // test-time: pending(bd-dd9, prepared-image-check-denied-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             started.elapsed() < Duration::from_secs(120),
             "denied launch timed out"
@@ -259,10 +261,12 @@ where
     let mut rng = FixtureRng(7);
     let mut inbox = VecDeque::new();
     let mut events = Vec::new();
+    // test-time: pending(bd-dd9, prepared-image-check-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = Instant::now();
     let id = NonZeroU32::new(87).unwrap();
     let mut runs = 0;
     loop {
+        // test-time: pending(bd-dd9, prepared-image-check-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             started.elapsed() < Duration::from_secs(120),
             "native prepared fixture timed out: {events:?}"
@@ -388,6 +392,7 @@ where
             break;
         }
         clock.set(upto.as_nanos());
+        // test-time: pending(bd-dd9, prepared-image-check-elapsed-2) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(started.elapsed() < Duration::from_secs(120));
     }
 }

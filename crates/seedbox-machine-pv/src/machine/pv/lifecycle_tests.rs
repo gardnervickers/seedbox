@@ -84,8 +84,10 @@ fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() 
 use super::guest;
 
 fn finish(machine: &mut PVMachine, clock: &crate::clock::SimulationClock) {
+    // test-time: pending(bd-dd9, lifecycle-tests-finish-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = std::time::Instant::now();
     loop {
+        // test-time: pending(bd-dd9, lifecycle-tests-finish-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             started.elapsed() < std::time::Duration::from_secs(60),
             "guest did not shut down: {}",
@@ -171,8 +173,10 @@ fn zero_budget_shutdown_snapshots_preserve_request_once() {
         let output_start = branch.console.len();
         branch.request(crate::pv::Request::Reboot).unwrap();
         assert!(!branch.shutdown);
+        // test-time: pending(bd-dd9, lifecycle-tests-zero-budget-shutdown-snapshots-preserve-request-once-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         let reboot_started = std::time::Instant::now();
         loop {
+            // test-time: pending(bd-dd9, lifecycle-tests-zero-budget-shutdown-snapshots-preserve-request-once-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
             assert!(reboot_started.elapsed() < std::time::Duration::from_secs(60));
             let upto = branch_clock.now() + 1_000_000;
             match branch.run(&mut (), at(upto)).unwrap() {
@@ -217,8 +221,10 @@ fn live_linux_ring_dma_snapshot_preserves_shutdown_at_newer_clock() {
         clock.clone(),
     )
     .unwrap();
+    // test-time: pending(bd-dd9, lifecycle-tests-live-linux-ring-dma-snapshot-preserves-shutdown-at-newer-clock-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = std::time::Instant::now();
     while !String::from_utf8_lossy(&machine.console).contains("PV_LIFECYCLE_READY") {
+        // test-time: pending(bd-dd9, lifecycle-tests-live-linux-ring-dma-snapshot-preserves-shutdown-at-newer-clock-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(started.elapsed() < std::time::Duration::from_secs(60));
         let upto = clock.now() + 1_000_000;
         match machine.run(&mut (), at(upto)).unwrap() {

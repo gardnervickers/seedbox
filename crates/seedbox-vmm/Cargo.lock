@@ -377,6 +377,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-test-time"
+version = "0.1.0"
+
+[[package]]
 name = "seedbox-vmm"
 version = "0.1.0"
 dependencies = [
@@ -408,6 +412,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "rayon",
+ "seedbox-test-time",
  "seedbox-vmm-control",
  "seedbox-vmm-protocol",
  "serde",

@@ -5,12 +5,7 @@
     any(target_os = "linux", target_os = "macos")
 ))]
 use seedbox_application::process_lifetime::{self, reclaim_barrier, LeasePaths, OwnedExecution};
-use std::{
-    fs,
-    os::fd::AsRawFd,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{fs, os::fd::AsRawFd, path::Path, time::Duration};
 fn launch(root: &Path, session: Option<&Path>) -> std::io::Result<OwnedExecution> {
     let executable = Path::new(env!("CARGO_BIN_EXE_seedbox-lifetime-fixture"));
     OwnedExecution::spawn(
@@ -32,11 +27,12 @@ fn launch(root: &Path, session: Option<&Path>) -> std::io::Result<OwnedExecution
     )
 }
 fn ready(root: &Path) {
-    let started = Instant::now();
-    while !root.join("holder-ready").exists() {
-        assert!(started.elapsed() < Duration::from_secs(7));
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    seedbox_test_time::HangGuard::new(
+        "positive lifetime holder readiness; retain 7s for contended process startup",
+        Duration::from_secs(7),
+    )
+    .wait_for(|| root.join("holder-ready").exists().then_some(()))
+    .unwrap();
 }
 #[test]
 fn explicit_none_does_not_discover_or_acquire_an_ancestor_session_lease() {

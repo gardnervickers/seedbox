@@ -795,7 +795,7 @@ fn a_failed_step_waits_for_a_still_running_peer() {
                 ProbeMachine(Box::new(|| Err(std::io::Error::other("fixture failure")))),
                 ProbeMachine(Box::new(move || {
                     entered.send(()).unwrap();
-                    continue_run.recv_timeout(Duration::from_secs(5)).unwrap();
+                    seedbox_test_time::HangGuard::new("driver peer entry/completion on continue_run; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(5)).recv(&continue_run).unwrap();
                     Ok(StopReason::BoundaryReached)
                 })),
             ])
@@ -806,14 +806,14 @@ fn a_failed_step_waits_for_a_still_running_peer() {
         let result = driver.step(at(10));
         finished.send(result).unwrap();
     });
-    running.recv_timeout(Duration::from_secs(5)).unwrap();
+    seedbox_test_time::HangGuard::new("driver peer entry/completion on running; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(5)).recv(&running).unwrap();
     assert!(matches!(
         returned.try_recv(),
         Err(mpsc::TryRecvError::Empty)
     ));
     release.send(()).unwrap();
     assert!(matches!(
-        returned.recv_timeout(Duration::from_secs(5)).unwrap(),
+        seedbox_test_time::HangGuard::new("driver peer entry/completion on returned; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(5)).recv(&returned).unwrap(),
         Err(Error::Machine {
             id: MachineId(0),
             ..

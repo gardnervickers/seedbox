@@ -2795,9 +2795,11 @@ pub(crate) mod tests {
             .is_empty());
         assert!(app.fault_menu.is_none());
         for c in [' ', '.', '+', '=', '-', 'c', 'f', ':'] {
+            app.notice = None;
             assert!(app.input(key(c)).is_empty());
             assert!(app
-                .notice(Instant::now())
+                .notice
+                .as_ref()
                 .unwrap()
                 .text
                 .contains("simulation completed"));
@@ -2853,6 +2855,7 @@ pub(crate) mod tests {
         let focus = app.focus.as_ref().unwrap();
         assert_eq!(focus.machines(), ["b", "late"]);
         assert_eq!(focus.selected, None);
+        // test-time: allow(controlled-time) -- Caller-selected observation time; exact authoritative server position must be returned regardless of this time input.
         assert_eq!(focus.now_ns(Instant::now()), 50);
         let mut empty = world(&[]);
         empty.revision = 4;
@@ -2910,8 +2913,10 @@ pub(crate) mod tests {
                 },
                 age_ns: 0,
             },
+            // test-time: allow(controlled-time) -- Caller-selected observation/query timestamp; the assertion requires the same exact server position even for a query twenty seconds later.
             Instant::now(),
         ));
+        // test-time: allow(controlled-time) -- Caller-selected observation/query timestamp; the assertion requires the same exact server position even for a query twenty seconds later.
         assert_eq!(focus.now_ns(Instant::now() + Duration::from_secs(20)), 25);
     }
 
@@ -3013,6 +3018,7 @@ pub(crate) mod tests {
                     },
                     age_ns: 0,
                 },
+                // test-time: allow(controlled-time) -- Caller-selected observation timestamp for the navigation fixture; assertions concern exact timeline/control state, not age or speed.
                 Instant::now(),
             ));
             assert!(app.input(key('3')).is_empty());
@@ -3550,14 +3556,8 @@ pub(crate) mod tests {
 
     #[test]
     fn editing_save_failure_survives_refresh_and_retry_persists_edits() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-model-timeline-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory_owner = tempfile::tempdir().unwrap();
+        let directory = directory_owner.path().join("timeline");
         std::fs::write(&directory, b"block directory creation").unwrap();
         let mut app = edited_timeline_app();
         app.timeline_directory = Some(directory.clone());
@@ -3583,14 +3583,8 @@ pub(crate) mod tests {
 
     #[test]
     fn unknown_admitted_fault_is_persisted_before_immediate_quit() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-immediate-timeline-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory_owner = tempfile::tempdir().unwrap();
+        let directory = directory_owner.path().join("timeline");
         let mut app = app(&["a"]);
         app.focus.as_mut().unwrap().resource = Some(timeline_resource(10));
         app.timeline_directory = Some(directory.clone());

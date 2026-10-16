@@ -177,6 +177,7 @@ where
             Ok((ids[0], ids[1]))
         })
         .unwrap();
+    // test-time: pending(bd-dd9, driver-sleep-trigger-tests-scenario-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
     let started = Instant::now();
     let mut events = Vec::new();
     let mut outcomes = Vec::new();
@@ -184,6 +185,7 @@ where
     let mut sleep_checkpoint = false;
     let mut marker_checkpoint = false;
     loop {
+        // test-time: pending(bd-dd9, driver-sleep-trigger-tests-scenario-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
         assert!(
             started.elapsed() < Duration::from_secs(180),
             "native sleep/trigger timed out"
