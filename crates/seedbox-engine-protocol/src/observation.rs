@@ -64,6 +64,10 @@ pub enum Kind {
         /// machines it affects. Absent from workers that predate it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<Box<seedbox_control::Action>>,
+        /// What the fault matched and did, once known: disk error, packet
+        /// selection, network impairment or queue counts, by kind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counts: Option<serde_json::Value>,
     },
     OverrideRejected {
         input_key: String,

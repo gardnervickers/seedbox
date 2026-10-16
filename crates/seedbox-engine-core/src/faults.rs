@@ -80,6 +80,20 @@ pub struct FaultRow {
     pub status: RowStatus,
 }
 impl FaultRow {
+    /// Every count the row carries, keyed by kind, or `None` before any.
+    pub fn counts(&self) -> Option<Value> {
+        let row = self.json();
+        let counts: serde_json::Map<String, Value> = [
+            "disk_error_counts",
+            "network_fault_counts",
+            "queue_counts",
+            "selection_counts",
+        ]
+        .into_iter()
+        .filter_map(|key| row.get(key).map(|value| (key.to_owned(), value.clone())))
+        .collect();
+        (!counts.is_empty()).then_some(Value::Object(counts))
+    }
     /// The row as a JSON value.
     pub fn json(&self) -> Value {
         serde_json::to_value(self).expect("a fault row is plain JSON")

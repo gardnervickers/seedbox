@@ -3672,6 +3672,7 @@ pub(crate) mod tests {
         let mut w = world(&["a", "b"]);
         w.revision = 2;
         w.faults.push(seedbox_api::FaultState {
+            counts: None,
             id: 1,
             input_key: None,
             action: "partition".into(),

@@ -386,7 +386,7 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
                             .map(target)
                             .or_else(|| f.machine.clone())
                             .unwrap_or_default(),
-                        output::word(&f.status).to_lowercase(),
+                        with_counts(output::word(&f.status).to_lowercase(), f.counts.as_ref()),
                         f.applied_time_ns.map_or_else(|| "-".into(), seconds),
                         if f.active { "yes".into() } else { "-".into() },
                     ]
@@ -397,6 +397,28 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
     println!();
     output::field("simulated time", seconds(world.simulated_time_ns));
     Ok(0)
+}
+
+/// A fault status with what it matched and did, when the engine counted it:
+/// `applied (matched 3, failed 1)`. Zero counts are left out.
+fn with_counts(status: String, counts: Option<&serde_json::Value>) -> String {
+    let Some(kinds) = counts.and_then(|c| c.as_object()) else {
+        return status;
+    };
+    let parts: Vec<String> = kinds
+        .values()
+        .filter_map(|kind| kind.as_object())
+        .flat_map(|kind| kind.iter())
+        .filter_map(|(name, value)| {
+            let value = value.as_u64().filter(|v| *v > 0)?;
+            Some(format!("{} {value}", name.replace('_', " ")))
+        })
+        .collect();
+    if parts.is_empty() {
+        format!("{status} (nothing matched)")
+    } else {
+        format!("{status} ({})", parts.join(", "))
+    }
 }
 
 /// The fault timeline: recorded and scheduled faults with what became of each.
@@ -439,7 +461,12 @@ pub(super) fn timeline(id: &SimulationId, json: bool) -> Result<u8> {
             .map_or_else(
                 // A finished run never reaches entries it had not admitted.
                 || if completed { "not reached" } else { "upcoming" }.into(),
-                |fault| output::word(&fault.status).to_lowercase(),
+                |fault| {
+                    with_counts(
+                        output::word(&fault.status).to_lowercase(),
+                        fault.counts.as_ref(),
+                    )
+                },
             )
     };
     output::table(
@@ -731,5 +758,25 @@ mod tests {
         assert!(!filter.admits(&entry(15, 0, seedbox_api::LogStream::Stderr)));
         assert!(!filter.admits(&entry(15, 1, seedbox_api::LogStream::Stdout)));
         assert!(filter.admits(&LogEntry::SourceUnavailable));
+    }
+
+    #[test]
+    fn fault_counts_summarize_nonzero_values() {
+        let counts = serde_json::json!({"disk_error_counts": {"failed": 1, "matched": 3}});
+        assert_eq!(
+            with_counts("applied".into(), Some(&counts)),
+            "applied (failed 1, matched 3)"
+        );
+        let none = serde_json::json!({"disk_error_counts": {"failed": 0, "matched": 0}});
+        assert_eq!(
+            with_counts("applied".into(), Some(&none)),
+            "applied (nothing matched)"
+        );
+        assert_eq!(with_counts("failed".into(), None), "failed");
+        let selection = serde_json::json!({"selection_counts": {"dropped": 2, "matched": 5}});
+        assert_eq!(
+            with_counts("applied".into(), Some(&selection)),
+            "applied (dropped 2, matched 5)"
+        );
     }
 }

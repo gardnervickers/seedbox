@@ -106,6 +106,7 @@ impl Receiver {
                                     },
                                 ),
                                 Kind::FaultChanged {
+                                    counts,
                                     id,
                                     action,
                                     machine,
@@ -116,6 +117,7 @@ impl Receiver {
                                 } => event(
                                     last_time,
                                     EventKind::FaultChanged {
+                                        counts: counts.map(Box::new),
                                         id,
                                         action,
                                         machine,
@@ -269,6 +271,7 @@ mod tests {
                 5,
                 30,
                 Kind::FaultChanged {
+                    counts: None,
                     id: 1,
                     action: "stop".into(),
                     machine: Some("oracle".into()),
@@ -330,6 +333,7 @@ mod tests {
                 (
                     30,
                     EventKind::FaultChanged {
+                        counts: None,
                         id: 1,
                         action: "stop".into(),
                         machine: Some("oracle".into()),

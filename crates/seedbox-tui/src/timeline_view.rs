@@ -387,6 +387,7 @@ mod tests {
         assert_eq!(observed_effect(&entry, None).0, "recorded");
         assert_eq!(observed_effect(&entry, Some(&world)).0, "upcoming");
         world.faults.push(seedbox_api::FaultState {
+            counts: None,
             input_key: None,
             id: 1,
             action: "heal".into(),

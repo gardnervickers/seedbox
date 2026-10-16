@@ -214,6 +214,7 @@ impl Tracker {
                 }
             }
             EventKind::FaultChanged {
+                counts,
                 id,
                 action,
                 machine,
@@ -226,6 +227,7 @@ impl Tracker {
                     self.machine(machine);
                 }
                 let fault = self.faults.entry(*id).or_insert_with(|| FaultState {
+                    counts: None,
                     id: *id,
                     action: action.clone(),
                     machine: machine.clone(),
@@ -240,6 +242,9 @@ impl Tracker {
                 }
                 fault.status = *status;
                 fault.applied_time_ns = *applied_time_ns;
+                if counts.is_some() {
+                    fault.counts = counts.as_deref().cloned();
+                }
                 if plan.is_some() {
                     fault.plan = plan.as_deref().cloned();
                 }
@@ -537,6 +542,7 @@ mod tests {
 
     fn fault(id: u32, status: FaultStatus, plan: FaultAction) -> EventKind {
         EventKind::FaultChanged {
+            counts: None,
             id,
             action: plan_name(&plan),
             machine: None,
@@ -809,6 +815,7 @@ mod tests {
             t.faults.insert(
                 id,
                 FaultState {
+                    counts: None,
                     id,
                     action: plan.name().into(),
                     machine: Some("a".into()),

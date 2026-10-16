@@ -72,6 +72,9 @@ pub enum EventKind {
         /// The admitted action, so clients can tell what it affects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<Box<serde_json::Value>>,
+        /// What the fault matched and did, once known, by kind of count.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counts: Option<Box<serde_json::Value>>,
     },
     MachineLifecycle {
         machine: String,

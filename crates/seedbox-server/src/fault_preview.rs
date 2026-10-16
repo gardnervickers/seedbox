@@ -337,6 +337,7 @@ mod tests {
     fn heal_resolves_active_original_targets_even_when_link_layer_is_masked() {
         let (configuration, mut world) = fixture();
         world.faults.push(FaultState {
+            counts: None,
             id: 1,
             input_key: None,
             action: "partition".into(),
@@ -397,6 +398,7 @@ mod tests {
             }]
         );
         world.faults.push(FaultState {
+            counts: None,
             id: 1,
             input_key: None,
             action: "drop_connection".into(),

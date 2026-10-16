@@ -3725,6 +3725,7 @@ mod tests {
             event,
         };
         let applied = |id| EventKind::FaultChanged {
+            counts: None,
             id,
             input_key: None,
             action: "heal".into(),
@@ -4011,6 +4012,7 @@ mod tests {
         let mut w = world(&["api", "db", "oracle"]);
         w.simulated_time_ns = 2_000_000;
         w.faults.push(FaultState {
+            counts: None,
             input_key: None,
             id: 3,
             action: "partition".into(),
@@ -4160,6 +4162,7 @@ mod tests {
         w.revision = 2;
         w.simulated_time_ns = 2_000_000_000;
         w.faults.push(FaultState {
+            counts: None,
             input_key: None,
             id: 1,
             action: "partition".into(),
@@ -4404,6 +4407,7 @@ mod tests {
         w.simulated_time_ns = 3_000_000_000;
         for (id, action, handle) in [(1, "throttle", "t1"), (2, "clock_skew", "c1")] {
             w.faults.push(FaultState {
+                counts: None,
                 input_key: None,
                 id,
                 action: action.into(),

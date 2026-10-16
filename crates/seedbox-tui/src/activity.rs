@@ -456,6 +456,7 @@ mod tests {
 
     fn fault(id: u32, action: &str, plan: serde_json::Value, at: u64, active: bool) -> FaultState {
         FaultState {
+            counts: None,
             id,
             input_key: None,
             action: action.into(),

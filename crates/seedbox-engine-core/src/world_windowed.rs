@@ -511,7 +511,8 @@ struct Coord<'a, M: WorldMachine> {
     prior_rounds: u64,
     boundaries: &'a mut u64,
     application_ready: bool,
-    fault_statuses: Vec<faults::RowStatus>,
+    /// Published status of each fault row, and whether its counts were.
+    fault_statuses: Vec<(faults::RowStatus, bool)>,
     published_rejections: usize,
     /// Routed frames not yet published; empty without an observation socket.
     frames: Vec<Frame>,
@@ -539,7 +540,9 @@ impl<M: WorldMachine> Coord<'_, M> {
         }
         self.published_rejections = self.input_program.rejections().len();
         for (index, row) in self.faults.log.iter().enumerate() {
-            if self.fault_statuses.get(index) == Some(&row.status) {
+            let counts = row.counts();
+            let published = (row.status, counts.is_some());
+            if self.fault_statuses.get(index) == Some(&published) {
                 continue;
             }
             publisher.publish(
@@ -547,6 +550,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 0,
                 at,
                 seedbox_engine_protocol::observation::Kind::FaultChanged {
+                    counts,
                     id: row.id,
                     input_key: self.input_program.key_for(row.id).map(str::to_owned),
                     action: row.action.to_string(),
@@ -560,9 +564,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                 },
             );
             if let Some(status) = self.fault_statuses.get_mut(index) {
-                *status = row.status;
+                *status = published;
             } else {
-                self.fault_statuses.push(row.status);
+                self.fault_statuses.push(published);
             }
         }
     }
@@ -599,6 +603,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 0,
                 at,
                 ObservationKind::FaultChanged {
+                    counts: row.counts(),
                     id: row.id,
                     input_key: self.input_program.key_for(row.id).map(str::to_owned),
                     action: row.action.to_string(),
@@ -1581,7 +1586,11 @@ where
     let life = guests.iter().map(|g| (g.m.paused, g.m.down)).collect();
     let application_ready = faults.initial_applications_ready();
     let fault_statuses = if observations.is_some() {
-        faults.log.iter().map(|row| row.status).collect()
+        faults
+            .log
+            .iter()
+            .map(|row| (row.status, row.counts().is_some()))
+            .collect()
     } else {
         Vec::new()
     };
