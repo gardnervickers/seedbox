@@ -178,12 +178,31 @@ impl<B: Backend> Machine<B> {
             serde_json::from_slice(&read_vec(input, length)?)
                 .map_err(|e| format!("decode ARM checkpoint: {e}"))
         })?;
-        if metadata.state.boot_identity != self.boot_identity
+        if !metadata
+            .state
+            .boot_identity
+            .same_inputs(&self.boot_identity)
             || metadata.state.kernel_hash != self.kernel_hash
             || metadata.state.initrd_hash != self.initrd_hash
             || metadata.state.page.len() != self.page.len()
         {
-            return Err("ARM checkpoint boot inputs mismatch".into());
+            let field = if !metadata
+                .state
+                .boot_identity
+                .same_inputs(&self.boot_identity)
+            {
+                format!(
+                    "boot layout {:?} != {:?}",
+                    metadata.state.boot_identity, self.boot_identity
+                )
+            } else if metadata.state.kernel_hash != self.kernel_hash {
+                "kernel".into()
+            } else if metadata.state.initrd_hash != self.initrd_hash {
+                "initrd".into()
+            } else {
+                "PV page size".into()
+            };
+            return Err(format!("ARM checkpoint boot inputs mismatch: {field}"));
         }
         metadata.state.ram = Arc::new(read_section(
             &mut reader,

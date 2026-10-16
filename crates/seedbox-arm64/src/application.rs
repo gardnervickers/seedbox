@@ -27,6 +27,23 @@ impl BootIdentity {
     pub fn from_spec(spec: crate::boot::BootSpec<'_>) -> Result<Self> {
         Ok(Self::from_layout(&spec.validate()?))
     }
+    /// The same boot inputs, whatever the incarnation: a rebooted
+    /// incarnation boots with its own entropy seed and without the launch
+    /// barrier, and a checkpoint of it restores into a replacement built from
+    /// the first incarnation's inputs. Restored RAM already holds everything
+    /// the seed and the barrier decided.
+    pub(crate) fn same_inputs(&self, other: &Self) -> bool {
+        let line = |l: &str| -> String {
+            l.split(' ')
+                .filter(|token| *token != "seedbox.barrier=1")
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        self.memory_bytes == other.memory_bytes
+            && self.initrd_addr == other.initrd_addr
+            && self.dtb_addr == other.dtb_addr
+            && line(&self.command_line) == line(&other.command_line)
+    }
     pub(crate) fn from_layout(layout: &crate::boot::BootLayout<'_>) -> Self {
         Self {
             memory_bytes: layout.memory_bytes() as u64,

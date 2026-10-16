@@ -771,11 +771,30 @@ impl OwnedWorker {
             Operation::Restore(_) => restored_identity.as_ref().expect("restore identity"),
             _ => &self.identity,
         };
+        // A failed operation leaves the worker's identity as it was; report
+        // the worker's own error rather than the identity it kept.
+        if let Answer::Error(error) = &response.answer {
+            if response.sequence == request.sequence && response.before.as_ref() == expected_before
+            {
+                return Err(error.clone());
+            }
+        }
         if response.sequence != request.sequence
             || response.before.as_ref() != expected_before
             || response.after.as_ref() != Some(expected_after)
         {
-            return Err("worker response stamp mismatch".into());
+            let op = serde_json::to_value(&request.operation)
+                .ok()
+                .and_then(|v| match v {
+                    serde_json::Value::String(name) => Some(name),
+                    serde_json::Value::Object(map) => map.keys().next().cloned(),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            return Err(format!(
+                "worker response stamp mismatch for {op}: expected {expected_before:?} -> {expected_after:?}, got {:?} -> {:?}",
+                response.before, response.after
+            ));
         }
         if let Answer::Error(error) = &response.answer {
             return Err(error.clone());

@@ -75,7 +75,7 @@ impl<B: Backend> Machine<B> {
     /// The original VM must already be destroyed on HVF. The replacement has
     /// identical boot inputs and mappings, and has never entered guest code.
     pub fn restore_snapshot(mut self, snapshot: &Snapshot) -> Result<Self> {
-        if self.boot_identity != snapshot.boot_identity
+        if !self.boot_identity.same_inputs(&snapshot.boot_identity)
             || self.kernel_hash != snapshot.kernel_hash
             || self.initrd_hash != snapshot.initrd_hash
             || self.ram.len() != snapshot.ram.len()
@@ -101,6 +101,7 @@ impl<B: Backend> Machine<B> {
         self.ready = snapshot.ready;
         self.trace = snapshot.trace.clone();
         self.seed = snapshot.seed;
+        self.boot_identity = snapshot.boot_identity.clone();
         self.raw_exits = snapshot.raw_exits;
         self.powered_off = snapshot.powered_off;
         self.application = snapshot.application.clone();
