@@ -186,7 +186,8 @@ and `machine-tcg` suites submit through the public service
 (`seedbox-server` `native_pv_service` / `native_tcg_service`, gated by `kvm-tests`
 / `tcg-tests`). `machine-pv-x86` also runs `native_controller_service`, whose
 prepared fixture is `SEEDBOX_PV_PREPARED_FIXTURE`. Those tests need `build/assets` from `cargo xtask build-assets`;
-the checker builds the release CLI itself.
+the checker builds the release CLI itself, into the same `CARGO_TARGET_DIR`
+the tests read.
 
 Code: [PV example](../crates/seedbox-machine/examples/pv.rs),
 [shared example RNG](../crates/seedbox-machine/examples/support/mod.rs).

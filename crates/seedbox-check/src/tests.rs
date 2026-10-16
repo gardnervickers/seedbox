@@ -684,16 +684,20 @@ fn test_machine_suites_schedule_feature_gated_public_service_targets_unfiltered(
     }
 }
 #[test]
-fn test_service_release_build_targets_the_checkout_release_cli() {
-    let job = service_release_build(
-        &env(&[("PATH", "/bin"), ("CARGO_TARGET_DIR", "/elsewhere")]),
-        std::path::Path::new("/fixture"),
-    );
-    assert_eq!(
-        job.args,
-        strings(&["cargo", "build", "--release", "--locked", "-p", "seedbox"])
-    );
-    assert_eq!(job.environment, env(&[("PATH", "/bin")]));
+fn test_service_release_build_uses_the_target_the_service_tests_read() {
+    // The service tests resolve release/seedbox under CARGO_TARGET_DIR, so the
+    // release build must keep it (and the checkout target when it is unset).
+    for environment in [
+        env(&[("PATH", "/bin"), ("CARGO_TARGET_DIR", "/agent-cache")]),
+        env(&[("PATH", "/bin")]),
+    ] {
+        let job = service_release_build(&environment, std::path::Path::new("/fixture"));
+        assert_eq!(
+            job.args,
+            strings(&["cargo", "build", "--release", "--locked", "-p", "seedbox"])
+        );
+        assert_eq!(job.environment, environment);
+    }
 }
 #[test]
 fn test_unselected_machine_suites_have_no_runs() {

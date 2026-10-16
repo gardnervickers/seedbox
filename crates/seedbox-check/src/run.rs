@@ -557,15 +557,14 @@ pub fn machine_suite_runs(suites: &[Suite], environment: &Environment, root: &Pa
     }
     result
 }
-/// `cargo build --release` of the CLI into the checkout's `target/release`,
-/// where the public-service tests find it; it embeds `build/assets`.
+/// `cargo build --release` of the CLI, embedding `build/assets`. It keeps the
+/// suite's `CARGO_TARGET_DIR`, because the public-service tests look for
+/// `release/seedbox` in that same target (the checkout's `target` when unset).
 pub fn service_release_build(environment: &Environment, root: &Path) -> Job {
-    let mut environment = environment.clone();
-    environment.remove("CARGO_TARGET_DIR");
     Job::new(
         "service-release-cli",
         words(&["cargo", "build", "--release", "--locked", "-p", "seedbox"]),
-        &environment,
+        environment,
         root,
     )
 }
