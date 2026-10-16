@@ -121,13 +121,10 @@ impl DriverExecutor {
         self.runtime = Some(super::binding::Binding::new(inputs)?);
         Ok(self)
     }
-    // Controller mapping and continuation are scoped to Linux x86 PV.
-    // Other PV hosts and TCG guest control remain explicit unproven paths.
+    // Controller mapping and continuation are scoped to Linux x86-64 hosts,
+    // for PV and TCG alike. Other hosts remain explicit unproven paths.
     fn admit_execution(&self, controller: bool) -> Result<()> {
-        if controller
-            && !(self.backend == DriverBackend::Pv
-                && cfg!(all(target_os = "linux", target_arch = "x86_64")))
-        {
+        if controller && !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
             return Err(Error::Setup(super::policy::CONTROLLER_INCOMPLETE.into()));
         }
         if self.backend == DriverBackend::Pv

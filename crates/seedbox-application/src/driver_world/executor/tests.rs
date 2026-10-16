@@ -62,7 +62,7 @@ fn malformed_report_or_digest_is_not_accepted_as_native_evidence() {
     assert!(decode_report(&serde_json::to_vec(&report).unwrap()).is_err());
 }
 #[test]
-fn pv_controller_scope_is_linux_x86_only_and_tcg_control_is_refused() {
+fn controller_scope_is_linux_x86_only_for_pv_and_tcg() {
     let mut pv = profile();
     pv.backend = crate::execution::Backend::Other("driver-pv".into());
     pv.semantic_parameters.engine = Some(DriverExecutor::descriptor(DriverBackend::Pv, "x86_64"));
@@ -83,13 +83,17 @@ fn pv_controller_scope_is_linux_x86_only_and_tcg_control_is_refused() {
         cfg!(all(target_os = "linux", target_arch = "x86_64"))
     );
     let tcg = DriverExecutor::new(profile(), DriverBackend::Tcg, 1).unwrap();
-    let error = tcg.admit_execution(true).unwrap_err().to_string();
-    assert!(
-        error.contains("source authorization")
-            && error.contains("control latency")
-            && error.contains("same resolved controller"),
-        "{error}"
-    );
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        tcg.admit_execution(true).unwrap();
+    } else {
+        let error = tcg.admit_execution(true).unwrap_err().to_string();
+        assert!(
+            error.contains("source authorization")
+                && error.contains("control latency")
+                && error.contains("same resolved controller"),
+            "{error}"
+        );
+    }
     tcg.preflight(None).unwrap();
     tcg.admit_execution(false).unwrap();
 }

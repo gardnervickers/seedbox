@@ -39,14 +39,14 @@ pub(super) fn encode(value: &BackendPolicy) -> Result<wire::BackendPolicy, Strin
 }
 /// Admit the proven native path without changing backend selection.
 // TODO: Re-evaluate: ARM PV requires its own native proof. Guest control is
-// scoped to Linux x86 PV; build binds the service name to Driver authority.
+// scoped to Linux x86-64 hosts, for PV and TCG alike; build binds the service
+// name to Driver authority.
 pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
     let policy = decode_optional(inventory.backend_policy())?;
     if policy
         .as_ref()
         .is_some_and(|policy| policy.controller.is_some())
-        && !(matches!(inventory, wire::Inventory::Pv { .. })
-            && cfg!(all(target_os = "linux", target_arch = "x86_64")))
+        && !cfg!(all(target_os = "linux", target_arch = "x86_64"))
     {
         return Err(CONTROLLER_INCOMPLETE.into());
     }
@@ -60,6 +60,7 @@ pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
 /// Keep PV controller continuation scoped independently of fresh admission.
 /// build::restore must bind the saved Driver controller and latency before any
 /// factory or native restoration; only Linux x86-64 continuation is exercised.
+/// TCG controller continuation goes through the same binding and [`admit`].
 pub(super) fn admit_restore(inventory: &wire::Inventory) -> Result<(), String> {
     let policy = decode_optional(inventory.backend_policy())?;
     if matches!(inventory, wire::Inventory::Pv { .. })

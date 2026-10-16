@@ -104,23 +104,27 @@ fn controller_must_be_the_dedicated_oracle_before_any_host_effects() {
     assert!(!output.exists());
 }
 #[test]
-fn unfinished_tcg_controller_requests_fail_closed_before_effects() {
+fn tcg_controller_requests_are_admitted_only_on_linux_x86_64() {
     let root = tempfile::tempdir().unwrap();
     let tcg = inventory(Some(wire::BackendPolicy {
         controller: Some("oracle".into()),
         ..Default::default()
     }));
-    for (index, inventory) in [tcg].into_iter().enumerate() {
-        let output = root.path().join(index.to_string());
-        let request = request(inventory, output.clone());
-        let error = open(&request)
-            .err()
-            .expect("unfinished candidate must not execute")
-            .to_string();
+    let output = root.path().join("output");
+    let error = open(&request(tcg.clone(), output.clone()))
+        .err()
+        .expect("the policy-test inputs are not runnable")
+        .to_string();
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        // Admitted: the request reaches materialization and fails only on its
+        // placeholder inputs, never on the controller gate.
+        crate::driver_world::policy::admit(&tcg).unwrap();
+        crate::driver_world::policy::admit_restore(&tcg).unwrap();
         assert!(
-            error.contains("incomplete") && error.contains("legacy service path"),
+            !error.contains("incomplete") && !error.contains("legacy service path"),
             "{error}"
         );
+    } else {
         assert!(
             error.contains("authorization")
                 && error.contains("latency")
