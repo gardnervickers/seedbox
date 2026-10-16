@@ -50,3 +50,9 @@ sha2 = "0.11"
 
 [profile.release]
 debug = 1
+
+# Content-store digests hash whole checkpoint and asset files. Unoptimized
+# SHA-256 makes in-process debug services (native service tests) spend tens
+# of seconds per checkpoint export; optimize only this leaf crate.
+[profile.dev.package.sha2]
+opt-level = 3
