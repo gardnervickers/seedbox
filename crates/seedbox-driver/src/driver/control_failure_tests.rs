@@ -95,7 +95,10 @@ fn uncertain_effect_retains_prior_settlement_and_never_claims_applied() {
     assert_eq!(settlements[2].1, SettlementStatus::Failed);
     assert_eq!(settlements[2].2, None);
     assert_eq!(
-        driver.machines[3].lifecycle.execution().factor_permille(),
+        driver.execution.machines[3]
+            .lifecycle
+            .execution()
+            .factor_permille(),
         2000
     );
     assert_eq!(
@@ -239,7 +242,7 @@ fn ack_batch(final_batch: bool, bad_ack: bool) -> Driver<AckBatchProbe> {
     // The Stop fault was admitted at the first barrier.
     assert!(events.iter().any(|event| event.at == Timestamp::from_nanos(10)
         && matches!(&event.kind, EventKind::FaultAdmitted(record) if record.fault == FaultId(1))));
-    assert!(driver.machines[2]
+    assert!(driver.execution.machines[2]
         .machine
         .as_ref()
         .unwrap()
@@ -268,13 +271,18 @@ fn assert_ack_settlement(driver: &Driver<AckBatchProbe>, events: &[Event]) {
     assert_eq!(*committed_at, Timestamp::from_nanos(20));
     // An immutable receipt is not permission to enqueue the reply or another
     // effect before the entire committed batch finishes control processing.
-    assert!(!driver.events.values().flatten().any(|event| matches!(
-        event,
-        Scheduled::Control(control::Event::Plan(
-            crate::oracle::service::Plan::Reply { .. }
-                | crate::oracle::service::Plan::Effect { .. }
-        )) | Scheduled::Control(control::Event::Call { .. })
-    )));
+    assert!(!driver
+        .execution
+        .events
+        .values()
+        .flatten()
+        .any(|event| matches!(
+            event,
+            Scheduled::Control(control::Event::Plan(
+                crate::oracle::service::Plan::Reply { .. }
+                    | crate::oracle::service::Plan::Effect { .. }
+            )) | Scheduled::Control(control::Event::Call { .. })
+        )));
 }
 #[test]
 fn earlier_ack_settlement_survives_later_bad_ack_in_same_committed_batch() {
@@ -292,7 +300,11 @@ fn earlier_ack_settlement_survives_later_bad_ack_in_same_committed_batch() {
             .count(),
         2
     );
-    assert!(driver.machines.iter().all(|entry| entry.staged.is_empty()));
+    assert!(driver
+        .execution
+        .machines
+        .iter()
+        .all(|entry| entry.staged.is_empty()));
     assert!(matches!(
         driver.step(Timestamp::from_nanos(20)),
         Err(Error::Failed)
@@ -339,6 +351,7 @@ fn a_settlement_cannot_reenter_execution_and_duplicate_retention() {
         detail: String::new(),
     };
     driver
+        .execution
         .events
         .entry(Timestamp::from_nanos(20))
         .or_default()

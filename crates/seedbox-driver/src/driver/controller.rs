@@ -38,7 +38,7 @@ impl ControllerSetup {
 impl<M: crate::machine::Machine> super::Driver<M> {
     /// Effective guest-control authority; omission preserves the SDK contract.
     pub fn controller_setup(&self) -> Option<ControllerSetup> {
-        self.control.controller
+        self.execution.control.controller
     }
 }
 wire_struct!(ControllerSetup {

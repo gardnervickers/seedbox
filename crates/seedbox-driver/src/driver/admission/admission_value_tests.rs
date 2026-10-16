@@ -75,7 +75,7 @@ fn changed_key_action_and_each_record_field_mismatch_before_effects() {
             d.with_barrier(|b| b.commit_input(&p)),
             Err(Error::PreparedInputMismatch)
         ));
-        assert!(!d.failed);
+        assert!(!d.execution.failed);
         assert_eq!(d.playback, playback);
         assert_eq!(encoded(&mut d), before, "field {field} mutated the source");
     }

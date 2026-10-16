@@ -168,15 +168,15 @@ where
         self.driver
             .check_schedule_shape(self.driver.now(), &key, &action)?;
         Driver::<M>::check_named_action(&action, handle.as_ref())?;
-        let mut control = self.driver.control.clone();
-        let mut inputs = self.driver.inputs.clone();
+        let mut control = self.driver.execution.control.clone();
+        let mut inputs = self.driver.execution.inputs.clone();
         for notice in control.service.take_notices() {
             Driver::<M>::track_input(&mut inputs, &notice);
         }
         let admitted = Driver::<M>::input_admission_with_handle(
             &mut control,
-            &self.driver.machines,
-            Some(&self.driver.network),
+            &self.driver.execution.machines,
+            Some(&self.driver.execution.network),
             &inputs,
             &key,
             &action,
@@ -261,6 +261,7 @@ where
         let result = (|| {
             let start = self.driver.observations.published.len();
             self.driver
+                .execution
                 .inputs
                 .insert(prepared.key.clone(), LiveInput::Pending);
             self.driver.admit_input(
@@ -313,9 +314,9 @@ where
     /// CPU-runnable machines alone are not zero-time work.
     fn has_due_work(&self) -> bool {
         let now = self.now();
-        self.events.first_key_value().is_some_and(|(at, events)| *at <= now && !events.is_empty())
-            || self.network.next_arrival().is_some_and(|at| at <= now.as_nanos())
-            || self.machines.iter().any(|entry| {
+        self.execution.events.first_key_value().is_some_and(|(at, events)| *at <= now && !events.is_empty())
+            || self.execution.network.next_arrival().is_some_and(|at| at <= now.as_nanos())
+            || self.execution.machines.iter().any(|entry| {
                 !entry.lifecycle.paused()
                     && matches!(entry.stopped, StopReason::Blocked { deadline: Some(at), .. } if at == now)
             })
@@ -329,7 +330,7 @@ where
                     fault,
                 });
             }
-            if let Some((at, reason)) = self.finished {
+            if let Some((at, reason)) = self.execution.finished {
                 return Ok(DueOutcome::Finished { at, reason });
             }
             // A timer's zero-budget outputs can generate new same-time control
@@ -532,7 +533,8 @@ where
                 self.entry(*id)?;
             }
             Some(Target::Name(name)) => {
-                self.control
+                self.execution
+                    .control
                     .target(name)
                     .map_err(|_| Error::UnknownName(name.clone()))?;
             }
@@ -552,7 +554,9 @@ where
                         self.entry(*id)?;
                     }
                     Target::Name(name) => {
-                        if self.control.target(name).is_err() && !self.control.declared(name) {
+                        if self.execution.control.target(name).is_err()
+                            && !self.execution.control.declared(name)
+                        {
                             return Err(Error::UnknownName(name.clone()));
                         }
                     }
@@ -566,12 +570,14 @@ where
         } = action
         {
             policy
-                .validate_shape(self.network.latency_ns(), network_faults)
+                .validate_shape(self.execution.network.latency_ns(), network_faults)
                 .map_err(Error::NetworkConfiguration)?;
         }
         if let Action::DropConnection { connection } = action {
             for name in [&connection.from, &connection.to] {
-                if self.control.target(name).is_err() && !self.control.declared(name) {
+                if self.execution.control.target(name).is_err()
+                    && !self.execution.control.declared(name)
+                {
                     return Err(Error::UnknownName(name.clone()));
                 }
             }
@@ -584,7 +590,7 @@ where
             }
         }
         if let Action::Spawn { name } = action {
-            if !self.control.spawnable(name) {
+            if !self.execution.control.spawnable(name) {
                 return Err(Error::UnknownName(name.clone()));
             }
         }
@@ -608,7 +614,7 @@ where
                 return Err(Error::InvalidDeadline(deadline));
             }
         }
-        if self.inputs.contains_key(key) {
+        if self.execution.inputs.contains_key(key) {
             return Err(Error::LiveInputKey(key.clone()));
         }
         Ok(())

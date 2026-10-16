@@ -32,8 +32,9 @@ fn driver() -> Driver<Park> {
 fn rpc(driver: &mut Driver<Park>, request: u32, fields: &str) {
     let payload = format!("{{\"version\":1,\"id\":{request},{fields}}}");
     driver
+        .execution
         .control
-        .invoke(&driver.machines, |service, view| {
+        .invoke(&driver.execution.machines, |service, view| {
             service.admit(
                 view,
                 "machine:0".into(),
@@ -81,20 +82,20 @@ fn cancellation_replaces_then_removes_only_obsolete_internal_markers() {
         )
         .unwrap();
     rpc(&mut driver, 3, r#""op":"cancel_trigger","trigger_id":1"#);
-    assert_eq!(driver.trigger_marker, Some(at(20)));
+    assert_eq!(driver.execution.trigger_marker, Some(at(20)));
     assert!(matches!(
-        driver.events[&at(10)].front(),
+        driver.execution.events[&at(10)].front(),
         Some(Scheduled::Control(control::Event::Input {
             action: Action::Throttle { .. },
             ..
         }))
     ));
-    assert_eq!(driver.events[&at(10)].len(), 1);
+    assert_eq!(driver.execution.events[&at(10)].len(), 1);
     rpc(&mut driver, 4, r#""op":"cancel_trigger","trigger_id":2"#);
-    assert_eq!(driver.trigger_marker, None);
-    assert_eq!(driver.events[&at(20)].len(), 1);
+    assert_eq!(driver.execution.trigger_marker, None);
+    assert_eq!(driver.execution.events[&at(20)].len(), 1);
     assert!(matches!(
-        driver.events[&at(20)].front(),
+        driver.execution.events[&at(20)].front(),
         Some(Scheduled::Control(control::Event::Input {
             action: Action::Pause(_),
             ..
@@ -106,26 +107,28 @@ fn firing_and_expiring_a_trigger_retire_old_marker_and_schedule_next_deadline() 
     let mut driver = driver();
     arm(&mut driver, 1, 10);
     arm(&mut driver, 2, 20);
-    driver.control.service.expire_triggers(10);
+    driver.execution.control.service.expire_triggers(10);
     driver.sync_trigger_marker();
-    assert!(!driver.events.contains_key(&at(10)));
-    assert_eq!(driver.trigger_marker, Some(at(20)));
+    assert!(!driver.execution.events.contains_key(&at(10)));
+    assert_eq!(driver.execution.trigger_marker, Some(at(20)));
     driver
+        .execution
         .control
         .service
         .committed_bytes("machine:0", 11, b"x", 11)
         .unwrap();
-    driver.clock.set(11);
+    driver.execution.clock.set(11);
     let plans = driver
+        .execution
         .control
-        .invoke_plans(&driver.machines, |service, view| {
+        .invoke_plans(&driver.execution.machines, |service, view| {
             service.trigger_effects(view, 11)
         })
         .unwrap();
     driver.control_plans(plans).unwrap();
     driver.sync_trigger_marker();
-    assert_eq!(driver.trigger_marker, None);
-    assert!(!driver.events.contains_key(&at(20)));
+    assert_eq!(driver.execution.trigger_marker, None);
+    assert!(!driver.execution.events.contains_key(&at(20)));
 }
 #[test]
 fn settlement_retires_its_deadline_without_deleting_other_policy_or_external_work() {
@@ -167,7 +170,7 @@ fn settlement_retires_its_deadline_without_deleting_other_policy_or_external_wor
             .into(),
         )])
         .unwrap();
-    let events = &driver.events[&at(100)];
+    let events = &driver.execution.events[&at(100)];
     assert_eq!(events.len(), 2);
     assert!(matches!(
         events[0],

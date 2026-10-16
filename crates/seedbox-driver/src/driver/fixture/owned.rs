@@ -277,7 +277,8 @@ pub(in crate::driver) fn status(d: &mut Driver<Mock>) -> PlaybackStatus {
     d.with_barrier(|b| Ok(b.playback())).unwrap()
 }
 pub(in crate::driver) fn states(d: &Driver<Mock>) -> Vec<State> {
-    d.machines
+    d.execution
+        .machines
         .iter()
         .map(|e| e.machine.as_ref().unwrap().state.clone())
         .collect()
@@ -285,7 +286,7 @@ pub(in crate::driver) fn states(d: &Driver<Mock>) -> Vec<State> {
 pub(in crate::driver) fn advance(d: &mut Driver<Mock>, end: u64) -> Vec<Event> {
     let mut events = d.drain_events();
     for _ in 0..1000 {
-        if d.now() >= at(end) || d.finished.is_some() {
+        if d.now() >= at(end) || d.execution.finished.is_some() {
             return events;
         }
         let outcome = d.step(at(end)).unwrap();

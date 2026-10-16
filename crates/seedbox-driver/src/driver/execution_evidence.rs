@@ -18,6 +18,7 @@ where
     ) -> Result<Option<ExecutionEvidence>, Error<M::Error>> {
         self.driver.check_valid()?;
         self.driver
+            .execution
             .machines
             .get_mut(id.0)
             .ok_or(Error::UnknownMachine(id))?

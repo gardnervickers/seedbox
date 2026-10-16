@@ -335,6 +335,7 @@ fn inputs_are_offered_in_machine_time_and_outputs_return_in_simulation_time() {
     set_rate(&mut driver, 0, 0, 100_000_000);
     // Raw queue entry: private timeline mechanics below the control policy.
     driver
+        .execution
         .events
         .entry(at(1_000_000_000))
         .or_default()

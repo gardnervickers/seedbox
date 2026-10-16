@@ -247,7 +247,7 @@ fn an_offered_but_unconsumed_crash_is_not_end_proof() {
         d.step(Timestamp::from_nanos(10)),
         Err(Error::InvalidBootEnd { .. })
     ));
-    assert_eq!(d.machines[1].last_ended_published, None);
+    assert_eq!(d.execution.machines[1].last_ended_published, None);
     assert!(!outputs(&mut d)
         .iter()
         .any(|o| matches!(o.payload, Response::BootEnded { .. })));
@@ -269,7 +269,7 @@ fn natural_exit_and_program_exit_payloads_survive_the_closed_codec() {
         )
         .unwrap();
         assert_eq!(restored.drain_events(), expected);
-        assert_eq!(restored.machines[1].last_ended_published, Some(0));
+        assert_eq!(restored.execution.machines[1].last_ended_published, Some(0));
     }
 }
 
@@ -291,7 +291,7 @@ fn natural_exit_reports_initial_zero_and_preserves_ordinary_stamping() {
         .iter()
         .filter(|o| o.machine == MachineId(1))
         .all(|o| o.boot == 0));
-    assert_eq!(d.machines[1].last_ended_published, Some(0));
+    assert_eq!(d.execution.machines[1].last_ended_published, Some(0));
 }
 #[test]
 fn crash_before_initial_native_start_has_no_fabricated_ram() {
@@ -313,13 +313,13 @@ fn crash_before_initial_native_start_has_no_fabricated_ram() {
             ..
         }
     )));
-    assert_eq!(d.machines[1].last_ended_published, Some(0));
+    assert_eq!(d.execution.machines[1].last_ended_published, Some(0));
 }
 #[test]
 fn reboot_payload_names_old_boot_but_every_carrier_keeps_prospective_boot() {
     let mut d = make(Mode::DeferredCrash, 1, 1);
     step(&mut d, 10);
-    assert_eq!(d.machines[1].last_ended_published, None);
+    assert_eq!(d.execution.machines[1].last_ended_published, None);
     d.drain_events();
     schedule(
         &mut d,
@@ -340,7 +340,7 @@ fn reboot_payload_names_old_boot_but_every_carrier_keeps_prospective_boot() {
         out.iter().all(|o| o.boot == 1),
         "generic carrier stamping must not be rewritten"
     );
-    assert_eq!(d.machines[1].last_ended_published, Some(0));
+    assert_eq!(d.execution.machines[1].last_ended_published, Some(0));
 }
 #[test]
 fn future_arbitrary_noend_and_past_identities_poison_without_publication() {
@@ -356,7 +356,7 @@ fn future_arbitrary_noend_and_past_identities_poison_without_publication() {
             Err(Error::InvalidBootEnd { .. })
         ));
         assert!(outputs(&mut d).is_empty());
-        assert_eq!(d.machines[1].last_ended_published, None);
+        assert_eq!(d.execution.machines[1].last_ended_published, None);
         assert!(matches!(d.with_barrier(|_| Ok(())), Err(Error::Failed)));
     }
     let mut d = make(Mode::DeferredCrash, 1, 1);
@@ -368,7 +368,7 @@ fn future_arbitrary_noend_and_past_identities_poison_without_publication() {
         Action::Reboot(Target::Machine(MachineId(1))),
     );
     step(&mut d, 20);
-    d.machines[1].machine.as_mut().unwrap().mode = Mode::Bad(0, true);
+    d.execution.machines[1].machine.as_mut().unwrap().mode = Mode::Bad(0, true);
     d.drain_events();
     assert!(matches!(
         d.step(Timestamp::from_nanos(30)),
@@ -386,8 +386,8 @@ fn exit_then_reboot_cannot_publish_the_same_ended_boot_again() {
         Action::Crash(Target::Machine(MachineId(1))),
     );
     step(&mut d, 10);
-    assert_eq!(d.machines[1].last_ended_published, Some(0));
-    d.machines[1].machine.as_mut().unwrap().mode = Mode::Duplicate;
+    assert_eq!(d.execution.machines[1].last_ended_published, Some(0));
+    d.execution.machines[1].machine.as_mut().unwrap().mode = Mode::Duplicate;
     d.drain_events();
     schedule(
         &mut d,
@@ -457,6 +457,7 @@ fn cursor_codec_and_mock_continuation_match_one_and_four_workers() {
     step(&mut source, 20);
     let c = roundtrip(source.checkpoint().unwrap());
     assert!(source
+        .execution
         .machines
         .iter()
         .skip(1)
@@ -485,6 +486,7 @@ fn cursor_codec_and_mock_continuation_match_one_and_four_workers() {
         )
         .unwrap();
         assert!(restored
+            .execution
             .machines
             .iter()
             .skip(1)
@@ -492,6 +494,7 @@ fn cursor_codec_and_mock_continuation_match_one_and_four_workers() {
         assert_eq!(restored.drain_events(), prefix);
         assert_eq!(continue_driver(&mut restored), expected);
         assert!(restored
+            .execution
             .machines
             .iter()
             .skip(1)

@@ -802,7 +802,10 @@ fn cut_candidates_draw_nothing_and_reserve_no_fifo_slot() {
         barriers(&mut driver, 20 * MS);
         (
             received(&log),
-            driver.network.pair_cursor(MachineId(0), MachineId(1)),
+            driver
+                .execution
+                .network
+                .pair_cursor(MachineId(0), MachineId(1)),
         )
     };
     // Cut frames neither advance the pair's streams nor its FIFO clock.
@@ -928,7 +931,10 @@ fn exhausted_frame_sequences_fail_with_position_overflow_before_publication() {
         NetworkConfig::default(),
         vec![spec(Some(1)).send(0, frame(mac(2), 0)), spec(Some(2))],
     );
-    driver.network.set_sequence(MachineId(0), u64::MAX);
+    driver
+        .execution
+        .network
+        .set_sequence(MachineId(0), u64::MAX);
     driver.drain_events();
     assert!(matches!(driver.step(at(MS)), Err(Error::PositionOverflow)));
     assert!(driver

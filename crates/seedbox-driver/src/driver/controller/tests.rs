@@ -33,7 +33,7 @@ pub(super) fn configured(
     .unwrap()
 }
 pub(super) fn replies(d: &Driver<Mock>) -> Vec<(u64, Value)> {
-    d.machines[0]
+    d.execution.machines[0]
         .machine
         .as_ref()
         .unwrap()
@@ -107,7 +107,7 @@ fn controller_target_is_invalid_but_host_authority_and_timing_remain() {
         "controller is outside failure model"
     );
     assert!(events.iter().any(|event| event.at == at(3) && matches!(&event.kind, EventKind::FaultAdmitted(record) if matches!(record.origin, FaultOrigin::Input { .. }))));
-    assert!(!d.failed);
+    assert!(!d.execution.failed);
 }
 #[test]
 fn observed_admission_effect_and_reply_are_exact_not_round_delayed() {
@@ -183,17 +183,18 @@ fn configured_reply_never_enters_successor_boot() {
         1,
     );
     advance(&mut d, 8);
-    assert!(d.events.values().flatten().any(|e| matches!(
+    assert!(d.execution.events.values().flatten().any(|e| matches!(
         e,
         driver::Scheduled::Control(driver::control::Event::Reply { .. })
     )));
     // Fold a confirmed mock reboot through the same lifecycle commit used
     // after a physical reboot; the queued reply must retain its original boot.
-    let boot = d.machines[0].lifecycle.boot();
+    let boot = d.execution.machines[0].lifecycle.boot();
     let plans = d
+        .execution
         .control
         .admission(
-            &mut d.machines,
+            &mut d.execution.machines,
             MachineId(0),
             at(8),
             crate::oracle::observation::Transition::Reboot { new_boot: boot + 1 },
@@ -359,5 +360,5 @@ fn guest_cannot_heal_host_network_handle_targeting_controller() {
         "controller is outside failure model"
     );
     assert!(events.iter().any(|event| event.at == at(18) && matches!(&event.kind, EventKind::FaultSettled { record, status: SettlementStatus::Applied, .. } if record.action == FaultAction::Heal && matches!(record.origin, FaultOrigin::Input { .. }))));
-    assert!(!d.failed);
+    assert!(!d.execution.failed);
 }

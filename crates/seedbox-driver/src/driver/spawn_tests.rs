@@ -157,11 +157,13 @@ fn oracle_only_spawn_ids_seeds_names_and_events_follow_admission_not_definition_
             *built.lock().unwrap(),
             ["fixture-0", "fixture-2", "fixture-1"]
         );
-        assert!(driver.machines[1..].iter().all(|e| e.lifecycle.boot() == 0
-            && e.reached == at(10)
-            && !e.lifecycle.paused()
-            && e.lifecycle.execution() == ExecutionConfig::default()
-            && e.machine.as_ref().unwrap().calls.is_empty()));
+        assert!(driver.execution.machines[1..]
+            .iter()
+            .all(|e| e.lifecycle.boot() == 0
+                && e.reached == at(10)
+                && !e.lifecycle.paused()
+                && e.lifecycle.execution() == ExecutionConfig::default()
+                && e.machine.as_ref().unwrap().calls.is_empty()));
         let mut events = driver.drain_events();
         for (fault, id, name) in [(1, 1, "fixture-2"), (2, 2, "fixture-1")] {
             let added = events.iter().position(|e| matches!(e.kind, EventKind::MachineAdded { machine, cause: Cause::Fault(f) } if machine == MachineId(id) && f == FaultId(fault))).unwrap();
@@ -169,14 +171,18 @@ fn oracle_only_spawn_ids_seeds_names_and_events_follow_admission_not_definition_
             let reply = events.iter().position(|e| matches!(e.kind, EventKind::ReplyAdmitted { id, .. } if id.request.get() == fault)).unwrap();
             assert!(added < settled && settled < reply);
             assert_eq!(
-                driver.machines[0].machine.as_ref().unwrap().replies[fault as usize - 1]["result"],
+                driver.execution.machines[0]
+                    .machine
+                    .as_ref()
+                    .unwrap()
+                    .replies[fault as usize - 1]["result"],
                 serde_json::json!({"machine":name})
             );
         }
         driver.step(at(20)).unwrap();
         events.extend(driver.drain_events());
         let mut global = SeededRng::new(123);
-        for e in &driver.machines {
+        for e in &driver.execution.machines {
             let mut expected = SeededRng::new(global.next_u64());
             assert_eq!(
                 e.machine.as_ref().unwrap().random,
@@ -217,7 +223,7 @@ fn unknown_duplicate_and_already_spawned_rejections_allocate_nothing() {
     driver.step(at(10)).unwrap();
     driver.step(at(20)).unwrap();
     assert_eq!(draws.load(Ordering::SeqCst), 3);
-    assert_eq!(driver.machines.len(), 3);
+    assert_eq!(driver.execution.machines.len(), 3);
     let records: Vec<_> = driver
         .drain_events()
         .into_iter()
@@ -242,7 +248,11 @@ fn unknown_duplicate_and_already_spawned_rejections_allocate_nothing() {
             }
         ))
     );
-    let replies = &driver.machines[0].machine.as_ref().unwrap().replies;
+    let replies = &driver.execution.machines[0]
+        .machine
+        .as_ref()
+        .unwrap()
+        .replies;
     assert_eq!(replies.len(), 6);
     for n in [1, 2, 4, 6] {
         let reply = replies.iter().find(|r| r["id"] == n).unwrap();
@@ -300,26 +310,32 @@ fn spawned_target_supports_throttle_crash_reboot_and_snapshot() {
     assert!(snapshot.calls.is_empty());
     driver.step(at(20)).unwrap();
     assert_eq!(
-        driver.machines[1].lifecycle.execution().factor_permille(),
+        driver.execution.machines[1]
+            .lifecycle
+            .execution()
+            .factor_permille(),
         2000
     );
     driver.step(at(30)).unwrap();
     assert!(matches!(
-        driver.machines[1].stopped,
+        driver.execution.machines[1].stopped,
         StopReason::Exited {
             reason: ExitReason::Crashed,
             ..
         }
     ));
     driver.step(at(40)).unwrap();
-    assert_eq!(driver.machines[1].lifecycle.boot(), 1);
-    assert!(!driver.machines[1].lifecycle.paused());
+    assert_eq!(driver.execution.machines[1].lifecycle.boot(), 1);
+    assert!(!driver.execution.machines[1].lifecycle.paused());
     assert_eq!(
-        driver.machines[1].lifecycle.execution().factor_permille(),
+        driver.execution.machines[1]
+            .lifecycle
+            .execution()
+            .factor_permille(),
         2000
     );
     assert_eq!(draws.load(Ordering::SeqCst), 2);
-    assert!(driver.machines[0]
+    assert!(driver.execution.machines[0]
         .machine
         .as_ref()
         .unwrap()
@@ -390,6 +406,7 @@ fn final_batch_and_stopped_pending_calls_never_create_or_draw_seed() {
     assert!(fixture::settlements(&driver.drain_events()).is_empty());
     let (mut driver, draws, built) = build(1, vec![], None);
     driver
+        .execution
         .events
         .entry(at(0))
         .or_default()
@@ -442,10 +459,11 @@ fn finish_and_stop_cut_off_already_admitted_spawn_effects() {
     let Response::SimulationControl { id, payload } = spawn(1, "fixture-1") else {
         unreachable!()
     };
-    driver.control.record_call(MachineId(0), id, 0);
+    driver.execution.control.record_call(MachineId(0), id, 0);
     let plans = driver
+        .execution
         .control
-        .invoke_plans(&driver.machines, |service, view| {
+        .invoke_plans(&driver.execution.machines, |service, view| {
             service.admit(
                 view,
                 control::Control::source(MachineId(0)),
@@ -483,10 +501,11 @@ fn pending_spawn_rejects_host_add_without_mutation_then_allows_next_identity() {
         let Response::SimulationControl { id, payload } = spawn(1, "fixture-1") else {
             unreachable!()
         };
-        driver.control.record_call(MachineId(0), id, 0);
+        driver.execution.control.record_call(MachineId(0), id, 0);
         let plans = driver
+            .execution
             .control
-            .invoke_plans(&driver.machines, |service, view| {
+            .invoke_plans(&driver.execution.machines, |service, view| {
                 service.admit(
                     view,
                     control::Control::source(MachineId(0)),
@@ -501,13 +520,13 @@ fn pending_spawn_rejects_host_add_without_mutation_then_allows_next_identity() {
         driver.flush_events().unwrap();
         let position = driver.position();
         let published = driver.observations.published.clone();
-        let queued = driver.events[&at(0)].len();
-        let definitions = driver.definitions.clone();
+        let queued = driver.execution.events[&at(0)].len();
+        let definitions = driver.execution.definitions.clone();
         assert_eq!(
-            driver.control.spawn_target("fixture-1").unwrap(),
+            driver.execution.control.spawn_target("fixture-1").unwrap(),
             MachineId(1)
         );
-        assert!(driver.control.target("fixture-1").is_err());
+        assert!(driver.execution.control.target("fixture-1").is_err());
         driver
             .with_barrier(|b| {
                 assert!(matches!(
@@ -523,16 +542,19 @@ fn pending_spawn_rejects_host_add_without_mutation_then_allows_next_identity() {
             .unwrap();
         assert_eq!(driver.position(), position);
         assert_eq!(driver.observations.published, published);
-        assert_eq!(driver.events[&at(0)].len(), queued);
-        assert_eq!(driver.definitions, definitions);
+        assert_eq!(driver.execution.events[&at(0)].len(), queued);
+        assert_eq!(driver.execution.definitions, definitions);
         assert_eq!(
-            driver.control.spawn_target("fixture-1").unwrap(),
+            driver.execution.control.spawn_target("fixture-1").unwrap(),
             MachineId(1)
         );
         assert_eq!(draws.load(Ordering::SeqCst), 1);
         assert_eq!(*built.lock().unwrap(), ["fixture-0"]);
         driver.step(at(0)).unwrap();
-        assert_eq!(driver.control.target("fixture-1").unwrap(), MachineId(1));
+        assert_eq!(
+            driver.execution.control.target("fixture-1").unwrap(),
+            MachineId(1)
+        );
         assert_eq!(draws.load(Ordering::SeqCst), 2);
         assert_eq!(*built.lock().unwrap(), ["fixture-0", "fixture-1"]);
         let host = driver
@@ -541,13 +563,14 @@ fn pending_spawn_rejects_host_add_without_mutation_then_allows_next_identity() {
         assert_eq!(host, MachineId(2));
         assert_eq!(
             driver
+                .execution
                 .control
                 .reply_target(&control::Control::source(host))
                 .unwrap(),
             host
         );
         assert_eq!(draws.load(Ordering::SeqCst), 3);
-        assert_eq!(driver.machines.len(), 3);
+        assert_eq!(driver.execution.machines.len(), 3);
         let events = driver.drain_events();
         assert_eq!(fixture::settlements(&events).len(), 1);
         assert!(events.iter().any(|e| matches!(
@@ -564,7 +587,7 @@ fn pending_spawn_rejects_host_add_without_mutation_then_allows_next_identity() {
 fn spawned_machine_has_equal_control_access() {
     let (mut driver, draws, _) = build(2, vec![vec![spawn(1, "fixture-1")]], None);
     driver.step(at(10)).unwrap();
-    driver.machines[1]
+    driver.execution.machines[1]
         .machine
         .as_mut()
         .unwrap()
@@ -573,11 +596,15 @@ fn spawned_machine_has_equal_control_access() {
     driver.step(at(20)).unwrap();
     assert_eq!(draws.load(Ordering::SeqCst), 3);
     assert_eq!(
-        driver.machines[2].machine.as_ref().unwrap().name,
+        driver.execution.machines[2].machine.as_ref().unwrap().name,
         "fixture-2"
     );
     assert_eq!(
-        driver.machines[1].machine.as_ref().unwrap().replies[0]["ok"],
+        driver.execution.machines[1]
+            .machine
+            .as_ref()
+            .unwrap()
+            .replies[0]["ok"],
         true
     );
 }

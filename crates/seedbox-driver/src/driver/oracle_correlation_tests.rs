@@ -24,18 +24,20 @@ fn retired_boot_ack_does_not_complete_current_boot_pending_stop() {
     )
     .unwrap();
     let command = NonZeroU32::new(7).unwrap();
-    driver.oracle_stops.insert((1, command));
+    driver.execution.oracle_stops.insert((1, command));
     // The one committed boot advances only through the transition path.
     driver
+        .execution
         .control
         .admission(
-            &mut driver.machines,
+            &mut driver.execution.machines,
             MachineId(0),
             Timestamp::from_nanos(0),
             crate::oracle::observation::Transition::Reboot { new_boot: 1 },
         )
         .unwrap();
     driver
+        .execution
         .control
         .offered(
             MachineId(0),
@@ -45,10 +47,11 @@ fn retired_boot_ack_does_not_complete_current_boot_pending_stop() {
         )
         .unwrap();
     driver
+        .execution
         .control
         .accepted(
             MachineId(0),
-            &mut driver.machines[0].lifecycle,
+            &mut driver.execution.machines[0].lifecycle,
             1,
             command,
             Timestamp::from_nanos(0),
@@ -64,14 +67,14 @@ fn retired_boot_ack_does_not_complete_current_boot_pending_stop() {
             result: crate::pv::CommandResult::Completed,
         },
     };
-    driver.machines[0].staged.push(ack(0));
+    driver.execution.machines[0].staged.push(ack(0));
     driver.commit_boundary().unwrap();
-    assert!(driver.finished.is_none());
-    assert!(driver.oracle_stops.contains(&(1, command)));
-    driver.machines[0].staged.push(ack(1));
+    assert!(driver.execution.finished.is_none());
+    assert!(driver.execution.oracle_stops.contains(&(1, command)));
+    driver.execution.machines[0].staged.push(ack(1));
     driver.commit_boundary().unwrap();
     assert_eq!(
-        driver.finished,
+        driver.execution.finished,
         Some((Timestamp::from_nanos(0), ExitReason::Shutdown))
     );
     assert_eq!(fixture::outputs(&driver.drain_events()).len(), 2);
@@ -90,8 +93,9 @@ fn first_terminal_response_wins_and_physical_shutdown_is_only_a_fallback() {
         )
         .unwrap();
         let id = NonZeroU32::new(7).unwrap();
-        driver.oracle_stops.insert((0, id));
+        driver.execution.oracle_stops.insert((0, id));
         driver
+            .execution
             .control
             .offered(
                 MachineId(0),
@@ -103,17 +107,18 @@ fn first_terminal_response_wins_and_physical_shutdown_is_only_a_fallback() {
             )
             .unwrap();
         driver
+            .execution
             .control
             .accepted(
                 MachineId(0),
-                &mut driver.machines[0].lifecycle,
+                &mut driver.execution.machines[0].lifecycle,
                 0,
                 id,
                 Timestamp::from_nanos(0),
                 Timestamp::from_nanos(0),
             )
             .unwrap();
-        driver.machines[0].stopped = StopReason::Exited {
+        driver.execution.machines[0].stopped = StopReason::Exited {
             reached: Timestamp::from_nanos(0),
             reason: ExitReason::Shutdown,
         };
@@ -127,7 +132,7 @@ fn first_terminal_response_wins_and_physical_shutdown_is_only_a_fallback() {
         } else {
             vec![outcome, stop]
         };
-        driver.machines[0].staged = responses
+        driver.execution.machines[0].staged = responses
             .into_iter()
             .map(|payload| MachineResponse {
                 machine: MachineId(0),
@@ -138,7 +143,7 @@ fn first_terminal_response_wins_and_physical_shutdown_is_only_a_fallback() {
             .collect();
         driver.commit_boundary().unwrap();
         assert_eq!(
-            driver.finished,
+            driver.execution.finished,
             Some((
                 Timestamp::from_nanos(0),
                 if stop_first {

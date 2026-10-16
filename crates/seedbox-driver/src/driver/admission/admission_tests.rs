@@ -49,23 +49,22 @@ fn throttle() -> Action {
 /// failed and native mock state; compare Playback itself too (including anchor).
 fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
     let Driver {
+        execution,
+        playback,
+        observations,
+        workers: _,
+        factory: _,
+    } = d;
+    let ExecutionState {
         clock,
         rng,
-        workers: _,
         quantum_ns,
         quantum_end,
         machines,
         events,
-        observations:
-            ObservationState {
-                staged_events,
-                published,
-                next_sequence,
-            },
         boundary_index,
         completed_quanta,
         quantum_committed,
-        playback,
         failed,
         oracle,
         finished,
@@ -74,9 +73,13 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         inputs,
         trigger_marker,
         definitions,
-        factory: _,
         network,
-    } = d;
+    } = execution;
+    let ObservationState {
+        staged_events,
+        published,
+        next_sequence,
+    } = observations;
     let SimulationRng::Seeded(rng) = rng else {
         panic!("owned RNG required by probe")
     };
@@ -159,7 +162,7 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
             .unwrap();
         let before = d.playback.clone();
         let position = d.position();
-        let quantum_end = d.quantum_end;
+        let quantum_end = d.execution.quantum_end;
         let native = states(&d);
         let p = prepare(&mut d, "live", pause());
         assert_eq!(p.key(), &key("live"));
@@ -180,10 +183,10 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
             "including exact host anchor and step target"
         );
         assert_eq!(d.now(), position.at);
-        assert_eq!(d.quantum_end, quantum_end);
-        assert_eq!(d.completed_quanta, position.completed_quanta);
+        assert_eq!(d.execution.quantum_end, quantum_end);
+        assert_eq!(d.execution.completed_quanta, position.completed_quanta);
         assert_eq!(states(&d), native, "held effect must not run a machine");
-        assert!(!d.machines[1].lifecycle.paused());
+        assert!(!d.execution.machines[1].lifecycle.paused());
         assert_eq!(d.position().boundary_index, position.boundary_index + 1);
         let events = d.drain_events();
         assert_eq!(
@@ -219,16 +222,16 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
         if stepping_release {
             d.with_barrier(|b| b.step_quantum()).unwrap();
             d.step(quantum_end).unwrap();
-            assert_eq!(d.completed_quanta, position.completed_quanta + 1);
+            assert_eq!(d.execution.completed_quanta, position.completed_quanta + 1);
             assert!(!status(&mut d).stepping);
         } else {
             d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
                 .unwrap();
             d.step(at(3)).unwrap();
-            assert_eq!(d.completed_quanta, position.completed_quanta);
+            assert_eq!(d.execution.completed_quanta, position.completed_quanta);
         }
         assert!(d.playback.held.is_none());
-        assert!(d.machines[1].lifecycle.paused());
+        assert!(d.execution.machines[1].lifecycle.paused());
         let events = d.drain_events();
         assert_eq!(applied_pause(&events), 1);
         assert_eq!(events.iter().filter(|e| matches!(&e.kind, EventKind::FaultSettled { record: fault, status: SettlementStatus::Applied, .. } if fault == record(&p))).count(), 1);
@@ -248,17 +251,17 @@ fn pending_step_survives_due_dispatch_and_next_step_finishes_exactly_one_quantum
     .unwrap();
     let playback = d.playback.clone();
     let now = d.now();
-    let end = d.quantum_end;
-    let quanta = d.completed_quanta;
+    let end = d.execution.quantum_end;
+    let quanta = d.execution.completed_quanta;
     let p = prepare(&mut d, "pause", pause());
     assert_eq!(commit(&mut d, &p), DueOutcome::Applied { at: now });
     assert_eq!(d.playback, playback);
     assert_eq!(d.now(), now);
-    assert_eq!(d.quantum_end, end);
-    assert_eq!(d.completed_quanta, quanta);
-    assert!(d.machines[1].lifecycle.paused());
+    assert_eq!(d.execution.quantum_end, end);
+    assert_eq!(d.execution.completed_quanta, quanta);
+    assert!(d.execution.machines[1].lifecycle.paused());
     d.step(end).unwrap();
-    assert_eq!(d.completed_quanta, quanta + 1);
+    assert_eq!(d.execution.completed_quanta, quanta + 1);
     assert!(!status(&mut d).stepping);
     assert!(matches!(
         d.step(at(30)).unwrap(),
@@ -287,8 +290,8 @@ fn limited_waiting_bypassed_without_reanchor_but_armed_hold_uses_existing_semant
         }
         let playback = d.playback.clone();
         let now = d.now();
-        let end = d.quantum_end;
-        let quanta = d.completed_quanta;
+        let end = d.execution.quantum_end;
+        let quanta = d.execution.completed_quanta;
         let p = prepare(&mut d, "throttle", throttle());
         let result = commit(&mut d, &p);
         if armed {
@@ -301,15 +304,27 @@ fn limited_waiting_bypassed_without_reanchor_but_armed_hold_uses_existing_semant
             );
             assert_eq!(d.playback.rate, PlaybackRate::Paused);
             assert!(!d.playback.before_next);
-            assert_eq!(d.machines[1].lifecycle.execution().factor_permille(), 1000);
+            assert_eq!(
+                d.execution.machines[1]
+                    .lifecycle
+                    .execution()
+                    .factor_permille(),
+                1000
+            );
         } else {
             assert_eq!(result, DueOutcome::Applied { at: now });
             assert_eq!(d.playback, playback);
-            assert_eq!(d.machines[1].lifecycle.execution().factor_permille(), 2000);
+            assert_eq!(
+                d.execution.machines[1]
+                    .lifecycle
+                    .execution()
+                    .factor_permille(),
+                2000
+            );
         }
         assert_eq!(d.now(), now);
-        assert_eq!(d.quantum_end, end);
-        assert_eq!(d.completed_quanta, quanta);
+        assert_eq!(d.execution.quantum_end, end);
+        assert_eq!(d.execution.completed_quanta, quanta);
     }
 }
 
@@ -363,19 +378,24 @@ fn pure_prepare_and_aborted_journal_do_not_allocate_or_publish() {
 fn unstaged_settlement_notice_is_projected_for_heal_without_mutating_real_inputs() {
     let mut d = ready();
     let now = d.now();
-    d.inputs.insert(key("setting"), LiveInput::Pending);
+    d.execution
+        .inputs
+        .insert(key("setting"), LiveInput::Pending);
     let (setting, _) = Driver::<Mock>::input_admission(
-        &mut d.control,
-        &d.machines,
-        &d.inputs,
+        &mut d.execution.control,
+        &d.execution.machines,
+        &d.execution.inputs,
         &key("setting"),
         &throttle(),
         now,
     )
     .unwrap()
     .unwrap();
-    d.control
-        .invoke(&d.machines, |service, _| service.applied(setting, 3, 3))
+    d.execution
+        .control
+        .invoke(&d.execution.machines, |service, _| {
+            service.applied(setting, 3, 3)
+        })
         .unwrap();
     let before = internal(&d);
     // Without projecting both unstaged notices, Pending cannot resolve Heal(Input).
@@ -388,7 +408,7 @@ fn unstaged_settlement_notice_is_projected_for_heal_without_mutating_real_inputs
     assert_eq!(record(&q).handle.as_ref().unwrap().to_string(), "p1");
     assert_eq!(internal(&d), before);
     assert!(matches!(
-        d.inputs.get(&key("setting")),
+        d.execution.inputs.get(&key("setting")),
         Some(LiveInput::Pending)
     ));
     // Publish the earlier setting notices explicitly only after testing purity.
@@ -397,17 +417,20 @@ fn unstaged_settlement_notice_is_projected_for_heal_without_mutating_real_inputs
     // unstaged, as an internal pre-publication fixture. Projection must retire
     // setting's live handle on the clone, not call real stage_notices().
     let (fault, _) = Driver::<Mock>::input_admission(
-        &mut d.control,
-        &d.machines,
-        &d.inputs,
+        &mut d.execution.control,
+        &d.execution.machines,
+        &d.execution.inputs,
         &key("internal-heal"),
         &Action::Heal(HealTarget::Input(key("setting"))),
         now,
     )
     .unwrap()
     .unwrap();
-    d.control
-        .invoke(&d.machines, |service, _| service.applied(fault, 3, 3))
+    d.execution
+        .control
+        .invoke(&d.execution.machines, |service, _| {
+            service.applied(fault, 3, 3)
+        })
         .unwrap();
     let before = internal(&d);
     let rejected = prepare(
@@ -424,7 +447,7 @@ fn unstaged_settlement_notice_is_projected_for_heal_without_mutating_real_inputs
     ));
     assert_eq!(internal(&d), before);
     assert!(matches!(
-        d.inputs.get(&key("setting")),
+        d.execution.inputs.get(&key("setting")),
         Some(LiveInput::Handle(_))
     ));
     assert!(matches!(
@@ -453,9 +476,9 @@ fn stale_position_id_and_boot_state_are_detected_before_any_real_mutation() {
     // not claimed a public returned/capturable service state.
     let now = d.now();
     Driver::<Mock>::input_admission(
-        &mut d.control,
-        &d.machines,
-        &d.inputs,
+        &mut d.execution.control,
+        &d.execution.machines,
+        &d.execution.inputs,
         &key("internal"),
         &Action::Pause(Target::Machine(MachineId(2))),
         now,
@@ -473,7 +496,7 @@ fn stale_position_id_and_boot_state_are_detected_before_any_real_mutation() {
     let mut d = ready();
     let p = prepare(&mut d, "old", pause());
     // Read-only preview uses the actual committed lifecycle, not position alone.
-    d.machines[1]
+    d.execution.machines[1]
         .lifecycle
         .admission(
             0,
@@ -484,7 +507,7 @@ fn stale_position_id_and_boot_state_are_detected_before_any_real_mutation() {
             ),
         )
         .unwrap();
-    d.machines[1]
+    d.execution.machines[1]
         .lifecycle
         .admission(
             0,
@@ -519,7 +542,13 @@ fn prepare_and_commit_refuse_due_work_but_apply_due_now_drains_it() {
         ));
     });
     assert_eq!(due(&mut d), DueOutcome::Applied { at: at(3) });
-    assert_eq!(d.machines[1].lifecycle.execution().factor_permille(), 2000);
+    assert_eq!(
+        d.execution.machines[1]
+            .lifecycle
+            .execution()
+            .factor_permille(),
+        2000
+    );
     assert!(d
         .with_barrier(|b| b.prepare_input(key("live"), pause()))
         .is_ok());
@@ -538,9 +567,9 @@ fn due_detection_includes_frames_and_timers_and_drains_timer_generated_calls() {
     let Response::TransmitFrame { bytes: packet } = frame(mac(1), 7) else {
         unreachable!()
     };
-    d.network.route(MachineId(0), 0, &packet).unwrap();
-    let arrival = d.network.next_arrival().unwrap();
-    d.clock.set(arrival);
+    d.execution.network.route(MachineId(0), 0, &packet).unwrap();
+    let arrival = d.execution.network.next_arrival().unwrap();
+    d.execution.clock.set(arrival);
     let before = internal(&d);
     assert!(matches!(
         d.with_barrier(|b| b.prepare_input(key("live"), pause())),
@@ -548,7 +577,7 @@ fn due_detection_includes_frames_and_timers_and_drains_timer_generated_calls() {
     ));
     assert_eq!(internal(&d), before);
     assert_eq!(due(&mut d), DueOutcome::Applied { at: at(arrival) });
-    assert!(d.network.next_arrival().is_none());
+    assert!(d.execution.network.next_arrival().is_none());
     assert!(states(&d)[1]
         .received
         .iter()
@@ -570,12 +599,12 @@ fn due_detection_includes_frames_and_timers_and_drains_timer_generated_calls() {
         vec![],
         true,
     );
-    d.clock.set(5);
-    d.machines[1].stopped = StopReason::Blocked {
+    d.execution.clock.set(5);
+    d.execution.machines[1].stopped = StopReason::Blocked {
         reached: at(0),
         deadline: Some(at(5)),
     };
-    d.machines[1].timer = Some(at(5));
+    d.execution.machines[1].timer = Some(at(5));
     let before = internal(&d);
     assert!(matches!(
         d.with_barrier(|b| b.prepare_input(key("live"), pause())),
@@ -584,10 +613,10 @@ fn due_detection_includes_frames_and_timers_and_drains_timer_generated_calls() {
     assert_eq!(internal(&d), before);
     assert_eq!(due(&mut d), DueOutcome::Applied { at: at(5) });
     assert!(
-        d.machines[2].lifecycle.paused(),
+        d.execution.machines[2].lifecycle.paused(),
         "timer-generated same-time call was not drained"
     );
-    assert!(!d.events.contains_key(&at(5)));
+    assert!(!d.execution.events.contains_key(&at(5)));
     assert!(
         states(&d).iter().all(|s| s.entropy.is_empty()),
         "zero-time drain executed positive budget"
@@ -632,7 +661,7 @@ fn schedule_shape_errors_match_prepare_without_mutation_or_journaling() {
         let scheduled = d.schedule(d.now(), key("bad"), action).unwrap_err();
         assert_eq!(projected.to_string(), scheduled.to_string());
         assert_eq!(internal(&d), before);
-        assert!(!d.failed);
+        assert!(!d.execution.failed);
     }
 }
 
@@ -659,7 +688,12 @@ fn stopped_finished_and_poisoned_preflights_never_mutate() {
             ));
         }
         if kind == 2 {
-            d.machines[0].machine.as_mut().unwrap().state.fail_run = true;
+            d.execution.machines[0]
+                .machine
+                .as_mut()
+                .unwrap()
+                .state
+                .fail_run = true;
             assert!(d.step(at(4)).is_err());
         }
         let before = internal(&d);
@@ -702,7 +736,10 @@ fn sequential_same_time_entries_apply_but_prequeued_fifo_still_rejects_reboot() 
         assert!(matches!(due(&mut d), DueOutcome::Applied { .. }));
         let events = d.drain_events();
         assert_eq!(events.iter().filter(|e| matches!(&e.kind, EventKind::InputRejected { key: k, .. } if k == &key("reboot"))).count(), usize::from(batch));
-        assert_eq!(d.machines[1].lifecycle.boot(), if batch { 0 } else { 1 });
+        assert_eq!(
+            d.execution.machines[1].lifecycle.boot(),
+            if batch { 0 } else { 1 }
+        );
         assert_eq!(states(&d)[1].dead, batch);
     }
 }
@@ -831,7 +868,7 @@ fn due_completion_keeps_pending_step_and_anchor_until_ordinary_step_observes_fin
     .unwrap();
     let playback = d.playback.clone();
     let position = d.position();
-    let end = d.quantum_end;
+    let end = d.execution.quantum_end;
     let p = prepare(
         &mut d,
         "finish",
@@ -846,8 +883,8 @@ fn due_completion_keeps_pending_step_and_anchor_until_ordinary_step_observes_fin
     );
     assert_eq!(d.playback, playback);
     assert_eq!(d.now(), position.at);
-    assert_eq!(d.quantum_end, end);
-    assert_eq!(d.completed_quanta, position.completed_quanta);
+    assert_eq!(d.execution.quantum_end, end);
+    assert_eq!(d.execution.completed_quanta, position.completed_quanta);
     assert!(matches!(
         d.step(at(100)).unwrap(),
         StepOutcome::Finished { .. }
@@ -939,7 +976,13 @@ fn zero_budget_machine_error_poison_preserves_confirmed_facts_and_never_retries(
                 b.prepare_input(key("crash"), Action::Crash(Target::Machine(MachineId(1))))
             })
             .unwrap();
-        d.machines[1].machine.as_mut().unwrap().mock.state.fail_run = true;
+        d.execution.machines[1]
+            .machine
+            .as_mut()
+            .unwrap()
+            .mock
+            .state
+            .fail_run = true;
         let result = if via_due {
             d.schedule(
                 at(3),
@@ -959,8 +1002,8 @@ fn zero_budget_machine_error_poison_preserves_confirmed_facts_and_never_retries(
             })
         ));
         assert_eq!(*calls.lock().unwrap(), vec![(3, 3)]);
-        assert!(d.failed);
-        assert!(d.machines.iter().all(|e| e.staged.is_empty()));
+        assert!(d.execution.failed);
+        assert!(d.execution.machines.iter().all(|e| e.staged.is_empty()));
         let events = d.drain_events();
         assert!(events
             .iter()

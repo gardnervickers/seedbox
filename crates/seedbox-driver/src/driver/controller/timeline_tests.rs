@@ -12,7 +12,8 @@ fn call_and_boot_pinned_reply_are_both_closed_codec_state() {
         let mut d = configured(specs.clone(), Some(Some(MachineId::ORACLE)), 1);
         advance(&mut d, boundary);
         assert_eq!(
-            d.events
+            d.execution
+                .events
                 .values()
                 .flatten()
                 .filter(|event| match event {
@@ -221,18 +222,19 @@ fn pending_old_boot_call_cannot_steal_reused_successor_rpc_identity() {
         1,
     );
     advance(&mut d, 8);
-    let boot = d.machines[0].lifecycle.boot();
+    let boot = d.execution.machines[0].lifecycle.boot();
     let plans = d
+        .execution
         .control
         .admission(
-            &mut d.machines,
+            &mut d.execution.machines,
             MachineId::ORACLE,
             at(8),
             crate::oracle::observation::Transition::Reboot { new_boot: boot + 1 },
         )
         .unwrap();
     d.control_plans(plans).unwrap();
-    d.machines[0]
+    d.execution.machines[0]
         .machine
         .as_mut()
         .unwrap()

@@ -30,24 +30,16 @@ where
         output: &mut impl Write,
     ) -> std::result::Result<(), CodecError> {
         // Exhaustive destructuring forces review when Driver authority expands.
-        let Driver {
+        let ExecutionState {
             clock,
             rng,
-            workers: _,
             quantum_ns,
             quantum_end,
             machines,
             events,
-            observations:
-                ObservationState {
-                    staged_events,
-                    published: _,
-                    next_sequence,
-                },
             boundary_index,
             completed_quanta,
             quantum_committed,
-            playback,
             failed,
             oracle,
             finished,
@@ -56,9 +48,14 @@ where
             inputs,
             trigger_marker,
             definitions,
-            factory: _,
             network,
-        } = &*self.driver;
+        } = &self.driver.execution;
+        let ObservationState {
+            staged_events,
+            published: _,
+            next_sequence,
+        } = &self.driver.observations;
+        let playback = &self.driver.playback;
         let SimulationRng::Seeded(rng) = rng else {
             return Err(CodecError::Invalid(
                 "policy evidence requires the owned seeded Driver RNG",

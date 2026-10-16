@@ -156,6 +156,7 @@ fn enqueue(driver: &mut Driver<QueueMachine>, at: Timestamp, id: u32) {
 /// policy; public scheduling only creates them from admitted faults.
 fn raw(driver: &mut Driver<QueueMachine>, at: Timestamp, target: MachineId, payload: Request) {
     driver
+        .execution
         .events
         .entry(at)
         .or_default()
@@ -182,13 +183,16 @@ fn unconsumed_due_input_survives_jobs_without_perpetual_runnable_work() {
     let mut driver = driver(vec![machine]);
     enqueue(&mut driver, at(0), 1);
     driver.step(at(10)).unwrap();
-    let calls = driver.machines[0].machine.as_ref().unwrap().calls;
-    assert_eq!(driver.machines[0].inbox.len(), 1);
+    let calls = driver.execution.machines[0].machine.as_ref().unwrap().calls;
+    assert_eq!(driver.execution.machines[0].inbox.len(), 1);
     assert!(matches!(
         driver.step(at(10)).unwrap(),
         StepOutcome::Blocked { .. }
     ));
-    assert_eq!(driver.machines[0].machine.as_ref().unwrap().calls, calls);
+    assert_eq!(
+        driver.execution.machines[0].machine.as_ref().unwrap().calls,
+        calls
+    );
 }
 #[test]
 fn ordered_reboot_discards_only_admitted_work_and_preserves_future_input() {
@@ -201,13 +205,21 @@ fn ordered_reboot_discards_only_admitted_work_and_preserves_future_input() {
     enqueue(&mut driver, at(5), 3);
     driver.step(at(0)).unwrap();
     assert_eq!(
-        driver.machines[0].machine.as_ref().unwrap().accepted,
+        driver.execution.machines[0]
+            .machine
+            .as_ref()
+            .unwrap()
+            .accepted,
         [(1, 2)]
     );
-    assert!(driver.events.contains_key(&at(5)));
+    assert!(driver.execution.events.contains_key(&at(5)));
     driver.step(at(10)).unwrap();
     assert_eq!(
-        driver.machines[0].machine.as_ref().unwrap().accepted,
+        driver.execution.machines[0]
+            .machine
+            .as_ref()
+            .unwrap()
+            .accepted,
         [(1, 2), (1, 3)]
     );
 }
@@ -245,7 +257,11 @@ fn output_after_returned_stop_poison_discards_entire_batch() {
         matches!(driver.step(at(10)), Err(Error::InvalidOutput { id: MachineId(0), at: emitted, reached }) if emitted == at(10) && reached == at(0))
     );
     assert!(fixture::outputs(&driver.drain_events()).is_empty());
-    assert!(driver.machines.iter().all(|entry| entry.staged.is_empty()));
+    assert!(driver
+        .execution
+        .machines
+        .iter()
+        .all(|entry| entry.staged.is_empty()));
     assert!(matches!(driver.step(at(10)), Err(Error::Failed)));
 }
 #[test]
@@ -256,6 +272,7 @@ fn later_batch_failure_discards_earlier_uncommitted_outputs() {
     // First local run acknowledges an input at zero, then sleeps until one;
     // the second run fails before any common boundary is committed.
     driver
+        .execution
         .control
         .offered(
             MachineId(0),
@@ -264,7 +281,7 @@ fn later_batch_failure_discards_earlier_uncommitted_outputs() {
             crate::oracle::observation::Origin::External,
         )
         .unwrap();
-    driver.machines[0].inbox.push_back(Input {
+    driver.execution.machines[0].inbox.push_back(Input {
         at: at(0),
         payload: Request::Application {
             id: NonZeroU32::new(1).unwrap(),
@@ -273,7 +290,7 @@ fn later_batch_failure_discards_earlier_uncommitted_outputs() {
     });
     assert!(matches!(driver.step(at(10)), Err(Error::Machine { .. })));
     assert!(fixture::outputs(&driver.drain_events()).is_empty());
-    assert!(driver.machines[0].staged.is_empty());
+    assert!(driver.execution.machines[0].staged.is_empty());
 }
 
 #[test]
@@ -288,20 +305,24 @@ fn normal_exit_discards_ended_boot_inbox_but_keeps_future_timeline() {
     raw(&mut driver, at(5), MachineId(1), Request::Reboot);
     enqueue_to(&mut driver, at(5), MachineId(1), 4);
     driver.step(at(0)).unwrap();
-    assert!(driver.machines[1].inbox.is_empty());
+    assert!(driver.execution.machines[1].inbox.is_empty());
     assert!(matches!(
-        driver.machines[1].stopped,
+        driver.execution.machines[1].stopped,
         StopReason::Exited { .. }
     ));
-    assert!(driver.events.contains_key(&at(5)));
+    assert!(driver.execution.events.contains_key(&at(5)));
     driver.step(at(4)).unwrap();
-    assert!(driver.machines[1].inbox.is_empty());
+    assert!(driver.execution.machines[1].inbox.is_empty());
     driver.step(at(10)).unwrap();
     assert_eq!(
-        driver.machines[1].machine.as_ref().unwrap().accepted,
+        driver.execution.machines[1]
+            .machine
+            .as_ref()
+            .unwrap()
+            .accepted,
         [(1, 4)]
     );
-    assert!(driver.machines[1].inbox.is_empty());
+    assert!(driver.execution.machines[1].inbox.is_empty());
 }
 
 impl QueueMachine {
@@ -322,7 +343,7 @@ impl QueueMachine {
 #[test]
 fn boot_generation_overflow_fails_before_reset_or_response_publication() {
     let mut driver = driver(vec![QueueMachine::new()]);
-    driver.machines[0]
+    driver.execution.machines[0]
         .lifecycle
         .admission(
             0,
@@ -338,7 +359,10 @@ fn boot_generation_overflow_fails_before_reset_or_response_publication() {
         driver.step(at(0)),
         Err(Error::BootOverflow { id: MachineId(0) })
     ));
-    assert_eq!(driver.machines[0].machine.as_ref().unwrap().boot, 0);
+    assert_eq!(
+        driver.execution.machines[0].machine.as_ref().unwrap().boot,
+        0
+    );
     assert!(fixture::outputs(&driver.drain_events()).is_empty());
     assert!(matches!(driver.step(at(0)), Err(Error::Failed)));
 }
@@ -361,7 +385,7 @@ fn public_inputs_enqueue_in_fifo_order_without_admission_or_reservation() {
     for action in actions.clone() {
         driver.schedule(at(0), auto_key(), action).unwrap();
     }
-    let queued: Vec<_> = driver.events[&at(0)]
+    let queued: Vec<_> = driver.execution.events[&at(0)]
         .iter()
         .map(|event| match event {
             Scheduled::Control(control::Event::Input { action, .. }) => action.clone(),
@@ -371,9 +395,15 @@ fn public_inputs_enqueue_in_fifo_order_without_admission_or_reservation() {
     assert_eq!(queued, actions);
     // Enqueue performs no machine admission, lifecycle transition or ID
     // reservation, and publishes nothing.
-    assert!(driver.machines[0].inbox.is_empty());
-    assert_eq!(driver.machines[0].machine.as_ref().unwrap().calls, 0);
-    let (_, events) = (driver.control.service.take_notices(), driver.drain_events());
+    assert!(driver.execution.machines[0].inbox.is_empty());
+    assert_eq!(
+        driver.execution.machines[0].machine.as_ref().unwrap().calls,
+        0
+    );
+    let (_, events) = (
+        driver.execution.control.service.take_notices(),
+        driver.drain_events(),
+    );
     assert!(events
         .iter()
         .all(|event| matches!(event.kind, EventKind::MachineAdded { .. })));

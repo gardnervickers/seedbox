@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
 fn continue_from(d: &mut Driver<Mock>) -> (Vec<Event>, Position, Vec<State>, PlaybackStatus) {
     let observed = status(d);
-    if d.finished.is_none()
+    if d.execution.finished.is_none()
         && !observed.stopped
         && observed.rate == PlaybackRate::Paused
         && !observed.stepping
@@ -17,7 +17,7 @@ fn continue_from(d: &mut Driver<Mock>) -> (Vec<Event>, Position, Vec<State>, Pla
             .unwrap();
     }
     let end = if observed.stepping { 10 } else { 40 };
-    let events = if d.finished.is_some() || observed.stopped {
+    let events = if d.execution.finished.is_some() || observed.stopped {
         d.step(at(100)).unwrap();
         d.drain_events()
     } else {
@@ -404,10 +404,11 @@ fn future_binary_closure_is_exact_and_invalid_resources_remain_deferred() {
             .append_data(&mut header, "file", &b"data"[..])
             .unwrap();
         let original = archive.into_inner().unwrap();
-        d.definitions[0].application.filesystem = FilesystemArchive::new(original.clone()).unwrap();
-        d.definitions[0].resources.memory_bytes = 0;
-        d.definitions[0].application.launch.argv.clear();
-        d.definitions[0].disk = Some(if image {
+        d.execution.definitions[0].application.filesystem =
+            FilesystemArchive::new(original.clone()).unwrap();
+        d.execution.definitions[0].resources.memory_bytes = 0;
+        d.execution.definitions[0].application.launch.argv.clear();
+        d.execution.definitions[0].disk = Some(if image {
             DiskImage::from_bytes(vec![7; 512]).unwrap()
         } else {
             DiskImage::zeroed(1u64 << 40).unwrap()
@@ -423,7 +424,7 @@ fn future_binary_closure_is_exact_and_invalid_resources_remain_deferred() {
             .unwrap();
         file.write_all(&original).unwrap();
         drop(file);
-        d.definitions[0].application.filesystem =
+        d.execution.definitions[0].application.filesystem =
             FilesystemArchive::new(std::fs::read(&source_file).unwrap()).unwrap();
         let (bytes, store) = artifact(d.checkpoint().unwrap());
         drop(d);
@@ -658,7 +659,7 @@ fn duplicate_maps_invalid_rng_and_consuming_map_cleanup() {
         true,
     );
     let drops = Arc::new(AtomicUsize::new(0));
-    for e in &mut d.machines {
+    for e in &mut d.execution.machines {
         e.machine.as_mut().unwrap().saved_drops = Some(drops.clone());
     }
     let c = d.checkpoint().unwrap();
@@ -719,7 +720,13 @@ fn held_effect_survives_running_rate_selection_and_rearm() {
         assert_eq!(before.rate, rate);
         assert_eq!(before.before_next_fault, rearm);
         let fault = before.before_fault.as_ref().unwrap().fault;
-        assert_eq!(d.machines[1].lifecycle.execution().factor_permille(), 1000);
+        assert_eq!(
+            d.execution.machines[1]
+                .lifecycle
+                .execution()
+                .factor_permille(),
+            1000
+        );
         let (bytes, store) = artifact(d.checkpoint().unwrap());
         let finish = |driver: &mut Driver<Mock>| {
             // Assert the round-tripped limited rate before normalizing pacing;
@@ -733,7 +740,10 @@ fn held_effect_survives_running_rate_selection_and_rearm() {
             let mut events = advance(driver, 20);
             events.extend(advance(driver, 30));
             assert_eq!(
-                driver.machines[1].lifecycle.execution().factor_permille(),
+                driver.execution.machines[1]
+                    .lifecycle
+                    .execution()
+                    .factor_permille(),
                 2000
             );
             assert!(status(driver).before_fault.is_none());

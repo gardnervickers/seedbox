@@ -225,6 +225,28 @@ impl<E> From<ClockOverflow> for Error<E> {
 type MachineFactory<M> =
     Box<dyn FnMut(&MachineDefinition) -> Result<M, <M as Machine>::Error> + Send>;
 
+/// Continuing execution, independent of host resources and observer retention.
+struct ExecutionState<M> {
+    clock: Arc<SimulationClock>,
+    rng: SimulationRng,
+    quantum_ns: u64,
+    quantum_end: Timestamp,
+    machines: Vec<Entry<M>>,
+    events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
+    boundary_index: u64,
+    completed_quanta: u64,
+    quantum_committed: bool,
+    failed: bool,
+    oracle: MachineId,
+    finished: Option<(Timestamp, ExitReason)>,
+    oracle_stops: BTreeSet<(u64, NonZeroU32)>,
+    control: control::Control,
+    inputs: BTreeMap<InputKey, LiveInput>,
+    trigger_marker: Option<Timestamp>,
+    definitions: Vec<MachineDefinition>,
+    network: network::Network,
+}
+
 /// Already-committed descriptions owned by one observer session. These are
 /// distinct from Entry::staged, whose accepted outputs still drive execution.
 #[derive(Clone, Default)]
@@ -300,29 +322,11 @@ struct ObservationState {
 /// concurrent Pause/Resume sequence succeeds. Oracle completion publishes the full response batch before stopping
 /// further admission.
 pub struct Driver<M: Machine> {
-    clock: Arc<SimulationClock>,
-    rng: SimulationRng,
     workers: Workers<M::Context>,
-    quantum_ns: u64,
-    quantum_end: Timestamp,
-    machines: Vec<Entry<M>>,
-    events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
-    observations: ObservationState,
-    boundary_index: u64,
-    completed_quanta: u64,
-    quantum_committed: bool,
+    execution: ExecutionState<M>,
     playback: Playback,
-    failed: bool,
-    oracle: MachineId,
-    finished: Option<(Timestamp, ExitReason)>,
-    oracle_stops: BTreeSet<(u64, NonZeroU32)>,
-    control: control::Control,
-    inputs: BTreeMap<InputKey, LiveInput>,
-    trigger_marker: Option<Timestamp>,
-    // Unstarted definitions and their constructor, retained for FIFO spawn effects.
-    definitions: Vec<MachineDefinition>,
+    observations: ObservationState,
     factory: MachineFactory<M>,
-    network: network::Network,
 }
 
 impl<M> Driver<M>
@@ -526,30 +530,32 @@ where
             );
         }
         let mut driver = Self {
-            clock,
             workers,
-            quantum_ns,
-            quantum_end,
-            machines,
-            rng,
-            events: BTreeMap::new(),
+            execution: ExecutionState {
+                clock,
+                quantum_ns,
+                quantum_end,
+                machines,
+                rng,
+                events: BTreeMap::new(),
+                boundary_index: 0,
+                completed_quanta: 0,
+                quantum_committed: false,
+                failed: false,
+                oracle: MachineId(0),
+                finished: None,
+                oracle_stops: BTreeSet::new(),
+                control,
+                inputs: BTreeMap::new(),
+                trigger_marker: None,
+                definitions: spawnable,
+                network,
+            },
             observations: ObservationState::default(),
-            boundary_index: 0,
-            completed_quanta: 0,
-            quantum_committed: false,
             playback: Playback::default(),
-            failed: false,
-            oracle: MachineId(0),
-            finished: None,
-            oracle_stops: BTreeSet::new(),
-            control,
-            inputs: BTreeMap::new(),
-            trigger_marker: None,
-            definitions: spawnable,
             factory: Box::new(factory),
-            network,
         };
-        for index in 0..driver.machines.len() {
+        for index in 0..driver.execution.machines.len() {
             driver.stage(
                 start,
                 EventKind::MachineAdded {
@@ -570,14 +576,14 @@ where
     // Constructor-only capacity cannot rebind a captured Driver to an absent or
     // new observer without changing simulation authority; keep this telemetry-only.
     pub fn set_frame_capacity(&mut self, capacity: usize) {
-        self.network.set_frame_capacity(capacity);
+        self.execution.network.set_frame_capacity(capacity);
     }
 
     /// Drain committed bounded frame observations independently of EventKind.
     /// Works after failure/stop/completion, does no machine work, and never
     /// changes authoritative counters or dense event/witness sequencing.
     pub fn drain_frames(&mut self) -> FrameFacts {
-        self.network.drain_frames()
+        self.execution.network.drain_frames()
     }
 
     /// Read cumulative per-pair decisions and confirmed receive offers without
@@ -589,7 +595,7 @@ where
     /// Keys are directed insertion identities, not concatenated display names;
     /// all pairs are retained even when names contain `->` or other punctuation.
     pub fn network_counters(&self) -> BTreeMap<NetworkPair, NetworkPairCounts> {
-        self.network.counts()
+        self.execution.network.counts()
     }
 
     /// Take all undrained events in publication order.
@@ -649,9 +655,9 @@ where
     }
 
     fn stage_notices(&mut self) {
-        let notices = self.control.service.take_notices();
+        let notices = self.execution.control.service.take_notices();
         for notice in &notices {
-            Self::track_input(&mut self.inputs, notice);
+            Self::track_input(&mut self.execution.inputs, notice);
         }
         self.observations
             .staged_events
@@ -744,7 +750,7 @@ where
         for staged in std::mem::take(&mut self.observations.staged_events) {
             let (at, kind) = match staged {
                 Staged::Driver(at, kind) => (at, kind),
-                Staged::Notice(notice) => match self.control.event(notice) {
+                Staged::Notice(notice) => match self.execution.control.event(notice) {
                     Ok(event) => event,
                     Err(message) => {
                         if result.is_ok() {
@@ -805,7 +811,7 @@ where
     }
 
     fn now(&self) -> Timestamp {
-        Timestamp::from_nanos(self.clock.now())
+        Timestamp::from_nanos(self.execution.clock.now())
     }
 
     /// Advance the simulation to its next barrier, no later than `upto`.
@@ -979,10 +985,10 @@ where
         let result = result.and_then(|outcome| self.flush_events().map(|()| outcome));
         if result.is_err() {
             // All submitted synchronous calls have finished before poisoning.
-            for entry in &mut self.machines {
+            for entry in &mut self.execution.machines {
                 entry.staged.clear();
             }
-            self.failed = true;
+            self.execution.failed = true;
             // Facts confirmed before the failure remain drainable.
             let _ = self.flush_events();
         }
@@ -991,26 +997,28 @@ where
 
     fn position(&self) -> Position {
         Position {
-            boundary_index: self.boundary_index,
-            completed_quanta: self.completed_quanta,
+            boundary_index: self.execution.boundary_index,
+            completed_quanta: self.execution.completed_quanta,
             at: self.now(),
         }
     }
 
     fn commit_boundary(&mut self) -> Result<(), Error<M::Error>> {
-        self.boundary_index = self
+        self.execution.boundary_index = self
+            .execution
             .boundary_index
             .checked_add(1)
             .ok_or(Error::PositionOverflow)?;
-        if self.now() == self.quantum_end && !self.quantum_committed {
-            self.completed_quanta = self
+        if self.now() == self.execution.quantum_end && !self.execution.quantum_committed {
+            self.execution.completed_quanta = self
+                .execution
                 .completed_quanta
                 .checked_add(1)
                 .ok_or(Error::PositionOverflow)?;
-            self.quantum_committed = true;
+            self.execution.quantum_committed = true;
         }
         let mut outputs = Vec::new();
-        for (index, entry) in self.machines.iter_mut().enumerate() {
+        for (index, entry) in self.execution.machines.iter_mut().enumerate() {
             outputs.extend(entry.staged.drain(..).inspect(|output| {
                 debug_assert_eq!(output.machine, MachineId(index));
             }));
@@ -1019,14 +1027,18 @@ where
         outputs.sort_by_key(|output| (output.at, output.machine));
         // Frames are routed in publication order; validated when their run was accepted.
         let position = self.position();
-        let observation_mark = self.network.observation_mark();
+        let observation_mark = self.execution.network.observation_mark();
         for output in &outputs {
             if let Response::TransmitFrame { bytes } = &output.payload {
-                if let Err(error) =
-                    self.network
-                        .route_at(position, output.machine, output.at.as_nanos(), bytes)
-                {
-                    self.network.discard_uncommitted_facts(observation_mark);
+                if let Err(error) = self.execution.network.route_at(
+                    position,
+                    output.machine,
+                    output.at.as_nanos(),
+                    bytes,
+                ) {
+                    self.execution
+                        .network
+                        .discard_uncommitted_facts(observation_mark);
                     return Err(match error {
                         network::RouteError::ArrivalOverflow => Error::TimeOverflow,
                         network::RouteError::SequenceOverflow => Error::PositionOverflow,
@@ -1036,7 +1048,7 @@ where
         }
         let mut terminal = None;
         for output in &outputs {
-            if output.machine != self.oracle {
+            if output.machine != self.execution.oracle {
                 continue;
             }
             match output.payload {
@@ -1046,7 +1058,7 @@ where
                     });
                 }
                 Response::CommandAcknowledged { id, result }
-                    if self.oracle_stops.remove(&(output.boot, id))
+                    if self.execution.oracle_stops.remove(&(output.boot, id))
                         && result == crate::pv::CommandResult::Completed =>
                 {
                     terminal.get_or_insert(ExitReason::Shutdown);
@@ -1062,12 +1074,14 @@ where
         let now = self.now();
         for output in &outputs {
             plans.extend(
-                self.control
-                    .observe(&mut self.machines, output, now)
+                self.execution
+                    .control
+                    .observe(&mut self.execution.machines, output, now)
                     .map_err(Error::Control)?,
             );
             if let Response::SimulationControl { id, payload } = &output.payload {
                 if self
+                    .execution
                     .control
                     .controller
                     .is_some_and(|setup| setup.controller != Some(output.machine))
@@ -1085,31 +1099,39 @@ where
                 });
             }
         }
-        for index in 0..self.machines.len() {
+        for index in 0..self.execution.machines.len() {
             plans.extend(
-                self.control
-                    .terminal(&mut self.machines, MachineId(index), now)
+                self.execution
+                    .control
+                    .terminal(&mut self.execution.machines, MachineId(index), now)
                     .map_err(Error::Control)?,
             );
         }
-        if self.finished.is_none() {
-            let reason = terminal.or_else(|| match self.machines[self.oracle.0].stopped {
-                StopReason::Exited { reason, .. } => Some(reason),
-                _ => None,
+        if self.execution.finished.is_none() {
+            let reason = terminal.or_else(|| {
+                match self.execution.machines[self.execution.oracle.0].stopped {
+                    StopReason::Exited { reason, .. } => Some(reason),
+                    _ => None,
+                }
             });
             if let Some(reason) = reason {
-                self.finished = Some((self.now(), reason));
+                self.execution.finished = Some((self.now(), reason));
             }
         }
-        if self.finished.is_some() {
-            self.control.service.cut_off_triggers(self.now().as_nanos());
+        if self.execution.finished.is_some() {
+            self.execution
+                .control
+                .service
+                .cut_off_triggers(self.now().as_nanos());
         } else {
             for call in calls {
                 let at = match &call {
-                    control::Event::Call { observed, .. } if self.control.controller.is_some() => {
+                    control::Event::Call { observed, .. }
+                        if self.execution.control.controller.is_some() =>
+                    {
                         Timestamp::from_nanos(
                             observed
-                                .checked_add(self.control.service.reply_latency_ns)
+                                .checked_add(self.execution.control.service.reply_latency_ns)
                                 .ok_or(Error::TimeOverflow)?,
                         )
                     }
@@ -1120,7 +1142,8 @@ where
                         "control admission precedes committed boundary".into(),
                     ));
                 }
-                self.events
+                self.execution
+                    .events
                     .entry(at)
                     .or_default()
                     .push_back(Scheduled::Control(call));
@@ -1128,8 +1151,9 @@ where
             self.control_plans(plans)?;
             let now = self.now().as_nanos();
             let plans = self
+                .execution
                 .control
-                .invoke_plans(&self.machines, |service, view| {
+                .invoke_plans(&self.execution.machines, |service, view| {
                     service.trigger_effects(view, now)
                 })
                 .map_err(Error::Control)?;
@@ -1141,16 +1165,17 @@ where
 
     fn sync_trigger_marker(&mut self) {
         let next = self
+            .execution
             .control
             .service
             .trigger_boundary()
             .map(Timestamp::from_nanos);
-        if next == self.trigger_marker {
+        if next == self.execution.trigger_marker {
             return;
         }
         // Only these internally owned markers are retired. External FIFO
         // actions and requests at the same timestamp retain their exact order.
-        for events in self.events.values_mut() {
+        for events in self.execution.events.values_mut() {
             events.retain(|event| {
                 !matches!(
                     event,
@@ -1160,10 +1185,11 @@ where
                 )
             });
         }
-        self.events.retain(|_, events| !events.is_empty());
-        self.trigger_marker = next;
+        self.execution.events.retain(|_, events| !events.is_empty());
+        self.execution.trigger_marker = next;
         if let Some(at) = next {
-            self.events
+            self.execution
+                .events
                 .entry(at)
                 .or_default()
                 .push_back(Scheduled::Control(control::Event::TriggerBoundary));
@@ -1177,14 +1203,14 @@ where
         use crate::oracle::service::Plan;
         for plan in plans {
             if let Plan::Settled(settlement) = plan {
-                for events in self.events.values_mut() {
+                for events in self.execution.events.values_mut() {
                     events.retain(|event| !matches!(event, Scheduled::Control(control::Event::Plan(Plan::Deadline { fault, .. })) if *fault == settlement.fault));
                 }
-                self.events.retain(|_, events| !events.is_empty());
+                self.execution.events.retain(|_, events| !events.is_empty());
                 // Immutable receipt ownership transferred in invoke_plans.
                 continue;
             }
-            if self.control.controller.is_some() {
+            if self.execution.control.controller.is_some() {
                 if let Plan::Reply {
                     boot,
                     source,
@@ -1193,7 +1219,11 @@ where
                     payload,
                 } = &plan
                 {
-                    let target = self.control.reply_target(source).map_err(Error::Control)?;
+                    let target = self
+                        .execution
+                        .control
+                        .reply_target(source)
+                        .map_err(Error::Control)?;
                     let boot = boot.ok_or_else(|| {
                         Error::Control("service reply lacks its caller boot".into())
                     })?;
@@ -1201,7 +1231,8 @@ where
                     if at < self.now() {
                         return Err(Error::Control("control reply scheduled in the past".into()));
                     }
-                    self.events
+                    self.execution
+                        .events
                         .entry(at)
                         .or_default()
                         .push_back(Scheduled::Control(control::Event::Reply {
@@ -1223,7 +1254,8 @@ where
             if at < self.now() {
                 return Err(Error::Control("control plan scheduled in the past".into()));
             }
-            self.events
+            self.execution
+                .events
                 .entry(at)
                 .or_default()
                 .push_back(Scheduled::Control(control::Event::Plan(plan)));
@@ -1243,17 +1275,20 @@ where
                 fault,
             });
         }
-        if self.finished.is_some() || upto == self.now() || (self.is_quiescent() && !external_work)
+        if self.execution.finished.is_some()
+            || upto == self.now()
+            || (self.is_quiescent() && !external_work)
         {
             return Ok(self.outcome());
         }
 
-        if self.now() == self.quantum_end {
-            self.quantum_committed = false;
-            self.quantum_end = Timestamp::from_nanos(
-                self.quantum_end
+        if self.now() == self.execution.quantum_end {
+            self.execution.quantum_committed = false;
+            self.execution.quantum_end = Timestamp::from_nanos(
+                self.execution
+                    .quantum_end
                     .as_nanos()
-                    .checked_add(self.quantum_ns)
+                    .checked_add(self.execution.quantum_ns)
                     .ok_or(Error::TimeOverflow)?,
             );
         }
@@ -1262,6 +1297,7 @@ where
         // can shorten another machine's next budget, but cannot invalidate the
         // round's final boundary. Intermediate local progress stays private.
         let boundary = self
+            .execution
             .machines
             .iter()
             .filter(|entry| !entry.lifecycle.paused())
@@ -1269,11 +1305,16 @@ where
                 StopReason::Blocked { deadline, .. } => deadline,
                 _ => None,
             })
-            .chain(self.events.first_key_value().map(|(&at, _)| at))
-            .chain(self.network.next_arrival().map(Timestamp::from_nanos))
+            .chain(self.execution.events.first_key_value().map(|(&at, _)| at))
+            .chain(
+                self.execution
+                    .network
+                    .next_arrival()
+                    .map(Timestamp::from_nanos),
+            )
             .chain(self.causal_bound())
             .chain(self.controller_bound())
-            .fold(upto.min(self.quantum_end), Timestamp::min);
+            .fold(upto.min(self.execution.quantum_end), Timestamp::min);
 
         let initial = self.now();
         let mut ran = false;
@@ -1281,8 +1322,9 @@ where
             if now >= boundary {
                 break;
             }
-            self.clock.set(now.as_nanos());
+            self.execution.clock.set(now.as_nanos());
             let limit = self
+                .execution
                 .machines
                 .iter()
                 .filter_map(Entry::next)
@@ -1290,6 +1332,7 @@ where
                 .min()
                 .map_or(boundary, |at| at.min(boundary));
             let ready = self
+                .execution
                 .machines
                 .iter()
                 .enumerate()
@@ -1303,7 +1346,8 @@ where
         // Finish early if all machines exited or became indefinitely blocked.
         // A queued input still keeps time moving toward its own barrier.
         let at = if self.is_quiescent() && !external_work {
-            self.machines
+            self.execution
+                .machines
                 .iter()
                 .map(|entry| entry.reached)
                 .max()
@@ -1312,7 +1356,7 @@ where
         } else {
             boundary
         };
-        self.clock.set(at.as_nanos());
+        self.execution.clock.set(at.as_nanos());
         if at != initial || ran {
             self.commit_boundary()?;
         }
@@ -1344,7 +1388,7 @@ where
         let offered_commands: Vec<_> = ids
             .iter()
             .flat_map(|&machine| {
-                self.machines[machine.0]
+                self.execution.machines[machine.0]
                     .inbox
                     .iter()
                     .filter_map(move |input| {
@@ -1352,8 +1396,8 @@ where
                     })
             })
             .collect();
-        let offered_stops: Vec<_> = if ids.contains(&self.oracle) {
-            self.machines[self.oracle.0]
+        let offered_stops: Vec<_> = if ids.contains(&self.execution.oracle) {
+            self.execution.machines[self.execution.oracle.0]
                 .inbox
                 .iter()
                 .filter_map(|input| {
@@ -1377,7 +1421,7 @@ where
         let mut bounds = BTreeMap::new();
         let mut views = Vec::with_capacity(ids.len());
         for &id in ids {
-            let entry = &self.machines[id.0];
+            let entry = &self.execution.machines[id.0];
             let start = entry.machine_time(id, now)?;
             let bound = entry.machine_time(id, upto)?;
             let anchor = Timestamp::from_nanos(entry.time.anchor());
@@ -1397,7 +1441,7 @@ where
         let (send, receive) = mpsc::channel();
         let mut submission_error = None;
         for (id, start, bound, mut inbox) in views {
-            let entry = &mut self.machines[id.0];
+            let entry = &mut self.execution.machines[id.0];
             let mut machine = entry.machine.take().expect("stopped machine");
             let mut rng = entry.rng.take().expect("stopped machine RNG");
             let execution = entry.lifecycle.execution();
@@ -1432,7 +1476,7 @@ where
         reports.sort_by_key(|(id, _, _, _, _, _)| *id);
         let mut stops = Vec::with_capacity(reports.len());
         for (id, machine, rng, remaining, outputs, stopped) in reports {
-            let entry = &mut self.machines[id.0];
+            let entry = &mut self.execution.machines[id.0];
             entry.machine = Some(machine);
             entry.rng = Some(rng);
             // Accepted inputs are the taken prefix; the rest stay in simulation time.
@@ -1459,7 +1503,7 @@ where
         for (id, outputs, result, admitted_end) in stops {
             let stopped = result?;
             let (start, bound, _) = bounds[&id];
-            let entry = &self.machines[id.0];
+            let entry = &self.execution.machines[id.0];
             let last_ended = boot_end::validate(
                 &outputs,
                 entry.lifecycle.boot(),
@@ -1491,7 +1535,7 @@ where
             }
             if outputs.iter().any(|output| {
                 matches!(&output.payload, Response::TransmitFrame { bytes }
-                    if !self.network.attached(id) || !crate::pv::frame_in_bounds(bytes))
+                    if !self.execution.network.attached(id) || !crate::pv::frame_in_bounds(bytes))
             }) {
                 return Err(Error::InvalidFrame { id });
             }
@@ -1533,25 +1577,26 @@ where
             ));
         }
         for &(id, command, at) in &offered_commands {
-            let entry = &mut self.machines[id.0];
+            let entry = &mut self.execution.machines[id.0];
             if !entry.inbox.iter().any(|input| {
                 control::command(&input.payload).is_some_and(|(pending, _)| pending == command)
             }) {
                 let boot = boot_of(entry);
-                self.control
+                self.execution
+                    .control
                     .accepted(id, &mut entry.lifecycle, boot, command, at, upto)
                     .map_err(Error::Control)?;
             }
         }
         for (id, reached, stopped, outputs, position, timer, last_ended) in accepted {
-            let entry = &mut self.machines[id.0];
+            let entry = &mut self.execution.machines[id.0];
             let boot = boot_of(entry);
-            if id == self.oracle {
+            if id == self.execution.oracle {
                 for &command in &offered_stops {
                     let unconsumed = entry.inbox.iter().any(|input| matches!(input.payload,
                         Request::Application { id, command: crate::pv::ApplicationCommand::Stop } if id == command));
                     if !unconsumed {
-                        self.oracle_stops.insert((boot, command));
+                        self.execution.oracle_stops.insert((boot, command));
                     }
                 }
             }
@@ -1598,7 +1643,7 @@ where
         host_now: Instant,
         hold_paused: bool,
     ) -> Result<Option<FaultRecord>, Error<M::Error>> {
-        if self.finished.is_some() {
+        if self.execution.finished.is_some() {
             return Ok(None);
         }
         let now = self.now();
@@ -1608,6 +1653,7 @@ where
         // Frames due now follow every timeline item due now, then timers.
         loop {
             while let Some(scheduled) = self
+                .execution
                 .events
                 .get(&now)
                 .and_then(|events| events.front())
@@ -1626,33 +1672,40 @@ where
                 {
                     let fault = *fault;
                     let check = self
+                        .execution
                         .control
-                        .invoke(&self.machines, |service, view| {
+                        .invoke(&self.execution.machines, |service, view| {
                             service.dispatch_check(view, fault)
                         })
                         .map_err(Error::Control)?;
                     if matches!(check, Some(Ok(()))) {
                         let was_held = self.playback.held.take().is_some();
                         if self.playback.before_next && !was_held {
-                            let record =
-                                self.control.pending_record(fault).map_err(Error::Control)?;
+                            let record = self
+                                .execution
+                                .control
+                                .pending_record(fault)
+                                .map_err(Error::Control)?;
                             self.playback
                                 .hold(record.clone(), self.position(), host_now);
                             return Ok(Some(record));
                         }
                         if hold_paused && !was_held && self.playback.holds_unarmed_effect() {
-                            let record =
-                                self.control.pending_record(fault).map_err(Error::Control)?;
+                            let record = self
+                                .execution
+                                .control
+                                .pending_record(fault)
+                                .map_err(Error::Control)?;
                             self.playback.held = Some(record.clone());
                             return Ok(Some(record));
                         }
                     }
                     checked = Some(check);
                 }
-                let events = self.events.get_mut(&now).expect("due events");
+                let events = self.execution.events.get_mut(&now).expect("due events");
                 events.pop_front();
                 if events.is_empty() {
-                    self.events.remove(&now);
+                    self.execution.events.remove(&now);
                 }
                 let mut service_effect = None;
                 let mut service_origin = None;
@@ -1668,9 +1721,9 @@ where
                                 id,
                                 payload,
                             } => {
-                                if self.machines[target.0].lifecycle.boot() != boot
+                                if self.execution.machines[target.0].lifecycle.boot() != boot
                                     || matches!(
-                                        self.machines[target.0].stopped,
+                                        self.execution.machines[target.0].stopped,
                                         StopReason::Exited { .. }
                                     )
                                 {
@@ -1692,26 +1745,30 @@ where
                                 observed,
                                 payload,
                             } => {
-                                let configured = self.control.controller.is_some();
+                                let configured = self.execution.control.controller.is_some();
                                 if configured
-                                    && (self.machines[source.0].lifecycle.boot() != boot
+                                    && (self.execution.machines[source.0].lifecycle.boot() != boot
                                         || matches!(
-                                            self.machines[source.0].stopped,
+                                            self.execution.machines[source.0].stopped,
                                             StopReason::Exited { .. }
                                         ))
                                 {
                                     continue;
                                 }
-                                let excluded =
-                                    self.control.controller.and_then(|setup| setup.controller);
+                                let excluded = self
+                                    .execution
+                                    .control
+                                    .controller
+                                    .and_then(|setup| setup.controller);
                                 if !configured {
-                                    self.control.record_call(source, id, boot);
+                                    self.execution.control.record_call(source, id, boot);
                                 }
                                 let plans = self
+                                    .execution
                                     .control
                                     .invoke_with_network(
-                                        &self.machines,
-                                        Some(&self.network),
+                                        &self.execution.machines,
+                                        Some(&self.execution.network),
                                         |service, view| {
                                             view.guest_controller = excluded;
                                             if configured {
@@ -1750,19 +1807,24 @@ where
                                 continue;
                             }
                             control::Event::TriggerBoundary => {
-                                self.events
+                                self.execution
+                                    .events
                                     .entry(now)
                                     .or_default()
                                     .push_back(Scheduled::Control(control::Event::TriggerFinalize));
                                 continue;
                             }
                             control::Event::TriggerFinalize => {
-                                self.control.service.expire_triggers(now.as_nanos());
+                                self.execution
+                                    .control
+                                    .service
+                                    .expire_triggers(now.as_nanos());
                                 self.sync_trigger_marker();
                                 continue;
                             }
                             control::Event::Plan(Plan::Wake { token, .. }) => {
                                 let plan = self
+                                    .execution
                                     .control
                                     .service
                                     .wake(token, now.as_nanos())
@@ -1772,8 +1834,11 @@ where
                             }
                             control::Event::Plan(Plan::Deadline { fault, .. }) => {
                                 // A Failed settlement publishes through service notices.
-                                if let Err(failure) =
-                                    self.control.service.deadline(fault, now.as_nanos())
+                                if let Err(failure) = self
+                                    .execution
+                                    .control
+                                    .service
+                                    .deadline(fault, now.as_nanos())
                                 {
                                     return Err(Error::Control(failure.message));
                                 }
@@ -1785,10 +1850,16 @@ where
                                 payload,
                                 ..
                             }) => {
-                                let target =
-                                    self.control.reply_target(&source).map_err(Error::Control)?;
+                                let target = self
+                                    .execution
+                                    .control
+                                    .reply_target(&source)
+                                    .map_err(Error::Control)?;
                                 reply_boot = Some(
-                                    self.control.take_call(target, id).map_err(Error::Control)?,
+                                    self.execution
+                                        .control
+                                        .take_call(target, id)
+                                        .map_err(Error::Control)?,
                                 );
                                 Scheduled::Input {
                                     id: target,
@@ -1811,10 +1882,11 @@ where
                                     None => continue,
                                     Some(Err(reason)) => {
                                         let collision =
-                                            self.control.service.handle_collision(fault);
+                                            self.execution.control.service.handle_collision(fault);
                                         let plans = self
+                                            .execution
                                             .control
-                                            .invoke_plans(&self.machines, |service, _| {
+                                            .invoke_plans(&self.execution.machines, |service, _| {
                                                 if collision {
                                                     service.failed_without_effect(
                                                         fault,
@@ -1858,7 +1930,7 @@ where
                                 if effect == Effect::Spawn {
                                     let created = self.spawn(&target, fault);
                                     if let Err(error) = created {
-                                        self.control.service.execution_failed(
+                                        self.execution.control.service.execution_failed(
                                             fault,
                                             None,
                                             now.as_nanos(),
@@ -1868,8 +1940,9 @@ where
                                         return Err(error);
                                     }
                                     let plans = self
+                                        .execution
                                         .control
-                                        .invoke_plans(&self.machines, |service, _| {
+                                        .invoke_plans(&self.execution.machines, |service, _| {
                                             service.applied(fault, now.as_nanos(), now.as_nanos())
                                         })
                                         .map_err(Error::Control)?;
@@ -1878,9 +1951,15 @@ where
                                     continue;
                                 }
                                 accepted_fault = Some(fault);
-                                let id =
-                                    self.control.reply_target(&target).map_err(Error::Control)?;
-                                debug_assert_eq!(self.machines[id.0].lifecycle.boot(), boot);
+                                let id = self
+                                    .execution
+                                    .control
+                                    .reply_target(&target)
+                                    .map_err(Error::Control)?;
+                                debug_assert_eq!(
+                                    self.execution.machines[id.0].lifecycle.boot(),
+                                    boot
+                                );
                                 if !effect.guest_command() {
                                     service_effect = Some(fault);
                                 }
@@ -2006,15 +2085,18 @@ where
                                 // (external) application requests.
                                 let origin = service_origin
                                     .unwrap_or(crate::oracle::observation::Origin::External);
-                                if !matches!(self.machines[id.0].stopped, StopReason::Exited { .. })
-                                {
-                                    self.control
+                                if !matches!(
+                                    self.execution.machines[id.0].stopped,
+                                    StopReason::Exited { .. }
+                                ) {
+                                    self.execution
+                                        .control
                                         .offered(id, command, action, origin)
                                         .map_err(Error::Control)?;
                                 }
                             }
                             use crate::oracle::observation::Transition;
-                            let boot = self.machines[id.0].lifecycle.boot();
+                            let boot = self.execution.machines[id.0].lifecycle.boot();
                             let new_boot = match input.payload {
                                 Request::Reboot => {
                                     Some(boot.checked_add(1).ok_or(Error::BootOverflow { id })?)
@@ -2030,11 +2112,11 @@ where
                             };
                             // The pause gate is cleared when this transition commits.
                             confirmed_transition = transition.map(|transition| (id, transition));
-                            let entry = &mut self.machines[id.0];
+                            let entry = &mut self.execution.machines[id.0];
                             match &input.payload {
                                 Request::Reboot | Request::Crash => {
-                                    if id == self.oracle {
-                                        self.oracle_stops.clear();
+                                    if id == self.execution.oracle {
+                                        self.execution.oracle_stops.clear();
                                     }
                                     entry.inbox.clear();
                                 }
@@ -2096,7 +2178,7 @@ where
                             | DriverEvent::SetExecution { machine: id, .. }
                             | DriverEvent::SetClockRate { machine: id, .. }) = event;
                             use crate::oracle::observation::Transition;
-                            let entry = &self.machines[id.0];
+                            let entry = &self.execution.machines[id.0];
                             let transition = match event {
                                 DriverEvent::SetExecution { config, .. } => {
                                     Some(Transition::Execution(config))
@@ -2134,7 +2216,7 @@ where
                             });
                             // Pause, resume and execution settings change only
                             // the lifecycle record, when the transition commits.
-                            let entry = &mut self.machines[id.0];
+                            let entry = &mut self.execution.machines[id.0];
                             match event {
                                 DriverEvent::SetExecution { .. } | DriverEvent::Pause(_) => {}
                                 DriverEvent::SetClockRate { rate, .. } => {
@@ -2168,7 +2250,7 @@ where
                 if let Err(error) = mechanical {
                     if let Some(fault) = accepted_fault {
                         // The Failed settlement publishes through service notices.
-                        let _ = self.control.service.execution_failed(
+                        let _ = self.execution.control.service.execution_failed(
                             fault,
                             None,
                             now.as_nanos(),
@@ -2183,35 +2265,37 @@ where
                 }
                 if let Some((id, transition)) = confirmed_transition {
                     let plans = self
+                        .execution
                         .control
-                        .admission(&mut self.machines, id, now, transition)
+                        .admission(&mut self.execution.machines, id, now, transition)
                         .map_err(Error::Control)?;
                     self.control_plans(plans)?;
                 }
                 if let Some(fault) = service_effect {
                     let plans = self
+                        .execution
                         .control
-                        .invoke_plans(&self.machines, |service, _| {
+                        .invoke_plans(&self.execution.machines, |service, _| {
                             service.applied(fault, now.as_nanos(), now.as_nanos())
                         })
                         .map_err(Error::Control)?;
                     self.control_plans(plans)?;
                 }
                 self.commit_boundary()?;
-                if self.finished.is_some() {
+                if self.execution.finished.is_some() {
                     return Ok(None);
                 }
             }
             if !self.deliver_frames(now)? {
                 break;
             }
-            if self.finished.is_some() {
+            if self.execution.finished.is_some() {
                 return Ok(None);
             }
         }
-        for index in 0..self.machines.len() {
-            let stopped = self.machines[index].stopped;
-            if self.machines[index].lifecycle.paused()
+        for index in 0..self.execution.machines.len() {
+            let stopped = self.execution.machines[index].stopped;
+            if self.execution.machines[index].lifecycle.paused()
                 || matches!(stopped, StopReason::Exited { .. })
             {
                 continue;
@@ -2237,7 +2321,7 @@ where
     /// whether any frame was due, so that newly generated timeline items at
     /// `now` are processed before timers.
     fn deliver_frames(&mut self, now: Timestamp) -> Result<bool, Error<M::Error>> {
-        let due = self.network.take_due(now.as_nanos());
+        let due = self.execution.network.take_due(now.as_nanos());
         if due.is_empty() {
             return Ok(false);
         }
@@ -2247,9 +2331,9 @@ where
         let mut offered = Vec::new();
         let position = self.position();
         for delivery in due {
-            let entry = &mut self.machines[delivery.to.0];
+            let entry = &mut self.execution.machines[delivery.to.0];
             if matches!(entry.stopped, StopReason::Exited { .. }) {
-                self.network.delivery_result(
+                self.execution.network.delivery_result(
                     position,
                     delivery.from,
                     delivery.to,
@@ -2282,7 +2366,8 @@ where
             return Err(error);
         }
         for (from, to, sent, bytes) in offered {
-            self.network
+            self.execution
+                .network
                 .delivery_result(position, from, to, sent, bytes, false);
         }
         self.commit_boundary()?;
@@ -2305,7 +2390,7 @@ where
         let ids = |names: &[String]| {
             names
                 .iter()
-                .map(|name| self.control.reply_target(name))
+                .map(|name| self.execution.control.reply_target(name))
                 .collect::<Result<Vec<_>, _>>()
         };
         let (left, right) = (
@@ -2313,21 +2398,25 @@ where
             ids(right).map_err(Error::Control)?,
         );
         let (changed, network) = match effect {
-            Effect::Partition => (self.network.partition(handle, &left, &right), None),
-            Effect::Unpartition => (self.network.heal(&handle), None),
+            Effect::Partition => (
+                self.execution.network.partition(handle, &left, &right),
+                None,
+            ),
+            Effect::Unpartition => (self.execution.network.heal(&handle), None),
             Effect::Shape(policy, faults) => (
-                self.network
+                self.execution
+                    .network
                     .shape(fault, handle, &left, &right, *policy, *faults),
                 None,
             ),
             Effect::Unshape => {
-                let stats = self.network.unshape(&handle);
+                let stats = self.execution.network.unshape(&handle);
                 (stats.is_some(), stats)
             }
             _ => (false, None),
         };
         if !changed {
-            let _ = self.control.service.execution_failed(
+            let _ = self.execution.control.service.execution_failed(
                 fault,
                 None,
                 now,
@@ -2337,8 +2426,9 @@ where
             return Err(Error::Control("network link effect failed".into()));
         }
         let plans = self
+            .execution
             .control
-            .invoke_plans(&self.machines, |service, _| {
+            .invoke_plans(&self.execution.machines, |service, _| {
                 service.applied_network(fault, now, network)
             })
             .map_err(Error::Control)?;
@@ -2357,8 +2447,13 @@ where
         let handle =
             handle.ok_or_else(|| Error::Control("connection effect lacks handle".into()))?;
         if *effect == Effect::Select {
-            if let Err(message) = self.network.select(fault, handle, connection.clone()) {
+            if let Err(message) = self
+                .execution
+                .network
+                .select(fault, handle, connection.clone())
+            {
                 let plans = self
+                    .execution
                     .control
                     .service
                     .failed_without_effect(fault, now, message)
@@ -2366,7 +2461,7 @@ where
                 return self.control_plans(plans);
             }
         } else if *effect == Effect::Unselect {
-            if !self.network.unselect(&handle) {
+            if !self.execution.network.unselect(&handle) {
                 return Err(Error::Control("selection disagrees with its handle".into()));
             }
         } else {
@@ -2375,6 +2470,7 @@ where
             ));
         }
         let plans = self
+            .execution
             .control
             .service
             .applied_network(fault, now, None)
@@ -2396,10 +2492,10 @@ where
         // Settlements confirmed earlier update the live-key handles first.
         self.stage_notices();
         match Self::input_admission_with_handle(
-            &mut self.control,
-            &self.machines,
-            Some(&self.network),
-            &self.inputs,
+            &mut self.execution.control,
+            &self.execution.machines,
+            Some(&self.execution.network),
+            &self.execution.inputs,
             &key,
             &action,
             handle.as_ref(),
@@ -2407,7 +2503,7 @@ where
         )? {
             Ok((_, plans)) => self.control_plans(plans),
             Err(rejection) => {
-                self.inputs.remove(&key);
+                self.execution.inputs.remove(&key);
                 self.stage(now, EventKind::InputRejected { key, rejection });
                 Ok(())
             }
@@ -2416,31 +2512,42 @@ where
 
     fn spawn(&mut self, name: &str, fault: u32) -> Result<(), Error<M::Error>> {
         let index = self
+            .execution
             .definitions
             .iter()
             .position(|d| d.name == name)
             .ok_or_else(|| Error::Control("spawn lacks declared definition".into()))?;
-        let id = self.control.spawn_target(name).map_err(Error::Control)?;
-        if id.0 != self.machines.len() {
+        let id = self
+            .execution
+            .control
+            .spawn_target(name)
+            .map_err(Error::Control)?;
+        if id.0 != self.execution.machines.len() {
             return Err(Error::Control(
                 "spawn identity out of insertion order".into(),
             ));
         }
-        let machine = (self.factory)(&self.definitions[index]).map_err(Error::Construction)?;
+        let machine =
+            (self.factory)(&self.execution.definitions[index]).map_err(Error::Construction)?;
         let mut bytes = [0; 8];
-        self.rng.fill_bytes(&mut bytes);
+        self.execution.rng.fill_bytes(&mut bytes);
         let now = self.now();
         let seed = u64::from_le_bytes(bytes);
-        self.machines.push(Entry::new(id, machine, seed, now));
-        let definition = &self.definitions[index];
-        self.network.admit(
+        self.execution
+            .machines
+            .push(Entry::new(id, machine, seed, now));
+        let definition = &self.execution.definitions[index];
+        self.execution.network.admit(
             id,
             &definition.name,
             seed,
             definition.network.as_ref().map(|i| i.mac()),
         );
-        self.control.spawned(name, seed).map_err(Error::Control)?;
-        self.definitions.remove(index);
+        self.execution
+            .control
+            .spawned(name, seed)
+            .map_err(Error::Control)?;
+        self.execution.definitions.remove(index);
         self.stage(
             self.now(),
             EventKind::MachineAdded {
@@ -2452,7 +2559,8 @@ where
     }
 
     fn next(&self) -> Option<(MachineId, Timestamp)> {
-        self.machines
+        self.execution
+            .machines
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| entry.next().map(|at| (MachineId(index), at)))
@@ -2460,7 +2568,9 @@ where
     }
 
     fn is_quiescent(&self) -> bool {
-        self.next().is_none() && self.events.is_empty() && self.network.is_idle()
+        self.next().is_none()
+            && self.execution.events.is_empty()
+            && self.execution.network.is_idle()
     }
 
     /// The latest round boundary at which no frame sent in the round can be
@@ -2470,25 +2580,27 @@ where
     /// none. An unrepresentable bound imposes none: no such arrival exists.
     fn causal_bound(&self) -> Option<Timestamp> {
         let earliest = self
+            .execution
             .machines
             .iter()
             .enumerate()
-            .filter(|&(index, _)| self.network.attached(MachineId(index)))
+            .filter(|&(index, _)| self.execution.network.attached(MachineId(index)))
             .filter_map(|(_, entry)| entry.next())
             .min()?;
         debug_assert!(earliest >= self.now(), "eligible producer behind now");
         earliest
             .as_nanos()
-            .checked_add(self.network.latency_ns())
+            .checked_add(self.execution.network.latency_ns())
             .map(Timestamp::from_nanos)
     }
 
     fn controller_bound(&self) -> Option<Timestamp> {
-        let setup = self.control.controller?;
+        let setup = self.execution.control.controller?;
         setup.controller?;
         // Target acknowledgements carry an observed effect time too. Bound all
         // runnable producers so their effect+latency cannot precede commit.
-        self.machines
+        self.execution
+            .machines
             .iter()
             .filter_map(Entry::next)
             .min()?
@@ -2498,7 +2610,7 @@ where
     }
 
     fn outcome(&self) -> StepOutcome {
-        if let Some((at, reason)) = self.finished {
+        if let Some((at, reason)) = self.execution.finished {
             return StepOutcome::Finished { at, reason };
         }
         let at = self.now();
@@ -2511,13 +2623,13 @@ where
 
     /// Unknown partial effects leave no trustworthy committed lifecycle.
     fn uncertain_failure(&mut self) {
-        for entry in &mut self.machines {
+        for entry in &mut self.execution.machines {
             entry.lifecycle.uncertain_failure();
         }
     }
 
     fn check_valid(&self) -> Result<(), Error<M::Error>> {
-        if self.failed {
+        if self.execution.failed {
             Err(Error::Failed)
         } else {
             Ok(())
@@ -2525,7 +2637,10 @@ where
     }
 
     fn entry(&self, id: MachineId) -> Result<&Entry<M>, Error<M::Error>> {
-        self.machines.get(id.0).ok_or(Error::UnknownMachine(id))
+        self.execution
+            .machines
+            .get(id.0)
+            .ok_or(Error::UnknownMachine(id))
     }
 }
 
@@ -2614,7 +2729,7 @@ where
     }
 
     fn check_running(&self) -> Result<(), Error<M::Error>> {
-        if self.driver.finished.is_some() {
+        if self.driver.execution.finished.is_some() {
             Err(Error::Completed)
         } else if self.driver.playback.stopped {
             Err(Error::Stopped)
@@ -2635,6 +2750,7 @@ where
     /// Observe machines in their stable insertion order.
     pub fn machines(&self) -> impl ExactSizeIterator<Item = (MachineId, &M)> {
         self.driver
+            .execution
             .machines
             .iter()
             .enumerate()
@@ -2669,6 +2785,7 @@ where
     ) -> Result<Option<seedbox_machine::machine::StateEvidence>, Error<M::Error>> {
         self.driver.check_valid()?;
         self.driver
+            .execution
             .machines
             .get_mut(id.0)
             .ok_or(Error::UnknownMachine(id))?
@@ -2712,21 +2829,22 @@ where
         machine: impl FnOnce() -> Result<M, M::Error>,
     ) -> Result<MachineId, Error<M::Error>> {
         self.check_mutation()?;
-        if self.driver.control.spawn_pending() {
+        if self.driver.execution.control.spawn_pending() {
             return Err(Error::SpawnPending);
         }
         let machine = machine().map_err(Error::Construction)?;
         let mut bytes = [0; 8];
-        self.driver.rng.fill_bytes(&mut bytes);
-        let id = MachineId(self.driver.machines.len());
+        self.driver.execution.rng.fill_bytes(&mut bytes);
+        let id = MachineId(self.driver.execution.machines.len());
         let now = self.driver.now();
         let seed = u64::from_le_bytes(bytes);
         self.driver
+            .execution
             .machines
             .push(Entry::new(id, machine, seed, now));
         // Host additions have no definition and therefore no interface.
-        self.driver.network.admit(id, "", seed, None);
-        self.driver.control.add_unnamed(seed);
+        self.driver.execution.network.admit(id, "", seed, None);
+        self.driver.execution.control.add_unnamed(seed);
         self.driver.stage(
             self.driver.now(),
             EventKind::MachineAdded {
@@ -2758,11 +2876,11 @@ where
     /// snapshot does not supply it: `stopped` exposes rounded simulation-time
     /// conversions, not the exact private machine-time position and timer.
     pub fn snapshot(&mut self, id: MachineId) -> Result<M::Snapshot, Error<M::Error>> {
-        if self.driver.finished.is_none() {
+        if self.driver.execution.finished.is_none() {
             self.check_mutation()?;
         }
         self.driver.entry(id)?;
-        self.driver.machines[id.0]
+        self.driver.execution.machines[id.0]
             .machine
             .as_mut()
             .expect("stopped machine")
@@ -2788,6 +2906,7 @@ where
         }
         self.driver.entry(id)?;
         self.driver
+            .execution
             .events
             .entry(at)
             .or_default()
@@ -2909,8 +3028,12 @@ where
         driver.check_valid()?;
         driver.check_schedule_shape(at, &key, &action)?;
         Driver::<M>::check_named_action(&action, handle.as_ref())?;
-        driver.inputs.insert(key.clone(), LiveInput::Pending);
         driver
+            .execution
+            .inputs
+            .insert(key.clone(), LiveInput::Pending);
+        driver
+            .execution
             .events
             .entry(at)
             .or_default()

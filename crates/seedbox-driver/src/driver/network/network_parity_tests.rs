@@ -40,10 +40,10 @@ fn schedule(d: &mut Driver<Mock>, k: &str, a: Action, n: Option<&str>) {
     d.with_barrier(|b| b.apply_due_now()).unwrap();
 }
 fn handles(d: &Driver<Mock>) -> Vec<String> {
-    let mut control = d.control.clone();
+    let mut control = d.execution.control.clone();
     let now = d.now().as_nanos();
     let plans = control
-        .invoke_with_network(&d.machines, Some(&d.network), |s, v| {
+        .invoke_with_network(&d.execution.machines, Some(&d.execution.network), |s, v| {
             s.admit(
                 v,
                 control::Control::source(MachineId(0)),
@@ -73,7 +73,7 @@ fn handles(d: &Driver<Mock>) -> Vec<String> {
         .collect()
 }
 fn replies(d: &Driver<Mock>) -> BTreeMap<u64, Value> {
-    d.machines[0]
+    d.execution.machines[0]
         .machine
         .as_ref()
         .unwrap()
@@ -111,20 +111,23 @@ fn settled(
 fn staged_tx(d: &mut Driver<Mock>, from: usize, bytes: Vec<u8>) {
     let response = MachineResponse {
         machine: MachineId(from),
-        boot: d.machines[from].lifecycle.boot(),
+        boot: d.execution.machines[from].lifecycle.boot(),
         at: d.now(),
         payload: tx(bytes),
     };
-    d.machines[from].staged.push(response);
+    d.execution.machines[from].staged.push(response);
     d.commit_boundary().unwrap();
 }
 fn direct_admit(d: &mut Driver<Mock>, k: &str, a: Action, n: Option<&str>) {
-    d.inputs.insert(key(k), LiveInput::Pending);
+    d.execution.inputs.insert(key(k), LiveInput::Pending);
     d.admit_input(key(k), a, n.map(name), d.now()).unwrap();
     d.commit_boundary().unwrap();
 }
 fn flow(d: &Driver<Mock>) -> Connection {
-    d.network.connections("fixture-1", "fixture-2", 0).remove(0)
+    d.execution
+        .network
+        .connections("fixture-1", "fixture-2", 0)
+        .remove(0)
 }
 #[test]
 fn named_host_guest_cross_heals_inspect_numbering_and_typed_counts() {
@@ -383,8 +386,9 @@ fn host_selection_guest_heal_fin_close_reincarnation_and_stale_pn_consumption() 
     );
     let mut events = d.drain_events();
     events.extend(advance(&mut d, 15));
-    assert!(!d.network.selection_available(&old));
+    assert!(!d.execution.network.selection_available(&old));
     assert!(d
+        .execution
         .network
         .connections("fixture-1", "fixture-2", 0)
         .is_empty());
@@ -533,8 +537,8 @@ fn two_pending_aliases_roundtrip_then_one_fails_without_poison_or_wrong_key_reti
         assert_eq!(settled(&events, "a").1, SettlementStatus::Applied);
         let loser = settled(&events, "b");
         assert_eq!(loser.1, SettlementStatus::Failed);
-        assert!(!d.inputs.contains_key(&key("b")));
-        assert!(d.inputs.contains_key(&key("a")));
+        assert!(!d.execution.inputs.contains_key(&key("b")));
+        assert!(d.execution.inputs.contains_key(&key("a")));
         assert_eq!(handles(&d), ["same"]);
         schedule(
             &mut d,
@@ -543,7 +547,7 @@ fn two_pending_aliases_roundtrip_then_one_fails_without_poison_or_wrong_key_reti
             None,
         );
         assert!(handles(&d).is_empty());
-        assert!(!d.inputs.contains_key(&key("a")));
+        assert!(!d.execution.inputs.contains_key(&key("a")));
         schedule(&mut d, "next", partition(), None);
         assert_eq!(
             settled(&d.drain_events(), "next")
@@ -594,9 +598,19 @@ fn own_input_heal_refuses_pending_neighbor_even_with_active_same_text() {
     direct_admit(&mut d, "b", partition(), Some("same"));
     let now = d.now();
     // Isolate the transient between the two same-time effects, not a public API.
-    let pending = d.events.get_mut(&now).unwrap().pop_back().unwrap();
+    let pending = d
+        .execution
+        .events
+        .get_mut(&now)
+        .unwrap()
+        .pop_back()
+        .unwrap();
     d.with_barrier(|b| b.apply_due_now()).unwrap();
-    d.events.entry(now).or_default().push_back(pending);
+    d.execution
+        .events
+        .entry(now)
+        .or_default()
+        .push_back(pending);
     assert!(matches!(
             d.with_barrier(
                 |b| b.prepare_input(key("wrong"), Action::Heal(HealTarget::Input(key("b"))))
@@ -606,12 +620,12 @@ fn own_input_heal_refuses_pending_neighbor_even_with_active_same_text() {
     // Public prepare intentionally refuses transient due work. Exercise ordinary
     // admission at that FIFO state on a clone, rather than weakening its guard.
     let project = |action| {
-        let mut control = d.control.clone();
+        let mut control = d.execution.control.clone();
         Driver::<Mock>::input_admission_with_handle(
             &mut control,
-            &d.machines,
-            Some(&d.network),
-            &d.inputs,
+            &d.execution.machines,
+            Some(&d.execution.network),
+            &d.execution.inputs,
             &key("projection"),
             &action,
             None,

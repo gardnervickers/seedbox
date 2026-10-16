@@ -20,8 +20,8 @@ fn exercise_streaming(mut d: Driver<Mock>) {
     let identity = d.checkpoint_map(Ok::<_, Io>).unwrap();
     assert_eq!(artifact(identity), expected_artifact);
     let drops = Arc::new(AtomicUsize::new(0));
-    let count = d.machines.len();
-    for entry in &mut d.machines {
+    let count = d.execution.machines.len();
+    for entry in &mut d.execution.machines {
         entry.machine.as_mut().unwrap().saved_drops = Some(drops.clone());
     }
     let mut store = Store::new();
@@ -116,7 +116,13 @@ fn streamed_capture_preserves_held_fault_and_pending_quantum_without_resuming() 
         artifact(d.checkpoint().unwrap())
     );
     assert_eq!(status(&mut d), before);
-    assert_eq!(d.machines[1].lifecycle.execution().factor_permille(), 1000);
+    assert_eq!(
+        d.execution.machines[1]
+            .lifecycle
+            .execution()
+            .factor_permille(),
+        1000
+    );
     d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
         .unwrap();
     let expected = advance(&mut d, 30);
@@ -134,7 +140,13 @@ fn streamed_capture_preserves_held_fault_and_pending_quantum_without_resuming() 
             .unwrap();
         assert_eq!(advance(&mut b, 30), expected);
         assert_eq!(states(&b), expected_states);
-        assert_eq!(b.machines[1].lifecycle.execution().factor_permille(), 2000);
+        assert_eq!(
+            b.execution.machines[1]
+                .lifecycle
+                .execution()
+                .factor_permille(),
+            2000
+        );
     }
     let mut d = build(vec![spec(0, true, vec![])], vec![], true);
     d.step(at(3)).unwrap();
@@ -289,11 +301,11 @@ fn immediate_mapper_can_release_native_snapshot_before_next_capture_peak_one() {
 
 /// Inspect cloned RNGs only, never drawing from the source to observe it.
 fn cursors(d: &Driver<Tracked>) -> Vec<Vec<u8>> {
-    let SimulationRng::Seeded(root) = &d.rng else {
+    let SimulationRng::Seeded(root) = &d.execution.rng else {
         panic!("unowned RNG")
     };
     std::iter::once(root)
-        .chain(d.machines.iter().map(|m| m.rng.as_ref().unwrap()))
+        .chain(d.execution.machines.iter().map(|m| m.rng.as_ref().unwrap()))
         .map(|rng| {
             let mut copy = rng.clone();
             let mut bytes = vec![0; 137];
@@ -303,7 +315,8 @@ fn cursors(d: &Driver<Tracked>) -> Vec<Vec<u8>> {
         .collect()
 }
 fn tracked_states(d: &Driver<Tracked>) -> Vec<State> {
-    d.machines
+    d.execution
+        .machines
         .iter()
         .map(|e| e.machine.as_ref().unwrap().inner.state.clone())
         .collect()
@@ -331,7 +344,7 @@ fn nth_capture_or_mapper_failure_drops_partial_results_without_source_changes_or
         let rng = cursors(&d);
         let runs = audit.runs.load(Ordering::SeqCst);
         if capture_failure {
-            d.machines[2]
+            d.execution.machines[2]
                 .machine
                 .as_mut()
                 .unwrap()
@@ -405,8 +418,8 @@ fn nth_capture_or_mapper_failure_drops_partial_results_without_source_changes_or
         assert_eq!(audit.contexts.load(Ordering::SeqCst), 1);
         assert_eq!(d.position(), position);
         assert_eq!(cursors(&d), rng);
-        assert!(!d.failed);
-        d.machines[2]
+        assert!(!d.execution.failed);
+        d.execution.machines[2]
             .machine
             .as_mut()
             .unwrap()
@@ -429,13 +442,19 @@ fn every_boundary_validation_precedes_first_capture_and_mapping() {
         let (mut d, audit) = tracked(3);
         match invalid {
             0 => {
-                d.machines[0].machine.as_mut().unwrap().inner.state.fail_run = true;
+                d.execution.machines[0]
+                    .machine
+                    .as_mut()
+                    .unwrap()
+                    .inner
+                    .state
+                    .fail_run = true;
                 assert!(d.step(at(1)).is_err());
             }
-            1 => d.rng = SimulationRng::External(Box::new(SeededRng::new(51))),
-            2 => d.machines[2].rng = None,
-            3 => d.quantum_ns = 0,
-            4 => d.machines[2].reached = at(1),
+            1 => d.execution.rng = SimulationRng::External(Box::new(SeededRng::new(51))),
+            2 => d.execution.machines[2].rng = None,
+            3 => d.execution.quantum_ns = 0,
+            4 => d.execution.machines[2].reached = at(1),
             5 => d.observations.next_sequence = 0,
             _ => unreachable!(),
         }

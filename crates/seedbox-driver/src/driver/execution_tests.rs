@@ -95,7 +95,11 @@ fn key(text: &str) -> InputKey {
     InputKey::new(text).unwrap()
 }
 fn calls(driver: &Driver<RecordingMachine>, id: MachineId) -> &[Call] {
-    &driver.machines[id.0].machine.as_ref().unwrap().calls
+    &driver.execution.machines[id.0]
+        .machine
+        .as_ref()
+        .unwrap()
+        .calls
 }
 fn rejected(events: &[Event]) -> Vec<(InputKey, RejectionReason)> {
     events
@@ -122,7 +126,7 @@ fn throttle_and_heal_apply_in_fifo_order_without_a_run_of_their_own() {
     driver.schedule(at(0), key("early"), heal(&slow)).unwrap();
     assert!(calls(&driver, id).is_empty());
     assert!(matches!(
-        driver.events[&at(0)][0],
+        driver.execution.events[&at(0)][0],
         Scheduled::Control(control::Event::Input {
             action: Action::Throttle { .. },
             ..
@@ -140,7 +144,10 @@ fn throttle_and_heal_apply_in_fifo_order_without_a_run_of_their_own() {
             lifecycle: vec!["shutdown"]
         }]
     );
-    assert_eq!(driver.machines[0].lifecycle.execution(), config(2000));
+    assert_eq!(
+        driver.execution.machines[0].lifecycle.execution(),
+        config(2000)
+    );
     assert_eq!(
         rejected(&driver.drain_events()),
         [(key("early"), RejectionReason::InvalidState)]
@@ -153,7 +160,7 @@ fn throttle_and_heal_apply_in_fifo_order_without_a_run_of_their_own() {
     driver.schedule(at(0), key("heal"), heal(&slow)).unwrap();
     driver.step(at(0)).unwrap();
     assert_eq!(
-        driver.machines[0].lifecycle.execution(),
+        driver.execution.machines[0].lifecycle.execution(),
         ExecutionConfig::default()
     );
     assert_eq!(calls(&driver, id).len(), 1);
@@ -169,7 +176,7 @@ fn paused_setting_does_not_adopt_machine_time_or_shift_its_timer() {
         reached: at(0),
         deadline: Some(at(20)),
     };
-    driver.machines[0].stopped = blocked;
+    driver.execution.machines[0].stopped = blocked;
     driver
         .schedule(at(0), auto_key(), Action::Pause(Target::Machine(id)))
         .unwrap();
@@ -178,11 +185,14 @@ fn paused_setting_does_not_adopt_machine_time_or_shift_its_timer() {
         .unwrap();
     driver.step(at(5)).unwrap();
     assert!(calls(&driver, id).is_empty());
-    assert!(driver.machines[0].lifecycle.paused());
-    assert_eq!(driver.machines[0].stopped, blocked);
-    assert_eq!(driver.machines[0].reached, at(0));
+    assert!(driver.execution.machines[0].lifecycle.paused());
+    assert_eq!(driver.execution.machines[0].stopped, blocked);
+    assert_eq!(driver.execution.machines[0].reached, at(0));
     assert_eq!(driver.now(), at(5));
-    assert_eq!(driver.machines[0].lifecycle.execution(), config(2000));
+    assert_eq!(
+        driver.execution.machines[0].lifecycle.execution(),
+        config(2000)
+    );
     driver
         .schedule(at(5), auto_key(), Action::Resume(Target::Machine(id)))
         .unwrap();
@@ -214,18 +224,21 @@ fn exited_settings_and_crash_reboot_retain_the_configured_value() {
     let id = MachineId(1);
     driver.step(at(1)).unwrap();
     assert!(matches!(
-        driver.machines[1].stopped,
+        driver.execution.machines[1].stopped,
         StopReason::Exited { .. }
     ));
-    let exited = driver.machines[1].stopped;
+    let exited = driver.execution.machines[1].stopped;
     let slow = key("slow");
     driver
         .schedule(at(1), slow.clone(), setting(id, 2000))
         .unwrap();
     driver.step(at(1)).unwrap();
     assert_eq!(calls(&driver, id).len(), 1);
-    assert_eq!(driver.machines[1].stopped, exited);
-    assert_eq!(driver.machines[1].lifecycle.execution(), config(2000));
+    assert_eq!(driver.execution.machines[1].stopped, exited);
+    assert_eq!(
+        driver.execution.machines[1].lifecycle.execution(),
+        config(2000)
+    );
     for (time, action) in [
         // A confirmed physical crash makes the boot down: Pause and Crash are
         // refused and Reboot is admitted directly. The new boot is live.
@@ -261,9 +274,9 @@ fn exited_settings_and_crash_reboot_retain_the_configured_value() {
             .collect::<Vec<_>>(),
         [RejectionReason::InvalidState, RejectionReason::InvalidState]
     );
-    assert!(!driver.machines[1].lifecycle.paused());
+    assert!(!driver.execution.machines[1].lifecycle.paused());
     assert_eq!(
-        driver.machines[1].lifecycle.execution(),
+        driver.execution.machines[1].lifecycle.execution(),
         ExecutionConfig::default()
     );
 }
@@ -321,9 +334,9 @@ fn invalid_scheduling_and_failed_steps_do_not_apply_later_settings() {
         driver.schedule(at(3), auto_key(), setting(MachineId(9), 2000)),
         Err(Error::UnknownMachine(_))
     ));
-    assert!(driver.events.is_empty());
+    assert!(driver.execution.events.is_empty());
     assert_eq!(
-        driver.machines[0].lifecycle.execution(),
+        driver.execution.machines[0].lifecycle.execution(),
         ExecutionConfig::default()
     );
     let slow = key("slow");
@@ -336,17 +349,33 @@ fn invalid_scheduling_and_failed_steps_do_not_apply_later_settings() {
         .unwrap();
     driver.schedule(at(3), auto_key(), heal(&slow)).unwrap();
     assert!(driver.step(at(3)).is_err());
-    assert_eq!(driver.machines[0].lifecycle.execution(), config(2000));
-    let queued = driver.events.values().map(VecDeque::len).sum::<usize>();
+    assert_eq!(
+        driver.execution.machines[0].lifecycle.execution(),
+        config(2000)
+    );
+    let queued = driver
+        .execution
+        .events
+        .values()
+        .map(VecDeque::len)
+        .sum::<usize>();
     assert!(matches!(
         driver.schedule(at(3), auto_key(), setting(id, 4000)),
         Err(Error::Failed)
     ));
     assert_eq!(
-        driver.events.values().map(VecDeque::len).sum::<usize>(),
+        driver
+            .execution
+            .events
+            .values()
+            .map(VecDeque::len)
+            .sum::<usize>(),
         queued
     );
-    assert_eq!(driver.machines[0].lifecycle.execution(), config(2000));
+    assert_eq!(
+        driver.execution.machines[0].lifecycle.execution(),
+        config(2000)
+    );
 }
 
 #[test]
@@ -361,16 +390,19 @@ fn global_playback_pause_withholds_setting_admission() {
         .unwrap();
     driver.step(at(0)).unwrap();
     assert_eq!(
-        driver.machines[0].lifecycle.execution(),
+        driver.execution.machines[0].lifecycle.execution(),
         ExecutionConfig::default()
     );
     assert!(calls(&driver, id).is_empty());
-    assert_eq!(driver.events[&at(0)].len(), 1);
+    assert_eq!(driver.execution.events[&at(0)].len(), 1);
     driver
         .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Unlimited))
         .unwrap();
     driver.step(at(0)).unwrap();
-    assert_eq!(driver.machines[0].lifecycle.execution(), config(2000));
+    assert_eq!(
+        driver.execution.machines[0].lifecycle.execution(),
+        config(2000)
+    );
     assert!(calls(&driver, id).is_empty());
 }
 
@@ -389,7 +421,11 @@ fn self_crash_while_paused_keeps_the_pause_gate_but_permits_reboot() {
     }
     assert!(driver.with_barrier(|b| b.paused(id)).unwrap());
     // The guest resets itself during the zero-budget run of a due Shutdown.
-    driver.machines[1].machine.as_mut().unwrap().exited = true;
+    driver.execution.machines[1]
+        .machine
+        .as_mut()
+        .unwrap()
+        .exited = true;
     driver
         .schedule(
             at(2),
@@ -434,12 +470,16 @@ fn self_crash_while_paused_keeps_the_pause_gate_but_permits_reboot() {
             ("resume".to_owned(), RejectionReason::InvalidState),
         ]
     );
-    driver.machines[1].machine.as_mut().unwrap().exited = false;
+    driver.execution.machines[1]
+        .machine
+        .as_mut()
+        .unwrap()
+        .exited = false;
     while driver.now() < at(8) {
         driver.step(at(8)).unwrap();
     }
     assert!(!driver.with_barrier(|b| b.paused(id)).unwrap());
-    assert_eq!(driver.machines[1].lifecycle.boot(), 1);
+    assert_eq!(driver.execution.machines[1].lifecycle.boot(), 1);
     let calls = calls(&driver, id);
     let reboot = calls
         .iter()

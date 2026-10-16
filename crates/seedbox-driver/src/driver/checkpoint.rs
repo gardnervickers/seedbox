@@ -303,17 +303,17 @@ where
     ) -> Result<Checkpoint<S>, CheckpointMapError<M::Error, E>> {
         let capture = CheckpointMapError::Capture;
         self.check_valid().map_err(capture)?;
-        let SimulationRng::Seeded(rng) = &self.rng else {
+        let SimulationRng::Seeded(rng) = &self.execution.rng else {
             return Err(capture(Error::CheckpointUnsupported));
         };
         validate(
             self.now(),
-            self.quantum_ns,
-            self.quantum_end,
-            self.oracle,
-            &self.machines,
-            &self.control,
-            &self.network,
+            self.execution.quantum_ns,
+            self.execution.quantum_end,
+            self.execution.oracle,
+            &self.execution.machines,
+            &self.execution.control,
+            &self.execution.network,
         )
         .map_err(|error| capture(Error::InvalidCheckpoint(error)))?;
         validate_publications(
@@ -324,6 +324,7 @@ where
         .map_err(|error| capture(Error::InvalidCheckpoint(error)))?;
         let rng = rng.clone();
         let machines = self
+            .execution
             .machines
             .iter_mut()
             .enumerate()
@@ -347,22 +348,22 @@ where
             now: self.now(),
             rng,
             machines,
-            quantum_ns: self.quantum_ns,
-            quantum_end: self.quantum_end,
-            events: self.events.clone(),
+            quantum_ns: self.execution.quantum_ns,
+            quantum_end: self.execution.quantum_end,
+            events: self.execution.events.clone(),
             observations: self.observations.clone(),
-            boundary_index: self.boundary_index,
-            completed_quanta: self.completed_quanta,
-            quantum_committed: self.quantum_committed,
+            boundary_index: self.execution.boundary_index,
+            completed_quanta: self.execution.completed_quanta,
+            quantum_committed: self.execution.quantum_committed,
             playback: self.playback.checkpoint(),
-            oracle: self.oracle,
-            finished: self.finished,
-            oracle_stops: self.oracle_stops.clone(),
-            control: self.control.clone(),
-            inputs: self.inputs.clone(),
-            trigger_marker: self.trigger_marker,
-            definitions: self.definitions.clone(),
-            network: self.network.clone(),
+            oracle: self.execution.oracle,
+            finished: self.execution.finished,
+            oracle_stops: self.execution.oracle_stops.clone(),
+            control: self.execution.control.clone(),
+            inputs: self.execution.inputs.clone(),
+            trigger_marker: self.execution.trigger_marker,
+            definitions: self.execution.definitions.clone(),
+            network: self.execution.network.clone(),
         })
     }
 
@@ -434,28 +435,30 @@ where
             })
             .collect::<Result<_, Error<M::Error>>>()?;
         Ok(Self {
-            clock: Arc::new(SimulationClock::new(checkpoint.now.as_nanos())),
-            rng: SimulationRng::Seeded(checkpoint.rng.clone()),
+            execution: ExecutionState {
+                clock: Arc::new(SimulationClock::new(checkpoint.now.as_nanos())),
+                rng: SimulationRng::Seeded(checkpoint.rng.clone()),
+                quantum_ns: checkpoint.quantum_ns,
+                quantum_end: checkpoint.quantum_end,
+                machines,
+                events: checkpoint.events.clone(),
+                boundary_index: checkpoint.boundary_index,
+                completed_quanta: checkpoint.completed_quanta,
+                quantum_committed: checkpoint.quantum_committed,
+                failed: false,
+                oracle: checkpoint.oracle,
+                finished: checkpoint.finished,
+                oracle_stops: checkpoint.oracle_stops.clone(),
+                control: checkpoint.control.clone(),
+                inputs: checkpoint.inputs.clone(),
+                trigger_marker: checkpoint.trigger_marker,
+                definitions: checkpoint.definitions.clone(),
+                network: checkpoint.network.clone(),
+            },
             workers,
-            quantum_ns: checkpoint.quantum_ns,
-            quantum_end: checkpoint.quantum_end,
-            machines,
-            events: checkpoint.events.clone(),
             observations: checkpoint.observations.clone(),
-            boundary_index: checkpoint.boundary_index,
-            completed_quanta: checkpoint.completed_quanta,
-            quantum_committed: checkpoint.quantum_committed,
             playback: checkpoint.playback.checkpoint(),
-            failed: false,
-            oracle: checkpoint.oracle,
-            finished: checkpoint.finished,
-            oracle_stops: checkpoint.oracle_stops.clone(),
-            control: checkpoint.control.clone(),
-            inputs: checkpoint.inputs.clone(),
-            trigger_marker: checkpoint.trigger_marker,
-            definitions: checkpoint.definitions.clone(),
             factory: Box::new(factory),
-            network: checkpoint.network.clone(),
         })
     }
 }
