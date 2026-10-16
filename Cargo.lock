@@ -1876,6 +1876,7 @@ dependencies = [
  "seedbox-engine-protocol",
  "seedbox-machine-pv",
  "seedbox-server",
+ "seedbox-test-time",
  "seedbox-vmm",
  "serde_json",
  "tar",

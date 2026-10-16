@@ -21,6 +21,7 @@ seedbox-vmm = { path = "../seedbox-vmm" }
 seedbox-arm64 = { path = "../seedbox-arm64" }
 
 [dev-dependencies]
+seedbox-test-time.workspace = true
 seedbox-server.workspace = true
 seedbox-api.workspace = true
 seedbox-client.workspace = true

@@ -1,11 +1,12 @@
 //! Real CLI → ordinary OCI preparation → retained Driver → native PV acceptance.
 //! Never substitutes a prepared manifest, executor, or execution report.
 use seedbox_application::process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE};
+use seedbox_test_time::HangGuard;
 use std::{
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 struct Service {
@@ -45,16 +46,19 @@ impl Service {
             .spawn()
             .unwrap();
         this.child = Some(child);
-        while std::os::unix::net::UnixStream::connect(this.path().join("state/server.sock"))
-            .is_err()
-        {
+        HangGuard::new(
+            "public daemon must publish its listening socket",
+            Duration::from_secs(60),
+        )
+        .wait_for(|| {
             assert!(
                 this.child.as_mut().unwrap().try_wait().unwrap().is_none(),
                 "service exited: {}",
                 fs::read_to_string(this.path().join("server.log")).unwrap()
             );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            std::os::unix::net::UnixStream::connect(this.path().join("state/server.sock")).ok()
+        })
+        .expect("daemon socket readiness infrastructure hang");
         this
     }
     fn path(&self) -> &Path {
@@ -201,13 +205,14 @@ impl Drop for Service {
             unsafe {
                 libc::kill(child.id() as i32, libc::SIGTERM);
             }
-            let began = Instant::now();
-            while child.try_wait().ok().flatten().is_none()
-                && began.elapsed() < Duration::from_secs(30)
+            let guard = HangGuard::new(
+                "failed-case daemon must finish graceful shutdown",
+                Duration::from_secs(30),
+            );
+            if let Err(error) =
+                guard.wait_for(|| child.try_wait().expect("observe failed-case daemon exit"))
             {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if child.try_wait().ok().flatten().is_none() {
+                eprintln!("cleanup infrastructure hang: {error}; forcing daemon termination");
                 let _ = child.kill();
                 let _ = child.wait();
             }
