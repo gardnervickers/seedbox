@@ -16,6 +16,7 @@ type Events = Arc<Mutex<Vec<&'static str>>>;
 
 async fn hang_guard(future: impl std::future::Future<Output = ()>) {
     // Infrastructure bound only. Correctness depends on explicit event gates.
+    // test-time: allow(hang-guard) -- Bound a broken channel rendezvous; entered/proceed gates and payload assertions, never elapsed time, decide correctness.
     tokio::time::timeout(Duration::from_secs(60), future)
         .await
         .unwrap();

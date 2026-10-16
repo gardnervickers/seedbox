@@ -1077,6 +1077,7 @@ impl NativeCase {
                 // The integrated wall limit is a hang guard, never a native
                 // progress verdict. Cleanup must run even after the case guard
                 // elapsed; reuse that guard solely to bound a broken join.
+                // test-time: allow(hang-guard) -- After cancelling every session, bound only a broken serve/blocking-worker join; expiration preserves uncertain inputs and fails infrastructure.
                 match tokio::time::timeout(HANG_GUARD, &mut server).await {
                     Ok(Ok(Ok(()))) => {}
                     Ok(Ok(Err(error))) => errors.push(format!("serve cleanup: {error}")),
@@ -1123,11 +1124,13 @@ async fn native_case_with_guard<Body>(guard: Duration, body: Body)
 where
     Body: for<'a> FnOnce(&'a mut NativeCase) -> BoxFuture<'a, ()>,
 {
+    // test-time: allow(hang-guard) -- Preserve this case's existing host safety budget; simulated bounds and exact outcome assertions remain the functional oracles.
+    let deadline = tokio::time::sleep(guard);
     let owner = finish_before_rethrow(
         NativeCase::default(),
         body,
         |owner| Box::pin(owner.cleanup()),
-        tokio::time::sleep(guard),
+        deadline,
     )
     .await;
     owner.remove_verified();
@@ -2231,6 +2234,8 @@ pub async fn native_forced_failure(backend: DriverBackend, timeout: bool) {
     let proof = Arc::new(Mutex::new(None));
     let body_proof = proof.clone();
     let (expire, expired) = tokio::sync::oneshot::channel();
+    // test-time: allow(hang-guard) -- Bound failure to reach the explicit START/paused-ack deadline signal; the injected oneshot, not host duration, selects the timeout regression.
+    let infrastructure_deadline = tokio::time::sleep(HANG_GUARD);
     let result = std::panic::AssertUnwindSafe(finish_before_rethrow(
         NativeCase::default(),
         move |owner| Box::pin(async move {
@@ -2259,7 +2264,7 @@ pub async fn native_forced_failure(backend: DriverBackend, timeout: bool) {
         async move {
             tokio::select! {
                 result = expired => { result.expect("forced timeout signal vanished before case failure"); },
-                () = tokio::time::sleep(HANG_GUARD) => {},
+                () = infrastructure_deadline => {},
             }
         },
     )).catch_unwind().await;

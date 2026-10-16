@@ -53,7 +53,7 @@ async fn assert_unapplied(session: &NativeSession, id: &seedbox_api::SimulationI
 pub async fn native_held_checkpoint(backend: DriverBackend) {
     // test-time: allow(measurement) -- Anchor report-only held-phase elapsed diagnostics; fault identity, exact paused state and witness equality are the assertions, never host speed.
     let began = Instant::now();
-    let phase = |name: &str| {
+    let phase = move |name: &str| {
         // test-time: allow(measurement) -- Print phase timing only; elapsed_ms is never a deadline, simulated-time bound or ordering witness.
         eprintln!(
             "held phase backend={} elapsed_ms={} phase={name}",
@@ -62,9 +62,8 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         )
     };
     phase("begin");
-    // test-time: allow(hang-guard) -- The documented 1200s HANG_GUARD only prevents infrastructure hangs on the loaded host; check_bound limits simulated progress and actual fault events certify the hold.
-    tokio::time::timeout(HANG_GUARD, async {
-        let mut session = NativeSession::new(backend);
+    native_case(move |owner| Box::pin(async move {
+        let session = owner.session(backend);
         let mut request = submission(backend, session.root.path(), &session.store, 2_000_000, 123);
         // Choose a live-workload fault point from this backend's actual Driver
         // readiness/end window, never an assumed architecture boot duration.
@@ -99,7 +98,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         session.worker(&baseline).await;
         let uninterrupted = session.complete(&baseline, false, 1, 123).await.unwrap();
         phase("baseline_completed");
-        let baseline_events = fault_events(&session, &baseline).await;
+        let baseline_events = fault_events(session, &baseline).await;
         assert_eq!(baseline_events.iter().filter(|(_, status)| *status == FaultStatus::Applied).count(), 1);
         let mut source_request = request;
         source_request.options.start_paused = true;
@@ -125,7 +124,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
             // Identify the actual admitted, paused, unapplied hold, rather than
             // comparing the reported boundary with a requested timestamp.
             if state.rate == PlaybackRate::Paused && !state.stepping && state.application_ready {
-                let events = fault_events(&session, &source).await;
+                let events = fault_events(session, &source).await;
                 if events.iter().filter(|(_, status)| *status == FaultStatus::Requested).count() == 1 {
                     assert!(!events.iter().any(|(_, status)| *status == FaultStatus::Applied));
                     break state;
@@ -139,8 +138,8 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         let bytes = session.output(&source).await;
         assert_eq!(bytes.windows(6).filter(|part| *part == b"START=").count(), 1);
         assert!(!bytes.windows(4).any(|part| part == b"END="));
-        assert_unapplied(&session, &source).await;
-        let source_events = fault_events(&session, &source).await;
+        assert_unapplied(session, &source).await;
+        let source_events = fault_events(session, &source).await;
         let requested: Vec<_> = source_events.iter().filter(|(_, status)| *status == FaultStatus::Requested).map(|(id, _)| *id).collect();
         assert_eq!(requested.len(), 1);
         let fault_id = requested[0];
@@ -150,7 +149,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
             other => panic!("held capture refused: {other:?}"),
         };
         assert_eq!(position, held.position);
-        assert_unapplied(&session, &source).await;
+        assert_unapplied(session, &source).await;
         phase("capture_ack");
         let exported = session.client.checkpoint_definition(&source, "held").await.unwrap();
         phase("export_completed");
@@ -181,12 +180,12 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         assert_eq!(paused.position, position);
         assert_eq!(paused.rate, PlaybackRate::Paused);
         assert!(!paused.stepping && !paused.terminal);
-        assert_unapplied(&session, &restored).await;
+        assert_unapplied(session, &restored).await;
         eprintln!("native held checkpoint: backend={} fault_id={fault_id} position={position:?} restored_paused=true applied_before_release=0", label(backend));
         session.control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
         let continued = session.complete(&restored, false, 4, 123).await.unwrap();
         phase("restored_completed");
-        let events = fault_events(&session, &restored).await;
+        let events = fault_events(session, &restored).await;
         let applied: Vec<_> = events.iter().filter(|(_, status)| *status == FaultStatus::Applied).map(|(id, _)| *id).collect();
         assert_eq!(applied, [fault_id], "held fault identity changed or applied twice");
         assert!(!events.iter().any(|(_, status)| *status == FaultStatus::Requested), "held input re-admitted after import");
@@ -198,6 +197,5 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         assert_eq!(continued, uninterrupted);
         assert_eq!(session.client.compare(&baseline, &restored).await.unwrap().witness_matches, Some(true));
         eprintln!("native held continuation: backend={} same_fault={fault_id} applied_after_release=1 raw_equal=true API_witness_equal=true witness={continued}", label(backend));
-        session.close().await;
-    }).await.expect("held checkpoint continuation made no progress before HANG_GUARD");
+    })).await;
 }
