@@ -153,6 +153,8 @@ the canonical crate; do not restore sibling source inclusion for these policies.
   stamp the source tree, Git revision, build flags or compiled binaries, and
   don't add compiler wrappers, reproducible-build checks, or formatting
   exceptions (`#[rustfmt::skip]`, `rustfmt.toml`) to keep engine bytes stable.
+  The development shell's sccache wrapper is allowed as a build cache, not a
+  determinism check or replay gate.
   Reformatting, moving code and changing build flags are ordinary changes;
   run `cargo fmt` on the VMM like any other crate.
 - The linked CLI uses the root lockfile and records an explicit internal-worker
@@ -192,7 +194,9 @@ Other categories are `controlled-time` (caller-selected logical time),
 do not depend on it: assertions must compare deterministic outputs across
 perturbations, never speed or ordering inferred from time. Each category needs a
 nonempty site-specific explanation. File/module/function blanket exemptions
-and stale annotations are rejected. An annotation on a timeout or spawn never\nexempts its async/closure/loop body; annotate each raw boundary inside it.\nMacro-body inspection is best effort.
+and stale annotations are rejected. An annotation on a timeout or spawn never
+exempts its async/closure/loop body; annotate each raw boundary inside it.
+Macro-body inspection is best effort.
 
 Approved existing progress/readiness debt is separate:
 `// test-time: pending(bd-dd9, <registered-site-id>) -- <reason>`.

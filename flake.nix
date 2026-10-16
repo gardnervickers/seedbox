@@ -46,6 +46,13 @@
         in {
           default = pkgs.mkShell ({
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+            RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
+            SCCACHE_CACHE_SIZE = "20G";
+            # Rust incremental outputs cannot be shared through sccache.
+            CARGO_INCREMENTAL = "0";
+            shellHook = ''
+              export SCCACHE_DIR="$HOME/.cache/sccache"
+            '';
             # Provisioned before invocation: wrappers never compile or download.
             SEEDBOX_CHECK = "${checker}/bin/seedbox-check";
             SEEDBOX_MINIO_PYTHONPATH = "${minioPythonFixture pkgs}";
@@ -53,7 +60,7 @@
             SEEDBOX_TCG_QEMU = "${tcgQemu}/bin/qemu-system-x86_64";
             SEEDBOX_TCG_FIRMWARE = "${tcgQemu}/share/qemu/qboot.rom";
             packages = with pkgs; [
-              rustc cargo rustfmt clippy pkg-config stdenv.cc git
+              rustc cargo rustfmt clippy sccache pkg-config stdenv.cc git
               cpio gzip curl jq python3 gnumake bc bison flex perl
               docker-client podman
               tcgQemu checker libarchive
