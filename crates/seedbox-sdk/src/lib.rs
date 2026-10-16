@@ -256,5 +256,7 @@ pub fn flush() -> io::Result<()> {
     CLIENT.flush()
 }
 
+pub mod control;
+
 #[cfg(test)]
 mod tests;

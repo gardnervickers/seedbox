@@ -274,6 +274,15 @@ the profile with its own seed. Sampling uses integer arithmetic only, keeps
 lifecycle and clock faults from overlapping on one machine, and never targets
 the oracle. Code: [sampler](../crates/seedbox-explore/src/faults.rs).
 
+The engine gates generated inputs by their reserved key namespace. A generated
+start due before every initial application is ready, or before the end of a
+quiet period, is skipped and recorded as a rejection whose reason begins with
+`skipped`; its `gen-<n>-end` teardown is skipped with it. Authored inputs and
+teardowns of admitted starts always run. The oracle's `quiet` control
+operation extends the quiet period from its admission time, so a workload can
+let its system recover before checking it; generated faults already active
+still end on schedule. Code: [gate](../crates/seedbox-engine-core/src/input_program.rs).
+
 ## Property records
 
 Guest properties travel the same committed path as application output. Every

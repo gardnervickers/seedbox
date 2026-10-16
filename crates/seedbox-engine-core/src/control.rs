@@ -204,8 +204,15 @@ pub struct Control {
     handles: u32,
     lookahead: u64,
     undelivered_reply: bool,
+    /// Generated fault starts due before this time are skipped.
+    #[serde(default)]
+    quiet_until: u64,
 }
 impl Control {
+    /// Generated fault starts due before this simulated time are skipped.
+    pub fn quiet_until(&self) -> u64 {
+        self.quiet_until
+    }
     /// Build from a world document's `control` object held as JSON; `null`
     /// has no controller.
     pub fn new(
@@ -257,6 +264,7 @@ impl Control {
             handles: 0,
             lookahead,
             undelivered_reply: false,
+            quiet_until: 0,
         })
     }
     fn target(&self, target: &Target) -> Result<String, String> {
@@ -451,6 +459,12 @@ impl Control {
             }
             Operation::Sleep { duration_ns } => {
                 effect = at.checked_add(*duration_ns).ok_or("sleep overflow")?;
+                None
+            }
+            Operation::Quiet { duration_ns } => {
+                let until = at.checked_add(*duration_ns).ok_or("quiet overflow")?;
+                self.quiet_until = self.quiet_until.max(until);
+                result = json!({ "quiet_until_ns": self.quiet_until });
                 None
             }
             Operation::Now {} => {

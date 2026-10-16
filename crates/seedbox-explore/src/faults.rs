@@ -17,8 +17,10 @@ pub struct Generated {
     pub action: Action,
 }
 
-/// Every generated key starts with this; user program keys must not.
-pub const KEY_PREFIX: &str = "gen-";
+use seedbox_engine_protocol::input_program::GENERATED_END_SUFFIX;
+/// Every generated key starts with this; user program keys must not. The
+/// engine gates generated inputs by this namespace.
+pub use seedbox_engine_protocol::input_program::GENERATED_PREFIX as KEY_PREFIX;
 
 /// Sample `profile` for one simulation. `machines` lists every machine
 /// including the oracle; `limit_ns` is the simulated time limit, which every
@@ -260,7 +262,7 @@ pub fn generate(
             action: start,
         });
         inputs.push(Generated {
-            key: format!("{handle}-end"),
+            key: format!("{handle}{GENERATED_END_SUFFIX}"),
             at_ns: end_at,
             action: end,
         });

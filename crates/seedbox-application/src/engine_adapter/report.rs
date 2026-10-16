@@ -606,6 +606,13 @@ impl HistoryCheck<'_> {
                 }
                 return Ok(None);
             }
+            // Quiet changes no machine; it answers at admission.
+            Operation::Quiet { .. } => {
+                if response && e != Some(a) {
+                    return Err(bad());
+                }
+                return Ok(None);
+            }
         };
         Ok(Some(action))
     }

@@ -118,6 +118,11 @@ pub enum Operation {
     Sleep {
         duration_ns: u64,
     },
+    /// Start no generated fault for this long. Teardowns of generated faults
+    /// already active still run, so the system can recover.
+    Quiet {
+        duration_ns: u64,
+    },
     Stop {
         target: Target,
     },

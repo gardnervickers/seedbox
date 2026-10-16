@@ -15,6 +15,12 @@ pub struct TimedInput {
     )]
     pub timeout_ns: u64,
 }
+/// Keys of inputs sampled from a fault profile. The server reserves this
+/// namespace: `gen-<n>` starts a generated fault and `gen-<n>-end` tears it
+/// down. Generated starts are skipped before the applications are ready and
+/// during quiet periods, and a skipped start's teardown is skipped with it.
+pub const GENERATED_PREFIX: &str = "gen-";
+pub const GENERATED_END_SUFFIX: &str = "-end";
 pub const fn default_timeout_ns() -> u64 {
     PROCESS_EFFECT_TIMEOUT_NS
 }

@@ -1098,8 +1098,12 @@ impl<M: WorldMachine> Coord<'_, M> {
                 if guests.iter().any(|g| g.m.time > input_boundary) {
                     return Err("input boundary is in committed machine past".into());
                 }
+                let gate = crate::input_program::Gate {
+                    ready: self.application_ready,
+                    quiet_until: self.control.quiet_until(),
+                };
                 self.input_program
-                    .admit_due(self.faults, input_boundary, &|action| {
+                    .admit_due(self.faults, input_boundary, gate, &|action| {
                         validate_host_action(guests, action)
                     })?;
                 self.publish_faults(input_boundary);

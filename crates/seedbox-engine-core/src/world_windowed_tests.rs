@@ -2673,3 +2673,22 @@ fn disk_errors_apply_at_their_boundary_survive_reboot_and_record_heal_counts() {
         }
     }
 }
+
+#[test]
+fn quiet_requests_extend_the_quiet_period_from_their_admission() {
+    let mut w = world(&["a", "b"]);
+    configure_control(&mut w);
+    w.control
+        .request(
+            0,
+            0,
+            b"SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"quiet\",\"duration_ns\":500}",
+            0,
+        )
+        .unwrap();
+    run(&mut w, 2_000, None).unwrap();
+    let response = &w.control.log[0]["response"];
+    let admitted = response["admitted_at_ns"].as_u64().unwrap();
+    assert_eq!(w.control.quiet_until(), admitted + 500);
+    assert_eq!(response["result"]["quiet_until_ns"], admitted + 500);
+}

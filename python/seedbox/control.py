@@ -223,6 +223,15 @@ class World:
         """Wait at least this many simulated seconds, plus RPC delivery latency."""
         return self._call("sleep", duration_ns=_nanoseconds(seconds))[1]
 
+    def quiet(self, seconds):
+        """Start no generated fault for this many simulated seconds; generated
+        faults already active still end on schedule. Returns the end time."""
+        result, _ = self._call("quiet", duration_ns=_nanoseconds(seconds))
+        if type(result.get("quiet_until_ns")) is not int:
+            self.close()
+            raise ProtocolError("invalid quiet result")
+        return result["quiet_until_ns"]
+
     def stop(self, target):
         """Return only after the application process group has been stopped."""
         return self._call("stop", target=_target(target))[1]

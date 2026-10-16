@@ -95,6 +95,10 @@ fn main() {
         interrupted > 0,
         json!({"interrupted": interrupted}),
     );
+    // Read back without new generated faults; any still active end on schedule.
+    if let Err(error) = seedbox_sdk::control::quiet(Duration::from_secs(60)) {
+        eprintln!("kvlog-oracle: no quiet period: {error}");
+    }
     let mut lost = Vec::new();
     for (key, value) in &acknowledged {
         let reply = loop {

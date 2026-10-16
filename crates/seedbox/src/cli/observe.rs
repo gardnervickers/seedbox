@@ -420,12 +420,18 @@ pub(super) fn timeline(id: &SimulationId, json: bool) -> Result<u8> {
         let Some(world) = &world else {
             return "-".into();
         };
-        if entry
+        if let Some(reason) = entry
             .id
             .strip_prefix("program:")
-            .is_some_and(|key| world.override_rejections.contains_key(key))
+            .and_then(|key| world.override_rejections.get(key))
         {
-            return "rejected".into();
+            // Gated generated faults were skipped by design, not refused.
+            return if reason.starts_with("skipped") {
+                "skipped"
+            } else {
+                "rejected"
+            }
+            .into();
         }
         entry
             .fault_id

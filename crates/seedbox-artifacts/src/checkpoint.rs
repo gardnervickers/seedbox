@@ -17,6 +17,9 @@ struct CapturedProgram {
     admissions: Vec<InputAdmission>,
     failed: bool,
     rejections: Vec<InputRejection>,
+    /// Generated starts skipped so far; carried through projection unchanged.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    skipped: std::collections::BTreeSet<String>,
 }
 impl CapturedProgram {
     fn validate(&self) -> Result<()> {
@@ -181,9 +184,27 @@ mod tests {
         program
             .commit_live(&mut faults, host.key.clone(), plan(1, &host), 10)
             .unwrap();
-        program.admit_due(&mut faults, 20, &|_| Ok(())).unwrap();
         program
-            .admit_due(&mut faults, 25, &|_| Err("portable rejected input".into()))
+            .admit_due(
+                &mut faults,
+                20,
+                seedbox_engine_core::input_program::Gate {
+                    ready: true,
+                    quiet_until: 0,
+                },
+                &|_| Ok(()),
+            )
+            .unwrap();
+        program
+            .admit_due(
+                &mut faults,
+                25,
+                seedbox_engine_core::input_program::Gate {
+                    ready: true,
+                    quiet_until: 0,
+                },
+                &|_| Err("portable rejected input".into()),
+            )
             .unwrap();
         program
             .commit_live(&mut faults, future.key.clone(), plan(3, &future), 25)
@@ -271,14 +292,34 @@ mod tests {
         );
         assert_eq!(restored.admissions().len(), 3);
         assert_eq!(restored.rejections().len(), 1);
-        restored.admit_due(&mut faults, 30, &|_| Ok(())).unwrap();
+        restored
+            .admit_due(
+                &mut faults,
+                30,
+                seedbox_engine_core::input_program::Gate {
+                    ready: true,
+                    quiet_until: 0,
+                },
+                &|_| Ok(()),
+            )
+            .unwrap();
         assert_eq!(
             restored.admissions().last().unwrap().key,
             "later-host-at-same-boundary"
         );
         assert_eq!(restored.admissions().last().unwrap().plan.id, 4);
         assert_eq!(restored.next_time(), 40);
-        restored.admit_due(&mut faults, 40, &|_| Ok(())).unwrap();
+        restored
+            .admit_due(
+                &mut faults,
+                40,
+                seedbox_engine_core::input_program::Gate {
+                    ready: true,
+                    quiet_until: 0,
+                },
+                &|_| Ok(()),
+            )
+            .unwrap();
         assert_eq!(
             restored.admissions().last().unwrap().key,
             "pending-authored"
@@ -370,7 +411,17 @@ mod same_time_tests {
         let mut program =
             Program::new(vec![authored.clone(), pending.clone()], u64::MAX, 0).unwrap();
         let mut faults = Faults::new(Vec::new(), vec!["oracle".into()]).unwrap();
-        program.admit_due(&mut faults, 10, &|_| Ok(())).unwrap();
+        program
+            .admit_due(
+                &mut faults,
+                10,
+                seedbox_engine_core::input_program::Gate {
+                    ready: true,
+                    quiet_until: 0,
+                },
+                &|_| Ok(()),
+            )
+            .unwrap();
         let plan = Plan {
             id: 2,
             at_ns: 10,
