@@ -665,6 +665,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
         "cargo test -p seedbox-test --locked --test prepared_application -- --ignored tcg",
         "cargo test -p seedbox-test --locked --test simulation_control -- --ignored tcg",
         "cargo test -p seedbox-server --locked --features tcg-tests --test native_tcg_service --",
+        "cargo test -p seedbox-server --locked --features tcg-tests --test native_controller_service --",
         "cargo test -p seedbox-machine-pv --locked --lib -- --ignored",
         "cargo test -p seedbox-machine-pv --locked --test native_machine -- --ignored",
         "cargo test -p seedbox-driver --locked --test native_driver -- --ignored pv",
@@ -691,7 +692,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
             .map(|job| job.args.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        20
+        21
     );
     assert_eq!(
         runs.iter().map(|job| job.name.as_str()).collect::<Vec<_>>(),
@@ -705,6 +706,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
             "machine-tcg/seedbox-test/--test/prepared_application",
             "machine-tcg/seedbox-test/--test/simulation_control",
             "machine-tcg/seedbox-server/--test/native_tcg_service",
+            "machine-tcg/seedbox-server/--test/native_controller_service",
             "machine-pv-x86/seedbox-machine-pv/--lib/",
             "machine-pv-x86/seedbox-machine-pv/--test/native_machine",
             "machine-pv-x86/seedbox-driver/--test/native_driver",
@@ -725,7 +727,11 @@ fn test_machine_suites_do_not_force_serial_execution() {
 #[test]
 fn test_machine_suites_schedule_feature_gated_public_service_targets_unfiltered() {
     for (suite, feature, targets) in [
-        ("machine-tcg", "tcg-tests", &["native_tcg_service"][..]),
+        (
+            "machine-tcg",
+            "tcg-tests",
+            &["native_tcg_service", "native_controller_service"][..],
+        ),
         (
             "machine-pv-x86",
             "kvm-tests",

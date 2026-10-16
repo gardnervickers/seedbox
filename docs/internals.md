@@ -237,8 +237,8 @@ console; the x86 platform is described in its
 `bin/cpu-loop` is also `SEEDBOX_CPU_LOOP_FIXTURE`, which both the `machine-pv-x86`
 and `machine-tcg` suites submit through the public service
 (`seedbox-server` `native_pv_service` / `native_tcg_service`, gated by `kvm-tests`
-/ `tcg-tests`). `machine-pv-x86` also runs `native_controller_service`, whose
-prepared fixture is `SEEDBOX_PV_PREPARED_FIXTURE`. Those tests need `build/assets` from `cargo xtask build-assets`;
+/ `tcg-tests`). Both suites also run `native_controller_service`, whose prepared fixture is
+`SEEDBOX_PV_PREPARED_FIXTURE` / `SEEDBOX_TCG_PREPARED_FIXTURE`. Those tests need `build/assets` from `cargo xtask build-assets`;
 the checker builds the release CLI itself, into the same `CARGO_TARGET_DIR`
 the tests read.
 
