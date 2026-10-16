@@ -64,6 +64,7 @@ fn fixture() -> sb::record::RunRecord {
             full_state: None,
             faults: vec![],
             detail: None,
+            properties: None,
         }),
         error: None,
         logs: BTreeMap::new(),

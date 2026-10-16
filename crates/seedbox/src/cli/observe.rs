@@ -262,6 +262,53 @@ fn seconds(ns: u64) -> String {
     format!("{}s", text.trim_end_matches('0').trim_end_matches('.'))
 }
 
+/// Guest property results reported beside the oracle verdict.
+pub(super) fn properties(id: &SimulationId, json: bool) -> Result<u8> {
+    let client = daemon::connect(None)?;
+    let resource = super::simulations::runtime()?
+        .block_on(client.describe(id))
+        .map_err(super::simulations::client_error)?;
+    let Some(assessment) = resource.status.properties else {
+        return Err(Error::Setup(format!(
+            "{id}: no property evidence yet; it arrives with the final report"
+        )));
+    };
+    if json {
+        output::json(&assessment)?;
+        return Ok(0);
+    }
+    output::table(
+        [
+            "PROPERTY", "KIND", "STATUS", "PASSES", "FAILURES", "EXAMPLE",
+        ],
+        assessment
+            .properties
+            .iter()
+            .map(|property| {
+                [
+                    property.id.clone(),
+                    output::word(&property.kind).to_lowercase(),
+                    output::word(&property.status).to_lowercase(),
+                    property.passes.to_string(),
+                    property.failures.to_string(),
+                    property.example.as_ref().map_or_else(
+                        || "-".into(),
+                        |example| {
+                            format!(
+                                "{} at {}",
+                                example.origin.machine,
+                                seconds(example.origin.time_ns)
+                            )
+                        },
+                    ),
+                ]
+            })
+            .collect(),
+    )?;
+    super::simulations::property_fields(&assessment);
+    Ok(0)
+}
+
 /// Machines, links with their counters and faults as the server observes them now.
 pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(None)?;

@@ -72,6 +72,7 @@ fn bundle(path: &Path) {
             full_state: None,
             faults: Vec::new(),
             detail: None,
+            properties: None,
         }),
         error: None,
         logs: BTreeMap::from([

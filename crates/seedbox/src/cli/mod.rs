@@ -716,6 +716,7 @@ fn run(cli: Cli) -> Result<u8> {
             CollectionArg::Checkpoints { id, json } => simulations::checkpoints(&id, None, json),
             CollectionArg::World { id, json } => observe::world(&id, json),
             CollectionArg::Timeline { id, json } => observe::timeline(&id, json),
+            CollectionArg::Properties { id, json } => observe::properties(&id, json),
         },
         Command::Describe { resource } => match resource {
             ResourceArg::Simulation { id, json } => simulations::describe(&id, json),
@@ -978,6 +979,14 @@ enum CollectionArg {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
         /// Print the world document as JSON instead of tables.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List a simulation's guest properties and how each was judged.
+    Properties {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Print the property assessment as JSON instead of a table.
         #[arg(long)]
         json: bool,
     },

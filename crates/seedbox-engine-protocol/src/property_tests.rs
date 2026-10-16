@@ -270,3 +270,35 @@ fn ledger_round_trips_through_checkpoint_serialization() {
     assert_eq!(restored, l);
     assert_eq!(l.error_count, 0);
 }
+
+#[test]
+fn ledger_survives_flattened_report_deserialization() {
+    // Engine reports flatten their evidence; serde's flatten buffer cannot
+    // turn string map keys back into integers.
+    #[derive(Serialize, Deserialize)]
+    struct Report {
+        version: u32,
+        #[serde(flatten)]
+        evidence: Evidence,
+    }
+    #[derive(Serialize, Deserialize)]
+    struct Evidence {
+        properties: Ledger,
+    }
+    let mut l = ledger(&[assert_record("a", "always", true)]);
+    l.apply(
+        &frame(SUPERVISOR_SESSION, 1, json!({"exit": {"code": 0}})),
+        "n2",
+        3,
+        9,
+    );
+    let text = serde_json::to_string(&Report {
+        version: 1,
+        evidence: Evidence {
+            properties: l.clone(),
+        },
+    })
+    .unwrap();
+    let report: Report = serde_json::from_str(&text).unwrap();
+    assert_eq!(report.evidence.properties, l);
+}

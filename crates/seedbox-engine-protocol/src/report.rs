@@ -114,6 +114,9 @@ pub struct WorldEvidence {
     pub control_latency_ns: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggers: Option<Vec<TriggerRecord>>,
+    /// Reduced property evidence; absent when the run produced no records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<crate::property::Ledger>,
 }
 
 /// The x86 engine's report of one run segment.

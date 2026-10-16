@@ -94,7 +94,7 @@ pub enum Kind {
 }
 
 /// A guest SDK message, after parsing.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Record {
     /// Make a property known before (or without) evaluating it.
@@ -175,7 +175,7 @@ pub struct Origin {
     pub time_ns: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Example {
     pub origin: Origin,
@@ -199,7 +199,7 @@ impl Example {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Property {
     pub kind: Kind,
@@ -251,7 +251,7 @@ impl Property {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvidenceError {
     pub error: String,
@@ -277,7 +277,7 @@ pub const DEFAULT_FATAL_SIGNAL: &str = "seedbox.main_process_not_killed_by_signa
 
 /// Reduced property evidence. Checkpoints retain it whole; every field is
 /// ordered, so serialization is canonical.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Ledger {
     pub properties: BTreeMap<String, Property>,
@@ -290,8 +290,36 @@ pub struct Ledger {
     /// Count of evidence errors; only the first [`MAX_ERRORS`] are kept.
     pub error_count: u64,
     pub errors: Vec<EvidenceError>,
-    /// Next expected sequence per machine, incarnation and session.
-    sequences: BTreeMap<String, BTreeMap<u32, BTreeMap<u32, u64>>>,
+    /// Next expected sequence per machine, incarnation and session. Stored
+    /// as a list: reports flatten this type, and flattened JSON maps cannot
+    /// carry integer keys.
+    #[serde(with = "sequence_list")]
+    sequences: BTreeMap<(String, u32, u32), u64>,
+}
+
+mod sequence_list {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+    type Map = BTreeMap<(String, u32, u32), u64>;
+    pub fn serialize<S: Serializer>(map: &Map, serializer: S) -> Result<S::Ok, S::Error> {
+        let list: Vec<_> = map
+            .iter()
+            .map(|((machine, incarnation, session), next)| (machine, incarnation, session, next))
+            .collect();
+        list.serialize(serializer)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Map, D::Error> {
+        let list = Vec::<(String, u32, u32, u64)>::deserialize(deserializer)?;
+        let count = list.len();
+        let map: Map = list
+            .into_iter()
+            .map(|(machine, incarnation, session, next)| ((machine, incarnation, session), next))
+            .collect();
+        if map.len() != count {
+            return Err(serde::de::Error::custom("duplicate property sequence"));
+        }
+        Ok(map)
+    }
 }
 
 impl Ledger {
@@ -332,11 +360,7 @@ impl Ledger {
         };
         let next = self
             .sequences
-            .entry(machine.into())
-            .or_default()
-            .entry(incarnation)
-            .or_default()
-            .entry(frame.session)
+            .entry((machine.into(), incarnation, frame.session))
             .or_insert(1);
         if frame.seq != *next {
             let expected = *next;
@@ -516,7 +540,7 @@ pub enum AssessmentStatus {
     Incomplete,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PropertyResult {
     pub id: String,
@@ -531,7 +555,7 @@ pub struct PropertyResult {
 }
 
 /// A run's property results, reported beside the oracle verdict.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Assessment {
     pub status: AssessmentStatus,

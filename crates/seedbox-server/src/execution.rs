@@ -540,6 +540,7 @@ impl ExecutionService {
                         &mut s.status,
                         exit,
                         report.and_then(|r| r.simulated_time_ns),
+                        report.and_then(|r| r.properties.as_ref()),
                     );
                     s.status.termination = Some(termination);
                     s.status.phase = Phase::Completed;
@@ -808,6 +809,7 @@ impl ExecutionService {
                                 &mut s.status,
                                 exit,
                                 report.and_then(|r| r.simulated_time_ns),
+                                report.and_then(|r| r.properties.as_ref()),
                             );
                         })
                         .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
@@ -869,8 +871,12 @@ fn merge_report_observation(
     status: &mut seedbox_api::SimulationStatus,
     exit: Option<u8>,
     time: Option<u64>,
+    properties: Option<&seedbox_engine_protocol::property::Ledger>,
 ) {
     status.oracle_exit_code = status.oracle_exit_code.or(exit);
+    if let Some(properties) = properties {
+        status.properties = Some(properties.assessment());
+    }
     if let Some(time) = time {
         status.simulated_time_ns = status.simulated_time_ns.max(time);
     }
@@ -1048,6 +1054,7 @@ mod tests {
                     full_state: None,
                     faults: vec![],
                     detail: None,
+                    properties: None,
                 })
             }
         }
@@ -1207,7 +1214,7 @@ mod tests {
         for phase in [Phase::Finalizing, Phase::Completed] {
             manager
                 .update(&id, |s| {
-                    merge_report_observation(&mut s.status, Some(7), Some(50));
+                    merge_report_observation(&mut s.status, Some(7), Some(50), None);
                     s.status.phase = phase;
                 })
                 .unwrap();

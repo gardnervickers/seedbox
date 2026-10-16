@@ -182,6 +182,7 @@ impl Fixture {
                 full_state: None,
                 faults: vec![],
                 detail: None,
+                properties: None,
             },
             calls: AtomicUsize::new(0),
             fail: false,

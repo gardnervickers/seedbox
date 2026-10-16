@@ -25,6 +25,7 @@
 #endif
 #include "control.h"
 #include "application-output.h"
+#include "property-relay.h"
 #include "barrier.h"
 #include "progress-launch.h"
 #include "world-clock.h"
@@ -485,6 +486,91 @@ static void credentials(void) {
     if (setgid(gid) || setuid(uid)) die("set image user");
     free(copy);
 }
+/* SDK connections on every machine. Each accepted connection is a session;
+ * its records keep their order, and a flush reply follows every earlier one. */
+static int property_listener = -1;
+static struct property_client { int fd; uint32_t session; uint64_t seq; } property_clients[PROPERTY_SESSIONS];
+static uint32_t property_session_id;
+static uint64_t supervisor_seq;
+static void property_relay(uint32_t session, uint64_t seq, const void *record, size_t size) {
+    char frame[PROPERTY_FRAME_BYTES];
+    size_t length = property_frame(frame, session, seq, record, size);
+    if (!length) { errno = E2BIG; die("property frame"); }
+    send_all(management, frame, length);
+}
+static void supervisor_record(const char *record) {
+    property_relay(0, ++supervisor_seq, record, strlen(record));
+}
+static void property_lost(const char *reason) {
+    char record[128];
+    int length = snprintf(record, sizeof(record), "{\"lost\":{\"reason\":\"%s\",\"count\":1}}", reason);
+    if (length < 0 || (size_t)length >= sizeof(record)) { errno = E2BIG; die("lost property record"); }
+    supervisor_record(record);
+}
+static void property_socket(const char *socket_path) {
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) property_clients[i].fd = -1;
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    if (strlen(socket_path) >= sizeof(address.sun_path)) { errno = ENAMETOOLONG; die("SDK socket path"); }
+    char *parent = strdup(socket_path), *slash;
+    if (!parent) die("SDK socket parent");
+    slash = strrchr(parent, '/');
+    if (slash && slash != parent) { *slash = 0; directories(parent, 0755); }
+    free(parent);
+    property_listener = socket(AF_UNIX, SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC, 0);
+    if (property_listener < 0) die("SDK socket");
+    strcpy(address.sun_path, socket_path);
+    if (bind(property_listener, (struct sockaddr *)&address, sizeof(address)) || chmod(socket_path, 0666)
+        || listen(property_listener, PROPERTY_SESSIONS)) die("SDK socket bind");
+}
+static void property_accept(void) {
+    for (;;) {
+        int client = accept4(property_listener, NULL, NULL, SOCK_NONBLOCK|SOCK_CLOEXEC);
+        if (client < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ECONNABORTED) return;
+            die("accept SDK socket");
+        }
+        struct property_client *slot = NULL;
+        for (unsigned i = 0; i < PROPERTY_SESSIONS && !slot; ++i) {
+            if (property_clients[i].fd < 0) slot = &property_clients[i];
+        }
+        /* Refused connections are evidence loss, never silently ignored. */
+        if (!slot) { close(client); property_lost("too many SDK connections"); continue; }
+        if (property_session_id == UINT32_MAX) { close(client); errno = EOVERFLOW; die("SDK session IDs exhausted"); }
+        *slot = (struct property_client){.fd = client, .session = ++property_session_id};
+    }
+}
+static void property_read(struct property_client *client) {
+    unsigned char record[PROPERTY_RECORD_BYTES + 1];
+    while (client->fd >= 0) {
+        ssize_t received = recv(client->fd, record, sizeof(record), MSG_TRUNC);
+        if (received < 0 && errno == EINTR) continue;
+        if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (received <= 0 && (received == 0 || errno == ECONNRESET)) {
+            close(client->fd); client->fd = -1;
+            return;
+        }
+        if (received < 0) die("read SDK socket");
+        if ((size_t)received > PROPERTY_RECORD_BYTES) { property_lost("SDK record too large"); continue; }
+        if ((size_t)received == sizeof(property_flush) - 1 && !memcmp(record, property_flush, sizeof(property_flush) - 1)) {
+            /* A departed client cannot receive its reply; that is its loss. */
+            ssize_t sent;
+            do { sent = send(client->fd, "ok", 2, MSG_DONTWAIT|MSG_NOSIGNAL); } while (sent < 0 && errno == EINTR);
+            continue;
+        }
+        property_relay(client->session, ++client->seq, record, (size_t)received);
+    }
+}
+/* Relay every record already sent, without waiting for further writers. */
+static void property_drain(void) {
+    property_accept();
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) property_read(&property_clients[i]);
+}
+static void property_exit(int status) {
+    char record[64];
+    if (WIFEXITED(status)) snprintf(record, sizeof(record), "{\"exit\":{\"code\":%d}}", WEXITSTATUS(status));
+    else snprintf(record, sizeof(record), "{\"exit\":{\"signal\":%d}}", WTERMSIG(status));
+    supervisor_record(record);
+}
 static struct application_output application_outputs[2] = {{-1, -1}, {-1, -1}};
 static void relay_output(unsigned stream, size_t limit) {
     char frame[2 * APPLICATION_OUTPUT_BYTES + 16];
@@ -641,6 +727,7 @@ static int stop(pid_t *child) {
     while (waitpid(-group, &status, 0) >= 0 || errno == EINTR) {}
     if (errno != ECHILD) return -1;
     drain_output();
+    if (property_listener >= 0) property_drain();
     for (unsigned stream = 0; stream < 2; ++stream) application_output_close(&application_outputs[stream]);
     return 0;
 }
@@ -743,15 +830,19 @@ static void relay_management(pid_t *child) {
  * idle disconnect releases the current session; a partial or outstanding RPC
  * still fails closed. The listener stays open for a later connection. */
 static void service_channels(pid_t *child, int timeout) {
-    struct pollfd pfds[5] = {
+    struct pollfd pfds[6 + PROPERTY_SESSIONS] = {
         {.fd = management, .events = POLLIN},
         {.fd = control_client < 0 ? control_listener : -1, .events = POLLIN},
         {.fd = control_client, .events = POLLIN},
         {.fd = application_outputs[0].read_fd, .events = POLLIN},
-        {.fd = application_outputs[1].read_fd, .events = POLLIN}
+        {.fd = application_outputs[1].read_fd, .events = POLLIN},
+        {.fd = property_listener, .events = POLLIN}
     };
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
+        pfds[6 + i] = (struct pollfd){.fd = property_listener >= 0 ? property_clients[i].fd : -1, .events = POLLIN};
+    }
     struct timespec limit = {.tv_sec = timeout / 1000, .tv_nsec = timeout % 1000 * 1000000L};
-    int ready = ppoll(pfds, 5, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
+    int ready = ppoll(pfds, 6 + PROPERTY_SESSIONS, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
     if (ready < 0) { if (errno != EINTR) die("poll management"); return; }
     if (!ready) return;
     if (pfds[1].revents & (POLLERR|POLLHUP|POLLNVAL)) { errno = EIO; die("control listener poll"); }
@@ -761,6 +852,12 @@ static void service_channels(pid_t *child, int timeout) {
     for (unsigned stream = 0; stream < 2; ++stream) {
         if (pfds[3 + stream].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("application output poll"); }
         if (pfds[3 + stream].revents & (POLLIN|POLLHUP)) relay_output(stream, APPLICATION_OUTPUT_BYTES);
+    }
+    if (pfds[5].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("SDK listener poll"); }
+    if (pfds[5].revents & POLLIN) property_accept();
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
+        if (pfds[6 + i].revents & POLLNVAL) { errno = EIO; die("SDK client poll"); }
+        if (pfds[6 + i].revents & (POLLIN|POLLHUP|POLLERR)) property_read(&property_clients[i]);
     }
     if (pfds[0].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("management port poll"); }
     if (pfds[0].revents & (POLLIN|POLLHUP)) relay_management(child);
@@ -772,6 +869,7 @@ static void supervise(pid_t *child) {
         while ((done = waitpid(-1, &status, WNOHANG)) > 0) {
             if (done == *child) {
                 drain_output();
+                if (property_listener >= 0) { property_drain(); property_exit(status); }
                 finish(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), 0);
             }
         }
@@ -840,6 +938,7 @@ int main(void) {
     }
     close(recipe_fd);
     relay_socket("/proc/cmdline", "/run/seedbox/control.sock");
+    property_socket("/run/seedbox/sdk.sock");
     /* Everything before this point is fixed by the boot seed; the application
      * starts after the world is released under the run seed. */
     struct timespec wall_clock = seedbox_wall_clock_at(wall_clock_epoch, seedbox_world_time_ns());

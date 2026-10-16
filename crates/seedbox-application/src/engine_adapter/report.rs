@@ -993,6 +993,7 @@ pub(super) fn checked_report(
     request: &ExecutionRequest<'_>,
 ) -> Result<ExecutionReport> {
     let world_witness = ContentDigest::try_from(raw.world_witness.clone())?;
+    let properties = raw.properties.clone();
     for machine in machines {
         ContentDigest::try_from(machine.witness.clone())?;
         machine
@@ -1151,6 +1152,7 @@ pub(super) fn checked_report(
             infrastructure_error
                 .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name))
         }),
+        properties,
     })
 }
 

@@ -1328,6 +1328,11 @@ fn report(
         world_witness
             .update(serde_json::to_vec(world.input_rejections()).map_err(|e| e.to_string())?);
     }
+    // Only a run with property records hashes them, keeping earlier witnesses.
+    let properties = (world.properties().records > 0).then(|| world.properties().clone());
+    if let Some(properties) = &properties {
+        world_witness.update(serde_json::to_vec(properties).map_err(|e| e.to_string())?);
+    }
     Ok(EngineReport {
         report_version: REPORT_VERSION,
         seed,
@@ -1342,6 +1347,7 @@ fn report(
             control_history,
             control_latency_ns: world.control().latency,
             triggers,
+            properties,
         },
         sim_seconds,
         host_seconds,

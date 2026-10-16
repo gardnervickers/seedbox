@@ -1,4 +1,5 @@
 use crate::{ExecutionTermination, Phase, SimulationId, Stage, StageTiming, TestVerdict};
+pub use seedbox_engine_protocol::property::Assessment as PropertyAssessment;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -250,6 +251,9 @@ pub struct SimulationStatus {
     pub stop_requested: bool,
     /// Set when execution starts on this server's engine.
     pub engine: Option<EngineBuild>,
+    /// Guest property results, reported beside the oracle verdict. Absent
+    /// until a final report with property evidence arrives.
+    pub properties: Option<PropertyAssessment>,
 }
 
 // Keep the derived verdict at the wire boundary, never in mutable status. The
@@ -268,6 +272,8 @@ struct StatusDocument {
     stop_requested: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     engine: Option<EngineBuild>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    properties: Option<PropertyAssessment>,
     #[serde(default, deserialize_with = "ignore_verdict")]
     verdict: Option<TestVerdict>,
 }
@@ -291,6 +297,7 @@ impl Serialize for SimulationStatus {
             termination: self.termination.clone(),
             stop_requested: self.stop_requested,
             engine: self.engine.clone(),
+            properties: self.properties.clone(),
             verdict: Some(self.verdict()),
         }
         .serialize(serializer)
@@ -310,6 +317,7 @@ impl<'de> Deserialize<'de> for SimulationStatus {
             termination: document.termination,
             stop_requested: document.stop_requested,
             engine: document.engine,
+            properties: document.properties,
         })
     }
 }
@@ -326,6 +334,7 @@ impl Default for SimulationStatus {
             termination: None,
             stop_requested: false,
             engine: None,
+            properties: None,
         }
     }
 }

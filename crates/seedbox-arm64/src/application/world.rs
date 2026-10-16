@@ -572,6 +572,11 @@ pub fn run(options: &Options) -> Result<Value> {
     if !world.input_rejections().is_empty() {
         hash.update(serde_json::to_vec(world.input_rejections()).map_err(|e| e.to_string())?);
     }
+    // Only a run with property records hashes them, keeping earlier witnesses.
+    let properties = (world.properties().records > 0).then(|| world.properties().clone());
+    if let Some(properties) = &properties {
+        hash.update(serde_json::to_vec(properties).map_err(|e| e.to_string())?);
+    }
     let counters = arm_counters(&world);
     let mut report = json!({"report_version":2,"seed":options.seed,"timebase":"arm64-pv-world-v1",
         "outcome":outcome,"world_witness":hex::encode(hash.finalize()),
@@ -591,6 +596,9 @@ pub fn run(options: &Options) -> Result<Value> {
     }
     if let Some(evidence) = trigger_evidence {
         report["triggers"] = evidence;
+    }
+    if let Some(properties) = properties {
+        report["properties"] = serde_json::to_value(properties).map_err(|e| e.to_string())?;
     }
     Ok(report)
 }

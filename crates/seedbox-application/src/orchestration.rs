@@ -318,6 +318,7 @@ impl Orchestrator {
                     full_state: None,
                     faults: vec![],
                     detail: Some("cancelled before execution".into()),
+                    properties: None,
                 });
             }
             let start = seedbox_engine_protocol::host_clock::Instant::now()?;

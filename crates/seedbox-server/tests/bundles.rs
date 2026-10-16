@@ -105,6 +105,7 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
             full_state: None,
             faults: Vec::new(),
             detail: Some("retained report diagnostic".into()),
+            properties: None,
         }),
         error: None,
         logs: BTreeMap::from([("worker-stdout".into(), diagnostic)]),

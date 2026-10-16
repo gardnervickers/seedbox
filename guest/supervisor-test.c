@@ -123,6 +123,19 @@ int main(int argc, char **argv) {
         struct timespec delay = {.tv_nsec = 100000000}; nanosleep(&delay, NULL);
         _exit(7);
     }
+    if (argc > 2 && (!strcmp(argv[1], "property-exit") || !strcmp(argv[1], "property-signal"))) {
+        /* Records sent before the exit reach the transport, flushed or not. */
+        int sdk = socket(AF_UNIX, SOCK_SEQPACKET, 0); assert(sdk >= 0);
+        struct sockaddr_un sdk_address = {.sun_family = AF_UNIX};
+        strcpy(sdk_address.sun_path, argv[2]);
+        assert(!connect(sdk, (struct sockaddr *)&sdk_address, sizeof(sdk_address)));
+        assert(send(sdk, "{\"a\":1}", 7, 0) == 7);
+        assert(send(sdk, property_flush, sizeof(property_flush) - 1, 0) == sizeof(property_flush) - 1);
+        char ok[4]; assert(recv(sdk, ok, sizeof(ok), 0) == 2 && !memcmp(ok, "ok", 2));
+        assert(send(sdk, "{\"b\":2}", 7, 0) == 7);
+        if (!strcmp(argv[1], "property-signal")) raise(SIGTERM);
+        _exit(5);
+    }
     if (argc > 1) { for (;;) pause(); }
     int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,sockets));
     assert(!fcntl(sockets[0], F_SETFL, O_NONBLOCK));
@@ -306,6 +319,76 @@ int main(int argc, char **argv) {
     }
     close(control_listener); control_listener = -1;
     assert(!unlink(address.sun_path) && !unlink(cmdline_path) && !rmdir(directory));
+    /* Property records: framing is hex of the exact datagram, sessions are
+     * per connection, and loss is reported by the supervisor's own session. */
+    char frame[PROPERTY_FRAME_BYTES];
+    size_t framed = property_frame(frame, 7, 42, (const unsigned char *)"{}", 2);
+    assert(framed == strlen("SBX_PROP1 7 42 7b7d\n") && !memcmp(frame, "SBX_PROP1 7 42 7b7d\n", framed));
+    unsigned char large[PROPERTY_RECORD_BYTES + 1]; memset(large, 'x', sizeof(large));
+    assert(property_frame(frame, 1, 1, large, PROPERTY_RECORD_BYTES) == strlen("SBX_PROP1 1 1 \n") + 2 * PROPERTY_RECORD_BYTES);
+    assert(!property_frame(frame, 1, 1, large, sizeof(large)) && !property_frame(frame, 1, 1, large, 0));
+    char sdk_directory[] = "/tmp/seedbox-sdk-XXXXXX"; assert(mkdtemp(sdk_directory));
+    struct sockaddr_un sdk_address = {.sun_family = AF_UNIX};
+    assert(snprintf(sdk_address.sun_path, sizeof(sdk_address.sun_path), "%s/run/sdk.sock", sdk_directory) > 0);
+    property_socket(sdk_address.sun_path); assert(property_listener >= 0);
+    assert(!stat(sdk_address.sun_path, &permissions)); assert((permissions.st_mode & 0777) == 0666);
+    int sdk = socket(AF_UNIX, SOCK_SEQPACKET, 0); assert(sdk >= 0);
+    assert(!connect(sdk, (struct sockaddr *)&sdk_address, sizeof(sdk_address)));
+    assert(send(sdk, "{}", 2, 0) == 2);
+    assert(send(sdk, property_flush, sizeof(property_flush) - 1, 0) == sizeof(property_flush) - 1);
+    assert(send(sdk, large, sizeof(large), 0) == sizeof(large));
+    service_channels(&child, 0);
+    service_channels(&child, 0);
+    n = read(sockets[1], buffer, sizeof(buffer)-1); assert(n > 0); buffer[n] = 0;
+    char lost[256];
+    snprintf(lost, sizeof(lost), "SBX_PROP1 1 1 7b7d\nSBX_PROP1 0 1 ");
+    assert(!strncmp(buffer, lost, strlen(lost)));
+    /* 7b226c6f7374223a = {"lost": */
+    assert(strstr(buffer, "SBX_PROP1 0 1 7b226c6f7374223a") && buffer[n - 1] == '\n');
+    char ok[4]; assert(recv(sdk, ok, sizeof(ok), MSG_DONTWAIT) == 2 && !memcmp(ok, "ok", 2));
+    /* Connections beyond the session limit are refused and reported. */
+    int extra[PROPERTY_SESSIONS];
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; i++) {
+        extra[i] = socket(AF_UNIX, SOCK_SEQPACKET, 0); assert(extra[i] >= 0);
+        assert(!connect(extra[i], (struct sockaddr *)&sdk_address, sizeof(sdk_address)));
+    }
+    service_channels(&child, 0);
+    n = read(sockets[1], buffer, sizeof(buffer)-1); assert(n > 0); buffer[n] = 0;
+    assert(!strncmp(buffer, "SBX_PROP1 0 2 7b226c6f7374223a", 30) && !strchr(buffer, '\n')[1]);
+    assert(property_session_id == PROPERTY_SESSIONS);
+    /* A closed session frees its slot; the next connection gets a new ID. */
+    close(sdk); for (unsigned i = 0; i < PROPERTY_SESSIONS; i++) close(extra[i]);
+    service_channels(&child, 0);
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; i++) assert(property_clients[i].fd == -1);
+    /* At the application's exit, already-sent records precede its exit record. */
+    for (int signalled = 0; signalled < 2; signalled++) {
+        int records[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, records));
+        check = fork(); assert(check >= 0);
+        if (!check) {
+            alarm(10); close(records[1]); management = records[0];
+            watch_children();
+            arguments = (char *[]){argv[0], signalled ? "property-signal" : "property-exit", sdk_address.sun_path, NULL};
+            child = start(); assert(child > 0);
+            supervise(&child);
+        }
+        close(records[0]);
+        assert(waitpid(check, &status, 0) == check);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == (signalled ? 128 + SIGTERM : 5));
+        size_t got = 0;
+        while ((n = read(records[1], buffer + got, sizeof(buffer) - got - 1)) > 0) got += (size_t)n;
+        assert(n == 0); buffer[got] = 0; close(records[1]);
+        /* {"a":1}, {"b":2}, then {"exit":{"code":5}} or {"exit":{"signal":15}}. */
+        const char *expected = signalled
+            ? "SBX_PROP1 34 1 7b2261223a317d\nSBX_PROP1 34 2 7b2262223a327d\nSBX_PROP1 0 3 7b2265786974223a7b227369676e616c223a31357d7d\n"
+            : "SBX_PROP1 33 1 7b2261223a317d\nSBX_PROP1 33 2 7b2262223a327d\nSBX_PROP1 0 3 7b2265786974223a7b22636f6465223a357d7d\n";
+        assert(!strcmp(buffer, expected));
+        /* The forked supervisor's session counter is its own. */
+        property_session_id++;
+    }
+    close(property_listener); property_listener = -1;
+    assert(!unlink(sdk_address.sun_path));
+    char sdk_parent[PATH_MAX]; snprintf(sdk_parent, sizeof(sdk_parent), "%s/run", sdk_directory);
+    assert(!rmdir(sdk_parent) && !rmdir(sdk_directory));
     /* Final output must reach the transport before the oracle exit, even when
      * SIGCHLD wins the poll race. Binary bytes and stream identity survive. */
     int logs[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, logs));

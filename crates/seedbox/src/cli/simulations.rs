@@ -877,11 +877,46 @@ fn report(resource: &Simulation, json: bool) -> Result<u8> {
         output::json(resource)?;
     } else {
         output::status(word, &resource.metadata.id);
+        if let Some(assessment) = &resource.status.properties {
+            property_fields(assessment);
+        }
     }
     if let Some(ExecutionTermination::Error { message }) = &resource.status.termination {
         eprintln!("execution: {message}");
     }
     Ok(code)
+}
+
+/// One summary field, then each violated property and each evidence error.
+pub(super) fn property_fields(assessment: &seedbox_api::PropertyAssessment) {
+    use seedbox_engine_protocol::property::PropertyStatus;
+    output::field(
+        "properties",
+        format!(
+            "{}: {} violated, {} unmet, {} total",
+            output::word(&assessment.status).to_lowercase(),
+            assessment.violated,
+            assessment.unmet,
+            assessment.properties.len()
+        ),
+    );
+    for property in &assessment.properties {
+        if property.status == PropertyStatus::Violated {
+            output::field("violated", &property.id);
+        }
+    }
+    for error in &assessment.errors {
+        output::field("evidence", &error.error);
+    }
+    if assessment.error_count > assessment.errors.len() as u64 {
+        output::field(
+            "evidence",
+            format!(
+                "{} more errors omitted",
+                assessment.error_count - assessment.errors.len() as u64
+            ),
+        );
+    }
 }
 
 pub(super) fn runtime() -> Result<tokio::runtime::Runtime> {

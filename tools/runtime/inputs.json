@@ -9,6 +9,7 @@
     "guest/build-compose.sh",
     "guest/compose-init.c",
     "guest/application-output.h",
+    "guest/property-relay.h",
     "guest/barrier.h",
     "guest/control.h",
     "guest/io.h",
