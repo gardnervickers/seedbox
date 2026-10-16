@@ -315,9 +315,26 @@ fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() 
             let root = directory.join("root");
             fs::create_dir(&root)?;
             fs::write(root.join("app"), b"cold application bytes; never executed")?;
+            // Match real ContainerTransport's prefixed archive, not just its
+            // directory-shaped test double: the SDK supplies its own rootfs/.
+            let archive = directory.join("rootfs.tar");
+            let mut tar = tar::Builder::new(fs::File::create(&archive)?);
+            tar.follow_symlinks(false);
+            tar.append_dir_all("rootfs", &root)?;
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(0);
+            header.set_size(0);
+            header.set_entry_type(tar::EntryType::Link);
+            tar.append_link(&mut header, "rootfs/app-hard", "rootfs/app")?;
+            header.set_entry_type(tar::EntryType::Symlink);
+            tar.append_link(&mut header, "rootfs/app-link", "/app")?;
+            tar.finish()?;
             Ok(ImportedImage {
                 image,
-                rootfs: RootFilesystem::Directory(root),
+                rootfs: RootFilesystem::Archive(archive),
                 auxiliary: BTreeMap::new(),
                 provenance: BTreeMap::new(),
             })
@@ -446,6 +463,20 @@ fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() 
         .collect::<Vec<_>>();
     assert!(names.iter().any(|path| path == Path::new("app")));
     assert!(!names.iter().any(|path| path.starts_with("seedbox")));
+    assert!(!names.iter().any(|path| path.starts_with("rootfs")));
+    let links = tar::Archive::new(&view[..])
+        .entries()
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            entry
+                .link_name()
+                .unwrap()
+                .map(|link| (entry.path().unwrap().into_owned(), link.into_owned()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(links[Path::new("app-hard")], Path::new("app"));
+    assert_eq!(links[Path::new("app-link")], Path::new("/app"));
     assert_eq!(prepared.oracle.name, "app");
     assert_eq!(prepared.machines[0].name, "side");
     assert_eq!(

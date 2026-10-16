@@ -12,6 +12,48 @@ use crate::{
 use seedbox_engine_protocol::driver_world as wire;
 use std::{collections::BTreeMap, fs, path::Path};
 
+// ContainerTransport's archive is ready for the legacy boot assembler: every
+// entry (and hard-link target) already carries its rootfs/ transport prefix.
+// The SDK takes an application-root tar and supplies its own rootfs/ prefix.
+// Rewrite metadata only; never extract guest paths onto the host.
+fn logical_archive(path: &Path) -> Result<Vec<u8>> {
+    fn relative(path: &Path) -> Result<&Path> {
+        let path = path.strip_prefix("rootfs").map_err(|_| {
+            Error::Integrity("OCI transport archive entry is outside rootfs".into())
+        })?;
+        if path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(Error::Integrity("unsafe OCI transport archive path".into()));
+        }
+        Ok(if path.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            path
+        })
+    }
+    let mut input = tar::Archive::new(std::io::BufReader::new(fs::File::open(path)?));
+    let mut output = tar::Builder::new(Vec::new());
+    for entry in input.entries()? {
+        let mut entry = entry?;
+        let original = entry.path()?.into_owned();
+        let name = relative(&original)?;
+        let mut header = crate::container_images::export_header(&mut entry, name)?;
+        if let Some(link) = entry.link_name()?.map(|path| path.into_owned()) {
+            let target = if header.entry_type().is_hard_link() {
+                relative(&link)?
+            } else {
+                &link
+            };
+            output.append_link(&mut header, name, target)?;
+        } else {
+            output.append_data(&mut header, name, &mut entry)?;
+        }
+    }
+    Ok(output.into_inner()?)
+}
+
 fn artifact(path: &Path) -> Result<wire::Artifact> {
     let bytes = fs::read(path)?;
     Ok(wire::Artifact {
@@ -75,7 +117,7 @@ impl OciBootFactory {
                 },
             };
             let bytes = match &request.image.rootfs {
-                crate::oci::RootFilesystem::Archive(path) => fs::read(path)?,
+                crate::oci::RootFilesystem::Archive(path) => logical_archive(path)?,
                 crate::oci::RootFilesystem::Directory(root) => {
                     let mut paths = vec![];
                     let mut pending = vec![root.to_owned()];
@@ -368,4 +410,31 @@ pub fn retain_oci_prepared(
     context.check()?;
     super::retain_prepared(inputs, &prepared, store)?;
     context.check()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn transport_archive_requires_rooted_entries_and_hardlink_targets() {
+        for (name, link) in [("app", None), ("rootfs/link", Some("app"))] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut tar = tar::Builder::new(file.reopen().unwrap());
+            let mut header = tar::Header::new_gnu();
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_size(0);
+            if let Some(target) = link {
+                header.set_entry_type(tar::EntryType::Link);
+                tar.append_link(&mut header, name, target).unwrap();
+            } else {
+                tar.append_data(&mut header, name, std::io::empty())
+                    .unwrap();
+            }
+            tar.finish().unwrap();
+            assert!(logical_archive(file.path()).is_err(), "{name} {link:?}");
+        }
+    }
 }
