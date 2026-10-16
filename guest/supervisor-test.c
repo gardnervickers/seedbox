@@ -378,9 +378,10 @@ int main(int argc, char **argv) {
         while ((n = read(records[1], buffer + got, sizeof(buffer) - got - 1)) > 0) got += (size_t)n;
         assert(n == 0); buffer[got] = 0; close(records[1]);
         /* {"a":1}, {"b":2}, then {"exit":{"code":5}} or {"exit":{"signal":15}}. */
-        const char *expected = signalled
-            ? "SBX_PROP1 34 1 7b2261223a317d\nSBX_PROP1 34 2 7b2262223a327d\nSBX_PROP1 0 3 7b2265786974223a7b227369676e616c223a31357d7d\n"
-            : "SBX_PROP1 33 1 7b2261223a317d\nSBX_PROP1 33 2 7b2262223a327d\nSBX_PROP1 0 3 7b2265786974223a7b22636f6465223a357d7d\n";
+        unsigned session = PROPERTY_SESSIONS + 1 + signalled;
+        char expected[512];
+        snprintf(expected, sizeof(expected), "SBX_PROP1 %u 1 7b2261223a317d\nSBX_PROP1 %u 2 7b2262223a327d\nSBX_PROP1 0 3 %s\n",
+                 session, session, signalled ? "7b2265786974223a7b227369676e616c223a31357d7d" : "7b2265786974223a7b22636f6465223a357d7d");
         assert(!strcmp(buffer, expected));
         /* The forked supervisor's session counter is its own. */
         property_session_id++;

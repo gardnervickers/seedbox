@@ -246,6 +246,8 @@ impl Property {
                 self.first_pass.as_ref().or(self.first_failure.as_ref())
             }
             (_, PropertyStatus::Violated) => self.first_failure.as_ref(),
+            // An unmet goal that was evaluated shows where it was false.
+            (_, PropertyStatus::Unmet) => self.first_failure.as_ref(),
             _ => self.first_pass.as_ref(),
         }
     }
@@ -427,10 +429,11 @@ impl Ledger {
                 });
             }
             Record::Lost { reason, count } => {
-                self.error(
-                    format!("{count} property records lost: {reason}"),
-                    Some(&origin),
-                );
+                let lost = match count {
+                    1 => "property record lost".to_string(),
+                    count => format!("{count} property records lost"),
+                };
+                self.error(format!("{lost}: {reason}"), Some(&origin));
             }
         }
     }

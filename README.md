@@ -52,8 +52,9 @@ the test and checks its results. Oracle exit code zero means pass; nonzero means
 fail. An execution that ends without an oracle exit has no completed test verdict.
 Applications and the oracle can also report **properties** through the
 [`seedbox-sdk`](crates/seedbox-sdk) crate: `always`, `sometimes`, `reachable`,
-`unreachable` and friends. Their assessment is reported beside the oracle verdict
-and never changes it; `seedbox get properties <sim-id>` lists each one.
+`unreachable` and friends. A violated property fails a run even when the oracle
+passes, and lost property evidence makes it incomplete; `seedbox get properties
+<sim-id>` lists each one.
 [evals/bank](evals/bank) is a small example with a planted bug.
 Set `memoryMiB` on a machine or the oracle to choose its RAM independently.
 Omission uses 1024 MiB; supported sizes are 64–3072 MiB on Apple Silicon and

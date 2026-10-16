@@ -340,10 +340,30 @@ impl Default for SimulationStatus {
 }
 
 impl SimulationStatus {
-    /// Derived rather than independently writable, so diagnostics cannot
-    /// accidentally replace an observed oracle verdict.
-    pub fn verdict(&self) -> TestVerdict {
+    /// What the oracle's exit alone says. Derived rather than independently
+    /// writable, so diagnostics cannot replace an observed oracle verdict.
+    pub fn oracle_verdict(&self) -> TestVerdict {
         TestVerdict::from_oracle(self.oracle_exit_code, self.phase)
+    }
+
+    /// The test verdict: the oracle's, except that a passing oracle fails
+    /// when a guest safety property was violated, and is incomplete when
+    /// property evidence was lost. Property results arrive with the final
+    /// report, so a passing oracle stays pending until completion.
+    pub fn verdict(&self) -> TestVerdict {
+        use seedbox_engine_protocol::property::AssessmentStatus;
+        let oracle = self.oracle_verdict();
+        if oracle != TestVerdict::Passed {
+            return oracle;
+        }
+        if self.phase != Phase::Completed {
+            return TestVerdict::Pending;
+        }
+        match self.properties.as_ref().map(|p| p.status) {
+            Some(AssessmentStatus::Violated) => TestVerdict::Failed,
+            Some(AssessmentStatus::Incomplete) => TestVerdict::Incomplete,
+            _ => TestVerdict::Passed,
+        }
     }
 }
 
@@ -409,7 +429,9 @@ mod tests {
         for (phase, code, verdict) in [
             (Phase::Running, None, "pending"),
             (Phase::Completed, None, "incomplete"),
-            (Phase::Running, Some(0), "passed"),
+            // A passing oracle waits for the final report's property results.
+            (Phase::Running, Some(0), "pending"),
+            (Phase::Completed, Some(0), "passed"),
             (Phase::Completed, Some(23), "failed"),
         ] {
             let status = SimulationStatus {
@@ -450,5 +472,53 @@ mod tests {
         );
         document["unknown"] = serde_json::json!(true);
         assert!(serde_json::from_value::<SimulationStatus>(document).is_err());
+    }
+
+    #[test]
+    fn property_results_qualify_only_a_passing_oracle_after_completion() {
+        use seedbox_engine_protocol::property::{AssessmentStatus, Ledger};
+        let assessment = |status| {
+            let mut assessment = Ledger::default().assessment();
+            assessment.status = status;
+            Some(assessment)
+        };
+        let status = |code, phase, properties| SimulationStatus {
+            oracle_exit_code: code,
+            phase,
+            properties,
+            ..SimulationStatus::default()
+        };
+        use AssessmentStatus::*;
+        use TestVerdict as V;
+        for (code, phase, properties, expected) in [
+            (Some(0), Phase::Completed, None, V::Passed),
+            (Some(0), Phase::Completed, assessment(Passed), V::Passed),
+            (Some(0), Phase::Completed, assessment(Violated), V::Failed),
+            (
+                Some(0),
+                Phase::Completed,
+                assessment(Incomplete),
+                V::Incomplete,
+            ),
+            (Some(0), Phase::Finalizing, assessment(Passed), V::Pending),
+            (Some(3), Phase::Completed, assessment(Passed), V::Failed),
+            (Some(3), Phase::Running, None, V::Failed),
+            (None, Phase::Completed, assessment(Violated), V::Incomplete),
+        ] {
+            let s = status(code, phase, properties);
+            assert_eq!(
+                s.verdict(),
+                expected,
+                "{code:?} {phase:?} {:?}",
+                s.properties
+            );
+            assert_eq!(s.oracle_verdict(), TestVerdict::from_oracle(code, phase));
+        }
+        // The serialized verdict is the qualified one.
+        let violated = status(Some(0), Phase::Completed, assessment(Violated));
+        assert_eq!(
+            serde_json::to_value(&violated).unwrap()["verdict"],
+            "failed"
+        );
     }
 }

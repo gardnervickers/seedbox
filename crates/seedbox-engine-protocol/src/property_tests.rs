@@ -123,6 +123,14 @@ fn unmet_goals_alone_pass_a_run() {
         json!({"declare": {"id": "a", "kind": "always"}}),
     ]);
     assert_eq!(l.assessment().status, AssessmentStatus::Passed);
+    // The unmet goal still shows where it was evaluated false.
+    let s = l
+        .assessment()
+        .properties
+        .into_iter()
+        .find(|p| p.id == "s")
+        .unwrap();
+    assert_eq!(s.example.unwrap().origin.seq, 1);
 }
 
 #[test]
@@ -221,6 +229,9 @@ fn lost_records_from_the_supervisor_are_evidence_errors() {
         l.errors[0].error,
         "2 property records lost: too many sessions"
     );
+    let lost = json!({"lost": {"reason": "record too large", "count": 1}});
+    l.apply(&frame(SUPERVISOR_SESSION, 2, lost), "n1", 0, 6);
+    assert_eq!(l.errors[1].error, "property record lost: record too large");
 }
 
 #[test]

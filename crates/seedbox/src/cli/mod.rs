@@ -35,9 +35,10 @@ use std::{
 const EXIT_CODES: &str = "\
 Exit status:
   0    PASS, or a replay/compare MATCH
-  1    FAIL, replay MISMATCH, or compare MISMATCH
+  1    FAIL (the oracle failed or a guest property was violated),
+       replay MISMATCH, or compare MISMATCH
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
-  3    INCOMPLETE (cancelled or otherwise incomplete)
+  3    INCOMPLETE (cancelled, otherwise incomplete, or property evidence lost)
        A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
   124  TIMEOUT";
 

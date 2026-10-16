@@ -308,7 +308,7 @@ mod tests {
         let failed = manager.describe(broken).unwrap();
         assert_eq!(failed.status.phase, Phase::Running);
         assert!(!failed.status.stop_requested);
-        assert_eq!(failed.status.verdict(), TestVerdict::Passed);
+        assert_eq!(failed.status.oracle_verdict(), TestVerdict::Passed);
         assert!(!manager
             .control_work()
             .unwrap()

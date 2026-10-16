@@ -12,7 +12,7 @@
 
 enum {
     PROPERTY_RECORD_BYTES = 4096,
-    PROPERTY_SESSIONS = 32,
+    PROPERTY_SESSIONS = 128,
     /* Prefix, two decimal fields, separators, hex payload and newline. */
     PROPERTY_FRAME_BYTES = 64 + 2 * PROPERTY_RECORD_BYTES,
 };

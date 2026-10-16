@@ -2477,6 +2477,20 @@ fn oracle_logs(frame: &mut Frame, app: &App, focus: &Focus, name: &str, area: Re
             format!("verdict {text} "),
             Style::new().fg(color),
         ));
+        // Say why a passing oracle's verdict changed.
+        if let Some(properties) = &resource.status.properties {
+            let reason = if properties.violated > 0 {
+                Some(format!("{} violated properties ", properties.violated))
+            } else if !properties.evidence_complete {
+                Some("property evidence lost ".into())
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                right.push(Span::styled("· ", Style::new().fg(DIM)));
+                right.push(Span::styled(reason, Style::new().fg(color)));
+            }
+        }
     }
     let b = Block::bordered()
         .border_type(BorderType::Rounded)

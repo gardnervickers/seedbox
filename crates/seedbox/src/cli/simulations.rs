@@ -4,7 +4,7 @@ use super::{daemon, defaults, output, ComposeArg, MAC};
 use futures_util::StreamExt;
 use seedbox_api::{
     ExecutionTermination, InputSource, Phase, Simulation, SimulationDocument, SimulationId,
-    SimulationSpec, SubmitRequest,
+    SimulationSpec, SubmitRequest, TestVerdict,
 };
 use seedbox_application::{execution::CancellationToken, Error, Result};
 use seedbox_client::Client;
@@ -856,10 +856,12 @@ pub(super) fn mutate_control(
 }
 
 fn status_outcome(status: &seedbox_api::SimulationStatus) -> (&'static str, u8) {
-    match status.oracle_exit_code {
-        Some(0) => ("PASS", 0),
-        Some(_) => ("FAIL", 1),
-        None => match status.termination {
+    match status.verdict() {
+        TestVerdict::Passed => ("PASS", 0),
+        TestVerdict::Failed => ("FAIL", 1),
+        // A passing oracle whose property evidence was lost.
+        _ if status.oracle_exit_code.is_some() => ("INCOMPLETE", 3),
+        _ => match status.termination {
             Some(ExecutionTermination::Error { .. }) => ("ERROR", 2),
             Some(
                 ExecutionTermination::SimulatedTimeLimit
@@ -905,8 +907,19 @@ pub(super) fn property_fields(assessment: &seedbox_api::PropertyAssessment) {
             output::field("violated", &property.id);
         }
     }
+    // Repeated errors print once with their count, in first-seen order.
+    let mut errors: Vec<(&str, usize)> = Vec::new();
     for error in &assessment.errors {
-        output::field("evidence", &error.error);
+        match errors.iter_mut().find(|(text, _)| *text == error.error) {
+            Some((_, count)) => *count += 1,
+            None => errors.push((&error.error, 1)),
+        }
+    }
+    for (error, count) in errors {
+        match count {
+            1 => output::field("evidence", error),
+            count => output::field("evidence", format!("{error} ({count} times)")),
+        }
     }
     if assessment.error_count > assessment.errors.len() as u64 {
         output::field(
