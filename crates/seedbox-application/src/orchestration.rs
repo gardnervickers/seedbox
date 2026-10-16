@@ -283,6 +283,10 @@ impl Orchestrator {
         write_record(&directory, &record)?;
         let output = directory.join("output");
         let execution = (|| -> Result<ExecutionReport> {
+            executor.preflight_resume(
+                self.resume_checkpoint.as_deref(),
+                record.identity.configuration.control.as_ref(),
+            )?;
             let replay_interventions = record
                 .identity
                 .interventions

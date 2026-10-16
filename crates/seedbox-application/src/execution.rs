@@ -87,6 +87,15 @@ pub trait ExecutionBackend: Send + Sync {
     fn validate_retained(&self, _inputs: &PreparedInputs) -> Result<()> {
         Ok(())
     }
+    /// Reject an unsupported resume from bounded metadata before any retained
+    /// execution inputs are materialized. Legacy adapters keep their own checks.
+    fn preflight_resume(
+        &self,
+        _checkpoint: Option<&Path>,
+        _control: Option<&crate::config::Control>,
+    ) -> Result<()> {
+        Ok(())
+    }
     /// The retained inputs execution reads; only these are copied into each
     /// attempt and reach `ExecutionRequest::artifacts`. Default: all of them.
     fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {

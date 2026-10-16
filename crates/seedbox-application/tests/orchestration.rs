@@ -2561,3 +2561,50 @@ fn interactive_history_is_sealed_as_portable_overrides_and_replays_without_journ
     assert!(missing.record.error.is_some());
     assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn resume_preflight_runs_before_interventions_or_execution_inputs_are_materialized() {
+    struct Refuse<'a>(&'a Backend);
+    impl ExecutionBackend for Refuse<'_> {
+        fn profile(&self) -> ExecutionProfile {
+            self.0.profile()
+        }
+        fn preflight_resume(
+            &self,
+            checkpoint: Option<&std::path::Path>,
+            _: Option<&config::Control>,
+        ) -> Result<()> {
+            assert_eq!(
+                checkpoint.unwrap(),
+                std::path::Path::new("unsupported-checkpoint")
+            );
+            Err(Error::Setup("resume refused by backend policy".into()))
+        }
+        fn runtime_inputs<'a>(&self, _: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
+            panic!("input selection must not follow a refused resume")
+        }
+        fn execute(&self, _: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+            panic!("refused resume must not execute")
+        }
+    }
+    let fixture = Fixture::new();
+    let run = fixture
+        .orchestrator
+        .clone()
+        .with_checkpoint("unsupported-checkpoint".into())
+        .run(
+            &fixture.simulation,
+            RunOptions::default(),
+            &fixture.preparer,
+            &Refuse(&fixture.backend),
+        )
+        .unwrap();
+    assert!(run
+        .record
+        .error
+        .unwrap()
+        .contains("resume refused by backend policy"));
+    assert!(!run.directory.join("inputs").exists());
+    assert!(!run.directory.join("output").exists());
+    assert!(!run.directory.join("interventions.json").exists());
+}

@@ -16,6 +16,7 @@ pub use executor::{DriverBackend, DriverExecutor};
 mod controller;
 mod native;
 mod policy;
+pub(crate) mod preflight;
 pub(crate) mod retained;
 pub use retained::retain_prepared;
 pub use retained::runtime_digest;

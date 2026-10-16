@@ -146,6 +146,15 @@ impl ExecutionBackend for DriverExecutor {
         super::retained::Closure::from_inputs(inputs)?;
         Ok(())
     }
+    fn preflight_resume(
+        &self,
+        checkpoint: Option<&std::path::Path>,
+        control: Option<&crate::config::Control>,
+    ) -> Result<()> {
+        checkpoint.map_or(Ok(()), |path| {
+            super::preflight::restore_file(path, control.map(|control| control.service.as_str()))
+        })
+    }
     fn runtime_inputs<'a>(
         &self,
         inputs: &'a PreparedInputs,

@@ -154,6 +154,17 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
         _ => {}
     }
 
+    if profile.semantic_parameters.launch() == crate::engine::ExecutableKind::DriverWorld {
+        if let Start::Checkpoint { manifest, .. } = &definition.start {
+            crate::driver_world::preflight::restore_manifest(
+                manifest,
+                definition
+                    .simulator
+                    .oracle_control
+                    .then(|| definition.oracle_name()),
+            )?;
+        }
+    }
     profile.engine = digest(&definition.runtime.engine)?;
     if definition.oracle.memory_bytes == 0
         || !definition.oracle.memory_bytes.is_multiple_of(1024 * 1024)
@@ -335,6 +346,17 @@ pub fn materialize_start(
     let Start::Checkpoint { manifest, assets } = &definition.start else {
         return Ok(None);
     };
+    if manifest.get("contract").and_then(|value| value.as_str())
+        == Some(seedbox_engine_protocol::driver_world::CONTRACT)
+    {
+        crate::driver_world::preflight::restore_manifest(
+            manifest,
+            definition
+                .simulator
+                .oracle_control
+                .then(|| definition.oracle_name()),
+        )?;
+    }
     fn validate_references(value: &serde_json::Value) -> Result<()> {
         match value {
             serde_json::Value::Object(values) => {
@@ -671,6 +693,65 @@ mod tests {
         let definition = resolve(&configuration, &inputs, 1, Vec::new()).unwrap();
         (temporary, store, definition, boot)
     }
+    #[test]
+    fn unsupported_driver_resume_refuses_before_any_start_asset_materialization() {
+        let (root, store, mut definition, _) = fixture();
+        let policy = seedbox_engine_protocol::driver_world::BackendPolicy {
+            timer_jitter_ns: u64::MAX,
+            ..Default::default()
+        };
+        let manifest = crate::driver_world::preflight::tests::manifest(Some(policy));
+        let expected = crate::driver_world::preflight::restore_manifest(&manifest, None)
+            .unwrap_err()
+            .to_string();
+        definition.start = Start::Checkpoint {
+            manifest,
+            assets: BTreeMap::from([("body".into(), Asset(format!("sha256:{}", "11".repeat(32))))]),
+        };
+        let mut semantic = crate::execution::SemanticParameters::new(1024);
+        semantic.engine = Some(crate::driver_world::DriverExecutor::descriptor(
+            crate::driver_world::DriverBackend::Pv,
+            "x86_64",
+        ));
+        let profile = ExecutionProfile {
+            backend: crate::execution::Backend::Other("driver-pv".into()),
+            engine: ContentDigest::of(b"engine"),
+            witness_mode: crate::execution::WitnessMode::Exits,
+            semantic_parameters: semantic,
+        };
+        definition.runtime.execution = serde_json::to_value(profile).unwrap();
+        definition.architecture = Architecture::X86_64;
+        assert_eq!(
+            prepared(&definition, &store).unwrap_err().to_string(),
+            expected
+        );
+        let output = root.path().join("not-materialized");
+        assert_eq!(
+            materialize_start(&definition, &store, &output)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn supported_non_controller_driver_resume_metadata_still_materializes() {
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            return;
+        }
+        let (root, store, mut definition, body) = fixture();
+        definition.start = Start::Checkpoint {
+            manifest: crate::driver_world::preflight::tests::manifest(None),
+            assets: BTreeMap::from([("body".into(), asset(&body))]),
+        };
+        let output = root.path().join("allowed");
+        assert!(materialize_start(&definition, &store, &output)
+            .unwrap()
+            .unwrap()
+            .is_file());
+    }
+
     #[test]
     fn resolved_launch_is_identical_until_inline_fields_change() {
         let (_temporary, store, mut definition, original) = fixture();
