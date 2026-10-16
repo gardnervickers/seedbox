@@ -444,10 +444,14 @@ struct FaultProfileArg {
 }
 
 #[derive(Args)]
-struct ExecutionArgs {
+pub(super) struct ExecutionArgs {
     /// Stop after this much active host time, excluding explicit pauses [default: unlimited].
     #[arg(long, value_parser = wall_time)]
-    wall_time: Option<u64>,
+    pub(super) wall_time: Option<u64>,
+    /// Capture a checkpoint named anchor-KEY when the anchor input KEY is
+    /// reached; repeatable. Captures never change results (Apple Silicon only).
+    #[arg(long = "capture-anchor", value_name = "KEY")]
+    pub(super) capture_anchors: Vec<String>,
 }
 
 fn wall_time(value: &str) -> std::result::Result<u64, String> {
@@ -697,15 +701,7 @@ fn run(cli: Cli) -> Result<u8> {
             execution,
         } => {
             let profile = faults::profile(faults.fault_profile.as_deref())?;
-            simulations::run(
-                &compose,
-                seed,
-                paused,
-                detach,
-                json,
-                profile,
-                execution.wall_time,
-            )
+            simulations::run(&compose, seed, paused, detach, json, profile, &execution)
         }
         Command::Branch {
             id,
@@ -713,13 +709,13 @@ fn run(cli: Cli) -> Result<u8> {
             detach,
             json,
             execution,
-        } => simulations::branch(&id, checkpoint, detach, json, execution.wall_time),
+        } => simulations::branch(&id, checkpoint, detach, json, &execution),
         Command::Rerun {
             id,
             detach,
             json,
             execution,
-        } => simulations::rerun(&id, detach, json, execution.wall_time),
+        } => simulations::rerun(&id, detach, json, &execution),
         Command::Compare {
             baseline,
             simulation,
@@ -783,6 +779,7 @@ fn run(cli: Cli) -> Result<u8> {
             seed,
             count,
             seedbox_api::ExecutionOptions {
+                capture_anchors: execution.capture_anchors.clone(),
                 start_paused: paused,
                 wall_time_ns: execution.wall_time,
             },

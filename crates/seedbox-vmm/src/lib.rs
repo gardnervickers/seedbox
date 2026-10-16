@@ -1344,6 +1344,7 @@ fn report(
             fault_error,
             input_admissions: world.input_admissions().to_vec(),
             input_rejections: world.input_rejections().to_vec(),
+            input_branches: world.input_branches().to_vec(),
             control_history,
             control_latency_ns: world.control().latency,
             triggers,

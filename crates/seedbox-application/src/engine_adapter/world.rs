@@ -271,9 +271,11 @@ pub fn validate_input_program(
     }
     let faults = configured_faults(configuration)?;
     for input in program {
-        faults
-            .validate_action_shape(&input.action)
-            .map_err(|error| Error::Setup(format!("program {}: {error}", input.key)))?;
+        if let Some(action) = input.action.fault() {
+            faults
+                .validate_action_shape(action)
+                .map_err(|error| Error::Setup(format!("program {}: {error}", input.key)))?;
+        }
     }
     Ok(())
 }
@@ -341,7 +343,8 @@ mod program_tests {
                 handle: "slow".into(),
                 machine: "db".into(),
                 speed_hz: 1_000_000_000,
-            },
+            }
+            .into(),
         };
         let heal = TimedInput {
             timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
@@ -349,7 +352,8 @@ mod program_tests {
             at_ns: 10,
             action: Action::Heal {
                 handle: "slow".into(),
-            },
+            }
+            .into(),
         };
         let entries = [slow("first", 10), heal.clone(), slow("again", 20)];
         validate_input_program(&config, &entries).unwrap();
@@ -368,7 +372,8 @@ mod program_tests {
         let mut unknown = slow("unknown", 1);
         unknown.action = Action::Stop {
             machine: "missing".into(),
-        };
+        }
+        .into();
         assert!(validate_input_program(&config, &[unknown]).is_err());
         config.control = Some(crate::config::Control {
             service: "db".into(),

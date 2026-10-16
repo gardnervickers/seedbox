@@ -518,6 +518,13 @@ pub struct World<M: WorldMachine> {
     pub(crate) boundaries: u64,
     /// Reduced property evidence, in commit order.
     pub(crate) properties: seedbox_engine_protocol::property::Ledger,
+    /// Anchors to stop at for a capture. A runtime option, never semantic.
+    pub(crate) anchor_captures: std::collections::BTreeSet<String>,
+    /// The anchor the last segment stopped at, for its owner to capture.
+    pub(crate) captured_anchor: Option<String>,
+    /// The last segment stopped at an anchor: the next resumes that
+    /// boundary's remaining inputs instead of reentering a host boundary.
+    pub(crate) resume_after_anchor: bool,
 }
 
 impl<M: WorldMachine> World<M> {
@@ -572,6 +579,9 @@ impl<M: WorldMachine> World<M> {
             slices: 0,
             boundaries: 0,
             properties: Default::default(),
+            anchor_captures: Default::default(),
+            captured_anchor: None,
+            resume_after_anchor: false,
         };
         world.validate()?;
         Ok(world)
@@ -601,6 +611,9 @@ impl<M: WorldMachine> World<M> {
     pub fn input_admissions(&self) -> &[crate::input_program::InputAdmission] {
         self.input_program.admissions()
     }
+    pub fn input_branches(&self) -> &[crate::input_program::BranchReceipt] {
+        self.input_program.branches()
+    }
 
     /// Attach a runtime-only sink; observations publish after a round commits.
     pub fn with_observations(
@@ -629,6 +642,21 @@ impl<M: WorldMachine> World<M> {
     pub fn properties(&self) -> &seedbox_engine_protocol::property::Ledger {
         &self.properties
     }
+    /// Stop at these anchors so the owner can capture checkpoints there.
+    /// Captures never change results; a cold run takes the same path.
+    pub fn set_anchor_captures(&mut self, keys: impl IntoIterator<Item = String>) {
+        self.anchor_captures = keys.into_iter().collect();
+    }
+    /// The anchor a `Checkpoint` outcome stopped at, if it was an anchor.
+    pub fn take_captured_anchor(&mut self) -> Option<String> {
+        self.captured_anchor.take()
+    }
+    pub fn run_seed(&self) -> u64 {
+        self.run_seed
+    }
+    pub fn branch_identity(&self) -> Option<&str> {
+        self.branch_identity.as_deref()
+    }
     pub fn boot_inputs(&self) -> &[M::Boot] {
         &self.boot
     }
@@ -649,6 +677,10 @@ impl<M: WorldMachine> World<M> {
     }
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+    /// Completed host boundaries, the index a checkpoint position records.
+    pub fn boundaries(&self) -> u64 {
+        self.boundaries
     }
     pub fn slices(&self) -> u64 {
         self.slices
@@ -1422,6 +1454,8 @@ pub struct WorldSnapshot<M: WorldMachine> {
     paused_ingress: Vec<u64>,
     #[serde(default)]
     properties: seedbox_engine_protocol::property::Ledger,
+    #[serde(default)]
+    resume_after_anchor: bool,
 }
 
 impl<M: WorldMachine> WorldSnapshot<M> {
@@ -1481,6 +1515,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             incarnations: world.incarnations.clone(),
             paused_ingress: world.paused_ingress.clone(),
             properties: world.properties.clone(),
+            resume_after_anchor: world.resume_after_anchor,
         })
     }
 
@@ -1604,6 +1639,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         world.slices = self.slices;
         world.boundaries = self.boundaries;
         world.properties = self.properties.clone();
+        world.resume_after_anchor = self.resume_after_anchor;
         if self.boot_snapshot && self.control.triggers.records.is_empty() {
             let names: Vec<_> = world.machines.iter().map(|m| m.name.clone()).collect();
             world.input_program = Default::default();

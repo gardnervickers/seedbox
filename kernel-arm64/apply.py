@@ -186,6 +186,43 @@ def changes(root, application=False):
             s = body(s, name, "\treturn 0; /* no host RNDR or firmware RNG */")
         return s
     edit("arch/arm64/include/asm/archrandom.h", rng)
+    # Branch entropy (as kernel/apply.py on x86). A reseed input at a
+    # simulated time reaches a stopped guest without its cooperation: the VMM
+    # writes entropy into the PV page and bumps a generation. The next random
+    # output, batched draw or tick mixes it into the input pool and reseeds.
+    def random(s):
+        s = replace(s, "#include <linux/random.h>\n",
+                    "#include <linux/random.h>\n#include <asm/seedbox.h>\n")
+        s = replace(s,
+            "static void crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n",
+            "static void __crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n"
+            "\t\t\t      u8 *random_data, size_t random_data_len);\n\n"
+            "static void crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n"
+            "\t\t\t    u8 *random_data, size_t random_data_len)\n{\n"
+            "\tseedbox_take_entropy();\n"
+            "\t__crng_make_state(chacha_state, random_data, random_data_len);\n}\n\n"
+            "static void __crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n")
+        s, n = re.subn(r"\n(\tnext_gen = READ_ONCE\(base_crng\.generation\);[ \t]*\\\n)",
+                       lambda m: "\n\tseedbox_take_entropy();\t\t\t\t\t\t\t\\\n" + m.group(1), s)
+        if n != 1:
+            raise ValueError(f"expected one batched generation check, found {n}")
+        return s + (
+            "\nvoid seedbox_take_entropy(void)\n{\n"
+            "\tstatic u64 seen;\n\tunsigned long flags;\n\tu8 entropy[32];\n\tu64 gen;\n\n"
+            "\tif (likely(seedbox_entropy_gen() == seen))\n\t\treturn;\n"
+            "\t/* No interrupt may draw from the old key mid-reseed. */\n"
+            "\tlocal_irq_save(flags);\n"
+            "\tgen = seedbox_entropy_gen();\n"
+            "\tif (gen != seen) {\n"
+            "\t\tseedbox_read_entropy(entropy);\n"
+            "\t\tmix_pool_bytes(entropy, sizeof(entropy));\n"
+            "\t\tmemzero_explicit(entropy, sizeof(entropy));\n"
+            "\t\t/* Before the CRNG is ready, mixing is enough. */\n"
+            "\t\tif (crng_ready())\n\t\t\tcrng_reseed(NULL);\n"
+            "\t\tseen = gen;\n"
+            "\t}\n"
+            "\tlocal_irq_restore(flags);\n}\n")
+    edit("drivers/char/random.c", random)
     for name in ["seedbox.c", "seedbox.h"]:
         target = "arch/arm64/" + ("kernel/" if name.endswith(".c") else "include/asm/") + name
         if (root / target).exists(): raise ValueError(f"already patched: {target}")

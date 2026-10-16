@@ -75,6 +75,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
         let mut seed = None;
         let mut host_control = None;
         let mut start_paused = false;
+        let mut capture_anchors = Vec::new();
         let mut observations = None;
         let mut interventions = None;
         let mut resume_checkpoint = None;
@@ -137,6 +138,11 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
                     ));
                 }
                 "--start-paused" => start_paused = true,
+                "--capture-anchor" => capture_anchors.push(
+                    args.next()
+                        .and_then(|key| key.to_str().map(str::to_owned))
+                        .ok_or("--capture-anchor needs a key")?,
+                ),
                 "--digest" => full_state = true,
                 "--stream-console" => {}
                 "--console-limit" => {
@@ -171,6 +177,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
             observations,
             console_limit,
             machine_workers,
+            capture_anchors,
         };
         let report = seedbox_arm64::application::world::run(&options)?;
         println!(

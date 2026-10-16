@@ -886,6 +886,57 @@ impl Catalogue {
         Ok((control, true))
     }
 
+    /// Register a checkpoint the engine captured at a requested anchor, as
+    /// the captured checkpoint receipt an interactive capture leaves.
+    pub fn record_anchor_checkpoint(
+        &mut self,
+        id: &SimulationId,
+        name: &str,
+        position: seedbox_engine_protocol::host_control::BoundaryPosition,
+    ) -> Result<()> {
+        if self.storage_failed {
+            return Err(Error::StorageFailed);
+        }
+        let mut entry = self
+            .entries
+            .get(id)
+            .ok_or_else(|| Error::NotFound(id.clone()))?
+            .clone();
+        if entry.controls.contains_key(name) {
+            return Ok(());
+        }
+        let checkpoint = seedbox_engine_protocol::host_control::CheckpointStatus {
+            request_id: name.to_owned(),
+            position,
+            state: seedbox_engine_protocol::host_control::CheckpointState::Captured,
+        };
+        let receipt = ControlReceipt {
+            request: seedbox_api::ControlRequest {
+                request_id: name.to_owned(),
+                command: seedbox_api::ControlCommand::Checkpoint,
+            },
+            revision: 1,
+            state: ControlState::Acknowledged {
+                status: seedbox_api::PlaybackStatus {
+                    position,
+                    rate: Default::default(),
+                    achieved_rate: None,
+                    stepping: false,
+                    terminal: false,
+                    application_ready: true,
+                },
+                error: None,
+                intervention: None,
+                detail: Some("captured at an anchor input".into()),
+                checkpoint: Some(checkpoint),
+            },
+        };
+        entry.controls.insert(name.to_owned(), receipt);
+        self.persist(&entry)?;
+        self.entries.insert(id.clone(), entry);
+        Ok(())
+    }
+
     pub fn acknowledge_control(
         &mut self,
         id: &SimulationId,

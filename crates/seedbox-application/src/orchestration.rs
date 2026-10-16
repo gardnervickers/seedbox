@@ -21,6 +21,8 @@ pub struct RunOptions {
     /// An explicit override wins over the resolved seed.
     pub seed: Option<u64>,
     pub cancellation: CancellationToken,
+    /// Anchor inputs to capture checkpoints at; never changes results.
+    pub capture_anchors: Vec<String>,
 }
 
 pub enum RunProgress<'a> {
@@ -330,6 +332,7 @@ impl Orchestrator {
                 wall_time_ns: options.wall_time_ns.unwrap_or(u64::MAX),
             };
             let mut report = executor.execute(ExecutionRequest {
+                capture_anchors: &options.capture_anchors,
                 start_paused: self.start_paused,
                 resume_checkpoint: self.resume_checkpoint.as_deref(),
                 intervention_history: Some(&directory.join("interventions.json")),

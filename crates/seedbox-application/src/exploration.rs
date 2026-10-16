@@ -262,6 +262,7 @@ impl Orchestrator {
                                     .run_prepared(
                                         simulation,
                                         RunOptions {
+                                            capture_anchors: Default::default(),
                                             wall_time_ns: None,
                                             seed: Some(seed),
                                             cancellation: cancellation.clone(),

@@ -20,24 +20,44 @@ struct CapturedProgram {
     /// Generated starts skipped so far; carried through projection unchanged.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     skipped: std::collections::BTreeSet<String>,
+    /// Consumed anchors and reseeds, which allocate no fault IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    branches: Vec<seedbox_engine_protocol::input_program::BranchReceipt>,
 }
 impl CapturedProgram {
     fn validate(&self) -> Result<()> {
         validate_program(&self.inputs, u64::MAX).map_err(Error::Integrity)?;
         if self.failed
             || self.next > self.inputs.len()
-            || self.next != self.admissions.len() + self.rejections.len()
+            || self.next != self.admissions.len() + self.rejections.len() + self.branches.len()
         {
             return Err(Error::Integrity(
                 "checkpoint has an invalid consumed input cursor".into(),
             ));
         }
-        let (mut admitted, mut rejected, mut previous) = (
+        let (mut admitted, mut rejected, mut branched, mut previous) = (
             self.admissions.iter().peekable(),
             self.rejections.iter().peekable(),
+            self.branches.iter(),
             0,
         );
         for input in &self.inputs[..self.next] {
+            if let seedbox_engine_protocol::input_program::InputAction::Branch(action) =
+                &input.action
+            {
+                let receipt = branched.next().ok_or_else(|| {
+                    Error::Integrity("checkpoint consumed branch input lacks its receipt".into())
+                })?;
+                if receipt.key != input.key
+                    || receipt.at_ns != input.at_ns
+                    || &receipt.action != action
+                {
+                    return Err(Error::Integrity(
+                        "checkpoint branch receipt disagrees with consumed input".into(),
+                    ));
+                }
+                continue;
+            }
             if rejected.peek().is_some_and(|r| r.key == input.key) {
                 let row = rejected.next().expect("peeked");
                 if row.at_ns != input.at_ns || row.reason.is_empty() {
@@ -51,7 +71,7 @@ impl CapturedProgram {
                 })?;
                 if row.key != input.key
                     || row.plan.at_ns != input.at_ns
-                    || row.plan.action != input.action
+                    || input.action.fault() != Some(&row.plan.action)
                     || row.plan.id <= previous
                     || Some(row.plan.deadline_ns) != input.at_ns.checked_add(input.timeout_ns)
                 {
@@ -110,7 +130,7 @@ pub fn project(start: &mut Start, overrides: &[Override], frozen: &History) -> R
             .ok_or_else(|| {
                 Error::Integrity("frozen checkpoint input lacks admission evidence".into())
             })?;
-        if input.action != entry.plan.action
+        if input.action.fault() != Some(&entry.plan.action)
             || input.at_ns != entry.plan.at_ns
             || input.at_ns.checked_add(input.timeout_ns) != Some(entry.plan.deadline_ns)
             || admission.plan != entry.plan
@@ -160,7 +180,8 @@ mod tests {
             at_ns,
             action: Action::PauseProcess {
                 machine: "oracle".into(),
-            },
+            }
+            .into(),
             timeout_ns: 100,
         }
     }
@@ -169,7 +190,7 @@ mod tests {
             id,
             at_ns: input.at_ns,
             deadline_ns: input.at_ns + input.timeout_ns,
-            action: input.action.clone(),
+            action: input.action.fault().expect("a fault input").clone(),
         }
     }
     fn fixture() -> (Start, Vec<Override>, History, Faults) {
@@ -393,19 +414,19 @@ mod same_time_tests {
         let authored = TimedInput {
             key: "authored".into(),
             at_ns: 10,
-            action: action.clone(),
+            action: action.clone().into(),
             timeout_ns: 100,
         };
         let host = TimedInput {
             key: "host".into(),
             at_ns: 10,
-            action: action.clone(),
+            action: action.clone().into(),
             timeout_ns: 100,
         };
         let pending = TimedInput {
             key: "pending".into(),
             at_ns: 20,
-            action: action.clone(),
+            action: action.clone().into(),
             timeout_ns: 100,
         };
         let mut program =

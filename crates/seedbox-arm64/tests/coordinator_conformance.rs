@@ -907,6 +907,7 @@ fn export_transfer(fixture: &Fixture) -> worker::ExportedTransfer {
             1,
             predecessor,
             worker::Operation::CrashExport {
+                branch_identity: None,
                 run_seed: 1009,
                 full_state: false,
                 transfer: descriptor.clone(),

@@ -188,6 +188,10 @@ pub struct ExecutionOptions {
     pub start_paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_time_ns: Option<u64>,
+    /// Anchor inputs to capture checkpoints at, as `anchor-<key>`. Captures
+    /// never change results: a cold run takes the same path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture_anchors: Vec<String>,
 }
 
 /// Request identity is scoped to this catalogue and retained for as long as its

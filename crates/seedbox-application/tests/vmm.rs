@@ -48,6 +48,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
     };
     let artifacts = BTreeMap::from([(hash, "/verified/retained-input".into())]);
     let request = ExecutionRequest {
+        capture_anchors: Default::default(),
         program: &[],
         intervention_history: None,
         start_paused: false,
@@ -1510,7 +1511,8 @@ fn unavailable_at_admission_requires_prior_crash_without_intervening_reboot() {
                 at_ns: crash_at.as_u64().unwrap(),
                 action: seedbox_control::Action::Crash {
                     machine: "server-machine".into(),
-                },
+                }
+                .into(),
             }];
             let mut scheduled_raw = raw.clone();
             scheduled_raw["control_history"] = json!([scheduled_raw["control_history"][1].clone()]);
@@ -2206,7 +2208,8 @@ fn reports_correlate_retained_interventions_with_guest_faults_and_oracle_exit() 
             at_ns: 60_000_000,
             action: seedbox_control::Action::Stop {
                 machine: "server-machine".into(),
-            },
+            }
+            .into(),
         });
         let remaining_request = ExecutionRequest {
             program: &remaining,

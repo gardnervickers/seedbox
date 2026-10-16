@@ -535,6 +535,9 @@ impl ExecutionService {
                         },
                     }
                 };
+                if let Err(error) = self.register_anchor_captures(&id) {
+                    eprintln!("simulation {id}: anchor captures: {error}");
+                }
                 self.manager.update(&id, |s| {
                     merge_report_observation(
                         &mut s.status,
@@ -779,6 +782,7 @@ impl ExecutionService {
             .run_prepared_observed(
                 &configuration,
                 RunOptions {
+                    capture_anchors: options.capture_anchors.clone(),
                     seed: spec.seed,
                     wall_time_ns: options.wall_time_ns,
                     cancellation: cancellation.clone(),
@@ -820,6 +824,60 @@ impl ExecutionService {
 }
 
 impl ExecutionService {
+    /// Register each `checkpoint-anchor-<key>.json` the engine published, with
+    /// the intervention history frozen at its position, so it can be branched
+    /// from like an interactive capture.
+    fn register_anchor_captures(&self, id: &SimulationId) -> seedbox_application::Result<()> {
+        let inputs: RetainedInputs = serde_json::from_reader(fs::File::open(
+            self.root.join("inputs").join(format!("{id}.json")),
+        )?)?;
+        let Some(attempt) = inputs.attempt else {
+            return Ok(());
+        };
+        let output = attempt
+            .join("output")
+            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR);
+        let Ok(entries) = fs::read_dir(&output) else {
+            return Ok(());
+        };
+        let history = seedbox_artifacts::interventions::read(&attempt.join("interventions.json"))?;
+        for entry in entries {
+            let file_name = entry?.file_name();
+            let Some(name) = file_name
+                .to_str()
+                .and_then(|n| n.strip_prefix("checkpoint-"))
+                .and_then(|n| n.strip_suffix(".json"))
+                .filter(|n| n.starts_with("anchor-") && !n.ends_with("-interventions"))
+            else {
+                continue;
+            };
+            #[derive(serde::Deserialize)]
+            struct Saved {
+                state: State,
+            }
+            #[derive(serde::Deserialize)]
+            struct State {
+                position: seedbox_engine_protocol::host_control::BoundaryPosition,
+            }
+            let saved: Saved = serde_json::from_reader(fs::File::open(output.join(&file_name))?)?;
+            let position = saved.state.position;
+            let mut frozen = history.clone();
+            frozen
+                .entries
+                .retain(|entry| entry.position.boundary_index <= position.boundary_index);
+            fs::write(
+                attempt.join(format!("checkpoint-{name}-interventions.json")),
+                frozen
+                    .encode()
+                    .map_err(seedbox_application::Error::Integrity)?,
+            )?;
+            self.manager
+                .record_anchor_checkpoint(id, name, position)
+                .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     fn retained_history(
         &self,
         retained: &RetainedInputs,

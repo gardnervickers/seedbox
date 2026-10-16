@@ -115,6 +115,9 @@ impl WorkerLaunch {
             if let Some(path) = observations {
                 command.arg("--observations").arg(path);
             }
+            for key in request.capture_anchors {
+                command.arg("--capture-anchor").arg(key);
+            }
             // The ARM world keeps its own flag contract.
             command
                 .arg("--config")
@@ -131,6 +134,11 @@ impl WorkerLaunch {
                 command.arg("--digest");
             }
         } else {
+            if !request.capture_anchors.is_empty() {
+                return Err(Error::Setup(
+                    "anchor captures are supported on the Apple Silicon backend only".into(),
+                ));
+            }
             let mut worker = WorkerRequest::new(world, request.seed, out);
             worker.observations = observations.map(std::path::Path::to_owned);
             worker.interventions = request.replay_interventions.cloned();
@@ -462,6 +470,7 @@ mod tests {
                 })).unwrap();
             let checkpoint = directory.path().join("checkpoint.json");
             let request = ExecutionRequest {
+                capture_anchors: Default::default(),
                 program: &[],
                 intervention_history: None,
                 start_paused: true,

@@ -508,6 +508,15 @@ impl WorldMachine for ArmMachine {
         Ok(())
     }
     fn succeed(&mut self, old: &mut Self, at: u64, seed: u64) -> Result<Option<u64>> {
+        self.succeed_branch(old, at, seed, None)
+    }
+    fn succeed_branch(
+        &mut self,
+        old: &mut Self,
+        at: u64,
+        seed: u64,
+        identity: Option<&str>,
+    ) -> Result<Option<u64>> {
         let mut guard = None;
         let mut result: Result<Option<u64>> = (|| {
             self.worker.ensure_active()?;
@@ -544,6 +553,7 @@ impl WorldMachine for ArmMachine {
                 transfer,
             } = old.worker.call(Operation::CrashExport {
                 run_seed: seed,
+                branch_identity: identity.map(str::to_owned),
                 full_state: self.full_state,
                 transfer: descriptor.clone(),
             })?
@@ -619,6 +629,17 @@ impl WorldMachine for ArmMachine {
             seed,
             domain: domain.into(),
         })
+    }
+    /// A branch's timer stream, as `Rng::branch` keys it on x86.
+    fn seed_timer_branch(&mut self, seed: u64, identity: Option<&str>, domain: &str) -> Result<()> {
+        match identity {
+            Some(identity) => self.seed_timer(seed, &format!("checkpoint/{identity}/{domain}")),
+            None => self.seed_timer(seed, domain),
+        }
+    }
+    fn reseed_guest(&mut self, entropy: [u32; 8]) -> Result<()> {
+        self.worker.ensure_active()?;
+        self.ready(Operation::ReseedGuest { entropy })
     }
     fn seed_progress_jitter(&mut self, seed: u64, domain: &str) -> Result<()> {
         self.ready(Operation::SeedProgressJitter {

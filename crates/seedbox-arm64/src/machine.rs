@@ -21,6 +21,9 @@ use seedbox_engine_core::cpu_charge::{throttled_ns, SYSCALL_NS};
 const PROGRESS_NS_OFFSET: usize = 56;
 const PROGRESS_JITTER_NS_OFFSET: usize = 64;
 const PROGRESS_JITTER_SEED_OFFSET: usize = 72;
+/// Branch entropy: a generation, then 32 bytes (kernel-arm64/seedbox.c).
+const ENTROPY_GEN_OFFSET: usize = 80;
+const ENTROPY_OFFSET: usize = 88;
 
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -262,6 +265,20 @@ impl<B: Backend> Machine<B> {
         unsafe { self.page.set_word(PROGRESS_JITTER_SEED_OFFSET, seed) }
     }
 
+    /// Give a stopped guest new entropy for a branch. The kernel mixes it
+    /// into its pool and reseeds at its next random draw or tick; the page is
+    /// part of snapshots, so a restored capture keeps the pending entropy.
+    pub fn reseed_guest(&mut self, entropy: [u32; 8]) -> Result<()> {
+        for (i, pair) in entropy.as_chunks::<2>().0.iter().enumerate() {
+            let word = u64::from(pair[0]) | (u64::from(pair[1]) << 32);
+            unsafe { self.page.set_word(ENTROPY_OFFSET + 8 * i, word)? };
+        }
+        let generation = unsafe { self.page.word(ENTROPY_GEN_OFFSET)? }
+            .checked_add(1)
+            .ok_or("entropy generation overflow")?;
+        unsafe { self.page.set_word(ENTROPY_GEN_OFFSET, generation) }
+    }
+
     pub fn seed_timer(&mut self, seed: u64, domain: &str) -> Result<()> {
         if domain.is_empty() {
             return Err("empty application timer domain".into());
@@ -496,9 +513,12 @@ impl<B: Backend> Machine<B> {
         })
     }
 
+    /// The next incarnation's disk. A branch keys unflushed-sector loss on
+    /// its identity, as x86 does; a continuation keeps the ordinary stream.
     pub fn crashed_disk(
         &self,
         seed: u64,
+        identity: Option<&str>,
         name: &str,
         incarnation: u32,
     ) -> Option<(crate::disk::Disk, u64)> {
@@ -507,7 +527,7 @@ impl<B: Backend> Machine<B> {
             .block
             .as_ref()?
             .disk()
-            .map(|disk| disk.crashed_seeded(seed, name, incarnation))
+            .map(|disk| disk.crashed_branch(seed, identity, name, incarnation))
     }
 
     pub fn take_log_chunks(&mut self) -> Vec<application::log_capture::Chunk> {

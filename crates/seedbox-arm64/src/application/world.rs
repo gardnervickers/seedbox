@@ -37,6 +37,9 @@ pub struct Options {
     /// Machine threads under the windowed scheduler; a performance setting
     /// that never changes results. 1 runs every machine on this thread.
     pub machine_workers: usize,
+    /// Anchor inputs to capture checkpoints at, published as
+    /// `checkpoint-anchor-<key>.json`. Captures never change results.
+    pub capture_anchors: Vec<String>,
 }
 
 mod checkpoint;
@@ -109,6 +112,11 @@ fn simulate_windowed(
             )
         }?;
         if outcome == world_windowed::RunOutcome::Checkpoint {
+            if let Some(key) = world.take_captured_anchor() {
+                capture_anchor(world, interactive, &key)?;
+                segments.push(scheduler);
+                continue;
+            }
             if let Some(host) = &mut interactive.host {
                 if interactive.checkpoints.capture_pending_with(
                     world,
@@ -139,6 +147,40 @@ fn simulate_windowed(
         return Ok((outcome.as_str(), scheduler));
     }
 }
+/// Publish the world stopped at an anchor, like an interactive capture but
+/// owned by the run: no host request, and the run continues at once.
+fn capture_anchor(
+    world: &mut world_core::World<ArmMachine>,
+    interactive: &Interactive,
+    key: &str,
+) -> Result<()> {
+    let at = world
+        .input_branches()
+        .last()
+        .filter(|receipt| receipt.key == key)
+        .ok_or("anchor capture without its receipt")?
+        .at_ns;
+    let position = seedbox_engine_core::host_control::BoundaryPosition {
+        boundary_index: world.boundaries(),
+        completed_rounds: world.slices(),
+        simulated_time_ns: at,
+    };
+    let replay = interactive.replay.checkpoint(position)?;
+    let snapshot = world_core::WorldSnapshot::take_checkpoint(world)?;
+    checkpoint::publish(
+        &interactive.output,
+        &format!("anchor-{key}"),
+        &checkpoint::Saved {
+            state: seedbox_engine_core::checkpoint::LiveCheckpoint {
+                world: snapshot,
+                replay,
+                position,
+            },
+            initial_launch: interactive.initial_launch.clone(),
+        },
+    )
+}
+
 /// Decode the ARM application dialect into the shared typed world document.
 /// Keep its existing required keys and rejection of x86-only inputs explicit.
 fn decode_config(bytes: &[u8]) -> Result<seedbox_engine_core::world_config::WorldConfig> {
@@ -396,6 +438,7 @@ pub fn run(options: &Options) -> Result<Value> {
         replay,
         checkpoints: Default::default(),
     };
+    world.set_anchor_captures(options.capture_anchors.iter().cloned());
     let resuming = options.resume_checkpoint.is_some();
     if let Some(path) = &options.resume_checkpoint {
         let saved = checkpoint::load(path)?;
@@ -584,6 +627,7 @@ pub fn run(options: &Options) -> Result<Value> {
         "frames_delivered":world.delivered(),"frames_dropped":world.dropped(),"network_counters":counters,
         "input_admissions":world.input_admissions(),
         "input_rejections":world.input_rejections(),
+        "input_branches":world.input_branches(),
         "faults":world.faults().log,"fault_error":world.faults().error.clone().or(world.control().error.clone()),
         "control_history":world.control().log,"control_latency_ns":world.control().latency,
         "rejected_fault_effects":world.faults().rejected_effects,"management_readiness":world.faults().readiness,

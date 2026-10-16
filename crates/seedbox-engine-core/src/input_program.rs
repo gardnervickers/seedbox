@@ -2,7 +2,8 @@
 use crate::faults::Faults;
 use seedbox_control::{Action, Plan};
 pub use seedbox_engine_protocol::input_program::{
-    merge_interventions, validate_program, InputAdmission, InputRejection, TimedInput,
+    merge_interventions, validate_program, BranchAction, BranchReceipt, InputAction,
+    InputAdmission, InputRejection, TimedInput,
 };
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +17,20 @@ pub struct Program {
     /// Generated starts that were skipped; their teardowns follow them.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     skipped: std::collections::BTreeSet<String>,
+    /// Consumed anchors and reseeds, which allocate no fault IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    branches: Vec<BranchReceipt>,
+}
+
+/// What admitting one due input did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Admitted {
+    /// A fault was admitted, or the input was rejected or skipped.
+    Fault,
+    /// The anchor phase at this time; a capture may follow.
+    Anchor { key: String },
+    /// Every future draw changes from here, before ordinary inputs due now.
+    Reseed { seed: u64, identity: String },
 }
 
 /// World conditions that gate generated inputs at their boundary.
@@ -40,11 +55,20 @@ impl Program {
     pub fn next_time(&self) -> u64 {
         self.inputs.get(self.next).map_or(u64::MAX, |i| i.at_ns)
     }
+    /// The next input is an anchor or reseed.
+    pub fn next_is_branch(&self) -> bool {
+        self.inputs
+            .get(self.next)
+            .is_some_and(|i| matches!(i.action, InputAction::Branch(_)))
+    }
     pub fn contains_key(&self, key: &str) -> bool {
         self.inputs.iter().any(|input| input.key == key)
     }
     pub fn rejections(&self) -> &[InputRejection] {
         &self.rejections
+    }
+    pub fn branches(&self) -> &[BranchReceipt] {
+        &self.branches
     }
     /// An edited checkpoint definition replaces only unapplied actions. The
     /// consumed prefix belongs to the saved world and cannot be undone.
@@ -83,7 +107,7 @@ impl Program {
         let input = TimedInput {
             key: key.clone(),
             at_ns: plan.at_ns,
-            action: plan.action.clone(),
+            action: plan.action.clone().into(),
             timeout_ns: plan
                 .deadline_ns
                 .checked_sub(plan.at_ns)
@@ -119,15 +143,26 @@ impl Program {
             return Err("input program admission previously failed".into());
         }
         validate_program(&self.inputs, u64::MAX)?;
-        if self.next != self.admissions.len() + self.rejections.len()
+        if self.next != self.admissions.len() + self.rejections.len() + self.branches.len()
             || self.next > self.inputs.len()
         {
             return Err("input program cursor differs from its admission history".into());
         }
         let mut admitted = self.admissions.iter().peekable();
         let mut rejected = self.rejections.iter().peekable();
+        let mut branched = self.branches.iter();
         let mut previous = 0;
         for input in self.inputs.iter().take(self.next) {
+            if let InputAction::Branch(action) = &input.action {
+                let receipt = branched.next().ok_or("missing branch input receipt")?;
+                if receipt.key != input.key
+                    || receipt.at_ns != input.at_ns
+                    || &receipt.action != action
+                {
+                    return Err("branch input receipt differs from its source".into());
+                }
+                continue;
+            }
             if rejected.peek().is_some_and(|r| r.key == input.key) {
                 let r = rejected.next().ok_or("missing input rejection evidence")?;
                 if r.at_ns != input.at_ns || r.reason.is_empty() {
@@ -138,7 +173,7 @@ impl Program {
             let row = admitted.next().ok_or("missing input admission evidence")?;
             if input.key != row.key
                 || input.at_ns != row.plan.at_ns
-                || input.action != row.plan.action
+                || input.action.fault() != Some(&row.plan.action)
                 || row.plan.id <= previous
                 || Some(row.plan.deadline_ns) != input.at_ns.checked_add(input.timeout_ns)
             {
@@ -156,7 +191,7 @@ impl Program {
         at: u64,
         gate: Gate,
         validate_action: &dyn Fn(&Action) -> Result<(), String>,
-    ) -> Result<(), String> {
+    ) -> Result<Admitted, String> {
         self.validate()?;
         let input = self
             .inputs
@@ -167,10 +202,28 @@ impl Program {
             return Err("wrong input program boundary".into());
         }
         let key = input.key.clone();
+        let action = match &input.action {
+            InputAction::Fault(action) => action.clone(),
+            InputAction::Branch(branch) => {
+                self.branches.push(BranchReceipt {
+                    key: input.key.clone(),
+                    at_ns: at,
+                    action: branch.clone(),
+                });
+                self.next += 1;
+                return Ok(match branch {
+                    BranchAction::Anchor {} => Admitted::Anchor { key },
+                    BranchAction::Reseed { seed, identity } => Admitted::Reseed {
+                        seed: *seed,
+                        identity: identity.clone(),
+                    },
+                });
+            }
+        };
         let result = (|| {
             // Malformed targets/parameters remain errors. Current world state
             // can diverge after an edit; record its deterministic rejection.
-            faults.validate_action_shape(&input.action)?;
+            faults.validate_action_shape(&action)?;
             if let Some(reason) = self.skip(&input, at, gate) {
                 use seedbox_engine_protocol::input_program::GENERATED_END_SUFFIX;
                 if !input.key.ends_with(GENERATED_END_SUFFIX) {
@@ -184,8 +237,8 @@ impl Program {
                 self.next += 1;
                 return Ok(());
             }
-            let runtime = validate_action(&input.action)
-                .and_then(|()| validate_override_state(faults, &input.action));
+            let runtime =
+                validate_action(&action).and_then(|()| validate_override_state(faults, &action));
             if let Err(reason) = runtime {
                 self.rejections.push(InputRejection {
                     key: input.key.clone(),
@@ -202,7 +255,7 @@ impl Program {
                     deadline_ns: at
                         .checked_add(input.timeout_ns)
                         .ok_or("input deadline overflow")?,
-                    action: input.action,
+                    action,
                 },
                 at,
             )?;
@@ -217,7 +270,9 @@ impl Program {
         if result.is_err() {
             self.failed = true;
         }
-        result.map_err(|e: String| format!("input {key}: {e}"))
+        result
+            .map(|()| Admitted::Fault)
+            .map_err(|e: String| format!("input {key}: {e}"))
     }
     /// Why a generated input is skipped here, if it is. Authored inputs and
     /// teardowns of admitted starts always run.
@@ -268,7 +323,7 @@ mod gate_tests {
         TimedInput {
             key: key.into(),
             at_ns,
-            action,
+            action: action.into(),
             timeout_ns: 1_000,
         }
     }

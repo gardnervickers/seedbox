@@ -517,6 +517,10 @@ struct Coord<'a, M: WorldMachine> {
     /// Routed frames not yet published; empty without an observation socket.
     frames: Vec<Frame>,
     properties: &'a mut seedbox_engine_protocol::property::Ledger,
+    anchor_captures: &'a std::collections::BTreeSet<String>,
+    captured_anchor: Option<String>,
+    /// Resume the boundary an anchor capture stopped in.
+    resume_after_anchor: bool,
 }
 
 impl<M: WorldMachine> Coord<'_, M> {
@@ -966,11 +970,18 @@ impl<M: WorldMachine> Coord<'_, M> {
         // existing boundary instead of applying it twice or creating a phantom
         // replay position for later interactive faults.
         let resuming = std::mem::take(&mut self.resume_boundary);
+        // An anchor capture stops inside this boundary before counting it or
+        // entering the host; the resumed segment finishes the boundary's
+        // remaining inputs and then counts it once, as a cold run does.
+        self.resume_after_anchor = false;
         let mut flow = if resuming {
             sw::Flow::Continue
         } else {
             self.advance_boundaries(plan, guests)?
         };
+        if self.captured_anchor.is_some() {
+            return Ok(flow);
+        }
         if !resuming {
             *self.boundaries = self
                 .boundaries
@@ -1071,6 +1082,43 @@ impl<M: WorldMachine> Coord<'_, M> {
                     .min(input_boundary)
                     .min(duration),
             );
+            // Branch inputs establish the anchor phase at T: before the
+            // controls, triggers and ordinary inputs due then.
+            if input_boundary <= start
+                && input_boundary <= control_boundary
+                && input_boundary <= trigger_boundary
+                && input_boundary <= fault_boundary
+                && input_boundary < duration
+                && self.input_program.next_is_branch()
+            {
+                if guests.iter().any(|g| g.m.time > input_boundary) {
+                    return Err("branch input boundary is in committed machine past".into());
+                }
+                let gate = crate::input_program::Gate {
+                    ready: self.application_ready,
+                    quiet_until: self.control.quiet_until(),
+                };
+                match self.input_program.admit_due(
+                    self.faults,
+                    input_boundary,
+                    gate,
+                    &|_| Ok(()),
+                )? {
+                    crate::input_program::Admitted::Anchor { key }
+                        if self.anchor_captures.contains(&key) =>
+                    {
+                        self.captured_anchor = Some(key);
+                        self.stopped = Some(RunOutcome::Checkpoint);
+                        self.interactive_checkpoint = true;
+                        return Ok(sw::Flow::Stop);
+                    }
+                    crate::input_program::Admitted::Reseed { seed, identity } => {
+                        self.reseed(guests, seed, &identity)?;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if control_boundary <= start
                 && control_boundary <= trigger_boundary
                 && control_boundary <= input_boundary
@@ -1151,6 +1199,44 @@ impl<M: WorldMachine> Coord<'_, M> {
             g.fork_at = fork_at;
         }
         Ok(sw::Flow::Continue)
+    }
+
+    /// Reseed every future draw from a branch input: guest entropy, timer and
+    /// progress jitter, network policy streams, and the seed later crashes,
+    /// reboots and disk faults derive from. Effects already sampled stay.
+    fn reseed(
+        &mut self,
+        guests: &mut [Guest<'_, M>],
+        seed: u64,
+        identity: &str,
+    ) -> Result<(), String> {
+        self.run_seed = seed;
+        self.branch_identity = Some(identity.to_owned());
+        self.faults
+            .links
+            .reseed_branch(seed, Some(identity), &self.names);
+        for (g, name) in guests.iter_mut().zip(&self.names) {
+            let incarnation = g.m.incarnation();
+            g.m.seed_timer_branch(
+                seed,
+                Some(identity),
+                &format!("timer-jitter/{name}/{incarnation}"),
+            )?;
+            g.m.seed_progress_jitter_branch(
+                seed,
+                Some(identity),
+                &format!("progress-jitter/{name}/{incarnation}"),
+            )?;
+            if !(g.m.down || matches!(g.m.state, State::Exited(_))) {
+                let mut rng = crate::rng::Rng::branch(
+                    seed,
+                    Some(identity),
+                    &format!("guest-entropy/{name}/{incarnation}"),
+                );
+                g.m.reseed_guest(std::array::from_fn(|_| rng.next() as u32))?;
+            }
+        }
+        Ok(())
     }
 
     /// The control barrier at `at`: refuse what the machines can no longer
@@ -1535,6 +1621,9 @@ where
         boundaries,
         scheduler_continuation,
         properties,
+        anchor_captures,
+        captured_anchor,
+        resume_after_anchor,
         ..
     } = world;
     if let Some(plan) = scheduler_continuation.as_ref() {
@@ -1555,7 +1644,8 @@ where
     for g in &mut guests {
         g.drain();
     }
-    let resume_boundary = scheduler_continuation.is_some();
+    let resume_anchor = std::mem::take(resume_after_anchor);
+    let resume_boundary = scheduler_continuation.is_some() && !resume_anchor;
     let mut plan = if let Some(mut plan) = scheduler_continuation.take() {
         for (index, guest) in guests.iter().enumerate() {
             sync(&mut plan, index, guest)?;
@@ -1611,6 +1701,9 @@ where
         fault_statuses,
         frames: Vec::new(),
         properties,
+        anchor_captures,
+        captured_anchor: None,
+        resume_after_anchor: resume_anchor,
         observations: observations.as_deref(),
         run,
         names,
@@ -1649,6 +1742,13 @@ where
     let interactive_checkpoint = coord.interactive_checkpoint;
     if let Some(reason) = coord.failure.take() {
         *failure = Some(reason);
+    }
+    // A reseed input changes the seed and identity later draws derive from.
+    *run_seed = coord.run_seed;
+    *branch_identity = coord.branch_identity.clone();
+    if let Some(key) = coord.captured_anchor.take() {
+        *captured_anchor = Some(key);
+        *resume_after_anchor = true;
     }
     drop(coord);
     drop(guests);

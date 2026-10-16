@@ -1965,13 +1965,13 @@ fn input_program_ids_follow_actual_admission_across_live_inputs_and_worker_count
                     timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
                     key: "early".into(),
                     at_ns: 2,
-                    action: partition("early"),
+                    action: partition("early").into(),
                 },
                 TimedInput {
                     timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
                     key: "late".into(),
                     at_ns: 20,
-                    action: partition("late"),
+                    action: partition("late").into(),
                 },
             ],
             30,
@@ -2064,7 +2064,7 @@ fn input_program_equal_time_order_follows_guest_then_trigger_and_drains_dependen
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
                 key: "cut".into(),
                 at_ns: 50,
-                action: partition("program"),
+                action: partition("program").into(),
             },
             TimedInput {
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
@@ -2072,7 +2072,8 @@ fn input_program_equal_time_order_follows_guest_then_trigger_and_drains_dependen
                 at_ns: 50,
                 action: Action::Heal {
                     handle: "program".into(),
-                },
+                }
+                .into(),
             },
         ],
         120,
@@ -2104,7 +2105,7 @@ fn input_program_checkpoint_restores_consumed_prefix_and_pending_suffix_once() {
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
                 key: "cut".into(),
                 at_ns: 10,
-                action: partition("program"),
+                action: partition("program").into(),
             },
             TimedInput {
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
@@ -2112,7 +2113,8 @@ fn input_program_checkpoint_restores_consumed_prefix_and_pending_suffix_once() {
                 at_ns: 20,
                 action: Action::Heal {
                     handle: "program".into(),
-                },
+                }
+                .into(),
             },
         ],
         30,
@@ -2158,13 +2160,14 @@ fn input_program_state_rejection_is_evidence_and_does_not_poison_edited_suffix()
                 at_ns: 10,
                 action: Action::Heal {
                     handle: "missing".into(),
-                },
+                }
+                .into(),
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
             },
             crate::input_program::TimedInput {
                 key: "valid".into(),
                 at_ns: 10,
-                action: partition("valid"),
+                action: partition("valid").into(),
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
             },
         ],
@@ -2259,7 +2262,7 @@ fn initially_paused_program_holds_launch_boundary_effect_until_resume() {
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
                 key: "first".into(),
                 at_ns: 0,
-                action: partition("first"),
+                action: partition("first").into(),
             }],
             20,
             0,
@@ -2369,7 +2372,7 @@ fn live_override_uses_effective_time_and_repeats_through_timed_program() {
         key: record.request_id,
         at_ns: record.plan.at_ns,
         timeout_ns: record.plan.deadline_ns - record.plan.at_ns,
-        action: record.plan.action,
+        action: record.plan.action.into(),
     };
     for workers in [0, 2, 4] {
         let mut replay = setup();
@@ -2397,8 +2400,8 @@ fn checkpoint_edit_replaces_pending_suffix_and_preserves_consumed_identity() {
         action,
         timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
     };
-    let first = input("cut", 10, partition("cut"));
-    let removed = input("removed", 20, partition("removed"));
+    let first = input("cut", 10, partition("cut").into());
+    let removed = input("removed", 20, partition("removed").into());
     let mut w = world(&["a", "b"]);
     w.early = 0;
     w.arm_input_program(vec![first.clone(), removed], 50, 0)
@@ -2416,7 +2419,8 @@ fn checkpoint_edit_replaces_pending_suffix_and_preserves_consumed_identity() {
                 30,
                 Action::Heal {
                     handle: "cut".into(),
-                },
+                }
+                .into(),
             ),
         ])
         .unwrap();
@@ -2462,7 +2466,7 @@ fn edited_duplicate_handle_is_rejected_and_future_actions_after_oracle_exit_stay
             .map(|(key, at_ns)| TimedInput {
                 key: key.into(),
                 at_ns,
-                action: partition("same"),
+                action: partition("same").into(),
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
             })
             .collect(),
@@ -2490,7 +2494,7 @@ fn checkpoint_continuation_schedules_edited_inputs_before_the_first_resumed_roun
         action,
         timeout_ns: 100,
     };
-    let first = input("consumed", 0, partition("consumed"));
+    let first = input("consumed", 0, partition("consumed").into());
     let mut w = world(&["a", "b"]);
     w.early = 0;
     w.arm_input_program(vec![first.clone()], 50, 0).unwrap();
@@ -2529,9 +2533,10 @@ fn checkpoint_continuation_schedules_edited_inputs_before_the_first_resumed_roun
                 at,
                 Action::Heal {
                     handle: "consumed".into(),
-                },
+                }
+                .into(),
             ),
-            input("inside-next-round", at + 1, partition("new")),
+            input("inside-next-round", at + 1, partition("new").into()),
         ])
         .unwrap();
         run_with(&mut w, 50, None, workers, Duration::ZERO).unwrap();
@@ -2691,4 +2696,159 @@ fn quiet_requests_extend_the_quiet_period_from_their_admission() {
     let admitted = response["admitted_at_ns"].as_u64().unwrap();
     assert_eq!(w.control.quiet_until(), admitted + 500);
     assert_eq!(response["result"]["quiet_until_ns"], admitted + 500);
+}
+
+fn branch_program(reseed: bool) -> Vec<crate::input_program::TimedInput> {
+    use crate::input_program::{BranchAction, InputAction, TimedInput};
+    let input = |key: &str, at_ns: u64, action: InputAction| TimedInput {
+        key: key.into(),
+        at_ns,
+        action,
+        timeout_ns: 1_000,
+    };
+    let fault = |value: Value| InputAction::Fault(serde_json::from_value(value).unwrap());
+    let mut program = vec![
+        input(
+            "lossy",
+            10,
+            fault(
+                json!({"action":"shape","handle":"lossy","from":["a"],"to":["b"],"latency_ns":10,"jitter_ns":5,"loss_ppm":500_000}),
+            ),
+        ),
+        input("anchor", 40, InputAction::Branch(BranchAction::Anchor {})),
+    ];
+    if reseed {
+        program.push(input(
+            "child",
+            40,
+            InputAction::Branch(BranchAction::Reseed {
+                seed: 9,
+                identity: "child".into(),
+            }),
+        ));
+    }
+    program.extend([
+        input("crash", 40, fault(json!({"action":"crash","machine":"b"}))),
+        input(
+            "reboot",
+            50,
+            fault(json!({"action":"reboot","machine":"b"})),
+        ),
+    ]);
+    program
+}
+
+fn branch_world(reseed: bool) -> World<Mock> {
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(branch_program(reseed), u64::MAX, 0)
+        .unwrap();
+    let mut frame = vec![0; 60];
+    frame[5] = 1;
+    frame[12..14].copy_from_slice(&[8, 0]);
+    for at in (5..90).step_by(2) {
+        let mut step = Step::new(at, Stop::Sent);
+        step.frames = vec![frame.clone()];
+        w.machines[0].steps.push_back(step);
+    }
+    w
+}
+
+/// Everything a branch may diverge in: fault evidence, network state, the
+/// receiving machine's history and the seed later draws derive from.
+fn branch_outcome(w: &World<Mock>) -> (Value, Value, Vec<String>, u64, Option<String>, usize) {
+    (
+        serde_json::to_value(w.faults.log.iter().map(|r| r.json()).collect::<Vec<_>>()).unwrap(),
+        serde_json::to_value(w.network_snapshot()).unwrap(),
+        machine_trace(w, "b"),
+        w.run_seed,
+        w.branch_identity.clone(),
+        w.input_program.branches().len(),
+    )
+}
+
+#[test]
+fn a_reseed_at_an_anchor_is_identical_cold_continued_and_restored() {
+    for workers in [0, 1, 2] {
+        let mut cold = branch_world(true);
+        run_with(&mut cold, 100, None, workers, Duration::from_micros(3)).unwrap();
+        let reference = branch_outcome(&cold);
+        assert_eq!(
+            (reference.3, reference.4.as_deref(), reference.5),
+            (9, Some("child"), 2)
+        );
+        assert!(machine_trace(&cold, "b")
+            .iter()
+            .any(|l| l.contains("reseed-guest")));
+
+        // Stop at the anchor, capture, and continue in the same process.
+        let mut warm = branch_world(true);
+        warm.set_anchor_captures(["anchor".to_string()]);
+        let (outcome, _) =
+            run_with(&mut warm, 100, None, workers, Duration::from_micros(3)).unwrap();
+        assert_eq!(outcome, "checkpoint");
+        assert_eq!(warm.take_captured_anchor().as_deref(), Some("anchor"));
+        // The capture sits after the anchor and before the reseed.
+        assert_eq!((warm.run_seed, warm.input_program.branches().len()), (2, 1));
+        let snapshot = WorldSnapshot::take_checkpoint(&mut warm).unwrap();
+        warm.set_anchor_captures([]);
+        run_with(&mut warm, 100, None, workers, Duration::from_micros(3)).unwrap();
+        assert_eq!(
+            branch_outcome(&warm),
+            reference,
+            "continued, workers {workers}"
+        );
+
+        // Restore the capture and continue again.
+        snapshot.restore(&mut warm).unwrap();
+        warm.factory.lock().unwrap().clear();
+        run_with(&mut warm, 100, None, workers, Duration::from_micros(3)).unwrap();
+        let restored = branch_outcome(&warm);
+        assert_eq!(
+            (
+                &restored.0,
+                &restored.1,
+                restored.3,
+                &restored.4,
+                restored.5
+            ),
+            (
+                &reference.0,
+                &reference.1,
+                reference.3,
+                &reference.4,
+                reference.5
+            ),
+            "restored, workers {workers}"
+        );
+        // The restored machine trace starts at the capture.
+        assert!(
+            reference.2.ends_with(&restored.2),
+            "restored trace, workers {workers}"
+        );
+    }
+}
+
+#[test]
+fn a_reseed_changes_future_draws_and_an_anchor_alone_changes_nothing_semantic() {
+    let mut parent = branch_world(false);
+    run(&mut parent, 100, None).unwrap();
+    let mut child = branch_world(true);
+    run(&mut child, 100, None).unwrap();
+    // Loss decisions after the anchor draw from the child's stream.
+    assert_ne!(
+        serde_json::to_value(parent.network_snapshot()).unwrap(),
+        serde_json::to_value(child.network_snapshot()).unwrap()
+    );
+    assert_eq!(
+        (parent.run_seed, parent.input_program.branches().len()),
+        (2, 1)
+    );
+    // A capture at the parent's anchor changes nothing it reports.
+    let mut captured = branch_world(false);
+    captured.set_anchor_captures(["anchor".to_string()]);
+    assert_eq!(run(&mut captured, 100, None).unwrap(), "checkpoint");
+    captured.set_anchor_captures([]);
+    run(&mut captured, 100, None).unwrap();
+    assert_eq!(branch_outcome(&captured), branch_outcome(&parent));
 }

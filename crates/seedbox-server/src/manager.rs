@@ -407,6 +407,19 @@ impl Manager {
             .delete_checkpoint(id, name)
     }
 
+    pub(crate) fn record_anchor_checkpoint(
+        &self,
+        id: &SimulationId,
+        name: &str,
+        position: seedbox_engine_protocol::host_control::BoundaryPosition,
+    ) -> Result<(), Error> {
+        self.0
+            .lock()
+            .map_err(|_| Error::StorageFailed)?
+            .catalogue
+            .record_anchor_checkpoint(id, name, position)
+    }
+
     pub(crate) fn captured_checkpoint(
         &self,
         id: &SimulationId,

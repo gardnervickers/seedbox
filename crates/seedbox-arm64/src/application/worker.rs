@@ -168,6 +168,9 @@ pub enum Operation {
         factor_permille: u64,
     },
     DiskErrors(Option<seedbox_engine_core::virtio_block::InjectedErrors>),
+    ReseedGuest {
+        entropy: [u32; 8],
+    },
     Evidence {
         full_state: bool,
         #[serde(default)]
@@ -175,6 +178,8 @@ pub enum Operation {
     },
     CrashExport {
         run_seed: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch_identity: Option<String>,
         full_state: bool,
         transfer: TransferDescriptor,
     },
@@ -438,6 +443,10 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                     Ok(Answer::Ready)
                 }
                 Operation::DiskErrors(errors) => Ok(Answer::DiskErrors(vm.disk_errors(errors)?)),
+                Operation::ReseedGuest { entropy } => {
+                    vm.reseed_guest(entropy)?;
+                    Ok(Answer::Ready)
+                }
                 Operation::Evidence {
                     full_state,
                     ram_pages,
@@ -451,6 +460,7 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 }
                 Operation::CrashExport {
                     run_seed,
+                    branch_identity,
                     full_state,
                     transfer,
                 } => {
@@ -462,6 +472,7 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                     let (disk, lost_sectors) = vm
                         .crashed_disk(
                             run_seed,
+                            branch_identity.as_deref(),
                             &request.expected.name,
                             request.expected.incarnation,
                         )
@@ -774,7 +785,8 @@ impl OwnedWorker {
                     | Operation::Park
                     | Operation::SeedTimer { .. }
                     | Operation::SeedProgressJitter { .. }
-                    | Operation::Throttle { .. },
+                    | Operation::Throttle { .. }
+                    | Operation::ReseedGuest { .. },
                 Answer::Ready
             ) | (Operation::Advance { .. }, Answer::Advanced { .. })
                 | (Operation::Frame(_), Answer::Accepted(_))
@@ -899,6 +911,7 @@ impl OwnedWorker {
                             | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
                             | Operation::DiskErrors(_)
+                            | Operation::ReseedGuest { .. }
                             | Operation::Evidence { .. }
                     );
                     let preserves_irq = matches!(
@@ -908,6 +921,7 @@ impl OwnedWorker {
                             | Operation::SeedProgressJitter { .. }
                             | Operation::Throttle { .. }
                             | Operation::DiskErrors(_)
+                            | Operation::ReseedGuest { .. }
                             | Operation::Evidence { .. }
                     );
                     if (preserves_deadline && observation.next_deadline != old.next_deadline)

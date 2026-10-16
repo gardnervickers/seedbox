@@ -161,6 +161,18 @@ impl WorldMachine for Mock {
         self.common.succeed(&old.common, at)?;
         Ok(Some(0))
     }
+    fn succeed_branch(
+        &mut self,
+        old: &mut Self,
+        at: u64,
+        seed: u64,
+        identity: Option<&str>,
+    ) -> Result<Option<u64>, String> {
+        if let Some(identity) = identity {
+            self.record(&format!("succeed-branch/{identity}"));
+        }
+        self.succeed(old, at, seed)
+    }
     fn park(&mut self) -> Result<(), String> {
         self.common.check_park(self.owed.is_some())?;
         self.common.commit_park();
@@ -432,5 +444,8 @@ pub(crate) fn world(names: &[&str]) -> World<Mock> {
         slices: 0,
         boundaries: 0,
         properties: Default::default(),
+        anchor_captures: Default::default(),
+        captured_anchor: None,
+        resume_after_anchor: false,
     }
 }

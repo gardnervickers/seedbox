@@ -452,6 +452,7 @@ fn unexpected_backend_failure_and_cancellation_retain_logs() {
         .run(
             &fixture.simulation,
             RunOptions {
+                capture_anchors: Default::default(),
                 seed: None,
                 cancellation: token,
                 wall_time_ns: None,

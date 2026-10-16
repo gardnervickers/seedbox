@@ -8,12 +8,59 @@ pub const MAX_INPUTS: usize = 4096;
 pub struct TimedInput {
     pub key: String,
     pub at_ns: u64,
-    pub action: Action,
+    pub action: InputAction,
     #[serde(
         default = "default_timeout_ns",
         skip_serializing_if = "is_default_timeout"
     )]
     pub timeout_ns: u64,
+}
+/// What an input does: an ordinary fault action, or a branch input that
+/// consumes no fault ID. Both share the `action`-tagged JSON form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InputAction {
+    Fault(Action),
+    Branch(BranchAction),
+}
+impl From<Action> for InputAction {
+    fn from(action: Action) -> Self {
+        Self::Fault(action)
+    }
+}
+impl InputAction {
+    pub fn fault(&self) -> Option<&Action> {
+        match self {
+            Self::Fault(action) => Some(action),
+            Self::Branch(_) => None,
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Fault(action) => action.name(),
+            Self::Branch(BranchAction::Anchor {}) => "anchor",
+            Self::Branch(BranchAction::Reseed { .. }) => "reseed",
+        }
+    }
+}
+/// Branch inputs. An anchor establishes the timed checkpoint phase at its
+/// time, before ordinary actions due then; a capture there is an optional
+/// cache of the execution. A reseed at the same time, after its anchor,
+/// changes every future draw from then on, identically in a cold run and in a
+/// continuation of that capture.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BranchAction {
+    Anchor {},
+    Reseed { seed: u64, identity: String },
+}
+/// A consumed branch input: where the program cursor passed it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchReceipt {
+    pub key: String,
+    pub at_ns: u64,
+    pub action: BranchAction,
 }
 /// Keys of inputs sampled from a fault profile. The server reserves this
 /// namespace: `gen-<n>` starts a generated fault and `gen-<n>-end` tears it
@@ -71,6 +118,43 @@ pub fn validate_program(inputs: &[TimedInput], duration_ns: u64) -> Result<(), S
             .ok_or_else(|| format!("input {} deadline overflows", input.key))?;
         previous = input.at_ns;
     }
+    validate_branches(inputs)
+}
+/// Branch inputs come first among the inputs due at their time; a reseed
+/// follows an anchor at the same time and names a nonempty identity.
+fn validate_branches(inputs: &[TimedInput]) -> Result<(), String> {
+    let mut ordinary_at = None;
+    let mut anchor_at = None;
+    for input in inputs {
+        match &input.action {
+            InputAction::Fault(_) => ordinary_at = Some(input.at_ns),
+            InputAction::Branch(branch) => {
+                if ordinary_at == Some(input.at_ns) {
+                    return Err(format!(
+                        "input {}: branch inputs precede the ordinary inputs due at their time",
+                        input.key
+                    ));
+                }
+                match branch {
+                    BranchAction::Anchor {} => anchor_at = Some(input.at_ns),
+                    BranchAction::Reseed { identity, .. } => {
+                        if anchor_at != Some(input.at_ns) {
+                            return Err(format!(
+                                "input {}: a reseed follows an anchor at the same time",
+                                input.key
+                            ));
+                        }
+                        if identity.is_empty() || identity.len() > 256 {
+                            return Err(format!(
+                                "input {}: reseed identity must be 1 to 256 bytes",
+                                input.key
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -85,7 +169,7 @@ pub fn merge_interventions(
         let input = TimedInput {
             key: entry.request_id.clone(),
             at_ns: entry.plan.at_ns,
-            action: entry.plan.action.clone(),
+            action: entry.plan.action.clone().into(),
             timeout_ns: entry
                 .plan
                 .deadline_ns
@@ -119,7 +203,8 @@ mod tests {
                 handle: "cut".into(),
                 left: vec!["a".into()],
                 right: vec!["b".into()],
-            },
+            }
+            .into(),
         };
         let history = crate::intervention::History {
             entries: vec![crate::intervention::Intervention {
@@ -129,7 +214,7 @@ mod tests {
                     id: 99,
                     at_ns: input.at_ns,
                     deadline_ns: 110,
-                    action: input.action.clone(),
+                    action: input.action.fault().expect("a fault input").clone(),
                 },
             }],
             ..Default::default()

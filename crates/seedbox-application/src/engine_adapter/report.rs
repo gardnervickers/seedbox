@@ -33,17 +33,29 @@ fn validate_input_admissions(
     program: &[seedbox_engine_protocol::input_program::TimedInput],
     admissions: &[seedbox_engine_protocol::input_program::InputAdmission],
     rejections: &[seedbox_engine_protocol::input_program::InputRejection],
+    branches: &[seedbox_engine_protocol::input_program::BranchReceipt],
     duration_ns: u64,
 ) -> Result<Vec<Plan>> {
+    use seedbox_engine_protocol::input_program::InputAction;
     seedbox_engine_protocol::input_program::validate_program(program, duration_ns)
         .map_err(Error::Integrity)?;
-    if admissions.len() + rejections.len() > program.len() {
+    let consumed = admissions.len() + rejections.len() + branches.len();
+    if consumed > program.len() {
         return Err(correlation_mismatch());
     }
     let mut admitted = admissions.iter().peekable();
     let mut rejected = rejections.iter().peekable();
+    let mut branched = branches.iter();
     let mut previous = 0;
-    for input in program.iter().take(admissions.len() + rejections.len()) {
+    for input in program.iter().take(consumed) {
+        if let InputAction::Branch(action) = &input.action {
+            let receipt = branched.next().ok_or_else(correlation_mismatch)?;
+            if receipt.key != input.key || receipt.at_ns != input.at_ns || &receipt.action != action
+            {
+                return Err(correlation_mismatch());
+            }
+            continue;
+        }
         if rejected.peek().is_some_and(|r| r.key == input.key) {
             let row = rejected.next().ok_or_else(correlation_mismatch)?;
             if row.at_ns != input.at_ns || row.reason.is_empty() {
@@ -55,7 +67,7 @@ fn validate_input_admissions(
         let plan = &row.plan;
         if input.key != row.key
             || input.at_ns != plan.at_ns
-            || input.action != plan.action
+            || input.action.fault() != Some(&plan.action)
             || plan.id <= previous
             || input.at_ns.checked_add(input.timeout_ns) != Some(plan.deadline_ns)
         {
@@ -74,9 +86,11 @@ fn validate_program_cutoff(
 ) -> Result<()> {
     if evidence.outcome != RunOutcome::FaultFailed {
         let program = external_program(request)?;
-        if let Some(next) =
-            program.get(evidence.input_admissions.len() + evidence.input_rejections.len())
-        {
+        if let Some(next) = program.get(
+            evidence.input_admissions.len()
+                + evidence.input_rejections.len()
+                + evidence.input_branches.len(),
+        ) {
             let committed = scheduler
                 .get("committed_ns")
                 .and_then(Value::as_u64)
@@ -1076,6 +1090,7 @@ pub(super) fn checked_report(
         &program,
         &raw.input_admissions,
         &raw.input_rejections,
+        &raw.input_branches,
         request.limits.simulated_time_ns,
     )?;
     external_plans.extend(scheduled.iter().cloned());
@@ -1338,7 +1353,8 @@ mod tests {
                 at_ns: 10 + i,
                 action: Action::Stop {
                     machine: "a".into(),
-                },
+                }
+                .into(),
             })
             .collect();
         let admissions: Vec<_> = program
@@ -1351,19 +1367,19 @@ mod tests {
                     id: 2 + i as u32 * 3,
                     at_ns: input.at_ns,
                     deadline_ns: input.at_ns + PROCESS_EFFECT_TIMEOUT_NS,
-                    action: input.action.clone(),
+                    action: input.action.fault().expect("a fault input").clone(),
                 },
             })
             .collect();
         assert_eq!(
-            validate_input_admissions(&program, &admissions, &[], 100)
+            validate_input_admissions(&program, &admissions, &[], &[], 100)
                 .unwrap()
                 .iter()
                 .map(|p| p.id)
                 .collect::<Vec<_>>(),
             [2, 5]
         );
-        assert!(validate_input_admissions(&program, &[], &[], 100)
+        assert!(validate_input_admissions(&program, &[], &[], &[], 100)
             .unwrap()
             .is_empty());
         for field in 0..5 {
@@ -1379,7 +1395,7 @@ mod tests {
                     }
                 }
             }
-            assert!(validate_input_admissions(&program, &bad, &[], 100).is_err());
+            assert!(validate_input_admissions(&program, &bad, &[], &[], 100).is_err());
         }
     }
     use super::*;
@@ -1393,7 +1409,8 @@ mod tests {
             timeout_ns: 37,
             action: seedbox_control::Action::Heal {
                 handle: "cut".into(),
-            },
+            }
+            .into(),
         };
         let program = [input("missing"), input("valid")];
         let admissions = [InputAdmission {
@@ -1402,7 +1419,7 @@ mod tests {
                 id: 1,
                 at_ns: 10,
                 deadline_ns: 47,
-                action: program[1].action.clone(),
+                action: program[1].action.fault().expect("a fault input").clone(),
             },
         }];
         let mut rejections = [InputRejection {
@@ -1411,13 +1428,16 @@ mod tests {
             reason: "heal of inactive handle".into(),
         }];
         assert_eq!(
-            super::validate_input_admissions(&program, &admissions, &rejections, 100).unwrap()[0]
-                .id,
+            super::validate_input_admissions(&program, &admissions, &rejections, &[], 100).unwrap()
+                [0]
+            .id,
             1
         );
         rejections[0].at_ns += 1;
-        assert!(super::validate_input_admissions(&program, &admissions, &rejections, 100).is_err());
-        assert!(super::validate_input_admissions(&program, &admissions, &[], 100).is_err());
+        assert!(
+            super::validate_input_admissions(&program, &admissions, &rejections, &[], 100).is_err()
+        );
+        assert!(super::validate_input_admissions(&program, &admissions, &[], &[], 100).is_err());
     }
 
     #[test]

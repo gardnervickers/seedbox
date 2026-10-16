@@ -168,15 +168,16 @@ pub(super) fn run(
     detach: bool,
     json: bool,
     fault_profile: Option<FaultProfile>,
-    wall_time_ns: Option<u64>,
+    execution: &super::ExecutionArgs,
 ) -> Result<u8> {
     let (spec, metadata) = load_spec(compose, seed)?;
     submit_with_profile(
         fault_profile,
         spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: execution.capture_anchors.clone(),
             start_paused: paused,
-            wall_time_ns,
+            wall_time_ns: execution.wall_time,
         },
         metadata,
         detach,
@@ -368,6 +369,7 @@ pub(super) fn replay(id: &SimulationId, json: bool, wall_time_ns: Option<u64>) -
     submit_with_comparison(
         resource.spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: Default::default(),
             start_paused: false,
             wall_time_ns,
         },
@@ -382,7 +384,7 @@ pub(super) fn rerun(
     id: &SimulationId,
     detach: bool,
     json: bool,
-    wall_time_ns: Option<u64>,
+    execution: &super::ExecutionArgs,
 ) -> Result<u8> {
     let client = daemon::connect(None)?;
     let resource = runtime()?
@@ -397,8 +399,9 @@ pub(super) fn rerun(
     submit(
         resource.spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: execution.capture_anchors.clone(),
             start_paused: false,
-            wall_time_ns,
+            wall_time_ns: execution.wall_time,
         },
         metadata,
         detach,
@@ -411,7 +414,7 @@ pub(super) fn branch(
     checkpoint: String,
     detach: bool,
     json: bool,
-    wall_time_ns: Option<u64>,
+    execution: &super::ExecutionArgs,
 ) -> Result<u8> {
     let client = daemon::connect(None)?;
     let resource = runtime()?
@@ -421,8 +424,9 @@ pub(super) fn branch(
     submit(
         resource.spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: execution.capture_anchors.clone(),
             start_paused: false,
-            wall_time_ns,
+            wall_time_ns: execution.wall_time,
         },
         metadata,
         detach,

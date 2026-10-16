@@ -109,6 +109,9 @@ pub struct WorldEvidence {
     pub input_admissions: Vec<crate::input_program::InputAdmission>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_rejections: Vec<crate::input_program::InputRejection>,
+    /// Consumed anchors and reseeds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_branches: Vec<crate::input_program::BranchReceipt>,
     pub fault_error: Option<String>,
     pub control_history: Vec<ControlRecord>,
     pub control_latency_ns: u64,

@@ -10,6 +10,7 @@
 #include <linux/of_irq.h>
 #include <linux/sched_clock.h>
 #include <linux/sizes.h>
+#include <linux/string.h>
 #include <asm/ptrace.h>
 #include <asm/seedbox.h>
 #include <asm/sysreg.h>
@@ -23,6 +24,10 @@ struct seedbox_page {
 	 * bound on its seeded variation each way (0 is off), and the
 	 * VMM-seeded stream that variation is drawn from. */
 	u64 progress_ns, progress_jitter_ns, progress_jitter_seed;
+	/* Runtime entropy for branch reseeds: the stopped VMM writes 32 bytes
+	 * and then bumps the generation; random.c mixes them in once. */
+	u64 entropy_gen;
+	u8 entropy[32];
 };
 /* Nominal virtual time one syscall costs; the page's syscall_ns is 1000 unthrottled. */
 #define SYSCALL_NS 1000ULL
@@ -201,8 +206,18 @@ static int shutdown_event(struct clock_event_device *dev)
 	return 0;
 }
 static int oneshot_event(struct clock_event_device *dev) { return 0; }
+u64 seedbox_entropy_gen(void)
+{
+	return page ? READ_ONCE(page->entropy_gen) : 0;
+}
+void seedbox_read_entropy(u8 entropy[32])
+{
+	memcpy(entropy, page->entropy, sizeof(page->entropy));
+}
 static irqreturn_t timer_irq(int irq, void *dev)
 {
+	/* A resumed branch takes its new entropy at its first tick. */
+	seedbox_take_entropy();
 	/* Deassert before invoking the clock core; it may arm another deadline. */
 	writeq(1, event + 8);
 	ce.event_handler(&ce);

@@ -55,6 +55,8 @@ pub struct ExecutionRequest<'a> {
     pub start_paused: bool,
     /// Saved engine position to restore before continuing this simulation.
     pub resume_checkpoint: Option<&'a Path>,
+    /// Anchor inputs to capture checkpoints at; never changes results.
+    pub capture_anchors: &'a [String],
     /// Optional durable semantic-input journal, read after the worker stops.
     pub intervention_history: Option<&'a Path>,
     /// Verified retained inputs to reapply, distinct from the live output journal.
