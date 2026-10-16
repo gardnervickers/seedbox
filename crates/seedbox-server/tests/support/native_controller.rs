@@ -38,6 +38,7 @@ fn request(session: &NativeSession) -> SubmitRequest {
             control: true,
             request_id: "controller".into(),
             extra_machines: vec![],
+            volumes: vec![],
         },
     )
 }

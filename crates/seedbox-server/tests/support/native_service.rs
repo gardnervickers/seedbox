@@ -13,6 +13,11 @@ mod export;
 pub use export::pv_large_export_under_load;
 #[path = "native_held_checkpoint.rs"]
 mod held_checkpoint;
+#[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
+#[path = "native_disk.rs"]
+mod disk;
+#[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
+pub use disk::{disk_checkpoint_continuation, disk_repeat_workers};
 pub use held_checkpoint::native_held_checkpoint;
 #[path = "case_cleanup.rs"]
 mod case_cleanup;
@@ -343,6 +348,7 @@ fn submission_with_machines(
             control: false,
             request_id: format!("cpu-{iterations}"),
             extra_machines,
+            volumes: vec![],
         },
     )
 }
@@ -353,6 +359,9 @@ struct NativeFixture {
     control: bool,
     request_id: String,
     extra_machines: Vec<&'static str>,
+    /// Named volumes of the one service; the shared preparation rule decides
+    /// its retained disk and guest mounts.
+    volumes: Vec<seedbox_spec::VolumeMount>,
 }
 fn fixture_submission(
     backend: DriverBackend,
@@ -374,6 +383,7 @@ fn fixture_submission(
     let oracle = fixture.name;
     let filesystem = fixture.filesystem;
     let launch = fixture.launch;
+    let volumes = driver_world::volume_setup(&fixture.volumes);
     let mut definition = MachineDefinition {
         name: oracle.into(),
         resources: Resources { memory_bytes: 0 },
@@ -381,7 +391,9 @@ fn fixture_submission(
             filesystem: FilesystemArchive::new(fs::read(&filesystem).unwrap()).unwrap(),
             launch: launch.clone(),
         },
-        disk: None,
+        disk: volumes
+            .disk_bytes
+            .map(|bytes| seedbox_machine::definition::DiskImage::zeroed(bytes).unwrap()),
         network: None,
     };
     let runtime = Runtime::from_archive(&archive, root).unwrap();
@@ -400,7 +412,15 @@ fn fixture_submission(
         selected.guest_assets.display(),
         selected.qemu,
     );
-    let environment = GuestEnvironment::new(oracle, "127.0.0.1 localhost\n", fixture.control);
+    let mut environment = GuestEnvironment::new(oracle, "127.0.0.1 localhost\n", fixture.control);
+    environment.named_volumes = volumes
+        .named_volumes
+        .iter()
+        .map(|volume| seedbox_machine::application::NamedVolume {
+            name: volume.name.clone(),
+            target: volume.target.clone(),
+        })
+        .collect();
     let boot = match backend {
         DriverBackend::Pv => seedbox_machine_pv::machine::pv::Factory::new(
             &executable,
@@ -460,7 +480,7 @@ fn fixture_submission(
                     working_dir: launch.working_directory.clone(),
                     user: launch.user.clone(),
                     volumes: vec![],
-                    disk_volumes: vec![],
+                    disk_volumes: fixture.volumes.clone(),
                 },
             },
         )]),
@@ -481,7 +501,7 @@ fn fixture_submission(
             hostname: environment.hostname.clone(),
             hosts: environment.hosts.clone(),
             anonymous_volumes: vec![],
-            named_volumes: vec![],
+            named_volumes: volumes.named_volumes.clone(),
             configs: BTreeMap::new(),
             limits: wire::GuestLimits {
                 max_map_count: environment.limits.max_map_count,
@@ -531,7 +551,7 @@ fn fixture_submission(
                 working_directory: launch.working_directory,
                 user: launch.user,
             },
-            disk: None,
+            disk: volumes.disk_bytes.map(|bytes| wire::Disk::Zero { bytes }),
             interface: None,
         },
         machines: vec![],
