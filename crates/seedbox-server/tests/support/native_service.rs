@@ -1584,7 +1584,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
         )
     };
     // Hang guard only: every decision below is taken from guest events.
-    tokio::time::timeout(Duration::from_secs(600), async {
+    tokio::time::timeout(HANG_GUARD, async {
         let seed = 123;
         let mut session = NativeSession::new(backend);
         let request = network_submission(backend, session.root.path(), &session.store, seed);
@@ -1647,9 +1647,9 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        // A pre-fault stop is not a checkpoint boundary (the worker refuses it
-        // as unsupported). One public step applies the marker and commits one
-        // round, leaving an ordinary paused boundary still inside the transfer.
+        // Capture at an ordinary paused boundary: one public step applies the
+        // marker and commits one round, still inside the transfer. Capture at
+        // the held pre-fault stop itself is covered by native_held_checkpoint.
         let before = session.client.playback(&source).await.unwrap().state.position.completed_rounds;
         session.control(&source, "apply-marker", ControlCommand::Step).await;
         loop {
@@ -1772,7 +1772,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
         session.close().await;
     })
     .await
-    .expect("in-flight checkpoint exceeded its 600-second hang guard");
+    .expect("in-flight checkpoint exceeded its hang guard");
 }
 fn runtime_backend(backend: DriverBackend) -> runtime_assets::Backend {
     match backend {
