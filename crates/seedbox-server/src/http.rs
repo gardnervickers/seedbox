@@ -75,6 +75,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/simulations/{id}/watch", get(watch))
         .route("/v1/simulations/{id}/playback", get(playback))
         .route("/v1/simulations/{id}/timeline", get(timeline))
+        .route("/v1/simulations/{id}/explanation", get(explanation))
         .route("/v1/simulations/{id}/derive", post(derive))
         .route("/v1/simulations/{id}/checkpoints", get(checkpoints))
         .route(
@@ -502,6 +503,42 @@ async fn timeline(
     })
     .await
     .map_err(|_| HttpError::internal("timeline task failed"))?
+}
+
+async fn explanation(
+    State(state): State<ApiState>,
+    id: Result<Path<SimulationId>, PathRejection>,
+) -> Result<Json<seedbox_api::Explanation>, HttpError> {
+    use crate::stream::Delivery;
+    let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let manager = state.manager.clone();
+    let subscribed = id.clone();
+    let mut receiver = tokio::task::spawn_blocking(move || manager.events(&subscribed, false))
+        .await
+        .map_err(|_| HttpError::internal("event subscription task failed"))??;
+    let (mut events, mut gaps) = (Vec::new(), 0);
+    loop {
+        match receiver.recv().await {
+            Delivery::Record(record) => events.push(record.payload.clone()),
+            Delivery::Gap { first, last } => gaps += last - first + 1,
+            Delivery::Closed => break,
+        }
+    }
+    tokio::task::spawn_blocking(move || {
+        let execution = state.execution.ok_or_else(|| {
+            HttpError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::Unavailable,
+                "execution evidence is unavailable",
+            )
+        })?;
+        execution
+            .explanation(&id, &events, gaps)
+            .map(Json)
+            .map_err(HttpError::from)
+    })
+    .await
+    .map_err(|_| HttpError::internal("explanation task failed"))?
 }
 
 async fn describe(

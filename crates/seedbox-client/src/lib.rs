@@ -227,6 +227,11 @@ impl Client {
             .await
     }
 
+    pub async fn explanation(&self, id: &SimulationId) -> Result<seedbox_api::Explanation, Error> {
+        self.document(self.request(Method::GET, &format!("/v1/simulations/{id}/explanation")))
+            .await
+    }
+
     pub async fn checkpoints(
         &self,
         id: &SimulationId,

@@ -64,6 +64,8 @@ pub use world::{
 mod timeline;
 pub use timeline::{DeriveRequest, FaultTimeline, TimelineEntry, TimelineOrigin};
 
+mod explanation;
+pub use explanation::{Explanation, ExplanationEntry, ExplanationKind};
 mod comparison;
 pub use comparison::{ComparisonStatus, SimulationComparison};
 

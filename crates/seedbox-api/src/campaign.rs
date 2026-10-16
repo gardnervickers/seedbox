@@ -163,9 +163,18 @@ pub enum FindingLabel {
 #[serde(tag = "state", rename_all = "camelCase", deny_unknown_fields)]
 pub enum ExportState {
     Pending,
-    /// Synced to its directory: durable.
+    /// A branched representative rerunning cold from its full program.
+    Reproducing {
+        simulation: SimulationId,
+    },
+    /// Synced to its directory: durable. `simulation` is the exported run:
+    /// the representative, or its cold rerun when that matched it. A bundle
+    /// `fromCheckpoint` carries the checkpoint its run started from.
     Published {
         path: String,
+        simulation: SimulationId,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        from_checkpoint: bool,
     },
     Failed {
         message: String,
@@ -308,6 +317,9 @@ pub struct ShrinkRequest {
 pub struct ShrinkProbe {
     pub simulation: SimulationId,
     pub inputs: u32,
+    /// A simplification probe's edit of the kept inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reproduced: Option<bool>,
 }
@@ -340,6 +352,14 @@ pub struct Shrink {
     /// The kept input keys, in program order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept: Vec<String>,
+    /// Simplifications of the kept inputs that still fail the same way.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edits: Vec<String>,
+    /// Probes start from the source's checkpoint, its consumed prefix fixed,
+    /// because its full program did not reproduce the failure from a fresh
+    /// start.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_checkpoint: bool,
     /// The probe that ran exactly the kept inputs and still failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reproduction: Option<SimulationId>,

@@ -198,6 +198,32 @@ impl ExecutionService {
         Ok(crate::timeline::project(&resource, &history, &world))
     }
 
+    /// A completed simulation's failure timeline from its retained evidence.
+    /// `events` is its retained event history, less `gaps` lost records.
+    pub fn explanation(
+        &self,
+        id: &SimulationId,
+        events: &[seedbox_api::SimulationEvent],
+        gaps: u64,
+    ) -> Result<seedbox_api::Explanation, Error> {
+        let resource = self.describe(id)?;
+        if resource.status.phase != Phase::Completed {
+            return Err(Error::Catalogue(catalogue::Error::Invalid(format!(
+                "simulation {id} is not complete; explain a completed simulation"
+            ))));
+        }
+        let world = self.manager.world(id)?;
+        let record = self.run_record(id)?;
+        Ok(crate::explain::project(
+            id,
+            &resource.spec.program,
+            &world,
+            events,
+            gaps,
+            record.as_ref().and_then(|r| r.report.as_ref()),
+        ))
+    }
+
     /// Return the immutable submitted inputs enriched with recorded external overrides.
     /// This is an export projection; the catalogue's admitted definition stays immutable.
     pub fn describe(&self, id: &SimulationId) -> Result<seedbox_api::Simulation, Error> {

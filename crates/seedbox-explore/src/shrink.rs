@@ -7,8 +7,14 @@
 //! still go alone. Every probe reruns the whole simulation and its oracle.
 //! The result is "1-minimal under these transformations" only when ddmin
 //! finished at single-atom granularity; otherwise it is merely reduced.
+//!
+//! A [`Simplifier`] then edits what remains, one input at a time, keeping
+//! an edit only when the failure persists: a fault ends sooner (its teardown
+//! or heal moves halfway towards its start), a trigger fires without its
+//! delay or after half of it, and a choice input selects the first
+//! alternative. Keys never change, so the kept set is the same.
 use seedbox_engine_protocol::input_program::{
-    BranchAction, InputAction, TimedInput, GENERATED_END_SUFFIX,
+    BranchAction, InputAction, RuleAction, TimedInput, GENERATED_END_SUFFIX,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -255,6 +261,215 @@ impl Shrinker {
         self.result = Some(Result::Minimal {
             keep: self.ordered(&self.keep(&self.current)),
         });
+    }
+}
+
+/// The shortest fault a simplification leaves, and the smallest delay it halves.
+const MIN_SPAN_NS: u64 = 1_000_000;
+
+/// One simplifying edit: `key`'s input replaced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edit {
+    pub key: String,
+    pub input: TimedInput,
+    pub summary: String,
+}
+
+/// The simplifying edits of a program, from input `fixed` on, most
+/// simplifying first for each input. No edit moves an input before the
+/// fixed prefix's last input.
+pub fn simplifications(program: &[TimedInput], fixed: usize) -> Vec<Edit> {
+    let floor = program[..fixed.min(program.len())]
+        .last()
+        .map_or(0, |i| i.at_ns);
+    let mut edits = Vec::new();
+    let mut starts: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut handles: BTreeMap<String, u64> = BTreeMap::new();
+    for (index, input) in program.iter().enumerate() {
+        let start = match &input.action {
+            InputAction::Fault(action) => {
+                let value = serde_json::to_value(action).unwrap_or_default();
+                let handle = value
+                    .get("handle")
+                    .and_then(|h| h.as_str())
+                    .map(str::to_owned);
+                match handle {
+                    Some(handle) if action.name() == "heal" => handles.get(&handle).copied(),
+                    Some(handle) => {
+                        handles.insert(handle, input.at_ns);
+                        None
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        }
+        .or_else(|| {
+            let start = input.key.strip_suffix(GENERATED_END_SUFFIX)?;
+            starts.get(start).copied()
+        });
+        starts.insert(&input.key, input.at_ns);
+        if index < fixed {
+            continue;
+        }
+        let mut edit = |input: TimedInput, summary: String| {
+            edits.push(Edit {
+                key: input.key.clone(),
+                input,
+                summary,
+            })
+        };
+        let shorter_at = start
+            .filter(|&s| input.at_ns >= s + 2 * MIN_SPAN_NS)
+            .map(|s| (s, (s + (input.at_ns - s) / 2).max(floor)))
+            .filter(|&(_, at)| at < input.at_ns);
+        if let Some((start, at_ns)) = shorter_at {
+            let mut shorter = input.clone();
+            shorter.at_ns = at_ns;
+            let summary = format!("end {} after {} ns", input.key, shorter.at_ns - start);
+            edit(shorter, summary);
+        }
+        match &input.action {
+            InputAction::Rule(RuleAction::Trigger(spec)) if spec.delay_ns > 0 => {
+                let mut immediate = input.clone();
+                if let InputAction::Rule(RuleAction::Trigger(spec)) = &mut immediate.action {
+                    spec.delay_ns = 0;
+                }
+                edit(immediate, format!("fire {} without delay", input.key));
+                if spec.delay_ns >= 2 * MIN_SPAN_NS {
+                    let mut half = input.clone();
+                    if let InputAction::Rule(RuleAction::Trigger(spec)) = &mut half.action {
+                        spec.delay_ns /= 2;
+                    }
+                    let summary = format!("fire {} after {} ns", input.key, spec.delay_ns / 2);
+                    edit(half, summary);
+                }
+            }
+            InputAction::Rule(RuleAction::Choice(choice)) if choice.select > 0 => {
+                let mut first = input.clone();
+                if let InputAction::Rule(RuleAction::Choice(choice)) = &mut first.action {
+                    choice.select = 0;
+                }
+                edit(
+                    first,
+                    format!("choose the first alternative at {}", input.key),
+                );
+            }
+            _ => {}
+        }
+    }
+    edits
+}
+
+/// A program with one edit applied, back in program order: by time, branch
+/// inputs first at their time, otherwise as before.
+pub fn apply(program: &[TimedInput], edit: &Edit) -> Vec<TimedInput> {
+    let mut edited: Vec<TimedInput> = program
+        .iter()
+        .map(|i| {
+            if i.key == edit.key {
+                edit.input.clone()
+            } else {
+                i.clone()
+            }
+        })
+        .collect();
+    edited.sort_by_key(|i| (i.at_ns, !matches!(i.action, InputAction::Branch(_))));
+    edited
+}
+
+/// Greedy simplification: try each edit of the current program, keep it when
+/// the failure persists, and start over from the edited program until no
+/// edit helps or the probes run out. A failed edit is never retried.
+#[derive(Clone, Debug)]
+pub struct Simplifier {
+    program: Vec<TimedInput>,
+    fixed: usize,
+    max_probes: u32,
+    probes: u32,
+    queue: Vec<Edit>,
+    rejected: BTreeSet<String>,
+    probing: Option<Edit>,
+    accepted: Vec<(String, String)>,
+    done: bool,
+}
+
+impl Simplifier {
+    /// Simplify `program`; its first `fixed` inputs stay as they are.
+    pub fn new(program: Vec<TimedInput>, fixed: usize, max_probes: u32) -> Self {
+        let queue = simplifications(&program, fixed);
+        Self {
+            program,
+            fixed,
+            max_probes,
+            probes: 0,
+            queue,
+            rejected: BTreeSet::new(),
+            probing: None,
+            accepted: Vec::new(),
+            done: false,
+        }
+    }
+    fn fingerprint(edit: &Edit) -> String {
+        serde_json::to_string(&edit.input).unwrap_or_default()
+    }
+    /// The next program to run and what it changed; None when finished.
+    pub fn next_probe(&mut self) -> Option<(Vec<TimedInput>, String)> {
+        if let Some(edit) = &self.probing {
+            return Some((apply(&self.program, edit), edit.summary.clone()));
+        }
+        while !self.done {
+            if self.probes >= self.max_probes {
+                self.done = true;
+                break;
+            }
+            let Some(edit) = (!self.queue.is_empty()).then(|| self.queue.remove(0)) else {
+                self.done = true;
+                break;
+            };
+            if self.rejected.contains(&Self::fingerprint(&edit)) {
+                continue;
+            }
+            self.probes += 1;
+            let probe = (apply(&self.program, &edit), edit.summary.clone());
+            self.probing = Some(edit);
+            return Some(probe);
+        }
+        None
+    }
+    /// Whether the last probe still failed the same way.
+    pub fn report(&mut self, failed: bool) -> std::result::Result<(), String> {
+        let edit = self.probing.take().ok_or("no simplification outstanding")?;
+        if failed {
+            self.program = apply(&self.program, &edit);
+            self.accepted.push((edit.key, edit.summary));
+            self.queue = simplifications(&self.program, self.fixed);
+        } else {
+            self.rejected.insert(Self::fingerprint(&edit));
+        }
+        Ok(())
+    }
+    pub fn done(&self) -> bool {
+        self.done
+    }
+    pub fn probes(&self) -> u32 {
+        self.probes
+    }
+    /// The simplified program so far.
+    pub fn program(&self) -> &[TimedInput] {
+        &self.program
+    }
+    /// The last kept edit of each input, in the order inputs were first
+    /// edited: repeated halvings show only where they ended.
+    pub fn accepted(&self) -> Vec<String> {
+        let mut last: Vec<(&str, &str)> = Vec::new();
+        for (key, summary) in &self.accepted {
+            match last.iter_mut().find(|(k, _)| k == key) {
+                Some(entry) => entry.1 = summary,
+                None => last.push((key, summary)),
+            }
+        }
+        last.into_iter().map(|(_, s)| s.to_owned()).collect()
     }
 }
 

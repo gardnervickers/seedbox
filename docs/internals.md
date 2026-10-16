@@ -392,7 +392,12 @@ members is reported as the observed campaign rate. Findings group a member's
 own violations by property and selected detail fields; the earliest ordinal
 is the representative, exported without anchor captures, synced, linked
 without overwriting, then the directory synced, before it is reported as
-published. `findings.json` in the directory is the baseline for later
+published. A branched representative is first rerun cold: its full program
+(every ancestor's prefix, anchors and reseeds included) from a fresh start,
+capturing nothing. When that run's record matches the representative's
+(outcome, result, fault history and witness), the cold run is exported, so
+the bundle carries no checkpoint; otherwise the representative is, marked
+`fromCheckpoint`. The campaign finishes only once no cold rerun is pending. `findings.json` in the directory is the baseline for later
 campaigns. Code: [planner](../crates/seedbox-explore/src/campaign.rs),
 [server](../crates/seedbox-server/src/execution/campaigns.rs).
 
@@ -414,8 +419,10 @@ set bit as a feature. Code: [client](../guest/progress/progress.c),
 ## Shrinking
 
 `seedbox shrink` runs ddmin (`seedbox-explore::shrink`) over a failed
-simulation's external inputs; a checkpoint's consumed prefix is fixed, and
-oracle calls are never in the program. A generated fault and its teardown are
+simulation's external inputs; oracle calls are never in the program. A source
+that started from a checkpoint shrinks its full program from a fresh start, so
+its prefix can shrink too; only if that does not reproduce the failure does it
+fall back to the checkpoint, whose consumed prefix is then fixed. A generated fault and its teardown are
 one atom, as is a mutation and its `-end` teardown; removing an anchor removes its reseeds, and removing a fault removes
 the heals of its handle. The unchanged program runs first to confirm the
 failure, then every probe reruns the whole simulation and its oracle and
@@ -424,6 +431,29 @@ violated again or, for an oracle failure, the oracle exits with the same code
 and every property the source violated is violated again, so a probe cannot
 drift into an unrelated failure. The result is "1-minimal under these transformations" only when
 ddmin finished at single-atom granularity; otherwise it is "reduced".
+With probes left, a greedy simplification pass then edits the kept inputs one
+at a time and keeps an edit only when the failure persists: a fault's teardown
+or heal moves halfway towards its start (never below 1 ms, nor before a fixed
+prefix), a trigger fires without its delay or after half of it, and a choice
+input selects its first alternative. Edits never change keys, so the kept set
+stands; the reproduction is the last probe that ran it.
+
+## Failure timeline
+
+`seedbox explain` projects a completed simulation's retained evidence into
+one simulated-time order (`seedbox-server/src/explain.rs`): non-fault program
+inputs with their trigger outcomes, trigger matches, faults at their applied
+(or scheduled) times, lifecycle, readiness and exits from the event history,
+oracle controls, every retained choice, and from the property ledger setup,
+main-process exits, each event name's first occurrence, first state values and
+transitions, and each property's first pass and first failure. Entries carry
+stable identities (`input:KEY`, `fault:ID`, `trigger:KEY`,
+`machine:NAME#INCARNATION`, `property:ID`, ...) and link what caused them: a
+fault to its input or trigger, a trigger match to its fault, a crash to the
+fault applied with it. The ledger keeps first occurrences and counts, so the
+explanation lists, rather than guesses, what it omits: repeated events,
+further property evaluations, dropped states, untracked choices, lost event
+history and evidence errors. It reads evidence only; nothing reruns.
 
 ## Property records
 

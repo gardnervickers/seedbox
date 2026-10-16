@@ -412,6 +412,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show a completed simulation's failure timeline: inputs, faults, triggers, lifecycle, choices and property evidence in simulated-time order, with what the evidence omits.
+    Explain {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Show only these kinds of entry; repeatable [default: all].
+        #[arg(long, value_enum)]
+        kind: Vec<observe::ExplainKind>,
+        /// Show only entries on this machine, and those on none.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Print the explanation document as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show completed simulation raw diagnostics, distinct from timed application logs.
     Diagnostics {
         /// Short simulation ID.
@@ -991,6 +1005,12 @@ fn run(cli: Cli) -> Result<u8> {
             transfer,
             json,
         } => bundles::import(&bundle, transfer.max_bytes, json),
+        Command::Explain {
+            id,
+            kind,
+            machine,
+            json,
+        } => observe::explain(&id, &kind, machine.as_deref(), json),
         Command::Diagnostics {
             id,
             name,

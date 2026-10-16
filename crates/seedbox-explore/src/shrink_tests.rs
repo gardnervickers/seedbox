@@ -87,3 +87,60 @@ fn an_unreproduced_failure_and_an_exhausted_budget_are_reported() {
         }
     );
 }
+
+#[test]
+fn simplification_shortens_faults_and_drops_delays_while_the_failure_persists() {
+    const MS: u64 = 1_000_000;
+    let program = vec![
+        input("prefix", 1, json!({"action":"crash","machine":"db"})),
+        input("gen-0", 10 * MS, json!({"action":"crash","machine":"db"})),
+        input(
+            "cut",
+            20 * MS,
+            json!({"action":"partition","handle":"cut","left":["a"],"right":["b"]}),
+        ),
+        input(
+            "gen-0-end",
+            90 * MS,
+            json!({"action":"reboot","machine":"db"}),
+        ),
+        input("heal", 100 * MS, json!({"action":"heal","handle":"cut"})),
+        input(
+            "mutate-1",
+            30 * MS,
+            json!({"action":"trigger","when":{"on":"event","name":"commit"},
+                "delay_ns": 8 * MS, "then":{"action":"crash","machine":"db"}}),
+        ),
+        input(
+            "pick",
+            40 * MS,
+            json!({"action":"choice","machine":"db","site":"retry","select":1}),
+        ),
+    ];
+    let mut program = program;
+    program.sort_by_key(|i| i.at_ns);
+    // The failure needs the partition to last at least 40ms and the crash to
+    // be down at least 20ms; delays and choices do not matter.
+    let fails = |p: &[TimedInput]| {
+        let at = |k: &str| p.iter().find(|i| i.key == k).unwrap().at_ns;
+        at("heal") - at("cut") >= 40 * MS && at("gen-0-end") - at("gen-0") >= 20 * MS
+    };
+    let mut simplifier = Simplifier::new(program.clone(), 1, 64);
+    while let Some((probe, _)) = simplifier.next_probe() {
+        assert_eq!(probe[0].key, "prefix", "the fixed prefix stays");
+        assert!(probe.windows(2).all(|w| w[0].at_ns <= w[1].at_ns));
+        simplifier.report(fails(&probe)).unwrap();
+    }
+    let result = simplifier.program();
+    assert!(fails(result));
+    let at = |k: &str| result.iter().find(|i| i.key == k).unwrap().at_ns;
+    assert!(at("heal") - at("cut") < 80 * MS, "partition shortened");
+    assert!(at("gen-0-end") - at("gen-0") < 40 * MS, "crash shortened");
+    let action = |k: &str| {
+        serde_json::to_value(&result.iter().find(|i| i.key == k).unwrap().action).unwrap()
+    };
+    assert_eq!(action("mutate-1").get("delay_ns"), None, "delay dropped");
+    assert_eq!(action("pick")["select"], 0);
+    assert_eq!(simplifier.accepted().len(), 4, "one final edit per input");
+    assert!(simplifier.done());
+}

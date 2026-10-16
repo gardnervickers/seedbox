@@ -157,7 +157,15 @@ struct ShrinkJob {
     spec: seedbox_api::SimulationSpec,
     inputs: Vec<ProgramInput>,
     removable: u32,
+    /// Inputs a probe keeps unchanged: a checkpoint's consumed prefix.
+    pending: usize,
     shrinker: Shrinker,
+    /// Edits the kept inputs once removal is done.
+    simplifier: Option<shrink::Simplifier>,
+    /// The checkpoint form of a branched source, should its full program
+    /// not reproduce from a fresh start.
+    fallback: Option<(seedbox_api::SimulationSpec, usize)>,
+    from_checkpoint: bool,
     probes: Vec<(ShrinkProbe, Vec<String>)>,
     running: Option<SimulationId>,
     error: Option<String>,
@@ -448,18 +456,26 @@ impl ExecutionService {
         let InputSource::Resolved { definition } = &resource.spec.inputs else {
             return Err(invalid("shrink needs a resolved definition"));
         };
-        // A checkpoint's consumed prefix is fixed.
-        let pending = match &definition.start {
-            seedbox_spec::definition::Start::Checkpoint { manifest, .. } => manifest
-                .pointer("/state/world/input_program/next")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-                as usize,
-            seedbox_spec::definition::Start::Fresh => 0,
+        // A branched source shrinks its full program from a fresh start, so
+        // its prefix can shrink too; its checkpoint, whose consumed prefix is
+        // fixed, is the fallback.
+        let (spec, fallback) = match &definition.start {
+            seedbox_spec::definition::Start::Checkpoint { manifest, .. } => {
+                let pending = manifest
+                    .pointer("/state/world/input_program/next")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let mut cold = resource.spec.clone();
+                if let InputSource::Resolved { definition } = &mut cold.inputs {
+                    definition.start = seedbox_spec::definition::Start::Fresh;
+                }
+                (cold, Some((resource.spec.clone(), pending)))
+            }
+            seedbox_spec::definition::Start::Fresh => (resource.spec.clone(), None),
         };
         let inputs = resource.spec.program.clone();
         let timed: Vec<TimedInput> = inputs.iter().map(timed).collect::<Result<_, _>>()?;
-        let candidates = shrink::candidates(&timed, pending);
+        let candidates = shrink::candidates(&timed, 0);
         let removable = candidates.atoms.iter().map(Vec::len).sum::<usize>() as u32;
         let mut jobs = self
             .jobs
@@ -472,9 +488,13 @@ impl ExecutionService {
             request: request.clone(),
             identity: FailureIdentity::of(&target, &resource.status),
             target,
-            spec: resource.spec.clone(),
+            spec,
             inputs,
             removable,
+            pending: 0,
+            simplifier: None,
+            fallback,
+            from_checkpoint: false,
             probes: Vec::new(),
             running: None,
             error: None,
@@ -610,13 +630,20 @@ impl ExecutionService {
             if resource.status.phase != Phase::Completed {
                 continue;
             }
-            self.finish_member(id, job, ordinal, &resource)?;
+            self.finish_member(job, ordinal, &resource)?;
         }
+        self.export_findings(id, job, queued)?;
+        // Finish only once every finding has its export.
+        let reproducing = job
+            .exports
+            .values()
+            .any(|e| matches!(e, ExportState::Reproducing { .. }));
         if job.stop_requested {
-            if job
-                .members
-                .values()
-                .all(|m| m.verdict.is_some() || m.error.is_some() || m.simulation.is_none())
+            if !reproducing
+                && job
+                    .members
+                    .values()
+                    .all(|m| m.verdict.is_some() || m.error.is_some() || m.simulation.is_none())
             {
                 job.completion = Some(CampaignCompletion::Cancelled);
                 self.release_all(job)?;
@@ -624,8 +651,10 @@ impl ExecutionService {
             return Ok(());
         }
         if job.planner.done() {
-            job.completion = Some(CampaignCompletion::Exhausted);
             self.release_all(job)?;
+            if !reproducing {
+                job.completion = Some(CampaignCompletion::Exhausted);
+            }
             return Ok(());
         }
         for plan in job.planner.next_batch() {
@@ -797,7 +826,6 @@ impl ExecutionService {
 
     fn finish_member(
         &self,
-        id: &str,
         job: &mut CampaignJob,
         ordinal: u32,
         resource: &seedbox_api::Simulation,
@@ -885,8 +913,7 @@ impl ExecutionService {
                 moments,
             })
             .map_err(invalid)?;
-        self.release_captures(job)?;
-        self.export_findings(id, job)
+        self.release_captures(job)
     }
 
     /// A finished campaign branches from nothing: free every capture.
@@ -920,28 +947,125 @@ impl ExecutionService {
     }
 
     /// Export each finding's representative once, durably, and keep the
-    /// directory's index current.
-    fn export_findings(&self, id: &str, job: &mut CampaignJob) -> Result<(), Error> {
+    /// directory's index current. A branched representative first reruns
+    /// cold, from its full program and a fresh start; when that run's record
+    /// matches the representative's, the cold run is exported instead, so the
+    /// bundle carries no checkpoint. Otherwise the representative is.
+    fn export_findings(
+        &self,
+        id: &str,
+        job: &mut CampaignJob,
+        queued: &mut Vec<SimulationId>,
+    ) -> Result<(), Error> {
         let current = findings(&job.context());
         for finding in &current {
-            if job.exports.contains_key(&finding.group) {
-                continue;
-            }
-            let state = match self.publish_bundle(
-                &finding.representative,
-                &job.findings_dir,
-                &finding.group,
-            ) {
-                Ok(path) => ExportState::Published {
-                    path: path.display().to_string(),
-                },
-                Err(error) => ExportState::Failed {
-                    message: error.to_string(),
-                },
+            let state = match job.exports.get(&finding.group) {
+                None => {
+                    let branched = job
+                        .members
+                        .get(&finding.ordinal)
+                        .is_some_and(|m| matches!(m.plan.kind, plan::PlanKind::Branch(_)));
+                    match branched.then(|| self.submit_cold(id, job, finding)) {
+                        Some(Ok((simulation, is_queued))) => {
+                            if is_queued {
+                                queued.push(simulation.clone());
+                            }
+                            ExportState::Reproducing { simulation }
+                        }
+                        Some(Err(Error::Catalogue(catalogue::Error::Unavailable))) => {
+                            return Err(Error::Catalogue(catalogue::Error::Unavailable));
+                        }
+                        Some(Err(_)) => self.export(job, finding, &finding.representative, true),
+                        None => self.export(job, finding, &finding.representative, false),
+                    }
+                }
+                Some(ExportState::Reproducing { simulation }) => {
+                    let simulation = simulation.clone();
+                    if self.manager.describe(&simulation)?.status.phase != Phase::Completed {
+                        continue;
+                    }
+                    if self.cold_matches(&finding.representative, &simulation)? {
+                        self.export(job, finding, &simulation, false)
+                    } else {
+                        self.export(job, finding, &finding.representative, true)
+                    }
+                }
+                Some(_) => continue,
             };
             job.exports.insert(finding.group.clone(), state);
         }
         write_index(&job.findings_dir, id, &findings(&job.context()))
+    }
+
+    fn export(
+        &self,
+        job: &CampaignJob,
+        finding: &Finding,
+        simulation: &SimulationId,
+        from_checkpoint: bool,
+    ) -> ExportState {
+        match self.publish_bundle(simulation, &job.findings_dir, &finding.group) {
+            Ok(path) => ExportState::Published {
+                path: path.display().to_string(),
+                simulation: simulation.clone(),
+                from_checkpoint,
+            },
+            Err(error) => ExportState::Failed {
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// Submit a representative's full program from a fresh start, capturing
+    /// nothing. Returns the simulation and whether it was queued.
+    fn submit_cold(
+        &self,
+        id: &str,
+        job: &CampaignJob,
+        finding: &Finding,
+    ) -> Result<(SimulationId, bool), Error> {
+        let mut spec = self.manager.describe(&finding.representative)?.spec;
+        let InputSource::Resolved { definition } = &mut spec.inputs else {
+            return Err(invalid("representative has no resolved definition"));
+        };
+        definition.start = seedbox_spec::definition::Start::Fresh;
+        let mut options = job.request.options.clone();
+        options.capture_anchors.clear();
+        let mut metadata = seedbox_spec::definition::Metadata {
+            name: job.request.metadata.name.clone(),
+            labels: job.request.metadata.labels.clone(),
+            annotations: job.request.metadata.annotations.clone(),
+        };
+        metadata.annotations.insert("campaign".into(), id.into());
+        metadata
+            .annotations
+            .insert("cold-rerun-of".into(), finding.representative.to_string());
+        let request = SubmitRequest {
+            options,
+            metadata,
+            request_id: format!("{id}-cold-{}", finding.ordinal),
+            spec,
+            fault_profile: None,
+        };
+        let (resource, _) = self.manager.submit(request)?;
+        let is_queued = resource.status.phase == Phase::Queued;
+        Ok((resource.metadata.id, is_queued))
+    }
+
+    /// The cold rerun reproduced the representative: same outcome, result,
+    /// fault history and witness.
+    fn cold_matches(
+        &self,
+        representative: &SimulationId,
+        cold: &SimulationId,
+    ) -> Result<bool, Error> {
+        let (Some(first), Some(second)) =
+            (self.run_record(representative)?, self.run_record(cold)?)
+        else {
+            return Ok(false);
+        };
+        Ok(seedbox_artifacts::record::compare(&first, &second).status
+            == seedbox_artifacts::record::ReplayStatus::Match)
     }
 
     fn publish_bundle(
@@ -994,18 +1118,66 @@ impl ExecutionService {
                 probe.reproduced = Some(reproduced);
             }
             job.running = None;
-            job.shrinker.report(reproduced).map_err(invalid)?;
+            match &mut job.simplifier {
+                Some(simplifier) => simplifier.report(reproduced).map_err(invalid)?,
+                None => job.shrinker.report(reproduced).map_err(invalid)?,
+            }
         }
-        let Some(keep) = job.shrinker.next_probe() else {
-            return Ok(());
+        let spent = job.probes.len() as u32;
+        let remaining = job.request.max_probes.saturating_sub(spent);
+        if job.shrinker.result() == Some(&shrink::Result::NotReproduced) && remaining > 0 {
+            if let Some((spec, pending)) = job.fallback.take() {
+                // The fresh start did not reproduce: shrink from the checkpoint.
+                let timed: Vec<TimedInput> =
+                    job.inputs.iter().map(timed).collect::<Result<_, _>>()?;
+                let candidates = shrink::candidates(&timed, pending);
+                job.removable = candidates.atoms.iter().map(Vec::len).sum::<usize>() as u32;
+                job.shrinker = Shrinker::new(candidates, remaining);
+                job.spec = spec;
+                job.pending = pending;
+                job.from_checkpoint = true;
+            }
+        }
+        if job.simplifier.is_none() {
+            if let Some(shrink::Result::Reduced { keep } | shrink::Result::Minimal { keep }) =
+                job.shrinker.result()
+            {
+                let program: Vec<TimedInput> = job
+                    .inputs
+                    .iter()
+                    .filter(|i| keep.contains(&i.key))
+                    .map(timed)
+                    .collect::<Result<_, _>>()?;
+                job.simplifier = Some(shrink::Simplifier::new(program, job.pending, remaining));
+            }
+        }
+        let (program, edit) = match &mut job.simplifier {
+            Some(simplifier) => match simplifier.next_probe() {
+                Some((program, summary)) => (
+                    program
+                        .iter()
+                        .map(program_input)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    Some(summary),
+                ),
+                None => return Ok(()),
+            },
+            None => {
+                let Some(keep) = job.shrinker.next_probe() else {
+                    return Ok(());
+                };
+                let program = job
+                    .inputs
+                    .iter()
+                    .filter(|i| keep.contains(&i.key))
+                    .cloned()
+                    .collect();
+                (program, None)
+            }
         };
+        let keep: Vec<String> = program.iter().map(|i| i.key.clone()).collect();
         let mut spec = job.spec.clone();
-        spec.program = job
-            .inputs
-            .iter()
-            .filter(|i| keep.contains(&i.key))
-            .cloned()
-            .collect();
+        spec.program = program;
         let mut metadata = seedbox_spec::definition::Metadata {
             name: format!("{}-shrink", job.source),
             ..Default::default()
@@ -1026,6 +1198,7 @@ impl ExecutionService {
             ShrinkProbe {
                 simulation: resource.metadata.id.clone(),
                 inputs: keep.len() as u32,
+                edit,
                 reproduced: None,
             },
             keep,
@@ -1036,6 +1209,32 @@ impl ExecutionService {
         }
         Ok(())
     }
+}
+
+/// "crash store for 300ms, 1ms after phase=compacting #1 on store".
+fn mutation_summary(m: &plan::Mutation) -> String {
+    use seedbox_control::EventSelector;
+    let (what, machine) = match &m.when {
+        EventSelector::Event { name, machine } => (format!("event {name}"), machine.as_ref()),
+        EventSelector::State {
+            name,
+            value,
+            machine,
+        } => (
+            format!("{name}={}", value.as_deref().unwrap_or("*")),
+            machine.as_ref(),
+        ),
+        other => (other.name().to_owned(), None),
+    };
+    let on = machine.map(|m| format!(" on {m}")).unwrap_or_default();
+    format!(
+        "{} {} for {}ms, {}ms after {what} #{}{on}",
+        format!("{:?}", m.kind).to_lowercase(),
+        m.target,
+        m.duration_ns / 1_000_000,
+        m.delay_ns / 1_000_000,
+        m.nth
+    )
 }
 
 /// The mutations a fault profile allows, on its targets (every machine but
@@ -1152,17 +1351,7 @@ fn view(id: &str, job: &CampaignJob) -> Campaign {
                         anchor: b.anchor.clone(),
                         reseed: b.reseed,
                         choices: b.choices.len() as u32,
-                        mutation: b.mutation.as_ref().map(|m| {
-                            format!(
-                                "{:?} {} {}ms after {}#{}",
-                                m.kind,
-                                m.target,
-                                m.delay_ns / 1_000_000,
-                                m.when.name(),
-                                m.nth
-                            )
-                            .to_lowercase()
-                        }),
+                        mutation: b.mutation.as_ref().map(mutation_summary),
                     },
                 },
                 simulation: m.simulation.clone(),
@@ -1461,17 +1650,25 @@ fn shrink_view(id: &str, job: &ShrinkJob) -> Shrink {
         Some(shrink::Result::Reduced { keep }) => (Some(ShrinkOutcome::Reduced), keep.clone()),
         Some(shrink::Result::Minimal { keep }) => (Some(ShrinkOutcome::Minimal), keep.clone()),
     };
+    // The last probe that ran the kept inputs, as simplified so far (an
+    // edit may reorder them).
+    let kept_set: BTreeSet<&String> = kept.iter().collect();
     let reproduction = job
         .probes
         .iter()
         .rev()
-        .find(|(probe, keys)| probe.reproduced == Some(true) && keys == &kept)
+        .find(|(probe, keys)| {
+            probe.reproduced == Some(true) && keys.iter().collect::<BTreeSet<_>>() == kept_set
+        })
         .map(|(probe, _)| probe.simulation.clone());
+    let finished = job.error.is_some()
+        || outcome == Some(ShrinkOutcome::NotReproduced)
+        || job.simplifier.as_ref().is_some_and(|s| s.done());
     Shrink {
         id: id.into(),
         source: job.source.clone(),
         target: job.target.clone(),
-        phase: if outcome.is_some() || job.error.is_some() {
+        phase: if finished {
             CampaignPhase::Completed
         } else {
             CampaignPhase::Running
@@ -1481,6 +1678,12 @@ fn shrink_view(id: &str, job: &ShrinkJob) -> Shrink {
         probes: job.probes.iter().map(|(p, _)| p.clone()).collect(),
         outcome,
         kept,
+        edits: job
+            .simplifier
+            .as_ref()
+            .map(|s| s.accepted())
+            .unwrap_or_default(),
+        from_checkpoint: job.from_checkpoint,
         reproduction,
         error: job.error.clone(),
     }

@@ -474,6 +474,112 @@ fn with_counts(status: String, counts: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// Kinds of failure-timeline entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(super) enum ExplainKind {
+    /// Anchors, reseeds, trigger and choice inputs.
+    Input,
+    /// Faults, with the input or trigger behind each.
+    Fault,
+    /// Trigger matches.
+    Trigger,
+    /// Crashes, reboots, pauses and throttles.
+    Lifecycle,
+    /// Machines becoming ready.
+    Ready,
+    /// Machine and main-process exits.
+    Exit,
+    /// Oracle control operations.
+    Control,
+    /// Answered structured choices.
+    Choice,
+    /// Workload setup completion.
+    Setup,
+    /// First occurrence of each SDK event.
+    Event,
+    /// First time each state value was reached.
+    State,
+    /// First time each state transition happened.
+    Transition,
+    /// First pass and first failure of each property.
+    Property,
+}
+
+impl ExplainKind {
+    fn of(kind: seedbox_api::ExplanationKind) -> Self {
+        use seedbox_api::ExplanationKind as K;
+        match kind {
+            K::Input => Self::Input,
+            K::Fault => Self::Fault,
+            K::Trigger => Self::Trigger,
+            K::Lifecycle => Self::Lifecycle,
+            K::Ready => Self::Ready,
+            K::Exit => Self::Exit,
+            K::Control => Self::Control,
+            K::Choice => Self::Choice,
+            K::Setup => Self::Setup,
+            K::Event => Self::Event,
+            K::State => Self::State,
+            K::Transition => Self::Transition,
+            K::Property => Self::Property,
+        }
+    }
+}
+
+/// A completed simulation's failure timeline from retained evidence.
+pub(super) fn explain(
+    id: &SimulationId,
+    kinds: &[ExplainKind],
+    machine: Option<&str>,
+    json: bool,
+) -> Result<u8> {
+    let client = daemon::connect(None)?;
+    let mut explanation = super::simulations::runtime()?
+        .block_on(client.explanation(id))
+        .map_err(super::simulations::client_error)?;
+    explanation.entries.retain(|e| {
+        (kinds.is_empty() || kinds.contains(&ExplainKind::of(e.kind)))
+            && machine.is_none_or(|m| e.machine.as_deref().is_none_or(|em| em == m))
+    });
+    if json {
+        output::json(&explanation)?;
+        return Ok(0);
+    }
+    output::table(
+        ["AT", "MACHINE", "KIND", "ID", "DETAIL"],
+        explanation
+            .entries
+            .iter()
+            .map(|e| {
+                let kind = output::word(&e.kind).to_lowercase();
+                [
+                    seconds(e.at_ns),
+                    match (&e.machine, e.incarnation) {
+                        (Some(m), Some(i)) if i > 0 => format!("{m}#{i}"),
+                        (Some(m), _) => m.clone(),
+                        (None, _) => "-".into(),
+                    },
+                    if e.violation {
+                        format!("{kind} VIOLATED")
+                    } else {
+                        kind
+                    },
+                    e.id.clone(),
+                    if e.links.is_empty() {
+                        e.detail.clone()
+                    } else {
+                        format!("{} [{}]", e.detail, e.links.join(", "))
+                    },
+                ]
+            })
+            .collect(),
+    )?;
+    for omission in &explanation.omissions {
+        output::field("omitted", omission);
+    }
+    Ok(0)
+}
+
 /// The fault timeline: recorded and scheduled faults with what became of each.
 pub(super) fn timeline(id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(None)?;

@@ -108,15 +108,19 @@ seedbox campaign . --budget 32 --fault-profile faults.yaml   # Guided search.
 seedbox get campaign <campaign-id>        # Members, assessment and findings.
 seedbox get findings <campaign-id> --preceded-by crash --within 2s
 seedbox shrink <sim-id>                   # Fewest external inputs that still fail.
+seedbox explain <sim-id>                  # Faults, lifecycle, choices and properties in order.
 ```
 
 A campaign starts as a seed sweep of roots that declare candidate anchors
 (`--anchor`). Each later generation mostly branches from members that showed
-something new (property outcomes, SDK events, setup, structured choices) at
-one of their anchor captures, reseeded and sometimes with a changed choice,
-and spends a fixed share on fresh roots. Plans depend only on results, never
-on capacity or completion order. Each finding's earliest member is exported
-to the state directory's `findings/<campaign>`; `--baseline DIR` labels
+something new (property outcomes, SDK events and states, setup, structured
+choices) at one of their anchor captures, reseeded, sometimes with a changed
+choice or a fault placed after one of the parent's events or states, and
+spends a fixed share on fresh roots, some with only a sample of the profile's
+fault kinds. Plans depend only on results, never on capacity or completion
+order. Each finding's earliest member is exported to the state directory's
+`findings/<campaign>`, as a cold rerun without checkpoints when that
+reproduces it; `--baseline DIR` labels
 findings new or observed again against an earlier campaign's directory, and
 the exit status follows the campaign's assessment, for CI. Anchor captures hold
 every machine's memory; members outside the corpus (`--corpus`) release theirs.

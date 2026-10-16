@@ -1343,6 +1343,8 @@ fn campaign_shrink_and_findings_bounds_are_usage_errors_before_any_server() {
             "--within",
         ),
         (vec!["stop", "nonsense!"], "ID"),
+        (vec!["explain", "k7m2p9qx", "--kind", "gossip"], "--kind"),
+        (vec!["explain", "not-an-id"], "ID"),
     ] {
         let output = seedbox(&args, project);
         assert_eq!(output.status.code(), Some(2), "{args:?}");

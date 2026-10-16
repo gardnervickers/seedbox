@@ -200,7 +200,19 @@ fn report(campaign: &Campaign, json: bool) -> Result<u8> {
             format!("{}{label}: {}", finding.group, finding.representative),
         );
         match &finding.export {
-            seedbox_api::ExportState::Published { path } => output::field("exported", path),
+            seedbox_api::ExportState::Published {
+                path,
+                from_checkpoint,
+                ..
+            } => {
+                output::field("exported", path);
+                if *from_checkpoint {
+                    output::field("export-start", "checkpoint (no matching cold rerun)");
+                }
+            }
+            seedbox_api::ExportState::Reproducing { simulation } => {
+                output::field("reproducing", simulation)
+            }
             seedbox_api::ExportState::Failed { message } => output::field("export-failed", message),
             seedbox_api::ExportState::Pending => {}
         }
@@ -426,8 +438,13 @@ pub(super) fn shrink(
             if done != reported {
                 reported = done;
                 let last = &shrink.probes[done - 1];
+                let edit = last
+                    .edit
+                    .as_ref()
+                    .map(|e| format!(" ({e})"))
+                    .unwrap_or_default();
                 eprintln!(
-                    "probe {done}: {} inputs, {}",
+                    "probe {done}: {} inputs{edit}, {}",
                     last.inputs,
                     if last.reproduced == Some(true) {
                         "reproduced"
@@ -477,6 +494,15 @@ fn shrink_report(shrink: &Shrink, json: bool) -> Result<u8> {
             );
             for key in &shrink.kept {
                 output::field("input", key);
+            }
+            for edit in &shrink.edits {
+                output::field("simplified", edit);
+            }
+            if shrink.from_checkpoint {
+                output::field(
+                    "start",
+                    "checkpoint; the full program did not fail from a fresh start",
+                );
             }
         }
         (None, None) => output::status("ERROR", &shrink.id),
