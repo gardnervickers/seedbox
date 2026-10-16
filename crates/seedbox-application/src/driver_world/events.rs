@@ -78,6 +78,70 @@ impl Publisher {
         }
         Ok(())
     }
+    /// Publish the separate bounded routing-fact stream, never EventKind or
+    /// event-chain evidence. Lost facts reserve sequence slots so the existing
+    /// receiver reports SourceGap, including when the next record is Closed.
+    pub(super) fn frames(
+        &mut self,
+        state: &mut State,
+        names: &BTreeMap<MachineId, String>,
+        facts: driver::FrameFacts,
+    ) -> Result<()> {
+        if self.socket.is_none() {
+            return Ok(());
+        }
+        let mut batch = Vec::new();
+        let mut at = state.world.position.simulated_time_ns;
+        for fact in facts.facts {
+            at = fact.position.at.as_nanos();
+            batch.push(observation::Frame {
+                from: name(names, fact.from)?.into(),
+                to: name(names, fact.to)?.into(),
+                sent_ns: fact.sent.as_nanos(),
+                due_ns: fact.due.map(|due| due.as_nanos()),
+                bytes: u32::try_from(fact.bytes).unwrap_or(u32::MAX),
+                fate: match fact.fate {
+                    driver::FrameFate::Scheduled => observation::FrameFate::Scheduled,
+                    driver::FrameFate::PartitionDropped => observation::FrameFate::PartitionDropped,
+                    driver::FrameFate::LossDropped => observation::FrameFate::LossDropped,
+                    driver::FrameFate::QueueDropped => observation::FrameFate::QueueDropped,
+                    driver::FrameFate::ReceiverDropped => observation::FrameFate::ReceiverDropped,
+                },
+            });
+            // Small bounded datagrams; oversized names or a full socket still
+            // consume a sequence in emit(), never block or silently retry.
+            if batch.len() == 16 {
+                self.emit(
+                    state,
+                    "",
+                    0,
+                    at,
+                    Kind::Frames {
+                        frames: std::mem::take(&mut batch),
+                    },
+                )?;
+            }
+        }
+        if !batch.is_empty() {
+            self.emit(state, "", 0, at, Kind::Frames { frames: batch })?;
+        }
+        if facts.omitted != 0 {
+            self.sequence = self
+                .sequence
+                .checked_add(facts.omitted)
+                .ok_or_else(|| invalid("Driver frame observation sequence exhausted"))?;
+            state.world.publication.observation_records = state
+                .world
+                .publication
+                .observation_records
+                .checked_add(facts.omitted)
+                .ok_or_else(|| invalid("Driver logical frame observation count exhausted"))?;
+            // Publish a watermark immediately, even if no later machine output
+            // follows. The receiver reports the missing observation range.
+            self.emit(state, "", 0, at, Kind::Frames { frames: vec![] })?;
+        }
+        Ok(())
+    }
     pub(super) fn close(&mut self, state: &mut State) -> Result<()> {
         self.emit(
             state,

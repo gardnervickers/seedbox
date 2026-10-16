@@ -557,11 +557,20 @@ where
         Ok(driver)
     }
 
+    /// Configure bounded host-only frame retention, including after restore.
+    /// Zero disables retention. Clearing or shrinking counts discarded facts as
+    /// omissions in the next drain. Never changes policy, machine work, event
+    /// sequencing or deterministic evidence.
+    // TODO: Re-evaluate: an observer belongs to the host, including after restore.
+    // Constructor-only capacity cannot rebind a captured Driver to an absent or
+    // new observer without changing simulation authority; keep this telemetry-only.
+    pub fn set_frame_capacity(&mut self, capacity: usize) {
+        self.network.set_frame_capacity(capacity);
+    }
+
     /// Drain committed bounded frame observations independently of EventKind.
     /// Works after failure/stop/completion, does no machine work, and never
     /// changes authoritative counters or dense event/witness sequencing.
-    // TODO: Re-evaluate: service frame SSE is observation, not simulation input
-    // or a second unbounded committed event history.
     pub fn drain_frames(&mut self) -> FrameFacts {
         self.network.drain_frames()
     }

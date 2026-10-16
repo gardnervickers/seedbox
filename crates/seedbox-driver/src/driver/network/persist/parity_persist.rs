@@ -391,8 +391,8 @@ impl Network {
             require(counts.queue_dropped <= counts.matched, "pair queue counts")?;
         }
         require(
-            self.frames.len() <= self.frame_capacity
-                && (self.frame_capacity != 0 || (self.frames.is_empty() && self.omitted == 0)),
+            // A disabled buffer can retain a clearing omission until drained.
+            self.frames.len() <= self.frame_capacity,
             "frame observation capacity",
         )?;
         for f in &self.frames {

@@ -1,3 +1,4 @@
+mod frames;
 mod held_checkpoint;
 mod public_actions;
 mod run;

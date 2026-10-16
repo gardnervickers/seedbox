@@ -76,7 +76,7 @@ where
 {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
-        driver: Driver<M>,
+        mut driver: Driver<M>,
         state: State,
         inventory: Inventory,
         output: PathBuf,
@@ -85,6 +85,9 @@ where
         observations: Option<&Path>,
         write_snapshot: fn(M::Snapshot, &mut BufWriter<File>) -> Result<()>,
     ) -> Result<Self> {
+        // Observation is host-owned even when the Driver came from a capture.
+        // Do not retain frame bodies/facts for non-publishing callers.
+        driver.set_frame_capacity(if observations.is_some() { 1024 } else { 0 });
         Ok(Self {
             driver,
             state,
@@ -141,6 +144,8 @@ where
                 self.publisher
                     .publish(&mut self.state, &self.names, event)?;
             }
+            self.publisher
+                .frames(&mut self.state, &self.names, self.driver.drain_frames())?;
             Ok(facts)
         })();
         if result.is_err() {

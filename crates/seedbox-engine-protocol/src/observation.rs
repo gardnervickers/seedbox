@@ -1,6 +1,7 @@
 //! Best-effort live worker observations, separate from execution reports and
-//! deterministic evidence. Logs and events consume a sequence even when lost;
-//! optional frame batches consume one only when accepted by the socket.
+//! deterministic evidence. Logs and events consume a sequence even when lost.
+//! Frame publishers may reserve missing sequence slots to report bounded-buffer
+//! or transport loss; optional frames never contribute to execution evidence.
 use crate::application_log::Chunk;
 use serde::{Deserialize, Serialize};
 

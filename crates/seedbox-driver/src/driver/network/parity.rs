@@ -195,8 +195,9 @@ pub struct FrameFact {
 }
 /// One bounded observation drain. omitted counts facts not retained since the
 /// last drain; authoritative per-pair counters do not depend on observation.
-/// Omitted saturates at u64::MAX. Disabled observation returns an empty drain
-/// with zero omissions; draining resets only these facts and their omission count.
+/// Omitted saturates at u64::MAX. Initially disabled observation returns an
+/// empty drain with zero omissions. Clearing/shrinking preserves omissions for
+/// the next drain; draining resets only facts and their omission count.
 // TODO: Re-evaluate: omission is transport loss, never simulation packet loss.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FrameFacts {
@@ -291,6 +292,15 @@ impl Network {
             self.omitted = self.omitted.saturating_add(1);
         }
     }
+    pub(crate) fn set_frame_capacity(&mut self, capacity: usize) {
+        self.frame_capacity = capacity;
+        if self.frames.len() > capacity {
+            let discarded = self.frames.len() - capacity;
+            self.frames.truncate(capacity);
+            self.omitted = self.omitted.saturating_add(discarded as u64);
+        }
+    }
+
     pub(crate) fn drain_frames(&mut self) -> FrameFacts {
         FrameFacts {
             facts: self.frames.drain(..).collect(),

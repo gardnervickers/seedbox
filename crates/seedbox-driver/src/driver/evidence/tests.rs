@@ -110,7 +110,15 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
             })
             .collect();
         let all: BTreeMap<_, _> = [
-            spec(0, true, vec![(1, frame(mac(1), 7))]),
+            spec(
+                0,
+                true,
+                vec![
+                    (1, frame(mac(1), 7)),
+                    (2, frame(mac(1), 8)),
+                    (3, frame(mac(1), 9)),
+                ],
+            ),
             spec(1, true, vec![]),
         ]
         .into_iter()
@@ -139,13 +147,58 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
         .unwrap()
     };
     let mut quiet = make(0);
-    let mut observed = make(8);
+    let mut observed = make(0);
+    observed.set_frame_capacity(8);
+    let mut disabled = make(8);
+    advance(&mut disabled, 50);
+    disabled.set_frame_capacity(0);
+    let (encoded, store) = artifact(disabled.checkpoint().unwrap());
+    let captured = decode(&encoded, &store);
+    let mut restored_cleared = restore(&captured, 4);
+    let cleared = disabled.drain_frames();
+    assert_eq!(restored_cleared.drain_frames(), cleared);
+    assert!(cleared.facts.is_empty());
+    assert_eq!(cleared.omitted, 3);
+    assert_eq!(disabled.drain_frames(), FrameFacts::default());
     advance(&mut quiet, 50);
     advance(&mut observed, 50);
     let before = evidence(&mut observed);
     assert_eq!(evidence(&mut quiet), before);
-    assert!(!observed.drain_frames().facts.is_empty());
+    assert_eq!(evidence(&mut disabled), before);
+    observed.set_frame_capacity(1);
+    let facts = observed.drain_frames();
+    assert_eq!(facts.facts.len(), 1);
+    assert_eq!(facts.omitted, 2);
     assert_eq!(evidence(&mut observed), before);
+
+    // Capture while deliveries are still pending. Restore host observation
+    // independently of the captured buffer, with either worker count.
+    let mut source = make(8);
+    advance(&mut source, 3);
+    let checkpoint = source.checkpoint().unwrap();
+    let retained = source.drain_frames();
+    assert!(!retained.facts.is_empty());
+    let mut uninterrupted = make(0);
+    advance(&mut uninterrupted, 80);
+    let expected = evidence(&mut uninterrupted);
+    for workers in [1, 4] {
+        for capacity in [0, 8] {
+            let mut branch = restore(&checkpoint, workers);
+            branch.set_frame_capacity(capacity);
+            let observations = branch.drain_frames();
+            if capacity == 0 {
+                assert!(observations.facts.is_empty());
+                assert_eq!(
+                    observations.omitted,
+                    retained.omitted + retained.facts.len() as u64
+                );
+            } else {
+                assert_eq!(observations, retained);
+            }
+            advance(&mut branch, 80);
+            assert_eq!(evidence(&mut branch), expected);
+        }
+    }
 }
 #[test]
 fn external_rng_cannot_be_invented_or_replaced_by_a_seeded_projection() {
