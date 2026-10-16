@@ -5,7 +5,6 @@ use seedbox_api::{
     PlaybackRate, ProgramInput,
 };
 const KEY: &str = "held-throttle";
-const AT: u64 = 33_000_000;
 
 async fn fault_events(
     session: &NativeSession,
@@ -53,13 +52,40 @@ async fn assert_unapplied(session: &NativeSession, id: &seedbox_api::SimulationI
 
 pub async fn native_held_checkpoint(backend: DriverBackend) {
     let began = Instant::now();
-    let phase = |name: &str| eprintln!("held phase backend={} elapsed_ms={} phase={name}", label(backend), began.elapsed().as_millis());
+    let phase = |name: &str| {
+        eprintln!(
+            "held phase backend={} elapsed_ms={} phase={name}",
+            label(backend),
+            began.elapsed().as_millis()
+        )
+    };
     phase("begin");
-    tokio::time::timeout(Duration::from_secs(180), async {
+    tokio::time::timeout(HANG_GUARD, async {
         let mut session = NativeSession::new(backend);
         let mut request = submission(backend, session.root.path(), &session.store, 2_000_000, 123);
+        // Choose a live-workload fault point from this backend's actual Driver
+        // readiness/end window, never an assumed architecture boot duration.
+        phase("calibration_prepared");
+        let calibration = session.submit(request.clone(), 1).await;
+        session.worker(&calibration).await;
+        session.complete(&calibration, false, 1, 123).await;
+        let finish = session.client.describe(&calibration).await.unwrap().status.simulated_time_ns;
+        let mut stream = session.client.events(&calibration).await.unwrap();
+        let mut ready = None;
+        while let Some(delivery) = stream.next().await {
+            if let EventDelivery::Event { observation, .. } = delivery.unwrap() {
+                if matches!(observation.event, EventKind::MachineReady { ref machine, .. } if machine == "oracle") {
+                    ready = Some(observation.simulated_time_ns.unwrap());
+                }
+            }
+        }
+        let ready = ready.expect("real application readiness event");
+        let at = ready + (finish - ready) / 2;
+        assert!(at > ready && at < finish);
+        eprintln!("held calibration backend={} ready_ns={ready} final_ns={finish} planned_fault_ns={at}", label(backend));
+        phase("calibration_completed");
         request.spec.program.push(ProgramInput {
-            key: KEY.into(), at_ns: AT, timeout_ns: 1_000_000_000,
+            key: KEY.into(), at_ns: at, timeout_ns: 1_000_000_000,
             action: serde_json::to_value(seedbox_control::Action::Throttle {
                 handle: "held-scale".into(), machine: "oracle".into(), factor_permille: 2000,
             }).unwrap(),
@@ -91,10 +117,16 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
                 eprintln!("held wait elapsed_ms={} state={state:?}", began.elapsed().as_millis());
                 previous = Some(mark);
             }
-            // The native committed boundary need not equal the authored due
-            // timestamp. The paused admitted fault and unapplied-effect checks
-            // below identify the hold; capture/restore positions stay exact.
-            if state.rate == PlaybackRate::Paused && !state.stepping && state.application_ready && state.position.simulated_time_ns >= AT { break state; }
+            check_bound(&session.client, &source, backend, state.position.simulated_time_ns, "its held fault stop").await;
+            // Identify the actual admitted, paused, unapplied hold, rather than
+            // comparing the reported boundary with a requested timestamp.
+            if state.rate == PlaybackRate::Paused && !state.stepping && state.application_ready {
+                let events = fault_events(&session, &source).await;
+                if events.iter().filter(|(_, status)| *status == FaultStatus::Requested).count() == 1 {
+                    assert!(!events.iter().any(|(_, status)| *status == FaultStatus::Applied));
+                    break state;
+                }
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
         phase("held_observed");
@@ -162,5 +194,5 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         assert_eq!(session.client.compare(&baseline, &restored).await.unwrap().witness_matches, Some(true));
         eprintln!("native held continuation: backend={} same_fault={fault_id} applied_after_release=1 raw_equal=true API_witness_equal=true witness={continued}", label(backend));
         session.close().await;
-    }).await.expect("held checkpoint continuation exceeded 180-second native budget");
+    }).await.expect("held checkpoint continuation made no progress before HANG_GUARD");
 }
