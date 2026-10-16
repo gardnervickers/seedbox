@@ -172,6 +172,18 @@ impl BackendProvider for NativeProvider {
     }
 }
 
+fn release_executable(checkout: &Path) -> PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| checkout.join("target"));
+    let target = if target.is_absolute() {
+        target
+    } else {
+        checkout.join(target)
+    };
+    target.join("release/seedbox")
+}
+
 fn artifact(path: &Path) -> wire::Artifact {
     let bytes = fs::read(path).unwrap();
     wire::Artifact {
@@ -211,7 +223,7 @@ fn submission(
         .join("../..")
         .canonicalize()
         .unwrap();
-    let executable = checkout.join("target/release/seedbox");
+    let executable = release_executable(&checkout);
     let archive = checkout.join("build/assets/driver-runtime.tar.gz");
     assert!(
         executable.is_file() && archive.is_file(),
@@ -286,7 +298,7 @@ fn fixture_submission(
         .join("../..")
         .canonicalize()
         .unwrap();
-    let executable = checkout.join("target/release/seedbox");
+    let executable = release_executable(&checkout);
     let archive = checkout.join("build/assets/driver-runtime.tar.gz");
     assert!(
         executable.is_file() && archive.is_file(),
