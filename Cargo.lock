@@ -2056,6 +2056,7 @@ name = "seedbox-explore"
 version = "0.1.0"
 dependencies = [
  "seedbox-control",
+ "seedbox-engine-protocol",
  "seedbox-spec",
  "serde_json",
 ]

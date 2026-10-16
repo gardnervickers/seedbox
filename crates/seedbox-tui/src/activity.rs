@@ -256,6 +256,7 @@ pub fn derive(
 ) -> Activity {
     let mut activity = Activity::default();
     let empty = WorldState {
+        triggers: Default::default(),
         override_rejections: Default::default(),
         simulation: "aaaaaaaa".parse().expect("valid placeholder id"),
         revision: 0,
@@ -444,6 +445,7 @@ mod tests {
 
     fn world(faults: Vec<FaultState>) -> WorldState {
         WorldState {
+            triggers: Default::default(),
             override_rejections: Default::default(),
             simulation: "k7m2p9qx".parse().unwrap(),
             revision: 1,

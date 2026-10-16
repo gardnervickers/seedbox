@@ -304,6 +304,9 @@ impl Faults {
             .ok_or_else(|| unknown.to_owned())
     }
     /// Validate shape and target names without assigning or reserving an ID.
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
     pub fn validate_action_shape(&self, action: &Action) -> Result<(), String> {
         self.compile(Plan {
             id: 0,
@@ -741,6 +744,10 @@ impl Faults {
         after: u64,
     ) -> Vec<seedbox_control::Connection> {
         self.connections.list(from, to, after, &self.names)
+    }
+    /// Connection incarnations opened so far.
+    pub fn connections_opened(&self) -> u64 {
+        self.connections.opened()
     }
     pub fn route(
         &mut self,

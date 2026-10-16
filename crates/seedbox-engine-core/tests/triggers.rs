@@ -1,4 +1,4 @@
-use seedbox_control::{Action, MAX_TRIGGERS};
+use seedbox_control::{Action, MAX_ACTIVE_TRIGGERS, MAX_TRIGGERS};
 use seedbox_engine_core::{faults, links, triggers};
 use triggers::Triggers;
 
@@ -119,16 +119,33 @@ fn matcher_storage_is_bounded_and_unused_evidence_is_absent() {
     assert!(t
         .arm("a".into(), vec![1], u64::MAX, 1, action("p"))
         .is_err());
-    for _ in 0..MAX_TRIGGERS {
+    for _ in 0..MAX_ACTIVE_TRIGGERS {
         t.arm("a".into(), vec![1; 256], 100, 100, action("p"))
             .unwrap();
     }
-    assert!(t.arm("a".into(), vec![1], 100, 100, action("p")).is_err());
+    let active = t.arm("a".into(), vec![1], 100, 100, action("p"));
+    assert!(active.unwrap_err().contains("active triggers"));
     for _ in 0..10_000 {
         bytes(&mut t, "a", 101, &[0]);
     }
-    assert_eq!(t.records.len(), MAX_TRIGGERS);
+    assert_eq!(t.records.len(), MAX_ACTIVE_TRIGGERS);
     assert!(t.records.iter().all(|r| r.prefix == 0 && r.seen == 10_000));
+    // Resolved triggers free their matchers but keep their IDs: the run's
+    // historical budget is separate and IDs are never recycled.
+    let mut now = 100;
+    while t.records.len() < MAX_TRIGGERS {
+        t.apply_boundary(&mut faults(), now + 100).unwrap();
+        now += 100;
+        let room = (MAX_TRIGGERS - t.records.len()).min(MAX_ACTIVE_TRIGGERS);
+        for _ in 0..room {
+            t.arm("a".into(), vec![1; 256], now, 100, action("p"))
+                .unwrap();
+        }
+    }
+    t.apply_boundary(&mut faults(), now + 100).unwrap();
+    let total = t.arm("a".into(), vec![1], now + 100, 100, action("p"));
+    assert!(total.unwrap_err().contains("per run"));
+    assert_eq!(t.records.last().unwrap().id as usize, MAX_TRIGGERS);
 }
 
 #[test]

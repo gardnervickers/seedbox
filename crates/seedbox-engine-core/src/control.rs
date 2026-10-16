@@ -523,7 +523,7 @@ impl Control {
             .and_then(|d| d.checked_add(self.latency))
             .and_then(|d| d.checked_add(seedbox_control::PROCESS_EFFECT_TIMEOUT_NS))
             .ok_or("trigger deadline overflow")?;
-        seedbox_control::check_trigger_budget(self.triggers.records.len())?;
+        seedbox_control::check_trigger_budget(&self.triggers.records)?;
         let source = match source {
             Target::Service(s) => self
                 .placement

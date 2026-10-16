@@ -2852,3 +2852,220 @@ fn a_reseed_changes_future_draws_and_an_anchor_alone_changes_nothing_semantic() 
     run(&mut captured, 100, None).unwrap();
     assert_eq!(branch_outcome(&captured), branch_outcome(&parent));
 }
+
+fn trigger_world() -> World<Mock> {
+    use crate::input_program::TimedInput;
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    let rule = |key: &str, value: Value| TimedInput {
+        key: key.into(),
+        at_ns: 0,
+        action: serde_json::from_value(value).unwrap(),
+        timeout_ns: 1_000,
+    };
+    let program = vec![
+        rule(
+            "after-commits",
+            json!({"action":"trigger","when":{"on":"event","name":"commit","machine":"a"},"nth":2,"then":{"action":"crash","machine":"b"}}),
+        ),
+        rule(
+            "revive",
+            json!({"action":"trigger","when":{"on":"lifecycle","machine":"b","transition":"crashed"},"delay_ns":15,"then":{"action":"reboot","machine":"b"}}),
+        ),
+        rule(
+            "never",
+            json!({"action":"trigger","when":{"on":"assertion","property":"p","holds":false},"within_ns":50,"then":{"action":"crash","machine":"a"}}),
+        ),
+        rule(
+            "third-frame",
+            json!({"action":"trigger","when":{"on":"frame","from":"a","to":"b"},"nth":3,"then":{"action":"partition","handle":"cut","left":["a"],"right":["b"]}}),
+        ),
+    ];
+    w.arm_input_program(program, u64::MAX, 0).unwrap();
+    let sdk = |seq: u64, record: Value| {
+        let hex: String = serde_json::to_vec(&record)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("SBX_PROP1 1 {seq} {hex}").into_bytes()
+    };
+    let mut frame = vec![0; 60];
+    frame[5] = 1;
+    frame[12..14].copy_from_slice(&[8, 0]);
+    let mut seq = 0;
+    for at in (4..90).step_by(3) {
+        let mut step = Step::new(at, Stop::Sent);
+        step.frames = vec![frame.clone()];
+        if [10, 19, 28].contains(&at) {
+            seq += 1;
+            step.properties = vec![sdk(seq, json!({"event":{"name":"commit"}}))];
+        }
+        if at == 25 {
+            seq += 1;
+            step.properties = vec![sdk(
+                seq,
+                json!({"assert":{"id":"p","kind":"always","condition":true}}),
+            )];
+        }
+        w.machines[0].steps.push_back(step);
+    }
+    w
+}
+
+fn trigger_outcome(w: &World<Mock>) -> (Value, Value, Vec<String>) {
+    (
+        w.control.triggers.evidence().unwrap().unwrap(),
+        serde_json::to_value(w.faults.log.iter().map(|r| r.json()).collect::<Vec<_>>()).unwrap(),
+        machine_trace(w, "b"),
+    )
+}
+
+#[test]
+fn typed_triggers_match_committed_occurrences_identically_cold_and_restored() {
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut cold = trigger_world();
+        run_with(&mut cold, 100, None, workers, Duration::from_micros(3)).unwrap();
+        let outcome = trigger_outcome(&cold);
+        assert_eq!(reference.get_or_insert_with(|| outcome.clone()), &outcome);
+    }
+    let reference = reference.unwrap();
+    let records: Vec<seedbox_control::TriggerRecord> =
+        serde_json::from_value(reference.0.clone()).unwrap();
+    let summary: Vec<_> = records
+        .iter()
+        .map(|r| {
+            (
+                r.key.clone().unwrap(),
+                r.status.as_str(),
+                r.seen,
+                r.matched_at_ns,
+                r.effect_at_ns,
+                r.fault_id,
+            )
+        })
+        .collect();
+    // The second commit at 19 crashes b one lookahead later; the crash at 29
+    // matches the reboot rule, which waits its delay. A passing assertion
+    // never matches a failing-only rule, which expires.
+    assert_eq!(
+        summary,
+        [
+            (
+                "after-commits".into(),
+                "fired",
+                2,
+                Some(19),
+                Some(29),
+                Some(2)
+            ),
+            ("revive".into(), "fired", 1, Some(29), Some(54), Some(3)),
+            ("never".into(), "expired", 0, None, None, None),
+            (
+                "third-frame".into(),
+                "fired",
+                3,
+                Some(10),
+                Some(20),
+                Some(1)
+            ),
+        ]
+    );
+    assert_eq!(
+        cold_statuses(&reference.1),
+        [
+            ("partition", "applied"),
+            ("crash", "applied"),
+            ("reboot", "applied")
+        ]
+    );
+
+    // A checkpoint between a match and its effect keeps the pending effect.
+    let mut warm = trigger_world();
+    assert_eq!(
+        segment(&mut warm, 100, None, None, Some(25), true).unwrap(),
+        "checkpoint"
+    );
+    assert_eq!(warm.control.triggers.records[0].status, "matched");
+    let saved = WorldSnapshot::take_checkpoint(&mut warm).unwrap();
+    for _ in 0..2 {
+        saved.restore_checkpoint(&mut warm).unwrap();
+        segment(&mut warm, 100, None, None, None, true).unwrap();
+        let restored = trigger_outcome(&warm);
+        assert_eq!((&restored.0, &restored.1), (&reference.0, &reference.1));
+    }
+}
+
+fn cold_statuses(log: &Value) -> Vec<(&str, &str)> {
+    log.as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["request"]["action"].as_str().unwrap(),
+                row["status"].as_str().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn typed_trigger_receipts_publish_each_status_change_once_and_link_their_fault() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("observations");
+    let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+    // Frame batches would fill a small datagram buffer; drain it meanwhile.
+    receiver
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    let drain = std::thread::spawn(move || {
+        let mut bytes = [0; seedbox_engine_protocol::observation::MAX_DATAGRAM_BYTES];
+        let mut kinds = Vec::new();
+        while let Ok(count) = receiver.recv(&mut bytes) {
+            let observed: seedbox_engine_protocol::observation::Observation =
+                serde_json::from_slice(&bytes[..count]).unwrap();
+            kinds.push(observed.kind);
+        }
+        kinds
+    });
+    let mut w = trigger_world()
+        .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
+    run(&mut w, 100, None).unwrap();
+    w.finish("duration", 100, &None).unwrap();
+    let mut receipts: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    let mut linked = BTreeMap::new();
+    for kind in drain.join().unwrap() {
+        match kind {
+            ObservationKind::TriggerChanged {
+                input_key, status, ..
+            } => receipts.entry(input_key).or_default().push(status.as_str()),
+            ObservationKind::FaultChanged {
+                id,
+                input_key: Some(key),
+                ..
+            } => {
+                linked.insert(id, key);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        receipts,
+        BTreeMap::from([
+            ("after-commits".into(), vec!["armed", "matched", "fired"]),
+            ("never".into(), vec!["armed", "expired"]),
+            ("revive".into(), vec!["armed", "matched", "fired"]),
+            ("third-frame".into(), vec!["armed", "matched", "fired"]),
+        ])
+    );
+    // A triggered fault carries its trigger's input key for presentation.
+    assert_eq!(
+        linked,
+        BTreeMap::from([
+            (1, "third-frame".to_string()),
+            (2, "after-commits".to_string()),
+            (3, "revive".to_string()),
+        ])
+    );
+}

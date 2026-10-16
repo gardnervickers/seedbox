@@ -14,10 +14,12 @@ use crate::links;
 use crate::network_counters::{
     self, DELIVERED, LOSS_DROPPED, PARTITION_DROPPED, QUEUE_DROPPED, RECEIVER_DROPPED,
 };
+use crate::triggers::Observed;
 use crate::window as sw;
 use crate::world::{self, Crash, Payload, SliceRequest, State, Stop, World, WorldMachine};
 use crate::world_events as events;
 use crate::{control, faults};
+use seedbox_control::Transition;
 pub use seedbox_engine_protocol::host_control::{Boundary, BoundaryPosition};
 use seedbox_engine_protocol::observation::{Frame, FrameFate, Kind as ObservationKind};
 use serde_json::{json, Value};
@@ -516,6 +518,14 @@ struct Coord<'a, M: WorldMachine> {
     published_rejections: usize,
     /// Routed frames not yet published; empty without an observation socket.
     frames: Vec<Frame>,
+    /// Published status of each trigger record; typed ones only.
+    trigger_statuses: Vec<Option<seedbox_control::TriggerStatus>>,
+    /// Frames routed this round while typed triggers watch: send time,
+    /// source, destination, and the port of a connection it opened.
+    trigger_frames: Vec<(u64, usize, usize, Option<u16>)>,
+    /// No frame arrives sooner than this after it is sent; typed trigger
+    /// effects follow their match by at least this much.
+    lookahead: u64,
     properties: &'a mut seedbox_engine_protocol::property::Ledger,
     anchor_captures: &'a std::collections::BTreeSet<String>,
     captured_anchor: Option<String>,
@@ -526,7 +536,56 @@ struct Coord<'a, M: WorldMachine> {
 impl<M: WorldMachine> Coord<'_, M> {
     /// Called only after policy mutations, never on idle execution rounds.
     /// This cache is runtime-only and starts at the segment's existing state.
+    /// The input that admitted a fault: directly, or through a typed trigger.
+    fn input_key(&self, id: u32) -> Option<String> {
+        self.input_program
+            .key_for(id)
+            .or_else(|| {
+                let records = &self.control.triggers.records;
+                records
+                    .iter()
+                    .find(|r| r.fault_id == Some(id))?
+                    .key
+                    .as_deref()
+            })
+            .map(str::to_owned)
+    }
+
+    /// Publish each typed trigger whose receipt status changed.
+    fn publish_triggers(&mut self, at: u64) {
+        let Some(publisher) = self.observations else {
+            return;
+        };
+        for (index, r) in self.control.triggers.records.iter().enumerate() {
+            let Some(key) = r.key.as_ref() else {
+                continue;
+            };
+            if self.trigger_statuses.get(index) == Some(&Some(r.status)) {
+                continue;
+            }
+            publisher.publish(
+                "",
+                0,
+                at,
+                ObservationKind::TriggerChanged {
+                    input_key: key.clone(),
+                    status: r.status,
+                    seen: r.seen,
+                    matched_at_ns: r.matched_at_ns,
+                    effect_at_ns: r.effect_at_ns,
+                    fault_id: r.fault_id,
+                    reason: r.rejection_reason.clone(),
+                },
+            );
+            if self.trigger_statuses.len() <= index {
+                self.trigger_statuses.resize(index + 1, None);
+            }
+            self.trigger_statuses[index] = Some(r.status);
+        }
+    }
+
     fn publish_faults(&mut self, at: u64) {
+        self.publish_triggers(at);
         let Some(publisher) = self.observations else {
             return;
         };
@@ -556,7 +615,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 seedbox_engine_protocol::observation::Kind::FaultChanged {
                     counts,
                     id: row.id,
-                    input_key: self.input_program.key_for(row.id).map(str::to_owned),
+                    input_key: self.input_key(row.id),
                     action: row.action.to_string(),
                     machine: row.machine.clone(),
                     status: row.status,
@@ -609,7 +668,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 ObservationKind::FaultChanged {
                     counts: row.counts(),
                     id: row.id,
-                    input_key: self.input_program.key_for(row.id).map(str::to_owned),
+                    input_key: self.input_key(row.id),
                     action: row.action.to_string(),
                     machine: row.machine.clone(),
                     status: row.status,
@@ -716,6 +775,10 @@ impl<M: WorldMachine> Coord<'_, M> {
         }
         let faults_changed = effects.iter().any(|(_, _, _, id, _)| *id != 0)
             || guests.iter().any(|guest| guest.exited_now);
+        // Typed triggers see this round's committed occurrences in one fixed
+        // order: time, machine, then source and position within it.
+        let typed = self.control.triggers.typed_armed();
+        let mut occurrences: Vec<(u64, usize, u8, usize, Observed)> = Vec::new();
         received.sort();
         for (at, from, to, accepted) in received {
             if accepted {
@@ -731,12 +794,21 @@ impl<M: WorldMachine> Coord<'_, M> {
             if id == 0 && success {
                 match self.faults.management_ready(m, at, self.latency) {
                     Err(error) => self.faults.error = Some(error),
-                    Ok(()) => machine_events.push((
-                        at,
-                        m,
-                        0,
-                        seedbox_engine_protocol::observation::Kind::MachineReady,
-                    )),
+                    Ok(()) => {
+                        if typed {
+                            let event = Observed::Lifecycle {
+                                machine: self.names[m].clone(),
+                                transition: Transition::Ready,
+                            };
+                            occurrences.push((at, m, 0, 0, event));
+                        }
+                        machine_events.push((
+                            at,
+                            m,
+                            0,
+                            seedbox_engine_protocol::observation::Kind::MachineReady,
+                        ))
+                    }
                 }
                 if !self.application_ready {
                     self.application_ready = self.faults.initial_applications_ready();
@@ -746,7 +818,15 @@ impl<M: WorldMachine> Coord<'_, M> {
             }
         }
         properties.sort();
-        for (at, m, _, incarnation, line) in properties {
+        for (at, m, j, incarnation, line) in properties {
+            if typed {
+                if let Some(event) = line
+                    .as_deref()
+                    .and_then(|line| crate::properties::observed(&self.names[m], line))
+                {
+                    occurrences.push((at, m, 1, j, event));
+                }
+            }
             crate::properties::commit(self.properties, &self.names[m], incarnation, at, line);
         }
         console.sort();
@@ -771,7 +851,42 @@ impl<M: WorldMachine> Coord<'_, M> {
                     seedbox_engine_protocol::observation::Kind::MachineExited { code },
                 ));
             }
+            if typed {
+                let event = Observed::Lifecycle {
+                    machine: self.names[m].clone(),
+                    transition: Transition::Exited,
+                };
+                occurrences.push((g.m.time, m, 3, 0, event));
+            }
             self.faults.machine_exited(m, g.m.time);
+        }
+        for (j, (at, from, to, opened)) in std::mem::take(&mut self.trigger_frames)
+            .into_iter()
+            .enumerate()
+        {
+            if !typed {
+                break;
+            }
+            let (from_name, to_name) = (self.names[from].clone(), self.names[to].clone());
+            if let Some(port) = opened {
+                let event = Observed::ConnectionOpen {
+                    from: from_name.clone(),
+                    to: to_name.clone(),
+                    port,
+                };
+                occurrences.push((at, from, 2, 2 * j, event));
+            }
+            let event = Observed::Frame {
+                from: from_name,
+                to: to_name,
+            };
+            occurrences.push((at, from, 2, 2 * j + 1, event));
+        }
+        occurrences.sort();
+        for (at, _, _, _, event) in occurrences {
+            self.control
+                .triggers
+                .observe(&event, at, self.lookahead, committed)?;
         }
         replies.sort();
         for (at, _) in replies {
@@ -820,6 +935,8 @@ impl<M: WorldMachine> Coord<'_, M> {
         self.publish_frames(committed);
         if faults_changed {
             self.publish_faults(committed);
+        } else {
+            self.publish_triggers(committed);
         }
         Ok(())
     }
@@ -928,6 +1045,22 @@ impl<M: WorldMachine> Coord<'_, M> {
         let g = &guests[m];
         self.life[m] = (g.m.paused, g.m.down);
         sync(plan, m, g)?;
+        let transition = match op {
+            faults::Lifecycle::Pause => Some(Transition::Paused),
+            faults::Lifecycle::Resume => Some(Transition::Resumed),
+            faults::Lifecycle::Crash => Some(Transition::Crashed),
+            faults::Lifecycle::Reboot => Some(Transition::Rebooted),
+            _ => None,
+        };
+        if let Some(transition) = transition.filter(|_| self.control.triggers.typed_armed()) {
+            let event = Observed::Lifecycle {
+                machine: self.names[m].clone(),
+                transition,
+            };
+            self.control
+                .triggers
+                .observe(&event, t, self.lookahead, t)?;
+        }
         if let Some(publisher) = self.observations {
             use seedbox_engine_protocol::observation::{Kind, MachineTransition};
             let transition = match op {
@@ -1100,6 +1233,7 @@ impl<M: WorldMachine> Coord<'_, M> {
                 };
                 match self.input_program.admit_due(
                     self.faults,
+                    &mut self.control.triggers,
                     input_boundary,
                     gate,
                     &|_| Ok(()),
@@ -1155,10 +1289,13 @@ impl<M: WorldMachine> Coord<'_, M> {
                     ready: self.application_ready,
                     quiet_until: self.control.quiet_until(),
                 };
-                self.input_program
-                    .admit_due(self.faults, input_boundary, gate, &|action| {
-                        validate_host_action(guests, action)
-                    })?;
+                self.input_program.admit_due(
+                    self.faults,
+                    &mut self.control.triggers,
+                    input_boundary,
+                    gate,
+                    &|action| validate_host_action(guests, action),
+                )?;
                 self.publish_faults(input_boundary);
                 self.apply_faults(plan, guests, input_boundary)?;
                 if self.faults.error.is_some() && self.control.pending.is_none() {
@@ -1349,10 +1486,19 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
         }
         let mut dst_mac = [0; 6];
         dst_mac.copy_from_slice(&frame[0..6]);
+        let typed = self.control.triggers.typed_armed();
         for dst in links::candidates(src, dst_mac, self.macs) {
             let last = self.faults.links.last.get(&(src, dst)).copied();
             let cut = *self.partitioned.get(&(src, dst)).unwrap_or(&false);
-            let at = match self.faults.route(src, dst, sent_at, &frame, cut) {
+            let opened_before = self.faults.connections_opened();
+            let routed = self.faults.route(src, dst, sent_at, &frame, cut);
+            if typed {
+                let opened = (self.faults.connections_opened() != opened_before)
+                    .then(|| crate::connections::syn_port(&frame))
+                    .flatten();
+                self.trigger_frames.push((sent_at, src, dst, opened));
+            }
+            let at = match routed {
                 links::Outcome::Cut => {
                     *self.dropped += 1;
                     self.count(sent_at, src, dst, PARTITION_DROPPED);
@@ -1586,8 +1732,9 @@ where
         ),
         None => None,
     };
+    let lookahead = world.lookahead;
     let params = sw::Params {
-        latency: world.lookahead,
+        latency: lookahead,
         early: world.early,
         duration: run.duration,
         end_on,
@@ -1700,6 +1847,9 @@ where
         application_ready,
         fault_statuses,
         frames: Vec::new(),
+        trigger_statuses: Vec::new(),
+        trigger_frames: Vec::new(),
+        lookahead,
         properties,
         anchor_captures,
         captured_anchor: None,
@@ -1735,6 +1885,7 @@ where
         boundaries,
     };
     coord.publish_initial_faults(plan.committed());
+    coord.publish_triggers(plan.committed());
     let started = Instant::now();
     let result = execute(&mut plan, &mut guests, clock, &mut coord);
     let host_seconds = started.elapsed().as_secs_f64();

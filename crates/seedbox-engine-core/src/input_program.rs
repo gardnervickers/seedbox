@@ -2,8 +2,8 @@
 use crate::faults::Faults;
 use seedbox_control::{Action, Plan};
 pub use seedbox_engine_protocol::input_program::{
-    merge_interventions, validate_program, BranchAction, BranchReceipt, InputAction,
-    InputAdmission, InputRejection, TimedInput,
+    merge_interventions, validate_program, ArmReceipt, BranchAction, BranchReceipt, InputAction,
+    InputAdmission, InputRejection, RuleAction, TimedInput,
 };
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,12 +20,16 @@ pub struct Program {
     /// Consumed anchors and reseeds, which allocate no fault IDs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     branches: Vec<BranchReceipt>,
+    /// Consumed trigger inputs and the trigger IDs they armed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    armed: Vec<ArmReceipt>,
 }
 
 /// What admitting one due input did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Admitted {
-    /// A fault was admitted, or the input was rejected or skipped.
+    /// A fault was admitted, a trigger armed, or the input was rejected
+    /// or skipped.
     Fault,
     /// The anchor phase at this time; a capture may follow.
     Anchor { key: String },
@@ -69,6 +73,9 @@ impl Program {
     }
     pub fn branches(&self) -> &[BranchReceipt] {
         &self.branches
+    }
+    pub fn armed(&self) -> &[ArmReceipt] {
+        &self.armed
     }
     /// An edited checkpoint definition replaces only unapplied actions. The
     /// consumed prefix belongs to the saved world and cannot be undone.
@@ -143,7 +150,11 @@ impl Program {
             return Err("input program admission previously failed".into());
         }
         validate_program(&self.inputs, u64::MAX)?;
-        if self.next != self.admissions.len() + self.rejections.len() + self.branches.len()
+        if self.next
+            != self.admissions.len()
+                + self.rejections.len()
+                + self.branches.len()
+                + self.armed.len()
             || self.next > self.inputs.len()
         {
             return Err("input program cursor differs from its admission history".into());
@@ -151,6 +162,8 @@ impl Program {
         let mut admitted = self.admissions.iter().peekable();
         let mut rejected = self.rejections.iter().peekable();
         let mut branched = self.branches.iter();
+        let mut armed = self.armed.iter();
+        let mut previous_trigger = 0;
         let mut previous = 0;
         for input in self.inputs.iter().take(self.next) {
             if let InputAction::Branch(action) = &input.action {
@@ -168,6 +181,17 @@ impl Program {
                 if r.at_ns != input.at_ns || r.reason.is_empty() {
                     return Err("invalid input rejection evidence".into());
                 }
+                continue;
+            }
+            if let InputAction::Rule(_) = &input.action {
+                let receipt = armed.next().ok_or("missing trigger input receipt")?;
+                if receipt.key != input.key
+                    || receipt.at_ns != input.at_ns
+                    || receipt.trigger_id <= previous_trigger
+                {
+                    return Err("trigger input receipt differs from its source".into());
+                }
+                previous_trigger = receipt.trigger_id;
                 continue;
             }
             let row = admitted.next().ok_or("missing input admission evidence")?;
@@ -188,6 +212,7 @@ impl Program {
     pub fn admit_due(
         &mut self,
         faults: &mut Faults,
+        triggers: &mut crate::triggers::Triggers,
         at: u64,
         gate: Gate,
         validate_action: &dyn Fn(&Action) -> Result<(), String>,
@@ -218,6 +243,34 @@ impl Program {
                         identity: identity.clone(),
                     },
                 });
+            }
+            InputAction::Rule(RuleAction::Trigger(spec)) => {
+                // A malformed rule is an error; a full budget is a rejection.
+                let shape = spec
+                    .when
+                    .machines()
+                    .into_iter()
+                    .find(|m| !faults.names().iter().any(|n| n == m))
+                    .map_or(Ok(()), |m| Err(format!("unknown machine {m}")))
+                    .and_then(|()| faults.validate_action_shape(&spec.then));
+                if let Err(e) = shape {
+                    self.failed = true;
+                    return Err(format!("input {key}: {e}"));
+                }
+                match triggers.arm_typed(&key, spec, at) {
+                    Ok(trigger_id) => self.armed.push(ArmReceipt {
+                        key,
+                        at_ns: at,
+                        trigger_id,
+                    }),
+                    Err(reason) => self.rejections.push(InputRejection {
+                        key,
+                        at_ns: at,
+                        reason,
+                    }),
+                }
+                self.next += 1;
+                return Ok(Admitted::Fault);
             }
         };
         let result = (|| {
@@ -343,6 +396,7 @@ mod gate_tests {
     #[test]
     fn generated_starts_wait_for_readiness_and_quiet_and_take_their_teardowns() {
         let mut faults = Faults::new(Vec::new(), vec!["a".into(), "b".into()]).unwrap();
+        let mut triggers = crate::triggers::Triggers::default();
         let mut program = Program::new(
             vec![
                 input("gen-0", 5, partition("gen-0")),
@@ -377,7 +431,9 @@ mod gate_tests {
             (21, quiet),
             (30, open),
         ] {
-            program.admit_due(&mut faults, at, gate, &ok).unwrap();
+            program
+                .admit_due(&mut faults, &mut triggers, at, gate, &ok)
+                .unwrap();
         }
         let skipped: Vec<(&str, &str)> = program
             .rejections()

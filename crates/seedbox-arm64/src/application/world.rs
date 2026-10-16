@@ -628,6 +628,7 @@ pub fn run(options: &Options) -> Result<Value> {
         "input_admissions":world.input_admissions(),
         "input_rejections":world.input_rejections(),
         "input_branches":world.input_branches(),
+        "input_armed":world.input_armed(),
         "faults":world.faults().log,"fault_error":world.faults().error.clone().or(world.control().error.clone()),
         "control_history":world.control().log,"control_latency_ns":world.control().latency,
         "rejected_fault_effects":world.faults().rejected_effects,"management_readiness":world.faults().readiness,

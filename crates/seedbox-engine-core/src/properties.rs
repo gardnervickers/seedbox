@@ -20,3 +20,14 @@ pub fn commit(
         Err(error) => ledger.malformed_frame(machine, incarnation, at, error),
     }
 }
+
+/// The SDK occurrence a committed line carries for typed triggers. The
+/// supervisor's own records and malformed lines carry none.
+pub fn observed(machine: &str, line: &[u8]) -> Option<crate::triggers::Observed> {
+    use seedbox_engine_protocol::property::{Record, SUPERVISOR_SESSION};
+    let frame = decode(line).ok()??;
+    if frame.session == SUPERVISOR_SESSION {
+        return None;
+    }
+    crate::triggers::Observed::from_record(machine, &Record::parse(&frame.payload).ok()?)
+}

@@ -232,6 +232,9 @@ pub(super) fn events(id: &SimulationId, follow: bool) -> Result<u8> {
 
 /// A short description of what a fault action targets.
 fn target(action: &serde_json::Value) -> String {
+    if action["action"] == "trigger" {
+        return trigger_rule(action);
+    }
     let Some(fields) = action.as_object() else {
         return String::new();
     };
@@ -255,6 +258,56 @@ fn target(action: &serde_json::Value) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// A trigger rule in one line: `event name=commit nth=2 -> crash machine=b`.
+fn trigger_rule(rule: &serde_json::Value) -> String {
+    let mut when = rule["when"].clone();
+    let on = when
+        .as_object_mut()
+        .and_then(|fields| fields.remove("on"))
+        .and_then(|on| on.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let mut parts = vec![on];
+    parts.extend(Some(target(&when)).filter(|t| !t.is_empty()));
+    if let Some(nth) = rule["nth"].as_u64() {
+        parts.push(format!("nth={nth}"));
+    }
+    if let Some(delay) = rule["delay_ns"].as_u64() {
+        parts.push(format!("delay={}", seconds(delay)));
+    }
+    if let Some(within) = rule["within_ns"].as_u64() {
+        parts.push(format!("within={}", seconds(within)));
+    }
+    let then = &rule["then"];
+    parts.push(format!(
+        "-> {} {}",
+        then["action"].as_str().unwrap_or("-"),
+        target(then)
+    ));
+    parts.join(" ").trim_end().to_owned()
+}
+
+/// A trigger's receipt, with a fired trigger's effect as its fault reports it.
+fn trigger_outcome(trigger: &seedbox_api::TriggerState, world: &seedbox_api::WorldState) -> String {
+    use seedbox_api::{FaultStatus, TriggerStatus};
+    match trigger.status {
+        TriggerStatus::Armed if trigger.seen > 0 => format!("armed (seen {})", trigger.seen),
+        TriggerStatus::Fired => {
+            let fault = trigger
+                .fault_id
+                .and_then(|id| world.faults.iter().find(|f| f.id == id));
+            match fault {
+                Some(f) if f.status == FaultStatus::Applied => {
+                    with_counts("applied".into(), f.counts.as_ref())
+                }
+                Some(f) if f.status == FaultStatus::Failed => "ineffective".into(),
+                _ => "fired".into(),
+            }
+        }
+        TriggerStatus::CutOff => "cut off".into(),
+        status => output::word(&status).to_lowercase(),
+    }
 }
 
 fn seconds(ns: u64) -> String {
@@ -454,6 +507,16 @@ pub(super) fn timeline(id: &SimulationId, json: bool) -> Result<u8> {
                 "rejected"
             }
             .into();
+        }
+        if let Some(trigger) = entry
+            .id
+            .strip_prefix("program:")
+            .and_then(|key| world.triggers.get(key))
+        {
+            return trigger_outcome(trigger, world);
+        }
+        if entry.action["action"] == "trigger" {
+            return if completed { "not reached" } else { "upcoming" }.into();
         }
         entry
             .fault_id
@@ -683,6 +746,20 @@ pub(super) fn wait(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trigger_rules_render_on_one_line() {
+        let rule = serde_json::json!({
+            "action": "trigger",
+            "when": {"on": "event", "name": "commit", "machine": "a"},
+            "nth": 2,
+            "delay_ns": 500_000_000,
+            "then": {"action": "crash", "machine": "b"},
+        });
+        assert_eq!(
+            super::target(&rule),
+            "event machine=a name=commit nth=2 delay=0.5s -> crash machine=b"
+        );
+    }
     use super::*;
 
     #[test]

@@ -93,6 +93,28 @@ impl Receiver {
                             }
                             last = observation.sequence;
                             match observation.kind {
+                                Kind::TriggerChanged {
+                                    input_key,
+                                    status,
+                                    seen,
+                                    matched_at_ns,
+                                    effect_at_ns,
+                                    fault_id,
+                                    reason,
+                                } => event(
+                                    last_time,
+                                    EventKind::TriggerChanged {
+                                        input_key,
+                                        trigger: seedbox_api::TriggerState {
+                                            status: status.into(),
+                                            seen,
+                                            matched_at_ns,
+                                            effect_at_ns,
+                                            fault_id,
+                                            reason,
+                                        },
+                                    },
+                                ),
                                 Kind::OverrideRejected {
                                     input_key,
                                     at_ns,

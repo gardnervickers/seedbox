@@ -1,5 +1,5 @@
 //! Authored external inputs and their runtime-assigned admission identities.
-use seedbox_control::{Action, Plan, PROCESS_EFFECT_TIMEOUT_NS};
+use seedbox_control::{Action, Plan, TriggerSpec, PROCESS_EFFECT_TIMEOUT_NS};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 pub const MAX_INPUTS: usize = 4096;
@@ -22,6 +22,7 @@ pub struct TimedInput {
 pub enum InputAction {
     Fault(Action),
     Branch(BranchAction),
+    Rule(RuleAction),
 }
 impl From<Action> for InputAction {
     fn from(action: Action) -> Self {
@@ -32,7 +33,7 @@ impl InputAction {
     pub fn fault(&self) -> Option<&Action> {
         match self {
             Self::Fault(action) => Some(action),
-            Self::Branch(_) => None,
+            Self::Branch(_) | Self::Rule(_) => None,
         }
     }
     pub fn name(&self) -> &'static str {
@@ -40,8 +41,24 @@ impl InputAction {
             Self::Fault(action) => action.name(),
             Self::Branch(BranchAction::Anchor {}) => "anchor",
             Self::Branch(BranchAction::Reseed { .. }) => "reseed",
+            Self::Rule(RuleAction::Trigger(_)) => "trigger",
         }
     }
+}
+/// Rule inputs. A trigger input arms a typed trigger when due; the trigger,
+/// not the input, later admits its effect as a fault with its own ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum RuleAction {
+    Trigger(TriggerSpec),
+}
+/// A consumed trigger input: the trigger ID it armed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArmReceipt {
+    pub key: String,
+    pub at_ns: u64,
+    pub trigger_id: u32,
 }
 /// Branch inputs. An anchor establishes the timed checkpoint phase at its
 /// time, before ordinary actions due then; a capture there is an optional
@@ -121,13 +138,19 @@ pub fn validate_program(inputs: &[TimedInput], duration_ns: u64) -> Result<(), S
     validate_branches(inputs)
 }
 /// Branch inputs come first among the inputs due at their time; a reseed
-/// follows an anchor at the same time and names a nonempty identity.
+/// follows an anchor at the same time and names a nonempty identity. Trigger
+/// inputs are ordinary inputs with a well-formed rule.
 fn validate_branches(inputs: &[TimedInput]) -> Result<(), String> {
     let mut ordinary_at = None;
     let mut anchor_at = None;
     for input in inputs {
         match &input.action {
             InputAction::Fault(_) => ordinary_at = Some(input.at_ns),
+            InputAction::Rule(RuleAction::Trigger(spec)) => {
+                ordinary_at = Some(input.at_ns);
+                spec.validate()
+                    .map_err(|e| format!("input {}: {e}", input.key))?;
+            }
             InputAction::Branch(branch) => {
                 if ordinary_at == Some(input.at_ns) {
                     return Err(format!(
@@ -193,6 +216,37 @@ pub fn merge_interventions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trigger_inputs_parse_with_defaults_and_refuse_unknown_fields() {
+        let json = serde_json::json!({
+            "key": "kill-on-commit",
+            "at_ns": 5,
+            "action": {
+                "action": "trigger",
+                "when": {"on": "event", "name": "committed", "machine": "db"},
+                "nth": 3,
+                "then": {"action": "crash", "machine": "db"},
+            },
+        });
+        let input: TimedInput = serde_json::from_value(json.clone()).unwrap();
+        let InputAction::Rule(RuleAction::Trigger(spec)) = &input.action else {
+            panic!("not a trigger: {input:?}");
+        };
+        assert_eq!(spec.nth, 3);
+        assert_eq!(spec.delay_ns, 0);
+        assert_eq!(input.action.name(), "trigger");
+        assert_eq!(serde_json::to_value(&input).unwrap(), json);
+        validate_program(&[input], 10).unwrap();
+        let mut unknown = json.clone();
+        unknown["action"]["surprise"] = true.into();
+        assert!(serde_json::from_value::<TimedInput>(unknown).is_err());
+        let mut zero = json;
+        zero["action"]["nth"] = 0.into();
+        let zero: TimedInput = serde_json::from_value(zero).unwrap();
+        assert!(validate_program(&[zero], 10)
+            .unwrap_err()
+            .contains("nth counts from 1"));
+    }
     #[test]
     fn retained_host_inputs_merge_by_explicit_identity_ignoring_scheduler_observations() {
         let input = TimedInput {

@@ -619,6 +619,9 @@ impl<M: WorldMachine> World<M> {
     pub fn input_branches(&self) -> &[crate::input_program::BranchReceipt] {
         self.input_program.branches()
     }
+    pub fn input_armed(&self) -> &[crate::input_program::ArmReceipt] {
+        self.input_program.armed()
+    }
 
     /// Attach a runtime-only sink; observations publish after a round commits.
     pub fn with_observations(
@@ -749,7 +752,36 @@ impl<M: WorldMachine> World<M> {
             self.machines.iter().map(|m| m.time).max().unwrap_or(0)
         };
         self.control.cut_off(&self.faults, cutoff);
+        let before: Vec<_> = self
+            .control
+            .triggers
+            .records
+            .iter()
+            .map(|r| r.status)
+            .collect();
         self.control.triggers.cut_off(cutoff);
+        if let Some(publisher) = &self.observations {
+            let records = &self.control.triggers.records;
+            for (r, before) in records.iter().zip(before) {
+                let Some(key) = r.key.as_ref().filter(|_| r.status != before) else {
+                    continue;
+                };
+                publisher.publish(
+                    "",
+                    0,
+                    cutoff,
+                    seedbox_engine_protocol::observation::Kind::TriggerChanged {
+                        input_key: key.clone(),
+                        status: r.status,
+                        seen: r.seen,
+                        matched_at_ns: r.matched_at_ns,
+                        effect_at_ns: r.effect_at_ns,
+                        fault_id: r.fault_id,
+                        reason: None,
+                    },
+                );
+            }
+        }
         Ok(cutoff)
     }
 

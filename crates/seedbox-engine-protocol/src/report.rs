@@ -112,6 +112,9 @@ pub struct WorldEvidence {
     /// Consumed anchors and reseeds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_branches: Vec<crate::input_program::BranchReceipt>,
+    /// Consumed trigger inputs and the triggers they armed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_armed: Vec<crate::input_program::ArmReceipt>,
     pub fault_error: Option<String>,
     pub control_history: Vec<ControlRecord>,
     pub control_latency_ns: u64,

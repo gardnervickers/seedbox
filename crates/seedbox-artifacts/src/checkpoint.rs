@@ -23,13 +23,20 @@ struct CapturedProgram {
     /// Consumed anchors and reseeds, which allocate no fault IDs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     branches: Vec<seedbox_engine_protocol::input_program::BranchReceipt>,
+    /// Consumed trigger inputs and the trigger IDs they armed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    armed: Vec<seedbox_engine_protocol::input_program::ArmReceipt>,
 }
 impl CapturedProgram {
     fn validate(&self) -> Result<()> {
         validate_program(&self.inputs, u64::MAX).map_err(Error::Integrity)?;
         if self.failed
             || self.next > self.inputs.len()
-            || self.next != self.admissions.len() + self.rejections.len() + self.branches.len()
+            || self.next
+                != self.admissions.len()
+                    + self.rejections.len()
+                    + self.branches.len()
+                    + self.armed.len()
         {
             return Err(Error::Integrity(
                 "checkpoint has an invalid consumed input cursor".into(),
@@ -41,6 +48,7 @@ impl CapturedProgram {
             self.branches.iter(),
             0,
         );
+        let (mut armed, mut previous_trigger) = (self.armed.iter(), 0);
         for input in &self.inputs[..self.next] {
             if let seedbox_engine_protocol::input_program::InputAction::Branch(action) =
                 &input.action
@@ -65,6 +73,21 @@ impl CapturedProgram {
                         "checkpoint input rejection disagrees with consumption".into(),
                     ));
                 }
+            } else if let seedbox_engine_protocol::input_program::InputAction::Rule(_) =
+                &input.action
+            {
+                let receipt = armed.next().ok_or_else(|| {
+                    Error::Integrity("checkpoint consumed trigger input lacks its receipt".into())
+                })?;
+                if receipt.key != input.key
+                    || receipt.at_ns != input.at_ns
+                    || receipt.trigger_id <= previous_trigger
+                {
+                    return Err(Error::Integrity(
+                        "checkpoint trigger receipt disagrees with consumed input".into(),
+                    ));
+                }
+                previous_trigger = receipt.trigger_id;
             } else {
                 let row = admitted.next().ok_or_else(|| {
                     Error::Integrity("checkpoint consumed input lacks admission evidence".into())
@@ -201,6 +224,7 @@ mod tests {
         let later = input("later-host-at-same-boundary", 30);
         let pending = input("pending-authored", 40);
         let mut faults = Faults::new(Vec::new(), vec!["oracle".into()]).unwrap();
+        let mut triggers = seedbox_engine_core::triggers::Triggers::default();
         let mut program = Program::new(vec![authored, rejected, pending], u64::MAX, 0).unwrap();
         program
             .commit_live(&mut faults, host.key.clone(), plan(1, &host), 10)
@@ -208,6 +232,7 @@ mod tests {
         program
             .admit_due(
                 &mut faults,
+                &mut triggers,
                 20,
                 seedbox_engine_core::input_program::Gate {
                     ready: true,
@@ -219,6 +244,7 @@ mod tests {
         program
             .admit_due(
                 &mut faults,
+                &mut triggers,
                 25,
                 seedbox_engine_core::input_program::Gate {
                     ready: true,
@@ -316,6 +342,7 @@ mod tests {
         restored
             .admit_due(
                 &mut faults,
+                &mut seedbox_engine_core::triggers::Triggers::default(),
                 30,
                 seedbox_engine_core::input_program::Gate {
                     ready: true,
@@ -333,6 +360,7 @@ mod tests {
         restored
             .admit_due(
                 &mut faults,
+                &mut seedbox_engine_core::triggers::Triggers::default(),
                 40,
                 seedbox_engine_core::input_program::Gate {
                     ready: true,
@@ -432,9 +460,11 @@ mod same_time_tests {
         let mut program =
             Program::new(vec![authored.clone(), pending.clone()], u64::MAX, 0).unwrap();
         let mut faults = Faults::new(Vec::new(), vec!["oracle".into()]).unwrap();
+        let mut triggers = seedbox_engine_core::triggers::Triggers::default();
         program
             .admit_due(
                 &mut faults,
+                &mut triggers,
                 10,
                 seedbox_engine_core::input_program::Gate {
                     ready: true,

@@ -303,6 +303,30 @@ added after the anchor is identical to running the child cold. Code:
 [coordinator](../crates/seedbox-engine-core/src/world_windowed.rs),
 [program](../crates/seedbox-engine-core/src/input_program.rs).
 
+## Typed triggers
+
+A `trigger` program input arms a typed trigger when due, in document order
+with the other inputs at its time; it allocates a trigger ID, not a fault ID.
+Its selector watches committed occurrences only: SDK events, assertions and
+setup markers at frame acceptance, readiness and exits as the coordinator
+absorbs them, lifecycle transitions where it commits them, and frames and TCP
+connection openings as it routes them. Each round's occurrences are offered in
+one order (time, machine, source, position), so worker count never changes
+which occurrence is the `nth`. The match schedules the effect one causal
+lookahead plus `delay_ns` later, which is never in any machine's committed
+past; at that boundary the effect meets the same state checks as a timed input
+and is admitted as an ordinary fault, or the trigger is rejected. Triggers
+still armed or matched when the run ends are cut off.
+
+Records are checkpointed whole and their receipts (armed, matched, fired,
+expired, rejected, cut off) are published for the world view; a fired
+trigger's fault carries the trigger's input key, and its status says whether
+the effect applied. A run allocates at most `MAX_TRIGGERS` IDs, never reused,
+and keeps at most `MAX_ACTIVE_TRIGGERS` armed or matched at once; resolved
+marker triggers free their matcher tables. Code:
+[matchers](../crates/seedbox-engine-core/src/triggers.rs),
+[rules](../crates/seedbox-control/src/lib.rs).
+
 ## Property records
 
 Guest properties travel the same committed path as application output. Every

@@ -76,6 +76,11 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         counts: Option<Box<serde_json::Value>>,
     },
+    /// A typed trigger input's receipt changed.
+    TriggerChanged {
+        input_key: String,
+        trigger: crate::TriggerState,
+    },
     MachineLifecycle {
         machine: String,
         incarnation: u32,

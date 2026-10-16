@@ -20,6 +20,59 @@ pub struct WorldState {
     pub machines: Vec<MachineState>,
     pub links: Vec<LinkState>,
     pub faults: Vec<FaultState>,
+    /// Typed trigger inputs by input key: what each has matched and done.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub triggers: std::collections::BTreeMap<String, TriggerState>,
+}
+
+/// A typed trigger input's receipt. A fired trigger's effect is the fault
+/// `fault_id`; that fault's status says whether it applied.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TriggerState {
+    pub status: TriggerStatus,
+    /// Matching occurrences so far.
+    pub seen: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_at_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_at_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TriggerStatus {
+    /// Watching for its occurrence.
+    Armed,
+    /// Matched; its effect waits for its time.
+    Matched,
+    /// Its effect was admitted as a fault.
+    Fired,
+    /// No match before its deadline.
+    Expired,
+    /// Its effect was refused at its time.
+    Rejected,
+    /// The run ended while it was armed or matched.
+    CutOff,
+    Cancelled,
+}
+impl From<seedbox_control::TriggerStatus> for TriggerStatus {
+    fn from(status: seedbox_control::TriggerStatus) -> Self {
+        use seedbox_control::TriggerStatus as Engine;
+        match status {
+            Engine::Armed => Self::Armed,
+            Engine::Matched => Self::Matched,
+            Engine::Fired => Self::Fired,
+            Engine::Expired => Self::Expired,
+            Engine::Rejected => Self::Rejected,
+            Engine::CutOff => Self::CutOff,
+            Engine::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

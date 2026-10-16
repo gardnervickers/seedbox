@@ -20,6 +20,7 @@ pub(crate) struct Tracker {
     machines: BTreeMap<String, MachineState>,
     faults: BTreeMap<u32, FaultState>,
     override_rejections: BTreeMap<String, String>,
+    triggers: BTreeMap<String, seedbox_api::TriggerState>,
     counters: BTreeMap<Pair, LinkCounters>,
     /// Active partition and shape handles, with the fault that set them.
     partitions: BTreeMap<String, (u32, BTreeSet<Pair>)>,
@@ -69,6 +70,7 @@ impl Tracker {
             machines: BTreeMap::new(),
             faults: BTreeMap::new(),
             override_rejections: BTreeMap::new(),
+            triggers: BTreeMap::new(),
             counters: BTreeMap::new(),
             partitions: BTreeMap::new(),
             shapes: BTreeMap::new(),
@@ -116,6 +118,10 @@ impl Tracker {
             } => {
                 self.override_rejections
                     .insert(input_key.clone(), reason.clone());
+            }
+            EventKind::TriggerChanged { input_key, trigger } => {
+                self.triggers.insert(input_key.clone(), trigger.clone());
+                self.revision += 1;
             }
             EventKind::MachineReady {
                 machine,
@@ -439,6 +445,7 @@ impl Tracker {
             .chain(self.machine_pauses.values().copied())
             .collect();
         WorldState {
+            triggers: self.triggers.clone(),
             override_rejections: self.override_rejections.clone(),
             simulation: self.simulation.clone(),
             revision: self.revision,

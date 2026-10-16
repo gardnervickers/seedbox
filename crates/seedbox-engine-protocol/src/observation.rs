@@ -69,6 +69,20 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         counts: Option<serde_json::Value>,
     },
+    /// A typed trigger input's receipt changed status.
+    TriggerChanged {
+        input_key: String,
+        status: seedbox_control::TriggerStatus,
+        seen: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        matched_at_ns: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effect_at_ns: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fault_id: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     OverrideRejected {
         input_key: String,
         at_ns: u64,
