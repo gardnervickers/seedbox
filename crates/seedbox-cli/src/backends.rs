@@ -17,16 +17,18 @@ use std::{
 };
 
 pub enum Executor {
-    Linux(VmmExecutor),
+    Linux(Box<VmmExecutor>),
+    Driver(Box<seedbox_application::driver_world::DriverExecutor>),
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    Mac(seedbox_application::mac::MacExecutor),
+    Mac(Box<seedbox_application::mac::MacExecutor>),
 }
 impl Executor {
     fn backend(&self) -> &dyn ExecutionBackend {
         match self {
-            Self::Linux(e) => e,
+            Self::Linux(e) => e.as_ref(),
+            Self::Driver(e) => e.as_ref(),
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(e) => e,
+            Self::Mac(e) => e.as_ref(),
         }
     }
 }
@@ -45,6 +47,13 @@ impl ExecutionBackend for Executor {
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         self.backend().validate_retained(inputs)
+    }
+    fn preflight_resume(
+        &self,
+        checkpoint: Option<&Path>,
+        control: Option<&seedbox_application::config::Control>,
+    ) -> Result<()> {
+        self.backend().preflight_resume(checkpoint, control)
     }
     fn runtime_inputs<'a>(
         &self,
@@ -71,6 +80,7 @@ pub struct Preparer {
     // Package extraction must outlive preparation and retention of its bytes.
     pub _helpers: Option<seedbox_application::guest_assets::Runtime>,
     pub cancellation: CancellationToken,
+    pub driver_inputs: Option<seedbox_application::runtime_assets::Inputs>,
 }
 impl Deref for Preparer {
     type Target = OciPreparer;
@@ -85,7 +95,12 @@ impl DerefMut for Preparer {
 }
 impl PreparationBackend for Preparer {
     fn validate_runtime_inputs(&self) -> Result<()> {
-        self.inputs.validate_runtime_inputs()
+        match &self.driver_inputs {
+            Some(runtime) => {
+                seedbox_application::driver_world::validate_oci_runtime(&self.inputs, runtime)
+            }
+            None => self.inputs.validate_runtime_inputs(),
+        }
     }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs> {
         let directory = tempfile::tempdir()?;
@@ -102,17 +117,30 @@ impl PreparationBackend for Preparer {
         context: &PreparationContext,
     ) -> Result<PreparedInputs> {
         self.validate_runtime_inputs()?;
-        self.prepare_with_transport(
-            simulation,
-            store,
-            context,
-            &seedbox_application::container_images::ContainerTransport {
-                docker: self.inputs.docker.clone(),
-                cancellation: context.cancellation.clone(),
-                progress: preparation_progress,
-                export_cache: Some(self.inputs.profile.engine.clone()),
-            },
-        )
+        let transport = seedbox_application::container_images::ContainerTransport {
+            docker: self.inputs.docker.clone(),
+            cancellation: context.cancellation.clone(),
+            progress: preparation_progress,
+            export_cache: Some(self.inputs.profile.engine.clone()),
+        };
+        let mut prepared = match &self.driver_inputs {
+            Some(runtime) => self
+                .inputs
+                .prepare_driver_with_transport(simulation, store, context, &transport, runtime)?,
+            None => self
+                .inputs
+                .prepare_with_transport(simulation, store, context, &transport)?,
+        };
+        if let Some(runtime) = &self.driver_inputs {
+            seedbox_application::driver_world::retain_oci_prepared(
+                &mut prepared,
+                simulation,
+                runtime,
+                store,
+                context,
+            )?;
+        }
+        Ok(prepared)
     }
 }
 
@@ -312,6 +340,40 @@ pub fn container_engine() -> Result<bollard::Docker> {
 )]
 mod tests {
     use super::{assets_beside, cached_kernel};
+
+    #[test]
+    fn default_driver_selection_preserves_explicit_legacy_inputs() {
+        fn defaults() -> crate::RuntimeInputs {
+            crate::RuntimeInputs {
+                kvm: crate::KvmInputs {
+                    kernel: None,
+                    vmm: None,
+                },
+                runtime_assets: None,
+                guest_init: None,
+                mke2fs: None,
+                full_state: false,
+            }
+        }
+        let supported = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+        assert_eq!(defaults().use_driver(false), supported);
+        assert!(!defaults().use_driver(true));
+        let mut full = defaults();
+        full.full_state = true;
+        assert_eq!(full.use_driver(false), supported);
+        for option in 0..5 {
+            let mut inputs = defaults();
+            let destination = match option {
+                0 => &mut inputs.kvm.vmm,
+                1 => &mut inputs.kvm.kernel,
+                2 => &mut inputs.runtime_assets,
+                3 => &mut inputs.guest_init,
+                _ => &mut inputs.mke2fs,
+            };
+            *destination = Some("/explicit-legacy-input".into());
+            assert!(!inputs.use_driver(false));
+        }
+    }
 
     #[test]
     fn embedded_kernel_cache_reuses_bytes_and_separates_versions() {

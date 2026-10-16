@@ -3,6 +3,29 @@
 These mechanisms depend on ordering or state that is easy to overlook.
 Each section links to the code that owns it.
 
+## Fresh Linux service preparation
+
+On Linux x86-64, ordinary fresh PV preparation selects the Driver worker contract.
+OCI image import, caching, launch resolution, configuration files and epoch
+selection still belong to `OciPreparer`. Its Driver branch uses the PV SDK's
+configured boot builder, not the legacy init/progress archive format. It retains
+both the complete boot bytes and the original application filesystem, so replay
+and later launch edits do not need the image engine or source project.
+See [preparation](../crates/seedbox-application/src/preparation.rs) and the
+[Driver retention bridge](../crates/seedbox-application/src/driver_world/preparation.rs).
+
+Explicit legacy executable or bootstrap overrides retain their existing formats
+and executor; the asset-directory override likewise keeps its legacy lookup.
+Other host platforms are unchanged. Replaying an existing run uses its recorded
+contract, not the current fresh-run selection. Control sockets are packaged only
+for the configured controller, whose service must also be the oracle/check service.
+
+Resume admission reads bounded checkpoint metadata before copying start assets
+or execution inputs. Parent and native restore use the same `admit_restore`
+policy, including the requested controller when a resolved definition is edited;
+there is no separate parent copy of host/controller eligibility rules.
+Native body and saved-authority validation still precede native restoration.
+
 ## Reference TCG machine
 
 `seedbox-machine` targets a single x86-64 `qemu64` CPU on QEMU’s `microvm`

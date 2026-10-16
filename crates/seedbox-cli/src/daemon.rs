@@ -41,7 +41,18 @@ impl BackendProvider for NativeBackends {
         cancellation: &CancellationToken,
     ) -> Result<Backends> {
         super::validate_machine(configuration)?;
-        let (preparation, execution) = self.inputs.backends(store, configuration, cancellation)?;
+        let (preparation, execution) =
+            self.inputs
+                .backends(store, configuration, cancellation, &self.session_root)?;
+        let execution = match execution {
+            Executor::Driver(executor) => {
+                Executor::Driver(Box::new((*executor).with_launch_context(
+                    self.environment.clone(),
+                    Some(self.session_lease.clone()),
+                )))
+            }
+            other => other,
+        };
         Ok(Backends {
             preparation: Box::new(preparation),
             execution: Box::new(execution),
@@ -114,11 +125,13 @@ impl BackendProvider for NativeBackends {
         let executor = if inputs.profile.backend == Backend::Hvf {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
-                Executor::Mac(seedbox_application::mac::MacExecutor::from_retained(
-                    &engine,
-                    store,
-                    inputs.profile.clone(),
-                )?)
+                Executor::Mac(Box::new(
+                    seedbox_application::mac::MacExecutor::from_retained(
+                        &engine,
+                        store,
+                        inputs.profile.clone(),
+                    )?,
+                ))
             }
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             {
@@ -127,11 +140,11 @@ impl BackendProvider for NativeBackends {
                 ));
             }
         } else {
-            Executor::Linux(VmmExecutor::from_retained(
+            Executor::Linux(Box::new(VmmExecutor::from_retained(
                 &engine,
                 store,
                 inputs.profile.clone(),
-            )?)
+            )?))
         };
         Ok(Box::new(executor))
     }

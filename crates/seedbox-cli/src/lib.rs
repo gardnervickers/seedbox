@@ -593,12 +593,62 @@ impl RuntimeInputs {
         Ok(())
     }
 
+    // Explicit legacy assets keep their existing formats and launch contract.
+    // Only the ordinary complete-build Linux PV default changes selection.
+    fn use_driver(&self, explicit_asset_directory: bool) -> bool {
+        cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            && self.kvm.vmm.is_none()
+            && self.kvm.kernel.is_none()
+            && self.runtime_assets.is_none()
+            && self.guest_init.is_none()
+            && self.mke2fs.is_none()
+            && !explicit_asset_directory
+    }
+
+    fn driver_backends(
+        &self,
+        store: &ContentStore,
+        simulation: &config::Simulation,
+        cancellation: &CancellationToken,
+        scratch: &Path,
+        engine: &Path,
+        witness: WitnessMode,
+    ) -> Result<(Preparer, Executor)> {
+        let executor = seedbox_application::driver_world::DriverExecutor::for_preparation(
+            engine, store, simulation, witness,
+        )?;
+        let runtime = backends::driver_runtime(None, scratch)?;
+        let selected = runtime.select(
+            seedbox_application::runtime_assets::Backend::Pv,
+            seedbox_spec::definition::Architecture::X86_64,
+        )?;
+        let inputs = OciPreparer {
+            docker: backends::container_engine()?,
+            kernel: selected.guest_assets.join("kernel"),
+            engine: engine.to_owned(),
+            init: selected.guest_assets.join("init"),
+            progress: selected.guest_assets.join("progress.tar"),
+            mke2fs: Some(selected.guest_assets.join("mke2fs")),
+            profile: executor.profile(),
+        };
+        Ok((
+            Preparer {
+                inputs,
+                _helpers: None,
+                cancellation: cancellation.clone(),
+                driver_inputs: Some(selected.clone()),
+            },
+            Executor::Driver(Box::new(executor.with_runtime(selected)?)),
+        ))
+    }
+
     /// Resolve every input and build the matching preparer and executor.
     fn backends(
         &self,
         store: &ContentStore,
         simulation: &config::Simulation,
         cancellation: &CancellationToken,
+        scratch: &Path,
     ) -> Result<(Preparer, Executor)> {
         self.validate_platform()?;
         validate_machine(simulation)?;
@@ -619,6 +669,16 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
+        if self.use_driver(std::env::var_os("SEEDBOX_ASSET_DIR").is_some()) {
+            return self.driver_backends(
+                store,
+                simulation,
+                cancellation,
+                scratch,
+                &engine,
+                witness,
+            );
+        }
         let kernel = backends::guest_kernel(self.kvm.kernel.clone())?;
         let runtime = Some(backends::guest_assets(self.runtime_assets.clone())?);
         let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
@@ -634,14 +694,14 @@ impl RuntimeInputs {
         };
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         let executor = {
-            Executor::Mac(seedbox_application::mac::MacExecutor::new(
+            Executor::Mac(Box::new(seedbox_application::mac::MacExecutor::new(
                 &engine,
                 &kernel,
                 store,
                 machine.memory_mb,
                 witness,
                 simulation.disk.torn_writes,
-            )?)
+            )?))
         };
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         let executor = {
@@ -651,12 +711,12 @@ impl RuntimeInputs {
             } else {
                 VmmExecutor::new_internal(&engine, store, machine.memory_mb, witness)?
             };
-            Executor::Linux(
+            Executor::Linux(Box::new(
                 executor
                     .with_torn_writes(simulation.disk.torn_writes)
                     .with_page_timer(machine.page_timer)
                     .with_deferred_tx(machine.deferred_tx),
-            )
+            ))
         };
         let inputs = OciPreparer {
             docker: backends::container_engine()?,
@@ -672,6 +732,7 @@ impl RuntimeInputs {
                 inputs,
                 _helpers: runtime,
                 cancellation: cancellation.clone(),
+                driver_inputs: None,
             },
             executor,
         ))
@@ -1038,7 +1099,8 @@ fn prepare(
     let (store, _) = state.open()?;
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
-    let (preparer, _) = inputs.backends(&store, &simulation, &cancellation)?;
+    let scratch = tempfile::tempdir()?;
+    let (preparer, _) = inputs.backends(&store, &simulation, &cancellation, scratch.path())?;
     if cancellation.is_cancelled() {
         return Err(Error::PreparationCancelled);
     }
