@@ -1350,7 +1350,7 @@ fn network_submission(
         .join("../..")
         .canonicalize()
         .unwrap();
-    let executable = checkout.join("target/release/seedbox");
+    let executable = release_executable(&checkout);
     let archive = checkout.join("build/assets/driver-runtime.tar.gz");
     assert!(
         executable.is_file() && archive.is_file(),
