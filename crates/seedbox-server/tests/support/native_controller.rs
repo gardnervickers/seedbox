@@ -107,14 +107,13 @@ fn occurrences(bytes: &[u8], marker: &[u8]) -> usize {
 }
 
 pub async fn pv_controller_repeat() {
-    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
-    tokio::time::timeout(HANG_GUARD, async {
-        let mut session = NativeSession::new(DriverBackend::Pv);
-        let request = request(&session);
+    native_case(|owner| Box::pin(async move {
+        let session = owner.session(DriverBackend::Pv);
+        let request = request(session);
         let first = session.submit(request.clone(), 1).await;
         session.worker(&first).await;
         let first_witness = session.complete(&first, false, 1, SEED).await.unwrap();
-        let first_output = output(&session, &first).await;
+        let first_output = output(session, &first).await;
         let first_replies = replies(&first_output);
         verify_replies(&first_replies, &[1,2,3], &session.launch_request(&first));
         assert_eq!(occurrences(&first_output, b"ORACLE_CONTROL_DONE"), 1);
@@ -122,7 +121,7 @@ pub async fn pv_controller_repeat() {
         assert_ne!(first, second);
         session.worker(&second).await;
         let second_witness = session.complete(&second, false, 4, SEED).await.unwrap();
-        let second_output = output(&session, &second).await;
+        let second_output = output(session, &second).await;
         let second_replies = replies(&second_output);
         verify_replies(&second_replies, &[1,2,3], &session.launch_request(&second));
         assert_eq!(occurrences(&second_output, b"ORACLE_CONTROL_DONE"), 1);
@@ -132,19 +131,17 @@ pub async fn pv_controller_repeat() {
         assert_eq!(compared.status, ComparisonStatus::Match);
         assert_eq!(compared.witness_matches, Some(true));
         eprintln!("native controller repeat: distinct_ids=true actual_workers=1/4 raw_equal=true replies_equal=true witness={first_witness}");
-        session.close().await;
-    }).await.expect("native controller repeat hit the host hang guard without finishing");
+    })).await;
 }
 
 pub async fn pv_controller_checkpoint() {
-    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
-    tokio::time::timeout(HANG_GUARD, async {
-        let mut session = NativeSession::new(DriverBackend::Pv);
-        let request = request(&session);
+    native_case(|owner| Box::pin(async move {
+        let session = owner.session(DriverBackend::Pv);
+        let request = request(session);
         let baseline = session.submit(request.clone(), 1).await;
         session.worker(&baseline).await;
         let uninterrupted = session.complete(&baseline, false, 1, SEED).await.unwrap();
-        let baseline_output = output(&session, &baseline).await;
+        let baseline_output = output(session, &baseline).await;
         let baseline_replies = replies(&baseline_output);
         verify_replies(&baseline_replies, &[1,2,3], &session.launch_request(&baseline));
         let admitted = number(&baseline_replies[1], "admitted_at_ns");
@@ -172,7 +169,7 @@ pub async fn pv_controller_checkpoint() {
                 if !state.stepping && state.position.completed_rounds > before { break state; }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             };
-            let bytes = output(&session, &source).await;
+            let bytes = output(session, &source).await;
             let partial = replies(&bytes);
             assert!(partial.len() <= 1, "sleep already replied before capture");
             assert_eq!(occurrences(&bytes, b"ORACLE_CONTROL_DONE"), 0);
@@ -221,7 +218,7 @@ pub async fn pv_controller_checkpoint() {
         eprintln!("native controller capture: oracle={ORACLE} before_wake=true pending_sleep_id=2 captured={position:?} restored={:?}", paused.position);
         session.control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
         let continued = session.complete(&restored, false, 4, SEED).await.unwrap();
-        let continued_output = output(&session, &restored).await;
+        let continued_output = output(session, &restored).await;
         let continued_replies = replies(&continued_output);
         verify_replies(&continued_replies, &[2,3], &launch);
         assert_eq!(continued_replies, baseline_replies[1..]);
@@ -231,6 +228,5 @@ pub async fn pv_controller_checkpoint() {
         let compared = session.client.compare(&baseline, &restored).await.unwrap();
         assert_eq!(compared.witness_matches, Some(true));
         eprintln!("native controller continuation: same_oracle=true no_duplicate_calls=true raw_equal=true witness={continued}");
-        session.close().await;
-    }).await.expect("native controller checkpoint hit the host hang guard without finishing");
+    })).await;
 }

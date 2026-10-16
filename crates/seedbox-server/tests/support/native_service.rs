@@ -13,8 +13,14 @@ mod export;
 pub use export::pv_large_export_under_load;
 #[path = "native_held_checkpoint.rs"]
 mod held_checkpoint;
-use futures_util::StreamExt;
 pub use held_checkpoint::native_held_checkpoint;
+#[path = "case_cleanup.rs"]
+mod case_cleanup;
+use case_cleanup::{finish_before_rethrow, panic_text, DEADLINE_FAILURE};
+#[path = "native_process_probe.rs"]
+mod native_process_probe;
+use futures_util::FutureExt;
+use futures_util::{future::BoxFuture, StreamExt};
 use seedbox_api::{
     ComparisonStatus, ExecutionTermination, Phase, SimulationSpec, SubmitRequest, TestVerdict,
 };
@@ -643,6 +649,9 @@ impl NativeSession {
         let cancellation = CancellationToken::default();
         let socket = root.path().join("api.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        // Finish fallible setup before spawning the owner. Once it starts, only
+        // infallible moves remain before the case registry retains this session.
+        let client = Client::connect_to(&socket).unwrap();
         let server = tokio::spawn(seedbox_server::serve(
             listener,
             manager.clone(),
@@ -662,7 +671,7 @@ impl NativeSession {
             workers,
             observed,
             bound: simulated_bound(backend),
-            client: Client::connect_to(&socket).unwrap(),
+            client,
             submitted: 0,
         }
     }
@@ -949,10 +958,11 @@ impl NativeSession {
         eprintln!("pre-close native scratch/runtime absence verified with session and execution lease barriers");
         barriers
     }
-    async fn close(mut self) {
-        self.cancel.0.cancel();
-        self.server.take().unwrap().await.unwrap().unwrap();
-        let _barriers = self.assert_cleanup();
+    fn remove_verified(self) {
+        assert!(
+            self.server.is_none(),
+            "serve must be joined before removing inputs"
+        );
         let session_path = self.session.path().to_owned();
         self.session.close();
         assert!(!session_path.exists());
@@ -1029,13 +1039,100 @@ impl NativeRun {
         }
     }
 }
+#[derive(Default)]
+struct NativeCase {
+    sessions: Vec<NativeSession>,
+    // Keep exclusive ownership barriers through verified directory removal.
+    barriers: Vec<fs::File>,
+}
+impl NativeCase {
+    fn session(&mut self, backend: DriverBackend) -> &mut NativeSession {
+        self.sessions.push(NativeSession::new(backend));
+        self.sessions.last_mut().unwrap()
+    }
+    async fn scenario(
+        &mut self,
+        backend: DriverBackend,
+        runs: &[NativeRun],
+        cancelled: bool,
+        expected_match: Option<bool>,
+    ) {
+        native_runs(self.session(backend), runs, cancelled, expected_match).await;
+    }
+    async fn cleanup(&mut self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        // Cancel ALL sessions before awaiting any one join, including a session
+        // whose last HTTP submission never returned an ID to the case body.
+        for session in &self.sessions {
+            if let Err(error) = session.cancel.1.cancel_active() {
+                errors.push(format!(
+                    "cancel session {}: {error}",
+                    session.session.path().display()
+                ));
+            }
+            session.cancel.0.cancel();
+        }
+        for session in &mut self.sessions {
+            if let Some(mut server) = session.server.take() {
+                // The integrated wall limit is a hang guard, never a native
+                // progress verdict. Cleanup must run even after the case guard
+                // elapsed; reuse that guard solely to bound a broken join.
+                match tokio::time::timeout(HANG_GUARD, &mut server).await {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(error))) => errors.push(format!("serve cleanup: {error}")),
+                    Ok(Err(error)) => errors.push(format!("serve join: {error}")),
+                    Err(_) => {
+                        server.abort();
+                        let _ = server.await;
+                        errors.push("cleanup join hang guard elapsed; inputs retained".into());
+                    }
+                }
+            } else {
+                errors.push("session owner join was missing; inputs retained".into());
+            }
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.assert_cleanup()
+            })) {
+                Ok(barriers) => self.barriers.extend(barriers),
+                Err(payload) => {
+                    errors.push(format!("W2 cleanup: {}", panic_text(payload.as_ref())))
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+    fn remove_verified(mut self) {
+        for session in self.sessions.drain(..) {
+            session.remove_verified();
+        }
+        // self.barriers remain held until all directories have been removed.
+    }
+}
+async fn native_case<Body>(body: Body)
+where
+    Body: for<'a> FnOnce(&'a mut NativeCase) -> BoxFuture<'a, ()>,
+{
+    let owner = finish_before_rethrow(
+        NativeCase::default(),
+        body,
+        |owner| Box::pin(owner.cleanup()),
+        tokio::time::sleep(HANG_GUARD),
+    )
+    .await;
+    owner.remove_verified();
+}
+
 async fn native_runs(
-    backend: DriverBackend,
+    session: &mut NativeSession,
     runs: &[NativeRun],
     cancelled: bool,
     expected_match: Option<bool>,
 ) {
-    let mut session = NativeSession::new(backend);
+    let backend = session.backend;
     let mut ids = Vec::new();
     let mut witnesses = Vec::new();
     let mut original: Option<SubmitRequest> = None;
@@ -1098,7 +1195,6 @@ async fn native_runs(
         }
         ids.push(id);
     }
-    session.close().await;
 }
 pub async fn native_session(
     backend: DriverBackend,
@@ -1110,55 +1206,77 @@ pub async fn native_session(
         .iter()
         .map(|n| NativeRun::cpu(*n))
         .collect::<Vec<_>>();
-    native_runs(backend, &runs, cancelled, expected_match).await;
+    native_case(move |owner| {
+        Box::pin(async move {
+            owner
+                .scenario(backend, &runs, cancelled, expected_match)
+                .await;
+        })
+    })
+    .await;
 }
 
+pub async fn native_completion_and_cancellation(backend: DriverBackend) {
+    // Preserve ONE aggregate case guard and two fresh scenario sessions.
+    native_case(move |owner| {
+        Box::pin(async move {
+            owner
+                .scenario(backend, &[NativeRun::cpu(200_000)], false, None)
+                .await;
+            owner
+                .scenario(backend, &[NativeRun::cpu(2_000_000_000)], true, None)
+                .await;
+        })
+    })
+    .await;
+}
 pub async fn pv_worker_counts() {
-    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
-    tokio::time::timeout(
-        HANG_GUARD,
-        native_runs(
-            DriverBackend::Pv,
-            &[
-                NativeRun::cpu(200_000),
-                NativeRun {
-                    workers: 4,
-                    ..NativeRun::cpu(200_000)
-                },
-            ],
-            false,
-            Some(true),
-        ),
-    )
-    .await
-    .expect("worker-count pair hit the host hang guard without finishing");
+    native_case(|owner| {
+        Box::pin(async move {
+            owner
+                .scenario(
+                    DriverBackend::Pv,
+                    &[
+                        NativeRun::cpu(200_000),
+                        NativeRun {
+                            workers: 4,
+                            ..NativeRun::cpu(200_000)
+                        },
+                    ],
+                    false,
+                    Some(true),
+                )
+                .await;
+        })
+    })
+    .await;
 }
 pub async fn pv_seed_report() {
-    // CPU-only input need not consume seed-dependent randomness. Report raw
-    // equality/inequality honestly; the changed-input W1 test requires inequality.
-    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
-    tokio::time::timeout(
-        HANG_GUARD,
-        native_runs(
-            DriverBackend::Pv,
-            &[
-                NativeRun::cpu(200_000),
-                NativeRun {
-                    seed: 124,
-                    ..NativeRun::cpu(200_000)
-                },
-            ],
-            false,
-            None,
-        ),
-    )
-    .await
-    .expect("seed-report pair hit the host hang guard without finishing");
+    // CPU-only input need not consume seed randomness; report raw results.
+    native_case(|owner| {
+        Box::pin(async move {
+            owner
+                .scenario(
+                    DriverBackend::Pv,
+                    &[
+                        NativeRun::cpu(200_000),
+                        NativeRun {
+                            seed: 124,
+                            ..NativeRun::cpu(200_000)
+                        },
+                    ],
+                    false,
+                    None,
+                )
+                .await;
+        })
+    })
+    .await;
 }
 pub async fn pv_checkpoint_continuation() {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
     let began = Instant::now();
-    let phase = |name: &str| {
+    let phase = move |name: &str| {
         eprintln!(
             "checkpoint phase: elapsed_ms={} unix_ms={} {name}",
             began.elapsed().as_millis(),
@@ -1169,9 +1287,8 @@ pub async fn pv_checkpoint_continuation() {
         )
     };
     phase("case_begin");
-    // test-time: allow(hang-guard) -- Outer HANG_GUARD retains the documented 1200s loaded-host safety budget; check_bound independently limits simulated progress and exact evidence decides success.
-    tokio::time::timeout(HANG_GUARD, async {
-        let mut session = NativeSession::new(DriverBackend::Pv);
+    native_case(move |owner| Box::pin(async move {
+        let session = owner.session(DriverBackend::Pv);
         // More than one virtual window of CPU work, still a finite stock fixture.
         let request = submission(DriverBackend::Pv, session.root.path(), &session.store, 2_000_000, 123);
         phase("baseline_submit_begin");
@@ -1292,8 +1409,7 @@ pub async fn pv_checkpoint_continuation() {
         let comparison = session.client.compare(&baseline, &restored).await.unwrap();
         assert_eq!(comparison.witness_matches, Some(true));
         eprintln!("public native checkpoint continuation: raw_equal=true witness_matches={:?} baseline={baseline} restored={restored} witness={continued}", comparison.witness_matches);
-        session.close().await;
-    }).await.expect("checkpoint roundtrip hit the host hang guard without finishing");
+    })).await;
 }
 // The in-flight checkpoint world: the oracle is the stock clock fixture's
 // `idle` role (one 12.5 s nanosleep, then exit 0), so its pending timer decides
@@ -2043,4 +2159,120 @@ fn scratch_prefix(backend: DriverBackend) -> &'static str {
         DriverBackend::Pv => "seedbox-pv-",
         DriverBackend::Tcg => "seedbox-tcg-",
     }
+}
+
+#[derive(Debug)]
+struct ForcedNativePanic;
+struct ForcedFailureProof {
+    root: PathBuf,
+    session: PathBuf,
+    leases: Vec<PathBuf>,
+    runtimes: Vec<PathBuf>,
+    processes: native_process_probe::OwnedProcesses,
+}
+impl ForcedFailureProof {
+    fn capture(session: &NativeSession) -> Self {
+        let root = session.root.path().to_owned();
+        let directory = session.session.path().to_owned();
+        let leases = directories(&directory)
+            .into_iter()
+            .map(|path| path.join(EXECUTION_LEASE_FILE))
+            .filter(|path| path.exists())
+            .collect();
+        Self {
+            root,
+            processes: native_process_probe::OwnedProcesses::capture(&directory),
+            session: directory,
+            leases,
+            runtimes: session.runtime_paths.lock().unwrap().clone(),
+        }
+    }
+    fn assert_clean_and_remove_expected_failure(self) {
+        self.processes.assert_exited();
+        let mut barriers =
+            vec![reclaim_barrier(&self.session.join(SESSION_LEASE_FILE), Duration::ZERO).unwrap()];
+        barriers.extend(
+            self.leases
+                .iter()
+                .map(|path| reclaim_barrier(path, Duration::ZERO).unwrap()),
+        );
+        let remaining = directories(&self.session)
+            .into_iter()
+            .filter(|path| {
+                let name = path.file_name().unwrap().to_string_lossy();
+                name.starts_with("native-scratch")
+                    || name.starts_with("seedbox-pv-")
+                    || name.starts_with("seedbox-tcg-")
+                    || name.starts_with("driver-runtime-")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            remaining.is_empty(),
+            "forced failure left native directories: {remaining:?}"
+        );
+        assert!(self.runtimes.iter().all(|path| !path.exists()));
+        // A failing case preserves its persistent artifacts. Only this EXPECTED
+        // failure test removes them after independently checking PIDFD death and
+        // reacquiring every lease barrier; uncertain cleanup never reaches here.
+        assert!(self.root.is_dir() && self.session.is_dir());
+        eprintln!("forced-failure cleanup proved: all captured worker/monitor/anchor pidfds exited, W2 barriers held, no native/runtime scratch");
+        fs::remove_dir_all(self.root).unwrap();
+    }
+}
+
+pub async fn native_forced_failure(backend: DriverBackend, timeout: bool) {
+    let proof = Arc::new(Mutex::new(None));
+    let body_proof = proof.clone();
+    let (expire, expired) = tokio::sync::oneshot::channel();
+    let result = std::panic::AssertUnwindSafe(finish_before_rethrow(
+        NativeCase::default(),
+        move |owner| Box::pin(async move {
+            let session = owner.session(backend);
+            let request = submission(backend, session.root.path(), &session.store, 2_000_000_000, 123);
+            let id = session.submit(request, 1).await;
+            session.worker(&id).await;
+            session.guest_start(&id).await;
+            session.control(&id, "forced-failure-pause", seedbox_api::ControlCommand::SetRate {
+                rate: seedbox_api::PlaybackRate::Paused,
+            }).await;
+            let paused = session.client.playback(&id).await.unwrap().state;
+            assert_eq!(paused.rate, seedbox_api::PlaybackRate::Paused);
+            assert!(!paused.terminal && !paused.stepping);
+            *body_proof.lock().unwrap() = Some(ForcedFailureProof::capture(session));
+            eprintln!("forcing native case failure: backend={} kind={} after START and paused acknowledgement", label(backend), if timeout { "signalled timeout" } else { "panic" });
+            if timeout {
+                // An explicit event drives the timeout path, not a host sleep.
+                expire.send(()).unwrap();
+                std::future::pending::<()>().await;
+            } else {
+                std::panic::panic_any(ForcedNativePanic);
+            }
+        }),
+        |owner| Box::pin(owner.cleanup()),
+        async move {
+            tokio::select! {
+                result = expired => { result.expect("forced timeout signal vanished before case failure"); },
+                () = tokio::time::sleep(HANG_GUARD) => {},
+            }
+        },
+    )).catch_unwind().await;
+    let payload = match result {
+        Err(payload) => payload,
+        Ok(_) => panic!("forced native failure was swallowed"),
+    };
+    if timeout {
+        assert_eq!(panic_text(payload.as_ref()), DEADLINE_FAILURE);
+    } else {
+        assert!(
+            payload.downcast_ref::<ForcedNativePanic>().is_some(),
+            "wrong panic: {}",
+            panic_text(payload.as_ref())
+        );
+    }
+    proof
+        .lock()
+        .unwrap()
+        .take()
+        .expect("case failed before controlled native failure")
+        .assert_clean_and_remove_expected_failure();
 }
