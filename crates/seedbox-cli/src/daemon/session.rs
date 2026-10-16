@@ -185,6 +185,10 @@ pub(super) fn test_scope() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 mod tests {
     use super::*;
     fn fresh(root: &Path) -> (SessionDirectory, Vec<String>) {

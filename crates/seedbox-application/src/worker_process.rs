@@ -40,15 +40,15 @@ fn replacement_version_with_timeout(
             supplied_path.display()
         ))
     };
-    let child = Command::new(engine)
+    let mut command = Command::new(engine);
+    command
         .arg("--version")
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| failure(&e.to_string()))?;
+        .process_group(0);
+    let child = crate::exec_files::spawn(&mut command).map_err(|e| failure(&e.to_string()))?;
     let mut process = OwnedProcess(Some(child));
     let mut stdout = process
         .0
@@ -402,7 +402,7 @@ impl WorkerLaunch {
     /// the explicit monitor boundary. The Driver adapter uses spawn_with_monitor.
     /// The caller must acquire any host lease before spawning. The returned
     /// worker stops and reaps its group before the caller releases its host guard.
-    pub(crate) fn spawn(mut self) -> Result<RunningWorker> {
+    pub(crate) fn spawn_worker(mut self) -> Result<RunningWorker> {
         if self.native_scratch.is_some() {
             return Err(Error::Setup(
                 "retained Driver workers require monitored launch for native scratch ownership"
@@ -410,7 +410,7 @@ impl WorkerLaunch {
             ));
         }
         let started = seedbox_engine_protocol::host_clock::Instant::now()?;
-        let child = self.command.spawn().map_err(|error| {
+        let child = crate::exec_files::spawn(&mut self.command).map_err(|error| {
             Error::Setup(format!(
                 "engine worker {}: {error}; {}",
                 self.engine.display(),
@@ -977,7 +977,7 @@ mod tests {
             spawn_fix: "test worker",
             native_scratch: None,
         }
-        .spawn()
+        .spawn_worker()
         .unwrap()
     }
 

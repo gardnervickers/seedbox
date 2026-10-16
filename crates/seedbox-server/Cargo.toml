@@ -27,6 +27,7 @@ futures-util.workspace = true
 seedbox-spec.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 seedbox-client.workspace = true
 seedbox-machine = { workspace = true, features = ["test-support"] }
 seedbox-machine-pv.workspace = true

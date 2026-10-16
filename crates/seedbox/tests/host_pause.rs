@@ -1,5 +1,9 @@
 //! Hardware acceptance of server-owned pause/resume using exact retained inputs.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 
 use seedbox_api::{
     ComparisonStatus, ControlCommand, ControlRequest, ControlState, Phase, PlaybackRate,

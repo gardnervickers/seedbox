@@ -1,6 +1,10 @@
 //! Host POSIX process tests. These do not establish either guest backend's
 //! transport, application protocol, libc packaging, or native acceptance.
 #![cfg(unix)]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use std::{path::Path, process::Command};
 
 #[test]

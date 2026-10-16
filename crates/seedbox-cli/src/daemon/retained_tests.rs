@@ -1,4 +1,8 @@
 //! Cold retained-provider ownership, not native guest or executable proof.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use super::*;
 use clap::Parser;
 use seedbox_application::{

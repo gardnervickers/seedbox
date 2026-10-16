@@ -2,7 +2,7 @@
 //! connection failures never launch processes or silently change endpoints.
 #![cfg(unix)]
 mod sse;
-pub use sse::LogStream;
+pub use sse::{CheckpointExportStream, LogStream};
 pub use sse::{EventStream, FrameStream, SimulationStream};
 
 use reqwest::{Method, RequestBuilder};
@@ -100,16 +100,46 @@ impl Client {
     }
 
     /// Export a checkpoint as a complete simulation definition with binary assets.
+    /// Export has no total-duration deadline. Dropping this future cancels its
+    /// request-owned work without changing the source simulation/checkpoint.
     pub async fn checkpoint_definition(
         &self,
         id: &SimulationId,
         checkpoint: &str,
     ) -> Result<Simulation, Error> {
-        self.document(self.request(
-            Method::GET,
-            &format!("/v1/simulations/{id}/checkpoints/{checkpoint}/definition"),
+        use futures_util::StreamExt;
+        let mut updates = self.checkpoint_export(id, checkpoint).await?;
+        while let Some(update) = updates.next().await {
+            match update? {
+                seedbox_api::CheckpointExport::Progress { .. } => {}
+                seedbox_api::CheckpointExport::Completed { simulation } => return Ok(*simulation),
+                seedbox_api::CheckpointExport::Failed { error } => {
+                    return Err(Error::Rejected {
+                        code: error.code,
+                        message: error.message,
+                    })
+                }
+            }
+        }
+        Err(Error::Stream(
+            "checkpoint export ended without a terminal record".into(),
         ))
-        .await
+    }
+
+    /// Observe a request-owned checkpoint export, with bounded/coalesced progress
+    /// and a terminal completed definition or structured error. There is no total
+    /// duration deadline. Dropping the stream cancels only this export.
+    pub async fn checkpoint_export(
+        &self,
+        id: &SimulationId,
+        checkpoint: &str,
+    ) -> Result<CheckpointExportStream, Error> {
+        let response = self
+            .event_response(&format!(
+                "/v1/simulations/{id}/checkpoints/{checkpoint}/definition"
+            ))
+            .await?;
+        Ok(sse::checkpoint_exports(response))
     }
 
     /// Derive a new simulation using server-owned source inputs and selected entries.
@@ -388,7 +418,9 @@ impl Client {
     async fn event_response(&self, path: &str) -> Result<reqwest::Response, Error> {
         let response = tokio::time::timeout(
             Duration::from_secs(10),
-            self.request(Method::GET, path).send(),
+            self.request(Method::GET, path)
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .send(),
         )
         .await
         .map_err(|_| Error::Stream("timed out waiting for watch headers".into()))??;

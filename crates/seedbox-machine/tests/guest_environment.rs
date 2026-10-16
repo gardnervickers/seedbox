@@ -1,5 +1,9 @@
 //! Configured boot archive and production C-header probes. No guest, mount,
 //! chroot, sysctl, formatter or network setup is executed on the host.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use seedbox_machine::{
     application::{
         self, DerivedApplication, GuestBootstrap, GuestEnvironment, GuestLimits, Kernel,

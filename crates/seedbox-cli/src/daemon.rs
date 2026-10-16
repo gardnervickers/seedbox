@@ -110,7 +110,7 @@ impl BackendProvider for NativeBackends {
             return Ok(Box::new(executor));
         }
         let scratch = tempfile::tempdir()?;
-        let engine = store.materialize(&inputs.profile.engine, scratch.path())?;
+        let engine = store.materialize_executable(&inputs.profile.engine, scratch.path())?;
         let executor = if inputs.profile.backend == Backend::Hvf {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {

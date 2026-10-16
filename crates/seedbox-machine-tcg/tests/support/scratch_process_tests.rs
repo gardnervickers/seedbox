@@ -1,4 +1,8 @@
 //! Real host children, fake QMP/RSP only: never QEMU or native guest execution.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use super::*;
 use seedbox_machine::{
     execution::ExecutionConfig,

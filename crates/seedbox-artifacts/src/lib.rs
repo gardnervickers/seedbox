@@ -6,6 +6,7 @@ pub mod config;
 pub mod diff;
 pub mod engine;
 pub mod evidence;
+pub mod exec_files;
 pub mod execution;
 pub mod image;
 pub mod interventions;

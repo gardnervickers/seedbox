@@ -194,7 +194,7 @@ impl OwnedExecution {
             });
         }
         status.set_nonblocking(true)?;
-        let monitor = command.spawn()?;
+        let monitor = crate::exec_files::spawn(&mut command)?;
         drop(command); // No parent-side copies of child stdio/control endpoints.
         let mut execution = Self {
             owner: None,
@@ -379,7 +379,7 @@ pub fn serve_monitor(mut arguments: Vec<std::ffi::OsString>) -> io::Result<()> {
     unsafe {
         anchor_command.pre_exec(move || inherit(anchor_lease.as_raw_fd(), LEASE_FD));
     }
-    let anchor = anchor_command.spawn()?;
+    let anchor = crate::exec_files::spawn(&mut anchor_command)?;
     drop(anchor_command);
     let group_id = anchor.id() as i32;
     let mut children = GroupChildren {
@@ -406,7 +406,7 @@ pub fn serve_monitor(mut arguments: Vec<std::ffi::OsString>) -> io::Result<()> {
     unsafe {
         command.pre_exec(move || inherit(inherited_lease.as_raw_fd(), LEASE_FD));
     }
-    children.worker = Some(command.spawn()?);
+    children.worker = Some(crate::exec_files::spawn(&mut command)?);
     drop(command);
     let worker = children.worker.as_ref().expect("spawned worker");
     // Copies of the worker's output endpoints must not keep files open or mask

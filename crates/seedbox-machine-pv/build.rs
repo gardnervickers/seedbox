@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "build script runs under cargo, not in a Seedbox process"
+)]
 fn main() {
     // Native PV machines: ARM64 on macOS/HVF or Linux/KVM, x86-64 on Linux/KVM.
     println!("cargo:rustc-check-cfg=cfg(seedbox_pv)");

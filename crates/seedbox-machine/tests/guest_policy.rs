@@ -1,5 +1,9 @@
 //! Host-only tests of the actual shared init's named-controller parser.
 #![cfg(unix)]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use std::{path::Path, process::Command};
 #[test]
 fn explicit_controller_overrides_environment_without_changing_legacy_fallback() {

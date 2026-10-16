@@ -61,7 +61,7 @@ impl VmmExecutor {
     ) -> Result<Self> {
         // Probe the retained copy, so the metadata describes the bytes we run.
         let scratch = tempfile::tempdir()?;
-        let engine = store.materialize(&self.profile.engine, scratch.path())?;
+        let engine = store.materialize_executable(&self.profile.engine, scratch.path())?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o500))?;
         let version = crate::worker_process::replacement_version(&engine, supplied_path)?;

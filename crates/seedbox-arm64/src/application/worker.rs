@@ -638,6 +638,10 @@ pub struct OwnedWorker {
 }
 impl OwnedWorker {
     pub fn spawn(executable: &std::path::Path, identity: Identity) -> Result<Self> {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "execution-worker process only; it writes its one executable copy (runtime extraction) before any machine or spawn exists"
+        )]
         let mut child = Command::new(executable)
             .args(["__engine", CONTRACT])
             .stdin(Stdio::piped())

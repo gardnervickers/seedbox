@@ -30,6 +30,7 @@ fn request(session: &NativeSession) -> SubmitRequest {
             launch: definition.application.launch,
             control: true,
             request_id: "controller".into(),
+            extra_machines: vec![],
         },
     )
 }

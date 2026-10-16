@@ -48,6 +48,11 @@ async fn native_pv_different_seed_is_reported() {
     native_service::pv_seed_report().await;
 }
 #[tokio::test]
+async fn native_pv_large_checkpoint_export_through_public_client_under_load() {
+    native_service::pv_large_export_under_load().await;
+}
+
+#[tokio::test]
 async fn native_pv_public_checkpoint_export_import_matches_uninterrupted() {
     native_service::pv_checkpoint_continuation().await;
 }

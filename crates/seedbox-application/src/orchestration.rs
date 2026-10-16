@@ -312,9 +312,18 @@ impl Orchestrator {
             for digest in executor.runtime_inputs(&record.identity.inputs) {
                 if !artifacts.contains_key(digest) {
                     let inputs = directory.join("inputs");
-                    let path = match &self.shared_inputs {
-                        Some(shared) => self.store.materialize_linked(digest, shared, &inputs)?,
-                        None => self.store.materialize(digest, &inputs)?,
+                    // The retained engine is the one host-executed input; guest
+                    // inputs are read as bytes (see Runtime::select).
+                    let executable = *digest == record.identity.inputs.profile.engine;
+                    let path = match (&self.shared_inputs, executable) {
+                        (Some(shared), true) => self
+                            .store
+                            .materialize_linked_executable(digest, shared, &inputs)?,
+                        (Some(shared), false) => {
+                            self.store.materialize_linked(digest, shared, &inputs)?
+                        }
+                        (None, true) => self.store.materialize_executable(digest, &inputs)?,
+                        (None, false) => self.store.materialize(digest, &inputs)?,
                     };
                     artifacts.insert(digest.clone(), path);
                 }

@@ -6,6 +6,10 @@
 //! waits, delays and register reads. Rings and buffers are preloaded too. QMP
 //! drives bounded execution, delivers and drains frames, reads RAM and
 //! migrates.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use seedbox_machine_tcg::machine::tcg::test_support::raw_program::{lapic, Asm, Cond, Reg};
 use serde_json::{json, Value};
 use std::{

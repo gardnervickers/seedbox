@@ -126,20 +126,23 @@ pub(super) fn extract<R: Read>(archive: &mut tar::Archive<R>, root: &Path) -> Re
                 .parent()
                 .ok_or_else(|| invalid("runtime member parent"))?,
         )?;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)?;
-        let length = std::io::copy(&mut member, &mut file)?;
-        if length != size {
-            return Err(invalid(format!("truncated driver runtime member {name}")));
+        let executable = member.header().mode()? & 0o111 != 0;
+        {
+            // The host QEMU launcher, loader and binary are executed by other
+            // processes of this execution. No fork may hold a writable copy of
+            // one until it execs; guest inputs are bytes and are not covered.
+            let _writing = executable.then(crate::exec_files::writing);
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
+            let length = std::io::copy(&mut member, &mut file)?;
+            if length != size {
+                return Err(invalid(format!("truncated driver runtime member {name}")));
+            }
+            file.flush()?;
         }
-        file.flush()?;
-        let mode = if member.header().mode()? & 0o111 != 0 {
-            0o755
-        } else {
-            0o644
-        };
+        let mode = if executable { 0o755 } else { 0o644 };
         fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
     }
     if local.is_some() || long_name.is_some() {

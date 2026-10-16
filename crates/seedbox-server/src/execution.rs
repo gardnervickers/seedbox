@@ -259,6 +259,16 @@ impl ExecutionService {
         id: &SimulationId,
         name: &str,
     ) -> Result<seedbox_api::Simulation, Error> {
+        self.checkpoint_definition_observed(id, name, &mut |_| Ok(()))
+    }
+
+    pub(crate) fn checkpoint_definition_observed(
+        &self,
+        id: &SimulationId,
+        name: &str,
+        progress: &mut impl FnMut(u64) -> std::io::Result<()>,
+    ) -> Result<seedbox_api::Simulation, Error> {
+        progress(0)?;
         self.manager.captured_checkpoint(id, name)?;
         let mut resource = self.describe(id)?;
         let seedbox_api::InputSource::Resolved { definition } = &mut resource.spec.inputs else {
@@ -277,8 +287,13 @@ impl ExecutionService {
             .join("output")
             .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR)
             .join(format!("checkpoint-{name}.json"));
-        definition.start =
-            seedbox_application::definition::capture_start(&path, &attempt, &self.store)?;
+        definition.start = seedbox_application::definition::capture_start_observed(
+            &path,
+            &attempt,
+            &self.store,
+            progress,
+        )?;
+        progress(0)?;
         resource
             .metadata
             .annotations

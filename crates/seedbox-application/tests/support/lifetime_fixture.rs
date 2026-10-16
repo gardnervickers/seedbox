@@ -1,4 +1,8 @@
 //! Process-only fixture. No VM or QEMU acceptance is implied.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use seedbox_application::process_lifetime::{self, OwnedExecution, ANCHOR_ENTRY, MONITOR_ENTRY};
 use std::{
     fs, io,

@@ -178,6 +178,16 @@ impl ContentStore {
     }
 
     fn put_reader_with(&self, mut reader: impl Read, durable: bool) -> Result<ContentDigest> {
+        self.put_reader_observed(&mut reader, durable, &mut |_| Ok(()))
+    }
+
+    fn put_reader_observed(
+        &self,
+        reader: &mut impl Read,
+        durable: bool,
+        progress: &mut impl FnMut(u64) -> io::Result<()>,
+    ) -> Result<ContentDigest> {
+        progress(0)?;
         let root = if durable {
             &self.root
         } else {
@@ -186,11 +196,12 @@ impl ContentStore {
         let directory = root.join("sha256");
         fs::create_dir_all(&directory)?;
         let mut temp = tempfile::NamedTempFile::new_in(&directory)?;
-        let digest = transfer(&mut reader, &mut temp)?;
+        let digest = transfer_observed(reader, &mut temp, progress)?;
         let path = directory.join(digest.hex());
         if durable {
             temp.as_file().sync_all()?;
         }
+        progress(0)?;
         match temp.persist_noclobber(&path) {
             Ok(_) => {}
             Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -203,7 +214,7 @@ impl ContentStore {
             Err(e) => return Err(e.error.into()),
         }
         // Verify an existing entry too; never repair corruption implicitly.
-        self.verify(&digest)?;
+        self.verify_observed(&digest, progress)?;
         Ok(digest)
     }
 
@@ -211,17 +222,35 @@ impl ContentStore {
     /// the file is hashed first, so retaining the same engine, kernel or image
     /// again never rewrites and syncs a second copy of it.
     pub fn put_file(&self, path: &Path) -> Result<ContentDigest> {
+        self.put_file_observed(path, &mut |_| Ok(()))
+    }
+
+    /// Retain a file with cooperative observation of every hash/copy/verification
+    /// pass. The callback receives bytes processed (not logical file offsets),
+    /// at most 64 KiB per call, and zero at phase boundaries/cache hits.
+    /// Returning an error stops work and removes any unpublished temporary file.
+    /// Completed immutable objects may remain; synchronous filesystem calls are
+    /// not interruptible, so cancellation is checked before/after those calls.
+    pub fn put_file_observed(
+        &self,
+        path: &Path,
+        progress: &mut impl FnMut(u64) -> io::Result<()>,
+    ) -> Result<ContentDigest> {
+        progress(0)?;
         let mut file = fs::File::open(path)?;
-        let digest = file_digest_with(&mut file, |file| transfer(file, &mut io::sink()))?;
+        let digest = file_digest_with(&mut file, |file| {
+            transfer_observed(file, &mut io::sink(), progress)
+        })?;
+        progress(0)?;
         if let Ok(existing) = fs::File::open(self.path(&digest)) {
             // Verify the existing entry; never repair corruption implicitly.
             if self.trusted(&digest, &existing)?.is_none() {
-                self.verify(&digest)?;
+                self.verify_observed(&digest, progress)?;
             }
             return Ok(digest);
         }
         file.seek(io::SeekFrom::Start(0))?;
-        self.put_reader(file)
+        self.put_reader_observed(&mut file, true, progress)
     }
 
     /// The object a named record points at, if the record exists and is
@@ -281,11 +310,29 @@ impl ContentStore {
     /// Reuse a verification only while the retained file's identity and metadata
     /// match the bytes this process hashed. Replacement or mutation rehashes it.
     pub fn verify(&self, digest: &ContentDigest) -> Result<()> {
-        let file = self.open(digest)?;
+        self.verify_observed(digest, &mut |_| Ok(()))
+    }
+
+    fn verify_observed(
+        &self,
+        digest: &ContentDigest,
+        progress: &mut impl FnMut(u64) -> io::Result<()>,
+    ) -> Result<()> {
+        progress(0)?;
+        let mut file = self.open(digest)?;
         if self.trusted(digest, &file)?.is_some() {
             return Ok(());
         }
-        self.copy_to(digest, &mut io::sink())
+        let before = Stamp::of(&file)?;
+        let actual = transfer_observed(&mut file, &mut io::sink(), progress)?;
+        if actual != *digest {
+            self.forget(digest);
+            return Err(Error::Integrity(format!("hash mismatch: {}", digest.hex())));
+        }
+        if Stamp::of(&file)? == before {
+            self.lock().insert(digest.clone(), before);
+        }
+        Ok(())
     }
 
     /// Streams into a caller-owned destination. Publish that destination only
@@ -353,6 +400,21 @@ impl ContentStore {
         Ok(path)
     }
 
+    /// `materialize` for a file this process (or one it launches) will execute,
+    /// such as the retained engine. The write holds [`crate::exec_files::writing`]
+    /// from opening the destination until every descriptor to it is closed, so
+    /// no concurrent fork can keep a writable copy that makes the first
+    /// execution fail with ETXTBSY. Only executables pay the exclusion; guest
+    /// inputs are read as bytes and use plain `materialize`.
+    pub fn materialize_executable(
+        &self,
+        digest: &ContentDigest,
+        directory: &Path,
+    ) -> Result<PathBuf> {
+        let _writing = crate::exec_files::writing();
+        self.materialize(digest, directory)
+    }
+
     /// Like `materialize`, but copies each object once into `shared` and
     /// hard-links that read-only copy into `directory`. Exploration attempts
     /// use it so a batch copies its engine and images once, not per seed.
@@ -367,6 +429,35 @@ impl ContentStore {
         shared: &Path,
         directory: &Path,
     ) -> Result<PathBuf> {
+        self.link_materialized(digest, shared, directory, false)
+    }
+
+    /// `materialize_linked` for an executable such as the retained engine; every
+    /// write it makes is covered like [`Self::materialize_executable`]. Reusing
+    /// an existing shared copy writes nothing and takes no exclusion.
+    pub fn materialize_linked_executable(
+        &self,
+        digest: &ContentDigest,
+        shared: &Path,
+        directory: &Path,
+    ) -> Result<PathBuf> {
+        self.link_materialized(digest, shared, directory, true)
+    }
+
+    fn link_materialized(
+        &self,
+        digest: &ContentDigest,
+        shared: &Path,
+        directory: &Path,
+        executable: bool,
+    ) -> Result<PathBuf> {
+        let write = |directory: &Path| {
+            if executable {
+                self.materialize_executable(digest, directory)
+            } else {
+                self.materialize(digest, directory)
+            }
+        };
         let source = shared.join(digest.hex());
         let mut copies = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         let reusable = match (copies.get(&source), fs::File::open(&source)) {
@@ -381,7 +472,7 @@ impl ContentStore {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
                 _ => {}
             }
-            let copy = self.materialize(digest, shared)?;
+            let copy = write(shared)?;
             // Read-only for every attempt; the engine copy also needs execute.
             fs::set_permissions(&copy, fs::Permissions::from_mode(0o500))?;
             copies.insert(copy, Stamp::of(&fs::File::open(&source)?)?);
@@ -397,7 +488,7 @@ impl ContentStore {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e.into()),
             Err(_) => {
                 drop(copies);
-                self.materialize(digest, directory)
+                write(directory)
             }
         }
     }
@@ -427,9 +518,18 @@ fn clone_file(_: &fs::File, _: &fs::File) -> io::Result<bool> {
 }
 
 fn transfer(input: &mut impl Read, output: &mut impl Write) -> Result<ContentDigest> {
+    transfer_observed(input, output, &mut |_| Ok(()))
+}
+
+fn transfer_observed(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    progress: &mut impl FnMut(u64) -> io::Result<()>,
+) -> Result<ContentDigest> {
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
+        progress(0)?;
         let count = match input.read(&mut buffer) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
@@ -439,6 +539,10 @@ fn transfer(input: &mut impl Read, output: &mut impl Write) -> Result<ContentDig
         }
         hash.update(&buffer[..count]);
         output.write_all(&buffer[..count])?;
+        progress(count as u64)?;
     }
     Ok(ContentDigest::finish(hash))
 }
+
+#[cfg(test)]
+mod observed_tests;

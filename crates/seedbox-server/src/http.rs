@@ -1,6 +1,8 @@
 //! Versioned local HTTP resource interface. The execution owner drains accepted
 //! IDs from the supplied queue; it must recover queued resources on startup.
 
+mod checkpoint_export;
+
 use crate::{catalogue::Error as CatalogueError, manager::Manager};
 use axum::{
     extract::{
@@ -23,6 +25,7 @@ use tokio::sync::mpsc;
 #[derive(Clone)]
 pub struct ApiState {
     execution: Option<Arc<crate::execution::ExecutionService>>,
+    shutdown: seedbox_application::execution::CancellationToken,
     manager: Arc<Manager>,
     submissions: mpsc::Sender<SimulationId>,
 }
@@ -33,9 +36,19 @@ impl ApiState {
         self
     }
 
+    /// Parent cancellation for request-owned work, including checkpoint export.
+    pub fn with_shutdown(
+        mut self,
+        shutdown: seedbox_application::execution::CancellationToken,
+    ) -> Self {
+        self.shutdown = shutdown;
+        self
+    }
+
     pub fn new(manager: Arc<Manager>, submissions: mpsc::Sender<SimulationId>) -> Self {
         Self {
             execution: None,
+            shutdown: Default::default(),
             manager,
             submissions,
         }
@@ -758,15 +771,30 @@ impl IntoResponse for HttpError {
 async fn checkpoint_definition(
     State(state): State<ApiState>,
     path: Result<Path<(SimulationId, String)>, PathRejection>,
-) -> Result<Json<Simulation>, HttpError> {
+    headers: axum::http::HeaderMap,
+) -> Result<Response, HttpError> {
     let Path((id, name)) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
     let execution = state
         .execution
         .ok_or_else(|| HttpError::invalid("execution evidence is unavailable"))?;
+    if headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        == Some("text/event-stream")
+    {
+        return Ok(checkpoint_export::response(
+            state.shutdown,
+            move |progress| {
+                execution
+                    .checkpoint_definition_observed(&id, &name, &mut |n| progress.advance(n))
+                    .map_err(HttpError::from)
+            },
+        ));
+    }
     tokio::task::spawn_blocking(move || {
         execution
             .checkpoint_definition(&id, &name)
-            .map(Json)
+            .map(|simulation| Json(simulation).into_response())
             .map_err(HttpError::from)
     })
     .await

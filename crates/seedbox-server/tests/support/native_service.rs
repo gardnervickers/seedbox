@@ -6,6 +6,11 @@
 mod controller;
 #[cfg(feature = "kvm-tests")]
 pub use controller::{pv_controller_checkpoint, pv_controller_repeat};
+#[cfg(feature = "kvm-tests")]
+#[path = "native_export.rs"]
+mod export;
+#[cfg(feature = "kvm-tests")]
+pub use export::pv_large_export_under_load;
 use futures_util::StreamExt;
 use seedbox_api::{
     ComparisonStatus, ExecutionTermination, Phase, SimulationSpec, SubmitRequest, TestVerdict,
@@ -168,6 +173,16 @@ fn submission(
         executable.is_file() && archive.is_file(),
         "run cargo xtask build-assets and cargo build --release first"
     );
+    submission_with_machines(backend, root, store, iterations, seed, vec![])
+}
+fn submission_with_machines(
+    backend: DriverBackend,
+    root: &Path,
+    store: &ContentStore,
+    iterations: u64,
+    seed: u64,
+    extra_machines: Vec<&'static str>,
+) -> SubmitRequest {
     // Both backends run the exact same static x86 cpu-loop ELF. The input's
     // historical PV fixture-package name does not select a backend or need KVM.
     let binary = fs::read(
@@ -204,6 +219,7 @@ fn submission(
             launch,
             control: false,
             request_id: format!("cpu-{iterations}"),
+            extra_machines,
         },
     )
 }
@@ -213,6 +229,7 @@ struct NativeFixture {
     launch: GuestLaunch,
     control: bool,
     request_id: String,
+    extra_machines: Vec<&'static str>,
 }
 fn fixture_submission(
     backend: DriverBackend,
@@ -289,6 +306,11 @@ fn fixture_submission(
         .unwrap()
         .checked_add(128 << 20)
         .unwrap();
+    let floor = if fixture.extra_machines.is_empty() {
+        floor
+    } else {
+        floor.max(192 << 20)
+    };
     let memory_mb = u32::try_from(floor.div_ceil(1 << 20)).unwrap();
     definition.resources.memory_bytes = u64::from(memory_mb) << 20;
     eprintln!(
@@ -374,7 +396,7 @@ fn fixture_submission(
             firmware: artifact(&assets.join("firmware")),
         },
     };
-    let prepared = wire::Prepared {
+    let mut prepared = wire::Prepared {
         inventory,
         oracle: wire::Machine {
             name: oracle.into(),
@@ -394,21 +416,46 @@ fn fixture_submission(
         quantum_ns: 1_000_000,
         network: wire::Network::default(),
     };
+    for &name in &fixture.extra_machines {
+        let mut machine = prepared.oracle.clone();
+        machine.name = name.into();
+        prepared.machines.push(machine);
+        let environments = match &mut prepared.inventory {
+            wire::Inventory::Pv { environments, .. }
+            | wire::Inventory::Tcg { environments, .. } => environments,
+        };
+        let mut environment = environments[oracle].clone();
+        environment.hostname = name.into();
+        environment.control_socket = false;
+        environments.insert(name.into(), environment);
+        inputs
+            .images
+            .insert(name.into(), inputs.images[oracle].clone());
+        inputs
+            .guests
+            .insert(name.into(), inputs.guests[oracle].clone());
+        inputs.placement.insert(name.into(), name.into());
+    }
     driver_world::retain_prepared(&mut inputs, &prepared, store).unwrap();
     let image = if fixture.control {
         "fixture/prepared-fixture"
     } else {
         "fixture/cpu-loop"
     };
+    let services: String = std::iter::once(oracle)
+        .chain(fixture.extra_machines.iter().copied())
+        .map(|name| format!("  {name}:\n    image: {image}\n"))
+        .collect();
     let mut configuration = seedbox_application::config::parse(
         &format!(
-            "name: native-{}-service\nservices:\n  {oracle}:\n    image: {image}\n",
+            "name: native-{}-service\nservices:\n{services}",
             label(backend)
         ),
         Path::new("/fixture/compose.yaml"),
         &Default::default(),
     )
     .unwrap();
+    configuration.check.service = oracle.into();
     configuration.machine.memory_mb = memory_mb;
     configuration.control = fixture.control.then(|| seedbox_spec::Control {
         service: oracle.into(),

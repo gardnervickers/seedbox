@@ -11,3 +11,8 @@ libc.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 tar.workspace = true
+
+# Developer tool: never runs inside a Seedbox server or worker, so its spawns
+# cannot race an executable write there (see clippy.toml).
+[lints.clippy]
+disallowed_methods = "allow"

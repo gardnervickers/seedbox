@@ -7,6 +7,8 @@ use seedbox_api::{EventDelivery, Phase, Simulation};
 use serde::de::DeserializeOwned;
 use std::{collections::VecDeque, pin::Pin};
 
+pub type CheckpointExportStream =
+    Pin<Box<dyn Stream<Item = Result<seedbox_api::CheckpointExport, Error>> + Send>>;
 pub type SimulationStream = Pin<Box<dyn Stream<Item = Result<Simulation, Error>> + Send>>;
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<EventDelivery, Error>> + Send>>;
 pub type FrameStream =
@@ -67,6 +69,12 @@ pub fn simulations(response: reqwest::Response) -> SimulationStream {
 pub fn frames(response: reqwest::Response) -> FrameStream {
     decode(response, |delivery: &seedbox_api::FrameDelivery| {
         matches!(delivery, seedbox_api::FrameDelivery::Closed)
+    })
+}
+
+pub(crate) fn checkpoint_exports(response: reqwest::Response) -> CheckpointExportStream {
+    decode(response, |update: &seedbox_api::CheckpointExport| {
+        !matches!(update, seedbox_api::CheckpointExport::Progress { .. })
     })
 }
 

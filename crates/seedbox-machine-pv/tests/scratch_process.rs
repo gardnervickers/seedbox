@@ -1,5 +1,9 @@
 //! Real host workers with an explicit fake protocol, never KVM/HVF or guests.
 #![cfg(all(unix, feature = "test-support"))]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use seedbox_machine::{
     definition::DiskImage,
     execution::ExecutionConfig,

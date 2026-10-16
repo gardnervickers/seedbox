@@ -1,4 +1,8 @@
 //! Host-only adversarial tar framing and genuine GNU/BSD writer fixtures.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use super::*;
 
 fn header(kind: tar::EntryType, name: &str, size: u64) -> tar::Header {

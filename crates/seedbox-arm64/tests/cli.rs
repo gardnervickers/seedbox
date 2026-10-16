@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use std::process::Command;
 #[test]
 fn help_and_usage_do_not_open_hypervisor() {

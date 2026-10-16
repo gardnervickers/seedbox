@@ -306,6 +306,10 @@ pub fn container_engine() -> Result<bollard::Docker> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 mod tests {
     use super::{assets_beside, cached_kernel};
 

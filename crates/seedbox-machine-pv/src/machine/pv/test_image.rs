@@ -3,6 +3,10 @@
 //! ARM64 fixtures are Linux Images; x86-64 fixtures are minimal 64-bit
 //! bzImages entered in long mode at the protected-mode payload + 0x200.
 #![allow(dead_code)]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 
 /// PV operations used by raw-image fixtures, in execution order.
 #[derive(Clone, Copy)]

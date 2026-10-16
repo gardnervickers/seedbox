@@ -532,6 +532,20 @@ waits for a new readiness observation. Application exits retain their exit code.
 Persistent stop and pause effects remain active until reversed or ended by a
 lifecycle transition.
 
+Checkpoint definition export negotiates a request-owned SSE response with byte-work
+progress and a terminal definition or structured error. The public client has no
+total export deadline; its header/connection guards do not bound hashing or copying.
+Dropping the export stream cancels its blocking work, as does server shutdown.
+Hash, copy and verification passes check cancellation at 64 KiB boundaries;
+synchronous filesystem calls finish before cancellation is observed. Unpublished
+temporary objects are removed; completed immutable cache objects remain reusable.
+A truncated stream is an error, never a partially successful export. The default
+JSON GET remains available for compatibility. CLI output is unchanged.
+
+Code: [export stream](../crates/seedbox-server/src/http/checkpoint_export.rs),
+[client](../crates/seedbox-client/src/lib.rs),
+[observed storage](../crates/seedbox-artifacts/src/store.rs).
+
 A checkpoint captures the world and its input-program cursor together. Restoring
 it must neither repeat consumed overrides nor lose pending ones. Capture requires
 a committed boundary with no outstanding I/O cost. A requested checkpoint may

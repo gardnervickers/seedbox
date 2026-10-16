@@ -103,14 +103,15 @@ fn listening(socket: &Path) -> Result<bool> {
 
 fn start(root: &Path, deadline: Instant) -> Result<()> {
     let executable = std::env::current_exe().map_err(super::setup)?;
-    let mut child = Command::new(&executable)
+    let mut command = Command::new(&executable);
+    command
         .args(["serve", "--startup-handshake", "--state"])
         .arg(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
+        .process_group(0);
+    let mut child = seedbox_application::exec_files::spawn(&mut command)
         .map_err(|e| Error::Setup(format!("start server {}: {e}", executable.display())))?;
     let result = (|| {
         let mut output = child

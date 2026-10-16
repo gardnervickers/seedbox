@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "build script runs under cargo, not in a Seedbox process"
+)]
 fn main() {
     // A reused target directory must not keep a C object from another checkout
     // whose source timestamps happen to be older than the cached build.

@@ -4,6 +4,10 @@
 //! ROM to RAM, finds the device's legacy virtio-mmio transport, enables one
 //! queue at `RING` and notifies it once. QMP drives bounded execution, reads
 //! RAM, exports the overlays and migrates; the Rust store decodes the results.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use super::raw_program_data::{Asm, Cond, Reg, GED_RESET, GED_SLEEP, PROGRAM};
 use crate::machine::disk::{Store, SECTOR};
 use serde_json::{json, Value};

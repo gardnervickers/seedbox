@@ -1,5 +1,6 @@
 use super::*;
 use std::{collections::BTreeSet, io::Write};
+mod exec_scope;
 mod tar_headers;
 
 fn elf(machine: u16) -> Vec<u8> {

@@ -22,6 +22,8 @@ mod status;
 pub use playback::{
     BoundaryPosition, PlaybackObservation, PlaybackRate, PlaybackStatus, RateMeasurement,
 };
+mod checkpoint_export;
+pub use checkpoint_export::CheckpointExport;
 mod controls;
 pub use controls::{
     CheckpointState, CheckpointStatus, ControlCommand, ControlReceipt, ControlRequest,

@@ -1,5 +1,9 @@
 //! Rust owns the former portable.py matrix and every expectation. Python is
 //! used only for the unchanged guest program and a language-call fixture.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use serde_json::{json, Value};
 use std::{
     fs,

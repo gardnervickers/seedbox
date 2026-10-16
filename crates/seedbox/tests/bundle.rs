@@ -1,4 +1,8 @@
 //! Contract tests use a test-only backend. No hardware qualification is implied.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use seedbox_application::{
     bundle::{self, Options},
     config::{self, Simulation},

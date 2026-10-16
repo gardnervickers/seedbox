@@ -371,6 +371,10 @@ fn materialize_factory(
     } else {
         // An explicitly unbound standalone worker owns its own extraction. The
         // service supplies a matching binding while holding Inputs in the parent.
+        // This is the worker's only executable write (the QEMU launcher and its
+        // closure). It must stay here, before `Factory::load` creates any machine,
+        // because machine QEMU and PV-worker spawns are not exec-file scoped
+        // (see seedbox_artifacts::exec_files): no fork can then copy its fd.
         let runtime = Runtime::from_archive(Path::new(&archive.artifact), output)?;
         verify_at(archive, &runtime.archive())?;
         let inputs = runtime.select(backend, architecture)?;

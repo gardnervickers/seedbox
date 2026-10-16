@@ -233,7 +233,7 @@ impl ExecutionBackend for MacExecutor {
         if request.cancellation.is_cancelled() {
             return Ok(incomplete(StopReason::Cancelled));
         }
-        WorkerLaunch::prepare(&request)?.spawn()?.wait(
+        WorkerLaunch::prepare(&request)?.spawn_worker()?.wait(
             request.cancellation,
             request.limits.wall_time_ns,
             |bytes| crate::engine_adapter::report_hvf(bytes, &request),

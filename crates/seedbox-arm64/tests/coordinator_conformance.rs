@@ -1,4 +1,8 @@
 //! Independent ARM coordinator boundary checks. No native CPU backend is used.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use seedbox_arm64::{application::worker, disk::Disk};
 use serde_json::{json, Value};
 use std::{

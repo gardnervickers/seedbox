@@ -3,6 +3,10 @@
     feature = "test-support",
     any(target_os = "linux", target_os = "macos")
 ))]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use seedbox_application::process_lifetime::{self, reclaim_barrier, OwnedExecution};
 use std::{
     ffi::OsString,

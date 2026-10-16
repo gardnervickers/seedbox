@@ -14,6 +14,7 @@ pub mod definition;
 pub mod driver_world;
 pub use seedbox_artifacts::diff;
 pub use seedbox_artifacts::engine;
+pub use seedbox_artifacts::exec_files;
 pub mod engine_adapter;
 pub mod execution;
 pub mod exploration;

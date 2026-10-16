@@ -3,6 +3,10 @@
 //! A concurrent fork can inherit a writable executable descriptor until exec.
 //! Run these scenarios alone in a child test harness so unrelated unit tests
 //! cannot inherit their descriptors. No production APIs or global locks needed.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 
 /// Return true only in the child running this exact scenario. The parent
 /// checks the child's result and returns false without creating any fixtures.

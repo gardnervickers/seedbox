@@ -1,4 +1,8 @@
 //! Validate the actual private build utility's archive, without extracting it.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test code: spawns here never race a Seedbox process writing an executable"
+)]
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
 #[derive(Debug)]

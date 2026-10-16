@@ -17,7 +17,7 @@ pub(super) fn execute(
     if request.cancellation.is_cancelled() {
         return Ok(incomplete(StopReason::Cancelled));
     }
-    let child = launch.spawn()?;
+    let child = launch.spawn_worker()?;
     child.wait(request.cancellation, request.limits.wall_time_ns, |bytes| {
         report(bytes, &request)
     })
