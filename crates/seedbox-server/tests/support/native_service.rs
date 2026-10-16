@@ -57,8 +57,8 @@ use std::{
 /// guest that keeps running without getting there fails at the same simulated
 /// point on any host. Measured with the cpu-loop fixture: TCG finishes 200k
 /// and 400k iterations, and prints `START=`, by 1.962 s; PV finishes 200k by
-/// 21 ms and the checkpoint scenario's 2M by 133 ms. The bounds are about 20
-/// times the largest of those.
+/// 21 ms and the checkpoint scenario's 2M by 133 ms; the controller fixture's
+/// one 20 ms sleep is far shorter. The bounds are about 20 times the largest.
 pub fn simulated_bound(backend: DriverBackend) -> u64 {
     match backend {
         DriverBackend::Pv => 3_000_000_000,
@@ -698,6 +698,16 @@ impl NativeSession {
                 .expect("watch closed before completion")
                 .unwrap();
             if state.status.phase == Phase::Completed {
+                // A completion observed without any earlier over-bound state
+                // still fails if it finished past the bound.
+                check_bound(
+                    &self.client,
+                    id,
+                    self.backend,
+                    state.status.simulated_time_ns,
+                    "it completed",
+                )
+                .await;
                 break state;
             }
             check_bound(
@@ -1034,6 +1044,14 @@ pub async fn pv_checkpoint_continuation() {
             let status = loop {
                 let status = session.client.playback(&source).await.unwrap().state;
                 assert!(!status.terminal, "fixture ended before mid-workload capture");
+                check_bound(
+                    &session.client,
+                    &source,
+                    DriverBackend::Pv,
+                    status.position.simulated_time_ns,
+                    "its mid-workload capture point",
+                )
+                .await;
                 if !status.stepping && status.position.completed_rounds > before { break status; }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             };

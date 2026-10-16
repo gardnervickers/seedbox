@@ -107,7 +107,7 @@ fn occurrences(bytes: &[u8], marker: &[u8]) -> usize {
 }
 
 pub async fn pv_controller_repeat() {
-    tokio::time::timeout(Duration::from_secs(180), async {
+    tokio::time::timeout(HANG_GUARD, async {
         let mut session = NativeSession::new(DriverBackend::Pv);
         let request = request(&session);
         let first = session.submit(request.clone(), 1).await;
@@ -132,11 +132,11 @@ pub async fn pv_controller_repeat() {
         assert_eq!(compared.witness_matches, Some(true));
         eprintln!("native controller repeat: distinct_ids=true actual_workers=1/4 raw_equal=true replies_equal=true witness={first_witness}");
         session.close().await;
-    }).await.expect("native controller repeat exceeded 180-second native budget");
+    }).await.expect("native controller repeat hit the host hang guard without finishing");
 }
 
 pub async fn pv_controller_checkpoint() {
-    tokio::time::timeout(Duration::from_secs(180), async {
+    tokio::time::timeout(HANG_GUARD, async {
         let mut session = NativeSession::new(DriverBackend::Pv);
         let request = request(&session);
         let baseline = session.submit(request.clone(), 1).await;
@@ -159,6 +159,14 @@ pub async fn pv_controller_checkpoint() {
             let position = loop {
                 let state = session.client.playback(&source).await.unwrap().state;
                 assert!(!state.terminal, "source ended before pending-call capture");
+                check_bound(
+                    &session.client,
+                    &source,
+                    DriverBackend::Pv,
+                    state.position.simulated_time_ns,
+                    "its pending-call capture point",
+                )
+                .await;
                 if !state.stepping && state.position.completed_rounds > before { break state; }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             };
@@ -222,5 +230,5 @@ pub async fn pv_controller_checkpoint() {
         assert_eq!(compared.witness_matches, Some(true));
         eprintln!("native controller continuation: same_oracle=true no_duplicate_calls=true raw_equal=true witness={continued}");
         session.close().await;
-    }).await.expect("native controller checkpoint exceeded 180-second native budget");
+    }).await.expect("native controller checkpoint hit the host hang guard without finishing");
 }
