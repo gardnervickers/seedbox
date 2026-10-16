@@ -966,6 +966,10 @@ fn observation_flags_are_validated_before_connecting() {
             "simulation ID must contain",
         ),
         (
+            vec!["get", "properties", "invalid"],
+            "simulation ID must contain",
+        ),
+        (
             vec!["events", "invalid", "--follow"],
             "simulation ID must contain",
         ),

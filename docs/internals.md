@@ -266,6 +266,35 @@ again.
 Code: [input program](../crates/seedbox-engine-core/src/input_program.rs),
 [coordinator](../crates/seedbox-engine-core/src/world.rs).
 
+## Property records
+
+Guest properties travel the same committed path as application output. Every
+machine's supervisor serves `/run/seedbox/sdk.sock`; each `SOCK_SEQPACKET`
+connection is a session, and each message is relayed unparsed as
+`SBX_PROP1 <session> <seq> <hex>`. Session 0 is the supervisor's own: lost
+records and the main process's exit. The management decoder retains every
+property line, whether or not anything observes the console, and the
+coordinator reduces them in its fixed absorb order (time, machine, channel
+order). The engine attributes each record to its machine and incarnation and
+stamps it with the commit time; guest-supplied times are never used.
+
+The reducer is pure and shared with offline reporting. It never fails: a
+malformed record, a sequence gap, an exceeded bound, a reserved or conflicting
+declaration all become evidence errors, and an assessment with evidence
+errors is at best incomplete. A definite violation stays visible regardless.
+Checkpoints carry the ledger, so a continuation keeps earlier records and
+sequencing. Reports include the ledger, and the world witness hashes it, only
+when a run produced records.
+
+A flush reply means the supervisor has written every earlier record from that
+connection to the management port. Records sent before the main process exits
+are relayed before its exit record, but descendants still writing are not
+waited for, and a machine crash discards what has not crossed the port.
+
+Code: [reducer](../crates/seedbox-engine-protocol/src/property.rs),
+[commit](../crates/seedbox-engine-core/src/properties.rs),
+[supervisor](../guest/compose-init.c), [SDK](../crates/seedbox-sdk/src/lib.rs).
+
 ## Fault discovery and previews
 
 The server owns categories, parameter schemas and effect explanations.

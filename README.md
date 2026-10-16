@@ -50,6 +50,11 @@ Start with [the etcd example](examples/etcd/seedbox.yaml), or generate a project
 `seedbox.yaml` defines machines and a separate **oracle**: the program that drives
 the test and checks its results. Oracle exit code zero means pass; nonzero means
 fail. An execution that ends without an oracle exit has no completed test verdict.
+Applications and the oracle can also report **properties** through the
+[`seedbox-sdk`](crates/seedbox-sdk) crate: `always`, `sometimes`, `reachable`,
+`unreachable` and friends. Their assessment is reported beside the oracle verdict
+and never changes it; `seedbox get properties <sim-id>` lists each one.
+[evals/bank](evals/bank) is a small example with a planted bug.
 Set `memoryMiB` on a machine or the oracle to choose its RAM independently.
 Omission uses 1024 MiB; supported sizes are 64–3072 MiB on Apple Silicon and
 64–65536 MiB on Linux x86-64. Preparation checks the image archive’s boot memory
@@ -67,6 +72,7 @@ Using `target/release/seedbox` as `seedbox`:
 seedbox get simulations
 seedbox get capacity                    # Occupied slots and queue reasons.
 seedbox describe simulation <sim-id>
+seedbox get properties <sim-id>          # Guest property results.
 seedbox logs <sim-id>                    # Recent application output, all machines.
 seedbox logs <sim-id> n1 --follow         # Stream one machine's output.
 seedbox events <sim-id> --follow          # Structured simulator events.

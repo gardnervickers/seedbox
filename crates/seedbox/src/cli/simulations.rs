@@ -893,7 +893,7 @@ pub(super) fn property_fields(assessment: &seedbox_api::PropertyAssessment) {
     output::field(
         "properties",
         format!(
-            "{}: {} violated, {} unmet, {} total",
+            "{} ({} violated, {} unmet, {} total)",
             output::word(&assessment.status).to_lowercase(),
             assessment.violated,
             assessment.unmet,
