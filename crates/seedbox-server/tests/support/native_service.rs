@@ -1,11 +1,11 @@
 //! Native public-service acceptance, not a fixture executor or protocol model.
 //! Uses the normal release CLI/runtime package and existing finite CPU fixture.
 
-#[cfg(feature = "kvm-tests")]
+#[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
 #[path = "native_controller.rs"]
 mod controller;
-#[cfg(feature = "kvm-tests")]
-pub use controller::{pv_controller_checkpoint, pv_controller_repeat};
+#[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
+pub use controller::{controller_checkpoint, controller_repeat};
 #[cfg(feature = "kvm-tests")]
 #[path = "native_export.rs"]
 mod export;

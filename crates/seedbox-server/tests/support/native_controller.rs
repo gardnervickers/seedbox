@@ -5,12 +5,19 @@ const ORACLE: &str = "control-leader";
 const SEED: u64 = 123;
 const SLEEP_NS: u64 = 20_000_000;
 
+/// The backend's own-source prepared fixture; both are built from
+/// `guest_prepared_fixture.c` and share its `--control-probe` mode.
+fn prepared_fixture(backend: DriverBackend) -> Vec<u8> {
+    let (name, package) = match backend {
+        DriverBackend::Pv => ("SEEDBOX_PV_PREPARED_FIXTURE", "machinePvTestFixtures"),
+        DriverBackend::Tcg => ("SEEDBOX_TCG_PREPARED_FIXTURE", "machineTcgTestFixtures"),
+    };
+    let path = std::env::var_os(name)
+        .unwrap_or_else(|| panic!("{name}: own-source {package}/bin/prepared-fixture"));
+    fs::read(path).unwrap()
+}
 fn request(session: &NativeSession) -> SubmitRequest {
-    let binary = fs::read(
-        std::env::var_os("SEEDBOX_PV_PREPARED_FIXTURE")
-            .expect("own-source machinePvTestFixtures/bin/prepared-fixture"),
-    )
-    .unwrap();
+    let binary = prepared_fixture(session.backend);
     let mut definition = seedbox_machine::test_support::prepared_image::definition(&binary, false);
     definition
         .application
@@ -20,7 +27,7 @@ fn request(session: &NativeSession) -> SubmitRequest {
     let filesystem = session.root.path().join("controller.tar");
     fs::write(&filesystem, definition.application.filesystem.as_bytes()).unwrap();
     fixture_submission(
-        DriverBackend::Pv,
+        session.backend,
         session.root.path(),
         &session.store,
         SEED,
@@ -106,9 +113,10 @@ fn occurrences(bytes: &[u8], marker: &[u8]) -> usize {
         .count()
 }
 
-pub async fn pv_controller_repeat() {
+/// Same input with 1 and 4 workers: identical guest replies and raw witness.
+pub async fn controller_repeat(backend: DriverBackend) {
     native_case(|owner| Box::pin(async move {
-        let session = owner.session(DriverBackend::Pv);
+        let session = owner.session(backend);
         let request = request(session);
         let first = session.submit(request.clone(), 1).await;
         session.worker(&first).await;
@@ -130,13 +138,15 @@ pub async fn pv_controller_repeat() {
         let compared = session.client.compare(&first, &second).await.unwrap();
         assert_eq!(compared.status, ComparisonStatus::Match);
         assert_eq!(compared.witness_matches, Some(true));
-        eprintln!("native controller repeat: distinct_ids=true actual_workers=1/4 raw_equal=true replies_equal=true witness={first_witness}");
+        eprintln!("native controller repeat: backend={} distinct_ids=true actual_workers=1/4 raw_equal=true replies_equal=true witness={first_witness}", label(backend));
     })).await;
 }
 
-pub async fn pv_controller_checkpoint() {
+/// Capture with an oracle Sleep pending, export, import and continue: no call
+/// is resent and the raw witness equals the uninterrupted run.
+pub async fn controller_checkpoint(backend: DriverBackend) {
     native_case(|owner| Box::pin(async move {
-        let session = owner.session(DriverBackend::Pv);
+        let session = owner.session(backend);
         let request = request(session);
         let baseline = session.submit(request.clone(), 1).await;
         session.worker(&baseline).await;
@@ -161,12 +171,13 @@ pub async fn pv_controller_checkpoint() {
                 check_bound(
                     &session.client,
                     &source,
-                    DriverBackend::Pv,
+                    backend,
                     state.position.simulated_time_ns,
                     "its pending-call capture point",
                 )
                 .await;
                 if !state.stepping && state.position.completed_rounds > before { break state; }
+                // test-time: allow(hang-guard) -- Poll interval while a Step completes; check_bound above fails on simulated progress and the native case's hang guard bounds a stalled step.
                 tokio::time::sleep(Duration::from_millis(5)).await;
             };
             let bytes = output(session, &source).await;
@@ -215,7 +226,7 @@ pub async fn pv_controller_checkpoint() {
         assert_eq!(paused.rate, PlaybackRate::Paused);
         assert!(!paused.stepping && !paused.terminal);
         assert_eq!(paused.position, position);
-        eprintln!("native controller capture: oracle={ORACLE} before_wake=true pending_sleep_id=2 captured={position:?} restored={:?}", paused.position);
+        eprintln!("native controller capture: backend={} oracle={ORACLE} before_wake=true pending_sleep_id=2 captured={position:?} restored={:?}", label(backend), paused.position);
         session.control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
         let continued = session.complete(&restored, false, 4, SEED).await.unwrap();
         let continued_output = output(session, &restored).await;
@@ -227,6 +238,6 @@ pub async fn pv_controller_checkpoint() {
         assert_eq!(uninterrupted, continued);
         let compared = session.client.compare(&baseline, &restored).await.unwrap();
         assert_eq!(compared.witness_matches, Some(true));
-        eprintln!("native controller continuation: same_oracle=true no_duplicate_calls=true raw_equal=true witness={continued}");
+        eprintln!("native controller continuation: backend={} same_oracle=true no_duplicate_calls=true raw_equal=true witness={continued}", label(backend));
     })).await;
 }
