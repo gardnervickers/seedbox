@@ -151,3 +151,31 @@ fn cached_verification_rejects_same_length_edits_and_replaced_objects() {
     fs::remove_file(object).unwrap();
     assert!(store.verify(&digest).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn session_files_link_into_the_session_store_and_never_the_cache() {
+    use std::os::unix::fs::MetadataExt;
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let session = directory.path().join("session");
+    let store = ContentStore::with_ephemeral_evidence(&cache, &session);
+    let capture = directory.path().join("checkpoint.bin");
+    std::fs::write(&capture, b"captured state").unwrap();
+    let digest = store.put_file_session(&capture).unwrap();
+    let object = session.join("sha256").join(digest.hex());
+    assert_eq!(std::fs::read(&object).unwrap(), b"captured state");
+    assert!(!cache.join("sha256").join(digest.hex()).exists());
+    assert_eq!(
+        std::fs::metadata(&object).unwrap().ino(),
+        std::fs::metadata(&capture).unwrap().ino(),
+        "linked, not copied"
+    );
+    assert_eq!(store.put_file_session(&capture).unwrap(), digest);
+    assert_eq!(store.read(&digest).unwrap(), b"captured state");
+    // A run's private copy of it is a clone where the filesystem allows.
+    let run = directory.path().join("run");
+    let copy = store.materialize(&digest, &run).unwrap();
+    assert_eq!(std::fs::read(&copy).unwrap(), b"captured state");
+    assert!(store.materialize(&digest, &run).is_err(), "never replaces");
+}

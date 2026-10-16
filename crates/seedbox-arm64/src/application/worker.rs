@@ -299,6 +299,98 @@ fn artifact_hash(file: &mut std::fs::File) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
+/// Writes a file and then deallocates its runs of whole aligned zero blocks.
+/// Reads return the same bytes; only the space a mostly-zero checkpoint
+/// takes changes. APFS allocates gaps written past the end, so holes are
+/// punched explicitly.
+struct Sparse<'a> {
+    file: &'a mut std::fs::File,
+    position: u64,
+    /// The current block's bytes, from its start in the file.
+    block: Vec<u8>,
+    /// Runs of zero blocks, as (offset, length).
+    zeros: Vec<(u64, u64)>,
+    /// Written blocks not yet passed to the file.
+    out: Vec<u8>,
+}
+impl<'a> Sparse<'a> {
+    const BLOCK: usize = 4096;
+    /// Shorter runs are not worth a system call.
+    const MIN_HOLE: u64 = 64 * 1024;
+    const BUFFER: usize = 1 << 20;
+    fn new(file: &'a mut std::fs::File) -> Self {
+        Self {
+            file,
+            position: 0,
+            block: Vec::with_capacity(Self::BLOCK),
+            zeros: Vec::new(),
+            out: Vec::with_capacity(Self::BUFFER),
+        }
+    }
+    fn emit(&mut self) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let start = self.position - self.block.len() as u64;
+        if self.block.len() == Self::BLOCK && self.block.iter().all(|&b| b == 0) {
+            match self.zeros.last_mut() {
+                Some((offset, length)) if *offset + *length == start => {
+                    *length += Self::BLOCK as u64
+                }
+                _ => self.zeros.push((start, Self::BLOCK as u64)),
+            }
+        }
+        self.out.extend_from_slice(&self.block);
+        self.block.clear();
+        if self.out.len() >= Self::BUFFER {
+            self.file.write_all(&self.out)?;
+            self.out.clear();
+        }
+        Ok(())
+    }
+    fn finish(mut self) -> Result<()> {
+        use std::io::Write as _;
+        self.emit().map_err(|e| e.to_string())?;
+        self.file.write_all(&self.out).map_err(|e| e.to_string())?;
+        self.file.flush().map_err(|e| e.to_string())?;
+        for &(offset, length) in self.zeros.iter().filter(|z| z.1 >= Self::MIN_HOLE) {
+            punch(self.file, offset, length);
+        }
+        Ok(())
+    }
+}
+/// Deallocate a zero range. Failure only costs space.
+#[cfg(target_os = "macos")]
+fn punch(file: &std::fs::File, offset: u64, length: u64) {
+    use std::os::fd::AsRawFd;
+    let hole = libc::fpunchhole_t {
+        fp_flags: 0,
+        reserved: 0,
+        fp_offset: offset as libc::off_t,
+        fp_length: length as libc::off_t,
+    };
+    // SAFETY: a valid descriptor and a fully initialized argument.
+    unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PUNCHHOLE, &hole) };
+}
+#[cfg(not(target_os = "macos"))]
+fn punch(_: &std::fs::File, _: u64, _: u64) {}
+impl std::io::Write for Sparse<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let take = (Self::BLOCK - self.block.len()).min(rest.len());
+            self.block.extend_from_slice(&rest[..take]);
+            self.position += take as u64;
+            rest = &rest[take..];
+            if self.block.len() == Self::BLOCK {
+                self.emit()?;
+            }
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// All requests complete stopped. Identity and sequence are checked before any
 /// physical action; errors terminate this worker rather than replaying mutation.
 pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Result<()> {
@@ -558,15 +650,18 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                         .mode(0o600)
                         .open(&artifact)
                         .map_err(|e| format!("create checkpoint {}: {e}", artifact.display()))?;
+                    // Guest RAM is mostly zero pages: leave them as holes.
+                    let mut sparse = Sparse::new(&mut file);
                     write_message(
-                        &mut file,
+                        &mut sparse,
                         &CheckpointHeader {
                             identity: request.expected.clone(),
                             observation: observation.clone(),
                             console_offset,
                         },
                     )?;
-                    snapshot.write_checkpoint(&mut file)?;
+                    snapshot.write_checkpoint(&mut sparse)?;
+                    sparse.finish()?;
                     let sha256 = artifact_hash(&mut file)?;
                     Ok(Answer::Snapshot(Checkpoint {
                         artifact,
@@ -1139,6 +1234,37 @@ fn valid_hash(value: &str) -> bool {
 impl Drop for OwnedWorker {
     fn drop(&mut self) {
         self.invalidate("worker dropped");
+    }
+}
+
+#[cfg(test)]
+mod sparse_tests {
+    use super::Sparse;
+    use std::io::Write;
+
+    #[test]
+    fn sparse_writes_read_back_identically_and_leave_zero_blocks_unallocated() {
+        use std::os::unix::fs::MetadataExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("checkpoint");
+        let mut expected = vec![7u8; 100];
+        expected.extend(vec![0u8; 64 * 4096]);
+        expected.extend(vec![9u8; 5000]);
+        expected.extend(vec![0u8; 3 * 4096]);
+        let mut file = std::fs::File::create(&path).unwrap();
+        let mut sparse = Sparse::new(&mut file);
+        // Unaligned writes of every size cross block boundaries.
+        for chunk in expected.chunks(3001) {
+            sparse.write_all(chunk).unwrap();
+        }
+        sparse.finish().unwrap();
+        drop(file);
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        let allocated = std::fs::metadata(&path).unwrap().blocks() * 512;
+        assert!(
+            allocated < expected.len() as u64 / 4,
+            "{allocated} bytes allocated"
+        );
     }
 }
 

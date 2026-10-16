@@ -212,6 +212,34 @@ impl ContentStore {
         Ok(digest)
     }
 
+    /// Retain a session's own file that never changes again, such as a
+    /// checkpoint capture, in the session store: linked when it shares a
+    /// filesystem, copied otherwise, and never promoted into the binary cache.
+    pub fn put_file_session(&self, path: &Path) -> Result<ContentDigest> {
+        let mut file = fs::File::open(path)?;
+        let digest = file_digest_with(&mut file, |file| transfer(file, &mut io::sink()))?;
+        if self.object_path(&digest).exists() {
+            self.verify(&digest)?;
+            return Ok(digest);
+        }
+        let directory = self
+            .evidence_root
+            .as_ref()
+            .unwrap_or(&self.root)
+            .join("sha256");
+        fs::create_dir_all(&directory)?;
+        match fs::hard_link(path, directory.join(digest.hex())) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(_) => {
+                file.seek(io::SeekFrom::Start(0))?;
+                return self.put_reader_with(file, false);
+            }
+        }
+        self.verify(&digest)?;
+        Ok(digest)
+    }
+
     /// Like `put_reader`, but an object already in the store is only read:
     /// the file is hashed first, so retaining the same engine, kernel or image
     /// again never rewrites and syncs a second copy of it.
@@ -335,8 +363,21 @@ impl ContentStore {
     pub fn materialize(&self, digest: &ContentDigest, directory: &Path) -> Result<PathBuf> {
         fs::create_dir_all(directory)?;
         let path = directory.join(digest.hex());
-        let mut temp = tempfile::NamedTempFile::new_in(directory)?;
         let mut source = self.open(digest)?;
+        // APFS clones by path: the copy shares extents, holes included.
+        if let Some(stamp) = self.trusted(digest, &source)? {
+            if clone_path(&self.object_path(digest), &path)? {
+                let mut copy = fs::File::open(&path)?;
+                if Stamp::of(&source)? == stamp && copy.metadata()?.len() == stamp.len {
+                    file_digest_with(&mut copy, |_| Ok(digest.clone()))?;
+                    return Ok(path);
+                }
+                // Changed while cloning: hash a copy instead.
+                fs::remove_file(&path)?;
+                self.forget(digest);
+            }
+        }
+        let mut temp = tempfile::NamedTempFile::new_in(directory)?;
         match self.trusted(digest, &source)? {
             Some(stamp) => {
                 if !clone_file(&source, temp.as_file())? {
@@ -428,6 +469,29 @@ fn clone_file(source: &fs::File, destination: &fs::File) -> io::Result<bool> {
 
 #[cfg(not(target_os = "linux"))]
 fn clone_file(_: &fs::File, _: &fs::File) -> io::Result<bool> {
+    Ok(false)
+}
+
+/// Clone `source` to the new path `destination` (clonefile), never
+/// replacing it. False where the filesystem cannot.
+#[cfg(target_os = "macos")]
+fn clone_path(source: &Path, destination: &Path) -> io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let target = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
+    // SAFETY: both are NUL-terminated paths that outlive the call.
+    if unsafe { libc::clonefile(source.as_ptr(), target.as_ptr(), 0) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENOTSUP | libc::EXDEV | libc::EINVAL) => Ok(false),
+        _ => Err(error),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clone_path(_: &Path, _: &Path) -> io::Result<bool> {
     Ok(false)
 }
 

@@ -285,7 +285,8 @@ pub fn capture_start(
                     ));
                 }
                 let name = format!("state-{}", assets.len() + 1);
-                assets.insert(name.clone(), asset(&store.put_file(&path)?));
+                // A capture belongs to its server session, like its run.
+                assets.insert(name.clone(), asset(&store.put_file_session(&path)?));
                 values.insert(key.into(), format!("asset:{name}").into());
                 for value in values.values_mut() {
                     visit(value, owned, store, assets)?;
