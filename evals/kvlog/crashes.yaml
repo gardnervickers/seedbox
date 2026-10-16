@@ -1,0 +1,7 @@
+# Crash the store at random while the oracle writes.
+start: 1s
+end: 18s
+interval: 3s
+faults:
+  - kind: crash
+    downtime: {min: 200ms, max: 1s}
