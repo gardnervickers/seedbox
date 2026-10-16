@@ -59,6 +59,13 @@ pub fn generate(
     let mut clock_free: BTreeMap<&str, u64> = BTreeMap::new();
     let mut disk_free: BTreeMap<&str, u64> = BTreeMap::new();
     for fault in &profile.faults {
+        if let FaultKind::Partition { from, .. } = fault {
+            if let Some(machine) = from.iter().find(|m| !machines.contains(m)) {
+                return Err(format!(
+                    "fault profile partition from {machine:?} is not a machine"
+                ));
+            }
+        }
         if let FaultKind::DiskError {
             targets: narrowed, ..
         } = fault
@@ -125,12 +132,16 @@ pub fn generate(
         };
         let handle = format!("{KEY_PREFIX}{faults}");
         let (start, end, length) = match kind {
-            FaultKind::Partition { duration, .. } => {
-                let right = machines
+            FaultKind::Partition { duration, from, .. } => {
+                let right: Vec<String> = machines
                     .iter()
-                    .filter(|m| m.as_str() != target)
+                    .filter(|m| m.as_str() != target && (from.is_empty() || from.contains(m)))
                     .cloned()
                     .collect();
+                if right.is_empty() {
+                    // The target is the only machine it would be cut off from.
+                    continue;
+                }
                 (
                     Action::Partition {
                         handle: handle.clone(),

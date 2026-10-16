@@ -97,11 +97,14 @@ pub enum DiskOp {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FaultKind {
-    /// Cut one target off from every other machine, including the oracle.
+    /// Cut one target off from the machines in `from`, or from every other
+    /// machine, including the oracle, when `from` is empty.
     Partition {
         #[serde(default = "weight")]
         weight: u32,
         duration: DurationRange,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        from: Vec<String>,
     },
     /// Delay and drop traffic leaving one target.
     #[serde(rename_all = "camelCase")]

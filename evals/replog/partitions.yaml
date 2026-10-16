@@ -1,0 +1,10 @@
+# Briefly cut one follower off from the leader now and then while the oracle
+# writes and reads; the oracle can still reach every replica.
+start: 1s
+end: 14s
+interval: 3s
+targets: [r2, r3]
+faults:
+  - kind: partition
+    from: [r1]
+    duration: {min: 100ms, max: 500ms}

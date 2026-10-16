@@ -1,0 +1,32 @@
+name: replog-eval
+machines:
+  r1:
+    build:
+      context: ../..
+      dockerfile: evals/replog/Dockerfile
+    entrypoint: [/replog-replica]
+    environment:
+      REPLOG_LEADER: "1"
+      REPLOG_FOLLOWERS: "r2,r3"
+      REPLOG_BUG: "1"
+  r2:
+    build:
+      context: ../..
+      dockerfile: evals/replog/Dockerfile
+    entrypoint: [/replog-replica]
+    environment:
+      REPLOG_BUG: "1"
+  r3:
+    build:
+      context: ../..
+      dockerfile: evals/replog/Dockerfile
+    entrypoint: [/replog-replica]
+    environment:
+      REPLOG_BUG: "1"
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/replog/Dockerfile
+  entrypoint: [/replog-oracle]
+network:
+  latency: 1ms

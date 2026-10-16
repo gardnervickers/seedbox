@@ -29,6 +29,7 @@ fn all_kinds() -> Vec<FaultKind> {
         FaultKind::Partition {
             weight: 2,
             duration: range(500, 5000),
+            from: vec![],
         },
         FaultKind::Shape {
             weight: 1,
@@ -153,6 +154,7 @@ fn partitions_isolate_one_target_from_everyone_and_respect_bounds() {
     let mut p = profile(vec![FaultKind::Partition {
         weight: 1,
         duration: range(100, 100),
+        from: vec![],
     }]);
     p.targets = vec!["n2".into()];
     p.max_faults = 3;
@@ -224,4 +226,26 @@ fn disk_errors_target_their_narrowed_machines_one_at_a_time() {
         *targets = vec!["oracle".into()];
     }
     assert!(generate(&p, 9, &machines(), "oracle", u64::MAX).is_err());
+}
+
+#[test]
+fn partitions_can_cut_a_target_off_from_named_machines_only() {
+    let mut p = profile(vec![FaultKind::Partition {
+        weight: 1,
+        duration: range(100, 200),
+        from: vec!["n1".into()],
+    }]);
+    p.targets = vec!["n2".into(), "n3".into()];
+    let inputs = generate(&p, 4, &machines(), "oracle", u64::MAX).unwrap();
+    assert!(!inputs.is_empty());
+    for input in &inputs {
+        if let Action::Partition { left, right, .. } = &input.action {
+            assert!(left == &["n2"] || left == &["n3"], "{left:?}");
+            assert_eq!(right, &["n1"]);
+        }
+    }
+    if let FaultKind::Partition { from, .. } = &mut p.faults[0] {
+        *from = vec!["n9".into()];
+    }
+    assert!(generate(&p, 4, &machines(), "oracle", u64::MAX).is_err());
 }
