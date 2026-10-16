@@ -1,10 +1,33 @@
 //! Acceptance inputs derived from the real example, never a replacement oracle.
-use seedbox_api::{ComparisonStatus, SimulationComparison};
+use seedbox_api::{
+    ComparisonStatus, ExecutionTermination, Phase, SimulationComparison, SimulationStatus,
+    TestVerdict,
+};
 use seedbox_spec::project::Project;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    Pv,
+    Tcg,
+}
+impl Backend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pv => "pv",
+            Self::Tcg => "tcg",
+        }
+    }
+    pub fn profile(self) -> &'static str {
+        match self {
+            Self::Pv => "driver-pv",
+            Self::Tcg => "driver-tcg",
+        }
+    }
+}
 
 pub const BASELINE_SEED: u64 = 123;
 pub const EXTRA_SEEDS: [u64; 2] = [124, 125];
@@ -13,12 +36,16 @@ pub const CONCURRENCY: usize = 1;
 
 /// Explicit CLI inputs: seed is never inherited from the process environment.
 /// Pause lets acceptance inspect the retained Driver definition before release.
-pub fn submit_arguments(project: &Path, seed: u64) -> Vec<std::ffi::OsString> {
+// Selector spelling is isolated here pending bd-736/bd-e9e. This test harness
+// does not implement or approve a CLI interface; native execution waits on them.
+pub fn submit_arguments(project: &Path, seed: u64, backend: Backend) -> Vec<std::ffi::OsString> {
     vec![
         "run".into(),
         project.as_os_str().to_owned(),
         "--seed".into(),
         seed.to_string().into(),
+        "--backend".into(),
+        backend.name().into(),
         "--paused".into(),
         "--detach".into(),
     ]
@@ -61,6 +88,51 @@ pub fn write_acceptance_project(directory: &Path) -> PathBuf {
     )
     .unwrap();
     path
+}
+
+pub fn require_oracle_output(output: &[u8]) -> Result<(), String> {
+    let output = std::str::from_utf8(output).map_err(|e| e.to_string())?;
+    let prefix = format!("RESULT pass acked={} ", WRITES_PER_WORKER * CONCURRENCY);
+    if !output
+        .lines()
+        .any(|line| line.starts_with(&prefix) && line.contains(" rev=") && line.contains(" hash="))
+    {
+        return Err(format!(
+            "missing real Go checker acknowledgement/revision/hash result: {output}"
+        ));
+    }
+    Ok(())
+}
+
+/// Identify the selected Driver backend and the presence of its opaque retained
+/// closure before release. The runtime validates that closure's contents; this
+/// harness never constructs or substitutes it.
+pub fn require_backend(execution: &serde_json::Value, backend: Backend) -> Result<(), String> {
+    if execution.get("backend").and_then(serde_json::Value::as_str) != Some(backend.profile())
+        || !execution
+            .get("driver_world")
+            .is_some_and(serde_json::Value::is_object)
+    {
+        return Err(format!(
+            "expected retained {} Driver closure, got {execution}",
+            backend.name()
+        ));
+    }
+    Ok(())
+}
+
+/// Equal failures are not acceptance. The designated real oracle must exit zero
+/// and normal execution must finish cleanly before comparing retained evidence.
+pub fn require_pass(status: &SimulationStatus) -> Result<(), String> {
+    if status.phase != Phase::Completed
+        || status.verdict() != TestVerdict::Passed
+        || status.termination != Some(ExecutionTermination::OracleExited)
+    {
+        return Err(format!(
+            "etcd acceptance did not complete cleanly with oracle PASS: {status:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// A headline MATCH alone is insufficient, and missing evidence is not success.

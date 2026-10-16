@@ -1,7 +1,24 @@
 //! Normal CLI/service etcd acceptance inputs and strict comparison checks.
 //! Native execution belongs to bd-207 after Driver preparation and disks land.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "support/etcd_native.rs"]
+mod etcd_native;
 #[path = "support/etcd_project.rs"]
 mod etcd_project;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+#[ignore = "native PV, OCI engine and normal release CLI; end-to-end runs belong to bd-207"]
+fn pv_etcd_through_normal_cli_service() {
+    etcd_native::run(Backend::Pv);
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+#[ignore = "native TCG, OCI engine and normal release CLI; requires bd-e9e/bd-16c, run in bd-207"]
+fn tcg_etcd_through_normal_cli_service() {
+    etcd_native::run(Backend::Tcg);
+}
 
 use etcd_project::*;
 use seedbox_api::{ComparisonStatus, SimulationComparison};
@@ -75,6 +92,104 @@ fn fixture_loads_via_normal_project_parser_without_modifying_example() {
     assert_eq!(fs::read(canonical_path).unwrap(), before);
 }
 
+#[test]
+fn passing_acceptance_requires_completed_oracle_zero_not_just_matching_evidence() {
+    use seedbox_api::{ExecutionTermination, Phase, SimulationStatus};
+    for phase in [
+        Phase::Queued,
+        Phase::Preparing,
+        Phase::Running,
+        Phase::Finalizing,
+        Phase::Completed,
+    ] {
+        for oracle_exit_code in [None, Some(0), Some(1)] {
+            for termination in [
+                Some(ExecutionTermination::OracleExited),
+                Some(ExecutionTermination::Stopped),
+                Some(ExecutionTermination::Error {
+                    message: "infrastructure failure".into(),
+                }),
+                None,
+            ] {
+                let expected = phase == Phase::Completed
+                    && oracle_exit_code == Some(0)
+                    && termination == Some(ExecutionTermination::OracleExited);
+                let status = SimulationStatus {
+                    phase,
+                    oracle_exit_code,
+                    termination,
+                    ..SimulationStatus::default()
+                };
+                assert_eq!(require_pass(&status).is_ok(), expected, "{status:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn forged_wire_verdict_cannot_replace_missing_oracle_exit() {
+    let status = seedbox_api::SimulationStatus {
+        phase: seedbox_api::Phase::Completed,
+        termination: Some(seedbox_api::ExecutionTermination::OracleExited),
+        ..Default::default()
+    };
+    let mut wire = serde_json::to_value(&status).unwrap();
+    wire["verdict"] = "passed".into();
+    let received = serde_json::from_value(wire).unwrap();
+    assert!(require_pass(&received).is_err());
+}
+
+#[test]
+fn backend_parameter_is_explicit_and_rejects_legacy_or_wrong_backend() {
+    let path = std::path::Path::new("project.yaml");
+    for backend in [Backend::Pv, Backend::Tcg] {
+        let args = submit_arguments(path, BASELINE_SEED, backend);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == [std::ffi::OsString::from("--backend"), backend.name().into()]));
+        let valid = serde_json::json!({"backend": backend.profile(), "driver_world": {}});
+        assert!(require_backend(&valid, backend).is_ok());
+        for invalid in [
+            serde_json::json!({"backend": "seedbox-kvm", "driver_world": {}}),
+            serde_json::json!({"backend": backend.profile()}),
+            serde_json::json!({"backend": backend.profile(), "driver_world": null}),
+        ] {
+            assert!(require_backend(&invalid, backend).is_err());
+        }
+    }
+    assert!(require_backend(
+        &serde_json::json!({"backend": "driver-pv", "driver_world": {}}),
+        Backend::Tcg
+    )
+    .is_err());
+    assert!(require_backend(
+        &serde_json::json!({"backend": "driver-tcg", "driver_world": {}}),
+        Backend::Pv
+    )
+    .is_err());
+}
+
+#[test]
+fn real_go_oracle_output_requires_all_requested_acknowledgements_and_settled_checks() {
+    assert!(require_oracle_output(
+        b"LOAD acked=4 failed=1 elapsed=1s\nRESULT pass acked=4 failed=1 rev=42 hash=11\n"
+    )
+    .is_ok());
+    for invalid in [
+        "RESULT fail acked=4 failed=0 rev=42 hash=11",
+        "RESULT pass acked=40 failed=0 rev=42 hash=11",
+        "RESULT pass acked=3 failed=0 rev=42 hash=11",
+        "RESULT pass acked=4 failed=0",
+        "RESULT incomplete acked=4 target=4",
+        "",
+    ] {
+        assert!(
+            require_oracle_output(invalid.as_bytes()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
 fn matching_comparison() -> SimulationComparison {
     SimulationComparison {
         baseline: "abcdefgh".parse().unwrap(),
@@ -121,7 +236,7 @@ fn seed_plan_keeps_repeat_identity_without_demanding_distinct_seed_witnesses() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project with spaces.yaml");
     let seeds = [BASELINE_SEED, BASELINE_SEED, EXTRA_SEEDS[0], EXTRA_SEEDS[1]];
-    let commands = seeds.map(|seed| submit_arguments(&project, seed));
+    let commands = seeds.map(|seed| submit_arguments(&project, seed, Backend::Pv));
     assert_eq!(commands[0], commands[1]);
     for (command, seed) in commands.iter().zip(["123", "123", "124", "125"]) {
         assert_eq!(
@@ -131,6 +246,8 @@ fn seed_plan_keeps_repeat_identity_without_demanding_distinct_seed_witnesses() {
                 project.as_os_str().to_owned(),
                 "--seed".into(),
                 seed.into(),
+                "--backend".into(),
+                "pv".into(),
                 "--paused".into(),
                 "--detach".into(),
             ]

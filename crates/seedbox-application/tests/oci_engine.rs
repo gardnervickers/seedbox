@@ -81,6 +81,67 @@ fn registry_images_export_the_expected_files() {
         }
     }
 }
+/// Real image preparation only: no container application or guest is started.
+/// Keep the exported closures for inspecting/reusing the acceptance inputs.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn canonical_etcd_member_and_go_oracle_export_real_image_closures() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/etcd/seedbox.yaml");
+    let simulation = config::load(&project, &BTreeMap::new()).unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("seedbox-etcd-oci-")
+        .tempdir()
+        .unwrap()
+        .keep();
+    eprintln!("retained etcd OCI fixture inputs: {}", directory.display());
+    let store = ContentStore::new(directory.join("store"));
+    // All members share the immutable image, but retain distinct launch/data-dir
+    // and volume declarations for the subsequent end-to-end service proof.
+    assert_eq!(
+        simulation.services["n1"].source,
+        simulation.services["n2"].source
+    );
+    assert_eq!(
+        simulation.services["n1"].source,
+        simulation.services["n3"].source
+    );
+    for (name, executable, argv0) in [
+        ("n1", "rootfs/usr/local/bin/etcd", "/usr/local/bin/etcd"),
+        ("oracle", "rootfs/client", "/client"),
+    ] {
+        let image = import(&simulation.services[name], &directory.join(name), &store);
+        let files = entries(&image);
+        let binary = &files[Path::new(executable)].1;
+        assert!(
+            binary.starts_with(b"\x7fELF"),
+            "{name} must retain its real ELF"
+        );
+        assert_eq!(binary[4], 2, "{name} must be ELF64");
+        assert_eq!(binary[5], 1, "{name} must be little-endian");
+        assert_eq!(
+            u16::from_le_bytes([binary[18], binary[19]]),
+            62,
+            "{name} must be x86-64"
+        );
+        assert_eq!(image.image.launch.argv[0], argv0);
+        if name == "oracle" {
+            assert_eq!(
+                &image.image.launch.argv[1..],
+                simulation.services[name].command.as_ref().unwrap()
+            );
+        }
+        store.verify(&image.image.config).unwrap();
+        for digest in image.image.layers.iter().chain(image.auxiliary.values()) {
+            store.verify(digest).unwrap();
+        }
+        fs::write(
+            directory.join(format!("{name}-image.json")),
+            serde_json::to_vec_pretty(&image.image).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
 #[test]
 fn build_honors_ignore_whiteouts_and_launch_metadata() {
     let directory = tempfile::tempdir().unwrap();

@@ -26,6 +26,31 @@ policy, including the requested controller when a resolved definition is edited;
 there is no separate parent copy of host/controller eligibility rules.
 Native body and saved-authority validation still precede native restoration.
 
+## Etcd acceptance inputs
+
+The [etcd service integration target](../crates/seedbox/tests/etcd_service.rs)
+uses the normal CLI and service for both backends, with one backend parameter.
+The machine suites select its corresponding native case. They require
+`SEEDBOX_ETCD_CLI` to name a complete release CLI with prepared runtime assets,
+and a Docker-compatible engine accessible to the test user, in addition to the
+ordinary backend fixtures. Portable checks compile the native cases without
+executing them.
+
+The test derives an explicit bounded variant of `examples/etcd`: four writes
+from one writer with a 180-second simulated oracle deadline. The checked-in
+example is untouched. All three real members, independent `/data` volumes and
+the original Go oracle remain. The checker still requires every requested
+acknowledgement, reads on every settled member, and matching revision and HashKV.
+A separate OCI-engine test exports the actual etcd and Go-oracle image closures;
+it never starts an application container or a guest.
+
+Seed 123 is submitted twice and replayed from retained inputs. Comparisons
+require matching outcome, witness, full state and fault history, independently
+of each run's oracle verdict. Seeds 124 and 125 also require a completed passing
+oracle; different seeds need not produce different witnesses. Oracle logs and
+resolved Driver/backend/volume inputs are retained with the CLI reports before
+server shutdown. Host stage timings are diagnostics, not correctness assertions.
+
 ## Reference TCG machine
 
 `seedbox-machine` targets a single x86-64 `qemu64` CPU on QEMU’s `microvm`
