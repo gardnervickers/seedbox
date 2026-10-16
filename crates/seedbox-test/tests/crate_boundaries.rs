@@ -175,6 +175,91 @@ fn repository_dependency_direction() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
     let graph = local_graph(&manifest).unwrap_or_else(|error| panic!("{error}"));
     verify(&graph).unwrap_or_else(|error| panic!("{error}"));
+    verify_exec(&graph).unwrap_or_else(|error| panic!("{error}"));
+}
+
+/// The exec-file lock is shared by production, worker and test code, so it
+/// must stay dependency-free; the shared test library must stay light enough
+/// for every crate to dev-depend on.
+fn verify_exec(graph: &Graph) -> Result<(), String> {
+    let exec = named(graph, "seedbox-exec")?;
+    if !graph[exec].edges.is_empty() {
+        return Err("seedbox-exec must have no local dependencies".into());
+    }
+    let test = named(graph, "seedbox-test")?;
+    for (path, kind) in &graph[test].edges {
+        if *kind != Kind::Dev && path != exec {
+            return Err(format!(
+                "seedbox-test's library may depend only on seedbox-exec, not {}",
+                graph[path].name
+            ));
+        }
+    }
+    for user in [
+        "seedbox-artifacts",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+    ] {
+        let user = named(graph, user)?;
+        if !graph[user]
+            .edges
+            .iter()
+            .any(|(path, kind)| path == exec && *kind == Kind::Normal)
+        {
+            return Err(format!(
+                "{} must spawn through seedbox-exec",
+                graph[user].name
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn exec_policy_rejects_dependencies_of_the_lock_crate() {
+    let mut graph = fixture();
+    for name in ["seedbox-exec", "seedbox-test", "seedbox-artifacts"] {
+        graph.insert(
+            PathBuf::from(name),
+            Package {
+                name: name.into(),
+                edges: vec![],
+            },
+        );
+    }
+    for user in [
+        "seedbox-artifacts",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+    ] {
+        graph
+            .get_mut(Path::new(user))
+            .unwrap()
+            .edges
+            .push((PathBuf::from("seedbox-exec"), Kind::Normal));
+    }
+    verify_exec(&graph).unwrap();
+    graph
+        .get_mut(Path::new("seedbox-exec"))
+        .unwrap()
+        .edges
+        .push((PathBuf::from("seedbox-machine"), Kind::Normal));
+    assert!(verify_exec(&graph)
+        .unwrap_err()
+        .contains("no local dependencies"));
+    graph
+        .get_mut(Path::new("seedbox-exec"))
+        .unwrap()
+        .edges
+        .clear();
+    graph
+        .get_mut(Path::new("seedbox-test"))
+        .unwrap()
+        .edges
+        .push((PathBuf::from("seedbox-machine"), Kind::Normal));
+    assert!(verify_exec(&graph)
+        .unwrap_err()
+        .contains("may depend only on seedbox-exec"));
 }
 
 fn fixture() -> Graph {

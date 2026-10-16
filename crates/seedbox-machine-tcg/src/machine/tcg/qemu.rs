@@ -381,11 +381,9 @@ impl Process {
             // not a lifetime guarantee: QEMU may close them during startup.
             command.args(["-add-fd", "fd=198,set=198,opaque=seedbox-execution-lease"]);
         }
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "execution-worker process only; it writes its one executable copy (runtime extraction) before any machine or spawn exists"
-        )]
-        let spawned = command.spawn();
+        // Through the process-wide exec-file scope: a test or a server in this
+        // process may be writing an executable when this forks.
+        let spawned = seedbox_exec::spawn(&mut command);
         // Command owns copies of the child socket endpoints even after spawn.
         // Release them before any read, including on spawn failure: otherwise
         // a dead child looks like a silent live peer until TIMEOUT instead of EOF.

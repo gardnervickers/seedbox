@@ -1,14 +1,14 @@
 # A fork copies every open descriptor until the child execs, so a fork while
 # another thread writes an executable makes that file's first exec fail with
 # ETXTBSY. Processes that write executables spawn only through
-# seedbox_application::exec_files::spawn (see crates/seedbox-artifacts/src/exec_files.rs).
+# seedbox_exec::spawn (see crates/seedbox-exec/src/lib.rs).
 # Worker-only and test/tool code opts out with a scoped allow and a reason.
 disallowed-methods = [
-    { path = "std::process::Command::spawn", reason = "use seedbox_application::exec_files::spawn: forks must not copy a descriptor to an executable being written" },
-    { path = "std::process::Command::output", reason = "use seedbox_application::exec_files::spawn and wait: forks must not copy a descriptor to an executable being written" },
-    { path = "std::process::Command::status", reason = "use seedbox_application::exec_files::spawn and wait: forks must not copy a descriptor to an executable being written" },
-    { path = "libc::fork", reason = "fork only through seedbox_application::exec_files::spawn" },
-    { path = "libc::vfork", reason = "fork only through seedbox_application::exec_files::spawn" },
-    { path = "libc::posix_spawn", reason = "fork only through seedbox_application::exec_files::spawn" },
-    { path = "libc::posix_spawnp", reason = "fork only through seedbox_application::exec_files::spawn" },
+    { path = "std::process::Command::spawn", reason = "use seedbox_exec::spawn: forks must not copy a descriptor to an executable being written" },
+    { path = "std::process::Command::output", reason = "use seedbox_exec::spawn and wait: forks must not copy a descriptor to an executable being written" },
+    { path = "std::process::Command::status", reason = "use seedbox_exec::spawn and wait: forks must not copy a descriptor to an executable being written" },
+    { path = "libc::fork", reason = "fork only through seedbox_exec::spawn" },
+    { path = "libc::vfork", reason = "fork only through seedbox_exec::spawn" },
+    { path = "libc::posix_spawn", reason = "fork only through seedbox_exec::spawn" },
+    { path = "libc::posix_spawnp", reason = "fork only through seedbox_exec::spawn" },
 ]

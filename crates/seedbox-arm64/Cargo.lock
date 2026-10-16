@@ -394,6 +394,7 @@ dependencies = [
  "libc",
  "seedbox-arm64-control",
  "seedbox-arm64-engine-core",
+ "seedbox-exec",
  "serde",
  "serde_json",
  "sha2",
@@ -431,6 +432,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "seedbox-exec"
+version = "0.1.0"
 
 [[package]]
 name = "serde"

@@ -638,16 +638,14 @@ pub struct OwnedWorker {
 }
 impl OwnedWorker {
     pub fn spawn(executable: &std::path::Path, identity: Identity) -> Result<Self> {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "execution-worker process only; it writes its one executable copy (runtime extraction) before any machine or spawn exists"
-        )]
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .args(["__engine", CONTRACT])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
+            .stderr(Stdio::inherit());
+        // Through the process-wide exec-file scope, like every other spawn.
+        let mut child = seedbox_exec::spawn(&mut command)
             .map_err(|e| format!("machine worker {}: {e}", executable.display()))?;
         let pipes = child.stdin.take().zip(child.stdout.take());
         match pipes {

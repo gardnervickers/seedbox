@@ -1942,6 +1942,7 @@ dependencies = [
  "libc",
  "seedbox-arm64-control",
  "seedbox-arm64-engine-core",
+ "seedbox-exec",
  "serde",
  "serde_json",
  "sha2",
@@ -1986,6 +1987,7 @@ dependencies = [
  "hex",
  "libc",
  "seedbox-engine-protocol",
+ "seedbox-exec",
  "seedbox-spec",
  "serde",
  "serde_json",
@@ -2083,6 +2085,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-exec"
+version = "0.1.0"
+
+[[package]]
 name = "seedbox-machine"
 version = "0.1.0"
 dependencies = [
@@ -2104,6 +2110,7 @@ dependencies = [
  "kvm-bindings",
  "kvm-ioctls 0.24.0",
  "libc",
+ "seedbox-exec",
  "seedbox-machine",
  "serde",
  "serde_json",
@@ -2118,6 +2125,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "libc",
+ "seedbox-exec",
  "seedbox-machine",
  "seedbox-machine-tcg",
  "serde",
@@ -2169,6 +2177,7 @@ dependencies = [
  "hex",
  "libc",
  "seedbox-driver",
+ "seedbox-exec",
  "seedbox-machine",
  "seedbox-machine-pv",
  "seedbox-machine-tcg",

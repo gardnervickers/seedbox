@@ -25,11 +25,9 @@ impl Worker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "execution-worker process only; it writes its one executable copy (runtime extraction) before any machine or spawn exists"
-        )]
-        let spawned = command.spawn();
+        // Through the process-wide exec-file scope: a test or a server in this
+        // process may be writing an executable when this forks.
+        let spawned = seedbox_exec::spawn(&mut command);
         // Child-only descriptor copies must not survive in this Command.
         drop(command);
         let mut child = spawned.map_err(|e| format!("PV worker {}: {e}", executable.display()))?;

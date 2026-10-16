@@ -9,6 +9,7 @@ test-support = ["seedbox-machine/test-support"]
 
 [dependencies]
 seedbox-machine.workspace = true
+seedbox-exec.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
