@@ -124,19 +124,22 @@ pub(crate) mod tests {
             let value = serde_json::to_value(&checkpoint).unwrap();
             assert_eq!(
                 crate::driver_world::policy::admit(&checkpoint.inventory).is_ok(),
-                controller.is_none() || cfg!(all(target_os = "linux", target_arch = "x86_64"))
+                controller.is_none()
+                    || crate::driver_world::platform::Host::current().runs_driver()
             );
             assert_eq!(
                 crate::driver_world::policy::admit_restore(&checkpoint.inventory).is_ok(),
-                controller.is_none() || cfg!(all(target_os = "linux", target_arch = "x86_64"))
+                controller.is_none()
+                    || crate::driver_world::platform::Host::current().runs_driver()
             );
             assert_eq!(
                 restore_manifest(&value, None).is_ok(),
-                controller.is_none() || cfg!(all(target_os = "linux", target_arch = "x86_64"))
+                controller.is_none()
+                    || crate::driver_world::platform::Host::current().runs_driver()
             );
             assert_eq!(
                 restore_manifest(&value, Some("oracle")).is_ok(),
-                cfg!(all(target_os = "linux", target_arch = "x86_64"))
+                crate::driver_world::platform::Host::current().runs_driver()
             );
         }
     }

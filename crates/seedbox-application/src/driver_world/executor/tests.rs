@@ -118,35 +118,34 @@ fn malformed_report_or_digest_is_not_accepted_as_native_evidence() {
     assert!(decode_report(&serde_json::to_vec(&report).unwrap()).is_err());
 }
 #[test]
-fn controller_scope_is_linux_x86_only_for_pv_and_tcg() {
+fn controller_scope_follows_driver_host_for_pv_and_tcg() {
     let mut pv = profile();
     pv.backend = crate::execution::Backend::Other("driver-pv".into());
     pv.semantic_parameters.engine = Some(DriverExecutor::descriptor(DriverBackend::Pv, "x86_64"));
     let pv = DriverExecutor::new(pv, DriverBackend::Pv, 1).unwrap();
-    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    if crate::driver_world::platform::Host::current().runs_driver() {
         pv.preflight(None).unwrap();
         pv.admit_execution(false).unwrap();
     } else {
         let error = pv.preflight(None).unwrap_err().to_string();
         assert!(
-            error.contains("incomplete") && error.contains("legacy service path"),
+            error.contains("requires Linux x86-64 (KVM) or macOS aarch64 (HVF)")
+                && error.contains("legacy service path"),
             "{error}"
         );
         assert!(pv.admit_execution(false).is_err());
     }
     assert_eq!(
         pv.admit_execution(true).is_ok(),
-        cfg!(all(target_os = "linux", target_arch = "x86_64"))
+        crate::driver_world::platform::Host::current().runs_driver()
     );
     let tcg = DriverExecutor::new(profile(), DriverBackend::Tcg, 1).unwrap();
-    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    if crate::driver_world::platform::Host::current().runs_driver() {
         tcg.admit_execution(true).unwrap();
     } else {
         let error = tcg.admit_execution(true).unwrap_err().to_string();
         assert!(
-            error.contains("source authorization")
-                && error.contains("control latency")
-                && error.contains("same resolved controller"),
+            error.contains("requires Linux x86-64 (KVM) or macOS aarch64 (HVF)"),
             "{error}"
         );
     }

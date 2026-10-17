@@ -440,7 +440,7 @@ mod tests {
                 full_state: false,
             }
         }
-        let supported = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+        let supported = seedbox_application::driver_world::platform::Host::current().runs_driver();
         assert_eq!(defaults().use_driver(), supported);
         let mut full = defaults();
         full.full_state = true;

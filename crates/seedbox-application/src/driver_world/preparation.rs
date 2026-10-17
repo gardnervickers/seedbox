@@ -78,13 +78,19 @@ pub(crate) struct BootArchive {
     pub bytes: Vec<u8>,
     pub filesystem: ContentDigest,
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 enum BootFactory {
     Pv(seedbox_machine_pv::machine::pv::Factory),
     Tcg(seedbox_machine_tcg::machine::tcg::Factory),
 }
 pub(crate) struct OciBootFactory {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
     factory: BootFactory,
 }
 impl OciBootFactory {
@@ -94,7 +100,10 @@ impl OciBootFactory {
         epoch: u32,
         blocks: std::num::NonZeroU32,
     ) -> Result<Self> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64")
+        ))]
         {
             let factory = if let Some(qemu) = &runtime.qemu {
                 BootFactory::Tcg(
@@ -117,14 +126,20 @@ impl OciBootFactory {
             };
             Ok(Self { factory })
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64")
+        )))]
         {
             let _ = (engine, runtime, epoch, blocks);
             Err(Error::Setup(super::policy::PV_INCOMPLETE.into()))
         }
     }
     pub(crate) fn boot(&self, request: OciBoot<'_>, store: &ContentStore) -> Result<BootArchive> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64")
+        ))]
         {
             use seedbox_machine::{
                 application::{GuestEnvironment, NamedVolume},
@@ -235,7 +250,10 @@ impl OciBootFactory {
                 filesystem: retained_filesystem,
             })
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64")
+        )))]
         {
             let OciBoot {
                 name,

@@ -77,9 +77,14 @@ pub fn resolve(
         .remove(oracle_name)
         .ok_or_else(|| Error::Integrity("prepared inputs omit oracle".into()))?;
     Ok(Definition {
+        // The retained engine descriptor names the guest ISA of Driver
+        // profiles (aarch64 on HVF hosts); legacy profiles keep their backend.
         architecture: match inputs.profile.backend {
             crate::execution::Backend::Hvf => Architecture::Aarch64,
-            _ => Architecture::X86_64,
+            _ => match crate::guest::Architecture::from_profile(&inputs.profile)? {
+                crate::guest::Architecture::Amd64 => Architecture::X86_64,
+                crate::guest::Architecture::Arm64 => Architecture::Aarch64,
+            },
         },
         seed,
         clock: Clock {

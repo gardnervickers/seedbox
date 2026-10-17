@@ -2,8 +2,8 @@
 use seedbox_engine_protocol::driver_world as wire;
 use seedbox_machine::definition::BackendPolicy;
 
-pub(super) const PV_INCOMPLETE: &str = "Driver PV execution on this host is incomplete: only non-controller x86-64 Linux execution and checkpoint continuation are proven; keep the existing legacy service path for other PV paths";
-pub(super) const CONTROLLER_INCOMPLETE: &str = "Driver controller execution is incomplete: source authorization and control latency must use the same resolved controller; keep the existing legacy service path until that wiring is proven";
+pub(super) const PV_INCOMPLETE: &str = "Driver PV execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF); keep the existing legacy service path on this host";
+pub(super) const CONTROLLER_INCOMPLETE: &str = "Driver controller execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF); keep the existing legacy service path on this host";
 
 pub(super) fn decode(value: &wire::BackendPolicy) -> Result<BackendPolicy, String> {
     let policy = BackendPolicy {
@@ -43,12 +43,22 @@ pub(super) fn admit_execution(
     backend: super::DriverBackend,
     controller: bool,
 ) -> Result<(), String> {
-    if controller && !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    admit_on(super::platform::Host::current(), backend, controller)
+}
+/// [`admit_execution`] for an explicit host. PV runs only where the host has
+/// a native leaf; a controller runs wherever that host runs Driver. TCG
+/// without a controller keeps its host-independent admission.
+// TODO: Re-evaluate: macOS aarch64 HVF admission is compiled and unit-tested
+// only; Gardner verifies it on hardware (bd-877).
+pub(super) fn admit_on(
+    host: super::platform::Host,
+    backend: super::DriverBackend,
+    controller: bool,
+) -> Result<(), String> {
+    if controller && host.guest(backend).is_none() {
         return Err(CONTROLLER_INCOMPLETE.into());
     }
-    if backend == super::DriverBackend::Pv
-        && !cfg!(all(target_os = "linux", target_arch = "x86_64"))
-    {
+    if backend == super::DriverBackend::Pv && host.guest(backend).is_none() {
         return Err(PV_INCOMPLETE.into());
     }
     Ok(())
@@ -77,15 +87,51 @@ pub(super) fn admit_restore(inventory: &wire::Inventory) -> Result<(), String> {
         && policy
             .as_ref()
             .is_some_and(|policy| policy.controller.is_some())
-        && !cfg!(all(target_os = "linux", target_arch = "x86_64"))
+        && super::platform::Host::current()
+            .guest(super::DriverBackend::Pv)
+            .is_none()
     {
-        return Err("Driver PV controller checkpoint continuation is incomplete; only non-controller x86-64 Linux restore is proven".into());
+        return Err("Driver PV controller checkpoint continuation requires Linux x86-64 (KVM) or macOS aarch64 (HVF)".into());
     }
     admit(inventory)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn admission_derives_from_host_not_compile_target() {
+        use super::super::{platform::Host, DriverBackend};
+        for (os, arch, driver) in [
+            ("linux", "x86_64", true),
+            ("macos", "aarch64", true),
+            ("linux", "aarch64", false),
+            ("macos", "x86_64", false),
+        ] {
+            let host = Host { os, arch };
+            for controller in [false, true] {
+                assert_eq!(
+                    admit_on(host, DriverBackend::Pv, controller).is_ok(),
+                    driver,
+                    "{host:?} PV controller={controller}"
+                );
+                assert_eq!(
+                    admit_on(host, DriverBackend::Tcg, controller).is_ok(),
+                    driver || !controller,
+                    "{host:?} TCG controller={controller}"
+                );
+            }
+        }
+        let refused = admit_on(
+            Host {
+                os: "linux",
+                arch: "aarch64",
+            },
+            DriverBackend::Pv,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(refused, PV_INCOMPLETE);
+    }
     #[test]
     fn conversion_is_lossless_and_optional_absence_is_not_explicit_default() {
         for policy in [

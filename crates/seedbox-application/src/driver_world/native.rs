@@ -146,7 +146,12 @@ impl Native {
                 let policy = super::policy::decode_optional(policy.as_ref())?;
                 snapshot.validate_policy(&name, policy.as_ref())?;
                 super::policy::admit_restore(inventory)?;
-                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                // Linux ARM64 KVM restore is not proven; HVF restore is
+                // compiled for bd-877 and verified on hardware separately.
+                #[cfg(any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64")
+                ))]
                 {
                     pv::PVMachine::from_snapshot_in(executable, snapshot, scratch_root).map(
                         |machine| Self::Pv {
@@ -155,7 +160,10 @@ impl Native {
                         },
                     )
                 }
-                #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+                #[cfg(not(any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64")
+                )))]
                 {
                     Err(super::policy::PV_INCOMPLETE.into())
                 }

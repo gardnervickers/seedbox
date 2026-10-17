@@ -636,8 +636,9 @@ impl RuntimeInputs {
 
     // Explicit legacy flags keep their existing formats and launch contract.
     // Inherited build helpers and SDK relocation do not choose an executor.
+    // Only Driver hosts (Linux x86-64 or macOS aarch64) select it by default.
     fn use_driver(&self) -> bool {
-        cfg!(all(target_os = "linux", target_arch = "x86_64"))
+        seedbox_application::driver_world::platform::Host::current().runs_driver()
             && self.kvm.vmm.is_none()
             && self.kvm.kernel.is_none()
             && self.runtime_assets.is_none()
@@ -657,18 +658,23 @@ impl RuntimeInputs {
         let executor = seedbox_application::driver_world::DriverExecutor::for_preparation(
             engine, store, simulation, witness,
         )?;
+        let (backend, runtime_backend) = match simulation.simulator.backend {
+            seedbox_spec::project::CpuBackend::Pv => (
+                seedbox_application::driver_world::DriverBackend::Pv,
+                seedbox_application::runtime_assets::Backend::Pv,
+            ),
+            seedbox_spec::project::CpuBackend::Tcg => (
+                seedbox_application::driver_world::DriverBackend::Tcg,
+                seedbox_application::runtime_assets::Backend::Tcg,
+            ),
+        };
+        let architecture = seedbox_application::driver_world::platform::Host::current()
+            .guest(backend)
+            .ok_or_else(|| {
+                Error::Setup("the Driver runtime requires Linux x86-64 or macOS aarch64".into())
+            })?;
         let runtime = backends::driver_runtime(None, scratch)?;
-        let selected = runtime.select(
-            match simulation.simulator.backend {
-                seedbox_spec::project::CpuBackend::Pv => {
-                    seedbox_application::runtime_assets::Backend::Pv
-                }
-                seedbox_spec::project::CpuBackend::Tcg => {
-                    seedbox_application::runtime_assets::Backend::Tcg
-                }
-            },
-            seedbox_spec::definition::Architecture::X86_64,
-        )?;
+        let selected = runtime.select(runtime_backend, architecture)?;
         let inputs = OciPreparer {
             docker: backends::container_engine()?,
             kernel: selected.guest_assets.join("kernel"),

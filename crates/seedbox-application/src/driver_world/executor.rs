@@ -70,7 +70,8 @@ impl DriverExecutor {
             failure_test: None,
         })
     }
-    /// Select the normal fresh Linux PV profile before OCI preparation. Runtime
+    /// Select the normal fresh Driver profile for this host before OCI
+    /// preparation, with the host's guest ISA ([`super::platform::Host`]). Runtime
     /// bytes remain explicit; legacy retained profiles are never rewritten.
     pub fn for_preparation(
         engine: &std::path::Path,
@@ -102,7 +103,12 @@ impl DriverExecutor {
         semantic.page_timer = simulation.machine.page_timer;
         semantic.deferred_tx = simulation.machine.deferred_tx;
         semantic.torn_writes = simulation.disk.torn_writes;
-        semantic.engine = Some(Self::descriptor(backend, "x86_64"));
+        // The host decides the guest ISA: x86-64 on Linux KVM and for TCG,
+        // aarch64 for PV on macOS HVF. Unsupported hosts are refused below.
+        let guest = super::platform::Host::current()
+            .guest(backend)
+            .map_or("x86_64", super::platform::architecture_name);
+        semantic.engine = Some(Self::descriptor(backend, guest));
         let executor = Self::new(
             ExecutionProfile {
                 backend: crate::execution::Backend::Other(

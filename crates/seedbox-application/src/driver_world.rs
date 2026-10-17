@@ -15,6 +15,7 @@ mod results;
 pub use executor::{DriverBackend, DriverExecutor};
 mod controller;
 mod native;
+pub mod platform;
 mod policy;
 pub(crate) mod preflight;
 pub(crate) mod preparation;

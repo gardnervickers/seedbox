@@ -164,7 +164,7 @@ fn codec3_ordinary_none_is_not_explicit_default_and_closed_body_is_checked() {
 }
 
 #[test]
-fn pv_controller_restore_remains_scoped_to_linux_x86() {
+fn pv_controller_restore_follows_driver_host() {
     let policy = wire::BackendPolicy {
         controller: Some("oracle".into()),
         ..Default::default()
@@ -172,6 +172,6 @@ fn pv_controller_restore_remains_scoped_to_linux_x86() {
     let admitted = crate::driver_world::policy::admit_restore(&inventory(Some(policy)));
     assert_eq!(
         admitted.is_ok(),
-        cfg!(all(target_os = "linux", target_arch = "x86_64"))
+        crate::driver_world::platform::Host::current().runs_driver()
     );
 }

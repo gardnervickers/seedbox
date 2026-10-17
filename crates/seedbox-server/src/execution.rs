@@ -541,11 +541,10 @@ impl ExecutionService {
     ) -> seedbox_application::Result<Run> {
         let mut resolved_spec = spec.clone();
         resolved_spec
-            .resolve_project_architecture(if cfg!(target_arch = "aarch64") {
-                seedbox_spec::definition::Architecture::Aarch64
-            } else {
-                seedbox_spec::definition::Architecture::X86_64
-            })
+            .resolve_project_architecture(
+                seedbox_application::driver_world::platform::Host::current()
+                    .project_architecture(spec.configuration.simulator.backend),
+            )
             .map_err(seedbox_application::Error::Setup)?;
         let spec = &resolved_spec;
         let options = self

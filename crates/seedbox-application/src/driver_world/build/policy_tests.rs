@@ -115,7 +115,7 @@ fn tcg_controller_requests_are_admitted_only_on_linux_x86_64() {
         .err()
         .expect("the policy-test inputs are not runnable")
         .to_string();
-    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    if crate::driver_world::platform::Host::current().runs_driver() {
         // Admitted: the request reaches materialization and fails only on its
         // placeholder inputs, never on the controller gate.
         crate::driver_world::policy::admit(&tcg).unwrap();
@@ -126,9 +126,7 @@ fn tcg_controller_requests_are_admitted_only_on_linux_x86_64() {
         );
     } else {
         assert!(
-            error.contains("authorization")
-                && error.contains("latency")
-                && error.contains("same resolved controller"),
+            error.contains("requires Linux x86-64 (KVM) or macOS aarch64 (HVF)"),
             "{error}"
         );
         assert!(
