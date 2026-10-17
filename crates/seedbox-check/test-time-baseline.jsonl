@@ -65,10 +65,6 @@
 {"context":"if started . elapsed (  ) > = Duration : : from_secs ( 2 ) { <body> }","occurrence":1,"operation":"method:elapsed","owner":"Peer::join","path":"crates/seedbox-application/tests/fault_examples/portable.rs"}
 {"context":"thread : : sleep ( Duration : : from_millis ( 5 ) ) ;","occurrence":1,"operation":"function:std::thread::sleep","owner":"Peer::join","path":"crates/seedbox-application/tests/fault_examples/portable.rs"}
 {"context":"let event = rx . recv_timeout ( Duration : : from_secs ( 2 ) ) . unwrap (  ) ;","occurrence":1,"operation":"method:recv_timeout","owner":"lost_reply","path":"crates/seedbox-application/tests/fault_examples/portable.rs"}
-{"context":"thread : : sleep ( Duration : : from_millis ( 10 ) ) ;","occurrence":1,"operation":"function:std::thread::sleep","owner":"io_deadlines","path":"crates/seedbox-application/tests/fault_examples/portable.rs"}
-{"context":"thread : : sleep ( Duration : : from_millis ( 250 ) ) ;","occurrence":1,"operation":"function:std::thread::sleep","owner":"io_deadlines","path":"crates/seedbox-application/tests/fault_examples/portable.rs"}
-{"context":"let started = Instant : : now (  ) ;","occurrence":1,"operation":"function:std::time::Instant::now","owner":"io_deadlines","path":"crates/seedbox-application/tests/fault_examples/portable.rs"}
-{"context":"let elapsed = started . elapsed (  ) ;","occurrence":1,"operation":"method:elapsed","owner":"io_deadlines","path":"crates/seedbox-application/tests/fault_examples/portable.rs"}
 {"context":"let start = host_clock : : Instant : : now (  ) . unwrap (  ) ;","occurrence":1,"operation":"function:seedbox_engine_protocol::host_clock::Instant::now","owner":"bracket","path":"crates/seedbox-application/tests/host_control.rs"}
 {"context":"while start . elapsed (  ) . unwrap (  ) . is_zero (  ) { <body> }","occurrence":1,"operation":"method:elapsed","owner":"bracket","path":"crates/seedbox-application/tests/host_control.rs"}
 {"context":"let interval = start . elapsed (  ) . unwrap (  ) ;","occurrence":1,"operation":"method:elapsed","owner":"bracket","path":"crates/seedbox-application/tests/host_control.rs"}

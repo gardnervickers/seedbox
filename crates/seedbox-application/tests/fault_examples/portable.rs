@@ -525,34 +525,64 @@ fn successful_progress_deadlines() {
     assert_eq!(result["state"]["acks"].as_array().unwrap().len(), 1);
 }
 fn io_deadlines() {
-    for trickle in [false, true] {
-        let peer = Peer::new(move |_, channel, _| {
-            if trickle {
-                for _ in 0..30 {
-                    if channel.write_all(b"O").is_err() {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
-            } else {
-                thread::sleep(Duration::from_millis(250));
-            }
-            None
-        });
+    // Exact binary fractions are caller-selected logical time. The real guest
+    // bounded_exchange still performs connect/send/receive/budget checks;
+    // only its clock and socket boundary are supplied by the language fixture.
+    for (case, receives, expected_timeouts) in [
+        (
+            "silent",
+            json!([{"op":"recv","advance_seconds":0.125,"error":"timeout"}]),
+            json!([0.125, 0.125, 0.125]),
+        ),
+        (
+            "trickle",
+            json!([
+                {"op":"recv","advance_seconds":0.0625,"bytes":"O"},
+                {"op":"recv","advance_seconds":0.0625,"bytes":"O"}
+            ]),
+            json!([0.125, 0.125, 0.125, 0.0625]),
+        ),
+        (
+            "complete-at-deadline",
+            json!([{"op":"recv","advance_seconds":0.125,"bytes":"OK 1\n"}]),
+            json!([0.125, 0.125, 0.125]),
+        ),
+    ] {
         let mut client = Adapter::new();
-        success(client.call(json!({"op":"client_open","address":peer.address})));
-        let started = Instant::now();
-        let result =
-            client.call(json!({"op":"client_reply","command":"LOAD 1","load_timeout":0.12}));
-        let elapsed = started.elapsed();
-        error(&result, "TimeoutError");
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "trickle={trickle} elapsed={elapsed:?} {result}"
+        success(client.call(json!({"op":"client_open","address":"127.0.0.1:1"})));
+        let mut steps = vec![json!({"op":"connect"}), json!({"op":"sendall"})];
+        steps.extend(receives.as_array().unwrap().iter().cloned());
+        let mut pending = Vec::new();
+        let result = client.observe(
+            json!({"op":"client_reply","command":"LOAD 1","load_timeout":0.125,"io_steps":steps}),
+            |event| pending.push(event),
         );
+        error(&result, "TimeoutError");
+        assert_eq!(pending.len(), 1, "{case}: {result}");
+        assert_eq!(pending[0]["command"], "PUT k/000000 v000000");
+        assert_eq!(pending[0]["state"]["sequence"], 0);
+        assert_eq!(pending[0]["state"]["acks"], json!([]));
         assert_eq!(result["state"]["sequence"], 0);
         assert_eq!(result["state"]["acks"], json!([]));
-        assert_eq!(peer.requests(), ["PUT k/000000 v000000"]);
-        peer.finish();
+        let io = result["io"].as_array().unwrap();
+        let sends: Vec<_> = io.iter().filter(|event| event["op"] == "sendall").collect();
+        assert_eq!(sends.len(), 1, "{case}: {result}");
+        assert_eq!(sends[0]["bytes"], "PUT k/000000 v000000\n");
+        let timeouts: Vec<_> = io
+            .iter()
+            .filter(|event| event["op"] == "settimeout")
+            .map(|event| event["timeout"].clone())
+            .collect();
+        assert_eq!(
+            timeouts,
+            expected_timeouts.as_array().unwrap().clone(),
+            "{case}: {result}"
+        );
+        assert_eq!(
+            io.iter().filter(|event| event["op"] == "recv").count(),
+            receives.as_array().unwrap().len()
+        );
+        assert_eq!(result["clock"], 0.125);
+        println!("controlled I/O deadline: {case}; pending PUT retained, no ack, logical deadline exhausted");
     }
 }
