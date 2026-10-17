@@ -8,7 +8,7 @@ use std::{
 };
 
 fn succeeds(command: &mut Command) -> std::process::Output {
-    let output = command.output().expect("fixture command starts");
+    let output = seedbox_exec::output(command).expect("fixture command starts");
     assert!(
         output.status.success(),
         "{command:?}\n{}\n{}",

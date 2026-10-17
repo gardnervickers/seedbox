@@ -90,8 +90,9 @@ impl Commands for Real {
                 Stdio::from(std::io::stderr())
             })
             .process_group(0);
-        let child = command
-            .spawn()
+        // Through the process-wide exec-file scope: the checker's own tests
+        // write executables that sibling tests then run.
+        let child = seedbox_exec::spawn(&mut command)
             .map_err(|e| io::Error::new(e.kind(), format!("{program}: {e}")))?;
         let mut owned = Owned {
             child,

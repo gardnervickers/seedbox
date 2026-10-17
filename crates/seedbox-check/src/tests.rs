@@ -127,9 +127,7 @@ fn test_machine_suites_are_explicit_and_require_inputs() {
             .any(|r| r.contains("/dev/kvm"))
     );
     let executable = root.join("input");
-    fs::write(&executable, "fixture").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    install_executable(&executable, "fixture");
     let mut inputs = Environment::new();
     for key in machine_inputs(Suite::MachineTcg) {
         inputs.insert(key, executable.to_string_lossy().into());
@@ -179,9 +177,7 @@ fn test_raw_machine_requirements_do_not_acquire_etcd_oci_or_cli_inputs() {
     fs::create_dir_all(runtime.parent().unwrap()).unwrap();
     fs::write(runtime, "runtime fixture").unwrap();
     let binary = temp.0.join("native-fixture");
-    fs::write(&binary, "fixture").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    install_executable(&binary, "fixture");
     let mut no_engine = host();
     no_engine.tools.remove("podman");
     assert!(!no_engine.engine(&Environment::new()));
@@ -1307,15 +1303,12 @@ fn wrapper_job(
 }
 #[test]
 fn compatibility_wrappers_only_exec_the_supplied_tool_and_preserve_arguments() {
-    use std::os::unix::fs::PermissionsExt;
     let t = fixture();
     let tool = t.0.join("coordinator with spaces");
-    fs::write(
+    install_executable(
         &tool,
         "#!/bin/sh\nprintf 'arg:%s\\n' \"$@\"\nprintf 'cwd:%s\\n' \"$PWD\"\nprintf 'incremental:%s\\n' \"${CARGO_INCREMENTAL-unset}\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let e = env(&[
         ("PATH", "/no-tools"),
         ("SEEDBOX_CHECK", tool.to_str().unwrap()),
@@ -1554,4 +1547,15 @@ fn valid_unicode_captured_process_stdout_is_preserved() {
     job.capture = true;
     assert_eq!(c.run(job).unwrap(), "λ雪\n");
     assert!(!c.failed);
+}
+
+/// Write an executable fixture with forks excluded until it is closed: sibling
+/// tests in this binary spawn through `seedbox_exec` and must not copy its
+/// writable descriptor (ETXTBSY). The checker cannot dev-depend on
+/// seedbox-test, which it checks, so it uses the lock directly.
+fn install_executable(path: &std::path::Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _writing = seedbox_exec::writing();
+    fs::write(path, contents).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }

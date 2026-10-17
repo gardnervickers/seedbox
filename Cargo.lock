@@ -2010,6 +2010,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "proc-macro2",
+ "seedbox-exec",
  "seedbox-test-time",
  "serde_json",
  "syn 2.0.119",

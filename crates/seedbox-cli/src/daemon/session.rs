@@ -172,6 +172,11 @@ fn session_directory_with_diagnostics(
 // before exec closes them. Every CLI library test that spawns a subprocess
 // must hold this scope through that spawn/child lifetime. Immediate session
 // probes share it; unrelated tests remain parallel.
+//
+// This is not the exec-file write/fork ordering (seedbox_exec), which ends at
+// exec: the session probes assert lease ownership across a held child's whole
+// lifetime, so they need their own exclusion. Spawns here still go through
+// seedbox_exec as well (bd-b02).
 #[cfg(test)]
 pub(super) fn test_scope() -> std::sync::MutexGuard<'static, ()> {
     static SESSION_FORK: std::sync::Mutex<()> = std::sync::Mutex::new(());
