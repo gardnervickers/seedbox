@@ -20,6 +20,11 @@ mod held_checkpoint;
 pub use disk::{disk_checkpoint_continuation, disk_repeat_workers};
 pub use held_checkpoint::native_held_checkpoint;
 #[cfg(feature = "kvm-tests")]
+#[path = "native_fault_api.rs"]
+mod fault_api;
+#[cfg(feature = "kvm-tests")]
+use fault_api::{applied_once, inject, step, until_output};
+#[cfg(feature = "kvm-tests")]
 #[path = "native_faults.rs"]
 mod faults;
 #[cfg(all(feature = "kvm-tests", feature = "worker-failure-tests"))]

@@ -1,9 +1,6 @@
 //! Real public fault injection and retained replay. No fixture engine results.
 use super::*;
-use seedbox_api::{
-    ControlCommand, ControlState, EventDelivery, EventKind, FaultAction, FaultStatus, InputSource,
-    PlaybackRate,
-};
+use seedbox_api::{ControlCommand, FaultAction, InputSource, PlaybackRate};
 #[cfg(feature = "worker-failure-tests")]
 #[path = "native_fault_worker_failure.rs"]
 mod worker_failure;
@@ -44,77 +41,8 @@ fn cpu_request(session: &NativeSession) -> SubmitRequest {
         .expect("CPU target has its own resolved map entry")
         .process
         .argv = vec!["/application".into(), "400000".into()];
-    request.spec = SimulationSpec::resolved(definition);
+    request.spec = SimulationSpec::resolved(definition).unwrap();
     request
-}
-async fn step(session: &NativeSession, id: &seedbox_api::SimulationId) {
-    let before = session
-        .client
-        .playback(id)
-        .await
-        .unwrap()
-        .state
-        .position
-        .completed_rounds;
-    session
-        .control(id, &format!("step-{before}"), ControlCommand::Step)
-        .await;
-    loop {
-        let state = session.client.playback(id).await.unwrap().state;
-        check_bound_at(
-            &session.client,
-            id,
-            session.backend,
-            session.bound,
-            state.position.simulated_time_ns,
-            "the fault-case step committed",
-        )
-        .await;
-        assert!(!state.terminal, "oracle ended during fault setup");
-        if !state.stepping && state.position.completed_rounds > before {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-}
-async fn until_output(
-    session: &NativeSession,
-    id: &seedbox_api::SimulationId,
-    marker: &str,
-) -> String {
-    loop {
-        let output = session.stdout(id, TARGET, false).await;
-        if output.contains(marker) {
-            return output;
-        }
-        step(session, id).await;
-    }
-}
-async fn inject(
-    session: &NativeSession,
-    id: &seedbox_api::SimulationId,
-    name: &str,
-    action: FaultAction,
-) -> u32 {
-    let receipt = session
-        .control(
-            id,
-            name,
-            ControlCommand::InjectFault {
-                action: action.clone(),
-            },
-        )
-        .await;
-    let ControlState::Acknowledged {
-        intervention: Some(intervention),
-        error: None,
-        ..
-    } = receipt.state
-    else {
-        panic!("missing admitted fault plan")
-    };
-    assert_eq!(intervention.plan.action, action);
-    intervention.plan.id
 }
 fn delta(output: &str) -> u64 {
     output
@@ -124,34 +52,6 @@ fn delta(output: &str) -> u64 {
         .parse()
         .unwrap()
 }
-async fn applied_once(session: &NativeSession, id: &seedbox_api::SimulationId, expected: &[u32]) {
-    let mut stream = session.client.events_with(id, false).await.unwrap();
-    let mut applied = Vec::new();
-    while let Some(delivery) = stream.next().await {
-        match delivery.unwrap() {
-            EventDelivery::Event { observation, .. } => match observation.event {
-                EventKind::FaultChanged {
-                    id,
-                    status: FaultStatus::Applied,
-                    ..
-                } => applied.push(id),
-                EventKind::OverrideRejected { .. }
-                | EventKind::SourceGap { .. }
-                | EventKind::SourceUnavailable => {
-                    panic!("fault rejected or native observations incomplete")
-                }
-                _ => {}
-            },
-            EventDelivery::Gap { .. } => panic!("fault observation gap"),
-            EventDelivery::Closed => {}
-        }
-    }
-    assert_eq!(
-        applied, expected,
-        "missing, duplicated or reordered native fault applications"
-    );
-}
-
 /// Establish a real, still-live guest under one applied public fault. The
 /// caller selects cancellation or original-worker failure only AFTER this
 /// positive application/fault/paused boundary, never by a host-time delay.

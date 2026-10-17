@@ -681,6 +681,10 @@ incarnation; tuple reuse can create a new one. A fault binds to that incarnation
 and cannot silently attach to its replacement. Already routed frames retain
 their previous delivery decisions.
 
+For a host-side `DropConnection`, obtain the real tuple and incarnation from the
+oracle's `connections` reply printed in guest logs; `seedbox get world` shows
+link state, not connection tuples.
+
 Unsupported traffic, including IPv6 and fragmented IPv4, bypasses connection
 selection and still follows ordinary link policy. Arming a fault does not prove
 it dropped traffic: check its dropped-packet count. Healing one handle does not
