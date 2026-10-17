@@ -2236,8 +2236,13 @@ fn initially_paused_program_holds_launch_boundary_effect_until_resume() {
     }
     let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
     client.connect(&endpoint).unwrap();
+    let reply_guard = seedbox_test_time::HangGuard::new(
+        "initially paused input-program control replies",
+        Duration::from_secs(2),
+    );
+    // test-time: allow(hang-guard) -- Actual paused/resume replies establish the held launch boundary, not a timed absence.
     client
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(reply_guard.remaining().unwrap()))
         .unwrap();
     struct Release(UnixDatagram);
     impl Drop for Release {

@@ -509,8 +509,13 @@ mod tests {
         let mut control = HostControl::bind(&endpoint).unwrap();
         let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
         client.connect(&endpoint).unwrap();
+        let reply_guard = seedbox_test_time::HangGuard::new(
+            "prepared fault host-control replies",
+            Duration::from_secs(2),
+        );
+        // test-time: allow(hang-guard) -- Bound actual prepare/commit/status replies; explicit replies and release establish ordering.
         client
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(reply_guard.remaining().unwrap()))
             .unwrap();
         // A failed assertion must release the scoped worker before joining it.
         struct Release(UnixDatagram);
@@ -671,8 +676,13 @@ mod tests {
         );
         let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
         client.connect(&endpoint).unwrap();
+        let reply_guard = seedbox_test_time::HangGuard::new(
+            "checkpoint admission reply",
+            std::time::Duration::from_secs(1),
+        );
+        // test-time: allow(hang-guard) -- Bound the actual checkpoint acknowledgement, not checkpoint timing or completion.
         client
-            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .set_read_timeout(Some(reply_guard.remaining().unwrap()))
             .unwrap();
         let request = Request { id: 3, command };
         client.send(&serde_json::to_vec(&request).unwrap()).unwrap();
@@ -765,9 +775,13 @@ mod tests {
         let mut control = HostControl::bind_paused(&endpoint).unwrap();
         let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
         client.connect(endpoint).unwrap();
-        // Hang guard only: a correct run never waits this long.
+        let reply_guard = seedbox_test_time::HangGuard::new(
+            "initially paused boundary status replies",
+            Duration::from_secs(2),
+        );
+        // test-time: allow(hang-guard) -- Actual status replies witness the held boundary; timeout is only infrastructure failure.
         client
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(reply_guard.remaining().unwrap()))
             .unwrap();
         let (done, completed) = mpsc::channel();
         // Always resume before joining, including on a failed assertion.
@@ -964,8 +978,13 @@ mod pre_fault_tests {
         assert!(control.pause_before_next_fault);
         let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
         client.connect(&endpoint).unwrap();
+        let reply_guard = seedbox_test_time::HangGuard::new(
+            "one-shot pre-fault stop control replies",
+            Duration::from_secs(2),
+        );
+        // test-time: allow(hang-guard) -- Bound actual stop/status/resume replies; their payloads determine success.
         client
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(reply_guard.remaining().unwrap()))
             .unwrap();
         struct Release(UnixDatagram);
         impl Drop for Release {
