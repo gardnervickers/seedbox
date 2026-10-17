@@ -265,6 +265,7 @@ impl Orchestrator {
                                             wall_time_ns: None,
                                             seed: Some(seed),
                                             cancellation: cancellation.clone(),
+                                            machine_workers: None,
                                         },
                                         inputs.clone(),
                                         executor,

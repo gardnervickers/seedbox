@@ -198,6 +198,7 @@ pub(super) fn run(
     selection: super::BackendSelection,
 ) -> Result<u8> {
     let wall_time_ns = selection.wall_time;
+    let machine_workers = selection.machine_workers;
     let (mut spec, metadata) = load_spec(compose, seed)?;
     select_backend(&mut spec, selection.backend)?;
     submit(
@@ -205,6 +206,7 @@ pub(super) fn run(
         seedbox_api::ExecutionOptions {
             start_paused: paused,
             wall_time_ns,
+            machine_workers,
         },
         metadata,
         detach,
@@ -222,6 +224,7 @@ pub(super) fn explore(
     selection: super::BackendSelection,
 ) -> Result<u8> {
     let wall_time_ns = selection.wall_time;
+    let machine_workers = selection.machine_workers;
     let (mut spec, metadata) = load_spec(compose, seed)?;
     select_backend(&mut spec, selection.backend)?;
     if spec
@@ -235,6 +238,7 @@ pub(super) fn explore(
         options: seedbox_api::ExecutionOptions {
             start_paused: paused,
             wall_time_ns,
+            machine_workers,
         },
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
@@ -391,6 +395,7 @@ pub(super) fn replay(
     selection: super::BackendSelection,
 ) -> Result<u8> {
     let wall_time_ns = selection.wall_time;
+    let machine_workers = selection.machine_workers;
     let client = daemon::connect(None)?;
     let mut resource = runtime()?
         .block_on(client.describe(id))
@@ -407,6 +412,7 @@ pub(super) fn replay(
         seedbox_api::ExecutionOptions {
             start_paused: false,
             wall_time_ns,
+            machine_workers,
         },
         metadata,
         false,
@@ -422,6 +428,7 @@ pub(super) fn rerun(
     selection: super::BackendSelection,
 ) -> Result<u8> {
     let wall_time_ns = selection.wall_time;
+    let machine_workers = selection.machine_workers;
     let client = daemon::connect(None)?;
     let mut resource = runtime()?
         .block_on(client.describe(id))
@@ -438,6 +445,7 @@ pub(super) fn rerun(
         seedbox_api::ExecutionOptions {
             start_paused: false,
             wall_time_ns,
+            machine_workers,
         },
         metadata,
         detach,
@@ -451,6 +459,7 @@ pub(super) fn branch(
     detach: bool,
     json: bool,
     wall_time_ns: Option<u64>,
+    machine_workers: Option<u32>,
 ) -> Result<u8> {
     let client = daemon::connect(None)?;
     let resource = runtime()?
@@ -462,6 +471,7 @@ pub(super) fn branch(
         seedbox_api::ExecutionOptions {
             start_paused: false,
             wall_time_ns,
+            machine_workers,
         },
         metadata,
         detach,

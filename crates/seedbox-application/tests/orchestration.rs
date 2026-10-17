@@ -448,6 +448,7 @@ fn unexpected_backend_failure_and_cancellation_retain_logs() {
                 seed: None,
                 cancellation: token,
                 wall_time_ns: None,
+                machine_workers: None,
             },
             &fixture.preparer,
             &fixture.backend,

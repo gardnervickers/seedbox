@@ -194,6 +194,10 @@ pub struct ExecutionOptions {
     pub start_paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_time_ns: Option<u64>,
+    /// Threads that run machines within a round. Performance only; never
+    /// part of the simulation identity and never changes results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_workers: Option<u32>,
 }
 
 /// Request identity is scoped to this catalogue and retained for as long as its

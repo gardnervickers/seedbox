@@ -525,6 +525,7 @@ struct BackendArgs {
 struct BackendSelection {
     backend: Option<seedbox_spec::project::CpuBackend>,
     wall_time: Option<u64>,
+    machine_workers: Option<u32>,
 }
 impl BackendArgs {
     fn selection(self, execution: ExecutionArgs) -> BackendSelection {
@@ -534,6 +535,7 @@ impl BackendArgs {
                 BackendArg::Tcg => seedbox_spec::project::CpuBackend::Tcg,
             }),
             wall_time: execution.wall_time,
+            machine_workers: execution.machine_workers,
         }
     }
 }
@@ -543,6 +545,9 @@ struct ExecutionArgs {
     /// Stop after this much active host time, excluding explicit pauses [default: unlimited].
     #[arg(long, value_parser = wall_time)]
     wall_time: Option<u64>,
+    /// Threads that run machines in parallel within a round; never changes results [default: 1].
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=64), help_heading = "Performance (never changes results)")]
+    machine_workers: Option<u32>,
 }
 
 fn wall_time(value: &str) -> std::result::Result<u64, String> {
@@ -865,7 +870,14 @@ fn run(cli: Cli) -> Result<u8> {
             detach,
             json,
             execution,
-        } => simulations::branch(&id, checkpoint, detach, json, execution.wall_time),
+        } => simulations::branch(
+            &id,
+            checkpoint,
+            detach,
+            json,
+            execution.wall_time,
+            execution.machine_workers,
+        ),
         Command::Rerun {
             backend,
             id,

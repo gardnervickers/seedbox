@@ -2242,6 +2242,64 @@ fn non_oracle_controller_refuses_before_image_preparation() {
 }
 
 #[test]
+fn machine_workers_help_and_range_on_every_execution_command() {
+    let root = tempfile::tempdir().unwrap();
+    for command in ["run", "explore", "rerun", "replay", "branch"] {
+        let help = seedbox(&[command, "--help"], root.path());
+        assert!(help.status.success(), "{command}: {}", stderr(&help));
+        let text = String::from_utf8_lossy(&help.stdout);
+        let performance = text
+            .split("Performance (never changes results):")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{command}: {text}"));
+        assert!(
+            performance.contains("--machine-workers <N>"),
+            "{command}: {text}"
+        );
+        assert!(performance.contains("[default: 1]"), "{command}: {text}");
+        for value in ["0", "65", "-1", "many"] {
+            let flag = format!("--machine-workers={value}");
+            let output = seedbox(&[command, &flag], root.path());
+            assert_eq!(output.status.code(), Some(2), "{command} {value}");
+            assert!(output.stdout.is_empty());
+            assert!(
+                stderr(&output).contains("--machine-workers"),
+                "{}",
+                stderr(&output)
+            );
+        }
+    }
+}
+
+#[test]
+fn machine_workers_is_accepted_on_every_execution_command() {
+    let root = tempfile::tempdir().unwrap();
+    for command in ["run", "explore", "rerun", "replay", "branch"] {
+        for value in ["1", "4", "64"] {
+            let mut args = vec![command];
+            if matches!(command, "run" | "explore") {
+                args.push("missing.yaml");
+            } else {
+                args.push("k7m2p9qx");
+                if command == "branch" {
+                    args.push("checkpoint-request");
+                }
+            }
+            args.extend(["--machine-workers", value]);
+            let output = seedbox(&args, root.path());
+            assert_eq!(output.status.code(), Some(2), "{command} {value}");
+            assert!(output.stdout.is_empty());
+            let expected = if matches!(command, "run" | "explore") {
+                "error: project file missing.yaml: not found\n"
+            } else {
+                "error: no local server is running; start `seedbox serve` in another terminal\n"
+            };
+            assert_eq!(stderr(&output), expected, "{command} {value}");
+        }
+    }
+}
+
+#[test]
 fn backend_flag_is_typed_and_only_on_the_four_execution_commands() {
     let root = tempfile::tempdir().unwrap();
     for command in ["run", "explore", "rerun", "replay"] {

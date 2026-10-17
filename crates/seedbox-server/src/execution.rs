@@ -737,6 +737,7 @@ impl ExecutionService {
                     seed: spec.seed,
                     wall_time_ns: options.wall_time_ns,
                     cancellation: cancellation.clone(),
+                    machine_workers: options.machine_workers,
                 },
                 inputs,
                 executor.as_ref(),
