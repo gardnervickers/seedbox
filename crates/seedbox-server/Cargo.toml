@@ -8,6 +8,8 @@ publish.workspace = true
 [features]
 kvm-tests = []
 tcg-tests = []
+# Explicit opt-in: never activated by normal release CLI/server dependencies.
+worker-failure-tests = ["seedbox-application/test-support"]
 
 [dependencies]
 seedbox-control.workspace = true

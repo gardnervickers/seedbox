@@ -8,3 +8,9 @@ pub mod native_service;
 async fn public_pv_throttle_heal_replays_once_with_native_witness() {
     native_service::pv_throttle_heal_replay().await;
 }
+
+#[cfg(feature = "worker-failure-tests")]
+#[tokio::test]
+async fn public_pv_fault_active_worker_failure_joins_real_monitor_and_cleans_native_processes() {
+    native_service::pv_fault_worker_failure().await;
+}

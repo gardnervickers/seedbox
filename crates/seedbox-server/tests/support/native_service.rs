@@ -22,6 +22,8 @@ pub use held_checkpoint::native_held_checkpoint;
 #[cfg(feature = "kvm-tests")]
 #[path = "native_faults.rs"]
 mod faults;
+#[cfg(all(feature = "kvm-tests", feature = "worker-failure-tests"))]
+pub use faults::pv_fault_worker_failure;
 #[cfg(feature = "kvm-tests")]
 pub use faults::pv_throttle_heal_replay;
 #[path = "case_cleanup.rs"]
@@ -164,7 +166,19 @@ impl Drop for CancelServer {
     }
 }
 
+#[cfg(feature = "worker-failure-tests")]
+type WorkerFailureSetup = Arc<
+    Mutex<
+        Option<(
+            PathBuf,
+            seedbox_application::process_lifetime::WorkerFailureInjector,
+        )>,
+    >,
+>;
+
 struct NativeProvider {
+    #[cfg(feature = "worker-failure-tests")]
+    worker_failure: WorkerFailureSetup,
     backend: DriverBackend,
     session: PathBuf,
     runtimes: Arc<Mutex<Vec<PathBuf>>>,
@@ -229,15 +243,21 @@ impl BackendProvider for NativeProvider {
             .lock()
             .unwrap()
             .push(selected.archive().parent().unwrap().to_owned());
-        let executor: Box<dyn ExecutionBackend> = Box::new(
-            DriverExecutor::new(
-                inputs.profile.clone(),
-                self.backend,
-                self.workers.load(Ordering::SeqCst),
-            )?
-            .with_runtime(selected)?
-            .with_launch_context(vec![], Some(self.session.join(SESSION_LEASE_FILE))),
-        );
+        let executor = DriverExecutor::new(
+            inputs.profile.clone(),
+            self.backend,
+            self.workers.load(Ordering::SeqCst),
+        )?
+        .with_runtime(selected)?
+        .with_launch_context(vec![], Some(self.session.join(SESSION_LEASE_FILE)));
+        // Only an explicitly opted-in test can replace the monitor executable;
+        // the retained real release Driver child and guest remain unchanged.
+        #[cfg(feature = "worker-failure-tests")]
+        let executor = match self.worker_failure.lock().unwrap().take() {
+            Some((monitor, injector)) => executor.with_worker_failure_test(monitor, injector),
+            None => executor,
+        };
+        let executor: Box<dyn ExecutionBackend> = Box::new(executor);
         Ok(if self.observed.load(Ordering::SeqCst) {
             executor
         } else {
@@ -624,6 +644,8 @@ fn fixture_submission(
 // A fresh public-service session per scenario; the Driver manifest is hand-built
 // for this native slice, not proof of the production authoring/provider path.
 struct NativeSession {
+    #[cfg(feature = "worker-failure-tests")]
+    worker_failure: WorkerFailureSetup,
     backend: DriverBackend,
     cancel: CancelServer,
     server: Option<tokio::task::JoinHandle<Result<(), seedbox_server::execution::Error>>>,
@@ -652,6 +674,8 @@ impl NativeSession {
         ));
         fs::write(session.path().join(SESSION_LEASE_FILE), []).unwrap();
         let runtime_paths = Arc::new(Mutex::new(Vec::new()));
+        #[cfg(feature = "worker-failure-tests")]
+        let worker_failure: WorkerFailureSetup = Default::default();
         let workers = Arc::new(AtomicUsize::new(1));
         let observed = Arc::new(AtomicBool::new(true));
         let manager = Arc::new(Manager::new(Catalogue::in_memory()));
@@ -662,6 +686,8 @@ impl NativeSession {
                 execution_root.clone(),
                 store.clone(),
                 Arc::new(NativeProvider {
+                    #[cfg(feature = "worker-failure-tests")]
+                    worker_failure: worker_failure.clone(),
                     backend,
                     session: session.path().to_owned(),
                     runtimes: runtime_paths.clone(),
@@ -685,6 +711,8 @@ impl NativeSession {
             cancellation.clone(),
         ));
         Self {
+            #[cfg(feature = "worker-failure-tests")]
+            worker_failure,
             backend,
             cancel: CancelServer(cancellation, manager),
             server: Some(server),

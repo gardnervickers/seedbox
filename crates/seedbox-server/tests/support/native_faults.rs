@@ -4,6 +4,12 @@ use seedbox_api::{
     ControlCommand, ControlState, EventDelivery, EventKind, FaultAction, FaultStatus, InputSource,
     PlaybackRate,
 };
+#[cfg(feature = "worker-failure-tests")]
+#[path = "native_fault_worker_failure.rs"]
+mod worker_failure;
+#[cfg(feature = "worker-failure-tests")]
+pub use worker_failure::pv_fault_worker_failure;
+
 const SEED: u64 = 123;
 const TARGET: &str = "target";
 const HANDLE: &str = "public-throttle";
