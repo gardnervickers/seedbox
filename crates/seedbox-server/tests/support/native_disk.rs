@@ -77,208 +77,230 @@ fn manifest_disk(session: &NativeSession, id: &seedbox_api::SimulationId) {
     );
 }
 
+/// Encoded length of the captured Driver state, which excludes machine
+/// snapshots; reported because small one-machine blobs once failed restore.
+fn driver_blob_bytes(session: &NativeSession, id: &seedbox_api::SimulationId) -> u64 {
+    let manifests = directories(&session.execution_root.join("runs").join(id.as_str()))
+        .into_iter()
+        .map(|path| path.join("checkpoint.json"))
+        .chain(std::iter::once(
+            session
+                .execution_root
+                .join("runs")
+                .join(id.as_str())
+                .join("checkpoint.json"),
+        ))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(manifests.len(), 1, "one captured checkpoint manifest");
+    let value: serde_json::Value =
+        serde_json::from_reader(fs::File::open(&manifests[0]).unwrap()).unwrap();
+    value["driver"]["length"]
+        .as_u64()
+        .expect("Driver blob length")
+}
+
 /// Same input twice, on one and four machine workers: both runs pass with the
 /// expected durable volume contents and equal raw/compared witnesses.
 pub async fn disk_repeat_workers(backend: DriverBackend) {
-    // test-time: allow(hang-guard) -- Shared HANG_GUARD only catches an execution that stops making simulated progress; completion's check_bound is the failure condition and witnesses decide success.
-    tokio::time::timeout(HANG_GUARD, async {
-        let mut session = NativeSession::new(backend);
-        let request = request(&session);
-        let mut runs = vec![];
-        for workers in [1, 4] {
-            let id = session.submit(request.clone(), workers).await;
-            session.worker(&id).await;
-            let witness = session.complete(&id, false, workers, SEED).await.unwrap();
-            manifest_disk(&session, &id);
-            let output = text(&session.output(&id).await);
-            assert!(output.starts_with("DISK volume boot=0\n"), "{output:?}");
-            assert!(output.ends_with(DONE), "{output:?}");
-            runs.push((id, witness, output));
-        }
-        assert_eq!(runs[0].1, runs[1].1, "workers 1/4 raw witnesses differ");
-        assert_eq!(runs[0].2, runs[1].2, "workers 1/4 outputs differ");
-        let comparison = session
-            .client
-            .compare(&runs[0].0, &runs[1].0)
-            .await
-            .unwrap();
-        assert_eq!(comparison.status, ComparisonStatus::Match);
-        assert_eq!(comparison.witness_matches, Some(true));
-        eprintln!(
-            "native disk repeat: backend={} witness={}",
-            label(backend),
-            runs[0].1
-        );
-        session.close().await;
+    native_case(move |owner| {
+        Box::pin(async move {
+            let session = owner.session(backend);
+            let request = request(session);
+            let mut runs = vec![];
+            for workers in [1, 4] {
+                let id = session.submit(request.clone(), workers).await;
+                session.worker(&id).await;
+                let witness = session.complete(&id, false, workers, SEED).await.unwrap();
+                manifest_disk(session, &id);
+                let output = text(&session.output(&id).await);
+                assert!(output.starts_with("DISK volume boot=0\n"), "{output:?}");
+                assert!(output.ends_with(DONE), "{output:?}");
+                runs.push((id, witness, output));
+            }
+            assert_eq!(runs[0].1, runs[1].1, "workers 1/4 raw witnesses differ");
+            assert_eq!(runs[0].2, runs[1].2, "workers 1/4 outputs differ");
+            let comparison = session
+                .client
+                .compare(&runs[0].0, &runs[1].0)
+                .await
+                .unwrap();
+            assert_eq!(comparison.status, ComparisonStatus::Match);
+            assert_eq!(comparison.witness_matches, Some(true));
+            eprintln!(
+                "native disk repeat: backend={} witness={}",
+                label(backend),
+                runs[0].1
+            );
+        })
     })
-    .await
-    .expect("host hang guard: disk repeat never completed");
+    .await;
 }
 
 /// Capture while the first round's completed device write is still unflushed
 /// and its sleep pending, export, delete the source, import on four workers and continue:
 /// output and raw witness equal the uninterrupted run.
 pub async fn disk_checkpoint_continuation(backend: DriverBackend) {
-    // test-time: allow(hang-guard) -- Shared HANG_GUARD only catches an execution that stops making simulated progress; check_bound limits the capture search in simulated time and witnesses decide success.
-    tokio::time::timeout(HANG_GUARD, async {
-        let mut session = NativeSession::new(backend);
-        let request = request(&session);
-        let baseline = session.submit(request.clone(), 1).await;
-        session.worker(&baseline).await;
-        let uninterrupted = session.complete(&baseline, false, 1, SEED).await.unwrap();
-        let full = text(&session.output(&baseline).await);
-        assert!(full.ends_with(DONE), "{full:?}");
+    native_case(move |owner| {
+        Box::pin(async move {
+            let session = owner.session(backend);
+            let request = request(session);
+            let baseline = session.submit(request.clone(), 1).await;
+            session.worker(&baseline).await;
+            let uninterrupted = session.complete(&baseline, false, 1, SEED).await.unwrap();
+            let full = text(&session.output(&baseline).await);
+            assert!(full.ends_with(DONE), "{full:?}");
 
-        let mut paused = request;
-        paused.options.start_paused = true;
-        let source = session.submit(paused, 1).await;
-        session.worker(&source).await;
-        session
-            .control(
-                &source,
-                "pause",
-                ControlCommand::SetRate {
-                    rate: PlaybackRate::Paused,
-                },
-            )
-            .await;
-        let mut step = 0u64;
-        let before = loop {
-            let rounds = session
+            let mut paused = request;
+            paused.options.start_paused = true;
+            let source = session.submit(paused, 1).await;
+            session.worker(&source).await;
+            session
+                .control(
+                    &source,
+                    "pause",
+                    ControlCommand::SetRate {
+                        rate: PlaybackRate::Paused,
+                    },
+                )
+                .await;
+            let mut step = 0u64;
+            let before = loop {
+                let rounds = session
+                    .client
+                    .playback(&source)
+                    .await
+                    .unwrap()
+                    .state
+                    .position
+                    .completed_rounds;
+                session
+                    .control(&source, &format!("step-{step}"), ControlCommand::Step)
+                    .await;
+                step += 1;
+                loop {
+                    let status = session.client.playback(&source).await.unwrap().state;
+                    assert!(!status.terminal, "probe ended before capture");
+                    check_bound(
+                        &session.client,
+                        &source,
+                        backend,
+                        status.position.simulated_time_ns,
+                        "its unflushed-write capture point",
+                    )
+                    .await;
+                    if !status.stepping && status.position.completed_rounds > rounds {
+                        break;
+                    }
+                    // test-time: allow(hang-guard) -- Yield between positive step-completion polls; check_bound supplies the simulated cap and the committed round count, not this delay, completes the step.
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let output = text(&session.output(&source).await);
+                assert!(
+                    !output.contains(SYNCED_FIRST),
+                    "capture point passed: {output:?}"
+                );
+                if output.contains(SUBMITTED_FIRST) {
+                    break output;
+                }
+            };
+            let captured = session
+                .control(&source, "saved", ControlCommand::Checkpoint)
+                .await;
+            let (rounds, ns) = match &captured.state {
+                ControlState::Acknowledged {
+                    checkpoint: Some(c),
+                    error: None,
+                    ..
+                } if c.state == CheckpointState::Captured => {
+                    (c.position.completed_rounds, c.position.simulated_time_ns)
+                }
+                other => panic!("checkpoint not captured: {other:?}"),
+            };
+            eprintln!(
+                "native disk capture: backend={} rounds={rounds} ns={ns} driver_blob_bytes={}",
+                label(backend),
+                driver_blob_bytes(session, &source)
+            );
+            let exported = session
                 .client
-                .playback(&source)
+                .checkpoint_definition(&source, "saved")
+                .await
+                .unwrap();
+            assert!(matches!(
+                &exported.spec.inputs,
+                InputSource::Resolved { .. }
+            ));
+            session.client.stop(&source).await.unwrap();
+            session.complete(&source, true, 1, SEED).await;
+            session
+                .client
+                .delete_checkpoint(&source, "saved")
+                .await
+                .unwrap();
+            session.client.delete(&source).await.unwrap();
+
+            session.workers.store(4, Ordering::SeqCst);
+            let restored = session
+                .client
+                .submit_definition(&serde_json::to_value(exported).unwrap(), true)
+                .await
+                .unwrap()
+                .metadata
+                .id;
+            session.submitted += 1;
+            session.worker(&restored).await;
+            assert!(session
+                .launch_request(&restored)
+                .resume_checkpoint
+                .is_some());
+            session
+                .control(
+                    &restored,
+                    "verify-paused-restore",
+                    ControlCommand::SetRate {
+                        rate: PlaybackRate::Paused,
+                    },
+                )
+                .await;
+            let position = session
+                .client
+                .playback(&restored)
                 .await
                 .unwrap()
                 .state
-                .position
-                .completed_rounds;
+                .position;
+            assert_eq!(
+                (position.completed_rounds, position.simulated_time_ns),
+                (rounds, ns)
+            );
             session
-                .control(&source, &format!("step-{step}"), ControlCommand::Step)
-                .await;
-            step += 1;
-            loop {
-                let status = session.client.playback(&source).await.unwrap().state;
-                assert!(!status.terminal, "probe ended before capture");
-                check_bound(
-                    &session.client,
-                    &source,
-                    backend,
-                    status.position.simulated_time_ns,
-                    "its unflushed-write capture point",
+                .control(
+                    &restored,
+                    "continue",
+                    ControlCommand::SetRate {
+                        rate: PlaybackRate::Unlimited,
+                    },
                 )
                 .await;
-                if !status.stepping && status.position.completed_rounds > rounds {
-                    break;
-                }
-                // test-time: allow(hang-guard) -- Yield between positive step-completion polls; check_bound supplies the simulated cap and the committed round count, not this delay, completes the step.
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            let output = text(&session.output(&source).await);
+            let continued = session.complete(&restored, false, 4, SEED).await.unwrap();
+            let after = text(&session.output(&restored).await);
             assert!(
-                !output.contains(SYNCED_FIRST),
-                "capture point passed: {output:?}"
+                !after.contains("DISK volume boot="),
+                "restore restarted the probe: {after:?}"
             );
-            if output.contains(SUBMITTED_FIRST) {
-                break output;
-            }
-        };
-        let captured = session
-            .control(&source, "saved", ControlCommand::Checkpoint)
-            .await;
-        let (rounds, ns) = match &captured.state {
-            ControlState::Acknowledged {
-                checkpoint: Some(c),
-                error: None,
-                ..
-            } if c.state == CheckpointState::Captured => {
-                (c.position.completed_rounds, c.position.simulated_time_ns)
-            }
-            other => panic!("checkpoint not captured: {other:?}"),
-        };
-        eprintln!(
-            "native disk capture: backend={} rounds={rounds} ns={ns}",
-            label(backend)
-        );
-        let exported = session
-            .client
-            .checkpoint_definition(&source, "saved")
-            .await
-            .unwrap();
-        assert!(matches!(
-            &exported.spec.inputs,
-            InputSource::Resolved { .. }
-        ));
-        session.client.stop(&source).await.unwrap();
-        session.complete(&source, true, 1, SEED).await;
-        session
-            .client
-            .delete_checkpoint(&source, "saved")
-            .await
-            .unwrap();
-        session.client.delete(&source).await.unwrap();
-
-        session.workers.store(4, Ordering::SeqCst);
-        let restored = session
-            .client
-            .submit_definition(&serde_json::to_value(exported).unwrap(), true)
-            .await
-            .unwrap()
-            .metadata
-            .id;
-        session.submitted += 1;
-        session.worker(&restored).await;
-        assert!(session
-            .launch_request(&restored)
-            .resume_checkpoint
-            .is_some());
-        session
-            .control(
-                &restored,
-                "verify-paused-restore",
-                ControlCommand::SetRate {
-                    rate: PlaybackRate::Paused,
-                },
-            )
-            .await;
-        let position = session
-            .client
-            .playback(&restored)
-            .await
-            .unwrap()
-            .state
-            .position;
-        assert_eq!(
-            (position.completed_rounds, position.simulated_time_ns),
-            (rounds, ns)
-        );
-        session
-            .control(
-                &restored,
-                "continue",
-                ControlCommand::SetRate {
-                    rate: PlaybackRate::Unlimited,
-                },
-            )
-            .await;
-        let continued = session.complete(&restored, false, 4, SEED).await.unwrap();
-        let after = text(&session.output(&restored).await);
-        assert!(
-            !after.contains("DISK volume boot="),
-            "restore restarted the probe: {after:?}"
-        );
-        assert_eq!(format!("{before}{after}"), full, "source + restored output");
-        assert_eq!(
-            uninterrupted, continued,
-            "raw uninterrupted/continued witnesses differ"
-        );
-        let comparison = session.client.compare(&baseline, &restored).await.unwrap();
-        assert_eq!(comparison.witness_matches, Some(true));
-        eprintln!(
-            "native disk checkpoint continuation: backend={} witness={continued}",
-            label(backend)
-        );
-        session.close().await;
+            assert_eq!(format!("{before}{after}"), full, "source + restored output");
+            assert_eq!(
+                uninterrupted, continued,
+                "raw uninterrupted/continued witnesses differ"
+            );
+            let comparison = session.client.compare(&baseline, &restored).await.unwrap();
+            assert_eq!(comparison.witness_matches, Some(true));
+            eprintln!(
+                "native disk checkpoint continuation: backend={} witness={continued}",
+                label(backend)
+            );
+        })
     })
-    .await
-    .expect("host hang guard: disk checkpoint continuation never completed");
+    .await;
 }
