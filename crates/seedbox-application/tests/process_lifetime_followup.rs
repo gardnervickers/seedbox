@@ -13,8 +13,8 @@ use std::{
     fs,
     path::Path,
     process::{Child, Command, Stdio},
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{mpsc, Arc},
+    time::Duration,
 };
 fn wait(path: &Path) {
     seedbox_test_time::HangGuard::new(
@@ -82,15 +82,24 @@ fn explicit_environment_survives_monitor_without_ambient_values() {
 #[tokio::test(flavor = "current_thread")]
 async fn dropping_on_executor_hands_off_join_without_blocking_it() {
     let root = tempfile::tempdir().unwrap();
-    let execution = worker(root.path(), "escaped", &[]);
+    let mut execution = worker(root.path(), "escaped", &[]);
     wait(&root.path().join("holder-ready"));
-    let start = Instant::now();
-    drop(execution);
-    tokio::task::yield_now().await;
-    assert!(
-        start.elapsed() < Duration::from_millis(250),
-        "async drop blocked waiting for process cleanup"
-    );
+    struct Joined(mpsc::Sender<()>);
+    impl Drop for Joined {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    let (joined, joined_rx) = mpsc::channel();
+    execution.retain_until_join(Joined(joined));
+    // This task and the controller below share one executor thread. The
+    // controller can release the escaped process only after drop yields back.
+    tokio::spawn(async move {
+        drop(execution);
+        tokio::task::yield_now().await;
+    })
+    .await
+    .unwrap();
     // The escaped process is still alive, so a destructor must not pretend the
     // execution is cleaned merely because monitor joining has been detached.
     assert!(reclaim_barrier(
@@ -99,9 +108,18 @@ async fn dropping_on_executor_hands_off_join_without_blocking_it() {
     )
     .is_err());
     fs::write(root.path().join("exit-holder"), []).unwrap();
+    // A detached or synchronously timed-out join is not success: only a
+    // successful monitor receipt releases this retained guard. In particular,
+    // blocking the executor until cleanup times out would leak it, not signal.
+    seedbox_test_time::HangGuard::new(
+        "monitor reaper delivers successful cleanup after executor releases escaped holder",
+        process_lifetime::COMPLETION_TIMEOUT + Duration::from_secs(7),
+    )
+    .recv(&joined_rx)
+    .unwrap();
     reclaim_barrier(
         &root.path().join(process_lifetime::EXECUTION_LEASE_FILE),
-        Duration::from_secs(3),
+        Duration::ZERO,
     )
     .unwrap();
 }
