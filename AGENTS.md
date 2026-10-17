@@ -176,7 +176,8 @@ Tests never sleep; wait on a signal to establish readiness or ordering.
 Use generous real-time timeouts (tens of seconds) only to bound waiting for a
 positive event: HangGuard, Tokio timeouts and socket timeouts are all fine.
 Never assert on elapsed host time or infer ordering from a timed absence.
-The portable checker rejects sleep calls in test code; no annotations or exemptions.
+The portable checker rejects host sleep calls in test code; no annotations or exemptions.
+Before handing off a test change, run `nix develop -c seedbox-check --test-time-policy` (~2s).
 
 Engine changes need relevant native hardware checks as well as portable tests.
 

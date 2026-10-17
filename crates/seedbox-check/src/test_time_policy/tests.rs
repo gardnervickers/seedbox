@@ -222,11 +222,9 @@ fn direct_async_native_and_aliased_sleep_calls_are_rejected() {
         "tokio::time::sleep(delay)",
         "tokio::time::sleep_until(deadline)",
         "async_std::task::sleep(delay)",
-        "smol::Timer::sleep(delay)",
         "libc::usleep(10)",
         "libc::nanosleep(ptr,ptr)",
         "libc::clock_nanosleep(clock,0,ptr,ptr)",
-        "timer.sleep(delay)",
     ] {
         assert_eq!(
             findings(&format!("#[test] fn f(){{{call};}}")).len(),
@@ -241,6 +239,9 @@ fn direct_async_native_and_aliased_sleep_calls_are_rejected() {
         "use std::thread::{self,JoinHandle}; #[test] fn f(){thread::sleep(delay);}",
         "use std::{thread::{self as host}}; #[test] fn f(){host::sleep(delay);}",
         "use tokio::time::*; #[test] fn f(){sleep(delay);}",
+        "use async_std::task::sleep as pause; #[test] fn f(){pause(delay);}",
+        "use libc::nanosleep as pause; #[test] fn f(){pause(ptr,ptr);}",
+        "use libc::*; #[test] fn f(){usleep(10);}",
     ] {
         assert_eq!(findings(code).len(), 1, "{code}");
     }
@@ -286,7 +287,6 @@ fn nested_macro_calls_closures_and_timeout_bodies_are_scanned() {
         "tokio::select!{_=tokio::time::sleep(delay)=>{},_=work()=>{}}",
         "custom!{outer!(std::thread::sleep(delay))}",
         "use tokio::time::sleep as pause; tokio::select!{_=pause(delay)=>{}}",
-        "assert!(timer.sleep(delay));",
     ] {
         assert_eq!(
             findings(&format!("#[test] fn f(){{{body}}}")).len(),
@@ -327,4 +327,20 @@ fn explicit_test_context_and_parse_errors_are_preserved() {
     assert!(source(Path::new("tests/broken.rs"), "not Rust", false)
         .unwrap_err()
         .contains("tests/broken.rs"));
+}
+
+#[test]
+fn controlled_timers_and_unrelated_sleep_named_functions_are_not_host_sleeps() {
+    for code in [
+        "#[test] fn f(){activity::Controlled::sleep_until(&timer,deadline);}",
+        "use activity::Controlled as Timer; #[test] fn f(){Timer::sleep_until(&timer,deadline);}",
+        "use activity::Controlled; #[test] fn f(){Controlled::sleep_until(&timer,deadline);}",
+        "#[test] fn f(){timer.sleep_until(deadline);timer.sleep(delay);}",
+        "fn sleep(delay:u64){} #[test] fn f(){sleep(42);}",
+        "#[test] fn f(){assert!(timer.sleep_until(deadline));}",
+        "#[test] fn f(){tokio::select!{_=activity::Controlled::sleep_until(&timer,deadline)=>{}}}",
+        "use tokio::time::sleep as pause; #[test] fn f(){assert!(timer.pause(delay));}",
+    ] {
+        assert!(findings(code).is_empty(), "{code}");
+    }
 }

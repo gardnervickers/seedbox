@@ -153,9 +153,8 @@ fn paths(tree: &UseTree, prefix: &str, aliases: &mut BTreeMap<String, String>) {
         UseTree::Glob(_) => {
             let prefix = expand_alias(aliases, prefix.trim_end_matches("::"));
             let names: &[&str] = match prefix.as_str() {
-                "std::thread" | "tokio::time" | "async_std::task" | "smol" => {
-                    &["sleep", "sleep_until"]
-                }
+                "std::thread" | "tokio::time" | "async_std::task" => &["sleep", "sleep_until"],
+                "libc" => &["sleep", "usleep", "nanosleep", "clock_nanosleep"],
                 _ => &[],
             };
             for name in names {
@@ -197,12 +196,17 @@ impl Policy {
     }
     fn sleep_path(&self, path: &str) -> bool {
         let resolved = expand_alias(&self.aliases, path);
-        resolved.rsplit("::").next().is_some_and(Self::sleep_name)
-    }
-    fn sleep_name(name: &str) -> bool {
         matches!(
-            name,
-            "sleep" | "sleep_until" | "usleep" | "nanosleep" | "clock_nanosleep"
+            resolved.as_str(),
+            "std::thread::sleep"
+                | "std::thread::sleep_until"
+                | "tokio::time::sleep"
+                | "tokio::time::sleep_until"
+                | "async_std::task::sleep"
+                | "libc::sleep"
+                | "libc::usleep"
+                | "libc::nanosleep"
+                | "libc::clock_nanosleep"
         )
     }
     // Macro grammars such as select! are not Rust expressions. Inspect calls
@@ -222,6 +226,9 @@ impl Policy {
                 && matches!(&tokens[i - 3], TokenTree::Ident(_))
             {
                 continue;
+            }
+            if i > 0 && matches!(&tokens[i - 1], TokenTree::Punct(p) if p.as_char() == '.') {
+                continue; // A receiver method is not a resolved free-function import.
             }
             let mut path = ident.to_string();
             let mut end = i + 1;
@@ -309,13 +316,6 @@ impl<'ast> Visit<'ast> for Policy {
             }
         }
         visit::visit_expr_call(self, expr);
-    }
-    fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
-        let name = expr.method.to_string();
-        if Self::sleep_name(&name) {
-            self.report(expr.method.span(), &name);
-        }
-        visit::visit_expr_method_call(self, expr);
     }
     fn visit_macro(&mut self, item: &'ast syn::Macro) {
         if self.test {
@@ -468,7 +468,8 @@ fn module_contexts(
                                 || value.starts_with("std::")
                                 || value.starts_with("tokio::")
                                 || value.starts_with("async_std::")
-                                || value.starts_with("smol::")
+                                || value == "libc"
+                                || value.starts_with("libc::")
                         };
                         target
                             .entry(name.clone())

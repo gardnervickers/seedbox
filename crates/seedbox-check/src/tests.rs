@@ -1708,3 +1708,44 @@ fn install_executable(path: &std::path::Path, contents: &str) {
     fs::write(path, contents).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
+
+#[test]
+fn scan_only_policy_mode_is_explicit_and_cannot_select_other_work() {
+    assert!(
+        options(strings(&["--test-time-policy"]))
+            .unwrap()
+            .test_time_policy
+    );
+    assert!(!options(vec![]).unwrap().test_time_policy);
+    for other in [
+        "portable",
+        "linux-kvm",
+        "--list",
+        "--portable-stage",
+        "--probe-linux",
+    ] {
+        assert_eq!(
+            options(strings(&["--test-time-policy", other])).unwrap_err(),
+            "--test-time-policy must be used without suites or other modes"
+        );
+    }
+}
+
+#[test]
+fn scan_only_stage_reports_success_findings_and_parse_failure() {
+    let t = fixture();
+    let file = t.0.join("crates/example/tests/fixture.rs");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(
+        &file,
+        "fn f(){activity::Controlled::sleep_until(&timer,deadline);}",
+    )
+    .unwrap();
+    assert_eq!(test_time_policy_stage(&t.0).unwrap(), 0);
+    fs::write(&file, "fn f(){tokio::time::sleep(delay);}").unwrap();
+    assert_eq!(test_time_policy_stage(&t.0).unwrap(), 1);
+    fs::write(&file, "not Rust").unwrap();
+    assert!(test_time_policy_stage(&t.0)
+        .unwrap_err()
+        .contains("fixture.rs"));
+}

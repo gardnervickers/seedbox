@@ -13,6 +13,7 @@ pub struct Options {
     pub suites: Vec<Suite>,
     pub list: bool,
     pub portable_stage: bool,
+    pub test_time_policy: bool,
     pub probe: bool,
     pub help: bool,
 }
@@ -20,17 +21,22 @@ pub fn options(args: Vec<String>) -> Result<Options, String> {
     let mut names = Vec::new();
     let mut list = false;
     let mut portable_stage = false;
+    let mut test_time_policy = false;
     let mut probe = false;
     let mut help = false;
     for arg in args {
         match arg.as_str() {
             "--list" => list = true,
             "--portable-stage" => portable_stage = true,
+            "--test-time-policy" => test_time_policy = true,
             "--probe-linux" => probe = true,
             "--help" | "-h" => help = true,
             _ if arg.starts_with('-') => return Err(format!("unknown option: {arg}; see --help")),
             _ => names.push(arg),
         }
+    }
+    if test_time_policy && (!names.is_empty() || list || portable_stage || probe) {
+        return Err("--test-time-policy must be used without suites or other modes".into());
     }
     let suites = expand(&names)?;
     if portable_stage && suites != [Suite::Portable] {
@@ -40,12 +46,13 @@ pub fn options(args: Vec<String>) -> Result<Options, String> {
         suites,
         list,
         portable_stage,
+        test_time_policy,
         probe,
         help,
     })
 }
 fn help() {
-    println!("Run explicitly named test suites; Cargo discovers tests.\n\nUsage: seedbox-check [--list] [SUITE ...]\n\n  --list             Check requirements without building or running tests.\n  --portable-stage   Run portable checks without the outer fmt/clippy steps.\n  --help             Show this help.\n\nsuites:");
+    println!("Run explicitly named test suites; Cargo discovers tests.\n\nUsage: seedbox-check [--list] [SUITE ...]\n\n  --list             Check requirements without building or running tests.\n  --portable-stage   Run portable checks without the outer fmt/clippy steps.\n  --test-time-policy Scan test code for host sleeps without running other checks.\n  --help             Show this help.\n\nsuites:");
     for s in SUITES {
         println!("  {:16} {}", s.name(), s.description());
     }
@@ -92,6 +99,9 @@ pub fn entry(args: Vec<std::ffi::OsString>) -> Result<u8, String> {
             "run from the checkout root, or use bash harness/check.sh inside nix develop".into(),
         );
     }
+    if options.test_time_policy {
+        return test_time_policy_stage(&root);
+    }
     let env = environment_values(std::env::vars_os())?;
     let mut checks = Checks::new(
         Real::install_signals().map_err(|e| e.to_string())?,
@@ -104,6 +114,22 @@ pub fn entry(args: Vec<std::ffi::OsString>) -> Result<u8, String> {
     }
     let host = observe(&mut checks, &options.suites)?;
     coordinate(&mut checks, &host, &options)
+}
+pub fn test_time_policy_stage(root: &Path) -> Result<u8, String> {
+    let report = super::test_time_policy::check(root)?;
+    for finding in &report.findings {
+        eprintln!("{finding}");
+    }
+    if report.findings.is_empty() {
+        println!("test-time-policy: PASS");
+        Ok(0)
+    } else {
+        eprintln!(
+            "test-time-policy: FAIL ({} findings)",
+            report.findings.len()
+        );
+        Ok(1)
+    }
 }
 pub fn probe_linux() -> String {
     use std::os::fd::AsRawFd;
@@ -403,18 +429,8 @@ pub fn portable<C: Commands>(checks: &mut Checks<C>, host: &Host) -> Result<(), 
         return Ok(());
     }
     if !timed(checks, "test-time-policy", |checks| {
-        let report = super::test_time_policy::check(&checks.root)?;
-        for finding in &report.findings {
-            eprintln!("{finding}");
-        }
-        let passed = report.findings.is_empty();
-        if !passed {
-            checks.failed = true;
-            eprintln!(
-                "test-time-policy: FAIL ({} findings)",
-                report.findings.len()
-            );
-        }
+        let passed = test_time_policy_stage(&checks.root)? == 0;
+        checks.failed |= !passed;
         Ok(passed)
     })? {
         return Ok(());
