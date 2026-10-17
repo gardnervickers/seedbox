@@ -165,14 +165,26 @@ fn guest_cpuid(kvm: &Kvm) -> Result<CpuId> {
     Ok(cpuid)
 }
 
-/// Guest-writable MSRs, without TSC, APIC and KVM paravirtual registers.
+/// MSRs that are host-owned rather than guest state: the TSC family, the
+/// APIC base, the TSC deadline, and KVM's paravirtual and Hyper-V synthetic
+/// ranges. The guest sees neither paravirtual interface (CPUID hides the
+/// hypervisor leaves, and Hyper-V access is CPUID-enforced), while their
+/// counters (for example Hyper-V VP_RUNTIME and TIME_REF_COUNT) advance with
+/// host time. They are never captured, restored or witnessed.
+// TODO: Re-evaluate: a register belongs to simulated state only if the guest
+// can observe it; host-clock counters it cannot read would make every run's
+// stopped state differ.
+fn host_owned_msr(index: u32) -> bool {
+    matches!(index, 0x10 | 0x11 | 0x12 | 0x1b | 0x3b | 0x6e0)
+        || (0x4b56_4d00..=0x4b56_4dff).contains(&index)
+        || (0x4000_0000..=0x4000_00ff).contains(&index)
+}
+/// Guest-writable MSRs that this vCPU can read, without host-owned ones.
 fn msr_list(kvm: &Kvm, cpu: &VcpuFd) -> Result<Vec<u32>> {
     let list = checked("KVM_GET_MSR_INDEX_LIST", kvm.get_msr_index_list())?;
     let mut indices = Vec::new();
     for &index in list.as_slice() {
-        if matches!(index, 0x10 | 0x11 | 0x12 | 0x1b | 0x3b | 0x6e0)
-            || (0x4b56_4d00..=0x4b56_4dff).contains(&index)
-        {
+        if host_owned_msr(index) {
             continue;
         }
         let mut one = Msrs::from_entries(&[kvm_msr_entry {
@@ -292,6 +304,19 @@ impl Backend for Native {
             )?;
         }
         let cpu = checked("KVM_CREATE_VCPU", vm.create_vcpu(0))?;
+        // Without this, KVM serves Hyper-V synthetic MSRs (host-time counters)
+        // to a guest RDMSR even though CPUID advertises no Hyper-V interface.
+        if kvm.check_extension_raw(KVM_CAP_HYPERV_ENFORCE_CPUID.into()) <= 0 {
+            return Err("PV KVM cannot enforce Hyper-V CPUID".into());
+        }
+        checked(
+            "enforce Hyper-V CPUID",
+            cpu.enable_cap(&kvm_enable_cap {
+                cap: KVM_CAP_HYPERV_ENFORCE_CPUID,
+                args: [1, 0, 0, 0],
+                ..Default::default()
+            }),
+        )?;
         checked("KVM_SET_CPUID2", cpu.set_cpuid2(&guest_cpuid(&kvm)?))?;
         let msrs = msr_list(&kvm, &cpu)?;
         Ok(Self {
@@ -564,16 +589,20 @@ impl Backend for Native {
             self.cpu
                 .set_sregs(&from_raw::<kvm_sregs>(&state.sregs, "sregs")?),
         )?;
-        // Write back only the MSRs that differ from this fresh vCPU.
+        // Write back only the MSRs that differ from this fresh vCPU. Snapshots
+        // taken before host-owned MSRs were excluded still carry them; they are
+        // host clocks, not guest state, so they are dropped rather than restored.
         let current = self.read_msrs()?;
-        if current.len() != state.msrs.len()
-            || current.iter().zip(&state.msrs).any(|(a, b)| a.0 != b.0)
-        {
-            return Err("PV snapshot MSR inventory differs from this host".into());
-        }
-        let changed: Vec<_> = state
+        let saved: Vec<_> = state
             .msrs
             .iter()
+            .filter(|(index, _)| !host_owned_msr(*index))
+            .collect();
+        if current.len() != saved.len() || current.iter().zip(&saved).any(|(a, b)| a.0 != b.0) {
+            return Err("PV snapshot MSR inventory differs from this host".into());
+        }
+        let changed: Vec<_> = saved
+            .into_iter()
             .zip(&current)
             .filter(|(saved, now)| saved.1 != now.1)
             .map(|(&(index, data), _)| kvm_msr_entry {

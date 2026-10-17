@@ -20,6 +20,35 @@ fn segment(s: &kvm_segment) -> [u64; 12] {
         s.unusable as u64,
     ]
 }
+/// The exception KVM would deliver. Without `injected` or `pending`, KVM keeps
+/// the vector and error code of an earlier host-assisted delivery, which
+/// depends on host exits and is never delivered again, so it is canonicalized.
+// TODO: Re-evaluate: evidence describes what the next entry delivers; KVM
+// ignores these fields on restore unless injected or pending is set.
+pub(super) fn exception_evidence(e: &kvm_vcpu_events) -> [u64; 7] {
+    let x = &e.exception;
+    if x.injected == 0 && x.pending == 0 {
+        return [0; 7];
+    }
+    [
+        x.injected as u64,
+        x.nr as u64,
+        x.has_error_code as u64,
+        x.pending as u64,
+        x.error_code as u64,
+        e.exception_has_payload as u64,
+        e.exception_payload,
+    ]
+}
+/// The interrupt KVM would deliver; its vector and kind matter only when
+/// injected, while the interrupt shadow always does.
+pub(super) fn interrupt_evidence(e: &kvm_vcpu_events) -> [u8; 4] {
+    let i = &e.interrupt;
+    if i.injected == 0 {
+        return [0, 0, 0, i.shadow];
+    }
+    [i.injected, i.nr, i.soft, i.shadow]
+}
 impl Native {
     pub(super) fn read_evidence(&mut self) -> Result<Vec<(String, String)>> {
         if self.held.is_some() {
@@ -73,7 +102,7 @@ impl Native {
             )?,
             part(
                 "events",
-                &json!({"exception":[e.exception.injected as u64,e.exception.nr as u64,e.exception.has_error_code as u64,e.exception.pending as u64,e.exception.error_code as u64,e.exception_has_payload as u64,e.exception_payload],"interrupt":[e.interrupt.injected,e.interrupt.nr,e.interrupt.soft,e.interrupt.shadow],"nmi":[e.nmi.injected,e.nmi.pending,e.nmi.masked],"sipi":e.sipi_vector,"flags":e.flags,"smi":[e.smi.smm,e.smi.pending,e.smi.smm_inside_nmi,e.smi.latched_init],"triple_fault":e.triple_fault.pending}),
+                &json!({"exception":exception_evidence(&e),"interrupt":interrupt_evidence(&e),"nmi":[e.nmi.injected,e.nmi.pending,e.nmi.masked],"sipi":e.sipi_vector,"flags":e.flags,"smi":[e.smi.smm,e.smi.pending,e.smi.smm_inside_nmi,e.smi.latched_init],"triple_fault":e.triple_fault.pending}),
             )?,
             part(
                 "vcpu",
