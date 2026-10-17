@@ -1,6 +1,9 @@
 //! Public clock faults checked against real clock-faults.c timer/clock output.
-//! Child of native_faults: reuse its real service, admission and replay helpers.
+//! Shares the real service, public admission and replay helpers.
 use super::*;
+use seedbox_api::{ControlCommand, FaultAction, InputSource, PlaybackRate};
+const SEED: u64 = 123;
+const TARGET: &str = "target";
 
 const CLOCK_HANDLE: &str = "public-clock";
 const SECOND: i128 = 1_000_000_000;
@@ -72,7 +75,7 @@ fn clock_request(session: &NativeSession) -> SubmitRequest {
     let mut definition = definition.as_ref().clone();
     definition.machines.get_mut(TARGET).unwrap().process.argv =
         vec!["/application".into(), "clock".into()];
-    request.spec = SimulationSpec::resolved(definition);
+    request.spec = SimulationSpec::resolved(definition).unwrap();
     request.options.start_paused = true;
     request
 }
@@ -253,15 +256,19 @@ async fn clock_case(backend: DriverBackend, case: ClockCase) {
     })).await;
 }
 
+#[cfg(feature = "kvm-tests")]
 pub async fn pv_clock_skew_heal_replay() {
     clock_case(DriverBackend::Pv, ClockCase::Skew).await;
 }
+#[cfg(feature = "kvm-tests")]
 pub async fn pv_clock_drift_heal_replay() {
     clock_case(DriverBackend::Pv, ClockCase::Drift).await;
 }
+#[cfg(feature = "tcg-tests")]
 pub async fn tcg_clock_skew_heal_replay() {
     clock_case(DriverBackend::Tcg, ClockCase::Skew).await;
 }
+#[cfg(feature = "tcg-tests")]
 pub async fn tcg_clock_drift_heal_replay() {
     clock_case(DriverBackend::Tcg, ClockCase::Drift).await;
 }

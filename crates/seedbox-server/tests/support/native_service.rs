@@ -19,11 +19,18 @@ mod held_checkpoint;
 #[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
 pub use disk::{disk_checkpoint_continuation, disk_repeat_workers};
 pub use held_checkpoint::native_held_checkpoint;
-#[cfg(feature = "kvm-tests")]
+#[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
 #[path = "native_fault_api.rs"]
 mod fault_api;
-#[cfg(feature = "kvm-tests")]
+#[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
 use fault_api::{applied_once, inject, step, until_output};
+#[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
+#[path = "native_fault_clock.rs"]
+mod clock_faults;
+#[cfg(feature = "kvm-tests")]
+pub use clock_faults::{pv_clock_drift_heal_replay, pv_clock_skew_heal_replay};
+#[cfg(feature = "tcg-tests")]
+pub use clock_faults::{tcg_clock_drift_heal_replay, tcg_clock_skew_heal_replay};
 #[cfg(feature = "kvm-tests")]
 #[path = "native_faults.rs"]
 mod faults;
