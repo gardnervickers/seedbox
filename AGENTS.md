@@ -53,7 +53,10 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
   so it would also move standalone crate builds and break their scripts.
 - Keep Cargo target directories private per agent; they are build outputs,
   not a shared cache. Preserve the build-only `SEEDBOX_BUILD_ROOT` checkout
-  invalidation.
+  invalidation. `seedbox-spec` uses the same watcher as engine/control so API
+  metadata follows checkout changes, including newer-to-older type layouts.
+  Checkouts predating a package's watcher need isolated target directories;
+  Cargo's relative dep-info alone does not make cross-worktree reuse safe.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
