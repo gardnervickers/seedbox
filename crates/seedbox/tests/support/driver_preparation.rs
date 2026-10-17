@@ -1,5 +1,8 @@
 //! Real CLI → ordinary OCI preparation → retained Driver → native PV acceptance.
 //! Never substitutes a prepared manifest, executor, or execution report.
+#[path = "driver_interactions.rs"]
+mod interactions;
+
 use seedbox_application::process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE};
 use seedbox_test_time::HangGuard;
 use std::{
@@ -17,10 +20,7 @@ struct Service {
 }
 impl Service {
     fn new() -> Self {
-        let root = tempfile::Builder::new()
-            .prefix("efd-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let root = tempfile::Builder::new().prefix("efd-").tempdir().unwrap();
         let target = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
@@ -79,6 +79,24 @@ impl Service {
     }
     fn cli(&self, args: &[&str]) -> Output {
         let output = self.command().args(args).output().unwrap();
+        if !output.status.success() {
+            // Catalogue state disappears during graceful daemon/session cleanup.
+            // Retain the actual public resource error before Drop tears it down.
+            let diagnostic = self
+                .command()
+                .args(["get", "simulations", "--json"])
+                .output()
+                .unwrap();
+            fs::write(
+                self.path().join("failed-catalogue.json"),
+                &diagnostic.stdout,
+            )
+            .unwrap();
+            eprintln!(
+                "public failure catalogue: {}",
+                String::from_utf8_lossy(&diagnostic.stdout)
+            );
+        }
         assert!(
             output.status.success(),
             "CLI {args:?}: status={} stdout={} stderr={}\nserver={}",

@@ -2305,7 +2305,8 @@ fn non_oracle_controller_refuses_before_image_preparation() {
 }
 
 // Runs only in the explicit application suite, after normal assets/release and
-// portable checks. The helper invokes target/release/seedbox for every guest.
+// portable checks. The helper invokes the normal release CLI for every guest;
+// its interactions case covers run/logs/events/wait/replay/shutdown on Driver.
 #[cfg(all(
     feature = "application-tests",
     target_os = "linux",
