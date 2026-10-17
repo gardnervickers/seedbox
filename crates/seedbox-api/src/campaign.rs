@@ -313,6 +313,10 @@ pub struct ShrinkRequest {
     /// which vary timing but no input. One keeps the exact timing.
     #[serde(default = "one_seed")]
     pub seeds: u32,
+    /// Shrink a branched source from its start checkpoint, its consumed
+    /// prefix fixed, rather than its full program from a fresh start.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_checkpoint: bool,
     pub options: ExecutionOptions,
 }
 

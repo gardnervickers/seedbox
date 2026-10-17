@@ -606,7 +606,11 @@ timing (guest entropy, jitter) but no input. It reproduces at the lowest seed
 that fails the same way, decided only once every lower seed has completed, so
 completion order never matters, and the other runs are then stopped. A
 failure that hangs on exact timing can then lose inputs that only shaped that
-timing; a checkpoint start keeps its state, so it uses only the source seed.
+timing. `--from-checkpoint` shrinks a branched source from its start
+checkpoint directly, so only inputs after the branch point (often a single
+mutation and its teardown) are candidates; a checkpoint start keeps its state,
+so derived seeds instead change the seed of a reseed input the probe keeps and
+the checkpoint has not consumed, and without one only the source seed applies.
 The reproduction names the run, and so the seed, that reproduced. The result is "1-minimal under these transformations" only when
 ddmin finished at single-atom granularity; otherwise it is "reduced".
 With probes left, a greedy simplification pass then edits the kept inputs one

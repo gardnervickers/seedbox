@@ -524,9 +524,19 @@ impl ExecutionService {
             }
             seedbox_spec::definition::Start::Fresh => (resource.spec.clone(), None),
         };
+        // Asked to, a branched source shrinks from its checkpoint directly.
+        let (spec, fallback, pending, floor_ns) = match (request.from_checkpoint, fallback) {
+            (true, Some((checkpoint, pending, at_ns))) => (checkpoint, None, pending, at_ns),
+            (true, None) => {
+                return Err(invalid(format!(
+                    "{source} did not start from a checkpoint; shrink it without --from-checkpoint"
+                )))
+            }
+            (false, fallback) => (spec, fallback, 0, 0),
+        };
         let inputs = resource.spec.program.clone();
         let timed: Vec<TimedInput> = inputs.iter().map(timed).collect::<Result<_, _>>()?;
-        let candidates = shrink::candidates(&timed, 0);
+        let candidates = shrink::candidates(&timed, pending);
         let removable = candidates.atoms.iter().map(Vec::len).sum::<usize>() as u32;
         let mut jobs = self
             .jobs
@@ -542,11 +552,11 @@ impl ExecutionService {
             spec,
             inputs,
             removable,
-            pending: 0,
-            floor_ns: 0,
+            pending,
+            floor_ns,
             simplifier: None,
             fallback,
-            from_checkpoint: false,
+            from_checkpoint: request.from_checkpoint,
             probes: Vec::new(),
             running: Vec::new(),
             error: None,
@@ -1276,14 +1286,28 @@ impl ExecutionService {
             }
         };
         let keep: Vec<String> = program.iter().map(|i| i.key.clone()).collect();
-        // A checkpoint start keeps its own state: only the source seed applies.
+        // A fresh start varies its run seed. A checkpoint start keeps its
+        // state, so it varies the seed of a reseed it has not yet consumed,
+        // if the probe keeps one; otherwise only the source seed applies.
         let fresh = matches!(
             &job.spec.inputs,
             InputSource::Resolved { definition }
                 if definition.start == seedbox_spec::definition::Start::Fresh
         );
+        let reseed = (!fresh)
+            .then(|| {
+                program.iter().position(|input| {
+                    input.action["action"] == "reseed"
+                        && job
+                            .inputs
+                            .iter()
+                            .position(|i| i.key == input.key)
+                            .is_some_and(|at| at >= job.pending)
+                })
+            })
+            .flatten();
         let base = job.spec.seed.unwrap_or_default();
-        let variants = if fresh && job.spec.seed.is_some() {
+        let variants = if (fresh && job.spec.seed.is_some()) || reseed.is_some() {
             job.request.seeds.max(1)
         } else {
             1
@@ -1293,7 +1317,13 @@ impl ExecutionService {
             let mut spec = job.spec.clone();
             spec.program = program.clone();
             if variant > 0 {
-                spec.seed = Some(probe_seed(base, variant));
+                match reseed {
+                    Some(at) => {
+                        let seed = spec.program[at].action["seed"].as_u64().unwrap_or_default();
+                        spec.program[at].action["seed"] = probe_seed(seed, variant).into();
+                    }
+                    None => spec.seed = Some(probe_seed(base, variant)),
+                }
             }
             let mut metadata = seedbox_spec::definition::Metadata {
                 name: format!("{}-shrink", job.source),

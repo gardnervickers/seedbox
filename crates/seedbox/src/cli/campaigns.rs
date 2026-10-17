@@ -394,23 +394,16 @@ pub(super) fn stop(id: &str) -> Result<u8> {
     })
 }
 
+/// Submit `request`, given a fresh request ID, and follow it unless detached.
 pub(super) fn shrink(
     id: &SimulationId,
-    max_probes: u32,
-    seeds: u32,
-    property: Option<String>,
-    options: seedbox_api::ExecutionOptions,
+    mut request: seedbox_api::ShrinkRequest,
     detach: bool,
     json: bool,
 ) -> Result<u8> {
     let client = daemon::connect(None)?;
-    let request = seedbox_api::ShrinkRequest {
-        request_id: Client::request_id().map_err(client_error)?,
-        max_probes,
-        property,
-        seeds,
-        options,
-    };
+    request.request_id = Client::request_id().map_err(client_error)?;
+    let from_checkpoint = request.from_checkpoint;
     runtime()?.block_on(async {
         let mut shrink = client
             .submit_shrink(id, &request)
@@ -460,11 +453,11 @@ pub(super) fn shrink(
                 );
             }
         }
-        shrink_report(&shrink, json)
+        shrink_report(&shrink, from_checkpoint, json)
     })
 }
 
-fn shrink_report(shrink: &Shrink, json: bool) -> Result<u8> {
+fn shrink_report(shrink: &Shrink, requested_checkpoint: bool, json: bool) -> Result<u8> {
     let code = match (&shrink.error, shrink.outcome) {
         (Some(_), _) | (None, None) => 2,
         (None, Some(ShrinkOutcome::NotReproduced)) => 1,
@@ -504,7 +497,9 @@ fn shrink_report(shrink: &Shrink, json: bool) -> Result<u8> {
             for edit in &shrink.edits {
                 output::field("simplified", edit);
             }
-            if shrink.from_checkpoint {
+            if requested_checkpoint {
+                output::field("start", "checkpoint, as requested");
+            } else if shrink.from_checkpoint {
                 output::field(
                     "start",
                     "checkpoint; the full program did not fail from a fresh start",

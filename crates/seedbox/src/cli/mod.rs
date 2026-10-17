@@ -336,6 +336,9 @@ enum Command {
         /// Seeds each probe may fail under, run at once: the source's, then derived ones that vary timing but no input. 1 keeps the exact timing.
         #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=8))]
         seeds: u32,
+        /// Shrink a branched simulation from its start checkpoint, keeping what it consumed: only inputs after the branch point are candidates, and derived seeds vary its reseed.
+        #[arg(long)]
+        from_checkpoint: bool,
         /// Property whose violation must persist [default: the oracle failure, otherwise the first violation].
         #[arg(long)]
         property: Option<String>,
@@ -977,19 +980,24 @@ fn run(cli: Cli) -> Result<u8> {
             id,
             max_probes,
             seeds,
+            from_checkpoint,
             property,
             detach,
             json,
             wall_time,
         } => campaigns::shrink(
             &id,
-            max_probes,
-            seeds,
-            property,
-            seedbox_api::ExecutionOptions {
-                capture_anchors: Vec::new(),
-                start_paused: false,
-                wall_time_ns: wall_time,
+            seedbox_api::ShrinkRequest {
+                request_id: String::new(),
+                max_probes,
+                property,
+                seeds,
+                from_checkpoint,
+                options: seedbox_api::ExecutionOptions {
+                    capture_anchors: Vec::new(),
+                    start_paused: false,
+                    wall_time_ns: wall_time,
+                },
             },
             detach,
             json,
