@@ -5,10 +5,8 @@ use crate::{
     pv::{Inbox, Outbox, Output, Request as GuestRequest, Response as GuestResponse},
     rng::SeededRng,
 };
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use seedbox_test_time::{GuestProgress, HangGuard};
+use std::{collections::VecDeque, time::Duration};
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
@@ -128,6 +126,21 @@ fn run(
         .unwrap();
     (stopped, output)
 }
+fn phase(name: &str, start: u64, deadline: u64) -> GuestProgress {
+    // Every poll advances its positive quantum: no same-instant retries.
+    GuestProgress::new(
+        name,
+        Duration::from_nanos(start),
+        Duration::from_nanos(deadline),
+        0,
+    )
+    .unwrap()
+}
+fn next(progress: &mut GuestProgress, now: u64, last: &str) -> u64 {
+    progress.next(Duration::from_nanos(now), Duration::from_millis(5))
+        .unwrap_or_else(|error| panic!("{}: {error}; now={now}; last stop/output={last}; pending=supervisor command or outcome", progress.phase()))
+        .as_nanos().try_into().unwrap()
+}
 #[test]
 #[ignore = "requires signed SEEDBOX_PV_WORKER, SEEDBOX_PV_KERNEL and SEEDBOX_PV_SERVICE_INITRD"]
 fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
@@ -141,15 +154,23 @@ fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
             replace_application(&archive, &application(code as u32)),
         )
         .unwrap();
-        // test-time: pending(bd-dd9, program-exit-tests-native-linux-program-exit-zero-and-nonzero-survive-snapshot-and-zero-runs-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        let start = Instant::now();
+        let guard = HangGuard::new(
+            "native exit/start/shutdown worker transport",
+            Duration::from_secs(300),
+        );
+        // The generated application is three instructions and has no sleeps.
+        // Allow five simulated seconds for Linux boot and supervisor startup;
+        // restart and shutdown each get one second for control/exit/reap timers.
+        let mut progress = phase("boot and immediate application exit", 0, 5_000_000_000);
         let mut now = 0;
+        let mut last = String::from("boot not yet run");
         loop {
-            // test-time: pending(bd-dd9, program-exit-tests-native-linux-program-exit-zero-and-nonzero-survive-snapshot-and-zero-runs-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-            assert!(start.elapsed() < Duration::from_secs(120));
-            let (stop, outputs) = run(&mut machine, now, now + 5_000_000, &[]);
+            guard.remaining().unwrap();
+            let upto = next(&mut progress, now, &last);
+            let (stop, outputs) = run(&mut machine, now, upto, &[]);
+            last = format!("{stop:?}; {outputs:?}");
             assert!(!matches!(stop, StopReason::Exited { .. }));
-            now += 5_000_000;
+            now = upto;
             if outputs.iter().any(|output| matches!(output.payload, GuestResponse::ApplicationOutcome { code: actual } if i32::from(actual) == code)) { break; }
         }
         let snapshot = machine.snapshot().unwrap();
@@ -174,8 +195,17 @@ fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
             let mut ack = 0;
             let mut outcome = 0;
             let mut cursor = now;
+            let mut progress = phase(
+                "restart acknowledgement and outcome",
+                now,
+                now + 1_000_000_000,
+            );
+            last = format!("start command {id} queued; awaiting acknowledgement/outcome");
             while outcome == 0 {
-                let (stop, outputs) = run(&mut branch, cursor, cursor + 5_000_000, &[]);
+                guard.remaining().unwrap();
+                let upto = next(&mut progress, cursor, &last);
+                let (stop, outputs) = run(&mut branch, cursor, upto, &[]);
+                last = format!("{stop:?}; {outputs:?}; ack={ack}; outcome={outcome}");
                 assert!(!matches!(stop, StopReason::Exited { .. }));
                 for output in outputs {
                     match output.payload {
@@ -190,14 +220,21 @@ fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
                         _ => {}
                     }
                 }
-                cursor += 5_000_000;
-                // test-time: pending(bd-dd9, program-exit-tests-native-linux-program-exit-zero-and-nonzero-survive-snapshot-and-zero-runs-elapsed-2) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-                assert!(start.elapsed() < Duration::from_secs(120));
+                cursor = upto;
             }
             assert_eq!((ack, outcome), (1, 1));
             run(&mut branch, cursor, cursor, &[GuestRequest::Shutdown]);
+            last = String::from("shutdown queued");
+            let mut progress = phase(
+                "shutdown without repeated outcome",
+                cursor,
+                cursor + 1_000_000_000,
+            );
             loop {
-                let (stop, outputs) = run(&mut branch, cursor, cursor + 5_000_000, &[]);
+                guard.remaining().unwrap();
+                let upto = next(&mut progress, cursor, &last);
+                let (stop, outputs) = run(&mut branch, cursor, upto, &[]);
+                last = format!("{stop:?}; {outputs:?}");
                 assert!(!outputs.iter().any(|output| matches!(
                     output.payload,
                     GuestResponse::ApplicationOutcome { .. }
@@ -206,9 +243,7 @@ fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
                     assert_eq!(reason, ExitReason::Shutdown);
                     break;
                 }
-                cursor += 5_000_000;
-                // test-time: pending(bd-dd9, program-exit-tests-native-linux-program-exit-zero-and-nonzero-survive-snapshot-and-zero-runs-elapsed-3) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-                assert!(start.elapsed() < Duration::from_secs(120));
+                cursor = upto;
             }
         }
     }

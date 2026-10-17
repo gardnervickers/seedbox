@@ -1,6 +1,7 @@
 use super::*;
 use crate::clock::Clock;
-use std::sync::Arc;
+use seedbox_test_time::{GuestProgress, HangGuard};
+use std::{sync::Arc, time::Duration};
 type PVMachine = crate::machine::test_environment::Environment<super::PVMachine>;
 use crate::rng::{RngStreamExt, SeededRng};
 
@@ -83,17 +84,45 @@ fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() 
 
 use super::guest;
 
+// pv-lifecycle-init.c retries port discovery 10,000 times with 1 ms
+// sleeps. Add five simulated seconds for Linux boot, device setup, SIGTERM,
+// child marker/wait/reap and sync/poweroff (no other fixture sleeps).
+const LIFECYCLE_BUDGET: u64 = 10_000 * 1_000_000 + 5_000_000_000;
+fn phase(name: &str, now: u64) -> GuestProgress {
+    // Timed blocks advance to their deadline; an untimed block must satisfy
+    // the phase or fail, so there are no legitimate unchanged poll rounds.
+    GuestProgress::new(
+        name,
+        Duration::from_nanos(now),
+        Duration::from_nanos(now + LIFECYCLE_BUDGET),
+        0,
+    )
+    .unwrap()
+}
+fn next(progress: &mut GuestProgress, now: u64, console: &[u8]) -> u64 {
+    progress
+        .next(Duration::from_nanos(now), Duration::from_millis(1))
+        .unwrap_or_else(|error| {
+            panic!(
+                "{}: {error}; now={now}; console={}",
+                progress.phase(),
+                String::from_utf8_lossy(console)
+            )
+        })
+        .as_nanos()
+        .try_into()
+        .unwrap()
+}
+
 fn finish(machine: &mut PVMachine, clock: &crate::clock::SimulationClock) {
-    // test-time: pending(bd-dd9, lifecycle-tests-finish-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = std::time::Instant::now();
+    let guard = HangGuard::new(
+        "lifecycle shutdown worker transport",
+        Duration::from_secs(300),
+    );
+    let mut progress = phase("boot and shutdown cleanup", clock.now());
     loop {
-        // test-time: pending(bd-dd9, lifecycle-tests-finish-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(60),
-            "guest did not shut down: {}",
-            String::from_utf8_lossy(&machine.console)
-        );
-        let upto = clock.now() + 1_000_000;
+        guard.remaining().unwrap();
+        let upto = next(&mut progress, clock.now(), &machine.console);
         match machine.run(&mut (), at(upto)).unwrap() {
             StopReason::Exited {
                 reason: ExitReason::Shutdown,
@@ -173,12 +202,14 @@ fn zero_budget_shutdown_snapshots_preserve_request_once() {
         let output_start = branch.console.len();
         branch.request(crate::pv::Request::Reboot).unwrap();
         assert!(!branch.shutdown);
-        // test-time: pending(bd-dd9, lifecycle-tests-zero-budget-shutdown-snapshots-preserve-request-once-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        let reboot_started = std::time::Instant::now();
+        let guard = HangGuard::new(
+            "lifecycle reboot worker transport",
+            Duration::from_secs(300),
+        );
+        let mut progress = phase("reboot readiness", branch_clock.now());
         loop {
-            // test-time: pending(bd-dd9, lifecycle-tests-zero-budget-shutdown-snapshots-preserve-request-once-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-            assert!(reboot_started.elapsed() < std::time::Duration::from_secs(60));
-            let upto = branch_clock.now() + 1_000_000;
+            guard.remaining().unwrap();
+            let upto = next(&mut progress, branch_clock.now(), &branch.console);
             match branch.run(&mut (), at(upto)).unwrap() {
                 StopReason::BoundaryReached => branch_clock.set(upto),
                 StopReason::Blocked {
@@ -221,12 +252,11 @@ fn live_linux_ring_dma_snapshot_preserves_shutdown_at_newer_clock() {
         clock.clone(),
     )
     .unwrap();
-    // test-time: pending(bd-dd9, lifecycle-tests-live-linux-ring-dma-snapshot-preserves-shutdown-at-newer-clock-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = std::time::Instant::now();
+    let guard = HangGuard::new("lifecycle boot worker transport", Duration::from_secs(300));
+    let mut progress = phase("live ring boot readiness", clock.now());
     while !String::from_utf8_lossy(&machine.console).contains("PV_LIFECYCLE_READY") {
-        // test-time: pending(bd-dd9, lifecycle-tests-live-linux-ring-dma-snapshot-preserves-shutdown-at-newer-clock-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(started.elapsed() < std::time::Duration::from_secs(60));
-        let upto = clock.now() + 1_000_000;
+        guard.remaining().unwrap();
+        let upto = next(&mut progress, clock.now(), &machine.console);
         match machine.run(&mut (), at(upto)).unwrap() {
             StopReason::BoundaryReached => clock.set(upto),
             StopReason::Blocked {

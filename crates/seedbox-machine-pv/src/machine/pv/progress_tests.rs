@@ -8,9 +8,10 @@ use crate::{
     pv::{Inbox, Outbox, Output, Response, Stream},
     rng::SeededRng,
 };
+use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{
     collections::{BTreeMap, VecDeque},
-    time::{Duration, Instant},
+    time::Duration,
 };
 #[cfg(target_arch = "aarch64")]
 const COMMAND_LINE: &str = "console=ttyAMA0 nosmp";
@@ -61,33 +62,61 @@ fn machine(iterations: u64, instrumented: bool) -> PVMachine {
     PVMachine::from_boot_inputs(&input("SEEDBOX_PV_WORKER"), bootstrap.kernel.image, archive)
         .unwrap()
 }
+fn workload_deadline(iterations: u64, factor: u32) -> Duration {
+    // cpu-loop.c executes one two-instruction block per iteration. Upper-bound
+    // it by one PV call per iteration (the client actually batches blocks),
+    // plus a million calls for loader/stdio/exit at the selected ns/call cost.
+    // Five simulated seconds allow Linux boot/device timer settlement, not
+    // application work; the fixture itself has no sleeps or input waits.
+    Duration::from_secs(5) + Duration::from_nanos((iterations + 1_000_000) * u64::from(factor))
+}
 struct Session {
     machine: PVMachine,
     clock: SimulationClock,
     rng: SeededRng,
     events: Vec<Output>,
-    started: Instant,
+    progress: GuestProgress,
+    guard: HangGuard,
 }
 impl Session {
-    fn new(machine: PVMachine) -> Self {
+    fn new(machine: PVMachine, iterations: u64, factor: u32) -> Self {
+        let deadline = workload_deadline(iterations, factor);
         Self {
             machine,
             clock: SimulationClock::new(0),
             rng: SeededRng::new(17),
             events: Vec::new(),
-            // test-time: pending(bd-dd9, progress-tests-session-new-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-            started: Instant::now(),
+            progress: GuestProgress::new(
+                "CPU fixture boot/work/outcome",
+                Duration::ZERO,
+                deadline,
+                0,
+            )
+            .unwrap(),
+            guard: HangGuard::new(
+                "native CPU fixture worker transport",
+                Duration::from_secs(300),
+            ),
         }
     }
     fn run(&mut self, budget: u64, factor: u32) {
-        // test-time: pending(bd-dd9, progress-tests-session-run-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            self.started.elapsed() < Duration::from_secs(120),
-            "instrumentation fixture timed out: {:?}",
-            self.events
-        );
+        self.guard.remaining().unwrap();
+        let limit = self
+            .progress
+            .next(
+                Duration::from_nanos(self.clock.now()),
+                Duration::from_nanos(budget),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: {error}; now={}; outputs={:?}",
+                    self.progress.phase(),
+                    self.clock.now(),
+                    self.events
+                )
+            });
         let now = Timestamp::from_nanos(self.clock.now());
-        let upto = Timestamp::from_nanos(self.clock.now() + budget);
+        let upto = Timestamp::from_nanos(limit.as_nanos().try_into().unwrap());
         let mut inbox = VecDeque::new();
         let result = self.machine.run(
             &mut RunContext {
@@ -165,29 +194,29 @@ impl Session {
 #[test]
 #[ignore = "requires signed native PV worker, ABI3 kernel, isolated progress runtime and CPU fixture"]
 fn native_instrumented_cpu_loop_has_work_cost_rate_and_snapshot_continuation() {
-    let raw_short = Session::new(machine(200_000, false)).finish(1_000_000, 1000);
-    let raw_long = Session::new(machine(400_000, false)).finish(1_000_000, 1000);
+    let raw_short = Session::new(machine(200_000, false), 200_000, 1000).finish(1_000_000, 1000);
+    let raw_long = Session::new(machine(400_000, false), 400_000, 1000).finish(1_000_000, 1000);
     assert!(
         raw_short < 100_000 && raw_long < 100_000,
         "raw CPU work unexpectedly charged: {raw_short}/{raw_long}"
     );
-    let short = Session::new(machine(200_000, true)).finish(1_000_000, 1000);
-    let long = Session::new(machine(400_000, true)).finish(1_000_000, 1000);
+    let short = Session::new(machine(200_000, true), 200_000, 1000).finish(1_000_000, 1000);
+    let long = Session::new(machine(400_000, true), 400_000, 1000).finish(1_000_000, 1000);
     assert!(
         short > 1_000_000 && long > short * 3 / 2,
         "instrumented cost must grow with CPU iterations"
     );
-    let doubled = Session::new(machine(400_000, true)).finish(1_000_000, 2000);
+    let doubled = Session::new(machine(400_000, true), 400_000, 2000).finish(1_000_000, 2000);
     assert!(
         doubled > long * 19 / 10 && doubled < long * 21 / 10,
         "measured CPU region rate: {long}/{doubled}"
     );
-    let partitioned = Session::new(machine(400_000, true)).finish(137_000, 1000);
+    let partitioned = Session::new(machine(400_000, true), 400_000, 1000).finish(137_000, 1000);
     assert_eq!(
         partitioned, long,
         "host run partition must not change charged CPU work"
     );
-    let mut original = Session::new(machine(2_000_000, true));
+    let mut original = Session::new(machine(2_000_000, true), 2_000_000, 1000);
     while !original.stdout().starts_with(b"START=") {
         original.run(1_000_000, 1000);
     }
@@ -199,6 +228,14 @@ fn native_instrumented_cpu_loop_has_work_cost_rate_and_snapshot_continuation() {
     let now = original.clock.now();
     let rng = original.rng.clone();
     let prefix = original.events.clone();
+    // Equivalent continuations keep the original absolute workload horizon.
+    let progress = GuestProgress::new(
+        "restored CPU continuation",
+        Duration::from_nanos(now),
+        workload_deadline(2_000_000, 1000),
+        0,
+    )
+    .unwrap();
     let expected = original.finish(137_000, 1000);
     assert!(
         original.clock.now() - now > 10_000_000,
@@ -216,8 +253,8 @@ fn native_instrumented_cpu_loop_has_work_cost_rate_and_snapshot_continuation() {
         clock: SimulationClock::new(now),
         rng,
         events: prefix,
-        // test-time: pending(bd-dd9, progress-tests-native-instrumented-cpu-loop-has-work-cost-rate-and-snapshot-continuation-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        started: Instant::now(),
+        progress,
+        guard: HangGuard::new("restored CPU worker transport", Duration::from_secs(300)),
     };
     assert_eq!(restored.finish(137_000, 1000), expected);
     assert_eq!(
@@ -228,4 +265,37 @@ fn native_instrumented_cpu_loop_has_work_cost_rate_and_snapshot_continuation() {
             .collect::<Vec<_>>(),
         outputs
     );
+}
+
+#[test]
+fn cpu_workload_horizon_caps_partitions_and_restored_continuation() {
+    let deadline = workload_deadline(2_000_000, 1000);
+    assert_eq!(deadline, Duration::from_secs(8));
+    assert_eq!(
+        workload_deadline(400_000, 2000),
+        Duration::from_millis(7800)
+    );
+    let snapshot = deadline - Duration::from_nanos(100);
+    let mut original = GuestProgress::new("original", Duration::ZERO, deadline, 0).unwrap();
+    let mut restored = GuestProgress::new("restored", snapshot, deadline, 0).unwrap();
+    for progress in [&mut original, &mut restored] {
+        assert_eq!(
+            progress.next(snapshot, Duration::from_nanos(137_000)),
+            Ok(deadline)
+        );
+        // A completed phase needs no next call at the edge. An unfinished
+        // phase cannot renew its budget, nor retry at the same instant.
+        assert_eq!(
+            progress.next(snapshot, Duration::from_nanos(1)),
+            Err(seedbox_test_time::ProgressError::NoProgress)
+        );
+        assert_eq!(
+            progress.next(snapshot - Duration::from_nanos(1), Duration::from_nanos(1)),
+            Err(seedbox_test_time::ProgressError::Backwards)
+        );
+        assert_eq!(
+            progress.next(deadline, Duration::from_nanos(1)),
+            Err(seedbox_test_time::ProgressError::Deadline)
+        );
+    }
 }
