@@ -285,6 +285,17 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() {
+    cold_driver_factory(seedbox_application::runtime_assets::Backend::Pv);
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn ordinary_tcg_oci_output_needs_no_pv_progress_and_retains_firmware() {
+    cold_driver_factory(seedbox_application::runtime_assets::Backend::Tcg);
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
     use seedbox_application::{
         driver_world::{self, DriverExecutor},
         execution::ExecutionBackend,
@@ -342,6 +353,10 @@ fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() 
     }
     let root = tempfile::tempdir().unwrap();
     let (mut preparer, mut simulation, store) = fixture(root.path());
+    simulation.simulator.backend = match backend {
+        runtime_assets::Backend::Pv => seedbox_spec::project::CpuBackend::Pv,
+        runtime_assets::Backend::Tcg => seedbox_spec::project::CpuBackend::Tcg,
+    };
     simulation
         .services
         .insert("side".into(), simulation.services["app"].clone());
@@ -368,7 +383,11 @@ fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() 
         header.set_uid(0);
         header.set_gid(0);
         header.set_mtime(0);
-        header.set_mode(0o644);
+        header.set_mode(if name.contains("/bin/") || name.contains("/libexec/") {
+            0o755
+        } else {
+            0o644
+        });
         header.set_size(bytes.len() as u64);
         header.set_cksum();
         tar.append_data(&mut header, name, bytes).unwrap();
@@ -381,6 +400,18 @@ fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() 
     append("pv/x86_64/init", &elf);
     append("pv/x86_64/mke2fs", &elf);
     append("pv/x86_64/command-line", b"rdinit=/init");
+    append("tcg/x86_64/kernel", &kernel);
+    append("tcg/x86_64/init", &elf);
+    append("tcg/x86_64/mke2fs", &elf);
+    append("tcg/x86_64/command-line", b"rdinit=/init");
+    append("tcg/x86_64/firmware", &vec![3; 64 * 1024]);
+    append(
+        "host/x86_64-linux/bin/qemu-system-x86_64",
+        b"#!/bin/sh\nexit 0\n",
+    );
+    append("host/x86_64-linux/libexec/qemu-system-x86_64", &elf);
+    append("host/x86_64-linux/lib/loader", b"cold library");
+    append("host/x86_64-linux/share/qemu/qboot.rom", b"cold firmware");
     let mut progress = tar::Builder::new(Vec::new());
     for name in [
         "bin64/drrun",
@@ -419,10 +450,7 @@ fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() 
     tar.into_inner().unwrap().finish().unwrap();
     let runtime = runtime_assets::Runtime::from_archive(&package, root.path()).unwrap();
     let selected = runtime
-        .select(
-            runtime_assets::Backend::Pv,
-            seedbox_spec::definition::Architecture::X86_64,
-        )
+        .select(backend, seedbox_spec::definition::Architecture::X86_64)
         .unwrap();
     preparer.kernel = selected.guest_assets.join("kernel");
     preparer.init = selected.guest_assets.join("init");
@@ -441,6 +469,14 @@ fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() 
     let mut inputs = preparer
         .prepare_driver_with_transport(&simulation, &store, &context, &Transport, &selected)
         .unwrap();
+    if backend == runtime_assets::Backend::Tcg {
+        assert!(
+            !preparer.progress.exists(),
+            "TCG package deliberately lacks progress.tar"
+        );
+        assert!(!inputs.auxiliary.contains_key("guest-progress"));
+        assert!(inputs.auxiliary.contains_key("guest-firmware"));
+    }
     let original_boots = inputs.guests.clone();
     driver_world::retain_oci_prepared(&mut inputs, &simulation, &selected, &store, &context)
         .unwrap();
@@ -507,14 +543,32 @@ fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() 
         Some(wire::Disk::Zero { bytes: 1073741824 })
     ));
     assert!(prepared.machines[0].disk.is_none());
-    let wire::Inventory::Pv {
-        boot_archives,
-        environments,
-        kernel,
-        ..
-    } = &prepared.inventory
-    else {
-        panic!("PV inventory")
+    let (boot_archives, environments, kernel) = match &prepared.inventory {
+        wire::Inventory::Pv {
+            boot_archives,
+            environments,
+            kernel,
+            ..
+        } => {
+            assert_eq!(backend, runtime_assets::Backend::Pv);
+            (boot_archives, environments, kernel)
+        }
+        wire::Inventory::Tcg {
+            boot_archives,
+            environments,
+            kernel,
+            firmware,
+            executable,
+            ..
+        } => {
+            assert_eq!(backend, runtime_assets::Backend::Tcg);
+            assert_eq!(firmware.sha256, inputs.auxiliary["guest-firmware"].hex());
+            assert_eq!(
+                executable.sha256,
+                ContentDigest::of(&fs::read(selected.qemu.as_ref().unwrap()).unwrap()).hex()
+            );
+            (boot_archives, environments, kernel)
+        }
     };
     assert_eq!(kernel.sha256, inputs.kernel.hex());
     assert_eq!(boot_archives["app"].sha256, inputs.guests["app"].hex());

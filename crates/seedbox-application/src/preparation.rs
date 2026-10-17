@@ -196,12 +196,15 @@ impl OciPreparer {
         let temporary = tempfile::tempdir()?;
         let init = store.materialize(&auxiliary["guest-init"], &temporary.path().join("init"))?;
         architecture.validate_elf(&init)?;
-        let progress = store.materialize(
-            &auxiliary["guest-progress"],
-            &temporary.path().join("progress.tar"),
-        )?;
+        let progress = auxiliary
+            .get("guest-progress")
+            .map(|digest| store.materialize(digest, &temporary.path().join("progress.tar")))
+            .transpose()?;
         if driver_runtime.is_none() {
-            crate::guest::validate_progress(&progress, architecture)?;
+            let progress = progress.as_deref().ok_or_else(|| {
+                Error::Integrity("legacy preparation is missing its progress archive".into())
+            })?;
+            crate::guest::validate_progress(progress, architecture)?;
         }
         let mke2fs = auxiliary
             .get("guest-mke2fs")
@@ -319,7 +322,7 @@ impl OciPreparer {
                         root,
                         &init,
                         mke2fs,
-                        Some(&progress),
+                        progress.as_deref(),
                         &recipe,
                         &archive,
                     )?,
@@ -328,7 +331,7 @@ impl OciPreparer {
                             root,
                             &init,
                             mke2fs,
-                            Some(&progress),
+                            progress.as_deref(),
                             &recipe,
                             &archive,
                         )?
