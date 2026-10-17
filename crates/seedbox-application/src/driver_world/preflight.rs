@@ -130,8 +130,14 @@ pub(crate) mod tests {
                 crate::driver_world::policy::admit_restore(&checkpoint.inventory).is_ok(),
                 controller.is_none() || cfg!(all(target_os = "linux", target_arch = "x86_64"))
             );
-            assert_eq!(restore_manifest(&value, None).is_ok(), controller.is_none() || cfg!(all(target_os = "linux", target_arch = "x86_64")));
-            assert_eq!(restore_manifest(&value, Some("oracle")).is_ok(), cfg!(all(target_os = "linux", target_arch = "x86_64")));
+            assert_eq!(
+                restore_manifest(&value, None).is_ok(),
+                controller.is_none() || cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            );
+            assert_eq!(
+                restore_manifest(&value, Some("oracle")).is_ok(),
+                cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            );
         }
     }
     #[test]
