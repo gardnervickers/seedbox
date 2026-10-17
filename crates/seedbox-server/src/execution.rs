@@ -285,7 +285,7 @@ impl ExecutionService {
             .ok_or_else(|| std::io::Error::other("checkpoint has no execution attempt"))?;
         let path = attempt
             .join("output")
-            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR)
+            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR)
             .join(format!("checkpoint-{name}.json"));
         definition.start = seedbox_application::definition::capture_start_observed(
             &path,
@@ -637,7 +637,7 @@ impl ExecutionService {
                         })?;
                         let path = attempt
                             .join("output")
-                            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR)
+                            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR)
                             .join(format!("checkpoint-{checkpoint}.json"));
                         if !path.is_file() {
                             return Err(seedbox_application::Error::Setup(format!(

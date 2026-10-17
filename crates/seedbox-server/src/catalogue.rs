@@ -894,7 +894,7 @@ pub(crate) fn resolve_program(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    seedbox_application::engine_adapter::validate_input_program(&spec.configuration, &program)
+    seedbox_application::fault_inputs::validate_input_program(&spec.configuration, &program)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     Ok(program)
 }

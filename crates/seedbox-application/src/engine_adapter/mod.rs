@@ -8,10 +8,11 @@ use std::{
     path::Path,
 };
 
-/// Execution failure whose VMM stderr may be excerpted by the CLI.
-pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
-
-pub use seedbox_artifacts::evidence::{page_hash_log, MACHINE_OUTPUT_DIR};
+// Preserve the public adapter paths while shared callers move to their owners.
+pub use crate::execution::{
+    page_hash_log, MACHINE_OUTPUT_DIR, VMM_FAILURE_MESSAGE, VOLUME_DISK_MIB,
+};
+pub use crate::fault_inputs::{fault_action_targets, validate_input_program};
 
 /// The retained executable and its recorded dispatch, without consulting the host.
 /// Run settings follow in its launch request (`worker_process`).

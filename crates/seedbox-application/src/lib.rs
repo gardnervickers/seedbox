@@ -18,6 +18,7 @@ pub use seedbox_artifacts::exec_files;
 pub mod engine_adapter;
 pub mod execution;
 pub mod exploration;
+pub mod fault_inputs;
 pub mod guest;
 pub mod guest_assets;
 #[cfg(any(target_os = "linux", test))]

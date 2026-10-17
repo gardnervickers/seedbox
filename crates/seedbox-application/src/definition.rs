@@ -62,7 +62,7 @@ pub fn resolve(
                         v.source.clone(),
                         Volume {
                             target: v.target.clone(),
-                            size_bytes: crate::engine_adapter::VOLUME_DISK_MIB * 1024 * 1024,
+                            size_bytes: crate::execution::VOLUME_DISK_MIB * 1024 * 1024,
                         },
                     )
                 })
@@ -195,7 +195,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
             ));
         }
         for volume in machine.volumes.values() {
-            if volume.size_bytes != crate::engine_adapter::VOLUME_DISK_MIB * 1024 * 1024 {
+            if volume.size_bytes != crate::execution::VOLUME_DISK_MIB * 1024 * 1024 {
                 return Err(Error::Setup(
                     "volume sizeBytes must equal the supported 1 GiB disk size".into(),
                 ));

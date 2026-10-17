@@ -204,9 +204,7 @@ impl WorkerLaunch {
             .checked_mul(2)
             .filter(|count| *count != 0)
             .ok_or_else(|| Error::Integrity("execution requires prepared machines".into()))?;
-        let out = request
-            .output
-            .join(crate::engine_adapter::MACHINE_OUTPUT_DIR);
+        let out = request.output.join(crate::execution::MACHINE_OUTPUT_DIR);
         let console_limit = 1024 * 1024 * 1024 / streams;
         let digest = request.prepared.profile.witness_mode == WitnessMode::FullState;
         if kind == ExecutableKind::ArmWorld {
@@ -427,7 +425,7 @@ impl WorkerLaunch {
 /// The original stderr file remains available for the complete diagnostic.
 fn worker_failure(report: &std::path::Path) -> String {
     const LIMIT: u64 = 8192;
-    let failure = crate::engine_adapter::VMM_FAILURE_MESSAGE;
+    let failure = crate::execution::VMM_FAILURE_MESSAGE;
     let tail = (|| -> std::io::Result<String> {
         let mut file = fs::File::open(report.with_file_name("vmm.stderr"))?;
         let len = file.metadata()?.len();
@@ -690,7 +688,7 @@ mod tests {
         let report = directory.path().join("vmm.json");
         assert_eq!(
             worker_failure(&report),
-            crate::engine_adapter::VMM_FAILURE_MESSAGE
+            crate::execution::VMM_FAILURE_MESSAGE
         );
         let stderr = directory.path().join("vmm.stderr");
         fs::write(
@@ -704,7 +702,7 @@ mod tests {
         fs::write(&stderr, " \n").unwrap();
         assert_eq!(
             worker_failure(&report),
-            crate::engine_adapter::VMM_FAILURE_MESSAGE
+            crate::execution::VMM_FAILURE_MESSAGE
         );
     }
 
@@ -905,9 +903,7 @@ mod tests {
                 }
             };
             assert_eq!(&args[..dispatch.len()], dispatch);
-            let out = directory
-                .path()
-                .join(crate::engine_adapter::MACHINE_OUTPUT_DIR);
+            let out = directory.path().join(crate::execution::MACHINE_OUTPUT_DIR);
             if kind == ExecutableKind::ArmWorld {
                 let world = directory.path().join("world.json");
                 let socket = launch.endpoint.socket();
@@ -1069,7 +1065,7 @@ mod tests {
         assert!(report
             .detail
             .unwrap()
-            .contains(crate::engine_adapter::VMM_FAILURE_MESSAGE));
+            .contains(crate::execution::VMM_FAILURE_MESSAGE));
         assert_reaped(pid, output.path());
     }
 

@@ -13,7 +13,7 @@ use std::{
 pub(crate) fn remove(attempt: &Path, name: &str) -> io::Result<()> {
     let output = attempt
         .join("output")
-        .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR);
+        .join(seedbox_application::execution::MACHINE_OUTPUT_DIR);
     let metadata = output.join(format!("checkpoint-{name}.json"));
     let file = match fs::File::open(&metadata) {
         Ok(file) => Some(file),
@@ -257,7 +257,7 @@ mod tests {
         let output = root
             .path()
             .join("output")
-            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR);
+            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR);
         fs::create_dir_all(output.join(".checkpoint-machines-test")).unwrap();
         let arm = output.join(".arm-checkpoint-test");
         let x86 = output.join(".checkpoint-machines-test/0.snapshot");
@@ -370,7 +370,7 @@ mod tests {
         let output = root
             .path()
             .join("output")
-            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR);
+            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR);
         let capture = driver_capture(&output, "saved");
         capture.validate().unwrap();
         let other = output.join("checkpoint-other-bodies-fixture");
@@ -400,7 +400,7 @@ mod tests {
             let output = root
                 .path()
                 .join("output")
-                .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR);
+                .join(seedbox_application::execution::MACHINE_OUTPUT_DIR);
             let mut capture = driver_capture(&output, "saved");
             let files = fs::read_dir(output.join("checkpoint-saved-bodies-fixture"))
                 .unwrap()
@@ -436,7 +436,7 @@ mod tests {
         let output = root
             .path()
             .join("output")
-            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR);
+            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR);
         let capture = driver_capture(&output, "saved");
         let directory = output.join("checkpoint-saved-bodies-fixture");
         let outside = root.path().join("outside");
@@ -458,7 +458,7 @@ mod tests {
         let output = root
             .path()
             .join("output")
-            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR);
+            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR);
         let mut capture = driver_capture(&output, "saved");
         let original = output.join("checkpoint-saved-bodies-fixture");
         let other = output.join("checkpoint-saved-bodies-other");
@@ -483,7 +483,7 @@ mod tests {
         let output = root
             .path()
             .join("output")
-            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR);
+            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR);
         let capture = driver_capture(&output, "saved");
         let metadata = output.join("checkpoint-saved.json");
         fs::write(&metadata, serde_json::to_vec(&capture).unwrap()).unwrap();

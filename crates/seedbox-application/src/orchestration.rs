@@ -448,7 +448,7 @@ impl Orchestrator {
 }
 
 fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> Result<()> {
-    crate::engine_adapter::validate_input_program(&identity.configuration, &identity.program)?;
+    crate::fault_inputs::validate_input_program(&identity.configuration, &identity.program)?;
     let inputs = &identity.inputs;
     let machines: BTreeSet<_> = inputs.placement.values().collect();
     if inputs

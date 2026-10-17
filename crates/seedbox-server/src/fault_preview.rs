@@ -8,7 +8,7 @@ pub(crate) fn preview(
     configuration: &seedbox_spec::Simulation,
     action: &Action,
 ) -> Result<FaultPreview, Error> {
-    let targets = seedbox_application::engine_adapter::fault_action_targets(configuration, action)
+    let targets = seedbox_application::fault_inputs::fault_action_targets(configuration, action)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     let mut result = FaultPreview {
         simulation: world.simulation.clone(),
@@ -95,7 +95,7 @@ pub(crate) fn preview(
                 .filter_map(|plan| serde_json::from_value::<Action>(plan).ok())
                 .find(|plan| healable_handle(plan) == Some(handle.as_str()));
             if let Some(original) = original {
-                let original_targets = seedbox_application::engine_adapter::fault_action_targets(
+                let original_targets = seedbox_application::fault_inputs::fault_action_targets(
                     configuration,
                     &original,
                 )

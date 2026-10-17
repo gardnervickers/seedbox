@@ -29,14 +29,14 @@ pub async fn pv_fault_worker_failure() {
         let Some(ExecutionTermination::Error { message }) = &completed.status.termination else {
             panic!("worker failure must remain an execution error, not an oracle verdict or stop: {:?}", completed.status);
         };
-        assert!(message.contains(seedbox_application::engine_adapter::VMM_FAILURE_MESSAGE), "wrong failure: {message}");
+        assert!(message.contains(seedbox_application::execution::VMM_FAILURE_MESSAGE), "wrong failure: {message}");
         assert_eq!(completed.status.oracle_exit_code, None);
         assert_eq!(completed.status.verdict(), TestVerdict::Incomplete);
         let records = directories(&session.execution_root.join("runs").join(id.as_str())).into_iter()
             .filter_map(|path| seedbox_application::orchestration::inspect(&path).ok()).collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
         assert!(records[0].report.as_ref().and_then(|report| report.witness.as_ref()).is_none(), "abrupt worker death must not fabricate a native witness");
-        assert!(records[0].error.as_ref().unwrap().contains(seedbox_application::engine_adapter::VMM_FAILURE_MESSAGE));
+        assert!(records[0].error.as_ref().unwrap().contains(seedbox_application::execution::VMM_FAILURE_MESSAGE));
         assert_eq!(session.launch_request(&id).seed, SEED);
         // Production runtime/scratch removal is authorized only after the real
         // monitor receipt. Also obtain the independent W2 ownership barriers.

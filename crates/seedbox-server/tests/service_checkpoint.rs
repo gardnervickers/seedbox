@@ -140,7 +140,7 @@ impl ExecutionBackend for Counter {
                     assert_eq!(request_id, "saved");
                     let output = request
                         .output
-                        .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR);
+                        .join(seedbox_application::execution::MACHINE_OUTPUT_DIR);
                     let state = output.join(".checkpoint-machines-saved/0.snapshot");
                     fs::create_dir_all(state.parent().unwrap())?;
                     let bytes = 7u64.to_le_bytes();

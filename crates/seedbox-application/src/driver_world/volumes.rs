@@ -25,7 +25,7 @@ pub fn volume_setup<'a>(mounts: impl IntoIterator<Item = &'a VolumeMount>) -> Vo
         .collect();
     VolumeSetup {
         disk_bytes: (!named_volumes.is_empty())
-            .then_some(crate::engine_adapter::VOLUME_DISK_MIB * 1024 * 1024),
+            .then_some(crate::execution::VOLUME_DISK_MIB * 1024 * 1024),
         named_volumes,
     }
 }

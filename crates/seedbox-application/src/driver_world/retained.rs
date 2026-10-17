@@ -397,9 +397,7 @@ pub(crate) fn request(
         seed: request.seed,
         program: request.program.to_vec(),
         simulated_time_ns: request.limits.simulated_time_ns,
-        output: request
-            .output
-            .join(crate::engine_adapter::MACHINE_OUTPUT_DIR),
+        output: request.output.join(crate::execution::MACHINE_OUTPUT_DIR),
         machine_workers: workers,
         start_paused: request.start_paused,
         full_state: request.prepared.profile.witness_mode

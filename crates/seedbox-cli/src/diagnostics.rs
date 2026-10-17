@@ -1,6 +1,6 @@
 //! Best-effort excerpts of local execution diagnostics, for text output only.
 
-use seedbox_application::{engine_adapter::VMM_FAILURE_MESSAGE, Error};
+use seedbox_application::{execution::VMM_FAILURE_MESSAGE, Error};
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},

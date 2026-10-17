@@ -16,7 +16,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use seedbox_artifacts::evidence::{page_hash_log, MACHINE_OUTPUT_DIR};
 pub use seedbox_artifacts::execution::*;
+
+/// Execution failure whose VMM stderr may be excerpted by the CLI.
+pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
+
+/// Size of the retained disk of a machine whose service mounts named volumes.
+/// Part of the execution semantics: changing it changes runs.
+pub const VOLUME_DISK_MIB: u64 = 1024;
 
 /// Resolves/builds images and retains their entire input closure in `store`.
 /// No guest execution, CPU pinning, or host-state mutation is allowed here.
