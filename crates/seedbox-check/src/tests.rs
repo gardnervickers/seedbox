@@ -841,6 +841,8 @@ fn portable_failure_blocks_all_native_work_but_not_outer_prerequisites() {
             stdout: String::new(),
         },
         Outcome::default(),
+        Outcome::default(),
+        Outcome::default(),
         Outcome {
             code: 1,
             stdout: String::new(),
@@ -854,9 +856,156 @@ fn portable_failure_blocks_all_native_work_but_not_outer_prerequisites() {
             .iter()
             .map(|j| j.name.as_str())
             .collect::<Vec<_>>(),
-        ["fmt", "clippy", "shell-discovery"]
+        [
+            "fmt",
+            "clippy",
+            "vmm-clippy",
+            "arm64-clippy",
+            "shell-discovery"
+        ]
     );
 }
+fn standalone_clippy_fixture() -> Temporary {
+    let t = fixture();
+    fs::create_dir_all(t.0.join("harness/acceptance/workloads")).unwrap();
+    fs::write(t.0.join("harness/acceptance/workloads/example.yaml"), "").unwrap();
+    t
+}
+
+#[test]
+fn standalone_outer_clippy_covers_host_backends_with_exact_args_and_private_targets() {
+    for (system, machine, expected) in [
+        ("Linux", "x86_64", vec!["vmm", "arm64"]),
+        ("Linux", "aarch64", vec!["arm64"]),
+        ("Darwin", "aarch64", vec!["arm64"]),
+        ("Darwin", "x86_64", vec!["arm64"]),
+    ] {
+        let t = standalone_clippy_fixture();
+        let caller = env(&[
+            ("CARGO_TARGET_DIR", "/agent-root-target"),
+            ("CARGO_INCREMENTAL", "1"),
+        ]);
+        let mut c = Checks::new(Spy::default(), t.0.clone(), caller.clone());
+        let mut h = host();
+        h.system = system.into();
+        h.machine = machine.into();
+        assert_eq!(
+            coordinate(&mut c, &h, &options(vec![]).unwrap()).unwrap(),
+            0
+        );
+        let standalone: Vec<_> = c
+            .commands
+            .jobs
+            .iter()
+            .filter(|job| job.name.ends_with("-clippy"))
+            .collect();
+        assert_eq!(standalone.len(), expected.len(), "{system}/{machine}");
+        for (job, backend) in standalone.iter().zip(expected) {
+            assert_eq!(job.name, format!("{backend}-clippy"));
+            assert_eq!(
+                job.args,
+                strings(&[
+                    "cargo",
+                    "clippy",
+                    "--release",
+                    "--locked",
+                    "--manifest-path",
+                    &format!("crates/seedbox-{backend}/Cargo.toml"),
+                    "--target-dir",
+                    &format!("crates/seedbox-{backend}/target"),
+                    "--all-targets",
+                    "--all-features",
+                    "--",
+                    "-D",
+                    "warnings",
+                ])
+            );
+            assert!(!job.environment.contains_key("CARGO_TARGET_DIR"));
+            assert_eq!(job.environment["CARGO_INCREMENTAL"], "0");
+            assert_eq!(job.cwd, t.0);
+        }
+        let workspace = c
+            .commands
+            .jobs
+            .iter()
+            .find(|job| job.name == "clippy")
+            .unwrap();
+        assert_eq!(
+            workspace.environment["CARGO_TARGET_DIR"],
+            "/agent-root-target"
+        );
+        assert_eq!(c.environment["CARGO_TARGET_DIR"], "/agent-root-target");
+        assert_eq!(c.environment["CARGO_INCREMENTAL"], "0");
+        assert_eq!(caller["CARGO_INCREMENTAL"], "1");
+    }
+}
+
+#[test]
+fn portable_stage_keeps_all_outer_clippy_out_of_the_backend_stage() {
+    let t = standalone_clippy_fixture();
+    let mut c = checks(&t.0);
+    let o = options(strings(&["--portable-stage"])).unwrap();
+    assert_eq!(coordinate(&mut c, &host(), &o).unwrap(), 0);
+    assert!(c
+        .commands
+        .jobs
+        .iter()
+        .all(|job| job.name != "fmt" && !job.name.contains("clippy")));
+    assert!(c
+        .commands
+        .jobs
+        .iter()
+        .any(|job| job.name == "vmm-feature-build"));
+    assert!(c
+        .commands
+        .jobs
+        .iter()
+        .any(|job| job.name == "arm64-feature-build"));
+}
+
+#[test]
+fn standalone_clippy_failure_is_retained_and_blocks_native_execution() {
+    let t = standalone_clippy_fixture();
+    let mut c = checks(&t.0);
+    c.commands.replies.extend([
+        Outcome::default(), // fmt
+        Outcome::default(), // workspace clippy
+        Outcome {
+            code: 1,
+            stdout: String::new(),
+        }, // VMM clippy
+    ]);
+    let o = options(strings(&["linux-kvm"])).unwrap();
+    assert_eq!(coordinate(&mut c, &host(), &o).unwrap(), 1);
+    assert!(c.commands.jobs.iter().any(|job| job.name == "arm64-clippy"));
+    assert!(c
+        .commands
+        .jobs
+        .iter()
+        .any(|job| job.name == "workspace-tests"));
+    assert_eq!(
+        c.commands
+            .jobs
+            .iter()
+            .map(|job| job.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "fmt",
+            "clippy",
+            "vmm-clippy",
+            "arm64-clippy",
+            "shell-discovery",
+            "vmm-feature-build",
+            "vmm-tests",
+            "arm64-feature-build",
+            "arm64-tests",
+            "workspace-feature-build",
+            "workspace-tests",
+            "workload-validation"
+        ]
+    );
+}
+
 #[test]
 fn empty_native_selection_and_empty_artifacts_are_errors() {
     let t = fixture();

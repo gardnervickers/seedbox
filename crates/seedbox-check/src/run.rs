@@ -259,6 +259,15 @@ pub fn observe<C: Commands>(checks: &mut Checks<C>, suites: &[Suite]) -> Result<
     }
     Ok(host)
 }
+fn portable_backends(host: &Host) -> Vec<(&'static str, &'static str)> {
+    let mut backends = Vec::new();
+    if host.system == "Linux" && host.machine == "x86_64" {
+        backends.push(("vmm", "test-vmm"));
+    }
+    backends.push(("arm64", "test-arm64"));
+    backends
+}
+
 pub fn coordinate<C: Commands>(
     checks: &mut Checks<C>,
     host: &Host,
@@ -306,6 +315,33 @@ pub fn coordinate<C: Commands>(
                 "warnings",
             ]),
         );
+        // Root workspace clippy does not select the standalone backends' test
+        // targets. Match portable backend availability and their private
+        // targets without executing any hardware tests.
+        for (backend, _) in portable_backends(host) {
+            let manifest = format!("crates/seedbox-{backend}/Cargo.toml");
+            let target = format!("crates/seedbox-{backend}/target");
+            let mut job = checks.job(
+                &format!("{backend}-clippy"),
+                words(&[
+                    "cargo",
+                    "clippy",
+                    "--release",
+                    "--locked",
+                    "--manifest-path",
+                    &manifest,
+                    "--target-dir",
+                    &target,
+                    "--all-targets",
+                    "--all-features",
+                    "--",
+                    "-D",
+                    "warnings",
+                ]),
+            );
+            job.environment.remove("CARGO_TARGET_DIR");
+            checks.run(job);
+        }
     }
     portable(checks, host)?;
     if checks.failed || options.suites == [Suite::Portable] {
@@ -399,12 +435,7 @@ pub fn portable<C: Commands>(checks: &mut Checks<C>, host: &Host) -> Result<(), 
     })? {
         return Ok(());
     }
-    let mut backends = Vec::new();
-    if host.system == "Linux" && host.machine == "x86_64" {
-        backends.push(("vmm", "test-vmm"));
-    }
-    backends.push(("arm64", "test-arm64"));
-    for (name, alias) in backends {
+    for (name, alias) in portable_backends(host) {
         for (suffix, args) in [
             (
                 "feature-build",
