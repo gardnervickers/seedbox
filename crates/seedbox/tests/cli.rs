@@ -1502,6 +1502,7 @@ fn campaign_shrink_and_findings_bounds_are_usage_errors_before_any_server() {
         (vec!["shrink", "k7m2p9qx", "--seeds", "9"], "--seeds"),
         (vec!["analyze", "not-an-id"], "ID"),
         (vec!["exec", "k7m2p9qx", "n1", "--", "ls"], "--at"),
+        (vec!["serve", "--lazy-restore=yes"], "--lazy-restore"),
         (
             vec!["exec", "k7m2p9qx", "n1", "--at", "soon", "--", "ls"],
             "--at",

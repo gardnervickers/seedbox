@@ -38,6 +38,8 @@ pub(crate) fn incomplete(reason: StopReason) -> ExecutionReport {
 pub(crate) const WATCHDOG_MS_PARAMETER: &str = "SEEDBOX_WATCHDOG_MS";
 /// Recorded performance parameter: machine threads of the windowed scheduler.
 pub(crate) const MACHINE_WORKERS_PARAMETER: &str = "SEEDBOX_MACHINE_WORKERS";
+/// Recorded performance parameter: ARM machine workers restore checkpoints lazily.
+pub(crate) const LAZY_RESTORE_PARAMETER: &str = "SEEDBOX_LAZY_RESTORE";
 
 /// Launch settings decoded from a run's recorded performance parameters.
 /// None of them changes results (docs/internals.md#parallel-scheduling).
@@ -47,6 +49,8 @@ pub(crate) struct LaunchPerformance {
     pub(crate) performance: Performance,
     /// Machine threads; unset, every machine runs on the coordinating thread.
     pub(crate) machine_workers: usize,
+    /// ARM machine workers map restored checkpoint RAM lazily.
+    pub(crate) lazy_restore: bool,
 }
 
 /// Record an explicit machine thread count among an executor's performance parameters.
@@ -71,6 +75,7 @@ pub(crate) fn launch_performance(
     let mut launch = LaunchPerformance {
         performance: Performance::default(),
         machine_workers: 1,
+        lazy_restore: false,
     };
     for (key, value) in parameters {
         let invalid = || Error::Integrity(format!("invalid performance parameter {key}={value}"));
@@ -89,6 +94,7 @@ pub(crate) fn launch_performance(
                     .filter(|n| (1..=MAX_MACHINE_WORKERS).contains(n))
                     .ok_or_else(invalid)?
             }
+            LAZY_RESTORE_PARAMETER if value == "1" => launch.lazy_restore = true,
             _ => return Err(invalid()),
         }
     }
@@ -176,6 +182,9 @@ impl WorkerLaunch {
                 .arg(console_limit.to_string())
                 .arg("--machine-workers")
                 .arg(machine_workers.to_string());
+            if performance.lazy_restore {
+                command.arg("--lazy-restore");
+            }
             if digest {
                 command.arg("--digest");
             }

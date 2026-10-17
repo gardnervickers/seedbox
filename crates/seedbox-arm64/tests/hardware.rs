@@ -285,7 +285,7 @@ fn hvf_checkpoint_continues_an_entered_guest() {
     original
         .snapshot()
         .unwrap()
-        .write_checkpoint(&mut bytes)
+        .write_checkpoint(&mut bytes, 0)
         .unwrap();
     original.run_until(20, || {}).unwrap();
     let expected = original.application_evidence(true).unwrap();

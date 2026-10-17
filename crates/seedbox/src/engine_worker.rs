@@ -82,6 +82,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
         let mut full_state = false;
         let mut console_limit = 1024 * 1024 * 1024;
         let mut machine_workers = 1;
+        let mut lazy_restore = false;
         let mut args = args.iter();
         while let Some(arg) = args.next() {
             let text = arg.to_str().ok_or("worker argument is not UTF-8")?;
@@ -153,6 +154,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
                         .parse::<usize>()
                         .map_err(|e| format!("console limit: {e}"))?;
                 }
+                "--lazy-restore" => lazy_restore = true,
                 "--machine-workers" => {
                     machine_workers = args
                         .next()
@@ -177,6 +179,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
             observations,
             console_limit,
             machine_workers,
+            lazy_restore,
             capture_anchors,
         };
         let report = seedbox_arm64::application::world::run(&options)?;
@@ -198,8 +201,12 @@ fn arm_world(_: OsString, _: Vec<OsString>) -> ExitCode {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn arm_machine(args: Vec<OsString>) -> ExitCode {
-    if !args.is_empty() {
-        return error("internal ARM machine contract takes no arguments");
+    let mut options = seedbox_arm64::application::worker::ServeOptions::default();
+    for arg in args {
+        match arg.to_str() {
+            Some("--lazy-restore") => options.lazy_restore = true,
+            _ => return error("internal ARM machine contract takes only --lazy-restore"),
+        }
     }
     // Responses are written whole, once each, so stdout is used unbuffered.
     let output = std::os::fd::AsFd::as_fd(&std::io::stdout()).try_clone_to_owned();
@@ -207,9 +214,10 @@ fn arm_machine(args: Vec<OsString>) -> ExitCode {
         Ok(fd) => std::fs::File::from(fd),
         Err(e) => return error(&format!("machine worker output: {e}")),
     };
-    match seedbox_arm64::application::worker::serve::<seedbox_arm64::backend::hvf::Hvf>(
+    match seedbox_arm64::application::worker::serve_with::<seedbox_arm64::backend::hvf::Hvf>(
         &mut std::io::stdin().lock(),
         &mut output,
+        options,
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => error(&message),

@@ -37,6 +37,9 @@ pub struct Options {
     /// Machine threads under the windowed scheduler; a performance setting
     /// that never changes results. 1 runs every machine on this thread.
     pub machine_workers: usize,
+    /// Machine workers restore checkpoints lazily (`ServeOptions`); a
+    /// performance setting that never changes results.
+    pub lazy_restore: bool,
     /// Anchor inputs to capture checkpoints at, published as
     /// `checkpoint-anchor-<key>.json`. Captures never change results.
     pub capture_anchors: Vec<String>,
@@ -333,7 +336,8 @@ pub fn run(options: &Options) -> Result<Value> {
             options.full_state,
         )?
     }
-    .with_observations(observations.clone());
+    .with_observations(observations.clone())
+    .with_lazy_restore(options.lazy_restore);
     let mut machines = Vec::new();
     let mut boots = Vec::new();
     let mut macs = Vec::new();

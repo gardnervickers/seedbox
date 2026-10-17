@@ -1406,7 +1406,7 @@ mod spi_regression {
         );
         // A second branch receives the unchanged snapshot, not the first branch's RNG.
         let mut checkpoint = Vec::new();
-        snapshot.write_checkpoint(&mut checkpoint).unwrap();
+        snapshot.write_checkpoint(&mut checkpoint, 0).unwrap();
         let mut branch = fresh().restore_checkpoint(checkpoint.as_slice()).unwrap();
         assert_eq!(branch.application_evidence(true).unwrap(), expected);
         assert_eq!(branch.timer_policy.as_mut().unwrap().1.next(), next_random);

@@ -708,6 +708,10 @@ struct Performance {
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..=60000))]
     watchdog_ms: Option<u64>,
+    /// Restore checkpoints by mapping their RAM, loaded as the guest touches it, without first hashing each file whole (Apple Silicon).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[arg(long)]
+    lazy_restore: bool,
 }
 
 impl Performance {
@@ -728,6 +732,9 @@ impl Performance {
             Executor::Mac(mut executor) => {
                 if let Some(workers) = self.machine_workers {
                     executor = executor.with_machine_workers(workers as usize)?;
+                }
+                if self.lazy_restore {
+                    executor = executor.with_lazy_restore();
                 }
                 Executor::Mac(executor)
             }

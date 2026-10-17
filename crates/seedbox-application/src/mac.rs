@@ -127,6 +127,14 @@ impl MacExecutor {
         crate::worker_process::insert_machine_workers(&mut self.performance, workers)?;
         Ok(self)
     }
+    /// Restore checkpoints lazily, mapping their RAM; never changes results.
+    pub fn with_lazy_restore(mut self) -> Self {
+        self.performance.insert(
+            crate::worker_process::LAZY_RESTORE_PARAMETER.into(),
+            "1".into(),
+        );
+        self
+    }
     pub fn doctor(engine: &Engine, kernel: &Path) -> Result<DoctorReport> {
         validate_kernel(kernel, 3072)?;
         Ok(DoctorReport {

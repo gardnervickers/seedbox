@@ -809,6 +809,28 @@ it must neither repeat consumed overrides nor lose pending ones. Capture require
 a committed boundary with no outstanding I/O cost. A requested checkpoint may
 therefore need another step before it becomes available.
 
+Machines in separate workers capture and restore at once: the coordinator
+first starts every machine's snapshot (or restore) request
+(`WorldMachine::begin_snapshot`, `begin_restore`), then collects the answers in
+machine order, so the checkpoint is the same as a serial one. On ARM a request
+is sent with `OwnedWorker::begin` and answered by `finish`; only snapshots and
+restores can be begun, one at a time per worker. A TigerBeetle machine's RAM
+checkpoint is about 2 GiB, so a four-machine capture or restore took the sum of
+four such copies before.
+
+An ARM checkpoint (`SBXARM02`) holds its metadata section, a zero padding
+section (a hole in the sparse file) and the RAM section, whose data starts at
+a host page boundary, then the disk section; each section ends with its
+SHA-256. With `seedbox serve --lazy-restore` the machine worker restores by
+unmapping guest RAM from the hypervisor, mapping the RAM section over it
+privately (`MAP_PRIVATE|MAP_FIXED`), and mapping it back: a page loads the
+first time the guest touches it and guest writes stay private. It does not
+hash the whole file first, nor the RAM section, which would read every page;
+the metadata and disk sections are still verified. The bytes the guest sees
+are the same, so results are too. On an 8-member TigerBeetle campaign a
+branch's four-machine restore took 14 s serially, 6.5 s in parallel and
+0.6 s lazily, with no measurable cost in the branch's execution.
+
 Machine lifecycle updates must occur at their defined commit points around
 fallible backend operations. A failed crash transaction poisons the world and
 terminates its workers; a retry cannot continue using partially changed state.

@@ -526,7 +526,7 @@ fn capture_and_restore(
     original
         .snapshot()
         .unwrap()
-        .write_checkpoint(&mut bytes)
+        .write_checkpoint(&mut bytes, 0)
         .unwrap();
     run_to(&mut original, capture, end);
     let continued = finish(&original);
@@ -536,6 +536,34 @@ fn capture_and_restore(
         .unwrap();
     run_to(&mut restored, capture, end);
     (continued, finish(&restored), deferred, asserted, pc)
+}
+
+/// A lazy restore maps the checkpoint file's RAM into the fresh VM instead
+/// of copying it; the guest must continue exactly as after a copied restore.
+#[test]
+fn a_lazy_restore_continues_like_the_uninterrupted_run() {
+    use std::io::{Seek, SeekFrom};
+    let end = 40 * PERIOD + PERIOD / 2;
+    let capture = 10 * PERIOD;
+    let kernel = image(PENDING);
+    let mut original = machine(&kernel);
+    run_to(&mut original, 0, capture);
+    let mut file = tempfile::tempfile().unwrap();
+    original
+        .snapshot()
+        .unwrap()
+        .write_checkpoint(&mut file, 0)
+        .unwrap();
+    run_to(&mut original, capture, end);
+    let continued = finish(&original);
+    drop(original);
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut restored = machine(&kernel).restore_checkpoint_lazy(&mut file).unwrap();
+    run_to(&mut restored, capture, end);
+    let lazy = finish(&restored);
+    assert_eq!(lazy.evidence, continued.evidence);
+    assert_eq!(lazy.cpu, continued.cpu);
+    assert_eq!((lazy.ticks, lazy.uart), (continued.ticks, continued.uart));
 }
 
 /// NEXT-100 case 82: checkpoint a guest whose timer interrupt is pending in the
