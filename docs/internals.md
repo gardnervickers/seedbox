@@ -32,8 +32,8 @@ or execution inputs. Parent and native restore use the same `admit_restore`
 policy, including the requested controller when a resolved definition is edited;
 there is no separate parent copy of host/controller eligibility rules.
 Native body and saved-authority validation still precede native restoration.
-Fresh TCG controller support does not establish controller checkpoint continuation;
-that path retains its independent refusal in the same restore policy.
+PV and TCG controller continuation use the same saved-authority binding on
+Linux x86-64; parent preflight and native admission share its host scope.
 
 ## Etcd preparation smoke and canonical acceptance
 

@@ -131,18 +131,9 @@ impl DriverExecutor {
         self.runtime = Some(super::binding::Binding::new(inputs)?);
         Ok(self)
     }
-    // Controller mapping and continuation are scoped to Linux x86-64 hosts,
-    // for PV and TCG alike. Other hosts remain explicit unproven paths.
+    // Parent and native admission share the Linux x86-64 controller scope.
     fn admit_execution(&self, controller: bool) -> Result<()> {
-        if controller && !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            return Err(Error::Setup(super::policy::CONTROLLER_INCOMPLETE.into()));
-        }
-        if self.backend == DriverBackend::Pv
-            && !cfg!(all(target_os = "linux", target_arch = "x86_64"))
-        {
-            return Err(Error::Setup(super::policy::PV_INCOMPLETE.into()));
-        }
-        Ok(())
+        super::policy::admit_execution(self.backend, controller).map_err(Error::Setup)
     }
     /// Descriptive current-host metadata and explicit owned launch contract. No
     /// revision, source/build hash, qualification or provenance admission gate.

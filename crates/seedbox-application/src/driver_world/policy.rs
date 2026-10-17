@@ -37,25 +37,35 @@ pub(super) fn encode(value: &BackendPolicy) -> Result<wire::BackendPolicy, Strin
         controller: value.controller.clone(),
     })
 }
-/// Admit the proven native path without changing backend selection.
-// TODO: Re-evaluate: ARM PV requires its own native proof. Guest control is
-// scoped to Linux x86-64 hosts, for PV and TCG alike; build binds the service
-// name to Driver authority.
-pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
-    let policy = decode_optional(inventory.backend_policy())?;
-    if policy
-        .as_ref()
-        .is_some_and(|policy| policy.controller.is_some())
-        && !cfg!(all(target_os = "linux", target_arch = "x86_64"))
-    {
+/// One execution policy for both parent admission and native inventory.
+/// Build binds the controller service name to Driver authority on both CPUs.
+pub(super) fn admit_execution(
+    backend: super::DriverBackend,
+    controller: bool,
+) -> Result<(), String> {
+    if controller && !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         return Err(CONTROLLER_INCOMPLETE.into());
     }
-    if matches!(inventory, wire::Inventory::Pv { .. })
+    if backend == super::DriverBackend::Pv
         && !cfg!(all(target_os = "linux", target_arch = "x86_64"))
     {
         return Err(PV_INCOMPLETE.into());
     }
     Ok(())
+}
+/// Admit the native inventory without changing backend selection.
+pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
+    let policy = decode_optional(inventory.backend_policy())?;
+    let backend = match inventory {
+        wire::Inventory::Pv { .. } => super::DriverBackend::Pv,
+        wire::Inventory::Tcg { .. } => super::DriverBackend::Tcg,
+    };
+    admit_execution(
+        backend,
+        policy
+            .as_ref()
+            .is_some_and(|policy| policy.controller.is_some()),
+    )
 }
 /// Keep PV controller continuation scoped independently of fresh admission.
 /// build::restore must bind the saved Driver controller and latency before any
@@ -63,16 +73,6 @@ pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
 /// TCG controller continuation goes through the same binding and [`admit`].
 pub(super) fn admit_restore(inventory: &wire::Inventory) -> Result<(), String> {
     let policy = decode_optional(inventory.backend_policy())?;
-    // Fresh TCG controller execution does not establish controller checkpoint
-    // continuation. Preserve its previous effective refusal in the one shared
-    // restore policy, independently of the fresh-execution admission above.
-    if matches!(inventory, wire::Inventory::Tcg { .. })
-        && policy
-            .as_ref()
-            .is_some_and(|policy| policy.controller.is_some())
-    {
-        return Err("Driver TCG controller checkpoint continuation is incomplete".into());
-    }
     if matches!(inventory, wire::Inventory::Pv { .. })
         && policy
             .as_ref()

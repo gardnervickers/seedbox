@@ -87,7 +87,7 @@ pub(crate) mod tests {
         .unwrap()
     }
     #[test]
-    fn fresh_tcg_control_does_not_enable_unproven_controller_restore() {
+    fn tcg_parent_restore_uses_the_native_controller_admission_scope() {
         for controller in [None, Some("oracle")] {
             let mut checkpoint: wire::Checkpoint = serde_json::from_value(manifest(None)).unwrap();
             let wire::Inventory::Pv {
@@ -123,11 +123,15 @@ pub(crate) mod tests {
             };
             let value = serde_json::to_value(&checkpoint).unwrap();
             assert_eq!(
-                crate::driver_world::policy::admit_restore(&checkpoint.inventory).is_ok(),
-                controller.is_none()
+                crate::driver_world::policy::admit(&checkpoint.inventory).is_ok(),
+                controller.is_none() || cfg!(all(target_os = "linux", target_arch = "x86_64"))
             );
-            assert_eq!(restore_manifest(&value, None).is_ok(), controller.is_none());
-            assert!(restore_manifest(&value, Some("oracle")).is_err());
+            assert_eq!(
+                crate::driver_world::policy::admit_restore(&checkpoint.inventory).is_ok(),
+                controller.is_none() || cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            );
+            assert_eq!(restore_manifest(&value, None).is_ok(), controller.is_none() || cfg!(all(target_os = "linux", target_arch = "x86_64")));
+            assert_eq!(restore_manifest(&value, Some("oracle")).is_ok(), cfg!(all(target_os = "linux", target_arch = "x86_64")));
         }
     }
     #[test]
