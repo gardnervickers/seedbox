@@ -815,6 +815,7 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 if identity.is_some() || request.expected.incarnation != 0 {
                     return Err("worker already bound or invalid initial incarnation".into());
                 }
+                Machine::<B>::label_stall_reports(&request.expected.name);
                 machine = Some(boot.machine(boot.disk()?)?);
                 boot_inputs = Some(boot.clone());
                 identity = Some(request.expected.clone());

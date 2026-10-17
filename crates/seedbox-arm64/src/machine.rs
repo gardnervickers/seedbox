@@ -65,6 +65,8 @@ pub enum MachineStop {
 
 /// Memory/device ownership and semantic decisions live here, never in a backend.
 /// Backend drops first and also retains its own references to every mapping.
+static STALL_LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 pub struct Machine<B: Backend> {
     backend: B,
     ram: Rc<Memory>,
@@ -1127,6 +1129,11 @@ impl<B: Backend> Machine<B> {
         }
         Ok(())
     }
+    /// Name this worker process's machine in stall reports; a worker serves
+    /// one machine, so the first name stands.
+    pub fn label_stall_reports(name: &str) {
+        let _ = STALL_LABEL.set(name.to_owned());
+    }
     /// Report, on stderr, where a guest is after it ran an entry for `ran`
     /// of host time without an exit. Diagnostic only: reads registers of
     /// the stopped vCPU and changes nothing.
@@ -1142,7 +1149,8 @@ impl<B: Backend> Machine<B> {
             Err(_) => ("?".into(), "?".into()),
         };
         eprintln!(
-            "seedbox stall: guest ran {:.1}s of host time without an exit at simulated {}ns: pc={} el={el} daif={daif} lr={} sp_el1={} sp_el0={} elr_el1={}",
+            "seedbox stall: machine {} ran {:.1}s of host time without an exit at simulated {}ns: pc={} el={el} daif={daif} lr={} sp_el1={} sp_el0={} elr_el1={}",
+            STALL_LABEL.get().map_or("?", String::as_str),
             ran.as_secs_f64(),
             self.clock.now(),
             core(CoreReg::Pc),

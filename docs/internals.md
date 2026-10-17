@@ -270,7 +270,7 @@ exit, then waits twice as long before each further report of the same
 stall; any guest exit resets it. The forced exit is an ordinary host
 interruption (`RunStop::Interrupted`). The machine reads the stopped vCPU's
 PC, exception level, DAIF mask, LR, stack pointers and ELR_EL1, prints one
-`seedbox stall:` line on the worker's stderr (retained as `vmm.stderr`), and
+`seedbox stall: machine NAME` line on the worker's stderr (retained as `vmm.stderr`), and
 re-enters. A guest spinning without exits, such as a raw loop outside progress
 instrumentation or one with interrupts masked, otherwise hangs a run with no
 evidence of where.
