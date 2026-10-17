@@ -228,6 +228,34 @@ mod tests {
     }
 
     #[test]
+    fn compare_and_set_sees_absent_keys_and_pending_writes() {
+        let model = RegisterOf::<u8>::default();
+        // A key never written holds no value: a CAS from any value fails.
+        let mut h = History::new();
+        let a = h.invoke(RegisterOp::Cas(0, 1));
+        h.complete(a, RegisterRet::Cas(true));
+        assert_eq!(verdict(&model, &h), "not-linearizable");
+        // A pending write can explain a later successful CAS...
+        let mut h = History::new();
+        let _ = h.invoke(RegisterOp::Write(3));
+        let a = h.invoke(RegisterOp::Cas(3, 4));
+        h.complete(a, RegisterRet::Cas(true));
+        let r = h.invoke(RegisterOp::Read);
+        h.complete(r, RegisterRet::Value(Some(4)));
+        assert_eq!(verdict(&model, &h), "linearizable");
+        // ...but a read after a completed successful CAS must see its value
+        // or a later one (etcd's stale-read shape).
+        let mut h = History::new();
+        let w = h.invoke(RegisterOp::Write(3));
+        h.complete(w, RegisterRet::Wrote);
+        let a = h.invoke(RegisterOp::Cas(3, 4));
+        h.complete(a, RegisterRet::Cas(true));
+        let r = h.invoke(RegisterOp::Read);
+        h.complete(r, RegisterRet::Value(Some(3)));
+        assert_eq!(verdict(&model, &h), "not-linearizable");
+    }
+
+    #[test]
     fn mutex_grants_never_overlap() {
         let model = MutexOf::<&str>::default();
         // Sequential holds.

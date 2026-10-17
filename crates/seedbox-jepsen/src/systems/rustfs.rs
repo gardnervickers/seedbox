@@ -616,66 +616,21 @@ pub fn run(args: Args) -> u8 {
         json!({"nodes": args.nodes, "workload": format!("{:?}", args.workload)}),
     );
     if args.crash_all_every > 0.0 {
-        crash_all_repeatedly(args.clone());
+        // A healthy restart finishes its storage setup within about 0.05 s
+        // and its bucket metadata migration about 0.35 s in, which the
+        // startup partition's 0.05-0.4 s delay straddles.
+        crate::nemesis::crash_all_repeatedly(
+            args.nodes.clone(),
+            args.crash_all_every,
+            args.crash_all_down,
+            args.startup_partition,
+            args.duration as f64,
+        );
     }
     match args.workload {
         Workload::Objects => objects(s3, &args, &bucket),
         Workload::Register => register(s3, &args, &bucket),
     }
-}
-
-/// Power-fail every server together about every `--crash-all-every` seconds
-/// (half to one and a half times it, from the seeded RNG) until the writes
-/// end, rebooting them all after `--crash-all-down` seconds (and, with
-/// `--startup-partition`, isolating one of them while they start).
-fn crash_all_repeatedly(args: Args) {
-    let mut ctl = match kit::connect_world(None) {
-        Ok(ctl) => ctl,
-        Err(error) => {
-            kit::evidence("nemesis-unavailable", json!({"error": error.0}));
-            return;
-        }
-    };
-    let start = Instant::now();
-    std::thread::spawn(move || {
-        let nodes: Vec<&str> = args.nodes.iter().map(String::as_str).collect();
-        let end = args.duration as f64;
-        let mut pace = crate::nemesis::Sleep;
-        let mut rng = Rng::new(kit::rng::entropy_seed());
-        loop {
-            let gap = rng.uniform(0.5, 1.5) * args.crash_all_every;
-            let tail = args.crash_all_down + args.startup_partition + 3.0;
-            if start.elapsed().as_secs_f64() + gap + tail > end {
-                return;
-            }
-            crate::nemesis::Pace::wait(&mut pace, &mut ctl, gap);
-            let crashed = crate::nemesis::crash_all(
-                &mut ctl,
-                &mut pace,
-                &nodes,
-                args.crash_all_down,
-                json!({}),
-            );
-            if let Err(error) = crashed {
-                kit::evidence("nemesis-failed", json!({"error": error.0}));
-            }
-            if args.startup_partition > 0.0 {
-                // A healthy restart finishes its storage setup within about
-                // 0.05 s and its bucket metadata migration about 0.35 s in.
-                crate::nemesis::Pace::wait(&mut pace, &mut ctl, rng.uniform(0.05, 0.4));
-                let (left, right) = crate::nemesis::isolate(rng.choice(&nodes), &nodes);
-                match crate::nemesis::cut(&mut ctl, &left, &right, json!({"startup": true})) {
-                    Ok(cut) => {
-                        crate::nemesis::Pace::wait(&mut pace, &mut ctl, args.startup_partition);
-                        if let Err(error) = crate::nemesis::heal(&mut ctl, &cut) {
-                            kit::evidence("nemesis-failed", json!({"error": error.0}));
-                        }
-                    }
-                    Err(error) => kit::evidence("nemesis-failed", json!({"error": error.0})),
-                }
-            }
-        }
-    });
 }
 
 fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
