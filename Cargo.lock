@@ -3169,6 +3169,7 @@ dependencies = [
  "libc",
  "seedbox-exec",
  "seedbox-test",
+ "seedbox-test-time",
  "serde_json",
  "tar",
  "tempfile",

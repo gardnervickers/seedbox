@@ -1,4 +1,5 @@
 //! Controlled Linux pre-exec probe, not a timing race or a QEMU/guest run.
+use seedbox_test_time::HangGuard;
 use std::{
     ffi::CString,
     fs::{self, File},
@@ -71,8 +72,15 @@ fn cloexec_fork_copy_blocks_exec_after_close_and_after_temp_rename_until_child_e
         );
         let (parent, child) = UnixStream::pair().unwrap();
         for pipe in [&parent, &child] {
-            pipe.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            pipe.set_write_timeout(Some(Duration::from_secs(5)))
+            let guard = HangGuard::new(
+                "fork probe acknowledgement and explicit release",
+                Duration::from_secs(5),
+            );
+            // test-time: allow(hang-guard) -- Bound the actual fork acknowledgement, never infer inheritance from silence.
+            pipe.set_read_timeout(Some(guard.remaining().unwrap()))
+                .unwrap();
+            // test-time: allow(hang-guard) -- Bound sending the explicit child release; ETXTBSY is checked independently.
+            pipe.set_write_timeout(Some(guard.remaining().unwrap()))
                 .unwrap();
         }
         let parent_fd = parent.as_raw_fd();

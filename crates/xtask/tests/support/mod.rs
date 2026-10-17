@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
+use seedbox_test_time::HangGuard;
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub fn root() -> PathBuf {
@@ -36,19 +36,17 @@ pub fn run(command: &mut Command, seconds: u64) -> Output {
     let mut child = OwnedChild(
         seedbox_test::process::spawn(command).unwrap_or_else(|e| panic!("{command:?}: {e}")),
     );
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(seconds),
-            "{command:?} exceeded {seconds}s\nstdout: {}\nstderr: {}",
-            fs::read_to_string(&stdout).unwrap_or_default(),
-            fs::read_to_string(&stderr).unwrap_or_default()
-        );
-        thread::sleep(Duration::from_millis(10));
-    };
+    let guard = HangGuard::new("xtask fixture process exit", Duration::from_secs(seconds));
+    let status = guard
+        .wait_for(|| child.0.try_wait().transpose())
+        .unwrap_or_else(|error| {
+            panic!(
+                "{command:?} exceeded {seconds}s: {error}\nstdout: {}\nstderr: {}",
+                fs::read_to_string(&stdout).unwrap_or_default(),
+                fs::read_to_string(&stderr).unwrap_or_default()
+            )
+        })
+        .unwrap();
     Output {
         status,
         stdout: fs::read(stdout).unwrap(),

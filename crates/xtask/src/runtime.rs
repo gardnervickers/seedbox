@@ -480,7 +480,7 @@ mod tests {
             io::{Read, Write},
             os::{fd::OwnedFd, unix::net::UnixStream},
             process::Stdio,
-            time::{Duration, Instant},
+            time::Duration,
         };
         struct Child(std::process::Child);
         impl Drop for Child {
@@ -542,11 +542,17 @@ mod tests {
         let (mut qmp, qmp_child) = UnixStream::pair().unwrap();
         let (mut gdb, gdb_child) = UnixStream::pair().unwrap();
         for socket in [&qmp, &gdb] {
+            let guard = seedbox_test_time::HangGuard::new(
+                "host descriptor probe socket exchange",
+                Duration::from_secs(5),
+            );
+            // test-time: allow(hang-guard) -- Wait for actual descriptor reply bytes, not a timed absence.
             socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
+                .set_read_timeout(Some(guard.remaining().unwrap()))
                 .unwrap();
+            // test-time: allow(hang-guard) -- Bound sending the probe payload; reply contents determine success.
             socket
-                .set_write_timeout(Some(Duration::from_secs(5)))
+                .set_write_timeout(Some(guard.remaining().unwrap()))
                 .unwrap();
         }
         qmp.write_all(b"qmp").unwrap();
@@ -582,22 +588,19 @@ mod tests {
             )
         });
         assert_eq!(&bytes, b"GDB");
-        let started = Instant::now();
-        loop {
-            if let Some(status) = child.0.try_wait().unwrap() {
-                assert!(
-                    status.success(),
-                    "{}",
-                    fs::read_to_string(&diagnostics).unwrap()
-                );
-                break;
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "host descriptor fixture failed to exit"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let guard = seedbox_test_time::HangGuard::new(
+            "host descriptor fixture process exit",
+            Duration::from_secs(5),
+        );
+        let status = guard
+            .wait_for(|| child.0.try_wait().transpose())
+            .expect("host descriptor fixture failed to exit")
+            .unwrap();
+        assert!(
+            status.success(),
+            "{}",
+            fs::read_to_string(&diagnostics).unwrap()
+        );
     }
 
     #[test]
