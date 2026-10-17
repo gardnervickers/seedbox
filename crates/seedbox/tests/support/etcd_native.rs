@@ -58,7 +58,6 @@ impl Cli {
             .stderr(fs::File::create(&stderr).map_err(|e| e.to_string())?);
         let mut child = seedbox_test::process::spawn_with(|| command.spawn())
             .map_err(|e| format!("spawn CLI {label}: {e}"))?;
-        // test-time: allow(hang-guard) -- Bound a positive CLI reply; expiration is infrastructure failure, never an oracle verdict.
         let status =
             tokio::time::timeout(guard.remaining().map_err(|e| e.to_string())?, child.wait())
                 .await
@@ -215,7 +214,6 @@ async fn start_server(cli: &Cli, guard: &HangGuard) -> Result<Child> {
         seedbox_test::process::spawn_with(|| command.spawn()).map_err(|e| e.to_string())?;
     let mut ready = String::new();
     let mut reader = BufReader::new(child.stdout.take().ok_or("missing startup pipe")?);
-    // test-time: allow(hang-guard) -- Bound the positive server startup handshake, with no sleep or timed absence used for ordering.
     tokio::time::timeout(
         guard.remaining().map_err(|e| e.to_string())?,
         reader.read_line(&mut ready),
@@ -404,7 +402,6 @@ pub fn run(backend: Backend) {
                 }
             }
         }
-        // test-time: allow(hang-guard) -- Bound positive exit of our owned server after graceful shutdown, including failure cleanup.
         let reaped = tokio::time::timeout(
             cleanup.remaining().map_err(|e| e.to_string())?,
             server.wait(),

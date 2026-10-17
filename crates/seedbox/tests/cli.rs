@@ -38,21 +38,23 @@ impl Drop for ServerCleanup {
         let Ok(client) = seedbox_client::Client::connect_to(&self.0) else {
             return;
         };
-        let Ok(Ok(info)) = runtime.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(2), client.info()).await
-        }) else {
+        let Ok(info) = runtime.block_on(client.info()) else {
             return;
         };
         // SAFETY: this server answered on the socket inside this test's private HOME.
         unsafe {
             libc::kill(info.process_id as i32, libc::SIGTERM);
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline
-            && std::os::unix::net::UnixStream::connect(&self.0).is_ok()
-        {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        seedbox_test_time::HangGuard::new(
+            "private CLI server closes its listener after SIGTERM",
+            std::time::Duration::from_secs(30),
+        )
+        .wait_for(|| {
+            std::os::unix::net::UnixStream::connect(&self.0)
+                .is_err()
+                .then_some(())
+        })
+        .unwrap();
     }
 }
 

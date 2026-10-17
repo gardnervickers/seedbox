@@ -128,7 +128,6 @@ fn serve_resource(root: &Path, body: String) -> std::thread::JoinHandle<Vec<Stri
                 })
                 .unwrap()
                 .unwrap();
-            // test-time: allow(hang-guard) -- Bound the positive HTTP header read, never a guest result or absence assertion.
             stream
                 .set_read_timeout(Some(guard.remaining().unwrap()))
                 .unwrap();

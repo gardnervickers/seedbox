@@ -9,7 +9,6 @@ use std::{
     io::{BufRead, BufReader},
     path::Path,
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
 };
 
 fn invoke(
@@ -262,14 +261,6 @@ impl Drop for Server {
         unsafe {
             libc::kill(self.0.id() as i32, libc::SIGTERM);
         }
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if self.0.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        self.0.wait().expect("reap owned application server");
     }
 }

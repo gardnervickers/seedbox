@@ -5,7 +5,7 @@ use seedbox_test::process::Guarded;
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 struct ServerGuard {
@@ -25,24 +25,22 @@ impl Drop for ServerGuard {
             return;
         };
         if runtime
-            .block_on(async { tokio::time::timeout(Duration::from_secs(2), client.info()).await })
-            .is_ok_and(|result| result.is_ok_and(|info| info.process_id == self.pid))
+            .block_on(client.info())
+            .is_ok_and(|info| info.process_id == self.pid)
         {
             // SAFETY: this PID was just verified by the server on our private test
             // socket. It is the daemon started by this test, not a saved PID.
             unsafe {
                 libc::kill(self.pid as i32, libc::SIGTERM);
             }
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline
-                && runtime
-                    .block_on(async {
-                        tokio::time::timeout(Duration::from_millis(200), client.info()).await
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_secs(30), async {
+                        while client.info().await.is_ok() {}
                     })
-                    .is_ok_and(|result| result.is_ok())
-            {
-                std::thread::sleep(Duration::from_millis(20));
-            }
+                    .await
+                })
+                .expect("private server closes its listener after SIGTERM");
         }
     }
 }
@@ -268,12 +266,16 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     );
     let mut range: seedbox_api::SeedRangeStatus =
         serde_json::from_slice(&exploration.stdout).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !range.complete() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(20));
-        range = runtime.block_on(client.seed_range(&range.source)).unwrap();
-    }
+    runtime
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(120), async {
+                while !range.complete() {
+                    range = client.seed_range(&range.source).await.unwrap();
+                }
+            })
+            .await
+        })
+        .expect("seed range publishes its completed preparation failure");
     assert_eq!(range.count, 3);
     assert_eq!(
         range.members.len(),

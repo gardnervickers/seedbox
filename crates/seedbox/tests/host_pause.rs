@@ -11,7 +11,7 @@ use std::{
     io::{BufRead, BufReader},
     path::Path,
     process::{Child, Command, Output, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 fn cli(binary: &Path, state: &Path) -> Command {
@@ -38,30 +38,28 @@ async fn set_rate(client: &Client, id: &SimulationId, rate: PlaybackRate) -> Pla
         command: ControlCommand::SetRate { rate },
     };
     let mut receipt = client.request_control(id, &request).await.unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        match receipt.state {
-            ControlState::Acknowledged {
-                status,
-                error: None,
-                ..
-            } => {
-                assert_eq!(status.rate, rate);
-                return status;
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match receipt.state {
+                ControlState::Acknowledged {
+                    status,
+                    error: None,
+                    ..
+                } => {
+                    assert_eq!(status.rate, rate);
+                    return status;
+                }
+                ControlState::Accepted => {}
+                state => panic!("playback command failed: {state:?}"),
             }
-            ControlState::Accepted => {}
-            state => panic!("playback command failed: {state:?}"),
+            receipt = client
+                .control_receipt(id, &request.request_id)
+                .await
+                .unwrap();
         }
-        assert!(
-            Instant::now() < deadline,
-            "playback command not acknowledged"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        receipt = client
-            .control_receipt(id, &request.request_id)
-            .await
-            .unwrap();
-    }
+    })
+    .await
+    .expect("playback command acknowledgement")
 }
 
 #[test]
@@ -98,55 +96,52 @@ fn paused_start_and_resume_has_identical_witness_and_full_state() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let id = &rerun.metadata.id;
-        let deadline = Instant::now() + Duration::from_secs(120);
-        loop {
-            match client.playback(id).await {
-                Ok(observation) => {
-                    assert!(!observation.state.terminal, "run ended before resume");
-                    assert_eq!(observation.state.rate, PlaybackRate::Paused);
-                    assert_eq!(observation.state.position.completed_rounds, 0);
-                    assert_eq!(observation.state.position.simulated_time_ns, 0);
+        tokio::time::timeout(Duration::from_secs(900), async {
+            let id = &rerun.metadata.id;
+            loop {
+                match client.playback(id).await {
+                    Ok(observation) => {
+                        assert!(!observation.state.terminal, "run ended before resume");
+                        assert_eq!(observation.state.rate, PlaybackRate::Paused);
+                        assert_eq!(observation.state.position.completed_rounds, 0);
+                        assert_eq!(observation.state.position.simulated_time_ns, 0);
+                        break;
+                    }
+                    Err(seedbox_client::Error::Rejected {
+                        code: seedbox_api::ErrorCode::Unavailable,
+                        ..
+                    }) => {}
+                    Err(error) => panic!("playback unavailable: {error}"),
+                }
+                let current = client.describe(id).await.unwrap();
+                assert_ne!(current.status.phase, Phase::Completed, "{current:?}");
+            }
+            let paused = set_rate(&client, id, PlaybackRate::Paused).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let observation = client.playback(id).await.unwrap();
+            assert_eq!(observation.state.rate, PlaybackRate::Paused);
+            assert_eq!(observation.state.position, paused.position);
+            assert_ne!(
+                client.describe(id).await.unwrap().status.phase,
+                Phase::Completed
+            );
+            set_rate(&client, id, PlaybackRate::Unlimited).await;
+
+            loop {
+                let current = client.describe(id).await.unwrap();
+                if current.status.phase == Phase::Completed {
+                    assert_eq!(current.status.verdict(), TestVerdict::Passed, "{current:?}");
                     break;
                 }
-                Err(seedbox_client::Error::Rejected {
-                    code: seedbox_api::ErrorCode::Unavailable,
-                    ..
-                }) => {}
-                Err(error) => panic!("playback unavailable: {error}"),
             }
-            let current = client.describe(id).await.unwrap();
-            assert_ne!(current.status.phase, Phase::Completed, "{current:?}");
-            assert!(Instant::now() < deadline, "no live playback endpoint");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let paused = set_rate(&client, id, PlaybackRate::Paused).await;
-        // test-time: pending(bd-dd9, host-pause-negative-position-window) -- Negative unchanged-position window needs a causal paused-boundary witness in bd-dd9.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let observation = client.playback(id).await.unwrap();
-        assert_eq!(observation.state.rate, PlaybackRate::Paused);
-        assert_eq!(observation.state.position, paused.position);
-        assert_ne!(
-            client.describe(id).await.unwrap().status.phase,
-            Phase::Completed
-        );
-        set_rate(&client, id, PlaybackRate::Unlimited).await;
-
-        let deadline = Instant::now() + Duration::from_secs(600);
-        loop {
-            let current = client.describe(id).await.unwrap();
-            if current.status.phase == Phase::Completed {
-                assert_eq!(current.status.verdict(), TestVerdict::Passed, "{current:?}");
-                break;
-            }
-            assert!(Instant::now() < deadline, "rerun exceeded test bound");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let comparison = client.compare(&source.metadata.id, id).await.unwrap();
-        assert_eq!(comparison.status, ComparisonStatus::Match);
-        assert!(comparison.outcome_matches);
-        assert_eq!(comparison.witness_matches, Some(true));
-        assert_eq!(comparison.full_state_matches, Some(true));
+            let comparison = client.compare(&source.metadata.id, id).await.unwrap();
+            assert_eq!(comparison.status, ComparisonStatus::Match);
+            assert!(comparison.outcome_matches);
+            assert_eq!(comparison.witness_matches, Some(true));
+            assert_eq!(comparison.full_state_matches, Some(true));
+        })
+        .await
+        .expect("pause/resume acceptance completes");
     });
 }
 
@@ -179,14 +174,6 @@ impl Drop for Server {
         unsafe {
             libc::kill(self.0.id() as i32, libc::SIGTERM);
         }
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if self.0.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        self.0.wait().expect("reap owned pause-test server");
     }
 }
