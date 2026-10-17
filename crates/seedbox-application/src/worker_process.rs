@@ -495,6 +495,7 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command
             .args(["-c", script])
+            .stdin(std::process::Stdio::piped())
             .env_clear()
             .env("PATH", std::env::var_os("PATH").expect("test tool PATH"))
             .process_group(0)
@@ -597,7 +598,7 @@ mod tests {
     fn cancelled_and_timed_out_workers_are_reaped_before_return() {
         for cancelled in [false, true] {
             let output = tempfile::tempdir().unwrap();
-            let child = worker(output.path(), "exec sleep 60");
+            let child = worker(output.path(), "exec cat");
             let pid = child.process.0.as_ref().unwrap().id();
             let token = CancellationToken::default();
             if cancelled {
@@ -625,7 +626,7 @@ mod tests {
         use seedbox_test_time::{handshake, ControlledClock, HangGuard};
         for cancel in [false, true] {
             let output = tempfile::tempdir().unwrap();
-            let child = worker(output.path(), "exec sleep 60");
+            let child = worker(output.path(), "exec cat");
             let pid = child.process.0.as_ref().unwrap().id();
             // Keep a real owned child and its cleanup assertions, but make the
             // budget proof independent of host passage and scheduling.
@@ -696,7 +697,7 @@ mod tests {
             let child = worker(
                 output.path(),
                 if early_drop {
-                    "exec sleep 60"
+                    "exec cat"
                 } else {
                     "printf invalid"
                 },

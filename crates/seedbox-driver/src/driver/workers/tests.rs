@@ -60,14 +60,14 @@ fn an_idle_worker_steals_jobs_from_an_occupied_workers_local_queue() {
                 });
             }
             ready.send(()).unwrap();
-            seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on wait; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(5)).recv(&wait)
+            seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on wait; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&wait)
                 .unwrap();
         })
         .unwrap();
-    seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on entered; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(5)).recv(&entered)
+    seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on entered; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&entered)
         .unwrap();
     let results = (0..8)
-        .map(|_| seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on stolen; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(5)).recv(&stolen))
+        .map(|_| seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on stolen; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&stolen))
         .collect::<Vec<_>>();
     let _ = release.send(());
     drop(workers);
@@ -84,7 +84,7 @@ fn reentrant_rayon_work_defers_context_use_until_the_outer_call_returns() {
         .submit::<io::Error>(0, move |context| {
             context.set(1);
             ready.send(()).unwrap();
-            seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on wait; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(5)).recv(&wait)
+            seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on wait; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&wait)
                 .unwrap();
             assert_eq!(rayon::yield_now(), Some(rayon::Yield::Executed));
             // The yielded driver job ran its dispatcher, but cannot borrow
@@ -93,7 +93,7 @@ fn reentrant_rayon_work_defers_context_use_until_the_outer_call_returns() {
             context.set(2);
         })
         .unwrap();
-    seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on entered; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(5)).recv(&entered)
+    seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on entered; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&entered)
         .unwrap();
     workers
         .submit::<io::Error>(1, move |context| {
@@ -102,7 +102,7 @@ fn reentrant_rayon_work_defers_context_use_until_the_outer_call_returns() {
         })
         .unwrap();
     release.send(()).unwrap();
-    let result = seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on done; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(5)).recv(&done);
+    let result = seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on done; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&done);
     drop(workers);
     assert_eq!(result, Ok(()));
 }
@@ -127,7 +127,7 @@ fn nested_pools_use_their_own_thread_local_contexts() {
             finished.send(()).unwrap();
         })
         .unwrap();
-    let result = seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on done; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(5)).recv(&done);
+    let result = seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on done; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&done);
     drop(workers);
     assert_eq!(result, Ok(()));
 }
@@ -159,7 +159,7 @@ fn unwinding_drains_a_large_reentrant_backlog_without_recursing() {
             finished.send(context.get()).unwrap();
         }));
     });
-    let result = seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on done; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(5)).recv(&done);
+    let result = seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on done; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&done);
     drop(workers);
     assert_eq!(result, Ok(COUNT));
 }

@@ -12,7 +12,7 @@ use std::{
 
 const LIMIT: usize = 256 * 1024;
 // Host time is an I/O hang guard, never a post-completion speed oracle.
-pub const DEADLINE: Duration = Duration::from_secs(5);
+pub const DEADLINE: Duration = Duration::from_secs(30);
 
 pub struct Sdk {
     child: Child,

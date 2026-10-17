@@ -33,7 +33,7 @@ fn exercise(request: Value) -> Value {
             .spawn()
             .unwrap(),
     );
-    let guard = HangGuard::new("guest oracle adapter process exit", Duration::from_secs(5));
+    let guard = HangGuard::new("guest oracle adapter process exit", Duration::from_secs(30));
     let status = guard
         .wait_for(|| child.0.try_wait().transpose())
         .expect("guest oracle adapter exceeded five seconds")

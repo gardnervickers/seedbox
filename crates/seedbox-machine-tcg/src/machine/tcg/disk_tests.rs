@@ -202,10 +202,50 @@ impl Qmp {
         value
     }
     fn command(&mut self, name: &str, arguments: Value) -> Result<Value, Value> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let timeout = || json!({"error": "QMP command exceeded 60-second deadline"});
         let request = json!({"execute": name, "arguments": arguments});
-        writeln!(self.stream.get_mut(), "{request}").unwrap();
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(timeout());
+        }
+        self.stream
+            .get_ref()
+            .set_write_timeout(Some(remaining))
+            .unwrap();
+        if let Err(error) = writeln!(self.stream.get_mut(), "{request}") {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) {
+                return Err(timeout());
+            }
+            panic!("QMP command write failed: {error}");
+        }
         loop {
-            let response = self.read();
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(timeout());
+            }
+            self.stream
+                .get_ref()
+                .set_read_timeout(Some(remaining))
+                .unwrap();
+            let mut line = String::new();
+            match self.stream.read_line(&mut line) {
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    return Err(timeout())
+                }
+                Err(error) => panic!("QMP response read failed: {error}"),
+            }
+            let response: Value = serde_json::from_str(&line).unwrap();
+            self.stopped |= response["event"] == "STOP";
             if response.get("event").is_some() {
                 continue;
             }
