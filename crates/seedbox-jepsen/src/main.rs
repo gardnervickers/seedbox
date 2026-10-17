@@ -2,7 +2,7 @@
 //! reproductions under Seedbox, plus host-side tools (scenario generation,
 //! the oracle build, log re-checks, the Elle cross-check and seed campaigns).
 use clap::{Parser, Subcommand, ValueEnum};
-use seedbox_jepsen::{campaign, checker, kit, scenario, systems, tools};
+use seedbox_jepsen::{campaign, checker, kit, scenario, summarize, systems, tools};
 use std::{fs, path::PathBuf, process::ExitCode};
 
 #[derive(Parser)]
@@ -118,6 +118,11 @@ enum Command {
     },
     /// Run scenarios over seeds, replay a sample, collect evidence and summarize (host).
     Campaign(campaign::Args),
+    /// Summarize a `seedbox explore --json` document: a row per member and a tally (host).
+    Summarize {
+        /// The explore document, or `-` for standard input.
+        file: PathBuf,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy)]
@@ -232,6 +237,7 @@ fn main() -> ExitCode {
             markdown,
         ),
         Command::Campaign(args) => campaign::run(args),
+        Command::Summarize { file } => summarize::run(&file),
     };
     // Under Seedbox an inconclusive oracle leaves its property unevaluated
     // rather than failing: it is not a finding.

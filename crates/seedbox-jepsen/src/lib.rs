@@ -18,5 +18,6 @@ pub mod finalread;
 pub mod kit;
 pub mod nemesis;
 pub mod scenario;
+pub mod summarize;
 pub mod systems;
 pub mod tools;
