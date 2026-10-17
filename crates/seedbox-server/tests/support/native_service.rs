@@ -19,6 +19,11 @@ mod held_checkpoint;
 #[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
 pub use disk::{disk_checkpoint_continuation, disk_repeat_workers};
 pub use held_checkpoint::native_held_checkpoint;
+#[cfg(feature = "kvm-tests")]
+#[path = "native_faults.rs"]
+mod faults;
+#[cfg(feature = "kvm-tests")]
+pub use faults::pv_throttle_heal_replay;
 #[path = "case_cleanup.rs"]
 mod case_cleanup;
 use case_cleanup::{finish_before_rethrow, panic_text, DEADLINE_FAILURE};
