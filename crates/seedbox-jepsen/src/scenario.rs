@@ -1248,11 +1248,15 @@ const RUSTFS_102: &str = "docker.io/rustfs/rustfs:1.0.2@sha256:7e948dad4748bda48
 
 fn rustfs() -> Vec<Scenario> {
     // (name, comment, oracle arguments)
-    let specs: [(&str, &str, &[&str]); 3] = [
+    let specs: [(&str, &str, &[&str]); 5] = [
         ("rustfs-healthy", "Baseline: four RustFS 1.0.2 servers, one erasure-coded drive each, keep every\nacknowledged object intact with no faults.", &[]),
         ("rustfs-current-generic", "The current release (1.0.2), looking for unknown bugs: S3 PUTs of unique objects\nfor 75 s with reads of acknowledged objects, then a read-back of every acknowledged\nobject. Run it with `--fault-profile harness/jepsen/rustfs/generic-faults.yaml`\n(power loss, process pauses, partitions) or `corruption-faults.yaml` (bit flips in\none server's object data).", &[]),
         ("rustfs-register-generic", "The current release (1.0.2) with six overwritten keys: PUT, DELETE and GET from\nclients on every node for 75 s, then a read of each key; every key's history must\nbe linearizable (S3's strong read-after-write and list consistency). Run it with\n`--fault-profile harness/jepsen/rustfs/generic-faults.yaml` or `corruption-faults.yaml`.",
          &["--workload", "register", "--size", "4096"]),
+        ("rustfs-crash-all", "The current release (1.0.2) under coordinated power loss: every server fails\ntogether about every 20 s (10-30 s) during 75 s of PUTs and reboots 2 s later. An object acknowledged\nbefore a power failure must survive it intact; this asks whether RustFS syncs\nan object before acknowledging it.",
+         &["--crash-all-every", "20"]),
+        ("rustfs-crash-all-large", "rustfs-crash-all with 1 MiB objects, which RustFS erasure-codes into separate\npart files rather than keeping inline in its metadata.",
+         &["--crash-all-every", "20", "--size", "1048576", "--clients", "2"]),
     ];
     specs
         .iter()
@@ -1268,7 +1272,7 @@ fn rustfs() -> Vec<Scenario> {
                         .env("RUSTFS_RPC_SECRET", "jepsen-rpc-secret")
                         .env("RUSTFS_CONSOLE_ENABLE", "false")
                         .memory(1024)
-                        .data("/data");
+                        .data_sized("/data", "4GiB");
                     (node, server)
                 })
                 .collect();
@@ -1277,7 +1281,9 @@ fn rustfs() -> Vec<Scenario> {
                 comment: comment.to_string(),
                 generated: "RustFS 1.0.2, four servers with one drive each".into(),
                 machines,
-                oracle: Machine::program(&strings(&[&["rustfs"], *arguments].concat())),
+                // The register check's search grows with unacknowledged writes.
+                oracle: Machine::program(&strings(&[&["rustfs"], *arguments].concat()))
+                    .memory(1024),
                 latency: "1ms".into(),
             }
         })

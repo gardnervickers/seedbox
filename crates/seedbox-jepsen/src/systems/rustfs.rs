@@ -68,6 +68,13 @@ pub struct Args {
     pub access_key: String,
     #[arg(long, default_value = "jepsen-secret")]
     pub secret_key: String,
+    /// Power-fail every server together about this often during the writes,
+    /// in seconds; 0 never does.
+    #[arg(long, default_value_t = 0.0)]
+    pub crash_all_every: f64,
+    /// Seconds the servers stay down after a coordinated power failure.
+    #[arg(long, default_value_t = 2.0)]
+    pub crash_all_down: f64,
     /// Seconds to wait after the writes before the read-back.
     #[arg(long, default_value_t = 20)]
     pub quiet: u64,
@@ -348,6 +355,20 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
             std::thread::sleep(Duration::from_secs(1 + attempt));
         }
     }
+    // Record each key's size first: the check below is the expensive part.
+    let sizes: Vec<_> = histories
+        .iter()
+        .map(|h| {
+            let h = h.lock().unwrap();
+            let ops = h.operations();
+            let pending = ops
+                .iter()
+                .filter(|o| matches!(o.outcome, wgl::OpOutcome::Pending))
+                .count();
+            json!({"ops": ops.len(), "pending": pending})
+        })
+        .collect();
+    kit::evidence("histories", json!({"keys": sizes}));
     let mut violations = Vec::new();
     let mut exhausted = Vec::new();
     let mut counts = json!({});
@@ -527,10 +548,51 @@ pub fn run(args: Args) -> u8 {
     seedbox_sdk::setup_complete(
         json!({"nodes": args.nodes, "workload": format!("{:?}", args.workload)}),
     );
+    if args.crash_all_every > 0.0 {
+        crash_all_repeatedly(args.clone());
+    }
     match args.workload {
         Workload::Objects => objects(s3, &args, &bucket),
         Workload::Register => register(s3, &args, &bucket),
     }
+}
+
+/// Power-fail every server together about every `--crash-all-every` seconds
+/// (half to one and a half times it, from the seeded RNG) until the writes
+/// end, rebooting them all after `--crash-all-down` seconds.
+fn crash_all_repeatedly(args: Args) {
+    let mut ctl = match kit::connect_world(None) {
+        Ok(ctl) => ctl,
+        Err(error) => {
+            kit::evidence("nemesis-unavailable", json!({"error": error.0}));
+            return;
+        }
+    };
+    let start = Instant::now();
+    std::thread::spawn(move || {
+        let nodes: Vec<&str> = args.nodes.iter().map(String::as_str).collect();
+        let end = args.duration as f64;
+        let mut pace = crate::nemesis::Sleep;
+        let mut rng = Rng::new(kit::rng::entropy_seed());
+        loop {
+            let gap = rng.uniform(0.5, 1.5) * args.crash_all_every;
+            if start.elapsed().as_secs_f64() + gap + args.crash_all_down > end {
+                return;
+            }
+            crate::nemesis::Pace::wait(&mut pace, &mut ctl, gap);
+            let crashed = crate::nemesis::crash_all(
+                &mut ctl,
+                &mut pace,
+                &nodes,
+                args.crash_all_down,
+                json!({}),
+            );
+            if let Err(error) = crashed {
+                kit::evidence("nemesis-failed", json!({"error": error.0}));
+                return;
+            }
+        }
+    });
 }
 
 fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
