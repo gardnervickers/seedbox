@@ -10,7 +10,7 @@ use std::{
     io::Write,
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 struct Owned(Child);
@@ -46,14 +46,12 @@ pub fn invoke(
             .unwrap(),
     );
     child.0.stdin.take().unwrap().write_all(input).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "preboot worker did not exit");
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let status = seedbox_test_time::HangGuard::new(
+        "preboot worker exits after EOF or malformed request",
+        Duration::from_secs(5),
+    )
+    .wait_for(|| child.0.try_wait().unwrap())
+    .expect("preboot worker did not exit");
     assert!(
         !state.exists(),
         "private worker must not initialize CLI state"

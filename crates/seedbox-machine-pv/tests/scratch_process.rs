@@ -223,18 +223,21 @@ fn abrupt_cold_owner_death_leaves_only_session_reclaimable_files() {
             .guarded_spawn()
             .unwrap(),
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !marker.exists() {
+    seedbox_test_time::HangGuard::new(
+        "cold scratch owner publishes its actual ready marker",
+        std::time::Duration::from_secs(5),
+    )
+    .wait_for(|| {
+        if marker.exists() {
+            return Some(());
+        }
         assert!(
             owner.0.try_wait().unwrap().is_none(),
             "cold scratch owner exited before ready"
         );
-        assert!(
-            std::time::Instant::now() < deadline,
-            "cold scratch owner did not become ready"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+        None
+    })
+    .expect("cold scratch owner did not become ready");
     let owned = owned_dirs(&root);
     assert_eq!(owned.len(), 1);
     owner.0.kill().unwrap(); // Actual abrupt death: no Rust destructor can run.

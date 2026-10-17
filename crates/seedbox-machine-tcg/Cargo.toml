@@ -25,6 +25,7 @@ bench = false
 harness = false
 
 [dev-dependencies]
+seedbox-test-time.workspace = true
 # Integration targets (including the native suite, run without features) use
 # this crate's own test-support fixtures, such as the x86 raw-program builder.
 seedbox-machine-tcg = { workspace = true, features = ["test-support"] }

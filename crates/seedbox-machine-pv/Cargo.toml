@@ -18,6 +18,7 @@ sha2.workspace = true
 tar.workspace = true
 
 [dev-dependencies]
+seedbox-test-time.workspace = true
 seedbox-machine = { workspace = true, features = ["test-support"] }
 seedbox-test.workspace = true
 hex.workspace = true
