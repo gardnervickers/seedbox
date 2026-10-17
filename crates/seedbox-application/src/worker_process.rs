@@ -1061,11 +1061,12 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         let mut child = worker(output.path(), "printf result");
         let pid = child.process.0.as_ref().unwrap().id();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while child.process.exited().unwrap().is_none() {
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        seedbox_test_time::HangGuard::new(
+            "owned worker reports its actual exit before explicit cleanup",
+            Duration::from_secs(5),
+        )
+        .wait_for(|| child.process.exited().unwrap())
+        .unwrap();
         assert_eq!(child.process.exited().unwrap(), Some(true));
         assert_eq!(child.process.exited().unwrap(), Some(true));
         child.process.stop().unwrap();
