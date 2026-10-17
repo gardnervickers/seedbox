@@ -624,13 +624,12 @@ fn sdk(
     append("tcg/x86_64/mke2fs", &elf);
     append("tcg/x86_64/command-line", b"rdinit=/init");
     append("tcg/x86_64/firmware", &vec![3; 64 * 1024]);
-    append(
-        "host/x86_64-linux/bin/qemu-system-x86_64",
-        b"#!/bin/sh\nexit 0\n",
-    );
-    append("host/x86_64-linux/libexec/qemu-system-x86_64", &elf);
-    append("host/x86_64-linux/lib/loader", b"cold library");
-    append("host/x86_64-linux/share/qemu/qboot.rom", b"cold firmware");
+    // Host QEMU members live under the system recorded in host-system.
+    let host = |name: &str| format!("host/{system}/{name}");
+    append(&host("bin/qemu-system-x86_64"), b"#!/bin/sh\nexit 0\n");
+    append(&host("libexec/qemu-system-x86_64"), &elf);
+    append(&host("lib/loader"), b"cold library");
+    append(&host("share/qemu/qboot.rom"), b"cold firmware");
     let mut progress = tar::Builder::new(Vec::new());
     for name in [
         "bin64/drrun",
@@ -671,7 +670,11 @@ fn sdk(
     let mut builder = tar::Builder::new(&mut arm_progress);
     for entry in tar::Archive::new(progress.as_slice()).entries().unwrap() {
         let mut entry = entry.unwrap();
-        let name = entry.path().unwrap().into_owned();
+        let mut name = entry.path().unwrap().into_owned();
+        // The aarch64 runtime carries its own ELF loader name.
+        if name.ends_with("lib/ld-linux-x86-64.so.2") {
+            name = "seedbox/progress/lib/ld-linux-aarch64.so.1".into();
+        }
         let bytes = if name.to_string_lossy().ends_with(".txt")
             || name.to_string_lossy().ends_with(".LIB")
         {
@@ -680,6 +683,9 @@ fn sdk(
             arm_elf.as_slice()
         };
         let mut header = tar::Header::new_gnu();
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
         header.set_mode(0o755);
         header.set_size(bytes.len() as u64);
         header.set_cksum();

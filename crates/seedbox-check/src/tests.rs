@@ -1163,6 +1163,8 @@ fn process_timeout_reaps_owned_descendants() {
             real.execute(&job).unwrap_err().kind(),
             std::io::ErrorKind::TimedOut
         );
+        // Parsing proves the descendant started; only Linux checks it was reaped.
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let pid: libc::pid_t = fs::read_to_string(root.join("descendant"))
             .unwrap()
             .trim()

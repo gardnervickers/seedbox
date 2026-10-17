@@ -64,16 +64,9 @@ fn eof_on_owner_pipe_stops_a_blocked_native_worker() {
     // SAFETY: path is a valid terminated string and mode is an ordinary mode_t.
     assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
     let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
-    command.arg("__engine");
-    #[cfg(target_os = "macos")]
+    // The Driver worker opens its request before any guest exists.
     command
-        .args(["arm64-world-v1", "--owner-pipe", "--seed", "1", "--config"])
-        .arg(&fifo)
-        .arg("--out")
-        .arg(directory.path().join("output"));
-    #[cfg(target_os = "linux")]
-    command
-        .args(["seedbox-internal-worker-v1", "--owner-pipe", "--request"])
+        .args(["__engine", "driver-world-v1", "--owner-pipe", "--request"])
         .arg(&fifo);
     let mut child = Cleanup(
         command

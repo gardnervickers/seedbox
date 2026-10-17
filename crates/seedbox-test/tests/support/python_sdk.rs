@@ -225,6 +225,8 @@ fn blocked_real_sdk_call_has_deadline_and_child_is_reaped_on_unwind() {
     let connected = sdk.exchange(json!({"action":"connect","path":path}));
     assert!(connected.get("error").is_none(), "{connected}");
     let (peer, _) = listener.accept().expect("real SDK connected");
+    // BSD-derived hosts let an accepted socket inherit non-blocking mode.
+    peer.set_nonblocking(false).unwrap();
     // A real request receipt, not silence or a sleep, establishes SDK progress.
     // The socket timeout is only a hang guard if that progress never happens.
     // test-time: allow(hang-guard) -- Bound receipt of the actual SDK request before deliberately exhausting its I/O budget.

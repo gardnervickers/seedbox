@@ -253,6 +253,8 @@ fn abrupt_cold_owner_death_leaves_only_session_reclaimable_files() {
     assert!(target.path().is_dir());
 }
 
+// Needs a real non-UTF-8 directory; APFS rejects such names with EILSEQ.
+#[cfg(target_os = "linux")]
 #[test]
 fn non_utf8_absolute_and_effective_relative_or_default_roots_fail_without_side_effects() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
@@ -392,6 +394,8 @@ fn all_valid_utf8_absolute_relative_and_default_spellings_remain_supported() {
     }
 }
 
+// Needs a real non-UTF-8 directory; APFS rejects such names with EILSEQ.
+#[cfg(target_os = "linux")]
 #[test]
 fn tempfile_override_is_default_authority_but_explicit_root_still_wins() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};

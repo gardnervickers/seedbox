@@ -128,10 +128,17 @@ fn serve_resource(root: &Path, body: String) -> std::thread::JoinHandle<Vec<Stri
                 })
                 .unwrap()
                 .unwrap();
+            // BSD-derived hosts let an accepted socket inherit the listener's
+            // non-blocking mode; the reads below are blocking and bounded.
+            stream.set_nonblocking(false).unwrap();
             // test-time: allow(hang-guard) -- Bound the positive HTTP header read, never a guest result or absence assertion.
-            stream
-                .set_read_timeout(Some(guard.remaining().unwrap()))
-                .unwrap();
+            match stream.set_read_timeout(Some(guard.remaining().unwrap())) {
+                Ok(()) => {}
+                // macOS rejects socket options once the peer has shut down:
+                // the startup liveness connection may already be closed.
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => continue,
+                Err(error) => panic!("bound request read: {error}"),
+            }
             let mut reader = BufReader::new(&mut stream);
             let mut line = String::new();
             if reader.read_line(&mut line).unwrap() == 0 {

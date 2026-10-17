@@ -172,6 +172,7 @@ impl WorkerLaunch {
                     .into(),
             ));
         }
+        // test-time: allow(hang-guard) -- Anchor the test worker's wall-time bound; its expiry is an infrastructure failure, never the asserted worker outcome.
         let started = seedbox_engine_protocol::host_clock::Instant::now()?;
         let child = crate::exec_files::spawn(&mut self.command).map_err(|error| {
             Error::Setup(format!(
