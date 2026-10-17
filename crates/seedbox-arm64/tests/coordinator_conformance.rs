@@ -4,6 +4,7 @@
     reason = "standalone workspace: no seedbox-test dependency and outside portable clippy; kept by bd-a8e"
 )]
 use seedbox_arm64::{application::worker, disk::Disk};
+use seedbox_test_time::HangGuard;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -11,8 +12,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -70,45 +70,25 @@ with open({:?}, 'wb', buffering=0) as requests:
             if keep_open { "True" } else { "False" }
         );
         let executable = self.path("worker");
-        fs::write(&executable, script).unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        // A child forked by a concurrent test may still hold our write descriptor
-        // until it execs, so exec fails with ETXTBSY. Nothing reopens the script
-        // for writing, so once one exec succeeds every later spawn will too.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            match std::process::Command::new(&executable)
-                .arg("--probe")
-                .status()
-            {
-                Ok(status) => {
-                    assert!(status.success(), "worker probe: {status}");
-                    break;
-                }
-                Err(error)
-                    if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline =>
-                {
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => panic!("worker probe {}: {error}", executable.display()),
-            }
+        {
+            let _writing = seedbox_exec::writing();
+            fs::write(&executable, script).unwrap();
         }
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        // Exclude concurrent fork/exec while writing above, then wait for the
+        // actual probe child instead of retrying ETXTBSY after a host delay.
+        let status =
+            seedbox_exec::status(std::process::Command::new(&executable).arg("--probe")).unwrap();
+        assert!(status.success(), "worker probe: {status}");
         executable
     }
     fn wait_for_requests(&self) -> u64 {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            if let Ok(meta) = fs::metadata(self.path("requests")) {
-                if meta.len() > 0 {
-                    return meta.len();
-                }
-            }
-            assert!(
-                Instant::now() < deadline,
-                "script did not receive a request"
-            );
-            thread::sleep(Duration::from_millis(5));
-        }
+        HangGuard::new("script records a request", Duration::from_secs(30))
+            .wait_for(|| {
+                let len = fs::metadata(self.path("requests")).ok()?.len();
+                (len > 0).then_some(len)
+            })
+            .unwrap()
     }
     fn pid(&self) -> i32 {
         fs::read_to_string(self.path("pid"))
@@ -117,23 +97,20 @@ with open({:?}, 'wb', buffering=0) as requests:
             .unwrap()
     }
     fn wait_for_operations(&self, expected: usize) {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
+        HangGuard::new(
+            "worker records complete operations",
+            Duration::from_secs(30),
+        )
+        .wait_for(|| {
             let bytes = fs::read(self.path("requests")).unwrap();
             let mut wire = bytes.as_slice();
             let mut count = 0;
             while let Ok(Some(_)) = worker::read_message::<worker::Request>(&mut wire) {
                 count += 1;
             }
-            if count == expected {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "worker recorded {count} of {expected} operations"
-            );
-            thread::sleep(Duration::from_millis(5));
-        }
+            (count == expected).then_some(())
+        })
+        .unwrap();
     }
 }
 impl Drop for Fixture {

@@ -41,6 +41,7 @@ kvm-ioctls = "0.24"
 cc = "1"
 
 [dev-dependencies]
+seedbox-test-time.workspace = true
 fdt = "0.1"
 
 [features]

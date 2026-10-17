@@ -7,13 +7,14 @@
 use super::raw_program_data::{Asm, Cond, Reg, GED_RESET, GED_SLEEP, PROGRAM};
 use crate::machine::disk::{Store, SECTOR};
 use seedbox_test::process::Guarded;
+use seedbox_test_time::HangGuard;
 use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const RING: u64 = 0x0010_0000;
@@ -169,17 +170,16 @@ struct Qmp {
 
 impl Qmp {
     fn connect(path: &Path, child: &mut Child) -> Self {
-        let started = Instant::now();
-        let stream = loop {
-            match UnixStream::connect(path) {
-                Ok(stream) => break stream,
+        let guard = HangGuard::new("QEMU QMP socket readiness", Duration::from_secs(30));
+        let stream = guard
+            .wait_for(|| match UnixStream::connect(path) {
+                Ok(stream) => Some(stream),
                 Err(error) => {
                     assert!(child.try_wait().unwrap().is_none(), "QEMU exited: {error}");
-                    assert!(started.elapsed() < Duration::from_secs(30), "{error}");
-                    std::thread::sleep(Duration::from_millis(5));
+                    None
                 }
-            }
-        };
+            })
+            .unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(60)))
             .unwrap();
@@ -320,11 +320,12 @@ fn start(
         let uri = format!("file:{}", path.display());
         qmp.command("migrate-incoming", json!({"uri": uri}))
             .unwrap();
-        let started = Instant::now();
-        while qmp.command("query-status", json!({})).unwrap()["status"] != "paused" {
-            assert!(started.elapsed() < Duration::from_secs(30));
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        HangGuard::new("QMP reports paused", Duration::from_secs(30))
+            .wait_for(|| {
+                (qmp.command("query-status", json!({})).unwrap()["status"] == "paused")
+                    .then_some(())
+            })
+            .unwrap();
     }
     Qemu { child, qmp }
 }
@@ -433,11 +434,12 @@ fn tcg_disk_device_completes_requests_and_migrates_its_overlays() {
             let image = directory.join("migration");
             let uri = format!("file:{}", image.display());
             qemu.qmp.command("migrate", json!({"uri": uri})).unwrap();
-            let started = Instant::now();
-            while qemu.qmp.command("query-migrate", json!({})).unwrap()["status"] != "completed" {
-                assert!(started.elapsed() < Duration::from_secs(30));
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            HangGuard::new("QMP reports completed", Duration::from_secs(30))
+                .wait_for(|| {
+                    (qemu.qmp.command("query-migrate", json!({})).unwrap()["status"] == "completed")
+                        .then_some(())
+                })
+                .unwrap();
             // A stale boot overlay is replaced entirely by the migrated one.
             let mut restored = start(directory, "restored", &ring, &boot_overlay(), Some(&image));
             assert_eq!(restored.qmp.export(directory, "restored-export"), exported);

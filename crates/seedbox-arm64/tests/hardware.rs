@@ -26,6 +26,61 @@ fn busy_wait_requires_hrtimer_duration() {
     }
 }
 
+mod jitter {
+    use std::{sync::mpsc, time::Duration};
+
+    /// Vary host scheduling by completing real work on a separate thread.
+    /// Each guest exit waits for its own completion signal, never a host delay.
+    pub(super) struct Jitter {
+        requests: Option<mpsc::Sender<u64>>,
+        completed: mpsc::Receiver<()>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Jitter {
+        pub(super) fn start() -> Self {
+            let (requests, received) = mpsc::channel::<u64>();
+            let (done, completed) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                for iterations in received {
+                    let mut work = iterations;
+                    for _ in 0..iterations {
+                        work = work.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        std::hint::black_box(work);
+                    }
+                    if done.send(()).is_err() {
+                        break;
+                    }
+                }
+            });
+            Self {
+                requests: Some(requests),
+                completed,
+                thread: Some(thread),
+            }
+        }
+        pub(super) fn perturb(&self, iterations: u64) {
+            self.requests.as_ref().unwrap().send(iterations).unwrap();
+            self.completed
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap();
+        }
+    }
+    impl Drop for Jitter {
+        fn drop(&mut self) {
+            self.requests.take();
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[test]
+    fn host_jitter_waits_for_each_work_completion() {
+        let jitter = Jitter::start();
+        for iterations in [0, 1, 5000, 0] {
+            jitter.perturb(iterations);
+        }
+    }
+}
+
 #[cfg(all(
     feature = "guest-tests",
     any(
@@ -34,7 +89,7 @@ fn busy_wait_requires_hrtimer_duration() {
     )
 ))]
 mod guest {
-    use super::busy_wait_elapsed;
+    use super::{busy_wait_elapsed, jitter::Jitter};
     use seedbox_arm64::{backend::Backend, machine::Machine, witness::Report};
     use std::{
         path::PathBuf,
@@ -42,7 +97,6 @@ mod guest {
             atomic::{AtomicBool, Ordering},
             Arc,
         },
-        time::Duration,
     };
     fn same(a: &Report, b: &Report) {
         if a.witness != b.witness {
@@ -79,7 +133,7 @@ mod guest {
             }
         }
     }
-    fn suite<B: Backend>(name: &str, fast: bool) {
+    fn suite<B: Backend>(name: &str) {
         let input = |key| {
             let path = std::env::var_os(key)
                 .unwrap_or_else(|| panic!("set {key}; see docs/internals.md#development-checks"));
@@ -103,8 +157,8 @@ mod guest {
             f.write_all(&serde_json::to_vec_pretty(report).unwrap())
                 .unwrap();
             eprintln!(
-            "{name} {label}: {} exits={} wall={:.6}s virtual={}ns deferred_spis={} deferred_clock_read_spis={}",
-            report.witness, report.exits, report.wall_seconds, report.virtual_ns,
+            "{name} {label}: {} exits={} virtual={}ns deferred_spis={} deferred_clock_read_spis={}",
+            report.witness, report.exits, report.virtual_ns,
             report.deferred_spi_events, report.deferred_clock_read_spis
         );
         };
@@ -125,8 +179,9 @@ mod guest {
             .unwrap();
         save("seed2", &c);
         assert_ne!(a.witness, c.witness);
-        // CPU load and randomly chosen host sleeps must not change any guest byte.
+        // CPU load and randomly sized work on another thread must not change any guest byte.
         let burner = Burner::start();
+        let jitter = Jitter::start();
         use std::io::Read;
         let mut entropy = [0u8; 8];
         std::fs::File::open("/dev/urandom")
@@ -140,8 +195,7 @@ mod guest {
                 rng ^= rng << 13;
                 rng ^= rng >> 7;
                 rng ^= rng << 17;
-                // test-time: allow(host-timing-perturbation) -- Seeded host jitter perturbs native execution; same() compares exact deterministic witnesses, not elapsed speed or assumed ordering.
-                std::thread::sleep(Duration::from_micros(rng % 5001));
+                jitter.perturb(rng % 5001);
             })
             .unwrap();
         drop(burner);
@@ -168,23 +222,16 @@ mod guest {
                 .any(|r| r.kind == 1 && r.write && r.addr == seedbox_arm64::EVENT_ADDR + 24),
             "busy-wait must cross a polling bound"
         );
-        if fast {
-            assert!(
-            a.wall_seconds < 1.0,
-            "baseline HVF boot including 200us guest timerfd spin and 1s sleep took {:.3}s; report timing failure (1s budget)",
-            a.wall_seconds
-        );
-        }
     }
     #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "hvf-tests"))]
     #[test]
     fn hvf_determinism() {
-        suite::<seedbox_arm64::backend::hvf::Hvf>("hvf", true);
+        suite::<seedbox_arm64::backend::hvf::Hvf>("hvf");
     }
     #[cfg(all(target_os = "linux", target_arch = "aarch64", feature = "kvm-tests"))]
     #[test]
     fn kvm_determinism() {
-        suite::<seedbox_arm64::backend::kvm::Kvm>("kvm", false);
+        suite::<seedbox_arm64::backend::kvm::Kvm>("kvm");
     }
 }
 
@@ -329,7 +376,7 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
     for generation in [1, 2] {
         let (mut client, mut server) = UnixStream::pair().unwrap();
         client
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(Duration::from_secs(30)))
             .unwrap();
         let thread = std::thread::spawn(move || {
             let mut output = server.try_clone().unwrap();

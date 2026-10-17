@@ -93,9 +93,7 @@ fn run(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
     // These are the explicitly supplied child stdio descriptors, owned only by
     // this fixture. No unsafe descriptor manipulation exists in production.
     let mut socket = unsafe { UnixStream::from_raw_fd(0) };
-    // test-time: allow(hang-guard) -- Bound receipt of actual QMP commands in this host-only fixture binary; preserve the existing thirty-second I/O error.
     socket.set_read_timeout(Some(Duration::from_secs(30)))?;
-    // test-time: allow(hang-guard) -- Bound delivery of actual QMP replies in this host-only fixture binary, not simulated progress.
     socket.set_write_timeout(Some(Duration::from_secs(30)))?;
     if gdb {
         let stream = unsafe { UnixStream::from_raw_fd(1) };

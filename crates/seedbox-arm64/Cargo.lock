@@ -395,6 +395,7 @@ dependencies = [
  "seedbox-arm64-control",
  "seedbox-arm64-engine-core",
  "seedbox-exec",
+ "seedbox-test-time",
  "serde",
  "serde_json",
  "sha2",

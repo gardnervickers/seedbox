@@ -8,13 +8,14 @@
 //! migrates.
 use seedbox_machine_tcg::machine::tcg::test_support::raw_program::{lapic, Asm, Cond, Reg};
 use seedbox_test::process::Guarded;
+use seedbox_test_time::HangGuard;
 use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const COMMANDS: u64 = 0x0002_0000;
@@ -278,17 +279,16 @@ struct Qmp {
 
 impl Qmp {
     fn connect(path: &Path, child: &mut Child) -> Self {
-        let started = Instant::now();
-        let stream = loop {
-            match UnixStream::connect(path) {
-                Ok(stream) => break stream,
+        let guard = HangGuard::new("QEMU QMP socket readiness", Duration::from_secs(30));
+        let stream = guard
+            .wait_for(|| match UnixStream::connect(path) {
+                Ok(stream) => Some(stream),
                 Err(error) => {
                     assert!(child.try_wait().unwrap().is_none(), "QEMU exited: {error}");
-                    assert!(started.elapsed() < Duration::from_secs(30), "{error}");
-                    std::thread::sleep(Duration::from_millis(5));
+                    None
                 }
-            }
-        };
+            })
+            .unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(60)))
             .unwrap();
@@ -372,17 +372,19 @@ impl Qmp {
     fn migrate(&mut self, path: &Path) {
         let uri = format!("file:{}", path.display());
         self.command("migrate", json!({"uri": uri})).unwrap();
-        let started = Instant::now();
-        while self.command("query-migrate", json!({})).unwrap()["status"] != "completed" {
-            assert!(started.elapsed() < Duration::from_secs(30));
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        HangGuard::new("QMP reports completed", Duration::from_secs(30))
+            .wait_for(|| {
+                (self.command("query-migrate", json!({})).unwrap()["status"] == "completed")
+                    .then_some(())
+            })
+            .unwrap();
         // Return the source to stopped control, as Process::snapshot does.
-        let started = Instant::now();
-        while self.command("query-status", json!({})).unwrap()["status"] != "postmigrate" {
-            assert!(started.elapsed() < Duration::from_secs(30));
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        HangGuard::new("QMP reports postmigrate", Duration::from_secs(30))
+            .wait_for(|| {
+                (self.command("query-status", json!({})).unwrap()["status"] == "postmigrate")
+                    .then_some(())
+            })
+            .unwrap();
         self.command("seedbox-capture-complete", json!({})).unwrap();
     }
 }
@@ -493,11 +495,12 @@ impl Qemu {
             let uri = format!("file:{}", path.display());
             qmp.command("migrate-incoming", json!({"uri": uri}))
                 .unwrap();
-            let started = Instant::now();
-            while qmp.command("query-status", json!({})).unwrap()["status"] != "paused" {
-                assert!(started.elapsed() < Duration::from_secs(30));
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            HangGuard::new("QMP reports paused", Duration::from_secs(30))
+                .wait_for(|| {
+                    (qmp.command("query-status", json!({})).unwrap()["status"] == "paused")
+                        .then_some(())
+                })
+                .unwrap();
         }
         Self {
             qmp,
