@@ -1500,6 +1500,11 @@ fn campaign_shrink_and_findings_bounds_are_usage_errors_before_any_server() {
         (vec!["shrink", "not-an-id"], "ID"),
         (vec!["shrink", "k7m2p9qx", "--seeds", "0"], "--seeds"),
         (vec!["shrink", "k7m2p9qx", "--seeds", "9"], "--seeds"),
+        (vec!["analyze", "not-an-id"], "ID"),
+        (vec!["analyze", "k7m2p9qx", "--samples", "0"], "--samples"),
+        (vec!["analyze", "k7m2p9qx", "--samples", "65"], "--samples"),
+        (vec!["analyze", "k7m2p9qx", "--times", "33"], "--times"),
+        (vec!["analyze", "k7m2p9qx", "--faults=yes"], "--faults"),
         (
             vec!["shrink", "k7m2p9qx", "--from-checkpoint=yes"],
             "--from-checkpoint",

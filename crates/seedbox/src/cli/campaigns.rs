@@ -457,6 +457,103 @@ pub(super) fn shrink(
     })
 }
 
+/// Submit an analysis, given a fresh request ID, and follow it unless
+/// detached.
+pub(super) fn analyze(
+    id: &SimulationId,
+    mut request: seedbox_api::AnalysisRequest,
+    detach: bool,
+    json: bool,
+) -> Result<u8> {
+    let client = daemon::connect(None)?;
+    request.request_id = Client::request_id().map_err(client_error)?;
+    runtime()?.block_on(async {
+        let mut analysis = client
+            .submit_analysis(id, &request)
+            .await
+            .map_err(client_error)?;
+        if detach {
+            if json {
+                output::json(&analysis)?;
+            } else {
+                output::status("CREATED", &analysis.id);
+            }
+            return Ok(0);
+        }
+        eprintln!("analysis: {} ({} arms)", analysis.id, analysis.arms.len());
+        let mut reported = 0;
+        while analysis.phase != CampaignPhase::Completed {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            analysis = client.analysis(&analysis.id).await.map_err(client_error)?;
+            let done: u32 = analysis
+                .arms
+                .iter()
+                .map(|a| a.completed + a.incomplete)
+                .sum();
+            let total: usize = analysis.arms.iter().map(|a| a.runs.len()).sum();
+            if done != reported {
+                reported = done;
+                eprintln!("analysis: {done} of {total} sampled runs completed");
+            }
+        }
+        analysis_report(&analysis, json)
+    })
+}
+
+fn analysis_report(analysis: &seedbox_api::Analysis, json: bool) -> Result<u8> {
+    let code = if analysis.error.is_some() { 2 } else { 0 };
+    if json {
+        output::json(analysis)?;
+        return Ok(code);
+    }
+    if let Some(error) = &analysis.error {
+        output::status("ERROR", &analysis.id);
+        output::field("error", error);
+        return Ok(code);
+    }
+    output::status("ANALYZED", &analysis.id);
+    output::field("target", &analysis.target);
+    output::field("ended", format!("{:.3}s", analysis.end_ns as f64 / 1e9));
+    for arm in &analysis.arms {
+        let mut rate = format!("{} of {} failed the same way", arm.failed, arm.completed);
+        if let Some([lo, hi]) = arm.interval_per_mille {
+            rate.push_str(&format!(
+                " (95% {:.0}-{:.0}%)",
+                lo as f64 / 10.0,
+                hi as f64 / 10.0
+            ));
+        }
+        if arm.other > 0 {
+            rate.push_str(&format!(", {} failed otherwise", arm.other));
+        }
+        if arm.incomplete > 0 {
+            rate.push_str(&format!(", {} incomplete", arm.incomplete));
+        }
+        match &arm.kind {
+            seedbox_api::AnalysisArmKind::Baseline => output::field("every draw varies", &rate),
+            seedbox_api::AnalysisArmKind::ReseedFrom { at_ns } => output::field(
+                &format!("draws vary from {:.3}s", *at_ns as f64 / 1e9),
+                &rate,
+            ),
+            seedbox_api::AnalysisArmKind::Without { keys, summary } => {
+                if let Some(failed) = arm.exact_failed {
+                    rate.push_str(if failed {
+                        "; exactly the source without it still fails"
+                    } else {
+                        "; exactly the source without it passes"
+                    });
+                }
+                output::field(&format!("without {} ({summary})", keys[0]), &rate)
+            }
+        }
+    }
+    output::field(
+        "note",
+        "rates of reruns under derived seeds; they show what the failure depends on in these runs, not a proven cause",
+    );
+    Ok(code)
+}
+
 fn shrink_report(shrink: &Shrink, requested_checkpoint: bool, json: bool) -> Result<u8> {
     let code = match (&shrink.error, shrink.outcome) {
         (Some(_), _) | (None, None) => 2,

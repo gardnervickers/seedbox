@@ -54,6 +54,12 @@ pub use campaign::{
     ShrinkProbe, ShrinkRequest, MAX_PAGE, MAX_SHRINK_SEEDS,
 };
 
+mod analysis;
+pub use analysis::{
+    Analysis, AnalysisArm, AnalysisArmKind, AnalysisRequest, MAX_ANALYSIS_RUNS,
+    MAX_ANALYSIS_SAMPLES, MAX_ANALYSIS_TIMES,
+};
+
 mod world;
 pub use world::{
     ApplicationCondition, ApplicationState, ChoiceInputState, FaultState, Frame, FrameDelivery,

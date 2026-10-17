@@ -15,6 +15,8 @@ use seedbox_explore::campaign::{self as plan, Planner};
 use seedbox_explore::shrink::{self, Shrinker};
 use std::collections::BTreeSet;
 
+mod analysis;
+
 const MAX_JOBS: usize = 64;
 
 /// Jobs each have their own lock, held only by the driver; readers use the
@@ -25,9 +27,23 @@ pub(crate) struct Jobs {
     shrinks: BTreeMap<String, Arc<Mutex<ShrinkJob>>>,
     views: BTreeMap<String, Published>,
     shrink_views: BTreeMap<String, (Shrink, ShrinkRequest)>,
+    analyses: BTreeMap<String, Arc<Mutex<analysis::AnalysisJob>>>,
+    analysis_views: BTreeMap<String, (seedbox_api::Analysis, seedbox_api::AnalysisRequest)>,
     /// Request IDs to the job they created.
     requests: BTreeMap<String, String>,
     stops: BTreeSet<String>,
+}
+
+impl Jobs {
+    /// Refuse a new job once the server holds as many as it keeps.
+    fn admit(&self) -> Result<(), Error> {
+        if self.campaigns.len() + self.shrinks.len() + self.analyses.len() >= MAX_JOBS {
+            return Err(invalid(format!(
+                "at most {MAX_JOBS} campaigns, shrinks and analyses per server"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// A campaign as readers see it between driver steps.
@@ -269,11 +285,7 @@ impl ExecutionService {
             }
             return Ok(published.campaign.clone());
         }
-        if jobs.campaigns.len() + jobs.shrinks.len() >= MAX_JOBS {
-            return Err(invalid(format!(
-                "at most {MAX_JOBS} campaigns and shrinks per server"
-            )));
-        }
+        jobs.admit()?;
         if matches!(request.spec.inputs, InputSource::Checkpoint { .. }) {
             return Err(invalid(
                 "a campaign starts from a fresh simulation, not a checkpoint",
@@ -461,11 +473,7 @@ impl ExecutionService {
                 }
                 return Ok(view.clone());
             }
-            if jobs.campaigns.len() + jobs.shrinks.len() >= MAX_JOBS {
-                return Err(invalid(format!(
-                    "at most {MAX_JOBS} campaigns and shrinks per server"
-                )));
-            }
+            jobs.admit()?;
         }
         if request.max_probes == 0 || request.max_probes > shrink::MAX_PROBES {
             return Err(invalid(format!(
@@ -483,23 +491,7 @@ impl ExecutionService {
         if resource.status.phase != Phase::Completed {
             return Err(invalid("shrink a completed simulation"));
         }
-        let target = match &request.property {
-            Some(property) => property.clone(),
-            None if resource.status.oracle_verdict() == TestVerdict::Failed => "oracle".into(),
-            None => resource
-                .status
-                .properties
-                .as_ref()
-                .and_then(|a| {
-                    a.properties
-                        .iter()
-                        .find(|p| p.status == PropertyStatus::Violated)
-                })
-                .map(|p| p.id.clone())
-                .ok_or_else(|| {
-                    invalid("the simulation neither failed its oracle nor violated a property")
-                })?,
-        };
+        let target = analysis::failure_target(&resource.status, request.property.as_ref())?;
         let InputSource::Resolved { definition } = &resource.spec.inputs else {
             return Err(invalid("shrink needs a resolved definition"));
         };
@@ -584,7 +576,7 @@ impl ExecutionService {
     /// own lock so reads never wait on slow evidence work. Returns newly
     /// queued simulations for the execution owner.
     pub fn advance_jobs(&self) -> Result<Vec<SimulationId>, Error> {
-        let (campaigns, shrinks, stops) = {
+        let (campaigns, shrinks, analyses, stops) = {
             let jobs = self
                 .jobs
                 .lock()
@@ -604,6 +596,15 @@ impl ExecutionService {
                     .iter()
                     .filter(|(id, _)| {
                         jobs.shrink_views
+                            .get(*id)
+                            .is_some_and(|(v, _)| v.phase == CampaignPhase::Running)
+                    })
+                    .map(|(id, job)| (id.clone(), job.clone()))
+                    .collect::<Vec<_>>(),
+                jobs.analyses
+                    .iter()
+                    .filter(|(id, _)| {
+                        jobs.analysis_views
                             .get(*id)
                             .is_some_and(|(v, _)| v.phase == CampaignPhase::Running)
                     })
@@ -645,6 +646,23 @@ impl ExecutionService {
                 .lock()
                 .map_err(|_| catalogue::Error::StorageFailed)?;
             if let Some(entry) = jobs.shrink_views.get_mut(&id) {
+                entry.0 = view;
+            }
+        }
+        for (id, job) in analyses {
+            let mut job = job.lock().map_err(|_| catalogue::Error::StorageFailed)?;
+            if let Err(error) = self.advance_analysis(&id, &mut job, &mut queued) {
+                if matches!(error, Error::Catalogue(catalogue::Error::Unavailable)) {
+                    return Err(error);
+                }
+                job.error = Some(error.to_string());
+            }
+            let view = analysis::analysis_view(&id, &job);
+            let mut jobs = self
+                .jobs
+                .lock()
+                .map_err(|_| catalogue::Error::StorageFailed)?;
+            if let Some(entry) = jobs.analysis_views.get_mut(&id) {
                 entry.0 = view;
             }
         }

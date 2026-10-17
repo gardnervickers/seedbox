@@ -204,6 +204,21 @@ impl Client {
         self.document(self.request(Method::GET, &format!("/v1/shrinks/{id}")))
             .await
     }
+    pub async fn submit_analysis(
+        &self,
+        source: &SimulationId,
+        request: &seedbox_api::AnalysisRequest,
+    ) -> Result<seedbox_api::Analysis, Error> {
+        self.document(
+            self.request(Method::POST, &format!("/v1/simulations/{source}/analyze"))
+                .json(request),
+        )
+        .await
+    }
+    pub async fn analysis(&self, id: &str) -> Result<seedbox_api::Analysis, Error> {
+        self.document(self.request(Method::GET, &format!("/v1/analyses/{id}")))
+            .await
+    }
 
     pub async fn compare(
         &self,

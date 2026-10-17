@@ -352,6 +352,32 @@ enum Command {
         #[arg(long, value_parser = wall_time)]
         wall_time: Option<u64>,
     },
+    /// Analyse what a failed simulation's failure depends on, by rerunning it with its later randomness or one fault changed.
+    Analyze {
+        /// Completed, failed simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Runs per arm, each under its own derived seeds.
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..=64))]
+        samples: u32,
+        /// Times, evenly spaced before the source ended, from which every later draw varies.
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u32).range(0..=32))]
+        times: u32,
+        /// Also rerun without each external fault, one at a time.
+        #[arg(long)]
+        faults: bool,
+        /// Property whose violation counts [default: the oracle failure, otherwise the first violation].
+        #[arg(long)]
+        property: Option<String>,
+        /// Return after the server accepts the analysis.
+        #[arg(long)]
+        detach: bool,
+        /// Print one analysis document as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Stop each run after this much active host time [default: unlimited].
+        #[arg(long, value_parser = wall_time)]
+        wall_time: Option<u64>,
+    },
     /// Rerun a simulation through the server and compare its retained results.
     #[command(after_help = EXIT_CODES)]
     Replay {
@@ -993,6 +1019,32 @@ fn run(cli: Cli) -> Result<u8> {
                 property,
                 seeds,
                 from_checkpoint,
+                options: seedbox_api::ExecutionOptions {
+                    capture_anchors: Vec::new(),
+                    start_paused: false,
+                    wall_time_ns: wall_time,
+                },
+            },
+            detach,
+            json,
+        ),
+        Command::Analyze {
+            id,
+            samples,
+            times,
+            faults,
+            property,
+            detach,
+            json,
+            wall_time,
+        } => campaigns::analyze(
+            &id,
+            seedbox_api::AnalysisRequest {
+                request_id: String::new(),
+                samples,
+                times,
+                faults,
+                property,
                 options: seedbox_api::ExecutionOptions {
                     capture_anchors: Vec::new(),
                     start_paused: false,

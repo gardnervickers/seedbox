@@ -620,6 +620,30 @@ prefix), a trigger fires without its delay or after half of it, and a choice
 input selects its first alternative. Edits never change keys, so the kept set
 stands; the reproduction is the last probe that ran it.
 
+## Counterfactual analysis
+
+Some failures need a cluster of faults and timing, so no small input set
+reproduces them. `seedbox analyze` (`seedbox-explore::counterfactual`, the
+server's `campaigns/analysis.rs`) asks instead how often the failure recurs
+when one thing changes, rerunning the source's full program from a fresh start
+in arms of `--samples` runs. The baseline varies every draw (the run seed and
+every reseed's seed). A time arm keeps every draw before T and varies every
+later one: it adds an anchor and a reseed at T and derives the seeds of the
+reseeds after it, so a later branch point does not restore the source's draws.
+Its times are evenly spaced before the source ended, rounded to milliseconds,
+skipping any that already hold an anchor. With `--faults`, a fault arm removes
+one external fault due before the source ended (with its teardown and the
+heals of its handle; a fault due later never applied) and varies
+every draw; its extra exact run keeps the source's seeds, so it is exactly the
+source minus that fault. Variant `v` derives the same seeds in every arm, so
+arms differ only in what they change. A run counts when it fails the same way
+(the shrink rule); runs that fail otherwise and runs without a verdict are
+counted apart and excluded from the rate. Each rate carries a 95% Wilson
+interval. A time arm near the baseline rate says the outcome was still open at
+T; one near 100% says the run was already doomed by then. Rates describe
+these reruns, not a proven cause. Every run is submitted at once, variant by
+variant, so early results cover every arm.
+
 ## Failure timeline
 
 `seedbox explain` projects a completed simulation's retained evidence into

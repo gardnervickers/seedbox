@@ -66,6 +66,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/campaigns/{id}/encounters", get(campaign_encounters))
         .route("/v1/simulations/{id}/shrink", post(submit_shrink))
         .route("/v1/shrinks/{id}", get(shrink))
+        .route("/v1/simulations/{id}/analyze", post(submit_analysis))
+        .route("/v1/analyses/{id}", get(analysis))
         .route("/v1/simulations/{id}/compare/{other}", get(compare))
         .route("/v1/simulations/{id}/diagnostics", get(diagnostics))
         .route(
@@ -1095,6 +1097,24 @@ async fn shrink(
 ) -> Result<Json<seedbox_api::Shrink>, HttpError> {
     let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
     jobs(state, move |e| e.shrink(&id)).await
+}
+
+async fn submit_analysis(
+    State(state): State<ApiState>,
+    path: Result<Path<SimulationId>, PathRejection>,
+    body: Result<Json<seedbox_api::AnalysisRequest>, JsonRejection>,
+) -> Result<Json<seedbox_api::Analysis>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let Json(request) = body.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.submit_analysis(&id, request)).await
+}
+
+async fn analysis(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<seedbox_api::Analysis>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.analysis(&id)).await
 }
 
 #[cfg(test)]
