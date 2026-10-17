@@ -1959,11 +1959,12 @@ fn invalid_relocated_driver_package_is_rejected_without_downloads_or_tools() {
     let project = root.join("demo");
     let assets = project.join("assets").join(std::env::consts::ARCH);
     fs::create_dir_all(&assets).unwrap();
-    fs::write(assets.join("driver-runtime.tar.gz"), b"not an archive").unwrap();
+    let archive = assets.join("driver-runtime.tar.gz");
+    fs::write(&archive, b"not an archive").unwrap();
     let output = seedbox(&["prepare", "--output", "prepared.json"], &project);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert!(stderr(&output).contains("gzip"), "{}", stderr(&output));
+    assert_eq!(stderr(&output), format!("error: driver runtime {}: invalid gzip header; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display()));
     assert!(!stderr(&output).contains("downloading"));
     assert!(!project.join("prepared.json").exists());
     assert!(!project.join(".seedbox/runs").exists());

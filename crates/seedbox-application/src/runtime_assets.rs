@@ -63,11 +63,14 @@ impl Runtime {
     /// existing `scratch` directory; no temporary-directory environment is read.
     /// No partial extraction is published. Clones keep their private child alive.
     pub fn from_archive(path: &Path, scratch: &Path) -> Result<Self> {
-        let file = fs::File::open(path).map_err(|error| Error::Setup(format!("driver runtime {}: {error}; run cargo xtask build-assets or supply a complete runtime archive", path.display())))?;
-        if file.metadata()?.len() > COMPRESSED_LIMIT {
-            return Err(invalid("compressed driver runtime exceeds 1 GiB"));
-        }
-        Self::load(file, scratch)
+        (|| {
+            let file = fs::File::open(path)?;
+            if file.metadata()?.len() > COMPRESSED_LIMIT {
+                return Err(invalid("compressed driver runtime exceeds 1 GiB"));
+            }
+            Self::load(file, scratch)
+        })()
+        .map_err(|error| Error::Setup(format!("driver runtime {}: {error}; run cargo xtask build-assets or supply a complete runtime archive", path.display())))
     }
     /// Read already-owned embedded or retained package bytes, with the same
     /// checks as [`Self::from_archive`]. No ambient asset lookup is performed.
@@ -327,3 +330,57 @@ fn guest_elf(path: &Path, machine: u16) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod archive_diagnostics_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn archive_failures_name_the_source_preserve_the_cause_and_remove_partial_extraction() {
+        let source = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let path = source.path().join("relocated-driver.tar.gz");
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let system = host_system();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(system.len() as u64);
+        header.set_mode(0o644);
+        tar.append_data(&mut header, "host-system", system.as_bytes())
+            .unwrap();
+        let valid = tar.into_inner().unwrap().finish().unwrap();
+        let mut checksum = valid.clone();
+        let length = checksum.len();
+        checksum[length - 8] ^= 1;
+        let mut malformed_tar =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        malformed_tar.write_all(b"not a tar archive").unwrap();
+        for bytes in [
+            b"not an archive".to_vec(),
+            malformed_tar.finish().unwrap(),
+            checksum,
+            valid[..valid.len() - 2].to_vec(),
+        ] {
+            let cause = Runtime::from_bytes(&bytes, scratch.path())
+                .unwrap_err()
+                .to_string();
+            fs::write(&path, &bytes).unwrap();
+            let error = Runtime::from_archive(&path, scratch.path()).unwrap_err();
+            assert!(matches!(error, Error::Setup(_)), "{error}");
+            assert_eq!(error.to_string(), format!("driver runtime {}: {cause}; run cargo xtask build-assets or supply a complete runtime archive", path.display()));
+            assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
+        }
+        // Metadata rejection must stay ahead of reading or copying this sparse file.
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(COMPRESSED_LIMIT + 1)
+            .unwrap();
+        let error = Runtime::from_archive(&path, scratch.path()).unwrap_err();
+        assert!(matches!(error, Error::Setup(_)), "{error}");
+        assert_eq!(error.to_string(), format!("driver runtime {}: input integrity: compressed driver runtime exceeds 1 GiB; run cargo xtask build-assets or supply a complete runtime archive", path.display()));
+        assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
+    }
+}
