@@ -234,6 +234,7 @@ pub fn generate(
                 op,
                 ppm,
                 effect,
+                scope,
                 ..
             } => (
                 Action::DiskError {
@@ -252,6 +253,14 @@ pub fn generate(
                         }
                         seedbox_spec::fault_profile::DiskEffect::Corrupt => {
                             seedbox_control::DiskEffect::Corrupt
+                        }
+                    },
+                    scope: match scope {
+                        seedbox_spec::fault_profile::DiskScope::Disk => {
+                            seedbox_control::DiskScope::Disk
+                        }
+                        seedbox_spec::fault_profile::DiskScope::Data => {
+                            seedbox_control::DiskScope::Data
                         }
                     },
                 },

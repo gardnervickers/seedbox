@@ -192,8 +192,17 @@ pub(crate) fn preview(
             }
         }
         Action::DiskError {
-            op, ppm, effect, ..
+            op,
+            ppm,
+            effect,
+            scope,
+            ..
         } => {
+            if *scope == seedbox_control::DiskScope::Data {
+                result.limitations.push(
+                    "Only reads and writes clear of the filesystem's superblocks, descriptors, bitmaps, inode tables and journal are selected, and none before the disk is formatted; directory and extent-index blocks can still be.".into(),
+                );
+            }
             result.preconditions.push(
                 "The machine must be up, have a retained disk and no active disk errors.".into(),
             );

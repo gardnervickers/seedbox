@@ -194,6 +194,8 @@ pub enum Lifecycle {
         ppm: u32,
         #[serde(default, skip_serializing_if = "seedbox_control::DiskEffect::is_error")]
         effect: seedbox_control::DiskEffect,
+        #[serde(default, skip_serializing_if = "seedbox_control::DiskScope::is_disk")]
+        scope: seedbox_control::DiskScope,
     },
     /// End disk errors; their counts belong to the healing row.
     HealDiskErrors {
@@ -250,7 +252,7 @@ pub struct Faults {
     disk_errors: BTreeMap<String, (usize, u32, seedbox_control::DiskOp, u32)>,
     /// Effects of active disk error handles other than `error`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    disk_effects: BTreeMap<String, seedbox_control::DiskEffect>,
+    disk_effects: BTreeMap<String, (seedbox_control::DiskEffect, seedbox_control::DiskScope)>,
     /// Active disk latency handles: machine, fault ID, operation, latency and jitter.
     #[serde(default)]
     disk_latencies: BTreeMap<String, (usize, u32, seedbox_control::DiskOp, u64, u64)>,
@@ -429,16 +431,20 @@ impl Faults {
                     ppm,
                     op,
                     effect,
+                    scope,
                     ..
                 } = &plan.action
                 {
                     if handle.is_empty() || !seedbox_control::DISK_ERROR_PPM.contains(ppm) {
                         return Err("invalid disk_error handle/ppm".into());
                     }
-                    if *effect == seedbox_control::DiskEffect::Corrupt
-                        && *op == seedbox_control::DiskOp::Flush
+                    if *op == seedbox_control::DiskOp::Flush
+                        && (*effect == seedbox_control::DiskEffect::Corrupt
+                            || *scope == seedbox_control::DiskScope::Data)
                     {
-                        return Err("a corrupt disk_error cannot select only flushes".into());
+                        return Err(
+                            "a corrupt or data-scoped disk_error cannot select only flushes".into(),
+                        );
                     }
                 }
                 target = Some(self.machine_index(machine, "unknown fault machine")?);
@@ -683,7 +689,8 @@ impl Faults {
                 id,
                 op,
                 ppm,
-                effect: self.disk_effects.get(handle).copied().unwrap_or_default(),
+                effect: self.disk_effects.get(handle).copied().unwrap_or_default().0,
+                scope: self.disk_effects.get(handle).copied().unwrap_or_default().1,
             })
     }
     /// Machine `m`'s active disk latency, if any, as the lifecycle that
@@ -1159,8 +1166,9 @@ impl Faults {
                 op,
                 ppm,
                 effect,
+                scope,
                 ..
-            } => self.apply_disk_error(i, now, handle, op, ppm, effect),
+            } => self.apply_disk_error(i, now, handle, op, ppm, (effect, scope)),
             Action::DiskLatency {
                 handle,
                 op,
@@ -1377,7 +1385,7 @@ impl Faults {
         handle: String,
         op: seedbox_control::DiskOp,
         ppm: u32,
-        effect: seedbox_control::DiskEffect,
+        (effect, scope): (seedbox_control::DiskEffect, seedbox_control::DiskScope),
     ) {
         let m = self.entries[i].target.expect("a disk error has a target");
         if self.active_handles().contains(&handle) {
@@ -1388,15 +1396,17 @@ impl Faults {
         }
         let id = self.entries[i].plan.id;
         self.disk_errors.insert(handle.clone(), (m, id, op, ppm));
-        if !effect.is_error() {
-            self.disk_effects.insert(handle.clone(), effect);
+        if !effect.is_error() || !scope.is_disk() {
+            self.disk_effects.insert(handle.clone(), (effect, scope));
         }
         let op_name = serde_json::to_value(op).expect("a disk op is a JSON string");
-        let effect_note = if effect.is_error() {
-            String::new()
-        } else {
-            "; effect=corrupt".into()
-        };
+        let mut effect_note = String::new();
+        if !effect.is_error() {
+            effect_note.push_str("; effect=corrupt");
+        }
+        if !scope.is_disk() {
+            effect_note.push_str("; scope=data");
+        }
         self.applied(
             i,
             now,
@@ -1412,6 +1422,7 @@ impl Faults {
                 op,
                 ppm,
                 effect,
+                scope,
             },
         ));
     }

@@ -178,6 +178,11 @@ pub struct InjectedErrors {
     counts: ErrorCounts,
     #[serde(default, skip_serializing_if = "seedbox_control::DiskEffect::is_error")]
     effect: seedbox_control::DiskEffect,
+    #[serde(default, skip_serializing_if = "seedbox_control::DiskScope::is_disk")]
+    scope: seedbox_control::DiskScope,
+    /// A data scope's static filesystem metadata, read once it exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<crate::disk::ext4::Layout>,
 }
 
 /// Requests a `disk_error` fault matched, and how many of them it failed
@@ -197,6 +202,7 @@ impl std::fmt::Debug for InjectedErrors {
             .field("draws", &self.rng.counter())
             .field("counts", &self.counts)
             .field("effect", &self.effect)
+            .field("scope", &self.scope)
             .finish()
     }
 }
@@ -212,11 +218,66 @@ impl InjectedErrors {
             rng,
             counts: ErrorCounts::default(),
             effect: seedbox_control::DiskEffect::Error,
+            scope: seedbox_control::DiskScope::Disk,
+            metadata: None,
         })
     }
     pub fn with_effect(mut self, effect: seedbox_control::DiskEffect) -> Self {
         self.effect = effect;
         self
+    }
+    pub fn with_scope(mut self, scope: seedbox_control::DiskScope) -> Self {
+        self.scope = scope;
+        self
+    }
+    /// Whether a request may be selected at all: under a data scope only a
+    /// read or write clear of the filesystem's static metadata whose blocks
+    /// (the data written, or the disk's content for a read) do not look like
+    /// metadata, and nothing before the filesystem exists. Ineligible
+    /// requests draw nothing.
+    fn eligible(&mut self, disk: &crate::disk::Disk, request: &Request) -> bool {
+        if self.scope == seedbox_control::DiskScope::Disk {
+            return true;
+        }
+        let sectors = match request.kind {
+            T_IN => (request.room / SECTOR) as u64,
+            T_OUT => (request.input.len() / SECTOR) as u64,
+            _ => return false,
+        };
+        if self.metadata.is_none() {
+            self.metadata =
+                crate::disk::ext4::layout(&mut |at, buf: &mut [u8]| read_bytes(disk, at, buf));
+        }
+        let Some(layout) = &self.metadata else {
+            return false;
+        };
+        if sectors == 0 || layout.overlaps(request.sector, sectors) {
+            return false;
+        }
+        let read;
+        let bytes = if request.kind == T_OUT {
+            &request.input[..]
+        } else {
+            let mut buf = vec![0; sectors as usize * SECTOR];
+            if disk.read(request.sector, &mut buf).is_err() {
+                return false;
+            }
+            read = buf;
+            &read[..]
+        };
+        // Whole filesystem blocks inside the request, by absolute position.
+        let per = layout.block_sectors.max(1);
+        let first = request.sector.div_ceil(per) * per;
+        let mut at = first;
+        while at + per <= request.sector + sectors {
+            let offset = ((at - request.sector) as usize) * SECTOR;
+            if crate::disk::ext4::is_metadata_block(&bytes[offset..offset + per as usize * SECTOR])
+            {
+                return false;
+            }
+            at += per;
+        }
+        true
     }
     /// Draw for one request; only matching requests consume the stream.
     /// Corruption never selects a flush.
@@ -243,6 +304,18 @@ impl InjectedErrors {
             chunk.copy_from_slice(&self.rng.next().to_le_bytes()[..chunk.len()]);
         }
     }
+}
+
+/// Fill `buf` from byte offset `at` of the disk through whole sectors.
+fn read_bytes(disk: &crate::disk::Disk, at: u64, buf: &mut [u8]) -> bool {
+    let first = at / SECTOR as u64;
+    let skip = (at % SECTOR as u64) as usize;
+    let mut sectors = vec![0; (skip + buf.len()).div_ceil(SECTOR) * SECTOR];
+    if disk.read(first, &mut sectors).is_err() {
+        return false;
+    }
+    buf.copy_from_slice(&sectors[skip..skip + buf.len()]);
+    true
 }
 
 /// Device metadata paired with the separate streaming disk checkpoint.
@@ -562,10 +635,11 @@ impl Block {
         let mut data = Vec::new();
         // An injected error fails a valid request before any disk effect;
         // injected corruption garbles the data the request moves instead.
+        let disk = &self.disk;
         let selected = self
             .errors
             .as_mut()
-            .is_some_and(|errors| errors.fails(request.kind));
+            .is_some_and(|errors| errors.eligible(disk, &request) && errors.fails(request.kind));
         let corrupt = selected
             && self
                 .errors

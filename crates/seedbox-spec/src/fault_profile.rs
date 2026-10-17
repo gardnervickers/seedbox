@@ -114,6 +114,23 @@ impl DiskEffect {
     }
 }
 
+/// Which sectors a generated disk error may select.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskScope {
+    /// Any request of the selected kind.
+    #[default]
+    Disk,
+    /// Only reads and writes clear of the filesystem's static metadata.
+    Data,
+}
+
+impl DiskScope {
+    pub fn is_disk(&self) -> bool {
+        *self == Self::Disk
+    }
+}
+
 /// One kind of generated fault. Each fault with a duration is followed by
 /// its teardown: a heal, resume, reboot or restart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,8 +181,10 @@ pub enum FaultKind {
     },
     /// Fail one target's disk requests of kind `op`, each with probability
     /// `ppm` per million, then heal; with `effect: corrupt`, complete them
-    /// with one sector of garbage instead. Only machines with a retained
-    /// disk can take it; `targets` narrows the profile's targets to those.
+    /// with one sector of garbage instead; with `scope: data`, select only
+    /// requests clear of the filesystem's static metadata. Only machines with
+    /// a retained disk can take it; `targets` narrows the profile's targets
+    /// to those.
     DiskError {
         #[serde(default = "weight")]
         weight: u32,
@@ -175,6 +194,8 @@ pub enum FaultKind {
         ppm: u32,
         #[serde(default, skip_serializing_if = "DiskEffect::is_error")]
         effect: DiskEffect,
+        #[serde(default, skip_serializing_if = "DiskScope::is_disk")]
+        scope: DiskScope,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<String>,
     },
@@ -254,14 +275,19 @@ impl FaultKind {
                 ppm,
                 op,
                 effect,
+                scope,
                 ..
             } => {
                 duration.validate("duration")?;
                 if *ppm == 0 || *ppm > 1_000_000 {
                     return Err("fault profile disk_error ppm must be 1 to 1000000".into());
                 }
-                if *effect == DiskEffect::Corrupt && *op == DiskOp::Flush {
-                    return Err("fault profile disk_error cannot corrupt only flushes".into());
+                if *op == DiskOp::Flush
+                    && (*effect == DiskEffect::Corrupt || *scope == DiskScope::Data)
+                {
+                    return Err(
+                        "fault profile disk_error cannot corrupt or data-scope only flushes".into(),
+                    );
                 }
                 Ok(())
             }

@@ -810,7 +810,15 @@ row's failed count is then the corrupted requests. The fault acts on the whole
 retained disk, which holds the ext4 filesystem under every volume, so it
 corrupts filesystem metadata and the journal as readily as application data;
 ext4 checksums its metadata, and a corrupted mount after a reboot fails as
-above. Runs without the field are unchanged.
+above. With `scope: data` the fault selects only reads and writes that avoid
+the filesystem's metadata (`disk/ext4.rs`): the static layout, read from the
+disk once it is formatted (superblocks, descriptors and reserved GDT,
+bitmaps, inode tables, and the blocks of the reserved inodes and the orphan
+file), and any block whose content looks like metadata allocated later (an
+extent node, a directory block's checksum tail or `.` entry, an htree node,
+an xattr block): the data written, or the disk's content for a read. It
+selects nothing before the disk is formatted, and never flushes. Runs without
+these fields are unchanged.
 
 A `disk_latency` fault makes the block model complete requests later instead
 of at their notification. Each admitted request is consumed from the avail

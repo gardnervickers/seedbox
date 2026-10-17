@@ -458,6 +458,46 @@ fn injected_corruption_garbles_one_sector_and_reports_success() {
     );
 }
 #[test]
+fn a_data_scope_spares_filesystem_metadata_and_unformatted_disks() {
+    use seedbox_control::{DiskEffect, DiskOp, DiskScope};
+    let fault = || {
+        InjectedErrors::new(DiskOp::Any, 1_000_000, crate::rng::Rng::new(1, "test"))
+            .unwrap()
+            .with_effect(DiskEffect::Corrupt)
+            .with_scope(DiskScope::Data)
+    };
+    // Before formatting nothing is eligible, and nothing is drawn.
+    let mut g = Guest::new(Policy::Block);
+    g.b.set_errors(Some(fault()));
+    let (_, write) = g.request(1, 2, &[9; 512], false);
+    g.notify().unwrap();
+    assert_eq!(g.m[write], 0);
+    assert_eq!(g.b.set_errors(None), Some(ErrorCounts::default()));
+    // On a formatted disk, metadata writes (an inode table) and flushes are
+    // spared; a data write past the tables is corrupted.
+    let mut image = crate::disk::ext4::fixture::image();
+    image.resize(48 * 4096, 0);
+    g.b = Block::new(Disk::new(Some(image), None).unwrap(), Policy::Block);
+    g.b.set_errors(Some(fault()));
+    let (_, table) = g.request(1, 9 * 8, &[3; 512], false);
+    let (_, data) = g.request(1, 42 * 8, &[5; 512], false);
+    let (_, flush) = g.request(4, 0, &[], false);
+    g.notify().unwrap();
+    assert_eq!((g.m[table], g.m[data], g.m[flush]), (0, 0, 0));
+    let mut sector = [0; 512];
+    g.b.disk().read(9 * 8, &mut sector).unwrap();
+    assert_eq!(sector, [3; 512]);
+    g.b.disk().read(42 * 8, &mut sector).unwrap();
+    assert_ne!(sector, [5; 512]);
+    assert_eq!(
+        g.b.set_errors(None),
+        Some(ErrorCounts {
+            matched: 1,
+            failed: 1
+        })
+    );
+}
+#[test]
 fn partial_injected_errors_are_seeded_and_survive_snapshots() {
     use seedbox_control::DiskOp;
     let run = |snapshot_after: Option<usize>| {

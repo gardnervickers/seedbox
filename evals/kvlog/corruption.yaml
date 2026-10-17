@@ -1,15 +1,19 @@
-# Silently corrupt some of the store's writes, and crash it, while the oracle
-# writes. The store replays its log without checksums, so even the fixed
-# variant (fsync before acknowledging) recovers garbled records.
+# Silently corrupt some of the store's data reads and writes, and crash it,
+# while the oracle writes. The store replays its log without checksums, so
+# even the fixed variant (fsync before acknowledging) can recover garbled
+# records. A corrupted append is usually rewritten by the next one, so most
+# damage comes from reads while a restarted store replays its log.
+# scope: data spares the filesystem's own metadata, so the disk still mounts.
 start: 1s
 end: 18s
 interval: 2s
 faults:
   - kind: disk_error
     weight: 2
-    op: write
-    ppm: 20000
+    op: any
+    ppm: 50000
     effect: corrupt
+    scope: data
     duration: {min: 1s, max: 4s}
     targets: [kv]
   - kind: crash

@@ -10,6 +10,7 @@
 //! power loss: nothing here is written to host storage.
 
 mod checkpoint;
+pub mod ext4;
 
 use crate::rng::Rng;
 use serde::Deserialize;

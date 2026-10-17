@@ -608,6 +608,8 @@ pub enum Action {
     /// nothing durable. With `corrupt` it succeeds with one sector's bytes
     /// replaced by seeded garbage: a read returns them (the disk keeps the
     /// right data) and a write stores them. Flushes are never corrupted.
+    /// With `scope: data` it selects only reads and writes clear of the
+    /// formatted filesystem's static metadata.
     DiskError {
         handle: String,
         machine: String,
@@ -616,6 +618,8 @@ pub enum Action {
         ppm: u32,
         #[serde(default, skip_serializing_if = "DiskEffect::is_error")]
         effect: DiskEffect,
+        #[serde(default, skip_serializing_if = "DiskScope::is_disk")]
+        scope: DiskScope,
     },
     /// Complete the machine's disk requests late, until the handle is
     /// healed: each request of kind `op` takes `latency_ns` plus a seeded
@@ -769,6 +773,23 @@ pub enum DiskEffect {
 impl DiskEffect {
     pub fn is_error(&self) -> bool {
         *self == Self::Error
+    }
+}
+/// Which sectors a `disk_error` fault may select.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskScope {
+    /// Any request of the selected kind.
+    #[default]
+    Disk,
+    /// Only reads and writes that touch none of the formatted ext4
+    /// filesystem's static metadata (superblocks, descriptors, bitmaps,
+    /// inode tables and the journal); nothing before it is formatted.
+    Data,
+}
+impl DiskScope {
+    pub fn is_disk(&self) -> bool {
+        *self == Self::Disk
     }
 }
 /// Disk error probabilities, in parts per million: from rare to every request.
