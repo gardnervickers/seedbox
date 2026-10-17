@@ -1,7 +1,7 @@
 //! Reading a simulation without changing it: retained logs and events, the
 //! observed world and fault timeline, and waiting for a condition. Every
 //! command reads what has happened and exits unless asked to follow.
-use super::{daemon, output};
+use super::{daemon, output, output::seconds};
 use futures_util::StreamExt;
 use seedbox_api::{
     EventDelivery, FaultStatus, LogDelivery, LogEntry, MachineCondition, Phase, PlaybackRate,
@@ -310,11 +310,6 @@ fn trigger_outcome(trigger: &seedbox_api::TriggerState, world: &seedbox_api::Wor
     }
 }
 
-fn seconds(ns: u64) -> String {
-    let text = format!("{:.3}", ns as f64 / 1e9);
-    format!("{}s", text.trim_end_matches('0').trim_end_matches('.'))
-}
-
 /// Guest property results reported beside the oracle verdict.
 pub(super) fn properties(id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(None)?;
@@ -382,8 +377,11 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
                     m.name.clone(),
                     output::word(&m.condition).to_lowercase(),
                     m.incarnation.to_string(),
-                    m.exit_code
-                        .map_or_else(|| "-".into(), |code| code.to_string()),
+                    match (m.exit_code, m.exited_out_of_memory()) {
+                        (Some(code), Some(_)) => format!("{code} (out of memory)"),
+                        (Some(code), None) => code.to_string(),
+                        (None, _) => "-".into(),
+                    },
                     if m.oracle { "yes".into() } else { "-".into() },
                 ]
             })

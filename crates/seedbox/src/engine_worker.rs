@@ -21,7 +21,7 @@ pub fn dispatch(args: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
             world_worker(executable, args.collect())
         }
         Some("arm64-fixture-v1") => arm_fixture(executable, args.collect()),
-        Some("arm64-machine-v2") => arm_machine(args.collect()),
+        Some("arm64-machine-v3") => arm_machine(args.collect()),
         Some(seedbox_application::engine::ARM_WORLD_V1) => arm_world(executable, args.collect()),
         _ => error("unsupported internal engine contract; use the CLI retained with this run"),
     })
@@ -201,9 +201,15 @@ fn arm_machine(args: Vec<OsString>) -> ExitCode {
     if !args.is_empty() {
         return error("internal ARM machine contract takes no arguments");
     }
+    // Responses are written whole, once each, so stdout is used unbuffered.
+    let output = std::os::fd::AsFd::as_fd(&std::io::stdout()).try_clone_to_owned();
+    let mut output = match output {
+        Ok(fd) => std::fs::File::from(fd),
+        Err(e) => return error(&format!("machine worker output: {e}")),
+    };
     match seedbox_arm64::application::worker::serve::<seedbox_arm64::backend::hvf::Hvf>(
         &mut std::io::stdin().lock(),
-        &mut std::io::stdout().lock(),
+        &mut output,
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => error(&message),

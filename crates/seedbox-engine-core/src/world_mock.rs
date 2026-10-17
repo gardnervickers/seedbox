@@ -60,6 +60,12 @@ pub(crate) struct Mock {
     pub(crate) bad: Option<&'static str>,
     pub(crate) throttleable: bool,
     pub(crate) hold: Option<crate::virtio_block::Hold>,
+    /// Chained slices this mock offers to run ahead; zero offers none.
+    pub(crate) chain: usize,
+    /// Slices run ahead, which the scheduler must request next, in order.
+    pub(crate) planned: VecDeque<(SliceRequest, Vec<Vec<u8>>)>,
+    /// Advances served as slices run ahead.
+    pub(crate) replayed: usize,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Saved {
@@ -93,7 +99,26 @@ impl Mock {
             bad: None,
             throttleable: true,
             hold: None,
+            chain: 0,
+            planned: VecDeque::new(),
+            replayed: 0,
         }
+    }
+    /// A request the scheduler makes must be the next slice run ahead, if any.
+    fn replay(&mut self, request: SliceRequest, then: &[&[u8]]) -> Result<(), String> {
+        let Some((planned, frames)) = self.planned.pop_front() else {
+            return Ok(());
+        };
+        if planned != request || frames.iter().map(Vec::as_slice).ne(then.iter().copied()) {
+            return Err(format!(
+                "{}: requested {request:?} with {} frames, ran ahead {planned:?} with {}",
+                self.name,
+                then.len(),
+                frames.len()
+            ));
+        }
+        self.replayed += 1;
+        Ok(())
     }
     fn record(&self, kind: &str) {
         self.trace
@@ -374,6 +399,72 @@ impl WorldMachine for Mock {
         Ok(1)
     }
     fn advance(
+        &mut self,
+        clock: &mut MockClock,
+        request: SliceRequest,
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<Stop, String> {
+        self.replay(request, &[])?;
+        self.slice(clock, request, frames)
+    }
+    fn delivers_after_advance(&self) -> bool {
+        self.chain > 0
+    }
+    fn advance_then_deliver(
+        &mut self,
+        clock: &mut MockClock,
+        request: SliceRequest,
+        frames: &mut Vec<Vec<u8>>,
+        then: &[&[u8]],
+    ) -> Result<(Stop, Option<Vec<bool>>), String> {
+        self.replay(request, then)?;
+        let stop = self.slice(clock, request, frames)?;
+        if stop == Stop::Reached && self.time == request.hard_limit && !then.is_empty() {
+            return Ok((stop, Some(self.deliver_frames(then)?)));
+        }
+        Ok((stop, None))
+    }
+    fn chain_capacity(&self) -> usize {
+        self.chain
+    }
+    /// Runs the first slice, then claims the planned slices its script would
+    /// reach in turn, through the first that stops short of its limit.
+    fn advance_chain(
+        &mut self,
+        clock: &mut MockClock,
+        first: ChainStep<'_>,
+        ahead: &[ChainStep<'_>],
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<(Stop, Option<Vec<bool>>, usize), String> {
+        if !self.planned.is_empty() || ahead.len() > self.chain {
+            return Err(format!(
+                "{}: chain requested while one is pending",
+                self.name
+            ));
+        }
+        let (stop, delivered) =
+            self.advance_then_deliver(clock, first.request, frames, &first.then)?;
+        let mut reached = stop == Stop::Reached && self.time == first.request.hard_limit;
+        let mut script = self.steps.iter().peekable();
+        for step in ahead {
+            if !reached {
+                break;
+            }
+            let limit = step.request.hard_limit;
+            reached = match script.next_if(|s| s.at <= limit) {
+                Some(s) => s.stop == Stop::Reached && s.at == limit,
+                None => true,
+            };
+            self.planned.push_back((
+                step.request,
+                step.then.iter().map(|bytes| bytes.to_vec()).collect(),
+            ));
+        }
+        Ok((stop, delivered, self.planned.len()))
+    }
+}
+impl Mock {
+    fn slice(
         &mut self,
         _: &mut MockClock,
         request: SliceRequest,

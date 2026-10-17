@@ -42,7 +42,7 @@ seconds, the worker stops waiting until it accepts one again; datagrams lost
 meanwhile become source gaps, which differ between runs. Frame batches for
 visualization never wait. `diagnostics ID` exposes completed raw
 console/management streams, chunk indexes and worker output separately, by exact
-retained name and digest.
+retained name and digest, and lists the guest kernel's out-of-memory kills.
 
 ## Definitions and execution state
 

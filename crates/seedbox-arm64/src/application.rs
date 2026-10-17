@@ -170,6 +170,34 @@ pub enum Event {
     },
 }
 
+/// Exactly `serde_json::to_vec(event)`, the bytes the world's event witness
+/// hashes, without the serializer's per-element cost for payload bytes.
+pub(crate) fn event_json(event: &Event) -> Result<Vec<u8>> {
+    let (name, bytes): (&[u8], &[u8]) = match event {
+        Event::Frame(bytes) => (b"Frame", bytes),
+        Event::Control(bytes) => (b"Control", bytes),
+        _ => return serde_json::to_vec(event).map_err(|e| e.to_string()),
+    };
+    let mut out = Vec::with_capacity(name.len() + 7 + bytes.len() * 4);
+    out.extend_from_slice(b"{\"");
+    out.extend_from_slice(name);
+    out.extend_from_slice(b"\":[");
+    for (i, &byte) in bytes.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        if byte >= 100 {
+            out.push(b'0' + byte / 100);
+        }
+        if byte >= 10 {
+            out.push(b'0' + byte / 10 % 10);
+        }
+        out.push(b'0' + byte % 10);
+    }
+    out.extend_from_slice(b"]}");
+    Ok(out)
+}
+
 /// The dedicated guest driver admits only these logical supervisor registers.
 /// No physical address, arbitrary register, or access width is guest-selected.
 pub fn supervisor_write(offset: u64, width: u8, value: u64) -> Result<Event> {
@@ -194,6 +222,44 @@ pub fn supervisor_write(offset: u64, width: u8, value: u64) -> Result<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn event_witness_bytes_match_serde_json() {
+        let every: Vec<u8> = (0..=255).collect();
+        let mut events = vec![
+            Event::Frame(Vec::new()),
+            Event::Control(Vec::new()),
+            Event::Frame(every.clone()),
+            Event::Control(every.iter().rev().copied().collect()),
+            Event::Ready,
+            Event::Effect {
+                id: 7,
+                success: false,
+            },
+            Event::Exit {
+                code: 3,
+                setup_error: true,
+            },
+            Event::Barrier,
+        ];
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        for length in [1, 2, 9, 60, 1514, 65536] {
+            let bytes = (0..length)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x as u8
+                })
+                .collect();
+            events.push(Event::Frame(bytes));
+        }
+        for event in &events {
+            assert_eq!(
+                event_json(event).unwrap(),
+                serde_json::to_vec(event).unwrap()
+            );
+        }
+    }
     #[test]
     fn supervisor_registers_are_width_checked_and_do_not_conflate_errors() {
         assert_eq!(

@@ -37,8 +37,18 @@ public final class CodeReuse {
         }
         reader.join();
         live[0] = reference;
-        for (int i = 0; i < 3; i++) System.gc();
-        long unloaded = dropped.stream().filter(w -> w.get() == null).count();
+        // A running compilation keeps every hidden class it touches (the holder of the method
+        // and the profiled receivers it inlines) alive until it ends; queued tasks hold theirs
+        // weakly. When the reader ends, a C2 compilation of this loop often still holds the
+        // newest copies, and three back-to-back collections can finish before it does,
+        // above all in a slow guest. Collect again while compilations finish.
+        long unloaded = 0;
+        for (int i = 0; i < 50; i++) {
+            System.gc();
+            unloaded = dropped.stream().filter(w -> w.get() == null).count();
+            if (i >= 2 && unloaded >= dropped.size() - 2) break;
+            if (i >= 2) Thread.sleep(100);
+        }
         Fz.out("mismatches", mismatches[0]);
         Fz.out("mostUnloaded", unloaded >= dropped.size() - 2);
         Fz.done();

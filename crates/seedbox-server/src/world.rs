@@ -4,7 +4,7 @@
 use seedbox_api::{
     ApplicationCondition, ApplicationState, EventKind, FaultAction, FaultState, FaultStatus, Frame,
     FrameFate, LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState,
-    MachineTransition, SimulationId, WorldState,
+    MachineTransition, OutOfMemoryKill, SimulationId, WorldState, MAX_OUT_OF_MEMORY_KILLS,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -105,6 +105,7 @@ impl Tracker {
                     last_transition_at_ns: None,
                     condition_since_ns: None,
                     application: ApplicationState::default(),
+                    out_of_memory_kills: Vec::new(),
                 },
             );
         }
@@ -161,6 +162,21 @@ impl Tracker {
                 self.process_effects.remove(machine);
                 self.machine_pauses.remove(machine);
                 self.before_pause.remove(machine);
+            }
+            EventKind::OutOfMemoryKill {
+                machine,
+                incarnation,
+                process,
+            } => {
+                let kills = &mut self.machine(machine).out_of_memory_kills;
+                if kills.len() == MAX_OUT_OF_MEMORY_KILLS {
+                    kills.remove(0);
+                }
+                kills.push(OutOfMemoryKill {
+                    incarnation: *incarnation,
+                    simulated_time_ns: time,
+                    process: process.clone(),
+                });
             }
             EventKind::MachineLifecycle {
                 machine,
@@ -535,6 +551,7 @@ mod tests {
             wall_clock_epoch: None,
             machine: Default::default(),
             disk: Default::default(),
+            progress_client: Default::default(),
         };
         spec.network.links.push(seedbox_spec::Link {
             from: "a".into(),
@@ -773,6 +790,67 @@ mod tests {
         );
         assert_eq!(t.snapshot().machines[0].application.exit_code, Some(7));
         assert_eq!(t.snapshot().machines[0].application.changed_at_ns, Some(50));
+    }
+
+    #[test]
+    fn out_of_memory_kills_survive_exit_and_reboot_and_stay_bounded() {
+        let mut t = tracker();
+        let kill = |incarnation| EventKind::OutOfMemoryKill {
+            machine: "a".into(),
+            incarnation,
+            process: Some(seedbox_api::OutOfMemoryProcess {
+                pid: 77,
+                command: "memhog".into(),
+                total_vm_kib: 300_000,
+                anon_rss_kib: 250_000,
+                file_rss_kib: 900,
+                shmem_rss_kib: 0,
+            }),
+        };
+        let before = t.snapshot().revision;
+        t.event(10, &kill(0));
+        assert!(t.snapshot().revision > before);
+        t.event(
+            10,
+            &EventKind::MachineExited {
+                machine: "a".into(),
+                incarnation: 0,
+                code: 137,
+            },
+        );
+        let machine = &t.snapshot().machines[0];
+        assert_eq!(machine.out_of_memory_kills.len(), 1);
+        assert_eq!(machine.out_of_memory_kills[0].simulated_time_ns, 10);
+        assert_eq!(
+            machine.exited_out_of_memory(),
+            machine.out_of_memory_kills.last()
+        );
+        t.event(
+            20,
+            &EventKind::MachineLifecycle {
+                machine: "a".into(),
+                incarnation: 1,
+                transition: MachineTransition::Rebooted,
+            },
+        );
+        t.event(
+            30,
+            &EventKind::MachineExited {
+                machine: "a".into(),
+                incarnation: 1,
+                code: 137,
+            },
+        );
+        // The earlier incarnation's kill is retained but explains no later exit.
+        let machine = &t.snapshot().machines[0];
+        assert_eq!(machine.out_of_memory_kills.len(), 1);
+        assert_eq!(machine.exited_out_of_memory(), None);
+        for _ in 0..MAX_OUT_OF_MEMORY_KILLS {
+            t.event(40, &kill(1));
+        }
+        let kills = &t.snapshot().machines[0].out_of_memory_kills;
+        assert_eq!(kills.len(), MAX_OUT_OF_MEMORY_KILLS);
+        assert!(kills.iter().all(|kill| kill.incarnation == 1));
     }
 
     #[test]

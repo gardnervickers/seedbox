@@ -98,6 +98,28 @@ straight-line code no longer reads can still be read on a fault path: HotSpot's
 implicit null checks deoptimize through handlers that save such registers, and a
 budget left there corrupted the heap.
 
+A simulation can choose the lean ARM client instead
+(`engine: {progressClient: lean}`, resolved into `simulator.progressClient`).
+It charges the same blocks, points and amounts and leaves through the dispatcher
+the same way, but it saves one fixed scratch register to its own TLS slot instead
+of using drreg, and a charge that crosses the budget branches to one shared slow
+path, emitted at start-up, instead of a clean call emitted into every block.
+drreg's per-block liveness analysis and those clean calls cost more than running
+the code: a shell started four times slower than under the bare translator, and
+2.4 times faster with the lean client. No application instruction runs while the
+register holds the budget. The charge's instructions have no translation, so the
+translator never relocates a thread there; when it reports such a thread's state
+from a recreated block, the client's restore-state event puts the register back,
+but a translation from stored tables cannot. Translated code and the client's
+own memory are smaller, so the translator commits less memory, and those commits
+are marked syscalls: simulated times differ slightly from the standard client.
+Preparation packages the chosen client at the path the guest supervisor runs, so
+neither the supervisor nor its launch recipe depends on the choice, and a
+standard machine's boot archive is byte-for-byte the one it was before the
+choice existed: the exit witness records guest PCs, so even a rebuilt supervisor
+changes it. A lean archive also carries a marker file, and preparing a
+definition checks that its `simulator.progressClient` names the archive's client.
+
 Guest signals arrive only at progress calls, so when the ARM translator
 synchronizes all threads, for example to flush code a JIT has rewritten, it
 always finds a busy thread inside the progress call. The translator cannot
@@ -142,6 +164,7 @@ code write otherwise retook the lock each time and the fork never ran.
 Minimal reproducers are in [`tools/jvm-fuzz/repros`](../tools/jvm-fuzz/repros).
 
 Code: [progress client](../guest/progress/progress.c),
+[lean client](../guest/progress/progress-lean.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
 the vector context and translator syscall mark commits in the ARM DynamoRIO
 fork (the `dynamorio-arm` flake input, [`nix/dynamorio.nix`](../nix/dynamorio.nix)),
@@ -247,6 +270,26 @@ automatically an event that belongs in the simulated world.
 
 Code: [x86 PV execution](../crates/seedbox-vmm/src/machine/pv.rs), [ARM machine](../crates/seedbox-arm64/src/machine.rs).
 
+## Out-of-memory kills
+
+A process the guest kernel kills for lack of memory exits with SIGKILL, which
+looks like any other `137`. The guest supervisor therefore reports each kill on
+its management transport as an `SBX_OOM1` frame, before it reports the exit.
+`/proc/vmstat` `oom_kill` counts kills. Linux reports a victim's PID, name and
+memory only in its log, so the supervisor polls `/dev/kmsg` from its start and
+parses the kernel's own `Killed process` record; it accepts only facility 0,
+which userspace cannot write. If the log ring overwrote a counted kill's
+record, that kill's frame carries no details. Both sources are guest state, so
+a replay reports the same kills at the same simulated times.
+
+The shared decoder turns each frame into an observation. The server publishes an
+`outOfMemoryKill` event, keeps the last 64 kills per machine in the world, and
+lists them in `diagnostics`. Like other events, they are not compared evidence.
+A kill that does not end the application, such as of a child process, is
+reported when it happens.
+
+Code: [guest parser](../guest/oom-report.h), [frame](../crates/seedbox-engine-protocol/src/out_of_memory.rs), [server world](../crates/seedbox-server/src/world.rs).
+
 ## Software exclusive reservations
 
 ARM load-exclusive/store-exclusive instructions implement atomic updates. A host
@@ -336,8 +379,39 @@ and machine-local sequence before routing them. A failure prevents the round
 from committing. Worker completion order must not change results. An idle
 machine must advance to its assigned wake time before delivering inputs.
 
+The server sizes the pool (`seedbox serve --machine-workers`). By default one
+worker runs every machine on the coordinating thread: concurrent seeds use host
+cores better. A larger pool helps a run whose machines could use spare cores, as
+when memory limits how many simulations run at once. An explicit count
+is recorded among a run's performance parameters, and the engine report's
+scheduler evidence states the count used. Neither is part of identity, witness or
+comparison, so a replay may use a different count and must still match.
+
 Code: [round contract](../crates/seedbox-engine-core/src/window/mod.rs),
 [world adapter](../crates/seedbox-engine-core/src/world_windowed.rs).
+
+## Chained ARM slices
+
+Each ARM machine runs in its own HVF worker process, driven by the coordinator
+over a pipe. A link delivers frames in order, at least 1 ns apart, so a burst
+from one send reaches the receiver as a run of delivery points: a slice to
+each frame's time, then its delivery. One host exchange per step limited bulk
+TCP to about 20 MiB of guest data per wall second.
+
+With each slice, the scheduler gives the ARM adapter the frames due at its
+limit and the slices it will request next if each one reaches its limit. The
+worker runs them in one exchange and stops after the first that falls short.
+Their answers wait in the worker handle and go only to the identical next
+requests, each validated as a separate exchange would be. Any other operation
+while chained slices are pending is a protocol error. Horizons, events,
+deliveries and interrupt state are therefore those of separate requests, and
+the chain is not in any witness. Planning stops before anything the loop
+handles itself: an event already due (with early-delivery slack), the slice
+end, a fork or a suspension. Payload bytes cross the pipe as one binary
+attachment after the JSON message.
+
+Code: [planner](../crates/seedbox-engine-core/src/world_windowed.rs),
+[worker protocol](../crates/seedbox-arm64/src/application/worker.rs).
 
 ## Fault ordering and replay
 
@@ -731,6 +805,14 @@ The default policy drops every unflushed sector; `simulator.disk.torn_writes`
 in a resolved definition keeps each one with probability one half. Neither
 keeps the guest's unwritten page cache.
 Restarting an application process is different from crashing its machine and disk.
+
+A machine whose service mounts named volumes gets one disk. The supervisor
+formats it as ext4 on first boot and bind-mounts one directory per volume, so
+volumes share its space. Its size is the sum of the resolved volumes'
+`sizeBytes` (each 1 GiB unless authored), at most 64 GiB, and is part of the
+world document. The disk is sparse: it stores only written sectors, in the
+worker's memory. Host memory, crash transfers, checkpoints and disk digests
+scale with written sectors, not the declared size.
 
 Code: [block](../crates/seedbox-engine-core/src/virtio_block.rs),
 [console](../crates/seedbox-engine-core/src/virtio_console.rs),

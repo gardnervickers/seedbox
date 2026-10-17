@@ -139,7 +139,8 @@ forks and checkpoints between rounds, on the calling thread, from committed
 state in a fixed order. arm64 runs its world through the same windowed
 scheduler (`application/world.rs`), serially or on a pool; the legacy loop
 (`world::simulate`) has no backend caller and stays only for its tests. Worker
-count is a performance setting.
+count is a performance setting: `seedbox serve --machine-workers` (default 1,
+serial) is recorded with each run and never enters identity, witness or comparison.
 A failed crash transaction poisons the retained World and terminates owned worker
 transports; retries must fail before any worker activity.
 

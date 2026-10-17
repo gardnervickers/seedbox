@@ -83,6 +83,9 @@ impl Payload for SimulationEvent {
             | EventKind::MachineReady { machine, .. }
             | EventKind::MachineLifecycle { machine, .. }
             | EventKind::MachineExited { machine, .. } => machine.len(),
+            EventKind::OutOfMemoryKill {
+                machine, process, ..
+            } => machine.len() + process.as_ref().map_or(0, |p| p.command.len()),
             _ => 0,
         })
     }
@@ -1002,6 +1005,7 @@ impl Manager {
             | EventKind::MachineReady { machine, .. }
             | EventKind::MachineLifecycle { machine, .. }
             | EventKind::MachineExited { machine, .. }
+            | EventKind::OutOfMemoryKill { machine, .. }
                 if !live.logs.contains_key(machine) =>
             {
                 EventKind::SourceUnavailable

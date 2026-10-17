@@ -4,7 +4,7 @@
 use seedbox_engine_protocol::{
     application_log,
     observation::{receiver_full, Kind, Observation, MAX_DATAGRAM_BYTES},
-    property,
+    out_of_memory, property,
 };
 use std::{
     os::unix::net::UnixDatagram,
@@ -308,6 +308,14 @@ impl Decoder {
                     if self.line.starts_with(application_log::PREFIX) {
                         emit(Line::Log(Kind::MalformedLog));
                     }
+                } else if self.line.starts_with(out_of_memory::PREFIX) {
+                    // A kill is reported even if its details are unreadable.
+                    emit(Line::Log(Kind::OutOfMemoryKill(
+                        out_of_memory::decode(&self.line)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(out_of_memory::Kill { process: None }),
+                    )));
                 } else {
                     match application_log::decode(&self.line) {
                         Ok(Some(chunk)) => emit(Line::Log(Kind::Log(chunk))),
@@ -576,6 +584,43 @@ mod tests {
                 })
             ]
         );
+    }
+
+    #[test]
+    fn out_of_memory_kills_are_observed_even_without_details() {
+        use seedbox_engine_protocol::out_of_memory::{Kill, Process};
+        let mut decoder = Decoder::default();
+        let mut output = Vec::new();
+        decoder.receive(
+            b"SBX_OOM1 7 9 8 2 1 6d656d686f67\nSBX_OOM1 -\nSBX_OOM1 x\nSBX_LOG1 1 61\n",
+            |kind| output.push(kind),
+        );
+        assert_eq!(
+            output,
+            vec![
+                Kind::OutOfMemoryKill(Kill {
+                    process: Some(Process {
+                        pid: 7,
+                        command: "memhog".into(),
+                        total_vm_kib: 9,
+                        anon_rss_kib: 8,
+                        file_rss_kib: 2,
+                        shmem_rss_kib: 1,
+                    })
+                }),
+                Kind::OutOfMemoryKill(Kill { process: None }),
+                Kind::OutOfMemoryKill(Kill { process: None }),
+                Kind::Log(Chunk {
+                    stream: Stream::Stdout,
+                    bytes: b"a".to_vec()
+                })
+            ]
+        );
+        // A kill is not application output, so output triggers never see it.
+        let mut state = crate::world::MachineState::new("app".into());
+        state.observe_console = true;
+        decoder.commit(&mut state, None, 3, b"SBX_OOM1 -\n");
+        assert!(state.committed_output.is_empty());
     }
 
     #[test]

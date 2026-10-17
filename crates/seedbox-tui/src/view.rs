@@ -3367,6 +3367,19 @@ fn event_text(kind: &EventKind) -> (String, String, Color) {
             format!("{machine} exited {code}"),
             if *code == 0 { DIM } else { RED },
         ),
+        EventKind::OutOfMemoryKill {
+            machine, process, ..
+        } => (
+            "machine".into(),
+            match process {
+                Some(process) => format!(
+                    "{machine} out of memory: killed {} (anon-rss {} kB)",
+                    process.command, process.anon_rss_kib
+                ),
+                None => format!("{machine} out of memory: killed a process"),
+            },
+            RED,
+        ),
         EventKind::ControlChanged { control } => {
             let (text, color) = control_summary(control);
             ("control".into(), text, color)
@@ -3552,6 +3565,35 @@ mod tests {
         EventDelivery, FaultState, Frame as WireFrame, FrameDelivery, LogDelivery, LogEntry,
         SimulationEvent,
     };
+
+    #[test]
+    fn out_of_memory_kills_name_the_victim() {
+        let mut kind = EventKind::OutOfMemoryKill {
+            machine: "n3".into(),
+            incarnation: 0,
+            process: Some(seedbox_api::OutOfMemoryProcess {
+                pid: 412,
+                command: "nats-server".into(),
+                total_vm_kib: 1_203_328,
+                anon_rss_kib: 446_228,
+                file_rss_kib: 1024,
+                shmem_rss_kib: 0,
+            }),
+        };
+        let (category, text, color) = event_text(&kind);
+        assert_eq!(
+            (category.as_str(), text.as_str(), color),
+            (
+                "machine",
+                "n3 out of memory: killed nats-server (anon-rss 446228 kB)",
+                RED
+            )
+        );
+        if let EventKind::OutOfMemoryKill { process, .. } = &mut kind {
+            *process = None;
+        }
+        assert_eq!(event_text(&kind).1, "n3 out of memory: killed a process");
+    }
 
     fn render(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();

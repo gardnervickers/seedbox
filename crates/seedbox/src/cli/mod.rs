@@ -91,6 +91,8 @@ enum Command {
         /// Simulations to execute at once.
         #[arg(long, default_value_t = std::num::NonZeroUsize::MIN.saturating_add(1), help_heading = "Performance (never changes results)")]
         capacity: std::num::NonZeroUsize,
+        #[command(flatten)]
+        performance: Performance,
     },
     /// Create a self-contained example project.
     Init {
@@ -426,7 +428,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show completed simulation raw diagnostics, distinct from timed application logs.
+    /// Show completed simulation raw diagnostics and guest out-of-memory kills, distinct from timed application logs.
     Diagnostics {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
@@ -632,6 +634,44 @@ struct RuntimeInputs {
     full_state: bool,
 }
 
+/// Server-owned host settings recorded with each run; they never change results.
+#[derive(Args, Clone, Copy, Debug, Default)]
+#[command(next_help_heading = "Performance (never changes results)")]
+struct Performance {
+    /// Machine threads per simulation; raise it when a run's machines could use spare cores, as when memory limits how many simulations run at once [default: 1].
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=seedbox_engine_protocol::launch::MAX_MACHINE_WORKERS as u64))]
+    machine_workers: Option<u64>,
+    /// Host CPU milliseconds a Linux KVM run may go without an exit before the PV watchdog reports where it is [default: 20].
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..=60000))]
+    watchdog_ms: Option<u64>,
+}
+
+impl Performance {
+    /// Record these settings on every run `executor` performs.
+    fn apply(&self, executor: Executor) -> Result<Executor> {
+        Ok(match executor {
+            Executor::Linux(mut executor) => {
+                if let Some(workers) = self.machine_workers {
+                    executor = executor.with_machine_workers(workers as usize)?;
+                }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                if let Some(milliseconds) = self.watchdog_ms {
+                    executor = executor.with_watchdog_ms(milliseconds)?;
+                }
+                Executor::Linux(executor)
+            }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            Executor::Mac(mut executor) => {
+                if let Some(workers) = self.machine_workers {
+                    executor = executor.with_machine_workers(workers as usize)?;
+                }
+                Executor::Mac(executor)
+            }
+        })
+    }
+}
+
 impl RuntimeInputs {
     /// Resolve every input and build the matching preparer and executor.
     fn backends(
@@ -753,9 +793,10 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Serve {
             state,
             inputs,
+            performance,
             startup_handshake,
             capacity,
-        } => daemon::serve(state, inputs, startup_handshake, capacity),
+        } => daemon::serve(state, inputs, performance, startup_handshake, capacity),
         Command::Inject { mutation, action } => faults::inject(mutation, &action),
         Command::Heal { mutation, handle } => simulations::mutate_control(
             mutation,

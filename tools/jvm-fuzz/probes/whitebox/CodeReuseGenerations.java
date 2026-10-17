@@ -148,8 +148,15 @@ public final class CodeReuseGenerations {
         Fz.join(ts);
         pub = null;
         live.clear();
-        for (int i = 0; i < 3; i++) wb.fullGC();
-        long unloaded = dropped.stream().filter(w -> w.get() == null).count();
+        // A running compilation keeps the hidden classes it touches alive until it ends (see
+        // CodeReuse), so collect again while compilations finish.
+        long unloaded = 0;
+        for (int i = 0; i < 50; i++) {
+            wb.fullGC();
+            unloaded = dropped.stream().filter(w -> w.get() == null).count();
+            if (i >= 2 && unloaded >= dropped.size() - 2) break;
+            if (i >= 2) Thread.sleep(100);
+        }
         diag("reused entries " + reused + " of " + gens + ", unloaded " + unloaded + " of " + dropped.size());
         Fz.out("generations", gens);
         Fz.out("directMismatches", direct);

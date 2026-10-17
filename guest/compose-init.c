@@ -26,6 +26,7 @@
 #include "control.h"
 #include "application-output.h"
 #include "property-relay.h"
+#include "oom-report.h"
 #include "barrier.h"
 #include "progress-launch.h"
 #include "world-clock.h"
@@ -601,17 +602,29 @@ static void kernel_log_open(void) {
 static void kernel_log_skip(void) {
     if (kernel_log >= 0 && lseek(kernel_log, 0, SEEK_END) < 0) die("seek kernel log");
 }
+static void oom_kills_reconcile(int64_t reported);
+/* One reader for both uses of the kernel log: default-property evidence for
+ * the SDK relay, and out-of-memory kill frames for the host. */
 static void kernel_log_read(void) {
-    char kmsg[8192], record[PROPERTY_RECORD_BYTES];
+    char kmsg[OOM_REPORT_RECORD_BYTES], record[PROPERTY_RECORD_BYTES];
+    int64_t oom_reported = 0;
     while (kernel_log >= 0) {
         ssize_t n = read(kernel_log, kmsg, sizeof(kmsg));
         if (n < 0 && errno == EINTR) continue;
         if (n < 0 && errno == EPIPE) continue; /* Overwritten records; read on. */
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
         if (n <= 0) die("read kernel log");
-        size_t size = kernel_record(record, kmsg, (size_t)n);
-        if (size) property_relay(0, ++supervisor_seq, record, size);
+        if (property_listener >= 0) {
+            size_t size = kernel_record(record, kmsg, (size_t)n);
+            if (size) property_relay(0, ++supervisor_seq, record, size);
+        }
+        if (management >= 0) {
+            char frame[OOM_REPORT_FRAME_BYTES];
+            size_t size = oom_report_frame(kmsg, (size_t)n, frame);
+            if (size) { send_all(management, frame, size); oom_reported++; }
+        }
     }
+    oom_kills_reconcile(oom_reported);
 }
 static void property_exit(int status) {
     char record[64];
@@ -682,6 +695,36 @@ static void drain_output(void) {
             relay_output(stream, count); pending -= (int)count;
         }
     }
+}
+#ifndef SEEDBOX_VMSTAT
+#define SEEDBOX_VMSTAT "/proc/vmstat"
+#endif
+static int64_t oom_kills_counted = -1;
+static int64_t oom_kill_count(void) {
+    static char text[32768];
+    int fd = open(SEEDBOX_VMSTAT, O_RDONLY|O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t used = 0;
+    for (;;) {
+        ssize_t n = read(fd, text + used, sizeof(text) - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { if (n < 0) used = 0; break; }
+        used += (size_t)n;
+        if (used == sizeof(text)) break;
+    }
+    close(fd);
+    return oom_report_count(text, used);
+}
+/* Report kills /proc/vmstat counted beyond the `reported` kernel kill records
+ * just framed: a detail-free frame for each one whose record the log ring
+ * overwrote. */
+static void oom_kills_reconcile(int64_t reported) {
+    if (management < 0) return;
+    int64_t counted = oom_kill_count();
+    if (counted >= 0 && oom_kills_counted >= 0) {
+        for (int64_t missing = counted - oom_kills_counted - reported; missing > 0; missing--) send_all(management, "SBX_OOM1 -\n", 11);
+    }
+    if (counted >= 0) oom_kills_counted = counted;
 }
 static pid_t start(void) {
     for (char **entry = environment; entry && *entry; ++entry) {
@@ -948,7 +991,7 @@ static void service_channels(pid_t *child, int timeout) {
         {.fd = application_outputs[0].read_fd, .events = POLLIN},
         {.fd = application_outputs[1].read_fd, .events = POLLIN},
         {.fd = property_listener, .events = POLLIN},
-        {.fd = property_listener >= 0 ? kernel_log : -1, .events = POLLIN}
+        {.fd = property_listener >= 0 || management >= 0 ? kernel_log : -1, .events = POLLIN}
     };
     for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
         pfds[7 + i] = (struct pollfd){.fd = property_listener >= 0 ? property_clients[i].fd : -1, .events = POLLIN};
@@ -967,6 +1010,7 @@ static void service_channels(pid_t *child, int timeout) {
     }
     if (pfds[5].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("SDK listener poll"); }
     if (pfds[5].revents & POLLIN) property_accept();
+    /* /dev/kmsg reports overwritten records as POLLERR; the next read skips them. */
     if (pfds[6].revents & POLLNVAL) { errno = EIO; die("kernel log poll"); }
     if (pfds[6].revents & (POLLIN|POLLERR)) kernel_log_read();
     for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
@@ -983,6 +1027,7 @@ static void supervise(pid_t *child) {
         while ((done = waitpid(-1, &status, WNOHANG)) > 0) {
             if (done == *child) {
                 drain_output();
+                kernel_log_read();
                 if (property_listener >= 0) { property_drain(); coverage_relay(); property_exit(status); }
                 finish(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), 0);
             }
@@ -1062,6 +1107,7 @@ int main(void) {
     if (clock_settime(CLOCK_REALTIME, &wall_clock)) die("set recorded wall clock");
     if (seedbox_launch_barrier("/proc/cmdline", "/dev/urandom")) die("launch barrier");
     watch_children();
+    oom_kills_counted = oom_kill_count();
     pid_t child = start();
     if (child < 0) die("initial application launch failed");
     management_ready();

@@ -64,6 +64,15 @@ Set `memoryMiB` on a machine or the oracle to choose its RAM independently.
 Omission uses 1024 MiB; supported sizes are 64–3072 MiB on Apple Silicon and
 64–65536 MiB on Linux x86-64. Preparation checks the image archive’s boot memory
 requirement; applications may need more.
+A machine's `volumes` keep their contents across a machine crash. Each one adds its
+`size` (default `1GiB`, from `16MiB`, in whole MiB or GiB such as `size: 4GiB`) to
+the machine's disk, which all of its volumes share and which holds at most 64 GiB.
+On Apple Silicon, `engine: {progressClient: lean}` runs applications under a
+cheaper build of the translator's progress instrumentation: short-lived processes,
+such as a shell script's commands, start about 2.5 times faster. It charges the
+same application instructions, but the translator's own work is charged too, so
+simulated times differ slightly from the default `standard` client; a seed
+reproduces only with the same choice.
 
 Images must match the guest architecture: `linux/arm64` on Apple Silicon,
 `linux/amd64` on Linux x86-64. Pull private images with Docker or Podman first;
@@ -82,7 +91,7 @@ seedbox logs <sim-id>                    # Recent application output, all machin
 seedbox logs <sim-id> n1 --follow         # Stream one machine's output.
 seedbox events <sim-id> --follow          # Structured simulator events.
 seedbox replay <sim-id>                  # Rerun and compare results.
-seedbox diagnostics <sim-id>             # List completed raw worker/console evidence.
+seedbox diagnostics <sim-id>             # Raw worker/console evidence; out-of-memory kills.
 seedbox export <sim-id> -o saved.seedbox.tar
 seedbox import saved.seedbox.tar          # Fresh completed resource; no execution.
 seedbox describe simulation <sim-id> > simulation.yaml

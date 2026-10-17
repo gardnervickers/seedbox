@@ -26,6 +26,7 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
         .filter(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "yaml")
+                && runs_here(path)
         })
         .collect();
     workloads.sort();
@@ -123,6 +124,13 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
     }
 }
 
+/// The lean progress client exists for arm64 guests only.
+fn runs_here(workload: &Path) -> bool {
+    let project: seedbox_spec::project::Project =
+        serde_yaml_ng::from_str(&fs::read_to_string(workload).unwrap()).unwrap();
+    project.engine.progress_client.is_standard() || cfg!(target_arch = "aarch64")
+}
+
 /// The CLI's `--json` resource for a submitted simulation.
 fn submitted(output: &str) -> Result<seedbox_api::Simulation, String> {
     serde_json::from_str(output).map_err(|error| format!("simulation JSON: {error}: {output}"))
@@ -188,40 +196,80 @@ async fn oracle_printed(
     Ok(output.windows(marker.len()).any(|window| window == marker))
 }
 
+/// Whether a simulation has finished executing: it has no worker control
+/// endpoint left to hold or capture.
+async fn ended(client: &seedbox_client::Client, id: &seedbox_api::SimulationId) -> bool {
+    client.describe(id).await.is_ok_and(|simulation| {
+        matches!(
+            simulation.status.phase,
+            seedbox_api::Phase::Finalizing | seedbox_api::Phase::Completed
+        )
+    })
+}
+
 /// Hold a paused run before the effect of the fault that follows the oracle's
 /// `marker` line. The oracle prints the line, then makes a non-fault call, so
-/// the line is published before that fault. Earlier faults are passed one at a
-/// time, pausing before each.
+/// the line is committed in an earlier round than that fault's admission.
+/// Earlier faults are passed one at a time, pausing before each.
+///
+/// Whether a held fault is the marked one does not depend on host speed or
+/// observation latency. The worker publishes each round's logs before the
+/// fault changes that round admits, on one ordered observation stream, and the
+/// server folds both in that order. So once the server's world shows the held
+/// fault admitted (scheduled, not yet applied), the marker is retained if and
+/// only if it preceded that fault. Each checkpoint oracle makes one fault call
+/// at a time, so the held fault is the only scheduled one not already passed.
 async fn hold_before_marked_fault(
     client: &seedbox_client::Client,
     id: &seedbox_api::SimulationId,
     marker: &[u8],
     deadline: Instant,
 ) -> Result<(), String> {
-    use seedbox_api::{ControlCommand, PlaybackRate};
+    use seedbox_api::{ControlCommand, FaultStatus, PlaybackRate};
+    let missing = || {
+        format!(
+            "run completed before the fault after its {:?} oracle line",
+            String::from_utf8_lossy(marker).trim_end()
+        )
+    };
     while client.playback(id).await.is_err() {
+        if ended(client, id).await {
+            return Err(missing());
+        }
         if Instant::now() > deadline {
             return Err("no live playback endpoint".into());
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let mut passed = None;
+    let mut held_faults = std::collections::BTreeSet::new();
     loop {
-        acknowledged(
+        let request = acknowledged(
             client,
             id,
             ControlCommand::PauseBeforeNextFault {
                 rate: PlaybackRate::Unlimited,
             },
         )
-        .await?;
+        .await;
+        if let Err(error) = request {
+            return Err(if ended(client, id).await {
+                missing()
+            } else {
+                error
+            });
+        }
         // Held before the next fault effect: paused, moved past the last
         // fault passed, and no longer moving.
         let mut last = None;
         let held = loop {
-            let observation = client.playback(id).await.map_err(|e| e.to_string())?;
+            let observation = match client.playback(id).await {
+                Ok(observation) => observation,
+                Err(_) if ended(client, id).await => return Err(missing()),
+                Err(error) => return Err(error.to_string()),
+            };
             if observation.state.terminal {
-                return Err("run completed before its marked capture phase".into());
+                return Err(missing());
             }
             let position = observation.state.position;
             if observation.state.rate == PlaybackRate::Paused
@@ -236,13 +284,28 @@ async fn hold_before_marked_fault(
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
-        // The line precedes a full RPC round trip, so it is published by now;
-        // allow for observation latency before passing this fault.
-        for _ in 0..20 {
-            if oracle_printed(client, id, marker).await? {
-                return Ok(());
+        // Wait for the held fault's admission to reach the server; every log
+        // the worker published before it has been retained by then.
+        let fault = loop {
+            let world = client.world(id).await.map_err(|e| e.to_string())?;
+            if let Some(fault) = world
+                .faults
+                .iter()
+                .find(|f| f.status == FaultStatus::Unrequested && !held_faults.contains(&f.id))
+            {
+                break fault.id;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "held at {held:?} without an observed scheduled fault: {:?}",
+                    world.faults
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        held_faults.insert(fault);
+        if oracle_printed(client, id, marker).await? {
+            return Ok(());
         }
         passed = Some(held);
     }
@@ -1334,5 +1397,160 @@ fn retained_output_is_accounted_attributed_and_replayed() {
             failures.join("\n"),
             retained.display()
         );
+    }
+}
+
+/// The guest kernel's out-of-memory kill of an application, as events,
+/// `get world` and `diagnostics` report it. Each line is the guest kernel's own
+/// report, so a replay reports the same kill at the same simulated time.
+fn out_of_memory_kill(
+    cli: &Path,
+    directory: &Path,
+    state: &Path,
+    id: &str,
+    name: &str,
+) -> Result<seedbox_api::OutOfMemoryKill, String> {
+    let events = invoke(
+        cli,
+        directory,
+        state,
+        &format!("{name}-events"),
+        &["events", id],
+    )?;
+    let mut kills = Vec::new();
+    let mut exit = None;
+    for line in events.lines() {
+        let delivery: seedbox_api::EventDelivery =
+            serde_json::from_str(line).map_err(|e| format!("event {line:?}: {e}"))?;
+        let seedbox_api::EventDelivery::Event { observation, .. } = delivery else {
+            continue;
+        };
+        match observation.event {
+            seedbox_api::EventKind::OutOfMemoryKill {
+                machine,
+                incarnation,
+                process,
+            } => kills.push((
+                machine,
+                seedbox_api::OutOfMemoryKill {
+                    incarnation,
+                    simulated_time_ns: observation.simulated_time_ns.unwrap_or_default(),
+                    process,
+                },
+            )),
+            seedbox_api::EventKind::MachineExited { machine, code, .. } if machine == "app" => {
+                exit = Some((code, observation.simulated_time_ns, kills.len()));
+            }
+            _ => {}
+        }
+    }
+    let [(machine, kill)] = &kills[..] else {
+        return Err(format!("expected one out-of-memory kill, got {kills:?}"));
+    };
+    let process = kill.process.as_ref().ok_or("kill has no process details")?;
+    if machine != "app" || kill.incarnation != 0 || process.anon_rss_kib < 32 * 1024 {
+        return Err(format!("unexpected kill on {machine}: {kill:?}"));
+    }
+    // The kill is reported before the exit it caused.
+    if !exit.is_some_and(|(code, time, before)| {
+        code == 137 && before == 1 && time.is_some_and(|time| time >= kill.simulated_time_ns)
+    }) {
+        return Err(format!(
+            "app exit {exit:?} does not follow the kill {kill:?}"
+        ));
+    }
+    let world = invoke(
+        cli,
+        directory,
+        state,
+        &format!("{name}-world"),
+        &["get", "world", id],
+    )?;
+    if !world.lines().any(|line| {
+        line.starts_with("app ")
+            && line.contains(" exited ")
+            && line.contains("137 (out of memory)")
+    }) {
+        return Err(format!("get world does not explain the exit:\n{world}"));
+    }
+    let diagnostics = invoke(
+        cli,
+        directory,
+        state,
+        &format!("{name}-diagnostics"),
+        &["diagnostics", id],
+    )?;
+    let expected = format!(
+        "out-of-memory: machine app incarnation 0 at {}s: the guest kernel's out-of-memory killer killed {} (pid {}, anon-rss {} kB); raise memoryMiB (now 384)",
+        format!("{:.3}", kill.simulated_time_ns as f64 / 1e9)
+            .trim_end_matches('0')
+            .trim_end_matches('.'),
+        process.command,
+        process.pid,
+        process.anon_rss_kib
+    );
+    if !diagnostics.lines().any(|line| line == expected) {
+        return Err(format!("diagnostics lacks {expected:?}:\n{diagnostics}"));
+    }
+    eprintln!("out of memory: {name}: {expected}");
+    Ok(kill.clone())
+}
+
+#[test]
+fn out_of_memory_kill_is_reported_and_replayed() {
+    let cli = std::env::var_os("SEEDBOX_TEST_CLI")
+        .expect("harness/check.sh supplies the current release CLI");
+    let reports =
+        std::env::var_os("SEEDBOX_TEST_REPORT_DIR").expect("set a fresh SEEDBOX_TEST_REPORT_DIR");
+    let cli = Path::new(&cli);
+    let workload = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../harness/acceptance/workloads/out-of-memory.yaml");
+    let directory = Path::new(&reports).join("out-of-memory");
+    fs::create_dir_all(&directory).unwrap();
+    let state_directory = tempfile::Builder::new()
+        .prefix("seedbox-oom-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let state_path = state_directory.path().join("state");
+    let state = state_path.as_path();
+    let server = match Server::start(cli, state) {
+        Ok(server) => server,
+        Err(error) => {
+            let retained = state_directory.keep();
+            panic!("{error}; retained server state: {}", retained.display());
+        }
+    };
+    let check = || -> Result<(), String> {
+        let output = invoke(
+            cli,
+            &directory,
+            state,
+            "run",
+            &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
+        )?;
+        let id = simulation_id(&output)?;
+        let kill = out_of_memory_kill(cli, &directory, state, id, "run")?;
+        let replay = invoke(
+            cli,
+            &directory,
+            state,
+            "replay",
+            &["replay", id, "--wall-time", "30m"],
+        )?;
+        let replayed = replay
+            .lines()
+            .find_map(|line| line.strip_prefix("MATCH: "))
+            .ok_or_else(|| format!("replay did not match: {replay}"))?;
+        let again = out_of_memory_kill(cli, &directory, state, replayed, "replay")?;
+        if again != kill {
+            return Err(format!("replay reported {again:?}, not {kill:?}"));
+        }
+        Ok(())
+    };
+    let result = check();
+    drop(server);
+    if let Err(error) = result {
+        let retained = state_directory.keep();
+        panic!("{error}\nretained server state: {}", retained.display());
     }
 }

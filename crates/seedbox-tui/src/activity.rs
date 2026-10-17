@@ -612,6 +612,7 @@ mod tests {
             last_transition_at_ns: None,
             condition_since_ns: None,
             application: Default::default(),
+            out_of_memory_kills: Vec::new(),
         });
         let activity = derive(Some(&w), &[], &[], 5);
         assert_eq!(

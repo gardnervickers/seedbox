@@ -57,8 +57,9 @@ pub use campaign::{
 mod world;
 pub use world::{
     ApplicationCondition, ApplicationState, ChoiceInputState, FaultState, Frame, FrameDelivery,
-    FrameFate, LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, TriggerState,
-    TriggerStatus, WorldState,
+    FrameFate, LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState,
+    OutOfMemoryKill, OutOfMemoryProcess, TriggerState, TriggerStatus, WorldState,
+    MAX_OUT_OF_MEMORY_KILLS,
 };
 
 mod timeline;
@@ -75,4 +76,7 @@ pub use capacity::{ExecutionCapacity, ExecutionOccupant, QueueReason, QueuedSimu
 mod bundles;
 mod diagnostics;
 pub use bundles::*;
-pub use diagnostics::{DiagnosticDocument, DiagnosticFile, DiagnosticFileQuery, DiagnosticFiles};
+pub use diagnostics::{
+    DiagnosticDocument, DiagnosticFile, DiagnosticFileQuery, DiagnosticFiles,
+    MachineOutOfMemoryKill,
+};

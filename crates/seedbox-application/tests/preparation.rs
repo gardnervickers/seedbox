@@ -84,6 +84,31 @@ fn invalid_profile_fails_before_image_import() {
         .contains("admitted profile requires memory_mb in 64..65536"));
 }
 #[test]
+fn image_setup_errors_name_the_machine() {
+    struct Transport;
+    impl ImageTransport for Transport {
+        fn import(
+            &self,
+            _: &config::Service,
+            _: &Path,
+            _: &ContentStore,
+            _: Option<(&PreparationContext, &str)>,
+            _: seedbox_application::guest::Architecture,
+        ) -> seedbox_application::Result<ImportedImage> {
+            Err(Error::Setup("image example/app: fix it".into()))
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (preparer, simulation, store) = fixture(root.path());
+    let context =
+        PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
+    let error = preparer
+        .prepare_with_transport(&simulation, &store, &context, &Transport)
+        .unwrap_err();
+    assert!(matches!(error, Error::Setup(_)), "{error:?}");
+    assert_eq!(error.to_string(), "machine app: image example/app: fix it");
+}
+#[test]
 fn preparation_retains_kernel_before_transport_changes_source() {
     struct Transport<'a>(&'a Path);
     impl ImageTransport for Transport<'_> {

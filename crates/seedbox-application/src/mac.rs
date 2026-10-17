@@ -122,6 +122,11 @@ impl MacExecutor {
             performance: BTreeMap::new(),
         }
     }
+    /// Machine threads of the windowed scheduler; never changes results.
+    pub fn with_machine_workers(mut self, workers: usize) -> Result<Self> {
+        crate::worker_process::insert_machine_workers(&mut self.performance, workers)?;
+        Ok(self)
+    }
     pub fn doctor(engine: &Engine, kernel: &Path) -> Result<DoctorReport> {
         validate_kernel(kernel, 3072)?;
         Ok(DoctorReport {

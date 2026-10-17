@@ -209,7 +209,7 @@ impl MachineState {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SliceRequest {
     pub hard_limit: u64,
     pub early_slack: u64,
@@ -238,6 +238,15 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     fn deliver_control(&mut self, bytes: &[u8]) -> Result<(), String>;
     fn deliver_serial(&mut self, bytes: &[u8]) -> Result<(), String>;
     fn deliver_frame(&mut self, bytes: &[u8]) -> Result<bool, String>;
+    /// Deliver consecutive frames due at one stopped point, in order, with
+    /// exactly the effects of one `deliver_frame` call each. An adapter may
+    /// override it to cross its host boundary once for the whole run.
+    fn deliver_frames(&mut self, frames: &[&[u8]]) -> Result<Vec<bool>, String> {
+        frames
+            .iter()
+            .map(|bytes| self.deliver_frame(bytes))
+            .collect()
+    }
     fn pause(&mut self) -> Result<(), String>;
     fn resume(&mut self, at: u64) -> Result<(), String>;
     fn boot_at(&mut self, at: u64) -> Result<(), String>;
@@ -370,6 +379,57 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
         request: SliceRequest,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String>;
+    /// Whether `advance_then_deliver` saves host work over `advance` followed
+    /// by `deliver_frames`. The scheduler only asks for it when it is true.
+    fn delivers_after_advance(&self) -> bool {
+        false
+    }
+    /// `advance`, then, only when it stops `Reached` exactly at the hard
+    /// limit, `deliver_frames(then)` there: the delivery the scheduler makes
+    /// next in that case. Returns the frame results only when it delivered.
+    fn advance_then_deliver(
+        &mut self,
+        clock: &mut Self::Clock,
+        request: SliceRequest,
+        frames: &mut Vec<Vec<u8>>,
+        then: &[&[u8]],
+    ) -> Result<(Stop, Option<Vec<bool>>), String> {
+        let stop = self.advance(clock, request, frames)?;
+        if stop == Stop::Reached && self.time == request.hard_limit && !then.is_empty() {
+            return Ok((stop, Some(self.deliver_frames(then)?)));
+        }
+        Ok((stop, None))
+    }
+    /// Further slices, beyond the next one, that this adapter can run in the
+    /// same host exchange. Zero asks the scheduler for no lookahead.
+    fn chain_capacity(&self) -> usize {
+        0
+    }
+    /// `advance_then_deliver(first)`. The adapter may also run `ahead`, the
+    /// slices the scheduler will request next if each one reaches its limit,
+    /// in the same host exchange, stopping after the first that does not.
+    /// Returns how many of them it ran; the scheduler's next that many
+    /// advances must request exactly those slices, which the adapter checks.
+    fn advance_chain(
+        &mut self,
+        clock: &mut Self::Clock,
+        first: ChainStep<'_>,
+        ahead: &[ChainStep<'_>],
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<(Stop, Option<Vec<bool>>, usize), String> {
+        let _ = ahead;
+        let (stop, delivered) =
+            self.advance_then_deliver(clock, first.request, frames, &first.then)?;
+        Ok((stop, delivered, 0))
+    }
+}
+
+/// One slice a chain plans: its request and the frames due at its limit,
+/// which are delivered there only if the slice reaches it.
+#[derive(Clone, Debug)]
+pub struct ChainStep<'a> {
+    pub request: SliceRequest,
+    pub then: Vec<&'a [u8]>,
 }
 /// Immutable slice preconditions, checked before any returned effects enter the
 /// world. Channel order remains the reference KVM order, not a merged batch.

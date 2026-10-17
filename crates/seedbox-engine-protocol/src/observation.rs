@@ -115,6 +115,8 @@ pub enum Kind {
     MachineExited {
         code: u8,
     },
+    /// The guest kernel's out-of-memory killer killed a process.
+    OutOfMemoryKill(crate::out_of_memory::Kill),
     /// Records omitted by a bounded machine/round observation buffer.
     LogGap {
         records: u64,

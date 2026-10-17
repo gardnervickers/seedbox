@@ -8,7 +8,7 @@ use crate::{
     host_control::Endpoint,
     Error, Result,
 };
-use seedbox_engine_core::launch::{Performance, WorkerRequest};
+use seedbox_engine_core::launch::{Performance, WorkerRequest, MAX_MACHINE_WORKERS};
 use std::{
     collections::BTreeMap,
     fs,
@@ -34,24 +34,65 @@ pub(crate) fn incomplete(reason: StopReason) -> ExecutionReport {
     }
 }
 
-/// The x86 worker's performance settings from a run's recorded performance
-/// parameters (`SEEDBOX_WATCHDOG_MS`); absent ones take defaults.
-pub(crate) fn launch_performance(parameters: &BTreeMap<String, String>) -> Result<Performance> {
-    let mut performance = Performance::default();
+/// Recorded performance parameter: the x86 PV watchdog interval in milliseconds.
+pub(crate) const WATCHDOG_MS_PARAMETER: &str = "SEEDBOX_WATCHDOG_MS";
+/// Recorded performance parameter: machine threads of the windowed scheduler.
+pub(crate) const MACHINE_WORKERS_PARAMETER: &str = "SEEDBOX_MACHINE_WORKERS";
+
+/// Launch settings decoded from a run's recorded performance parameters.
+/// None of them changes results (docs/internals.md#parallel-scheduling).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LaunchPerformance {
+    /// x86 worker settings; the ARM world has no watchdog.
+    pub(crate) performance: Performance,
+    /// Machine threads; unset, every machine runs on the coordinating thread.
+    pub(crate) machine_workers: usize,
+}
+
+/// Record an explicit machine thread count among an executor's performance parameters.
+pub(crate) fn insert_machine_workers(
+    parameters: &mut BTreeMap<String, String>,
+    workers: usize,
+) -> Result<()> {
+    if !(1..=MAX_MACHINE_WORKERS).contains(&workers) {
+        return Err(Error::Setup(format!(
+            "--machine-workers: use 1..{MAX_MACHINE_WORKERS}"
+        )));
+    }
+    parameters.insert(MACHINE_WORKERS_PARAMETER.into(), workers.to_string());
+    Ok(())
+}
+
+/// The launch settings from a run's recorded performance parameters
+/// (`SEEDBOX_WATCHDOG_MS`, `SEEDBOX_MACHINE_WORKERS`); absent ones take defaults.
+pub(crate) fn launch_performance(
+    parameters: &BTreeMap<String, String>,
+) -> Result<LaunchPerformance> {
+    let mut launch = LaunchPerformance {
+        performance: Performance::default(),
+        machine_workers: 1,
+    };
     for (key, value) in parameters {
         let invalid = || Error::Integrity(format!("invalid performance parameter {key}={value}"));
         match key.as_str() {
-            "SEEDBOX_WATCHDOG_MS" => {
-                performance.watchdog_ms = value
+            WATCHDOG_MS_PARAMETER => {
+                launch.performance.watchdog_ms = value
                     .parse()
                     .ok()
                     .filter(|ms| *ms != 0)
                     .ok_or_else(invalid)?
             }
+            MACHINE_WORKERS_PARAMETER => {
+                launch.machine_workers = value
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=MAX_MACHINE_WORKERS).contains(n))
+                    .ok_or_else(invalid)?
+            }
             _ => return Err(invalid()),
         }
     }
-    Ok(performance)
+    Ok(launch)
 }
 
 pub(crate) struct WorkerLaunch {
@@ -101,6 +142,8 @@ impl WorkerLaunch {
             .join(crate::engine_adapter::MACHINE_OUTPUT_DIR);
         let console_limit = 1024 * 1024 * 1024 / streams;
         let digest = request.prepared.profile.witness_mode == WitnessMode::FullState;
+        let performance = launch_performance(request.performance_parameters)?;
+        let machine_workers = performance.machine_workers;
         if kind == ExecutableKind::ArmWorld {
             if request.start_paused {
                 command.arg("--start-paused");
@@ -130,7 +173,9 @@ impl WorkerLaunch {
                 .arg("--host-control")
                 .arg(endpoint.socket())
                 .arg("--console-limit")
-                .arg(console_limit.to_string());
+                .arg(console_limit.to_string())
+                .arg("--machine-workers")
+                .arg(machine_workers.to_string());
             if digest {
                 command.arg("--digest");
             }
@@ -152,7 +197,8 @@ impl WorkerLaunch {
             worker.log_chunk_limit = Some((1_048_576 / streams).min(65_536));
             worker.stream_console = true;
             worker.features = crate::engine_adapter::recorded_features(&request.prepared.profile)?;
-            worker.performance = launch_performance(request.performance_parameters)?;
+            worker.performance = performance.performance;
+            worker.machine_workers = machine_workers;
             let path = request.output.join(WORKER_REQUEST_FILE);
             fs::write(&path, serde_json::to_vec_pretty(&worker)?)?;
             command.arg("--request").arg(path);
@@ -514,6 +560,8 @@ mod tests {
                 )]),
             };
             let original = serde_json::to_vec(&prepared.profile).unwrap();
+            // Unset, every machine runs on the coordinating thread.
+            let default_workers = "1";
             let launch = WorkerLaunch::prepare(&request, &engine, kind).unwrap();
             let args: Vec<_> = launch
                 .command
@@ -553,6 +601,8 @@ mod tests {
                     socket.to_str().unwrap(),
                     "--console-limit",
                     "268435456",
+                    "--machine-workers",
+                    default_workers,
                     "--digest",
                 ];
                 assert_eq!(&args[dispatch.len()..], expected);
@@ -567,7 +617,7 @@ mod tests {
                 let mut expected =
                     WorkerRequest::new(directory.path().join("world.json"), 1009, out);
                 expected.start_paused = true;
-                expected.interventions = Some(history);
+                expected.interventions = Some(history.clone());
                 expected.resume_checkpoint = Some(checkpoint.clone());
                 expected.digest = true;
                 expected.host_control = Some(launch.endpoint.socket());
@@ -575,11 +625,38 @@ mod tests {
                 expected.log_chunk_limit = Some(65536);
                 expected.stream_console = true;
                 expected.performance.watchdog_ms = 50;
+                expected.machine_workers = 1;
                 assert_eq!(worker, expected);
             }
             assert_eq!(serde_json::to_vec(&prepared.profile).unwrap(), original);
             drop(launch);
             assert!(!directory.path().join("host-control").exists());
+            // An explicit server setting reaches the engine unchanged, even
+            // above the machine count.
+            let parameters = BTreeMap::from([
+                ("SEEDBOX_WATCHDOG_MS".into(), "50".into()),
+                (MACHINE_WORKERS_PARAMETER.into(), "8".into()),
+            ]);
+            let explicit = ExecutionRequest {
+                performance_parameters: &parameters,
+                ..request
+            };
+            let launch = WorkerLaunch::prepare(&explicit, &engine, kind).unwrap();
+            if kind == ExecutableKind::ArmWorld {
+                let args: Vec<_> = launch
+                    .command
+                    .get_args()
+                    .map(|v| v.to_str().unwrap())
+                    .collect();
+                let at = args.iter().position(|a| *a == "--machine-workers").unwrap();
+                assert_eq!(args[at + 1], "8");
+            } else {
+                let path = directory.path().join(WORKER_REQUEST_FILE);
+                let worker: WorkerRequest =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                assert_eq!(worker.machine_workers, 8);
+            }
+            drop(launch);
         }
     }
 
@@ -593,14 +670,22 @@ mod tests {
                     .collect(),
             )
         };
-        assert_eq!(decode(&[]).unwrap(), Performance::default());
-        assert_eq!(
-            decode(&[("SEEDBOX_WATCHDOG_MS", "50")]).unwrap(),
-            Performance { watchdog_ms: 50 }
-        );
+        let defaults = decode(&[]).unwrap();
+        assert_eq!(defaults.performance, Performance::default());
+        assert_eq!(defaults.machine_workers, 1);
+        let set = decode(&[
+            ("SEEDBOX_WATCHDOG_MS", "50"),
+            ("SEEDBOX_MACHINE_WORKERS", "64"),
+        ])
+        .unwrap();
+        assert_eq!(set.performance, Performance { watchdog_ms: 50 });
+        assert_eq!(set.machine_workers, 64);
         for bad in [
             ("SEEDBOX_WATCHDOG_MS", "0"),
             ("SEEDBOX_WATCHDOG_MS", "fast"),
+            ("SEEDBOX_MACHINE_WORKERS", "0"),
+            ("SEEDBOX_MACHINE_WORKERS", "65"),
+            ("SEEDBOX_MACHINE_WORKERS", "all"),
             ("SEEDBOX_MARGIN", "64"),
         ] {
             assert!(decode(&[bad]).is_err(), "{bad:?}");

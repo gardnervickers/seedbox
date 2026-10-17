@@ -168,6 +168,18 @@ impl Write for Counter {
 }
 
 impl<B: Backend> Machine<B> {
+    /// The boot identity a checkpoint stream was captured under, read without
+    /// a machine, so a restore can build its replacement from the same boot.
+    pub fn checkpoint_boot_identity(mut reader: impl Read) -> Result<application::BootIdentity> {
+        if &bytes::<8>(&mut reader)? != MAGIC {
+            return Err("unsupported ARM checkpoint format".into());
+        }
+        let metadata: Metadata = read_section(&mut reader, MAX_METADATA, |input, length| {
+            serde_json::from_slice(&read_vec(input, length)?)
+                .map_err(|e| format!("decode ARM checkpoint: {e}"))
+        })?;
+        Ok(metadata.state.boot_identity)
+    }
     /// Consume a fresh replacement. Verification finishes before touching the
     /// native VM; any error drops the replacement and leaves the source intact.
     pub fn restore_checkpoint(self, mut reader: impl Read) -> Result<Self> {

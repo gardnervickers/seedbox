@@ -172,6 +172,12 @@ struct Guest<'a, M> {
     exited_now: bool,
     /// Held a block request in the last round: when, and for which trigger.
     held_now: Option<(u64, u32)>,
+    /// Results of frames the last slice already delivered at its hard
+    /// limit: (index of the first, one per frame). The next delivery consumes it.
+    delivered: Option<(usize, Vec<bool>)>,
+    /// Slices the adapter already ran ahead in an earlier exchange; the next
+    /// that many advances replay them.
+    ahead: usize,
 }
 
 /// Machine capability and exited-target policy shared by all host-origin inputs.
@@ -232,6 +238,8 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
             observations: crate::observation::Buffer::default(),
             exited_now: false,
             held_now: None,
+            delivered: None,
+            ahead: 0,
         }
     }
 
@@ -311,6 +319,34 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
     /// Deliver the assigned events the machine's time has reached, in key
     /// order. With `slack`, a non-strict event may arrive `delivery_early`
     /// before its time; a strict one never does.
+    /// Record frames a slice delivered at its limit for the next delivery,
+    /// which must then find exactly them due.
+    fn check_delivered(
+        &mut self,
+        stop: Stop,
+        limit: u64,
+        i: usize,
+        then: &[(u64, usize, &[u8])],
+        delivered: Option<Vec<bool>>,
+    ) -> Result<(), String> {
+        let Some(accepted) = delivered else {
+            return Ok(());
+        };
+        if stop != Stop::Reached
+            || self.m.time != limit
+            || self.m.state != State::Running
+            || accepted.len() != then.len()
+            || then.is_empty()
+        {
+            return Err(format!(
+                "{}: frames delivered with a slice that did not reach them",
+                self.m.name
+            ));
+        }
+        self.delivered = Some((i, accepted));
+        Ok(())
+    }
+
     fn deliver(
         &mut self,
         a: &sw::Assignment<Msg>,
@@ -318,19 +354,45 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
         outputs: &mut Vec<sw::Output<Msg>>,
         slack: bool,
     ) -> Result<(), String> {
-        while let Some(e) = a.incoming.get(*i).filter(|e| {
-            let early = if slack && !e.payload.strict() {
-                a.delivery_early
-            } else {
-                0
-            };
-            e.key.at <= self.m.time.saturating_add(early)
-        }) {
+        while let Some(e) = a.incoming.get(*i).filter(|e| due(a, e, self.m.time, slack)) {
             let now = self.m.time;
             match &e.payload {
-                Msg::Frame { from, bytes } => {
-                    let accepted = self.m.deliver_frame(bytes)?;
-                    self.received.push((e.key.at, *from, accepted));
+                Msg::Frame { .. } => {
+                    // Deliver the run of consecutive due frames together.
+                    // Delivery never moves the machine's time, so these are
+                    // exactly the frames, in the order, that one-by-one
+                    // delivery would take, and each keeps its own effects.
+                    let run = due_frames(a, *i, now, slack);
+                    let accepted = match self.delivered.take() {
+                        // The slice that reached this time delivered them.
+                        Some((start, accepted)) if start == *i && accepted.len() == run.len() => {
+                            accepted
+                        }
+                        Some(_) => {
+                            return Err(format!(
+                                "{}: frames delivered with the slice differ from those due",
+                                self.m.name
+                            ))
+                        }
+                        None => {
+                            let frames: Vec<&[u8]> =
+                                run.iter().map(|(_, _, bytes)| *bytes).collect();
+                            self.m.deliver_frames(&frames)?
+                        }
+                    };
+                    if accepted.len() != run.len() {
+                        return Err(format!(
+                            "{}: {} frame results for {} frames",
+                            self.m.name,
+                            accepted.len(),
+                            run.len()
+                        ));
+                    }
+                    for (&(at, from, _), accepted) in run.iter().zip(accepted) {
+                        self.received.push((at, from, accepted));
+                    }
+                    *i += run.len();
+                    continue;
                 }
                 Msg::Serial(bytes) => self.m.deliver_serial(bytes)?,
                 Msg::Control(bytes) => {
@@ -353,6 +415,92 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
         }
         Ok(())
     }
+}
+
+/// Whether the machine may take this event at `time`. With `slack`, a
+/// non-strict event may arrive `delivery_early` before its time; a strict
+/// one never does.
+fn due(a: &sw::Assignment<Msg>, e: &sw::Event<Msg>, time: u64, slack: bool) -> bool {
+    let early = if slack && !e.payload.strict() {
+        a.delivery_early
+    } else {
+        0
+    };
+    e.key.at <= time.saturating_add(early)
+}
+
+/// The run of consecutive frames from `start` that are due at `time`:
+/// (nominal time, sender, bytes).
+fn due_frames(
+    a: &sw::Assignment<Msg>,
+    start: usize,
+    time: u64,
+    slack: bool,
+) -> Vec<(u64, usize, &[u8])> {
+    a.incoming[start..]
+        .iter()
+        .take_while(|e| due(a, e, time, slack))
+        .map_while(|e| match &e.payload {
+            Msg::Frame { from, bytes } => Some((e.key.at, *from, &bytes[..])),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The slices this round's loop requests after one that reaches `time`
+/// with the frames due there delivered, `next` being the first event left,
+/// for as long as each later slice also reaches its limit: the loop then
+/// delivers nothing else, stays running and does not reach the slice end.
+/// It stops before any slice the loop might not request that way.
+fn plan_ahead(
+    a: &sw::Assignment<Msg>,
+    slice_end: u64,
+    mut next: usize,
+    mut time: u64,
+    observe_console: bool,
+    capacity: usize,
+) -> Vec<world::ChainStep<'_>> {
+    let mut steps = Vec::new();
+    while steps.len() < capacity && time < slice_end {
+        // Anything due now, even early, is delivered by the loop itself.
+        if a.incoming.get(next).is_some_and(|e| due(a, e, time, true)) {
+            break;
+        }
+        let (event, strict) = a
+            .incoming
+            .get(next)
+            .map_or((sw::NEVER, false), |e| (e.key.at, e.payload.strict()));
+        let limit = a.stop.min(event);
+        if limit <= time {
+            break;
+        }
+        let early_slack = if limit == a.stop {
+            a.stop_early
+        } else if strict {
+            0
+        } else {
+            a.delivery_early
+        };
+        let then: Vec<&[u8]> = if limit == event {
+            due_frames(a, next, limit, false)
+                .into_iter()
+                .map(|(_, _, bytes)| bytes)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        next += then.len();
+        time = limit;
+        steps.push(world::ChainStep {
+            request: SliceRequest {
+                hard_limit: limit,
+                early_slack,
+                observe_console,
+            },
+            then,
+        });
+    }
+    steps
 }
 
 impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
@@ -393,6 +541,12 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
             // state and even when it stands at or past the slice end: a
             // skewed release or a resumed segment can leave it there.
             self.deliver(a, &mut i, &mut outputs, false)?;
+            if self.delivered.is_some() {
+                return Err(format!(
+                    "{}: frames delivered with the slice were not due",
+                    self.m.name
+                ));
+            }
             if self.m.state == State::Halted {
                 // Wake at the machine's own next action or the next event's
                 // nominal time, as the reference scheduler's key does. An
@@ -433,8 +587,57 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
                 early_slack: early,
                 observe_console: self.observe,
             };
+            // When the slice ends at a frame's time, the next iteration
+            // delivers the frames due there before anything else: the machine
+            // stays running, unsuspended and short of its fork time. An
+            // adapter may then deliver them in the same host exchange.
+            let then = if self.m.delivers_after_advance()
+                && limit == event
+                && self.fork_at.is_none_or(|t| limit < t)
+                && !self.suspended()
+            {
+                due_frames(a, i, limit, false)
+            } else {
+                Vec::new()
+            };
             let observation = world::SliceObservation::begin(self.m, request)?;
-            let stop = self.m.advance(clock, request, &mut frames)?;
+            let first = world::ChainStep {
+                request,
+                then: then.iter().map(|(_, _, bytes)| *bytes).collect(),
+            };
+            let chain = self.ahead == 0
+                && self.m.delivers_after_advance()
+                && self.m.chain_capacity() > 0
+                && self.fork_at.is_none()
+                && !self.suspended();
+            let stop = if chain {
+                let ahead = plan_ahead(
+                    a,
+                    slice_end,
+                    i + then.len(),
+                    limit,
+                    self.observe,
+                    self.m.chain_capacity(),
+                );
+                let (stop, delivered, ran) =
+                    self.m.advance_chain(clock, first, &ahead, &mut frames)?;
+                if ran > ahead.len() {
+                    return Err(format!("{}: adapter ran unplanned slices", self.m.name));
+                }
+                self.ahead = ran;
+                self.check_delivered(stop, limit, i, &then, delivered)?;
+                stop
+            } else if then.is_empty() {
+                self.ahead = self.ahead.saturating_sub(1);
+                self.m.advance(clock, request, &mut frames)?
+            } else {
+                self.ahead = self.ahead.saturating_sub(1);
+                let (stop, delivered) =
+                    self.m
+                        .advance_then_deliver(clock, request, &mut frames, &first.then)?;
+                self.check_delivered(stop, limit, i, &then, delivered)?;
+                stop
+            };
             observation.validate(self.m, request, stop)?;
             self.drain();
             let now = self.m.time;
@@ -478,6 +681,12 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
             } else {
                 stalled = None;
             }
+        }
+        if self.ahead != 0 {
+            return Err(format!(
+                "{}: {} slices run ahead were not requested",
+                self.m.name, self.ahead
+            ));
         }
         Ok(sw::Report {
             time: self.m.time,
