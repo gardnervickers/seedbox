@@ -108,3 +108,29 @@ fn install_refuses_to_replace_an_existing_file() {
     let error = install_executable(&path, SCRIPT, 0o700).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
 }
+
+#[test]
+fn closing_and_renaming_the_written_file_does_not_revoke_a_forked_copy() {
+    // bd-0d1: a temp file written, closed and renamed over the target is the
+    // same inode, so a fork that copied the writer still makes it busy.
+    use std::os::unix::fs::MetadataExt;
+    let _serial = serial();
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("launcher");
+    let (mut file, path) = tempfile::NamedTempFile::new_in(directory.path())
+        .unwrap()
+        .into_parts();
+    file.write_all(SCRIPT).unwrap();
+    file.set_permissions(fs::Permissions::from_mode(0o700))
+        .unwrap();
+    let inode = file.metadata().unwrap().ino();
+    let mut held = HeldChildren::new();
+    held.hold(Spawn::GuardForkOnly).unwrap();
+    drop(file);
+    path.persist(&target).unwrap();
+    assert_eq!(fs::metadata(&target).unwrap().ino(), inode);
+    let error = status(&mut Command::new(&target)).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY), "{error}");
+    held.release().unwrap();
+    assert!(status(&mut Command::new(&target)).unwrap().success());
+}

@@ -1,7 +1,4 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 use std::{collections::BTreeMap, path::Path, process::Command};
 
 #[test]
@@ -12,7 +9,7 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
     assert!(Command::new("python3")
         .arg(examples.join("generate.py"))
         .arg(&destination)
-        .status()
+        .guarded_status()
         .unwrap()
         .success());
     let fixed = seedbox_application::config::load(

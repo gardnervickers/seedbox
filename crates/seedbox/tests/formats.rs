@@ -1,13 +1,10 @@
 //! Run manifests are strict: unsupported versions and unknown fixed fields are
 //! rejected even when their checksums are recomputed. No guest execution.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use seedbox_application::{
     orchestration::{inspect, RunRecord},
     store::ContentDigest,
 };
+use seedbox_test::process::Guarded;
 use std::{fs, path::Path, process::Command};
 
 #[allow(dead_code)]
@@ -27,7 +24,7 @@ fn invoke(root: &Path, args: &[&str]) -> std::process::Output {
         .env_clear()
         .env("HOME", root)
         .env("PATH", "")
-        .output()
+        .guarded_output()
         .unwrap()
 }
 

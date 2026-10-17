@@ -1,9 +1,5 @@
 //! Configured boot archive and production C-header probes. No guest, mount,
 //! chroot, sysctl, formatter or network setup is executed on the host.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use seedbox_machine::{
     application::{
         self, DerivedApplication, GuestBootstrap, GuestEnvironment, GuestLimits, Kernel,
@@ -11,6 +7,7 @@ use seedbox_machine::{
     },
     definition::{FilesystemArchive, Launch, PreparedApplication},
 };
+use seedbox_test::process::Guarded;
 use std::{
     collections::BTreeMap,
     fs,
@@ -360,7 +357,7 @@ fn probe() -> &'static Probe {
             .arg(root.join("tests/support/guest_environment_probe.c"))
             .arg("-o")
             .arg(&path)
-            .output()
+            .guarded_output()
             .map_err(|e| e.to_string())?;
         if !build.status.success() {
             return Err(String::from_utf8_lossy(&build.stderr).into_owned());
@@ -378,7 +375,7 @@ fn run(bytes: &[u8], mode: &str, flags: &str) -> (bool, String) {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .guarded_spawn()
         .unwrap();
     c.stdin.take().unwrap().write_all(bytes).unwrap();
     let out = c.wait_with_output().unwrap();

@@ -3,10 +3,7 @@
 //! A concurrent fork can inherit a writable executable descriptor until exec.
 //! Run these scenarios alone in a child test harness so unrelated unit tests
 //! cannot inherit their descriptors. No production APIs or global locks needed.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 
 /// Return true only in the child running this exact scenario. The parent
 /// checks the child's result and returns false without creating any fixtures.
@@ -20,7 +17,7 @@ pub(crate) fn isolated(qualified_name: &str) -> bool {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture", "--test-threads=1"])
         .env(CHILD, name)
-        .output()
+        .guarded_output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

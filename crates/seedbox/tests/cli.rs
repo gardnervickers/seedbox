@@ -1,7 +1,4 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 use std::{
     fs,
     path::Path,
@@ -21,7 +18,7 @@ fn seedbox_with(args: &[&str], cwd: &Path, path: Option<&Path>) -> Output {
         .env("TMPDIR", cwd)
         .env("SEEDBOX_ASSET_DIR", cwd.join("assets"))
         .env("PATH", path.map(Path::as_os_str).unwrap_or_default())
-        .output()
+        .guarded_output()
         .unwrap()
 }
 
@@ -101,7 +98,7 @@ fn explicit_asset_directory_overrides_bundled_driver_without_build_tools() {
         .env("HOME", &root)
         .env("SEEDBOX_ASSET_DIR", &root)
         .env("PATH", "")
-        .output()
+        .guarded_output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let archive = root
@@ -129,7 +126,7 @@ fn explicit_asset_directory_overrides_bundled_driver_without_build_tools() {
             } else {
                 command.args([flag, path]);
             }
-            let output = command.output().unwrap();
+            let output = command.guarded_output().unwrap();
             assert_eq!(output.status.code(), Some(2));
             assert_eq!(
                 stderr(&output),
@@ -197,23 +194,22 @@ fn internal_dispatch_rejects_missing_and_unknown_contracts_before_cli_state_setu
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn internal_worker_requires_a_request_without_state_or_external_tools() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let tools = root.join("tools");
     fs::create_dir(&tools).unwrap();
     let marker = root.join("tool-called");
     let cargo = tools.join("cargo");
-    fs::write(
+    seedbox_test::process::install_executable(
         &cargo,
         format!(
             "#!/bin/sh\necho invoked >> '{}'\nexit 0\n",
             marker.display()
-        ),
+        )
+        .as_bytes(),
+        0o755,
     )
     .unwrap();
-    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
         .args(["__engine", "seedbox-internal-worker-v1"])
@@ -224,7 +220,7 @@ fn internal_worker_requires_a_request_without_state_or_external_tools() {
         .env("PATH", &tools)
         .env("CARGO", &cargo)
         .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .guarded_output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(output.stdout.is_empty());
@@ -893,7 +889,7 @@ fn doctor_reports_missing_driver_inputs_without_downloads() {
         .env("SEEDBOX_ASSET_DIR", root)
         .env("PATH", "")
         .env("GH_TOKEN", "invalid\ncredential")
-        .output()
+        .guarded_output()
         .unwrap();
     let archive = root
         .join(std::env::consts::ARCH)
@@ -907,7 +903,6 @@ fn doctor_reports_missing_driver_inputs_without_downloads() {
 
 #[test]
 fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_environment() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let tools = root.join("tools");
@@ -915,15 +910,16 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
     let marker = root.join("tool-called");
     for name in ["cargo", "podman", "skopeo", "umoci"] {
         let tool = tools.join(name);
-        fs::write(
+        seedbox_test::process::install_executable(
             &tool,
             format!(
                 "#!/bin/sh\necho invoked >> '{}'\nexit 0\n",
                 marker.display()
-            ),
+            )
+            .as_bytes(),
+            0o755,
         )
         .unwrap();
-        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
     }
     for json in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
@@ -939,7 +935,7 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
             .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
             .env("CARGO", tools.join("cargo"))
             .env("SEEDBOX_STATE", root.join("unwanted-state"))
-            .output()
+            .guarded_output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
         assert_eq!(stderr(&output), "error: --kernel kernel: not found\n");
@@ -2024,7 +2020,7 @@ fn runtime_assets_override_is_documented_and_missing_paths_fail_before_preparati
         .env("SEEDBOX_ASSET_DIR", root)
         .env("PATH", "")
         .env("SEEDBOX_RUNTIME_ASSETS", "env-missing.tar.gz")
-        .output()
+        .guarded_output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
@@ -2324,7 +2320,7 @@ fn non_oracle_controller_refuses_before_image_preparation() {
         .env("PATH", "")
         .env("DOCKER_HOST", "unix:///not-an-image-engine")
         .current_dir(root.path())
-        .output()
+        .guarded_output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());

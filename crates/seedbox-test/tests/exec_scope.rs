@@ -4,7 +4,7 @@
 //! store read is paused on a FIFO (so the destination descriptor is provably
 //! open) and the fork child is held in `pre_exec` (so it provably has not
 //! exec'd) until the test explicitly releases it.
-use seedbox_application::{
+use seedbox_artifacts::{
     exec_files,
     store::{ContentDigest, ContentStore},
 };
@@ -147,7 +147,7 @@ fn scoped_spawn(command: &mut Command) -> io::Result<Child> {
     exec_files::spawn(command)
 }
 
-type Materialize = fn(&ContentStore, &ContentDigest, &Path) -> seedbox_application::Result<PathBuf>;
+type Materialize = fn(&ContentStore, &ContentDigest, &Path) -> seedbox_artifacts::Result<PathBuf>;
 const PLAIN: Materialize = |store, digest, directory| store.materialize(digest, directory);
 const EXECUTABLE: Materialize =
     |store, digest, directory| store.materialize_executable(digest, directory);

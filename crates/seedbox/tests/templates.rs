@@ -1,11 +1,8 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use seedbox_application::{
     config,
     templates::{self, Template},
 };
+use seedbox_test::process::Guarded;
 use std::{collections::BTreeMap, fs, process::Command};
 
 #[allow(dead_code)]
@@ -60,7 +57,7 @@ fn init_cli_refuses_to_overwrite_an_existing_project() {
             .arg("init")
             .arg(&destination)
             .args(["--template", "redis"])
-            .output()
+            .guarded_output()
             .unwrap()
     };
     assert!(command().status.success());

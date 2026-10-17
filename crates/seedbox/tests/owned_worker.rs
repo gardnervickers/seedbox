@@ -4,10 +4,7 @@
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 
 use seedbox_test_time::HangGuard;
 use std::{
@@ -46,7 +43,7 @@ fn lifecycle_private_entries_are_dispatched_before_public_cli_or_native_boot() {
             .args(arguments)
             .env_clear()
             .stdin(Stdio::null())
-            .output()
+            .guarded_output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
@@ -84,7 +81,7 @@ fn eof_on_owner_pipe_stops_a_blocked_native_worker() {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0)
-            .spawn()
+            .guarded_spawn()
             .unwrap(),
     );
     let config_writer = HangGuard::new(

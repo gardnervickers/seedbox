@@ -1,9 +1,6 @@
 //! Rust owns the former portable.py matrix and every expectation. Python is
 //! used only for the unchanged guest program and a language-call fixture.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 use seedbox_test_time::HangGuard;
 use serde_json::{json, Value};
 use std::{
@@ -84,7 +81,7 @@ impl Program {
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .stdout(output.try_clone().unwrap())
             .stderr(output)
-            .spawn()
+            .guarded_spawn()
             .unwrap();
         let mut result = Self {
             child,
@@ -259,7 +256,7 @@ impl Adapter {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .guarded_spawn()
             .unwrap();
         let input = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();

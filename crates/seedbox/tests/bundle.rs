@@ -1,8 +1,4 @@
 //! Contract tests use a test-only backend. No hardware qualification is implied.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use seedbox_application::{
     bundle::{self, Options},
     config::{self, Simulation},
@@ -12,6 +8,7 @@ use seedbox_application::{
     store::{ContentDigest, ContentStore},
     Error, Result,
 };
+use seedbox_test::process::Guarded;
 use std::{
     collections::BTreeMap,
     fs,
@@ -700,7 +697,7 @@ fn portable_cli_default_export_import_and_inspect_need_no_tools_or_original_stat
             .env_clear()
             .env("HOME", f.directory.path())
             .env("PATH", "")
-            .output()
+            .guarded_output()
             .unwrap()
     };
     let out = invoke(&[

@@ -738,8 +738,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let engine = directory.path().join("engine");
         let probe = |body: &str, timeout| {
-            fs::write(&engine, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
+            {
+                // Rewritten and then executed: no fork may hold a writable copy.
+                let _writing = crate::exec_files::writing();
+                fs::write(&engine, format!("#!/bin/sh\n{body}\n")).unwrap();
+                fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
+            }
             replacement_version_with_timeout(&engine, &engine, timeout)
         };
         assert_eq!(

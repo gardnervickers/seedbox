@@ -3,10 +3,7 @@
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 use std::{
     fs,
     io::{BufRead, BufReader},
@@ -33,7 +30,7 @@ fn invoke(
         .stdout(log.try_clone().map_err(|error| error.to_string())?)
         .stderr(log);
     let status = command
-        .status()
+        .guarded_status()
         .map_err(|error| format!("{}: {error}", cli.display()))?;
     if !status.success() {
         // CI keeps only the console, so show the end of the failing log there.
@@ -236,7 +233,7 @@ impl Server {
                 .args(["serve", "--startup-handshake", "--full-state"])
                 .env("SEEDBOX_STATE", state)
                 .stdout(Stdio::piped())
-                .spawn()
+                .guarded_spawn()
                 .map_err(|e| e.to_string())?,
         );
         let mut ready = String::new();

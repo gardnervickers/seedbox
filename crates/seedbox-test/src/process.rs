@@ -7,7 +7,7 @@ use std::{
         unix::{fs::PermissionsExt, process::CommandExt},
     },
     path::Path,
-    process::{Child, Command, ExitStatus, Output, Stdio},
+    process::{Child, Command, Stdio},
     thread::JoinHandle,
 };
 
@@ -26,49 +26,7 @@ pub fn install_executable(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()
     Ok(())
 }
 
-/// `Command::spawn` through the process-wide scope.
-pub fn spawn(command: &mut Command) -> io::Result<Child> {
-    seedbox_exec::spawn(command)
-}
-
-/// `Command::status` through the process-wide scope. Like std, standard
-/// streams are inherited unless the command sets them.
-pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
-    spawn(command)?.wait()
-}
-
-/// `Command::output` through the process-wide scope. Unlike std, stdin is
-/// always null and stdout/stderr are always captured, even if the command set
-/// them; use [`spawn`] for other stdio.
-pub fn output(command: &mut Command) -> io::Result<Output> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    spawn(command)?.wait_with_output()
-}
-
-/// The guarded spawn helpers as `Command` methods, for builder chains:
-/// `Command::new(x).arg(y).guarded_status()`.
-pub trait Guarded {
-    /// [`spawn`].
-    fn guarded_spawn(&mut self) -> io::Result<Child>;
-    /// [`status`].
-    fn guarded_status(&mut self) -> io::Result<ExitStatus>;
-    /// [`output`]: stdin null, stdout and stderr captured.
-    fn guarded_output(&mut self) -> io::Result<Output>;
-}
-impl Guarded for Command {
-    fn guarded_spawn(&mut self) -> io::Result<Child> {
-        spawn(self)
-    }
-    fn guarded_status(&mut self) -> io::Result<ExitStatus> {
-        status(self)
-    }
-    fn guarded_output(&mut self) -> io::Result<Output> {
-        output(self)
-    }
-}
+pub use seedbox_exec::{output, spawn, status, Guarded};
 
 /// How a held child is started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

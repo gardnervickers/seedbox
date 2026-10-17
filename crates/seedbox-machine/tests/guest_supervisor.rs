@@ -1,10 +1,7 @@
 //! Host POSIX process tests. These do not establish either guest backend's
 //! transport, application protocol, libc packaging, or native acceptance.
 #![cfg(unix)]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 use std::{path::Path, process::Command};
 
 #[test]
@@ -21,7 +18,7 @@ fn real_process_lifecycle_and_exact_output_bytes() {
         .arg(source.join("guest_supervisor_test.c"))
         .arg("-o")
         .arg(&executable)
-        .output()
+        .guarded_output()
         .expect("C compiler from the project development shell");
     assert!(
         build.status.success(),
@@ -29,7 +26,7 @@ fn real_process_lifecycle_and_exact_output_bytes() {
         String::from_utf8_lossy(&build.stderr)
     );
     let result = Command::new(&executable)
-        .output()
+        .guarded_output()
         .expect("run isolated POSIX supervisor fixture");
     assert!(
         result.status.success(),
@@ -54,7 +51,7 @@ fn real_oracle_socket_correlation_and_management_demultiplexing() {
         .arg(source.join("guest_oracle_test.c"))
         .arg("-o")
         .arg(&executable)
-        .output()
+        .guarded_output()
         .expect("C compiler from project development shell");
     assert!(
         build.status.success(),
@@ -70,7 +67,7 @@ fn real_oracle_socket_correlation_and_management_demultiplexing() {
         .expect("isolated short socket directory");
     let result = Command::new(executable)
         .arg(sockets.path())
-        .output()
+        .guarded_output()
         .expect("run oracle socket fixture");
     assert!(
         result.status.success(),
@@ -93,7 +90,7 @@ fn runtime_credentials_reject_numeric_and_named_sentinels_before_mutation() {
         .arg(source)
         .arg("-o")
         .arg(&executable)
-        .output()
+        .guarded_output()
         .expect("C compiler from project development shell");
     assert!(
         build.status.success(),
@@ -101,7 +98,7 @@ fn runtime_credentials_reject_numeric_and_named_sentinels_before_mutation() {
         String::from_utf8_lossy(&build.stderr)
     );
     let result = Command::new(executable)
-        .output()
+        .guarded_output()
         .expect("credential fixture");
     assert!(result.status.success(), "{result:?}");
     assert_eq!(
@@ -121,14 +118,16 @@ fn network_argument_parsing_and_interface_configuration() {
         .arg(source.join("guest_network_test.c"))
         .arg("-o")
         .arg(&executable)
-        .output()
+        .guarded_output()
         .expect("C compiler from project development shell");
     assert!(
         build.status.success(),
         "{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let result = Command::new(executable).output().expect("network fixture");
+    let result = Command::new(executable)
+        .guarded_output()
+        .expect("network fixture");
     assert!(result.status.success(), "{result:?}");
     // Configuration needs an unprivileged user and network namespace; a host
     // without them reports a skip rather than a pass.
@@ -160,7 +159,7 @@ fn network_probe_echoes_udp_and_tcp_over_loopback() {
         .arg(source)
         .arg("-o")
         .arg(&executable)
-        .output()
+        .guarded_output()
         .expect("C compiler from project development shell");
     assert!(
         build.status.success(),
@@ -170,7 +169,7 @@ fn network_probe_echoes_udp_and_tcp_over_loopback() {
     let mut server = Command::new(&executable)
         .args(["server", "0"])
         .stdout(std::process::Stdio::piped())
-        .spawn()
+        .guarded_spawn()
         .expect("probe server");
     let mut ready = String::new();
     BufReader::new(server.stdout.take().unwrap())
@@ -182,7 +181,7 @@ fn network_probe_echoes_udp_and_tcp_over_loopback() {
         .unwrap_or_else(|| panic!("{ready:?}"));
     let result = Command::new(&executable)
         .args(["client", "127.0.0.1", &port.to_string(), "1048576"])
-        .output()
+        .guarded_output()
         .expect("probe client");
     server.kill().unwrap();
     server.wait().unwrap();
@@ -193,7 +192,7 @@ fn network_probe_echoes_udp_and_tcp_over_loopback() {
     );
     let usage = Command::new(&executable)
         .args(["client", "127.0.0.1", "0", "1"])
-        .output()
+        .guarded_output()
         .unwrap();
     assert_eq!(usage.status.code(), Some(64));
 }
@@ -212,7 +211,7 @@ fn network_probe_idle_mode_and_usage() {
         .arg(source)
         .arg("-o")
         .arg(&executable)
-        .output()
+        .guarded_output()
         .expect("C compiler from project development shell");
     assert!(
         build.status.success(),
@@ -222,7 +221,7 @@ fn network_probe_idle_mode_and_usage() {
     let mut idle = Command::new(&executable)
         .arg("idle")
         .stdout(std::process::Stdio::piped())
-        .spawn()
+        .guarded_spawn()
         .expect("idle probe");
     let mut line = String::new();
     BufReader::new(idle.stdout.take().unwrap())
@@ -238,7 +237,10 @@ fn network_probe_idle_mode_and_usage() {
         &["server-disk", "65536"],
         &["server-disk", "x"],
     ] {
-        let usage = Command::new(&executable).args(arguments).output().unwrap();
+        let usage = Command::new(&executable)
+            .args(arguments)
+            .guarded_output()
+            .unwrap();
         assert_eq!(usage.status.code(), Some(64), "{arguments:?}");
     }
 }

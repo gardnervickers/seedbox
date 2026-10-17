@@ -1,12 +1,9 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use seedbox_application::{
     execution::{ExecutionBackend, WitnessMode},
     store::ContentDigest,
     vmm,
 };
+use seedbox_test::process::Guarded;
 use std::path::Path;
 
 #[test]
@@ -17,7 +14,7 @@ fn explicit_combined_cli_is_retained_with_its_actual_version() {
     let binary = Path::new(env!("CARGO_BIN_EXE_seedbox"));
     let expected = std::process::Command::new(binary)
         .arg("--version")
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(expected.status.success());
     let version = String::from_utf8(expected.stdout).unwrap();

@@ -1,7 +1,4 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -52,7 +49,7 @@ pub(super) fn initrd_source(source: String) -> Vec<u8> {
         .arg(&source_path)
         .arg("-o")
         .arg(&output)
-        .status()
+        .guarded_status()
         .unwrap();
     assert!(status.success());
     let program = fs::read(output).unwrap();

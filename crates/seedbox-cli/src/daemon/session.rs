@@ -185,12 +185,9 @@ pub(super) fn test_scope() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 mod tests {
     use super::*;
+    use seedbox_test::process::Guarded;
     fn fresh(root: &Path) -> (SessionDirectory, Vec<String>) {
         let mut messages = Vec::new();
         let session =
@@ -314,7 +311,7 @@ mod tests {
             .args(["--exact", &name, "--nocapture"])
             .env_clear()
             .env(ROOT, root.path())
-            .output()
+            .guarded_output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         assert!(
@@ -393,6 +390,12 @@ mod tests {
         let (parent, child) = UnixStream::pair().unwrap();
         let parent_fd = parent.as_raw_fd();
         let child_fd = child.as_raw_fd();
+        // Deliberate raw fork: the probe needs a child held before exec with a
+        // copy of the lease. It needs private session items, so it stays here.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "deliberate held-before-exec fork probe of the session lease (bd-31e)"
+        )]
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork probe: {}", std::io::Error::last_os_error());
         if pid == 0 {

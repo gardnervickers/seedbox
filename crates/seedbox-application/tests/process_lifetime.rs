@@ -4,11 +4,8 @@
     feature = "test-support",
     any(target_os = "linux", target_os = "macos")
 ))]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use seedbox_application::process_lifetime::{reclaim_barrier, Completion, ExitBarrier, WorkerExit};
+use seedbox_test::process::Guarded;
 use std::{
     fs,
     path::Path,
@@ -43,7 +40,7 @@ fn start(root: &Path, mode: &str) -> Server {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(fs::File::create(root.join("server-stderr")).unwrap())
-            .spawn()
+            .guarded_spawn()
             .unwrap(),
     );
     wait(&root.join("server-ready"));
@@ -177,7 +174,7 @@ fn concurrent_executions_do_not_inherit_another_executions_owner_writer() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(fs::File::create(root.path().join("server-stderr")).unwrap())
-            .spawn()
+            .guarded_spawn()
             .unwrap(),
     );
     wait(&root.path().join("server-ready"));

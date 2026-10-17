@@ -1,10 +1,7 @@
 #![cfg(unix)]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 
 use seedbox_client::Client;
+use seedbox_test::process::Guarded;
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -69,7 +66,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
         .args(["serve", "--startup-handshake"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .guarded_spawn()
         .unwrap();
     let mut ready = String::new();
     std::io::BufRead::read_line(
@@ -84,7 +81,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
                 .args(["get", "simulations", "--json"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .spawn()
+                .guarded_spawn()
                 .unwrap()
         })
         .collect();
@@ -122,7 +119,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
         .arg("run")
         .arg(&compose)
         .args(["--paused", "--json"])
-        .output()
+        .guarded_output()
         .unwrap();
     assert_eq!(
         result.status.code(),
@@ -151,7 +148,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
             simulation.metadata.id.as_str(),
             "--json",
         ])
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(
         checkpoints.status.success(),
@@ -170,7 +167,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
             "missing",
             "--json",
         ])
-        .output()
+        .guarded_output()
         .unwrap();
     assert_eq!(missing.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&missing.stderr).contains("not found"));
@@ -182,7 +179,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
             simulation.metadata.id.as_str(),
             "--json",
         ])
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(described.status.success());
     assert_eq!(
@@ -197,7 +194,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
             "--watch",
             "--json",
         ])
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(watched.status.success());
     assert_eq!(
@@ -206,7 +203,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     );
     let events = cli(root)
         .args(["events", simulation.metadata.id.as_str()])
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(
         events.status.success(),
@@ -229,7 +226,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     );
     let logs = cli(root)
         .args(["logs", simulation.metadata.id.as_str(), "oracle", "--json"])
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(
         logs.status.success(),
@@ -241,7 +238,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     assert!(logs.stdout.is_empty());
     let playback = cli(root)
         .args(["playback", simulation.metadata.id.as_str(), "--json"])
-        .output()
+        .guarded_output()
         .unwrap();
     assert_eq!(playback.status.code(), Some(2));
     assert!(playback.stdout.is_empty());
@@ -253,7 +250,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
             simulation.metadata.id.as_str(),
             "missing",
         ])
-        .output()
+        .guarded_output()
         .unwrap();
     assert_eq!(deleted.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&deleted.stderr)
@@ -262,7 +259,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
         .arg("explore")
         .arg(&compose)
         .args(["--count", "3", "--detach", "--json"])
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(
         exploration.status.success(),
@@ -296,7 +293,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
         for _ in 0..2 {
             let deleted = cli(root)
                 .args(["delete", "simulation", id.as_str()])
-                .output()
+                .guarded_output()
                 .unwrap();
             assert!(
                 deleted.status.success(),
@@ -312,7 +309,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
         .unwrap()
         .items
         .is_empty());
-    let stopped = cli(root).arg("shutdown").output().unwrap();
+    let stopped = cli(root).arg("shutdown").guarded_output().unwrap();
     assert!(
         stopped.status.success(),
         "{}",
@@ -329,7 +326,7 @@ fn noninteractive_commands_do_not_start_a_server() {
     let temp = tempfile::tempdir().unwrap();
     let result = cli(temp.path())
         .args(["get", "simulations", "--json"])
-        .output()
+        .guarded_output()
         .unwrap();
     assert_eq!(result.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&result.stderr).contains("start `seedbox serve`"));

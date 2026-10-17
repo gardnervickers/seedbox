@@ -1,9 +1,6 @@
 //! Host-only adversarial tar framing and genuine GNU/BSD writer fixtures.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use super::*;
+use seedbox_test::process::Guarded;
 
 fn header(kind: tar::EntryType, name: &str, size: u64) -> tar::Header {
     let mut header = tar::Header::new_gnu();
@@ -278,7 +275,10 @@ fn actual_gnu_and_bsd_pax_writers_preserve_long_library_names_bytes_and_modes() 
     let list_path = fixture.path().join("files");
     fs::write(&list_path, list).unwrap();
     for program in ["tar", "bsdtar"] {
-        let version = Command::new(program).arg("--version").output().unwrap();
+        let version = Command::new(program)
+            .arg("--version")
+            .guarded_output()
+            .unwrap();
         assert!(version.status.success());
         eprintln!(
             "actual host writer: {}",
@@ -297,7 +297,11 @@ fn actual_gnu_and_bsd_pax_writers_preserve_long_library_names_bytes_and_modes() 
             .args(["--null", "-T", "-"])
             .env("COPYFILE_DISABLE", "1")
             .stdin(Stdio::from(fs::File::open(&list_path).unwrap()))
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // Not guarded_output: that forces stdin to null.
+            .guarded_spawn()
+            .and_then(|child| child.wait_with_output())
             .unwrap();
         assert!(
             output.status.success(),

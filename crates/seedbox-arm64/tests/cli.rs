@@ -1,6 +1,6 @@
 #![allow(
     clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
+    reason = "standalone workspace: no seedbox-test dependency and outside portable clippy; kept by bd-a8e"
 )]
 use std::process::Command;
 #[test]

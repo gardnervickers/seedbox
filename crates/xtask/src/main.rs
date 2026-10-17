@@ -7,9 +7,6 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 mod runtime;
 
-#[cfg(all(test, target_os = "linux"))]
-mod fork_write_tests;
-
 // Spawns and executable writes go through the process-wide seedbox_exec scope
 // (runtime.rs writes the QEMU launcher and copies its closure). Production
 // build-assets is sequential; the unit tests share one descriptor table.

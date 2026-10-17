@@ -1,9 +1,6 @@
 //! Shared process-entry assertions: only EOF, malformed framing and preboot
 //! requests. No Boot request is sent, so no hypervisor or guest is constructed.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 use std::{
     ffi::OsString,
     fs,
@@ -42,7 +39,7 @@ pub fn invoke(
             .stdin(Stdio::piped())
             .stdout(fs::File::create(&stdout).unwrap())
             .stderr(fs::File::create(&stderr).unwrap())
-            .spawn()
+            .guarded_spawn()
             .unwrap(),
     );
     child.0.stdin.take().unwrap().write_all(input).unwrap();

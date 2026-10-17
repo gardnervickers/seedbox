@@ -1,15 +1,12 @@
 //! Hardware acceptance of server-owned pause/resume using exact retained inputs.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 
 use seedbox_api::{
     ComparisonStatus, ControlCommand, ControlRequest, ControlState, Phase, PlaybackRate,
     PlaybackStatus, Simulation, SimulationId, TestVerdict,
 };
 use seedbox_client::Client;
+use seedbox_test::process::Guarded;
 use std::{
     io::{BufRead, BufReader},
     path::Path,
@@ -83,7 +80,7 @@ fn paused_start_and_resume_has_identical_witness_and_full_state() {
             .arg("run")
             .arg(&workload)
             .args(["--seed", "1009", "--json"])
-            .output()
+            .guarded_output()
             .unwrap(),
     );
     assert_eq!(source.status.verdict(), TestVerdict::Passed);
@@ -92,7 +89,7 @@ fn paused_start_and_resume_has_identical_witness_and_full_state() {
             .arg("run")
             .arg(&workload)
             .args(["--seed", "1009", "--paused", "--detach", "--json"])
-            .output()
+            .guarded_output()
             .unwrap(),
     );
     let client = Client::connect_to(&state.join("server.sock")).unwrap();
@@ -161,7 +158,7 @@ impl Server {
             cli(binary, state)
                 .args(["serve", "--startup-handshake", "--full-state"])
                 .stdout(Stdio::piped())
-                .spawn()
+                .guarded_spawn()
                 .unwrap(),
         );
         let mut ready = String::new();

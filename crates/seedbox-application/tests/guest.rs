@@ -1,11 +1,8 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use seedbox_application::{
     guest::{build_initramfs, launch_recipe},
     image::Launch,
 };
+use seedbox_test::process::Guarded;
 use std::{
     collections::BTreeMap,
     fs,
@@ -54,8 +51,11 @@ fn initramfs_round_trip_preserves_image_files_modes_and_hardlinks() {
         .args(["-idm", "--no-absolute-filenames", "--no-preserve-owner"])
         .current_dir(&output)
         .stdin(fs::File::open(archive).unwrap())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        // Not guarded_output: that forces stdin to null.
+        .guarded_spawn()
+        .and_then(|child| child.wait_with_output())
         .expect("cpio from nix develop");
     assert!(
         status.status.success(),

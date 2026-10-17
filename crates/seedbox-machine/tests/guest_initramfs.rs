@@ -1,8 +1,5 @@
 //! Validate the actual private build utility's archive, without extracting it.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
 #[derive(Debug)]
@@ -54,7 +51,7 @@ fn pack(directory: &Path, base: Option<&Path>, output: &Path) {
     if let Some(base) = base {
         command.arg("--base").arg(base);
     }
-    assert!(command.status().unwrap().success());
+    assert!(command.guarded_status().unwrap().success());
 }
 #[test]
 fn private_guest_archive_preserves_binary_inputs_and_overlays_without_extraction() {

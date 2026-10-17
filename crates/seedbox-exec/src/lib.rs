@@ -138,6 +138,46 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
     child
 }
 
+/// `Command::status` through [`spawn`]. Like std, standard streams are
+/// inherited unless the command sets them.
+pub fn status(command: &mut Command) -> io::Result<std::process::ExitStatus> {
+    spawn(command)?.wait()
+}
+
+/// `Command::output` through [`spawn`]. Unlike std, stdin is always null and
+/// stdout/stderr are always captured, even if the command set them; use
+/// [`spawn`] for other stdio.
+pub fn output(command: &mut Command) -> io::Result<std::process::Output> {
+    use std::process::Stdio;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn(command)?.wait_with_output()
+}
+
+/// [`spawn`], [`status`] and [`output`] as `Command` methods, for builder
+/// chains: `Command::new(x).arg(y).guarded_status()`.
+pub trait Guarded {
+    /// [`spawn`].
+    fn guarded_spawn(&mut self) -> io::Result<Child>;
+    /// [`status`].
+    fn guarded_status(&mut self) -> io::Result<std::process::ExitStatus>;
+    /// [`output`]: stdin null, stdout and stderr captured.
+    fn guarded_output(&mut self) -> io::Result<std::process::Output>;
+}
+impl Guarded for Command {
+    fn guarded_spawn(&mut self) -> io::Result<Child> {
+        spawn(self)
+    }
+    fn guarded_status(&mut self) -> io::Result<std::process::ExitStatus> {
+        status(self)
+    }
+    fn guarded_output(&mut self) -> io::Result<std::process::Output> {
+        output(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

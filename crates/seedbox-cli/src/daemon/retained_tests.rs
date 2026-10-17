@@ -1,8 +1,4 @@
 //! Cold retained-provider ownership, not native guest or executable proof.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use super::*;
 use clap::Parser;
 use seedbox_application::{
@@ -11,6 +7,7 @@ use seedbox_application::{
     store::ContentDigest,
 };
 use seedbox_engine_protocol::driver_world as wire;
+use seedbox_test::process::Guarded;
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
 
 #[test]
@@ -65,7 +62,7 @@ fn retained_driver_acquires_only_recorded_runtime_and_owns_it_until_executor_dro
             ["kernel", "init", "command-line", "mke2fs", "progress.tar"]
                 .map(|name| format!("pv/{}/{name}", std::env::consts::ARCH))
         )
-        .status()
+        .guarded_status()
         .unwrap()
         .success());
     let store = ContentStore::new(root.path().join("store"));

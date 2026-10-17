@@ -1,9 +1,6 @@
 //! Host-only tests of the actual shared init's named-controller parser.
 #![cfg(unix)]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 use std::{path::Path, process::Command};
 #[test]
 fn explicit_controller_overrides_environment_without_changing_legacy_fallback() {
@@ -17,7 +14,7 @@ fn explicit_controller_overrides_environment_without_changing_legacy_fallback() 
         .arg(root.join("tests/fixtures/guest-policy.c"))
         .arg("-o")
         .arg(&binary)
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(
         output.status.success(),
@@ -35,7 +32,7 @@ fn explicit_controller_overrides_environment_without_changing_legacy_fallback() 
     ] {
         let o = Command::new(&binary)
             .args([fallback, command])
-            .output()
+            .guarded_output()
             .unwrap();
         assert!(o.status.success(), "{command:?}");
         assert_eq!(o.stdout, expected.as_bytes(), "{command:?}");
@@ -47,7 +44,10 @@ fn explicit_controller_overrides_environment_without_changing_legacy_fallback() 
         "seedbox.control=0 seedbox.control=0",
         "seedbox.control=1 seedbox.control=0",
     ] {
-        let o = Command::new(&binary).args(["1", command]).output().unwrap();
+        let o = Command::new(&binary)
+            .args(["1", command])
+            .guarded_output()
+            .unwrap();
         assert_eq!(o.status.code(), Some(2), "{command:?}");
         assert_eq!(o.stdout, b"invalid\n");
     }

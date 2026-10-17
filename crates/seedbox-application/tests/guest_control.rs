@@ -1,7 +1,4 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_test::process::Guarded;
 use std::process::Command;
 #[cfg(target_os = "linux")]
 #[test]
@@ -14,10 +11,10 @@ fn supervisor_io_survives_hidden_device_nodes_without_leaking_through_exec() {
         .arg(root.join("io-test.c"))
         .arg("-o")
         .arg(&binary)
-        .status()
+        .guarded_status()
         .unwrap()
         .success());
-    assert!(Command::new(binary).status().unwrap().success());
+    assert!(Command::new(binary).guarded_status().unwrap().success());
 }
 #[test]
 fn actual_guest_command_parser_rejects_ambiguous_and_uncorrelated_ids() {
@@ -29,10 +26,10 @@ fn actual_guest_command_parser_rejects_ambiguous_and_uncorrelated_ids() {
         .arg(root.join("control-test.c"))
         .arg("-o")
         .arg(&binary)
-        .status()
+        .guarded_status()
         .unwrap()
         .success());
-    assert!(Command::new(binary).status().unwrap().success());
+    assert!(Command::new(binary).guarded_status().unwrap().success());
 }
 #[cfg(target_os = "linux")]
 #[test]
@@ -45,10 +42,10 @@ fn actual_supervisor_reaps_before_ack_and_checks_exec_success() {
         .arg(root.join("supervisor-test.c"))
         .arg("-o")
         .arg(&binary)
-        .status()
+        .guarded_status()
         .unwrap()
         .success());
-    assert!(Command::new(binary).status().unwrap().success());
+    assert!(Command::new(binary).guarded_status().unwrap().success());
 }
 
 #[test]
@@ -62,10 +59,10 @@ fn guest_application_output_preserves_stream_identity_and_every_byte() {
         .arg(root.join("application-output-test.c"))
         .arg("-o")
         .arg(&binary)
-        .status()
+        .guarded_status()
         .unwrap()
         .success());
-    let output = Command::new(binary).output().unwrap();
+    let output = Command::new(binary).guarded_output().unwrap();
     assert!(
         output.status.success(),
         "{}",

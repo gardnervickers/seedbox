@@ -1,8 +1,5 @@
 //! Process-only fixture. No VM or QEMU acceptance is implied.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_application::exec_files::Guarded;
 use seedbox_application::process_lifetime::{self, OwnedExecution, ANCHOR_ENTRY, MONITOR_ENTRY};
 use std::{
     fs, io,
@@ -127,7 +124,7 @@ fn run() -> io::Result<()> {
                 .arg(root)
                 .arg(mode)
                 .stdin(Stdio::null());
-            let _child = holder.spawn()?;
+            let _child = holder.guarded_spawn()?;
             drop(holder);
             wait(&root.join("holder-ready"))?;
             fs::write(root.join("worker-ready"), [])?;

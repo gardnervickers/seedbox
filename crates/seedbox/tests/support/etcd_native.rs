@@ -4,6 +4,7 @@
 //! until its real user route lands.
 use super::etcd_project::*;
 use seedbox_api::{InputSource, Simulation, SimulationComparison};
+use seedbox_test::process::Guarded;
 use seedbox_test_time::HangGuard;
 use std::{
     ffi::OsString,
@@ -39,10 +40,6 @@ impl Cli {
         command
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "test invokes an already-built release CLI; no executable is written while acceptance runs"
-    )]
     async fn invoke(&self, guard: &HangGuard, label: &str, args: &[OsString]) -> Result<Vec<u8>> {
         eprintln!("etcd CLI {label}: {args:?}");
         let stdout = self.directory.join(format!("{label}.stdout"));
@@ -52,7 +49,7 @@ impl Cli {
             .args(args)
             .stdout(fs::File::create(&stdout).map_err(|e| e.to_string())?)
             .stderr(fs::File::create(&stderr).map_err(|e| e.to_string())?)
-            .spawn()
+            .guarded_spawn()
             .map_err(|e| format!("spawn CLI {label}: {e}"))?;
         // test-time: allow(hang-guard) -- Bound a positive CLI reply; expiration is infrastructure failure, never an oracle verdict.
         let status =
@@ -176,17 +173,13 @@ fn require_definition(simulation: &Simulation, backend: Backend, seed: u64) -> R
     Ok(())
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test starts an already-built release server; no executable is written concurrently"
-)]
 async fn start_server(cli: &Cli, guard: &HangGuard) -> Result<Child> {
     let mut child = cli
         .command()
         .args(["serve", "--startup-handshake", "--full-state"])
         .stdout(Stdio::piped())
         .stderr(fs::File::create(cli.directory.join("server.stderr")).map_err(|e| e.to_string())?)
-        .spawn()
+        .guarded_spawn()
         .map_err(|e| e.to_string())?;
     let mut ready = String::new();
     let mut reader = BufReader::new(child.stdout.take().ok_or("missing startup pipe")?);

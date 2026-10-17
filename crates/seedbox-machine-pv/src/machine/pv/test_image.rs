@@ -3,10 +3,7 @@
 //! ARM64 fixtures are Linux Images; x86-64 fixtures are minimal 64-bit
 //! bzImages entered in long mode at the protected-mode payload + 0x200.
 #![allow(dead_code)]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
+use seedbox_exec::Guarded;
 
 /// PV operations used by raw-image fixtures, in execution order.
 #[derive(Clone, Copy)]
@@ -275,7 +272,7 @@ pub(super) fn assemble(source: &str) -> Vec<u8> {
         .arg(&path)
         .arg("-o")
         .arg(&object)
-        .status()
+        .guarded_status()
         .unwrap()
         .success());
     assert!(Command::new(input("SEEDBOX_PV_LD"))
@@ -291,7 +288,7 @@ pub(super) fn assemble(source: &str) -> Vec<u8> {
         .arg(&object)
         .arg("-o")
         .arg(&raw)
-        .status()
+        .guarded_status()
         .unwrap()
         .success());
     let code = fs::read(raw).unwrap();

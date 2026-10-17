@@ -372,12 +372,9 @@ pub fn container_engine() -> Result<bollard::Docker> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 mod tests {
     use super::{assets_beside, cached_kernel, execution_backend_label};
+    use seedbox_test::process::Guarded;
 
     #[test]
     fn backend_progress_names_tcg_from_profile_not_host() {
@@ -467,7 +464,7 @@ mod tests {
             .arg("-C")
             .arg(directory.path())
             .arg("host-system")
-            .status()
+            .guarded_status()
             .unwrap()
             .success());
         let bytes = std::fs::read(&archive).unwrap();

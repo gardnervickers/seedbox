@@ -1,8 +1,5 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "test code: spawns here never race a Seedbox process writing an executable"
-)]
 use super::*;
+use seedbox_test::process::Guarded;
 
 type TarEntry<'a> = (
     &'a str,
@@ -405,14 +402,13 @@ fn flattened_snapshot_rejects_duplicate_target_hardlink_overwrite() {
 #[cfg(unix)]
 #[test]
 fn retained_recipe_decodes_and_linux_executes_path_script_wrapper_and_restart() {
-    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+    use std::{fs, process::Command};
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let script = root.join("program");
     // Deliberately no shebang: preserve the existing /bin/sh fallback, along
     // with execvp-style PATH lookup and exact empty/spaced argument boundaries.
-    fs::write(&script,b"printf 'cwd=%s\\nfirst=<%s>\\nempty=<%s>\\nvalue=<%s>\\n' \"$PWD\" \"$1\" \"$2\" \"$VALUE\"\n").unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    seedbox_test::process::install_executable(&script,b"printf 'cwd=%s\\nfirst=<%s>\\nempty=<%s>\\nvalue=<%s>\\n' \"$PWD\" \"$1\" \"$2\" \"$VALUE\"\n", 0o755).unwrap();
     let launch = Launch {
         argv: vec!["program".into(), "one two".into(), "".into()],
         environment: BTreeMap::from([
@@ -435,7 +431,7 @@ fn retained_recipe_decodes_and_linux_executes_path_script_wrapper_and_restart() 
         .arg(source.join("guest_application_test.c"))
         .arg("-o")
         .arg(&executable)
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(
         compiled.status.success(),
@@ -445,7 +441,7 @@ fn retained_recipe_decodes_and_linux_executes_path_script_wrapper_and_restart() 
     let inspected = Command::new(&executable)
         .arg(&recipe_path)
         .arg("--inspect")
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(inspected.status.success());
     let mut expected = String::new();
@@ -476,7 +472,7 @@ fn retained_recipe_decodes_and_linux_executes_path_script_wrapper_and_restart() 
             fs::write(&recipe_path, recipe(&launch, &prefix).unwrap()).unwrap();
             let result = Command::new(&executable)
                 .arg(&recipe_path)
-                .output()
+                .guarded_output()
                 .unwrap();
             assert!(
                 result.status.success(),
@@ -494,7 +490,7 @@ fn retained_recipe_decodes_and_linux_executes_path_script_wrapper_and_restart() 
     assert!(!Command::new(executable)
         .arg(recipe_path)
         .arg("--inspect")
-        .status()
+        .guarded_status()
         .unwrap()
         .success());
 }
@@ -515,7 +511,7 @@ fn nonroot_execute_only_and_directory_path_candidates_plain_and_wrapped() {
         .arg(source.join("guest_launch_permissions_test.c"))
         .arg("-o")
         .arg(&executable)
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(
         compiled.status.success(),
@@ -527,8 +523,12 @@ fn nonroot_execute_only_and_directory_path_candidates_plain_and_wrapped() {
     fs::create_dir(&first).unwrap();
     fs::create_dir(&last).unwrap();
     fs::create_dir(first.join("program")).unwrap();
-    fs::copy(&executable, last.join("program")).unwrap();
-    fs::set_permissions(last.join("program"), fs::Permissions::from_mode(0o111)).unwrap();
+    seedbox_test::process::install_executable(
+        &last.join("program"),
+        &fs::read(&executable).unwrap(),
+        0o111,
+    )
+    .unwrap();
     let launch = Launch {
         argv: vec!["program".into(), "--child".into(), "permissions".into()],
         environment: BTreeMap::from([(
@@ -544,7 +544,10 @@ fn nonroot_execute_only_and_directory_path_candidates_plain_and_wrapped() {
     ] {
         let path = root.join("recipe");
         fs::write(&path, recipe(&launch, &prefix).unwrap()).unwrap();
-        let result = Command::new(&executable).arg(path).output().unwrap();
+        let result = Command::new(&executable)
+            .arg(path)
+            .guarded_output()
+            .unwrap();
         assert!(
             result.status.success(),
             "{:?}: {}",
