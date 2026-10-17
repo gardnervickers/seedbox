@@ -41,7 +41,7 @@ fn control(service: &Service, id: &str, command: &str) {
 
 #[test]
 fn public_driver_cli_run_logs_events_wait_replay_and_shutdown() {
-    let mut service = Service::new();
+    let mut service = Service::new("pv");
     let oracle = r#"import json,socket
 print('DRIVER_CLI_BEGIN',flush=True)
 s=socket.socket(socket.AF_UNIX); s.connect('/run/seedbox/control.sock'); reader=s.makefile('rb')

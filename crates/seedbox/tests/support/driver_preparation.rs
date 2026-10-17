@@ -17,10 +17,14 @@ struct Service {
     child: Option<Child>,
     binary: PathBuf,
     docker: std::ffi::OsString,
+    backend: &'static str,
 }
 impl Service {
-    fn new() -> Self {
-        let root = tempfile::Builder::new().prefix("efd-").tempdir().unwrap();
+    fn new(backend: &'static str) -> Self {
+        let root = tempfile::Builder::new()
+            .prefix("efd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let target = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
@@ -35,6 +39,7 @@ impl Service {
             child: None,
             binary,
             docker,
+            backend,
         };
         let log = fs::File::create(this.path().join("server.log")).unwrap();
         let child = this
@@ -108,7 +113,7 @@ impl Service {
         output
     }
     fn run(&self, project: &Path) -> String {
-        let output = self.cli(&[
+        let mut args = vec![
             "run",
             project.to_str().unwrap(),
             "--seed",
@@ -116,7 +121,12 @@ impl Service {
             "--wall-time",
             "15m",
             "--json",
-        ]);
+        ];
+        // Preserve actual coverage of omission's PV default, not just --backend pv.
+        if self.backend != "pv" {
+            args.extend(["--backend", self.backend]);
+        }
+        let output = self.cli(&args);
         let run: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let id = run["metadata"]["id"].as_str().unwrap().to_owned();
         self.assert_profile(&id);
@@ -130,10 +140,11 @@ impl Service {
         };
         let execution = &definition.runtime.execution;
         assert_eq!(
-            execution["semantic_parameters"]["engine"]["engine_backend"], "driver-pv",
+            execution["semantic_parameters"]["engine"]["engine_backend"],
+            format!("driver-{}", self.backend),
             "{execution}"
         );
-        assert_eq!(execution["backend"], "driver-pv");
+        assert_eq!(execution["backend"], format!("driver-{}", self.backend));
         eprintln!("normal CLI retained profile: id={id} execution={execution}");
     }
     fn witness(&self, id: &str) -> String {
@@ -159,6 +170,14 @@ impl Service {
     }
     fn replay(&self, id: &str) {
         let original = self.witness(id);
+        let different = if self.backend == "pv" { "tcg" } else { "pv" };
+        let denied = self
+            .command()
+            .args(["replay", id, "--backend", different, "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(denied.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("differs from retained backend"));
         let output = self.cli(&["replay", id, "--wall-time", "15m", "--json"]);
         let comparison: seedbox_api::SimulationComparison =
             serde_json::from_slice(&output.stdout).unwrap();
@@ -175,6 +194,22 @@ impl Service {
         // Public comparison is backed by the normal worker's native witness,
         // not by equality of preparation metadata or a canned executor report.
         assert_eq!(original.len(), 64);
+        let output = self.cli(&[
+            "rerun",
+            id,
+            "--backend",
+            self.backend,
+            "--wall-time",
+            "15m",
+            "--json",
+        ]);
+        let rerun: seedbox_api::Simulation = serde_json::from_slice(&output.stdout).unwrap();
+        self.assert_profile(rerun.metadata.id.as_str());
+        assert_eq!(original, self.witness(rerun.metadata.id.as_str()));
+        eprintln!(
+            "normal CLI same-backend rerun: backend={} id={}",
+            self.backend, rerun.metadata.id
+        );
     }
     fn cleanup_barriers(&self) -> Vec<fs::File> {
         let dirs = directories(self.path());
@@ -263,7 +298,14 @@ fn directories(root: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn normal_driver_existing_example_run_and_replay_match() {
-    let service = Service::new();
+    existing_example("pv");
+}
+#[test]
+fn normal_driver_tcg_existing_example_run_and_replay_match() {
+    existing_example("tcg");
+}
+fn existing_example(backend: &'static str) {
+    let service = Service::new(backend);
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/redis")
         .canonicalize()
@@ -278,7 +320,14 @@ fn normal_driver_existing_example_run_and_replay_match() {
 
 #[test]
 fn normal_driver_two_guests_only_the_oracle_can_use_control() {
-    let service = Service::new();
+    two_guest_authority("pv");
+}
+#[test]
+fn normal_driver_tcg_two_guests_only_the_oracle_can_use_control() {
+    two_guest_authority("tcg");
+}
+fn two_guest_authority(backend: &'static str) {
+    let service = Service::new(backend);
     let oracle = r#"import socket,json
 listener=socket.socket(); listener.bind(('0.0.0.0',31415)); listener.listen(1); listener.settimeout(30)
 channel=socket.socket(socket.AF_UNIX); channel.connect('/run/seedbox/control.sock'); reader=channel.makefile('rb')
@@ -315,6 +364,43 @@ peer.sendall(b'blocked\n'); peer.close()
     assert!(oracle.contains("AUTHORITY_VERIFIED"));
     eprintln!("two-guest native authority: non-controller connect ENOENT; controller Now/Now acknowledged; oracle passed");
     service.replay(&id);
+    service.close();
+}
+
+#[test]
+fn normal_driver_tcg_explore_records_every_seed_backend() {
+    let service = Service::new("tcg");
+    let project = service.path().join("seedbox.yaml");
+    fs::write(&project, serde_json::to_vec(&serde_json::json!({
+        "name":"backend-range", "machines":{},
+        "oracle":{"image":"docker.io/library/python:3.13-alpine", "command":["python3","-c","print('RANGE_BACKEND_OK')"]}
+    })).unwrap()).unwrap();
+    let output = service.cli(&[
+        "explore",
+        project.to_str().unwrap(),
+        "--backend",
+        "tcg",
+        "--seed",
+        "123",
+        "--count",
+        "2",
+        "--wall-time",
+        "15m",
+        "--json",
+    ]);
+    let range: seedbox_api::SeedRangeStatus = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(range.complete());
+    assert!(range.error.is_none());
+    assert_eq!(range.members.len(), 2);
+    for member in &range.members {
+        assert_eq!(member.status.oracle_exit_code, Some(0));
+        service.assert_profile(member.metadata.id.as_str());
+        assert_eq!(service.witness(member.metadata.id.as_str()).len(), 64);
+    }
+    eprintln!(
+        "TCG explore retained backend for both seeds, first={}",
+        range.first_seed
+    );
     service.close();
 }
 

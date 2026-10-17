@@ -2341,9 +2341,36 @@ fn non_oracle_controller_refuses_before_image_preparation() {
     assert!(!prepared.exists());
 }
 
-// Runs only in the explicit application suite, after normal assets/release and
-// portable checks. The helper invokes the normal release CLI for every guest;
-// its interactions case covers run/logs/events/wait/replay/shutdown on Driver.
+#[test]
+fn backend_flag_is_typed_and_only_on_the_four_execution_commands() {
+    let root = tempfile::tempdir().unwrap();
+    for command in ["run", "explore", "rerun", "replay"] {
+        let help = seedbox(&[command, "--help"], root.path());
+        assert!(help.status.success(), "{command}: {}", stderr(&help));
+        let text = String::from_utf8_lossy(&help.stdout);
+        assert!(
+            text.contains("--backend") && text.contains("pv") && text.contains("tcg"),
+            "{command}: {text}"
+        );
+        let invalid = seedbox(&[command, "--backend", "not-a-backend"], root.path());
+        assert_eq!(invalid.status.code(), Some(2));
+        assert!(
+            stderr(&invalid).contains("not-a-backend"),
+            "{}",
+            stderr(&invalid)
+        );
+    }
+    for command in ["serve", "prepare", "branch"] {
+        let help = seedbox(&[command, "--help"], root.path());
+        assert!(help.status.success());
+        assert!(!String::from_utf8_lossy(&help.stdout).contains("--backend"));
+    }
+}
+
+// Explicit application acceptance, using the normal release CLI for each guest.
+// Its interactions case covers run/logs/events/wait/replay/shutdown on Driver.
+// Runs after normal assets/release and integration-owned portable coverage;
+// native runs use the shared host lock.
 #[cfg(all(
     feature = "application-tests",
     target_os = "linux",
