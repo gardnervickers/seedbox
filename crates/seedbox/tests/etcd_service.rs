@@ -72,6 +72,7 @@ fn fixture_loads_via_normal_project_parser_without_modifying_example() {
         let volumes = &configuration.services[member].volumes;
         assert_eq!(volumes.len(), 1);
         assert_eq!(volumes[0].target, "/data");
+        assert_eq!(volumes[0].source, format!("{member}-data"));
     }
     assert_eq!(fs::read(canonical_path).unwrap(), before);
 }

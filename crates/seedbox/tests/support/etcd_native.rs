@@ -27,12 +27,20 @@ struct Cli {
 impl Cli {
     fn command(&self) -> Command {
         let mut command = Command::new(&self.executable);
-        // Keep normal CLI runtime-path and engine resolution. Clear the known
-        // legacy VMM override, as the existing application acceptance does.
-        // The explicit selector and retained profile check prohibit a silent
-        // legacy/PV fallback without discarding legitimate TCG asset paths.
+        // This case owns a complete embedded Driver build. Inherited bootstrap
+        // paths (including nix develop's static mke2fs) select legacy mode and
+        // must not override that build. Preserve the engine connection settings.
+        for key in [
+            "SEEDBOX_VMM",
+            "SEEDBOX_KERNEL",
+            "SEEDBOX_RUNTIME_ASSETS",
+            "SEEDBOX_GUEST_INIT",
+            "SEEDBOX_MKE2FS",
+            "SEEDBOX_ASSET_DIR",
+        ] {
+            command.env_remove(key);
+        }
         command
-            .env_remove("SEEDBOX_VMM")
             .env("SEEDBOX_STATE", &self.state)
             .stdin(Stdio::null())
             .kill_on_drop(true);
@@ -80,6 +88,31 @@ impl Cli {
             )
             .await?;
         serde_json::from_slice(&bytes).map_err(|e| format!("{label}: {e}"))
+    }
+
+    /// Retain terminal errors while the catalogue still exists. Observation
+    /// failure is diagnostic only and never replaces the original case failure.
+    async fn capture_failure_resources(&self, guard: &HangGuard) -> Result<()> {
+        let bytes = self
+            .invoke(
+                guard,
+                "failure-resources",
+                &words(&["get", "simulations", "--json"]),
+            )
+            .await?;
+        let resources: seedbox_api::SimulationList =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        for summary in resources.items {
+            let id = summary.metadata.id;
+            let resource = self
+                .describe(guard, &format!("failure-{id}"), id.as_str())
+                .await?;
+            eprintln!(
+                "captured resource {id} before shutdown: {:?}",
+                resource.status
+            );
+        }
+        Ok(())
     }
 
     async fn fresh(
@@ -163,7 +196,7 @@ fn require_definition(simulation: &Simulation, backend: Backend, seed: u64) -> R
         if member.volumes.len() != 1
             || !member
                 .volumes
-                .get("data")
+                .get(&format!("{name}-data"))
                 .is_some_and(|volume| volume.target == "/data" && volume.size_bytes > 0)
         {
             return Err(format!("{name} did not retain its persistent /data disk"));
@@ -354,6 +387,11 @@ pub fn run(backend: Backend) {
             "graceful etcd test server and owned worker shutdown",
             Duration::from_secs(120),
         );
+        if result.is_err() {
+            if let Err(error) = cli.capture_failure_resources(&cleanup).await {
+                eprintln!("resource diagnostic capture failed (original error retained): {error}");
+            }
+        }
         let shutdown = cli
             .invoke(&cleanup, "shutdown", &words(&["shutdown"]))
             .await;
@@ -385,5 +423,44 @@ pub fn run(backend: Backend) {
     });
     if let Err(error) = result {
         panic!("{error}; retained evidence {}", cli.directory.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::BTreeMap, ffi::OsStr};
+
+    #[test]
+    fn normal_cli_command_clears_legacy_bootstrap_overrides() {
+        let cli = Cli {
+            executable: "unused-cli".into(),
+            directory: "unused-reports".into(),
+            state: "owned-state".into(),
+        };
+        let command = cli.command();
+        let environment: BTreeMap<OsString, Option<OsString>> = command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_os_string)))
+            .collect();
+        for key in [
+            "SEEDBOX_VMM",
+            "SEEDBOX_KERNEL",
+            "SEEDBOX_RUNTIME_ASSETS",
+            "SEEDBOX_GUEST_INIT",
+            "SEEDBOX_MKE2FS",
+            "SEEDBOX_ASSET_DIR",
+        ] {
+            assert_eq!(environment.get(OsStr::new(key)), Some(&None), "{key}");
+        }
+        assert_eq!(
+            environment.get(OsStr::new("SEEDBOX_STATE")),
+            Some(&Some(cli.state.into_os_string()))
+        );
+        assert!(
+            !environment.contains_key(OsStr::new("DOCKER_HOST")),
+            "preserve the caller's engine connection"
+        );
     }
 }
