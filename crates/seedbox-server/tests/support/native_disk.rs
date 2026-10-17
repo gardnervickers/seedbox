@@ -80,16 +80,10 @@ fn manifest_disk(session: &NativeSession, id: &seedbox_api::SimulationId) {
 /// Encoded length of the captured Driver state, which excludes machine
 /// snapshots; reported because small one-machine blobs once failed restore.
 fn driver_blob_bytes(session: &NativeSession, id: &seedbox_api::SimulationId) -> u64 {
+    // The attempt writes `<output>/machines/checkpoint-<name>.json`.
     let manifests = directories(&session.execution_root.join("runs").join(id.as_str()))
         .into_iter()
-        .map(|path| path.join("checkpoint.json"))
-        .chain(std::iter::once(
-            session
-                .execution_root
-                .join("runs")
-                .join(id.as_str())
-                .join("checkpoint.json"),
-        ))
+        .map(|path| path.join("checkpoint-saved.json"))
         .filter(|path| path.is_file())
         .collect::<Vec<_>>();
     assert_eq!(manifests.len(), 1, "one captured checkpoint manifest");
