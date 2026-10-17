@@ -4,6 +4,7 @@
 mod interactions;
 
 use seedbox_application::process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE};
+use seedbox_test::process::Guarded;
 use seedbox_test_time::HangGuard;
 use std::{
     fs,
@@ -48,7 +49,7 @@ impl Service {
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log)
-            .spawn()
+            .guarded_spawn()
             .unwrap();
         this.child = Some(child);
         HangGuard::new(
@@ -83,14 +84,14 @@ impl Service {
         command
     }
     fn cli(&self, args: &[&str]) -> Output {
-        let output = self.command().args(args).output().unwrap();
+        let output = self.command().args(args).guarded_output().unwrap();
         if !output.status.success() {
             // Catalogue state disappears during graceful daemon/session cleanup.
             // Retain the actual public resource error before Drop tears it down.
             let diagnostic = self
                 .command()
                 .args(["get", "simulations", "--json"])
-                .output()
+                .guarded_output()
                 .unwrap();
             fs::write(
                 self.path().join("failed-catalogue.json"),
@@ -174,7 +175,7 @@ impl Service {
         let denied = self
             .command()
             .args(["replay", id, "--backend", different, "--json"])
-            .output()
+            .guarded_output()
             .unwrap();
         assert_eq!(denied.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&denied.stderr).contains("differs from retained backend"));

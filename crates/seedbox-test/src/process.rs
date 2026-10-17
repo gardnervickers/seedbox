@@ -26,7 +26,7 @@ pub fn install_executable(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()
     Ok(())
 }
 
-pub use seedbox_exec::{output, spawn, status, Guarded};
+pub use seedbox_exec::{output, spawn, spawn_with, status, Guarded};
 
 /// How a held child is started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

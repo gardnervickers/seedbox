@@ -138,6 +138,17 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
     child
 }
 
+/// Run `spawn` with the fork-to-exec window covered, for spawners other than
+/// `std::process::Command` (such as `tokio::process::Command`, which forks
+/// through std and returns once the child has exec'd). `spawn` must only
+/// start the child: it must not wait for it, write an executable, or spawn
+/// again through this module.
+pub fn spawn_with<T>(spawn: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    held::assert_none("spawn_with");
+    let _spawning = Spawning::new(SCOPE.read().unwrap_or_else(PoisonError::into_inner));
+    spawn()
+}
+
 /// `Command::status` through [`spawn`]. Like std, standard streams are
 /// inherited unless the command sets them.
 pub fn status(command: &mut Command) -> io::Result<std::process::ExitStatus> {
@@ -198,6 +209,9 @@ mod tests {
         command.args(["-c", "exit 0"]);
         assert!(spawn(&mut command).unwrap().wait().unwrap().success());
         assert!(try_writing().is_some(), "spawn released its guard at exec");
+        let excluded = spawn_with(|| Ok(try_writing().is_none())).unwrap();
+        assert!(excluded, "spawn_with excludes writers while it runs");
+        assert!(try_writing().is_some(), "spawn_with released its guard");
         nesting_panics_before_it_can_deadlock();
     }
 

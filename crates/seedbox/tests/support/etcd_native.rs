@@ -4,7 +4,6 @@
 //! until its real user route lands.
 use super::etcd_project::*;
 use seedbox_api::{InputSource, Simulation, SimulationComparison};
-use seedbox_test::process::Guarded;
 use seedbox_test_time::HangGuard;
 use std::{
     ffi::OsString,
@@ -44,12 +43,12 @@ impl Cli {
         eprintln!("etcd CLI {label}: {args:?}");
         let stdout = self.directory.join(format!("{label}.stdout"));
         let stderr = self.directory.join(format!("{label}.stderr"));
-        let mut child = self
-            .command()
+        let mut command = self.command();
+        command
             .args(args)
             .stdout(fs::File::create(&stdout).map_err(|e| e.to_string())?)
-            .stderr(fs::File::create(&stderr).map_err(|e| e.to_string())?)
-            .guarded_spawn()
+            .stderr(fs::File::create(&stderr).map_err(|e| e.to_string())?);
+        let mut child = seedbox_test::process::spawn_with(|| command.spawn())
             .map_err(|e| format!("spawn CLI {label}: {e}"))?;
         // test-time: allow(hang-guard) -- Bound a positive CLI reply; expiration is infrastructure failure, never an oracle verdict.
         let status =
@@ -174,13 +173,13 @@ fn require_definition(simulation: &Simulation, backend: Backend, seed: u64) -> R
 }
 
 async fn start_server(cli: &Cli, guard: &HangGuard) -> Result<Child> {
-    let mut child = cli
-        .command()
+    let mut command = cli.command();
+    command
         .args(["serve", "--startup-handshake", "--full-state"])
         .stdout(Stdio::piped())
-        .stderr(fs::File::create(cli.directory.join("server.stderr")).map_err(|e| e.to_string())?)
-        .guarded_spawn()
-        .map_err(|e| e.to_string())?;
+        .stderr(fs::File::create(cli.directory.join("server.stderr")).map_err(|e| e.to_string())?);
+    let mut child =
+        seedbox_test::process::spawn_with(|| command.spawn()).map_err(|e| e.to_string())?;
     let mut ready = String::new();
     let mut reader = BufReader::new(child.stdout.take().ok_or("missing startup pipe")?);
     // test-time: allow(hang-guard) -- Bound the positive server startup handshake, with no sleep or timed absence used for ordering.
