@@ -229,30 +229,45 @@ fn tx_chains_preserve_opaque_bytes_and_complete_each_available_head_once() {
 
 #[test]
 fn malformed_receive_chains_fail_without_consuming_or_writing() {
+    use std::io::Read;
+    const COMPLETED: &str = "SEEDBOX_NET_HOSTILE_COMPLETED=9";
     if std::env::var_os("SEEDBOX_NET_HOSTILE_CHILD").is_none() {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "malformed_receive_chains_fail_without_consuming_or_writing",
+                "device_tests::malformed_receive_chains_fail_without_consuming_or_writing",
                 "--nocapture",
             ])
             .env("SEEDBOX_NET_HOSTILE_CHILD", "1")
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                assert!(status.success());
-                return;
-            }
-            if std::time::Instant::now() >= deadline {
-                child.kill().unwrap();
-                child.wait().unwrap();
-                panic!("malformed network chain did not terminate within ten seconds");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        let status = seedbox_test_time::HangGuard::new(
+            "malformed network chain child completes its actual cases",
+            std::time::Duration::from_secs(10),
+        )
+        .wait_for(|| child.try_wait().unwrap())
+        .unwrap_or_else(|_| {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("malformed network chain did not terminate within ten seconds");
+        });
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        print!("{stdout}");
+        assert!(status.success(), "malformed network child failed: {status}");
+        assert!(
+            stdout.lines().any(|line| line == COMPLETED),
+            "malformed network child did not complete all nine cases: {stdout}"
+        );
+        return;
     }
+    let mut completed = 0;
     for case in 0..9 {
         let (mut net, mut memory) = rx_device(true);
         match case {
@@ -295,7 +310,12 @@ fn malformed_receive_chains_fail_without_consuming_or_writing() {
         assert!(net.receive(&mut memory, b"frame").unwrap().irq);
         assert_eq!(net.stats().rx_frames, 1);
         assert_eq!(&memory[0x302..0x304], &[1, 0]);
+        completed += 1;
     }
+    assert_eq!(completed, 9);
+    // Printed only after every malformed rejection and repaired completion
+    // assertion passed. A zero-match libtest child cannot produce this marker.
+    println!("\n{COMPLETED}");
 }
 
 #[test]

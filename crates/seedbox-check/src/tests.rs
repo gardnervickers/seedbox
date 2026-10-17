@@ -1051,7 +1051,13 @@ fn process_timeout_reaps_owned_descendants() {
     );
     job.capture = true;
     job.timeout = Some(Duration::from_secs(5));
-    assert_eq!(Real.execute(&job).unwrap().code, 0);
+    let result = Real.execute(&job).unwrap();
+    assert_eq!(result.code, 0);
+    assert!(
+        result.stdout.contains("1 passed; 0 failed"),
+        "timeout child test did not execute: {}",
+        result.stdout
+    );
 }
 #[test]
 fn process_interruption_cleans_group_and_does_not_start_later_commands() {
@@ -1140,7 +1146,13 @@ fn process_interruption_cleans_group_and_does_not_start_later_commands() {
     );
     job.capture = true;
     job.timeout = Some(Duration::from_secs(5));
-    assert_eq!(Real.execute(&job).unwrap().code, 0);
+    let result = Real.execute(&job).unwrap();
+    assert_eq!(result.code, 0);
+    assert!(
+        result.stdout.contains("1 passed; 0 failed"),
+        "interruption child test did not execute: {}",
+        result.stdout
+    );
     sender.join().unwrap();
 }
 

@@ -128,6 +128,11 @@ fn case(name: &str) {
         fs::read_to_string(&stdout).unwrap(),
         fs::read_to_string(&stderr).unwrap()
     );
+    let child_stdout = fs::read_to_string(&stdout).unwrap();
+    assert!(
+        child_stdout.contains("1 passed; 0 failed"),
+        "supervisor case {name} did not execute: {child_stdout}"
+    );
     let diagnostics = fs::read_to_string(stderr).unwrap();
     if name.contains("status-error") {
         assert!(

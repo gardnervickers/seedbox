@@ -390,6 +390,7 @@ dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
+ "seedbox-test-time",
  "seedbox-vmm-control",
  "seedbox-vmm-engine-core",
  "serde",
