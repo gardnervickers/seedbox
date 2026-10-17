@@ -4,7 +4,9 @@
 //! faults stop. An acknowledged object that reads back missing, or with bytes
 //! other than those written, violates the check (S3 promises strong
 //! read-after-write); a read-back that cannot reach the cluster is
-//! inconclusive. Contents derive from the key, so no copy is kept.
+//! inconclusive. Contents derive from the key, so no copy is kept. Every
+//! server's final listing must then hold every acknowledged key and only keys
+//! some client tried to write (S3 listings are strongly consistent too).
 //!
 //! `--workload register` instead treats a few keys as registers: PUT writes
 //! a unique value, DELETE writes "absent", GET reads, from clients spread over
@@ -20,7 +22,7 @@ use hmac::{Hmac, Mac};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{BufReader, Read, Write},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime},
@@ -98,7 +100,14 @@ impl S3 {
     ) -> Result<(u16, Vec<u8>)> {
         let timeout = Duration::from_secs(self.args.timeout);
         let host = format!("{node}:{}", self.args.port);
-        let headers = sign(&self.args, method, &host, path, body, SystemTime::now());
+        let headers = sign(
+            (&self.args.access_key, &self.args.secret_key),
+            method,
+            &host,
+            path,
+            body,
+            SystemTime::now(),
+        );
         let mut stream = http::connect(node, self.args.port, timeout)?;
         let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
         for (name, value) in &headers {
@@ -118,29 +127,31 @@ impl S3 {
 }
 
 /// SigV4 headers for one request: `x-amz-date`, `x-amz-content-sha256` and
-/// `Authorization`.
+/// `Authorization`. `target` is the path and any query, already in canonical
+/// form (parameters sorted and URI-encoded).
 fn sign(
-    args: &Args,
+    (access_key, secret_key): (&str, &str),
     method: &str,
     host: &str,
-    path: &str,
+    target: &str,
     body: &[u8],
     at: SystemTime,
 ) -> Vec<(String, String)> {
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let seconds = at
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let (date, stamp) = amz_date(seconds);
     let payload = hex(&Sha256::digest(body));
     let canonical = format!(
-        "{method}\n{path}\n\nhost:{host}\nx-amz-content-sha256:{payload}\nx-amz-date:{stamp}\n\nhost;x-amz-content-sha256;x-amz-date\n{payload}"
+        "{method}\n{path}\n{query}\nhost:{host}\nx-amz-content-sha256:{payload}\nx-amz-date:{stamp}\n\nhost;x-amz-content-sha256;x-amz-date\n{payload}"
     );
     let scope = format!("{date}/us-east-1/s3/aws4_request");
     let to_sign = format!(
         "AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{}",
         hex(&Sha256::digest(canonical.as_bytes()))
     );
-    let mut key = format!("AWS4{}", args.secret_key).into_bytes();
+    let mut key = format!("AWS4{secret_key}").into_bytes();
     for part in [date.as_str(), "us-east-1", "s3", "aws4_request"] {
         key = hmac(&key, part.as_bytes());
     }
@@ -152,7 +163,7 @@ fn sign(
             "Authorization".into(),
             format!(
                 "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={signature}",
-                args.access_key
+                access_key
             ),
         ),
     ]
@@ -387,6 +398,69 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     }
 }
 
+/// Every key in `bucket` as `node` lists it (ListObjectsV2, a page at a time).
+fn list(s3: &S3, node: &str, bucket: &str) -> std::result::Result<Vec<String>, String> {
+    let mut keys = Vec::new();
+    let mut token: Option<String> = None;
+    loop {
+        // Parameters in canonical (sorted) order.
+        let mut query = String::new();
+        if let Some(token) = &token {
+            query.push_str(&format!("continuation-token={}&", uri_encode(token)));
+        }
+        query.push_str("list-type=2&max-keys=1000");
+        match s3.request(node, "GET", &format!("{bucket}?{query}"), &[]) {
+            Reply::Status(200, body) => {
+                let text = String::from_utf8_lossy(&body);
+                keys.extend(xml_texts(&text, "Key"));
+                let truncated =
+                    xml_texts(&text, "IsTruncated").first().map(String::as_str) == Some("true");
+                match xml_texts(&text, "NextContinuationToken").pop() {
+                    Some(next) if truncated => token = Some(next),
+                    _ if truncated => return Err("truncated listing without a token".into()),
+                    _ => return Ok(keys),
+                }
+            }
+            Reply::Status(status, body) => return Err(format!("HTTP {status} {}", s3_code(&body))),
+            Reply::Unreachable(error) => return Err(error),
+        }
+    }
+}
+
+/// The unescaped text of every `<tag>` element.
+fn xml_texts(text: &str, tag: &str) -> Vec<String> {
+    let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some((_, after)) = rest.split_once(open.as_str()) {
+        let Some((inner, tail)) = after.split_once(close.as_str()) else {
+            break;
+        };
+        out.push(
+            inner
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&apos;", "'")
+                .replace("&amp;", "&"),
+        );
+        rest = tail;
+    }
+    out
+}
+
+/// URI encoding as SigV4 specifies it: RFC 3986 unreserved characters stay.
+fn uri_encode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// The `<Code>` of an S3 error document, or `-`.
 fn s3_code(body: &[u8]) -> String {
     let text = String::from_utf8_lossy(body);
@@ -412,6 +486,8 @@ fn contents(key: &str, size: usize) -> Vec<u8> {
 
 #[derive(Default)]
 struct Tally {
+    /// Every key a PUT was sent for, acknowledged or not.
+    attempted: Vec<String>,
     acknowledged: Vec<String>,
     failed: u64,
     /// Failed PUTs by HTTP status and S3 error code.
@@ -487,6 +563,7 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
                     } else {
                         let key = format!("c{client}-{i}");
                         let body = contents(&key, args.size);
+                        tally.lock().unwrap().attempted.push(key.clone());
                         match s3.request(node, "PUT", &format!("{bucket}/{key}"), &body) {
                             Reply::Status(200, _) => {
                                 mine.push(key.clone());
@@ -510,14 +587,19 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     for worker in workers {
         let _ = worker.join();
     }
-    let (acknowledged, reads, stale) = {
+    let (attempted, acknowledged, reads, stale) = {
         let t = tally.lock().unwrap();
         kit::evidence(
             "progress",
             json!({"acknowledged": t.acknowledged.len(), "failed": t.failed, "failures": t.failures,
                    "unknown": t.unknown, "reads": t.reads}),
         );
-        (t.acknowledged.clone(), t.reads, t.stale.clone())
+        (
+            t.attempted.clone(),
+            t.acknowledged.clone(),
+            t.reads,
+            t.stale.clone(),
+        )
     };
     // The fault profile ends before the writes do; let reboots and healing finish.
     kit::pause(args.quiet as f64);
@@ -555,7 +637,50 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
             None => unreadable.push(key.clone()),
         }
     }
+    // Every server's listing must hold every acknowledged key, and only keys
+    // some client tried to write.
+    let attempted: BTreeSet<&str> = attempted.iter().map(String::as_str).collect();
+    let mut unlisted = Vec::new();
+    let mut phantom = Vec::new();
+    let mut unlistable = 0;
+    for node in &args.nodes {
+        let mut listed = Err(String::new());
+        for attempt in 0..3 {
+            listed = list(&s3, node, bucket);
+            if listed.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1 + attempt));
+        }
+        let listed = match listed {
+            Ok(keys) => keys,
+            Err(error) => {
+                kit::evidence("unlistable", json!({"node": node, "error": error}));
+                unlistable += 1;
+                continue;
+            }
+        };
+        let set: BTreeSet<&str> = listed.iter().map(String::as_str).collect();
+        for key in &acknowledged {
+            if !set.contains(key.as_str()) {
+                unlisted.push(json!({"node": node, "key": key}));
+            }
+        }
+        for key in set.difference(&attempted) {
+            phantom.push(json!({"node": node, "key": key}));
+        }
+    }
     let mut details = BTreeMap::new();
+    details.insert("unlisted", json!(unlisted.len()));
+    details.insert(
+        "unlisted_sample",
+        json!(unlisted.iter().take(10).collect::<Vec<_>>()),
+    );
+    details.insert(
+        "phantom",
+        json!(phantom.iter().take(10).collect::<Vec<_>>()),
+    );
+    details.insert("unlistable_nodes", json!(unlistable));
     details.insert(
         "missing",
         json!(missing.iter().take(10).collect::<Vec<_>>()),
@@ -571,17 +696,24 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     );
     kit::evidence("details", json!(details));
     let summary = format!(
-        "{} acknowledged objects: {} missing, {} with other bytes, {} unreadable; {} of {} reads during the run stale",
+        "{} acknowledged objects: {} missing, {} with other bytes, {} unreadable; {} of {} reads during the run stale; {} unlisted and {} phantom listings",
         acknowledged.len(),
         missing.len(),
         corrupt.len(),
         unreadable.len(),
         stale.len(),
-        reads
+        reads,
+        unlisted.len(),
+        phantom.len()
     );
-    if !missing.is_empty() || !corrupt.is_empty() || !stale.is_empty() {
+    if !missing.is_empty()
+        || !corrupt.is_empty()
+        || !stale.is_empty()
+        || !unlisted.is_empty()
+        || !phantom.is_empty()
+    {
         kit::verdict(kit::VIOLATION, &summary)
-    } else if !unreadable.is_empty() || acknowledged.is_empty() {
+    } else if !unreadable.is_empty() || unlistable > 0 || acknowledged.is_empty() {
         kit::verdict(kit::INCONCLUSIVE, &summary)
     } else {
         kit::verdict(kit::OK, &summary)
@@ -618,6 +750,34 @@ mod tests {
         let mut body = register_body(42, 64);
         body[40] = b'x';
         assert_eq!(register_value(&body, 64), None);
+    }
+
+    #[test]
+    fn signature_matches_the_aws_list_objects_example() {
+        // AWS's documented SigV4 example: GET Bucket (List Objects) with
+        // max-keys=2 and prefix=J, at 2013-05-24T00:00:00Z.
+        let headers = sign(
+            (
+                "AKIAIOSFODNN7EXAMPLE",
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            ),
+            "GET",
+            "examplebucket.s3.amazonaws.com",
+            "/?max-keys=2&prefix=J",
+            &[],
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_369_353_600),
+        );
+        assert!(headers[2].1.ends_with(
+            "Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"
+        ));
+    }
+
+    #[test]
+    fn listings_parse_keys_and_tokens() {
+        let page = "<ListBucketResult><IsTruncated>true</IsTruncated><Contents><Key>c0-1</Key></Contents>\
+                    <Contents><Key>a&amp;b</Key></Contents><NextContinuationToken>x/y=</NextContinuationToken></ListBucketResult>";
+        assert_eq!(xml_texts(page, "Key"), ["c0-1", "a&b"]);
+        assert_eq!(uri_encode("x/y="), "x%2Fy%3D");
     }
 
     #[test]
