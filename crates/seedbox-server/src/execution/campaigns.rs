@@ -1076,7 +1076,20 @@ impl ExecutionService {
         simulation: &SimulationId,
         from_checkpoint: bool,
     ) -> ExportState {
-        match self.publish_bundle(simulation, &job.findings_dir, &finding.group) {
+        // Findings that share a representative share its bundle: link it.
+        let existing = job.exports.values().find_map(|e| match e {
+            ExportState::Published {
+                path,
+                simulation: published,
+                ..
+            } if published == simulation => Some(PathBuf::from(path)),
+            _ => None,
+        });
+        let published = match existing {
+            Some(existing) => link_bundle(&existing, &job.findings_dir, &finding.group, simulation),
+            None => self.publish_bundle(simulation, &job.findings_dir, &finding.group),
+        };
+        match published {
             Ok(path) => ExportState::Published {
                 path: path.display().to_string(),
                 simulation: simulation.clone(),
@@ -1146,18 +1159,8 @@ impl ExecutionService {
         dir: &Path,
         group: &str,
     ) -> Result<PathBuf, Error> {
-        let name: String = group
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .take(96)
-            .collect();
-        let path = dir.join(format!("{name}-{simulation}.seedbox.tar"));
+        let path = bundle_path(dir, group, simulation);
+        let name = bundle_name(group);
         let temporary = dir.join(format!(".{name}-{simulation}.partial"));
         let mut file = fs::File::create(&temporary)?;
         let options = seedbox_artifacts::archive::Options {
@@ -1331,6 +1334,39 @@ impl ExecutionService {
         job.running = runs;
         Ok(())
     }
+}
+
+/// A finding's bundle name: its group, made safe for a file name.
+fn bundle_name(group: &str) -> String {
+    group
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(96)
+        .collect()
+}
+
+fn bundle_path(dir: &Path, group: &str, simulation: &SimulationId) -> PathBuf {
+    dir.join(format!("{}-{simulation}.seedbox.tar", bundle_name(group)))
+}
+
+/// Publish an already published bundle under another finding's name, as a
+/// hard link, without overwriting; then sync the directory.
+fn link_bundle(
+    existing: &Path,
+    dir: &Path,
+    group: &str,
+    simulation: &SimulationId,
+) -> Result<PathBuf, Error> {
+    let path = bundle_path(dir, group, simulation);
+    fs::hard_link(existing, &path)?;
+    fs::File::open(dir)?.sync_all()?;
+    Ok(path)
 }
 
 /// "crash store for 300ms, 1ms after phase=compacting #1 on store".
@@ -1872,6 +1908,26 @@ fn read_index(dir: &Path) -> Result<BTreeSet<String>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn findings_sharing_a_representative_link_one_bundle() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let simulation: SimulationId = "k7m2p9qx".parse().unwrap();
+        let first = bundle_path(dir.path(), "seedbox.no_crashing_processes", &simulation);
+        fs::write(&first, b"bundle").unwrap();
+        let linked = link_bundle(&first, dir.path(), "ledger: checks hold", &simulation).unwrap();
+        assert_eq!(
+            linked.file_name().unwrap(),
+            "ledger__checks_hold-k7m2p9qx.seedbox.tar"
+        );
+        assert_eq!(
+            fs::metadata(&first).unwrap().ino(),
+            fs::metadata(&linked).unwrap().ino()
+        );
+        // Never overwrites an existing bundle.
+        assert!(link_bundle(&first, dir.path(), "ledger: checks hold", &simulation).is_err());
+    }
 
     #[test]
     fn the_lowest_reproducing_seed_decides_a_probe() {
