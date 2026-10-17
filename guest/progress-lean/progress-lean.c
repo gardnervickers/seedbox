@@ -273,9 +273,15 @@ static void finished(void)
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
 {
     uint32_t parsed_budget, parsed_points;
-    if (!seedbox_progress_arguments(argc, argv, &parsed_budget, &parsed_points)) {
+    const char *coverage;
+    if (!seedbox_progress_arguments(argc, argv, &parsed_budget, &parsed_points, &coverage)) {
         dr_fprintf(STDERR, "seedbox progress: expected " SEEDBOX_PROGRESS_INSTRUCTIONS
                    " and " SEEDBOX_PROGRESS_POINTS ", each with a positive u32\n");
+        dr_abort();
+        return;
+    }
+    if (coverage) {
+        dr_fprintf(STDERR, "seedbox progress: the lean client records no block coverage\n");
         dr_abort();
         return;
     }
