@@ -107,6 +107,8 @@ fn runtime_credentials_reject_numeric_and_named_sentinels_before_mutation() {
     );
 }
 
+// The guest network sources use Linux-only socket, interface and O_DIRECT APIs.
+#[cfg(target_os = "linux")]
 #[test]
 fn network_argument_parsing_and_interface_configuration() {
     let directory = tempfile::tempdir().expect("isolated network test directory");
@@ -147,6 +149,8 @@ fn network_argument_parsing_and_interface_configuration() {
 
 /// Host loopback check of the shared guest network probe's own logic. Guest
 /// ARP and simulated delivery are covered only by native machine tests.
+// The guest network sources use Linux-only socket, interface and O_DIRECT APIs.
+#[cfg(target_os = "linux")]
 #[test]
 fn network_probe_echoes_udp_and_tcp_over_loopback() {
     use std::io::{BufRead, BufReader};
@@ -199,6 +203,8 @@ fn network_probe_echoes_udp_and_tcp_over_loopback() {
 
 /// Host check of the probe's `idle` mode and argument validation. The
 /// `server-disk` mode writes `/dev/vda` and runs only inside guests.
+// The guest network sources use Linux-only socket, interface and O_DIRECT APIs.
+#[cfg(target_os = "linux")]
 #[test]
 fn network_probe_idle_mode_and_usage() {
     use std::io::{BufRead, BufReader};

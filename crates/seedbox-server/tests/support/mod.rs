@@ -64,13 +64,17 @@ pub fn resolved_request(id: &str) -> SubmitRequest {
         auxiliary: Default::default(),
         provenance: Default::default(),
     };
-    let definition = seedbox_application::definition::resolve(
+    let mut definition = seedbox_application::definition::resolve(
         &request.spec.configuration,
         &inputs,
         123,
         Vec::new(),
     )
     .unwrap();
+    // Resolve for this host's PV server, as a real submission would: the
+    // descriptor-free profile defaults to x86-64, which arm64 PV rejects.
+    definition.architecture = seedbox_application::driver_world::platform::Host::current()
+        .project_architecture(seedbox_spec::project::CpuBackend::Pv);
     request.spec = SimulationSpec::resolved(definition).unwrap();
     request
 }

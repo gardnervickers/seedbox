@@ -8,6 +8,8 @@ let
 in pkgs.runCommand "seedbox-tcg-kernel-x86_64-${source.version}" {
   HOST_CC = "${pkgs.stdenv.cc}/bin/cc";
   HOST_CXX = "${pkgs.stdenv.cc}/bin/c++";
+  # LLVM=1 would otherwise partially link GCC host objects with ld.lld.
+  HOST_LD = "${pkgs.stdenv.cc}/bin/ld";
   nativeBuildInputs = with pkgs; [
     llvmPackages.clang-unwrapped llvmPackages.lld llvmPackages.llvm
     gnumake bc bison flex perl python3 pkg-config openssl elfutils xz

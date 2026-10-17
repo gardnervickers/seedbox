@@ -180,6 +180,7 @@ mod process {
         assert!(inbox.is_empty());
         out
     }
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     fn assert_reaped(record: &Path) {
         #[cfg(target_os = "linux")]
         for e in events(record).iter().filter(|v| v["kind"] == "start") {

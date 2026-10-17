@@ -118,32 +118,57 @@ fn tool(name: &str, args: &[&std::ffi::OsStr]) -> Result<String> {
 fn print_elf(flag: &str, file: &Path) -> Result<String> {
     tool("patchelf", &[flag.as_ref(), file.as_os_str()])
 }
+/// Retain `source` once in the flat `lib/` directory and return its retained
+/// name; identical bytes under one name are shared. A different library whose
+/// name is taken is an error unless `qualify` allows `<package>-<name>`, where
+/// `<package>` is the directory containing its `lib/`. Mach-O references and
+/// identities are rewritten to the retained name, so Darwin can keep both.
+/// ELF loaders also deduplicate by SONAME, so Linux rejects such conflicts.
 fn add_library(
     source: PathBuf,
     destination: &Path,
     seen: &mut BTreeMap<String, PathBuf>,
-    pending: &mut VecDeque<PathBuf>,
+    pending: &mut VecDeque<(PathBuf, String)>,
+    qualify: bool,
 ) -> Result<String> {
     let name = source
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or("non-UTF-8 runtime library")?
         .to_owned();
-    if let Some(previous) = seen.get(&name) {
-        if fs::read(previous)? != fs::read(&source)? {
-            return Err(format!(
-                "conflicting runtime library {name}: {} and {}",
-                previous.display(),
-                source.display()
-            )
-            .into());
-        }
-    } else {
-        copy(&source, &destination.join("lib").join(&name))?;
-        seen.insert(name.clone(), source.clone());
-        pending.push_back(source);
+    let mut candidates = vec![name.clone()];
+    if qualify {
+        let package = source
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|s| s.to_str())
+            .ok_or("runtime library package name")?;
+        // Nix store entries are `<32-character hash>-<name>`.
+        let package = match package.split_once('-') {
+            Some((hash, rest)) if hash.len() == 32 => rest,
+            _ => package,
+        };
+        candidates.push(format!("{package}-{name}"));
     }
-    Ok(name)
+    for candidate in candidates {
+        match seen.get(&candidate) {
+            Some(previous) if fs::read(previous)? == fs::read(&source)? => return Ok(candidate),
+            Some(_) => {}
+            None => {
+                copy(&source, &destination.join("lib").join(&candidate))?;
+                seen.insert(candidate.clone(), source.clone());
+                pending.push_back((source, candidate.clone()));
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(format!(
+        "conflicting runtime library {name}: {} and {}",
+        seen[&name].display(),
+        source.display()
+    )
+    .into())
 }
 fn linux_closure(qemu: &Path, destination: &Path) -> Result<()> {
     let real = destination.join("libexec/qemu-system-x86_64");
@@ -158,15 +183,13 @@ fn linux_closure(qemu: &Path, destination: &Path) -> Result<()> {
         loader.parent().ok_or("loader parent")?.display()
     );
     let mut seen = BTreeMap::new();
-    let mut pending = VecDeque::from([qemu.to_owned()]);
-    let loader_name = add_library(loader.clone(), destination, &mut seen, &mut pending)?;
-    while let Some(source) = pending.pop_front() {
+    let mut pending = VecDeque::from([(qemu.to_owned(), String::new())]);
+    let loader_name = add_library(loader.clone(), destination, &mut seen, &mut pending, false)?;
+    while let Some((source, packaged)) = pending.pop_front() {
         let target = if source == qemu {
             real.clone()
         } else {
-            destination
-                .join("lib")
-                .join(source.file_name().ok_or("library name")?)
+            destination.join("lib").join(&packaged)
         };
         let search = print_elf("--print-rpath", &source)?;
         let needed = print_elf("--print-needed", &source)?;
@@ -182,7 +205,7 @@ fn linux_closure(qemu: &Path, destination: &Path) -> Result<()> {
         for name in needed.lines() {
             let dependency = resolve_elf(&source, &search, name)
                 .or_else(|_| resolve_elf(qemu, &executable_search, name))?;
-            let retained = add_library(dependency, destination, &mut seen, &mut pending)?;
+            let retained = add_library(dependency, destination, &mut seen, &mut pending, false)?;
             if retained != name {
                 run(Command::new("patchelf")
                     .args(["--replace-needed", name, &retained])
@@ -252,15 +275,13 @@ fn darwin_closure(qemu: &Path, destination: &Path) -> Result<()> {
     let real = destination.join("libexec/qemu-system-x86_64");
     copy(qemu, &real)?;
     let executable_commands = tool("/usr/bin/otool", &["-l".as_ref(), qemu.as_os_str()])?;
-    let mut pending = VecDeque::from([qemu.to_owned()]);
+    let mut pending = VecDeque::from([(qemu.to_owned(), String::new())]);
     let mut seen = BTreeMap::new();
-    while let Some(source) = pending.pop_front() {
+    while let Some((source, packaged)) = pending.pop_front() {
         let target = if source == qemu {
             real.clone()
         } else {
-            destination
-                .join("lib")
-                .join(source.file_name().ok_or("library name")?)
+            destination.join("lib").join(&packaged)
         };
         // The second pass resolves loader-relative references emitted by Nix's
         // Darwin fixups; all other unresolved/non-system dependencies fail.
@@ -282,7 +303,7 @@ fn darwin_closure(qemu: &Path, destination: &Path) -> Result<()> {
                         Err(error)
                     }
                 })?;
-            let retained = add_library(dependency, destination, &mut seen, &mut pending)?;
+            let retained = add_library(dependency, destination, &mut seen, &mut pending, true)?;
             let replacement = format!(
                 "@loader_path/{}{retained}",
                 if source == qemu { "../lib/" } else { "" }
@@ -294,10 +315,7 @@ fn darwin_closure(qemu: &Path, destination: &Path) -> Result<()> {
         if source != qemu {
             run(Command::new("/usr/bin/install_name_tool")
                 .arg("-id")
-                .arg(format!(
-                    "@rpath/{}",
-                    source.file_name().ok_or("library name")?.to_string_lossy()
-                ))
+                .arg(format!("@rpath/{packaged}"))
                 .arg(&target))?;
         }
         for rpath in macho_rpaths(&load_commands) {
@@ -683,18 +701,18 @@ mod tests {
     #[test]
     fn closure_preserves_modes_and_rejects_basename_conflicts() {
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join("one")).unwrap();
-        fs::create_dir(dir.path().join("two")).unwrap();
-        let first = dir.path().join("one/libsame.so");
-        let second = dir.path().join("two/libsame.so");
+        fs::create_dir_all(dir.path().join("one/lib")).unwrap();
+        fs::create_dir_all(dir.path().join("two/lib")).unwrap();
+        let first = dir.path().join("one/lib/libsame.so");
+        let second = dir.path().join("two/lib/libsame.so");
         fs::write(&first, b"one").unwrap();
         fs::write(&second, b"two").unwrap();
         fs::set_permissions(&first, fs::Permissions::from_mode(0o555)).unwrap();
         let out = dir.path().join("package");
         let mut seen = BTreeMap::new();
         let mut pending = VecDeque::new();
-        add_library(first.clone(), &out, &mut seen, &mut pending).unwrap();
-        add_library(first, &out, &mut seen, &mut pending).unwrap();
+        add_library(first.clone(), &out, &mut seen, &mut pending, false).unwrap();
+        add_library(first, &out, &mut seen, &mut pending, false).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(
             fs::metadata(out.join("lib/libsame.so"))
@@ -704,7 +722,44 @@ mod tests {
                 & 0o777,
             0o755
         );
-        assert!(add_library(second, &out, &mut seen, &mut pending).is_err());
+        assert!(add_library(second, &out, &mut seen, &mut pending, false).is_err());
+    }
+
+    #[test]
+    fn darwin_closure_qualifies_basename_conflicts_by_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash = "r7k52b2q44b3k9rdk72q1kcdiizp361x";
+        fs::create_dir_all(dir.path().join("apple/lib")).unwrap();
+        fs::create_dir_all(dir.path().join(format!("{hash}-libiconv-1.19/lib"))).unwrap();
+        let first = dir.path().join("apple/lib/libiconv.2.dylib");
+        let second = dir
+            .path()
+            .join(format!("{hash}-libiconv-1.19/lib/libiconv.2.dylib"));
+        fs::write(&first, b"apple").unwrap();
+        fs::write(&second, b"gnu").unwrap();
+        let out = dir.path().join("package");
+        let mut seen = BTreeMap::new();
+        let mut pending = VecDeque::new();
+        let add = |source: &PathBuf, seen: &mut _, pending: &mut _| {
+            add_library(source.clone(), &out, seen, pending, true).unwrap()
+        };
+        assert_eq!(add(&first, &mut seen, &mut pending), "libiconv.2.dylib");
+        let qualified = "libiconv-1.19-libiconv.2.dylib";
+        assert_eq!(add(&second, &mut seen, &mut pending), qualified);
+        assert_eq!(add(&second, &mut seen, &mut pending), qualified);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["libiconv.2.dylib", qualified]
+        );
+        assert_eq!(fs::read(out.join("lib").join(qualified)).unwrap(), b"gnu");
+        // A third distinct library with the same package and name still fails.
+        fs::create_dir_all(dir.path().join("other/libiconv-1.19/lib")).unwrap();
+        let third = dir.path().join("other/libiconv-1.19/lib/libiconv.2.dylib");
+        fs::write(&third, b"other").unwrap();
+        assert!(add_library(third, &out, &mut seen, &mut pending, true).is_err());
     }
     #[test]
     fn macho_loader_and_rpath_resolution_is_explicit() {

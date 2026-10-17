@@ -496,6 +496,9 @@ fn graceful_reconnect_starts_new_ids_and_preserves_explicit_handles() {
                     Err(e) => panic!("Unix peer accept: {e}"),
                 })
                 .expect("Unix peer accept deadline");
+            // BSD-derived hosts let an accepted socket inherit the listener's
+            // non-blocking mode; these reads are blocking and bounded.
+            channel.set_nonblocking(false).unwrap();
             fn read_byte(
                 channel: &mut UnixStream,
                 guard: &seedbox_test_time::HangGuard,

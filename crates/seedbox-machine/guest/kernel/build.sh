@@ -6,7 +6,7 @@ fragment=$2
 output=$3
 mkdir source build "$output"
 tar -xf "$source_archive" -C source --strip-components=1
-make() { command make -s -C source O="$PWD/build" ARCH=x86_64 LLVM=1 HOSTCC="${HOST_CC:-cc}" HOSTCXX="${HOST_CXX:-c++}" "$@"; }
+make() { command make -s -C source O="$PWD/build" ARCH=x86_64 LLVM=1 HOSTCC="${HOST_CC:-cc}" HOSTCXX="${HOST_CXX:-c++}" HOSTLD="${HOST_LD:-ld}" "$@"; }
 make defconfig
 source/scripts/kconfig/merge_config.sh -m -O "$PWD/build" build/.config "$fragment"
 make olddefconfig

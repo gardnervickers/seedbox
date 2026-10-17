@@ -91,7 +91,7 @@ fn inventory(policy: Option<wire::BackendPolicy>) -> Inventory {
     }
 }
 #[test]
-fn codec3_policy_binding_refuses_before_native_restore_and_only_x86_linux_restores_cold_pv() {
+fn codec3_policy_binding_refuses_before_native_restore_and_driver_hosts_restore_cold_pv() {
     let policy = BackendPolicy::default();
     let (name, snapshot) = cold(Some(policy.clone()));
     let mut encoded = vec![];
@@ -130,10 +130,15 @@ fn codec3_policy_binding_refuses_before_native_restore_and_only_x86_linux_restor
         &limits,
         root.path(),
     );
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    assert!(restored.is_ok(), "valid cold restore must remain host-only");
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-    assert!(restored.err().unwrap().contains("incomplete"));
+    // Cold PV restore follows the host mapping, like controller admission.
+    if crate::driver_world::platform::Host::current().runs_driver() {
+        assert!(
+            restored.is_ok(),
+            "valid cold restore must succeed on a Driver host"
+        );
+    } else {
+        assert!(restored.err().unwrap().contains("incomplete"));
+    }
     assert!(!missing.exists());
 }
 #[test]

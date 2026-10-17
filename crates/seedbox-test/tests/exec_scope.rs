@@ -4,6 +4,10 @@
 //! store read is paused on a FIFO (so the destination descriptor is provably
 //! open) and the fork child is held in `pre_exec` (so it provably has not
 //! exec'd) until the test explicitly releases it.
+//!
+//! The probes assert Linux semantics: exec of a file still open for writing
+//! fails with ETXTBSY. Other Unix hosts permit it, so the file is Linux-only.
+#![cfg(target_os = "linux")]
 use seedbox_artifacts::{
     exec_files,
     store::{ContentDigest, ContentStore},
