@@ -1064,7 +1064,7 @@ fn test_time_policy_failure_blocks_backend_execution() {
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(
         file,
-        "#[cfg(test)] fn not_a_guard(){std::time::Instant::now();}",
+        "#[cfg(test)] fn not_a_signal(){std::thread::sleep(delay);}",
     )
     .unwrap();
     let mut c = checks(&t.0);

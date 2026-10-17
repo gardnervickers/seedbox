@@ -403,23 +403,7 @@ pub fn portable<C: Commands>(checks: &mut Checks<C>, host: &Host) -> Result<(), 
         return Ok(());
     }
     if !timed(checks, "test-time-policy", |checks| {
-        println!(
-            "test-time pending registered sites: {}",
-            super::test_time_policy::registered_pending_count()
-        );
-        println!(
-            "test-time baseline registered sites: {}",
-            super::test_time_policy::registered_baseline_count(&checks.root)?
-        );
         let report = super::test_time_policy::check(&checks.root)?;
-        println!(
-            "test-time baseline validated sites: {} ({} registered)",
-            report.baseline_matched, report.baseline_registered
-        );
-        println!(
-            "test-time pending validated sites: {}",
-            report.pending_sites.len()
-        );
         for finding in &report.findings {
             eprintln!("{finding}");
         }
