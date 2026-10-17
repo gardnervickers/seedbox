@@ -3826,6 +3826,106 @@ mod tests {
         assert!(control_summary(&receipt).0.contains("outcome unknown"));
     }
 
+    // FIXTURE: TestBackend rendering of the public events a successful Driver
+    // run publishes. This is not the separate LIVE PTY acceptance capture.
+    fn completed_normal_exits_fixture() -> App {
+        let mut app = app(&["app", "oracle"]);
+        let mut resource = crate::model::tests::timeline_resource(10);
+        resource.metadata.name = "fixture-normal-exits".into();
+        resource.status.phase = Phase::Completed;
+        resource.status.stage = None;
+        resource.status.oracle_exit_code = Some(0);
+        resource.status.termination = Some(seedbox_api::ExecutionTermination::OracleExited);
+        resource.status.simulated_time_ns = 100_000_000_000;
+        app.apply(Update::Resource(resource));
+        let mut w = world(&["app", "oracle"]);
+        w.simulated_time_ns = 100_000_000_000;
+        for machine in &mut w.machines {
+            machine.condition = MachineCondition::Exited;
+            machine.exit_code = Some(0);
+        }
+        app.apply(Update::World(w));
+        for (index, machine) in ["app", "oracle"].into_iter().enumerate() {
+            app.apply(Update::Event(EventDelivery::Event {
+                sequence: index as u64 + 1,
+                observation: SimulationEvent {
+                    simulation: "k7m2p9qx".parse().unwrap(),
+                    revision: 1,
+                    simulated_time_ns: Some(100_000_000_000),
+                    position: None,
+                    event: EventKind::MachineExited {
+                        machine: machine.into(),
+                        incarnation: 0,
+                        code: 0,
+                    },
+                },
+            }));
+        }
+        app.apply(Update::Playback(seedbox_api::PlaybackObservation {
+            state: seedbox_api::PlaybackStatus {
+                position: seedbox_api::BoundaryPosition {
+                    boundary_index: 10,
+                    completed_rounds: 10,
+                    simulated_time_ns: 100_000_000_000,
+                },
+                rate: PlaybackRate::Unlimited,
+                achieved_rate: None,
+                stepping: false,
+                terminal: true,
+                application_ready: true,
+            },
+            age_ns: 0,
+        }));
+        app
+    }
+
+    #[test]
+    fn fixture_completed_normal_exits_are_not_active_faults() {
+        let app = completed_normal_exits_fixture();
+        assert_eq!(
+            app.focus.as_ref().unwrap().activity(),
+            crate::activity::Activity::default()
+        );
+        let text = render(&app);
+        assert!(text.contains("0 active"), "{text}");
+        assert!(text.contains("nothing active"), "{text}");
+        assert!(!text.contains("2 active"), "{text}");
+        assert!(
+            text.contains("exited 0"),
+            "lifecycle inspection remains: {text}"
+        );
+        assert!(text.contains("passed"), "{text}");
+        println!("BEGIN FIXTURE completed-normal-exits (TestBackend, NOT LIVE)\n{text}END FIXTURE completed-normal-exits");
+    }
+
+    #[test]
+    fn fixture_injected_stop_and_crash_remain_in_fault_history() {
+        let mut app = completed_normal_exits_fixture();
+        let w = app.focus.as_mut().unwrap().world.as_mut().unwrap();
+        for (index, action) in ["stop", "crash"].into_iter().enumerate() {
+            w.faults.push(FaultState {
+                id: index as u32 + 1,
+                input_key: None,
+                action: action.into(),
+                machine: Some("app".into()),
+                status: FaultStatus::Applied,
+                applied_time_ns: Some(1_000_000),
+                plan: Some(serde_json::json!({"action":action,"machine":"app"})),
+                active: false,
+            });
+        }
+        let activity = app.focus.as_ref().unwrap().activity();
+        assert!(activity.active.is_empty());
+        assert_eq!(activity.history.len(), 2);
+        for action in ["stop", "crash"] {
+            assert!(activity.history.iter().any(|item| item.action == action));
+        }
+        let text = render(&app);
+        assert!(text.contains("HISTORY"), "{text}");
+        assert!(text.contains("stop app"), "{text}");
+        assert!(text.contains("crash app"), "{text}");
+    }
+
     #[test]
     fn completed_screen_offers_inspection_and_rerun_without_live_rate() {
         let mut app = app(&["a"]);
