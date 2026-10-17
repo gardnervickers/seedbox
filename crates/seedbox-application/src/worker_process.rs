@@ -455,6 +455,19 @@ pub(crate) struct RunningWorker<P = OwnedProcess> {
 }
 
 impl RunningWorker<crate::process_lifetime::OwnedExecution> {
+    #[cfg(feature = "test-support")]
+    pub(crate) fn with_failure_injector(
+        self,
+        injector: &crate::process_lifetime::WorkerFailureInjector,
+    ) -> Result<Self> {
+        self.process
+            .bind_failure_injector(injector)
+            .map_err(|error| {
+                Error::Execution(format!("bind original worker failure injector: {error}"))
+            })?;
+        Ok(self)
+    }
+
     /// Carry runtime/scratch deletion guards into the detached monitor join if
     /// the caller drops this execution on an async cancellation path.
     pub(crate) fn retain_until_join(mut self, guard: impl Send + 'static) -> Self {

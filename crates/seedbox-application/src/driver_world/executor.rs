@@ -30,8 +30,23 @@ pub struct DriverExecutor {
     runtime: Option<super::binding::Binding>,
     environment: Vec<(OsString, OsString)>,
     session_lease: Option<PathBuf>,
+    #[cfg(feature = "test-support")]
+    failure_test: Option<(PathBuf, crate::process_lifetime::WorkerFailureInjector)>,
 }
 impl DriverExecutor {
+    /// Test-only monitor override and original-worker injection. `monitor` must
+    /// dispatch the real process_lifetime monitor/anchor compiled with test-support
+    /// (the lifetime fixture does this); the retained Driver worker is unchanged.
+    #[cfg(feature = "test-support")]
+    pub fn with_worker_failure_test(
+        mut self,
+        monitor: PathBuf,
+        injector: crate::process_lifetime::WorkerFailureInjector,
+    ) -> Self {
+        self.failure_test = Some((monitor, injector));
+        self
+    }
+
     /// Use an explicit retained profile and server-owned worker count. Factory
     /// inventory must name the same backend; no fallback or profile rewriting.
     pub fn new(profile: ExecutionProfile, backend: DriverBackend, workers: usize) -> Result<Self> {
@@ -46,6 +61,8 @@ impl DriverExecutor {
             runtime: None,
             environment: vec![],
             session_lease: None,
+            #[cfg(feature = "test-support")]
+            failure_test: None,
         })
     }
     /// Select the normal fresh Linux PV profile before OCI preparation. Runtime
@@ -244,9 +261,15 @@ impl ExecutionBackend for DriverExecutor {
             .artifacts
             .get(&self.profile.engine)
             .ok_or_else(|| Error::Integrity("missing retained Driver monitor executable".into()))?;
+        #[cfg(feature = "test-support")]
+        let monitor = self.failure_test.as_ref().map_or(monitor, |(path, _)| path);
         let mut worker = launch.spawn_with_monitor(monitor, self.session_lease.as_deref())?;
         if let Some(runtime) = &self.runtime {
             worker = worker.retain_until_join(runtime.retained_inputs());
+        }
+        #[cfg(feature = "test-support")]
+        if let Some((_, injector)) = &self.failure_test {
+            worker = worker.with_failure_injector(injector)?;
         }
         worker.wait(
             request.cancellation,

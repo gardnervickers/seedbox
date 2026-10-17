@@ -16,6 +16,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "test-support")]
+#[path = "process_lifetime_failure.rs"]
+mod failure;
+#[cfg(feature = "test-support")]
+use failure::OwnerEndpoint;
+#[cfg(feature = "test-support")]
+pub use failure::WorkerFailureInjector;
+#[cfg(not(feature = "test-support"))]
+type OwnerEndpoint = UnixStream;
+
 pub const MONITOR_ENTRY: &str = "--seedbox-execution-monitor-v1";
 pub const ANCHOR_ENTRY: &str = "--seedbox-execution-anchor-v1";
 pub const WORKER_LEASE_ENTRY: &str = "--seedbox-execution-lease-v1";
@@ -70,7 +80,7 @@ impl Completion {
 /// The server owns only this monitor, never the worker. Closing `owner` requests
 /// termination. Dropping or cancelling must not kill the monitor.
 pub struct OwnedExecution {
-    owner: Option<UnixStream>,
+    owner: Option<OwnerEndpoint>,
     pending: Option<MonitorReceipt>,
 }
 struct MonitorReceipt {
@@ -209,6 +219,8 @@ impl OwnedExecution {
         owner.set_write_timeout(Some(COMPLETION_TIMEOUT))?;
         owner.write_all(&(environment.len() as u64).to_le_bytes())?;
         owner.write_all(&environment)?;
+        #[cfg(feature = "test-support")]
+        let owner = std::sync::Arc::new(std::sync::Mutex::new(owner));
         execution.owner = Some(owner);
         Ok(execution)
     }
@@ -224,6 +236,19 @@ impl OwnedExecution {
     }
     pub fn cancel(&mut self) {
         self.owner.take();
+    }
+
+    /// Bind a feature-only one-shot request to this original spawn, without
+    /// transferring process ownership or keeping the owner's endpoint alive.
+    #[cfg(feature = "test-support")]
+    pub fn bind_failure_injector(&self, injector: &WorkerFailureInjector) -> io::Result<()> {
+        let owner = self.owner.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "execution owner already closed",
+            )
+        })?;
+        injector.bind(owner)
     }
 
     /// Observe a complete receipt without waiting for worker execution.
@@ -408,7 +433,6 @@ pub fn serve_monitor(mut arguments: Vec<std::ffi::OsString>) -> io::Result<()> {
     }
     children.worker = Some(crate::exec_files::spawn(&mut command)?);
     drop(command);
-    let worker = children.worker.as_ref().expect("spawned worker");
     // Copies of the worker's output endpoints must not keep files open or mask
     // EOF. Status has its own descriptor and is not worker stdout/stderr.
     unsafe {
@@ -425,13 +449,21 @@ pub fn serve_monitor(mut arguments: Vec<std::ffi::OsString>) -> io::Result<()> {
                 "execution group anchor exited before termination; execution files must be kept",
             ));
         }
-        if let Some(exit) = observe_exit(worker)? {
+        if let Some(exit) = observe_exit(children.worker.as_ref().expect("spawned worker"))? {
             break Some(exit);
         }
         let mut byte = [0];
         match owner.read(&mut byte) {
             Ok(0) => break None,
-            Ok(_) => {}
+            Ok(_) => {
+                #[cfg(feature = "test-support")]
+                if byte[0] == failure::FAIL_WORKER {
+                    // This is the monitor's ORIGINAL unreaped Child. It never
+                    // signals a discovered/saved PID or the anchor/monitor.
+                    // Observe its real exit next, then use ordinary cleanup.
+                    children.worker.as_mut().expect("spawned worker").kill()?;
+                }
+            }
             Err(e)
                 if e.kind() == io::ErrorKind::Interrupted
                     || e.kind() == io::ErrorKind::WouldBlock => {}
@@ -471,7 +503,7 @@ pub fn serve_monitor(mut arguments: Vec<std::ffi::OsString>) -> io::Result<()> {
     drop(anchor_owner);
     let deadline = Instant::now();
     let exit = loop {
-        if let Some(exit) = observe_exit(worker)? {
+        if let Some(exit) = observe_exit(children.worker.as_ref().expect("spawned worker"))? {
             break exit;
         }
         if deadline.elapsed() >= TERMINATION_TIMEOUT {
