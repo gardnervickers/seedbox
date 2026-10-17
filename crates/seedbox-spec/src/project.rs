@@ -141,8 +141,65 @@ pub enum CpuBackend {
     Tcg,
 }
 impl CpuBackend {
+    /// Validate the redundant retained labels against the executable contract.
+    /// Non-Driver profiles retain their existing hardware selection.
+    pub fn from_driver_metadata(
+        backend: &str,
+        driver_contract: bool,
+        engine_backend: Option<&str>,
+    ) -> Result<Option<Self>, String> {
+        if !driver_contract
+            && !backend.starts_with("driver-")
+            && !engine_backend.is_some_and(|name| name.starts_with("driver-"))
+        {
+            return Ok(None);
+        }
+        match (driver_contract, backend, engine_backend) {
+            (true, "driver-pv", Some("driver-pv")) => Ok(Some(Self::Pv)),
+            (true, "driver-tcg", Some("driver-tcg")) => Ok(Some(Self::Tcg)),
+            _ => Err(format!("inconsistent Driver backend metadata: runtime.execution.backend {backend:?} must match semantic_parameters.engine.engine_backend {engine_backend:?} under the driver-world-v1 contract")),
+        }
+    }
+
     pub fn is_pv(&self) -> bool {
         *self == Self::Pv
+    }
+}
+
+#[cfg(test)]
+mod backend_authority_tests {
+    use super::CpuBackend;
+    #[test]
+    fn backend_authority_requires_matching_driver_metadata_and_contract() {
+        for (tag, other, cpu) in [
+            ("driver-pv", "driver-tcg", CpuBackend::Pv),
+            ("driver-tcg", "driver-pv", CpuBackend::Tcg),
+        ] {
+            assert_eq!(
+                CpuBackend::from_driver_metadata(tag, true, Some(tag)).unwrap(),
+                Some(cpu)
+            );
+            for (top, contract, engine) in [
+                (other, true, Some(tag)),
+                (tag, true, Some(other)),
+                (tag, false, Some(tag)),
+                (tag, true, None),
+                ("seedbox-kvm", true, Some(tag)),
+                (tag, true, Some("unknown")),
+            ] {
+                assert!(CpuBackend::from_driver_metadata(top, contract, engine)
+                    .unwrap_err()
+                    .contains("inconsistent Driver backend metadata"));
+            }
+        }
+        assert_eq!(
+            CpuBackend::from_driver_metadata("seedbox-kvm", false, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            CpuBackend::from_driver_metadata("seedbox-hvf", false, Some("hvf")).unwrap(),
+            None
+        );
     }
 }
 

@@ -191,7 +191,8 @@ impl Definition {
     pub fn oracle_name(&self) -> &str {
         self.oracle.name.as_deref().unwrap_or(Self::ORACLE)
     }
-    pub fn configuration(&self, name: &str) -> crate::Simulation {
+    pub fn configuration(&self, name: &str) -> Result<crate::Simulation, String> {
+        let backend = self.runtime.driver_backend()?.unwrap_or_default();
         let mut services = BTreeMap::new();
         for (name, machine) in self
             .machines
@@ -233,7 +234,7 @@ impl Definition {
                 },
             );
         }
-        crate::Simulation {
+        Ok(crate::Simulation {
             name: name.into(),
             source: std::path::PathBuf::new(),
             services,
@@ -260,14 +261,21 @@ impl Definition {
             },
             disk: self.simulator.disk.clone(),
             simulator: crate::project::SimulatorDefaults {
-                backend: if self.runtime.execution["backend"] == "driver-tcg" {
-                    crate::project::CpuBackend::Tcg
-                } else {
-                    crate::project::CpuBackend::Pv
-                },
+                backend,
                 blocks_per_progress_call: self.simulator.blocks_per_progress_call,
             },
-        }
+        })
+    }
+}
+
+impl Runtime {
+    pub fn driver_backend(&self) -> Result<Option<crate::project::CpuBackend>, String> {
+        let engine = &self.execution["semantic_parameters"]["engine"];
+        crate::project::CpuBackend::from_driver_metadata(
+            self.execution["backend"].as_str().unwrap_or_default(),
+            engine["kind"] == "driver-world-v1",
+            engine["engine_backend"].as_str(),
+        )
     }
 }
 

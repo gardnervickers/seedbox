@@ -702,7 +702,9 @@ impl ExecutionService {
             "sha256:{}",
             inputs.guests[&oracle_name].hex()
         ));
-        let configuration = definition.configuration("");
+        let resolved_spec = seedbox_api::SimulationSpec::resolved(definition)
+            .map_err(seedbox_application::Error::Setup)?;
+        let configuration = resolved_spec.configuration.clone();
         let mut retained = RetainedInputs {
             checkpoint: checkpoint.clone(),
             prepared: inputs.clone(),
@@ -715,7 +717,7 @@ impl ExecutionService {
         }
         self.manager
             .update(id, |s| {
-                s.spec = seedbox_api::SimulationSpec::resolved(definition);
+                s.spec = resolved_spec;
                 s.status.phase = Phase::Running;
                 s.status.stage = Some(Stage::Booting);
             })

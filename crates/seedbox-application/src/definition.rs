@@ -107,6 +107,7 @@ pub fn resolve(
 }
 
 pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<PreparedInputs> {
+    definition.runtime.driver_backend().map_err(Error::Setup)?;
     definition
         .start
         .validate_overrides(&definition.overrides)
@@ -343,6 +344,7 @@ pub fn materialize_start(
     store: &ContentStore,
     directory: &std::path::Path,
 ) -> Result<Option<std::path::PathBuf>> {
+    definition.runtime.driver_backend().map_err(Error::Setup)?;
     let Start::Checkpoint { manifest, assets } = &definition.start else {
         return Ok(None);
     };
@@ -694,6 +696,32 @@ mod tests {
         (temporary, store, definition, boot)
     }
     #[test]
+    fn backend_authority_rejects_before_resolved_asset_materialization() {
+        for (top, actual) in [("driver-pv", "driver-tcg"), ("driver-tcg", "driver-pv")] {
+            let (root, store, mut definition, _) = fixture();
+            definition.runtime.execution["backend"] = top.into();
+            definition.runtime.execution["semantic_parameters"]["engine"] =
+                serde_json::json!({"kind":"driver-world-v1", "engine_backend":actual});
+            definition.runtime.kernel = Asset(format!("sha256:{}", "0".repeat(64)));
+            let error = prepared(&definition, &store).err().unwrap().to_string();
+            assert!(
+                error.contains("inconsistent Driver backend metadata"),
+                "{error}"
+            );
+            assert!(definition
+                .configuration("")
+                .unwrap_err()
+                .contains("inconsistent Driver backend metadata"));
+            let output = root.path().join("not-materialized");
+            assert!(materialize_start(&definition, &store, &output)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("inconsistent Driver backend metadata"));
+            assert!(!output.exists());
+        }
+    }
+    #[test]
     fn unsupported_driver_resume_refuses_before_any_start_asset_materialization() {
         let (root, store, mut definition, _) = fixture();
         let policy = seedbox_engine_protocol::driver_world::BackendPolicy {
@@ -808,6 +836,7 @@ mod tests {
         use seedbox_engine_protocol::driver_world as wire;
         let (temporary, store, mut definition, _) = fixture();
         let mut inputs = prepared(&definition, &store).unwrap();
+        inputs.profile.backend = crate::execution::Backend::Other("driver-pv".into());
         inputs.profile.semantic_parameters.engine =
             Some(DriverExecutor::descriptor(DriverBackend::Pv, "aarch64"));
         // Fixture bytes exercise retention/launch adaptation only. They are not
@@ -904,7 +933,7 @@ mod tests {
         let edited = prepared(&definition, &store).unwrap();
         let settings = execution_settings_with_inputs(&edited).unwrap();
         assert!(settings.get("driver_world").is_some());
-        let simulation = definition.configuration("");
+        let simulation = definition.configuration("").unwrap();
         let mut artifacts = BTreeMap::new();
         for (index, digest) in edited.digests().enumerate() {
             artifacts.entry(digest.clone()).or_insert_with(|| {
@@ -1195,7 +1224,7 @@ mod tests {
             tcg_definition.simulator.oracle_control = true;
             tcg_definition.runtime.execution = execution_settings_with_inputs(&tcg_inputs).unwrap();
             let tcg_inputs = prepared(&tcg_definition, &store).unwrap();
-            let mut simulation = tcg_definition.configuration("");
+            let mut simulation = tcg_definition.configuration("").unwrap();
             simulation.schedule.timer_jitter_ns = 127;
             simulation.schedule.stop_tolerance_ns = 91;
             let output = temporary

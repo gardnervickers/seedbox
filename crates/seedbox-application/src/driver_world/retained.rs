@@ -20,6 +20,7 @@ pub(super) fn validate_contract(profile: &crate::execution::ExecutionProfile) ->
             "Driver execution requires its recorded driver-world-v1 contract",
         ));
     }
+    profile.driver_backend().map_err(bad)?;
     for (field, enabled) in [
         ("page_timer", profile.semantic_parameters.page_timer),
         ("deferred_tx", profile.semantic_parameters.deferred_tx),

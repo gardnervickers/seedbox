@@ -20,6 +20,23 @@ pub struct ExecutionProfile {
     pub semantic_parameters: SemanticParameters,
 }
 
+impl ExecutionProfile {
+    /// One checked CPU authority for retained Driver selection and display.
+    pub fn driver_backend(&self) -> Result<Option<seedbox_spec::project::CpuBackend>, String> {
+        let backend = match &self.backend {
+            Backend::Kvm => "seedbox-kvm",
+            Backend::Hvf => "seedbox-hvf",
+            Backend::Other(name) => name.as_str(),
+        };
+        let engine = self.semantic_parameters.engine.as_ref();
+        seedbox_spec::project::CpuBackend::from_driver_metadata(
+            backend,
+            engine.is_some_and(|engine| engine.kind == ExecutableKind::DriverWorld),
+            engine.map(|engine| engine.engine_backend.as_str()),
+        )
+    }
+}
+
 /// The execution backend that records and replays a run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Backend {

@@ -139,7 +139,7 @@ impl<'de> Deserialize<'de> for SimulationSpec {
         if value.get("runtime").is_some() {
             let definition: seedbox_spec::definition::Definition =
                 serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-            Ok(Self::resolved(definition))
+            Self::resolved(definition).map_err(serde::de::Error::custom)
         } else {
             if value.get("configuration").is_none() {
                 let partial: crate::Submission =
@@ -148,22 +148,29 @@ impl<'de> Deserialize<'de> for SimulationSpec {
             }
             let project: LegacySpec =
                 serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            let configuration = match &project.inputs {
+                InputSource::Resolved { definition } => definition
+                    .configuration(&project.configuration.name)
+                    .map_err(serde::de::Error::custom)?,
+                _ => project.configuration,
+            };
             Ok(Self {
                 start_paused: false,
                 seed: project.seed,
                 inputs: project.inputs,
-                configuration: project.configuration,
+                configuration,
                 program: project.program,
             })
         }
     }
 }
 impl SimulationSpec {
-    pub fn resolved(definition: seedbox_spec::definition::Definition) -> Self {
-        Self {
+    pub fn resolved(definition: seedbox_spec::definition::Definition) -> Result<Self, String> {
+        let configuration = definition.configuration("")?;
+        Ok(Self {
             start_paused: false,
             seed: Some(definition.seed),
-            configuration: definition.configuration(""),
+            configuration,
             program: definition
                 .overrides
                 .iter()
@@ -177,7 +184,7 @@ impl SimulationSpec {
             inputs: InputSource::Resolved {
                 definition: Box::new(definition),
             },
-        }
+        })
     }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -64,6 +64,7 @@ impl BackendProvider for NativeBackends {
         inputs: &PreparedInputs,
         store: &ContentStore,
     ) -> Result<Box<dyn ExecutionBackend>> {
+        let driver_backend = inputs.profile.driver_backend().map_err(Error::Setup)?;
         if seedbox_application::engine::recorded_launch(&inputs.profile)?
             == seedbox_application::engine::ExecutableKind::DriverWorld
         {
@@ -75,10 +76,15 @@ impl BackendProvider for NativeBackends {
                 .ok_or_else(|| {
                     Error::Integrity("Driver contract has no executable descriptor".into())
                 })?;
-            let backend = match descriptor.engine_backend.as_str() {
-                "driver-pv" => seedbox_application::driver_world::DriverBackend::Pv,
-                "driver-tcg" => seedbox_application::driver_world::DriverBackend::Tcg,
-                value => return Err(Error::Setup(format!("driver-world-v1 backend {value:?}: use its recorded driver-pv or driver-tcg inventory"))),
+            let backend = match driver_backend.ok_or_else(|| {
+                Error::Setup("Driver contract has no validated CPU backend".into())
+            })? {
+                seedbox_spec::project::CpuBackend::Pv => {
+                    seedbox_application::driver_world::DriverBackend::Pv
+                }
+                seedbox_spec::project::CpuBackend::Tcg => {
+                    seedbox_application::driver_world::DriverBackend::Tcg
+                }
             };
             let digest = seedbox_application::driver_world::runtime_digest(inputs, store)?;
             let mut archive =

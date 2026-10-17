@@ -71,6 +71,6 @@ pub fn resolved_request(id: &str) -> SubmitRequest {
         Vec::new(),
     )
     .unwrap();
-    request.spec = SimulationSpec::resolved(definition);
+    request.spec = SimulationSpec::resolved(definition).unwrap();
     request
 }

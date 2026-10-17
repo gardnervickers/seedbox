@@ -10,6 +10,28 @@ fn profile() -> ExecutionProfile {
     }
 }
 #[test]
+fn backend_authority_rejects_both_inconsistent_profiles_before_worker_launch() {
+    for (backend, tag, other) in [
+        (DriverBackend::Pv, "driver-pv", "driver-tcg"),
+        (DriverBackend::Tcg, "driver-tcg", "driver-pv"),
+    ] {
+        let mut matching = profile();
+        matching.backend = crate::execution::Backend::Other(tag.into());
+        matching.semantic_parameters.engine = Some(DriverExecutor::descriptor(backend, "x86_64"));
+        DriverExecutor::new(matching.clone(), backend, 1).unwrap();
+        matching.backend = crate::execution::Backend::Other(other.into());
+        let error = DriverExecutor::new(matching, backend, 1)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("inconsistent Driver backend metadata"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn missing_witness_is_an_error_without_erasing_the_actual_oracle_verdict_or_observations() {
     let mut report = incomplete(StopReason::Completed);
     report.simulated_time_ns = Some(73);

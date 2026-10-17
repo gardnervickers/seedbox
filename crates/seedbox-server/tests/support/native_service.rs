@@ -610,7 +610,7 @@ fn fixture_submission(
         metadata: Default::default(),
         options: Default::default(),
         request_id: fixture.request_id,
-        spec: SimulationSpec::resolved(definition),
+        spec: SimulationSpec::resolved(definition).unwrap(),
     };
     request.metadata.name = format!("native-{}-service", label(backend));
     request
@@ -1748,7 +1748,7 @@ fn network_submission(
         metadata: Default::default(),
         options: Default::default(),
         request_id: "in-flight".into(),
-        spec: SimulationSpec::resolved(definition),
+        spec: SimulationSpec::resolved(definition).unwrap(),
     };
     request.metadata.name = format!("native-{}-in-flight", label(backend));
     request
@@ -1771,7 +1771,7 @@ fn with_capture_marker(mut request: SubmitRequest, at_ns: u64) -> SubmitRequest 
         timeout_ns: seedbox_spec::definition::default_timeout_ns(),
     });
     // The submitted program is derived from the definition's overrides.
-    request.spec = SimulationSpec::resolved(definition);
+    request.spec = SimulationSpec::resolved(definition).unwrap();
     assert_eq!(request.spec.program.len(), 1);
     request
 }

@@ -166,13 +166,13 @@ fn select_backend(
 ) -> Result<()> {
     use seedbox_spec::project::CpuBackend;
     let recorded = match &spec.inputs {
-        InputSource::Resolved { definition } => {
-            Some(if definition.runtime.execution["backend"] == "driver-tcg" {
-                CpuBackend::Tcg
-            } else {
-                CpuBackend::Pv
-            })
-        }
+        InputSource::Resolved { definition } => Some(
+            definition
+                .runtime
+                .driver_backend()
+                .map_err(Error::Setup)?
+                .unwrap_or_default(),
+        ),
         _ => None,
     };
     match (recorded, requested) {
@@ -962,7 +962,7 @@ mod tests {
             runtime: d::Runtime {
                 kernel: asset.clone(),
                 engine: asset.clone(),
-                execution: serde_json::json!({"backend":"driver-tcg"}),
+                execution: serde_json::json!({"backend":"driver-tcg", "semantic_parameters":{"engine":{"kind":"driver-world-v1", "engine_backend":"driver-tcg"}}}),
             },
             machines: Default::default(),
             oracle: d::Machine {
@@ -989,7 +989,7 @@ mod tests {
             start: d::Start::Fresh,
             overrides: vec![],
         };
-        let mut retained = SimulationSpec::resolved(definition);
+        let mut retained = SimulationSpec::resolved(definition).unwrap();
         select_backend(&mut retained, None).unwrap();
         assert_eq!(retained.configuration.simulator.backend, CpuBackend::Tcg);
         select_backend(&mut retained, Some(CpuBackend::Tcg)).unwrap();
@@ -1001,6 +1001,33 @@ mod tests {
             "{error}"
         );
         assert_eq!(retained.configuration.simulator.backend, CpuBackend::Tcg);
+        let InputSource::Resolved { definition } = retained.inputs else {
+            panic!("resolved fixture")
+        };
+        for (tag, other, cpu, different) in [
+            ("driver-pv", "driver-tcg", CpuBackend::Pv, CpuBackend::Tcg),
+            ("driver-tcg", "driver-pv", CpuBackend::Tcg, CpuBackend::Pv),
+        ] {
+            let mut definition = definition.as_ref().clone();
+            definition.runtime.execution["backend"] = tag.into();
+            definition.runtime.execution["semantic_parameters"]["engine"]["engine_backend"] =
+                tag.into();
+            let mut selected = SimulationSpec::resolved(definition).unwrap();
+            select_backend(&mut selected, None).unwrap();
+            select_backend(&mut selected, Some(cpu)).unwrap();
+            assert_eq!(selected.configuration.simulator.backend, cpu);
+            assert!(select_backend(&mut selected, Some(different)).is_err());
+            let InputSource::Resolved { definition } = &mut selected.inputs else {
+                unreachable!()
+            };
+            definition.runtime.execution["backend"] = other.into();
+            for requested in [None, Some(cpu), Some(different)] {
+                assert!(select_backend(&mut selected, requested)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("inconsistent Driver backend metadata"));
+            }
+        }
     }
 
     #[test]

@@ -65,21 +65,28 @@ impl ExecutionBackend for Executor {
         eprintln!(
             "running: starting {} machines through {}",
             request.prepared.guests.len(),
-            execution_backend_label(&self.backend().profile().backend)
+            execution_backend_label(&self.backend().profile())?
         );
         self.backend().execute(request)
     }
 }
 
-fn execution_backend_label(backend: &seedbox_application::execution::Backend) -> &'static str {
-    if matches!(backend, seedbox_application::execution::Backend::Other(name) if name == "driver-tcg")
-    {
-        "TCG"
-    } else if cfg!(target_os = "macos") {
-        "HVF"
-    } else {
-        "KVM"
-    }
+fn execution_backend_label(
+    profile: &seedbox_application::execution::ExecutionProfile,
+) -> Result<&'static str> {
+    Ok(
+        if profile
+            .driver_backend()
+            .map_err(seedbox_application::Error::Setup)?
+            == Some(seedbox_spec::project::CpuBackend::Tcg)
+        {
+            "TCG"
+        } else if cfg!(target_os = "macos") {
+            "HVF"
+        } else {
+            "KVM"
+        },
+    )
 }
 
 pub struct Preparer {
@@ -378,19 +385,44 @@ mod tests {
 
     #[test]
     fn backend_progress_names_tcg_from_profile_not_host() {
-        use seedbox_application::execution::Backend;
-        assert_eq!(
-            execution_backend_label(&Backend::Other("driver-tcg".into())),
-            "TCG"
-        );
-        assert_eq!(
-            execution_backend_label(&Backend::Other("driver-pv".into())),
-            if cfg!(target_os = "macos") {
+        use seedbox_application::{
+            driver_world::{DriverBackend, DriverExecutor},
+            execution::{Backend, ExecutionProfile, SemanticParameters, WitnessMode},
+            store::ContentDigest,
+        };
+        for (cpu, tag) in [
+            (DriverBackend::Pv, "driver-pv"),
+            (DriverBackend::Tcg, "driver-tcg"),
+        ] {
+            let mut semantic_parameters = SemanticParameters::new(128);
+            semantic_parameters.engine = Some(DriverExecutor::descriptor(cpu, "x86_64"));
+            let mut profile = ExecutionProfile {
+                backend: Backend::Other(tag.into()),
+                engine: ContentDigest::of(b"metadata fixture"),
+                witness_mode: WitnessMode::Exits,
+                semantic_parameters,
+            };
+            let expected = if cpu == DriverBackend::Tcg {
+                "TCG"
+            } else if cfg!(target_os = "macos") {
                 "HVF"
             } else {
                 "KVM"
-            }
-        );
+            };
+            assert_eq!(execution_backend_label(&profile).unwrap(), expected);
+            profile.backend = Backend::Other(
+                if cpu == DriverBackend::Tcg {
+                    "driver-pv"
+                } else {
+                    "driver-tcg"
+                }
+                .into(),
+            );
+            assert!(execution_backend_label(&profile)
+                .unwrap_err()
+                .to_string()
+                .contains("inconsistent Driver backend metadata"));
+        }
     }
 
     #[test]

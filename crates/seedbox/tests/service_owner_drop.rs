@@ -333,7 +333,7 @@ fn request(store: &ContentStore) -> SubmitRequest {
         request_id: "paused-owned-execution".into(),
         metadata: Default::default(),
         options: Default::default(),
-        spec: SimulationSpec::resolved(definition),
+        spec: SimulationSpec::resolved(definition).unwrap(),
     };
     request.options.start_paused = true;
     request
