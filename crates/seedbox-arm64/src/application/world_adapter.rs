@@ -184,8 +184,14 @@ pub struct Factory {
     captures: Vec<Option<Arc<Mutex<Captures>>>>,
     generation: Cell<u64>,
     full_state: bool,
+    /// Machine workers restore checkpoints lazily; never changes results.
+    lazy_restore: bool,
 }
 impl Factory {
+    pub(crate) fn with_lazy_restore(mut self, lazy_restore: bool) -> Self {
+        self.lazy_restore = lazy_restore;
+        self
+    }
     pub(crate) fn with_observations(
         mut self,
         observations: Option<Arc<seedbox_engine_core::observation::Publisher>>,
@@ -268,6 +274,7 @@ impl Factory {
             captures,
             generation: Cell::new(0),
             full_state,
+            lazy_restore: false,
         })
     }
 }
@@ -312,6 +319,20 @@ impl DerefMut for ArmMachine {
     }
 }
 impl ArmMachine {
+    /// The next checkpoint file for this machine's worker.
+    fn next_checkpoint_artifact(&mut self) -> Result<std::path::PathBuf> {
+        self.snapshot_sequence = self
+            .snapshot_sequence
+            .checked_add(1)
+            .ok_or("ARM checkpoint sequence overflow")?;
+        let artifact = self.output.join(format!(
+            ".arm-checkpoint-{}-{}-{}",
+            std::process::id(),
+            self.worker.identity().generation,
+            self.snapshot_sequence
+        ));
+        std::path::absolute(artifact).map_err(|e| format!("checkpoint path: {e}"))
+    }
     fn reject<T>(&mut self, error: String) -> Result<T> {
         self.worker.invalidate(&error);
         Err(error)
@@ -420,7 +441,13 @@ impl WorldMachine for ArmMachine {
             generation,
             incarnation: 0,
         };
-        let mut worker = OwnedWorker::spawn(&factory.executable, identity)?;
+        let mut worker = OwnedWorker::spawn_with(
+            &factory.executable,
+            identity,
+            super::worker::ServeOptions {
+                lazy_restore: factory.lazy_restore,
+            },
+        )?;
         let cpu_speed_hz = boot
             .progress
             .as_ref()
@@ -769,21 +796,18 @@ impl WorldMachine for ArmMachine {
         // validate each stopped worker before reading its native state.
         Ok(())
     }
+    fn begin_snapshot(&mut self) -> Result<()> {
+        let artifact = self.next_checkpoint_artifact()?;
+        self.worker.begin(Operation::Snapshot { artifact })
+    }
     fn snapshot(&mut self) -> Result<Self::Snapshot> {
-        self.snapshot_sequence = self
-            .snapshot_sequence
-            .checked_add(1)
-            .ok_or("ARM checkpoint sequence overflow")?;
-        let artifact = self.output.join(format!(
-            ".arm-checkpoint-{}-{}-{}",
-            std::process::id(),
-            self.worker.identity().generation,
-            self.snapshot_sequence
-        ));
-        let artifact =
-            std::path::absolute(artifact).map_err(|e| format!("checkpoint path: {e}"))?;
-        let Answer::Snapshot(checkpoint) = self.worker.call(Operation::Snapshot { artifact })?
-        else {
+        let answer = if self.worker.begun() {
+            self.worker.finish()?
+        } else {
+            let artifact = self.next_checkpoint_artifact()?;
+            self.worker.call(Operation::Snapshot { artifact })?
+        };
+        let Answer::Snapshot(checkpoint) = answer else {
             return self.reject("invalid ARM checkpoint response".into());
         };
         Ok(Snapshot {
@@ -796,15 +820,24 @@ impl WorldMachine for ArmMachine {
             retired: self.retired.clone(),
         })
     }
+    fn begin_restore(&mut self, snapshot: &Self::Snapshot) -> Result<()> {
+        if self.name != snapshot.world.name {
+            return Err("ARM checkpoint machine name mismatch".into());
+        }
+        self.worker
+            .begin(Operation::Restore(snapshot.checkpoint.clone()))
+    }
     fn restore(&mut self, snapshot: &Self::Snapshot) -> Result<u64> {
         if self.name != snapshot.world.name {
             return Err("ARM checkpoint machine name mismatch".into());
         }
-        if !matches!(
+        let answer = if self.worker.begun() {
+            self.worker.finish()?
+        } else {
             self.worker
-                .call(Operation::Restore(snapshot.checkpoint.clone()))?,
-            Answer::Restored(_)
-        ) {
+                .call(Operation::Restore(snapshot.checkpoint.clone()))?
+        };
+        if !matches!(answer, Answer::Restored(_)) {
             return self.reject("invalid ARM checkpoint restore response".into());
         }
         self.physical = self

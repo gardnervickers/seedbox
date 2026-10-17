@@ -367,7 +367,17 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     /// Idempotently poison, close and reap owned worker transport without another
     /// guest request. In-process adapters explicitly succeed without a child.
     fn terminate_worker(&mut self) -> Result<(), String>;
+    /// Start `snapshot` without waiting for it, so a world's machines in
+    /// separate workers capture at once; `snapshot` then completes it. In-process
+    /// adapters do nothing here.
+    fn begin_snapshot(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     fn snapshot(&mut self) -> Result<Self::Snapshot, String>;
+    /// Start `restore` without waiting, as `begin_snapshot` does.
+    fn begin_restore(&mut self, _snapshot: &Self::Snapshot) -> Result<(), String> {
+        Ok(())
+    }
     fn restore(&mut self, snapshot: &Self::Snapshot) -> Result<u64, String>;
     /// Return at the first causal effect. Frames share this stop's committed
     /// timestamp; never batch frames past that stop or advance past hard_limit
@@ -1646,6 +1656,11 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         }) {
             return Err("checkpoint requires drained machine messages".into());
         }
+        // Workers capture their machines at once; collecting the results in
+        // machine order keeps the snapshot identical.
+        for machine in world.machines.iter_mut() {
+            machine.begin_snapshot()?;
+        }
         Ok(Self {
             boot_snapshot,
             version: 1,
@@ -1781,6 +1796,10 @@ impl<M: WorldMachine> WorldSnapshot<M> {
                 world.machines[i] =
                     M::boot(&world.factory, &name, &world.boot[i], world.barrier, seed)?;
             }
+            // Workers restore their machines at once.
+            world.machines[i].begin_restore(snapshot)?;
+        }
+        for (i, snapshot) in self.machines.iter().enumerate() {
             pages += world.machines[i].restore(snapshot)?;
         }
         if self.boot_snapshot {

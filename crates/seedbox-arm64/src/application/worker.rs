@@ -782,7 +782,24 @@ fn run_slice<B: Backend>(
 
 /// All requests complete stopped. Identity and sequence are checked before any
 /// physical action; errors terminate this worker rather than replaying mutation.
+/// How a machine worker serves; none of it changes results.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ServeOptions {
+    /// Restore checkpoints lazily: guest RAM maps the checkpoint file's RAM
+    /// section, loaded as the guest touches it, and the file is not hashed
+    /// as a whole first (the metadata and disk sections are still verified).
+    pub lazy_restore: bool,
+}
+
 pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Result<()> {
+    serve_with::<B>(input, output, ServeOptions::default())
+}
+
+pub fn serve_with<B: Backend>(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    options: ServeOptions,
+) -> Result<()> {
     let mut sequence = 0u64;
     let mut identity: Option<Identity> = None;
     let mut machine: Option<Machine<B>> = None;
@@ -832,7 +849,9 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 }
                 let mut file = std::fs::File::open(&saved.artifact)
                     .map_err(|e| format!("open checkpoint: {e}"))?;
-                if artifact_hash(&mut file)? != saved.sha256 {
+                // A lazy restore reads RAM only as the guest touches it, so it
+                // does not hash the whole file first.
+                if !options.lazy_restore && artifact_hash(&mut file)? != saved.sha256 {
                     return Err("checkpoint artifact hash mismatch".into());
                 }
                 let header = read_message::<CheckpointHeader>(&mut file)?
@@ -862,9 +881,12 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                 // HVF allows one VM per process and requires architectural restore
                 // into a never-entered replacement. Failure terminates this worker.
                 drop(machine.take());
-                let restored = boot
-                    .machine::<B>(boot.disk()?)?
-                    .restore_checkpoint(&mut file)?;
+                let replacement = boot.machine::<B>(boot.disk()?)?;
+                let restored = if options.lazy_restore {
+                    replacement.restore_checkpoint_lazy(&mut file)?
+                } else {
+                    replacement.restore_checkpoint(&mut file)?
+                };
                 if restored.stopped_observation() != saved.observation
                     || saved.console_offset > restored.console().len()
                 {
@@ -1108,7 +1130,8 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                             console_offset,
                         },
                     )?;
-                    snapshot.write_checkpoint(&mut sparse)?;
+                    let start = sparse.position;
+                    snapshot.write_checkpoint(&mut sparse, start)?;
                     sparse.finish()?;
                     let sha256 = artifact_hash(&mut file)?;
                     Ok(Answer::Snapshot(Checkpoint {
@@ -1160,11 +1183,25 @@ pub struct OwnedWorker {
     /// Chained slices the worker already ran, each with its answer and the
     /// stopped facts after it, served to the matching next requests.
     chained: std::collections::VecDeque<(Slice, Answer, StoppedObservation)>,
+    /// A snapshot or restore request sent by `begin`, awaiting `finish`.
+    begun: Option<Request>,
 }
 impl OwnedWorker {
     pub fn spawn(executable: &std::path::Path, identity: Identity) -> Result<Self> {
-        let mut child = Command::new(executable)
-            .args(["__engine", CONTRACT])
+        Self::spawn_with(executable, identity, ServeOptions::default())
+    }
+    /// A worker that serves with `options` (`--lazy-restore`).
+    pub fn spawn_with(
+        executable: &std::path::Path,
+        identity: Identity,
+        options: ServeOptions,
+    ) -> Result<Self> {
+        let mut command = Command::new(executable);
+        command.args(["__engine", CONTRACT]);
+        if options.lazy_restore {
+            command.arg("--lazy-restore");
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -1185,6 +1222,7 @@ impl OwnedWorker {
             observation: None,
             poison: None,
             chained: std::collections::VecDeque::new(),
+            begun: None,
         })
     }
     pub fn ensure_active(&self) -> Result<()> {
@@ -1250,6 +1288,54 @@ impl OwnedWorker {
             }
         }
     }
+    /// Send a snapshot or restore request without waiting for its answer;
+    /// `finish` takes it. Other operations use `call`.
+    pub fn begin(&mut self, operation: Operation) -> Result<()> {
+        if let Some(error) = &self.poison {
+            return Err(format!("machine worker is terminal: {error}"));
+        }
+        let result = (|| -> Result<()> {
+            if !matches!(
+                operation,
+                Operation::Snapshot { .. } | Operation::Restore(_)
+            ) {
+                return Err("only a snapshot or restore can be begun".into());
+            }
+            if !self.bound || !self.chained.is_empty() || self.begun.is_some() {
+                return Err("worker cannot begin a request now".into());
+            }
+            let request = Request {
+                sequence: self.sequence,
+                expected: self.identity.clone(),
+                operation,
+            };
+            send(self.input.as_mut().ok_or("worker input closed")?, &request)?;
+            self.begun = Some(request);
+            Ok(())
+        })();
+        if let Err(error) = &result {
+            self.invalidate(error);
+        }
+        result
+    }
+    /// The answer to the request `begin` sent.
+    pub fn finish(&mut self) -> Result<Answer> {
+        if let Some(error) = &self.poison {
+            return Err(format!("machine worker is terminal: {error}"));
+        }
+        let request = self.begun.take().ok_or("no begun worker request")?;
+        match self.complete(request) {
+            Ok(answer) => Ok(answer),
+            Err(error) => {
+                self.invalidate(&error);
+                Err(self.poison.clone().unwrap_or(error))
+            }
+        }
+    }
+    /// Whether a begun request awaits `finish`.
+    pub fn begun(&self) -> bool {
+        self.begun.is_some()
+    }
     fn exchange(&mut self, operation: Operation) -> Result<Answer> {
         if !self.chained.is_empty() {
             // Only the exact next chained slice may be requested.
@@ -1307,12 +1393,19 @@ impl OwnedWorker {
                 return Err("invalid worker slice hard limit".into());
             }
         }
+        if self.begun.is_some() {
+            return Err("worker request while another awaits its answer".into());
+        }
         let request = Request {
             sequence: self.sequence,
             expected: self.identity.clone(),
             operation,
         };
         send(self.input.as_mut().ok_or("worker input closed")?, &request)?;
+        self.complete(request)
+    }
+    /// Receive and validate the answer to `request`, already sent.
+    fn complete(&mut self, request: Request) -> Result<Answer> {
         let mut response =
             receive::<Response>(self.output.as_mut().ok_or("worker output closed")?)?
                 .ok_or("machine worker closed its output")?;
@@ -1897,6 +1990,7 @@ mod tests {
             observation: None,
             poison: None,
             chained: Default::default(),
+            begun: None,
         };
         let request = Request {
             sequence: 0,
