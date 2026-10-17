@@ -972,3 +972,135 @@ mod tests {
         );
     }
 }
+
+/// Rerun a completed simulation to a moment and run a command in one of its
+/// machines there; print the command's output and exit as `EXEC_HELP` says.
+pub(super) fn exec(
+    id: &SimulationId,
+    mut request: seedbox_api::ExecRequest,
+    keep: bool,
+) -> Result<u8> {
+    use super::simulations::client_error;
+    let client = daemon::connect(None)?;
+    request.request_id = Client::request_id().map_err(client_error)?;
+    let machine = request.machine.clone();
+    let cancellation = CancellationToken::default();
+    let _signals = super::signals::Signals::interrupt(&cancellation)?;
+    super::simulations::runtime()?.block_on(async {
+        let simulation = client
+            .submit_exec(id, &request)
+            .await
+            .map_err(client_error)?;
+        let rerun = simulation.metadata.id.clone();
+        eprintln!(
+            "exec: rerun {rerun} to {} on {machine}",
+            seconds(request.at_ns)
+        );
+        let mut stream = log_stream(&client, &rerun, Some(&machine), true).await?;
+        let mut pending = Vec::new();
+        let mut outcome = None;
+        while outcome.is_none() && !cancellation.is_cancelled() {
+            let Some(next) = stream.next().await else {
+                break;
+            };
+            match next.map_err(client_error)? {
+                LogDelivery::Entry {
+                    entry:
+                        LogEntry::Bytes {
+                            stream: seedbox_api::LogStream::Stderr,
+                            bytes,
+                            ..
+                        },
+                    ..
+                } => {
+                    pending.extend(bytes);
+                    while let Some(end) = pending.iter().position(|b| *b == b'\n') {
+                        let line: Vec<u8> = pending.drain(..=end).collect();
+                        let text = String::from_utf8_lossy(&line[..line.len() - 1]);
+                        match exec_line(&text) {
+                            Some(ExecLine::Output(out)) => {
+                                output::bytes(format!("{out}\n").as_bytes())?
+                            }
+                            Some(ExecLine::Exit(code, note)) => {
+                                eprintln!("exec: {note}");
+                                outcome = Some(code);
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                LogDelivery::Closed => break,
+                _ => {}
+            }
+        }
+        if !keep {
+            let _ = client.stop(&rerun).await;
+        }
+        Ok(outcome.unwrap_or_else(|| {
+            eprintln!("exec: the rerun ended before the command ran or finished");
+            2
+        }))
+    })
+}
+
+enum ExecLine<'a> {
+    Output(&'a str),
+    /// The exit status and the supervisor's note.
+    Exit(u8, &'a str),
+}
+
+/// A supervisor line about the command: `seedbox exec ID| OUTPUT` or
+/// `seedbox exec ID: NOTE` (`exited N`, `killed by signal N`, `NAME: not
+/// found`; `start` is not an exit).
+fn exec_line(line: &str) -> Option<ExecLine<'_>> {
+    let rest = line.strip_prefix("seedbox exec ")?;
+    let digits = rest.find(|c: char| !c.is_ascii_digit())?;
+    let (number, rest) = rest.split_at(digits);
+    if number.is_empty() {
+        return None;
+    }
+    if let Some(out) = rest.strip_prefix("| ") {
+        return Some(ExecLine::Output(out));
+    }
+    let note = rest.strip_prefix(": ")?;
+    match note {
+        "exited 0" => Some(ExecLine::Exit(0, note)),
+        _ if note.starts_with("exited ") || note.starts_with("killed by signal ") => {
+            Some(ExecLine::Exit(1, note))
+        }
+        _ if note.ends_with(": not found") => Some(ExecLine::Exit(2, note)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+
+    #[test]
+    fn supervisor_exec_lines_are_output_or_an_exit() {
+        assert!(matches!(
+            exec_line("seedbox exec 4| a: b | c"),
+            Some(ExecLine::Output("a: b | c"))
+        ));
+        assert!(matches!(
+            exec_line("seedbox exec 4: exited 0"),
+            Some(ExecLine::Exit(0, _))
+        ));
+        assert!(matches!(
+            exec_line("seedbox exec 4: exited 3"),
+            Some(ExecLine::Exit(1, _))
+        ));
+        assert!(matches!(
+            exec_line("seedbox exec 4: killed by signal 9"),
+            Some(ExecLine::Exit(1, _))
+        ));
+        assert!(matches!(
+            exec_line("seedbox exec 4: ls: not found"),
+            Some(ExecLine::Exit(2, _))
+        ));
+        assert!(exec_line("seedbox exec 4: start /bin/ls").is_none());
+        assert!(exec_line("seedbox exec x| y").is_none());
+        assert!(exec_line("application line").is_none());
+    }
+}

@@ -547,6 +547,13 @@ pub enum Action {
     ResumeProcess {
         machine: String,
     },
+    /// Run `argv` in the machine's application environment, beside the
+    /// application, with its output in the machine's logs: a debugging probe
+    /// added to a rerun, never part of a fault profile.
+    Exec {
+        machine: String,
+        argv: Vec<String>,
+    },
     Partition {
         handle: String,
         left: Vec<String>,
@@ -669,6 +676,7 @@ impl Action {
             Self::Restart { .. } => "restart",
             Self::PauseProcess { .. } => "pause_process",
             Self::ResumeProcess { .. } => "resume_process",
+            Self::Exec { .. } => "exec",
             Self::Partition { .. } => "partition",
             Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
@@ -690,6 +698,7 @@ impl Action {
             | Self::Restart { machine }
             | Self::PauseProcess { machine }
             | Self::ResumeProcess { machine }
+            | Self::Exec { machine, .. }
             | Self::Pause { machine }
             | Self::Resume { machine }
             | Self::Crash { machine }
@@ -711,6 +720,7 @@ impl Action {
                 | Self::Restart { .. }
                 | Self::PauseProcess { .. }
                 | Self::ResumeProcess { .. }
+                | Self::Exec { .. }
         )
     }
     /// Whole-machine lifecycle effects, which the world applies at admission.
@@ -807,6 +817,32 @@ pub const PREEMPT_PPM: std::ops::RangeInclusive<u32> = 1..=1_000_000;
 /// stalled device (1 s). Jitter is bounded the same way.
 pub const DISK_LATENCY_NS: std::ops::RangeInclusive<u64> = 1_000..=1_000_000_000;
 /// Latency and jitter within [`DISK_LATENCY_NS`] (jitter may be zero).
+/// The most bytes an `exec` argv may hold, NULs between arguments included.
+pub const EXEC_ARGV_BYTES: usize = 4096;
+
+/// An `exec` argv: one to 64 arguments, none with a NUL, the first nonempty.
+pub fn validate_exec(argv: &[String]) -> Result<(), String> {
+    if argv.is_empty() || argv.len() > 64 || argv[0].is_empty() {
+        return Err("exec argv must hold 1 to 64 arguments, the first nonempty".into());
+    }
+    if argv.iter().any(|a| a.contains('\0')) {
+        return Err("exec arguments may not contain NUL".into());
+    }
+    if argv.iter().map(|a| a.len() + 1).sum::<usize>() > EXEC_ARGV_BYTES {
+        return Err(format!("exec argv is over {EXEC_ARGV_BYTES} bytes"));
+    }
+    Ok(())
+}
+
+/// The supervisor's form of an `exec` argv: the arguments joined by NUL,
+/// in lowercase hex, so no byte can break the management frame.
+pub fn exec_payload(argv: &[String]) -> String {
+    argv.join("\0")
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 pub fn validate_disk_latency(latency_ns: u64, jitter_ns: u64) -> Result<(), String> {
     if !DISK_LATENCY_NS.contains(&latency_ns) || jitter_ns > *DISK_LATENCY_NS.end() {
         return Err(format!(

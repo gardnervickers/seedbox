@@ -378,6 +378,26 @@ enum Command {
         #[arg(long, value_parser = wall_time)]
         wall_time: Option<u64>,
     },
+    /// Run a command in a machine at a moment of a completed simulation, by rerunning it to that moment.
+    #[command(after_help = EXEC_HELP)]
+    Exec {
+        /// Completed simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Machine to run the command in.
+        machine: String,
+        /// Simulated time at which the command runs, such as 12s.
+        #[arg(long, value_parser = sim_time)]
+        at: u64,
+        /// Keep the rerun going after the command exits, rather than stopping it.
+        #[arg(long)]
+        keep: bool,
+        /// Stop the rerun after this much active host time [default: unlimited].
+        #[arg(long, value_parser = wall_time)]
+        wall_time: Option<u64>,
+        /// The command and its arguments, after `--`.
+        #[arg(last = true, required = true)]
+        argv: Vec<String>,
+    },
     /// Rerun a simulation through the server and compare its retained results.
     #[command(after_help = EXIT_CODES)]
     Replay {
@@ -601,6 +621,17 @@ fn wall_time(value: &str) -> std::result::Result<u64, String> {
 fn sim_time(value: &str) -> std::result::Result<u64, String> {
     config::duration_ns(value).map_err(|error| error.to_string())
 }
+
+const EXEC_HELP: &str =
+    "The rerun starts fresh from the source's definition and inputs, so it is the
+source up to --at; the command then runs beside the application, under the
+same translator, and must exist in the machine's image. Its output goes to
+stdout; the rerun's ID and the command's exit go to stderr.
+
+Exit status:
+  0    the command exited 0
+  1    the command exited nonzero or was killed
+  2    it never ran (not found, or the rerun ended first), or a usage or setup error";
 
 const WAIT_HELP: &str = "Conditions:
   completed                    the simulation has completed, for any reason
@@ -1053,6 +1084,28 @@ fn run(cli: Cli) -> Result<u8> {
             },
             detach,
             json,
+        ),
+        Command::Exec {
+            id,
+            machine,
+            at,
+            keep,
+            wall_time,
+            argv,
+        } => observe::exec(
+            &id,
+            seedbox_api::ExecRequest {
+                request_id: String::new(),
+                machine,
+                at_ns: at,
+                argv,
+                options: seedbox_api::ExecutionOptions {
+                    capture_anchors: Vec::new(),
+                    start_paused: false,
+                    wall_time_ns: wall_time,
+                },
+            },
+            keep,
         ),
         Command::Events { id, follow } => observe::events(&id, follow),
         Command::Wait {

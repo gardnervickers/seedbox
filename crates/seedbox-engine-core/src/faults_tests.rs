@@ -459,3 +459,36 @@ fn target_preview_preserves_all_fault_state_rng_and_next_identity() {
         untouched.links.stream_sample((0, 1))
     );
 }
+#[test]
+fn an_exec_sends_its_argv_in_hex_and_needs_a_running_process() {
+    let mut f = engine::Faults::new(
+        vec![
+            json!({"id":1,"at_ns":10,"deadline_ns":20,"action":"exec","machine":"n1","argv":["cat","/data/a b"]}),
+            json!({"id":2,"at_ns":30,"deadline_ns":40,"action":"stop","machine":"n1"}),
+        ],
+        vec!["n1".into()],
+    )
+    .unwrap();
+    // "cat\0/data/a b", byte by byte.
+    assert_eq!(
+        f.apply_due(10),
+        vec![(0, b"exec 1 636174002f646174612f612062\n".to_vec())]
+    );
+    f.effect(0, 1, 12, true);
+    assert_eq!(f.log[0].json()["status"], "applied");
+    f.apply_due(30);
+    f.effect(0, 2, 32, true);
+    // An exec into a stopped application is not admitted.
+    let exec = seedbox_control::Action::Exec {
+        machine: "n1".into(),
+        argv: vec!["ls".into()],
+    };
+    assert!(f.validate_admission_state(&exec).is_err());
+    for argv in [json!([]), json!([""]), json!(["a\u{0}b"])] {
+        assert!(engine::Faults::new(
+            vec![json!({"id":1,"at_ns":10,"deadline_ns":20,"action":"exec","machine":"n1","argv":argv})],
+            vec!["n1".into()],
+        )
+        .is_err());
+    }
+}

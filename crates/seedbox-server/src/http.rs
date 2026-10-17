@@ -68,6 +68,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/shrinks/{id}", get(shrink))
         .route("/v1/simulations/{id}/analyze", post(submit_analysis))
         .route("/v1/analyses/{id}", get(analysis))
+        .route("/v1/simulations/{id}/exec", post(submit_exec))
         .route("/v1/simulations/{id}/compare/{other}", get(compare))
         .route("/v1/simulations/{id}/diagnostics", get(diagnostics))
         .route(
@@ -1107,6 +1108,45 @@ async fn submit_analysis(
     let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
     let Json(request) = body.map_err(|e| HttpError::invalid(e.body_text()))?;
     jobs(state, move |e| e.submit_analysis(&id, request)).await
+}
+
+async fn submit_exec(
+    State(state): State<ApiState>,
+    path: Result<Path<SimulationId>, PathRejection>,
+    body: Result<Json<seedbox_api::ExecRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Simulation>), HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let Json(request) = body.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let execution = state
+        .execution
+        .clone()
+        .ok_or_else(|| HttpError::invalid("exec is unavailable"))?;
+    let permit = state.submissions.try_reserve_owned().map_err(|_| {
+        HttpError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Unavailable,
+            "execution queue unavailable; retry with the same request ID",
+        )
+    })?;
+    tokio::task::spawn_blocking(move || {
+        let submission = execution
+            .exec_submission(&id, request)
+            .map_err(HttpError::from)?;
+        let (simulation, created) = state.manager.submit(submission)?;
+        if created {
+            permit.send(simulation.metadata.id.clone());
+        }
+        Ok((
+            if created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            },
+            Json(simulation),
+        ))
+    })
+    .await
+    .map_err(|_| HttpError::internal("exec task failed"))?
 }
 
 async fn analysis(

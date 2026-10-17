@@ -238,6 +238,81 @@ impl ExecutionService {
     }
 }
 
+impl ExecutionService {
+    /// The submission that reruns a completed simulation from a fresh start
+    /// with `argv` run in one machine at `at_ns`; the run is the source's
+    /// until then.
+    pub fn exec_submission(
+        &self,
+        source: &SimulationId,
+        request: seedbox_api::ExecRequest,
+    ) -> Result<SubmitRequest, Error> {
+        seedbox_control::validate_exec(&request.argv).map_err(invalid)?;
+        let resource = self.portable_simulation(source)?;
+        if resource.status.phase != Phase::Completed {
+            return Err(invalid("exec into a completed simulation"));
+        }
+        let mut spec = resource.spec.clone();
+        match &mut spec.inputs {
+            InputSource::Resolved { definition } => {
+                if !definition.machines.contains_key(&request.machine) {
+                    return Err(invalid(format!(
+                        "{source} has no machine {}",
+                        request.machine
+                    )));
+                }
+                definition.start = seedbox_spec::definition::Start::Fresh;
+            }
+            _ => return Err(invalid("exec needs a resolved definition")),
+        }
+        if request.at_ns >= resource.status.simulated_time_ns {
+            return Err(invalid(format!(
+                "{source} ended at {} ns; exec before that",
+                resource.status.simulated_time_ns
+            )));
+        }
+        let mut program: Vec<TimedInput> =
+            spec.program.iter().map(timed).collect::<Result<_, _>>()?;
+        // After every input already due then, so the command sees their effects.
+        let at = program.partition_point(|i| i.at_ns <= request.at_ns);
+        program.insert(
+            at,
+            TimedInput {
+                key: "exec".into(),
+                at_ns: request.at_ns,
+                action: InputAction::Fault(seedbox_control::Action::Exec {
+                    machine: request.machine.clone(),
+                    argv: request.argv.clone(),
+                }),
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            },
+        );
+        seedbox_engine_protocol::input_program::validate_program(&program, u64::MAX)
+            .map_err(invalid)?;
+        spec.program = program
+            .iter()
+            .map(program_input)
+            .collect::<Result<_, _>>()?;
+        let mut metadata = seedbox_spec::definition::Metadata {
+            name: format!("{source}-exec"),
+            ..Default::default()
+        };
+        metadata
+            .annotations
+            .insert("derived-from".into(), source.to_string());
+        metadata
+            .annotations
+            .insert("exec".into(), request.machine.clone());
+        Ok(SubmitRequest {
+            options: request.options,
+            metadata,
+            request_id: request.request_id,
+            spec,
+            fault_profile: None,
+        })
+    }
+}
+
 /// What a probe of `status` must show to fail the same way: `property`, or
 /// the oracle failure, or the first violated property.
 pub(super) fn failure_target(

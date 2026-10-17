@@ -215,6 +215,17 @@ impl Client {
         )
         .await
     }
+    pub async fn submit_exec(
+        &self,
+        source: &SimulationId,
+        request: &seedbox_api::ExecRequest,
+    ) -> Result<Simulation, Error> {
+        self.document(
+            self.request(Method::POST, &format!("/v1/simulations/{source}/exec"))
+                .json(request),
+        )
+        .await
+    }
     pub async fn analysis(&self, id: &str) -> Result<seedbox_api::Analysis, Error> {
         self.document(self.request(Method::GET, &format!("/v1/analyses/{id}")))
             .await

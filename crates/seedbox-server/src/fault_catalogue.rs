@@ -293,6 +293,8 @@ mod tests {
             | Action::Crash { .. }
             | Action::Reboot { .. }
             | Action::DropConnection { .. } => {}
+            // A debugging probe (`seedbox exec`), not a fault to discover.
+            Action::Exec { .. } => {}
         }
     }
     fn example(schema: &Value) -> Value {

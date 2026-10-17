@@ -393,6 +393,7 @@ impl Faults {
             | Action::Restart { machine }
             | Action::PauseProcess { machine }
             | Action::ResumeProcess { machine }
+            | Action::Exec { machine, .. }
             | Action::Pause { machine }
             | Action::Resume { machine }
             | Action::Crash { machine }
@@ -417,6 +418,9 @@ impl Faults {
                         return Err("invalid disk_latency handle".into());
                     }
                     seedbox_control::validate_disk_latency(*latency_ns, *jitter_ns)?;
+                }
+                if let Action::Exec { argv, .. } = &plan.action {
+                    seedbox_control::validate_exec(argv)?;
                 }
                 if let Action::Throttle {
                     handle, speed_hz, ..
@@ -793,6 +797,8 @@ impl Faults {
                 Some("restart requires a stopped target process")
             }
             Action::PauseProcess { .. } if self.stopped[index] => Some("target process is stopped"),
+            Action::Exec { .. } if self.stopped[index] => Some("target process is stopped"),
+            Action::Exec { .. } if self.frozen[index] => Some("target process is paused"),
             Action::PauseProcess { .. } if self.frozen[index] => {
                 Some("target process is already paused")
             }
@@ -1042,7 +1048,12 @@ impl Faults {
         match e.clock {
             Some(ClockChange::Step(step)) => format!("clock_step {id} {step}\n"),
             Some(ClockChange::Rate(rate)) => format!("clock_rate {id} {rate}\n"),
-            None => format!("{} {id}\n", command(&e.plan.action)),
+            None => match &e.plan.action {
+                Action::Exec { argv, .. } => {
+                    format!("exec {id} {}\n", seedbox_control::exec_payload(argv))
+                }
+                action => format!("{} {id}\n", command(action)),
+            },
         }
         .into_bytes()
     }
@@ -1135,7 +1146,8 @@ impl Faults {
             Action::Stop { .. }
             | Action::Restart { .. }
             | Action::PauseProcess { .. }
-            | Action::ResumeProcess { .. } => {
+            | Action::ResumeProcess { .. }
+            | Action::Exec { .. } => {
                 self.request_effect(i, commands);
             }
             Action::ClockSkew {
@@ -1650,6 +1662,7 @@ impl Faults {
                 }
                 Action::PauseProcess { .. } => self.frozen[machine] = true,
                 Action::ResumeProcess { .. } => self.frozen[machine] = false,
+                Action::Exec { .. } => {}
                 _ => self.stopped[machine] = false,
             }
             self.applied(

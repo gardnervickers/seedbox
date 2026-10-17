@@ -316,6 +316,9 @@ impl Tracker {
                     self.process_effects.remove(machine);
                 }
             }
+            // A debugging probe runs beside the application and changes no
+            // world state.
+            FaultAction::Exec { .. } => {}
             FaultAction::Pause { machine } => {
                 self.machine_pauses.insert(machine.clone(), id);
             }

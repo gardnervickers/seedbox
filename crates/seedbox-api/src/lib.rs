@@ -56,7 +56,7 @@ pub use campaign::{
 
 mod analysis;
 pub use analysis::{
-    Analysis, AnalysisArm, AnalysisArmKind, AnalysisRequest, MAX_ANALYSIS_RUNS,
+    Analysis, AnalysisArm, AnalysisArmKind, AnalysisRequest, ExecRequest, MAX_ANALYSIS_RUNS,
     MAX_ANALYSIS_SAMPLES, MAX_ANALYSIS_TIMES,
 };
 

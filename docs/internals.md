@@ -655,6 +655,27 @@ T; one near 100% says the run was already doomed by then. Rates describe
 these reruns, not a proven cause. Every run is submitted at once, variant by
 variant, so early results cover every arm.
 
+## Commands in a recorded run
+
+`seedbox exec ID MACHINE --at T -- ARGV` runs a command in a machine at a
+moment of a completed simulation. The server (`exec_submission`) builds an
+ordinary rerun of the source's full program from a fresh start, with one
+`exec` input at T after the inputs already due then; replay is exact, so the
+rerun is the source up to T. The engine sends the guest supervisor
+`exec ID HEX`, the argv joined by NUL in lowercase hex
+(`seedbox_control::exec_payload`), when the application is running (not
+stopped or paused), and the supervisor acknowledges it like a process fault.
+The supervisor forks the command in the application's environment (working
+directory, limits, credentials, variables, PATH lookup) under the same
+translator, reads its output through a pipe, and writes each line to the
+application's stderr as `seedbox exec ID| LINE`, between `seedbox exec ID:
+start PATH` and `exited N` or `killed by signal N` (or `NAME: not found`).
+One runs at a time. The CLI follows the machine's logs, prints the prefixed
+lines and exits 0, 1 or 2 by the command's outcome, then stops the rerun
+unless `--keep`. The command must exist in the image; the rerun is a new
+simulation, and its results after T reflect the command.
+Code: [supervisor](../guest/compose-init.c), [server](../crates/seedbox-server/src/execution/campaigns/analysis.rs).
+
 ## Failure timeline
 
 `seedbox explain` projects a completed simulation's retained evidence into

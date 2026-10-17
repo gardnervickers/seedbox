@@ -17,6 +17,7 @@
 #include <pwd.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -726,6 +727,145 @@ static void oom_kills_reconcile(int64_t reported) {
     }
     if (counted >= 0) oom_kills_counted = counted;
 }
+/* The application's argv under the progress translator: drrun, its
+ * options and client, `--`, then the arguments. */
+static char **instrumented_arguments(char **arguments) {
+    size_t count = 0;
+    while (arguments[count]) ++count;
+    /* Translator arguments, the application's own, and execv's NULL. */
+    enum { PREFIX_MAX = 15 };
+    char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
+    if (!instrumented) die("instrumentation arguments");
+    size_t prefix = 0;
+    instrumented[prefix++] = "/seedbox/progress/bin64/drrun";
+    instrumented[prefix++] = "-opt_speed";
+    instrumented[prefix++] = "-disable_traces";
+#if defined(__aarch64__)
+    /* The patched ARM translator implements guest-epoch reservations and
+     * hides host-only exclusive-store retries from application execution. */
+    instrumented[prefix++] = "-ldstex2cas";
+    /* Detect rewritten code through the application's IC IVAU, rather
+     * than write protection and sandboxing; the latter exhausted memory
+     * in the observed Kafka startup. Clear CTR_EL0.DIC so applications
+     * cannot legally omit the IC IVAU that invalidates cached code. */
+    instrumented[prefix++] = "-no_hw_cache_consistency";
+    instrumented[prefix++] = "-fake_ctr_dic";
+#endif
+    instrumented[prefix++] = "-c";
+    instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
+    /* Static: the vector outlives this call. */
+    static char progress_budget[11], progress_points[11];
+    snprintf(progress_budget, sizeof(progress_budget), "%u", instructions_per_progress_call);
+    snprintf(progress_points, sizeof(progress_points), "%u", progress_points_per_block);
+    instrumented[prefix++] = "--instructions-per-progress-call";
+    instrumented[prefix++] = progress_budget;
+    instrumented[prefix++] = "--progress-points-per-block";
+    instrumented[prefix++] = progress_points;
+    if (coverage_enabled) {
+        instrumented[prefix++] = "--coverage-dir";
+        instrumented[prefix++] = COVERAGE_DIR;
+    }
+    instrumented[prefix++] = "--";
+    if (prefix > PREFIX_MAX) die("instrumentation prefix");
+    for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
+    instrumented[prefix + count] = NULL;
+    return instrumented;
+}
+/* `exec` children run beside the application, one at a time. Their output
+ * comes back through `exec_read`, and each line joins the application's
+ * stderr prefixed `seedbox exec ID| `, so it stays apart from the
+ * application's own output. */
+static int exec_output[2] = {-1, -1};
+static int exec_read = -1;
+static char exec_line[1024];
+static size_t exec_used;
+static pid_t exec_child = -1;
+static uint32_t exec_id;
+static void exec_note(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static void exec_note(const char *format, ...) {
+    if (exec_output[1] < 0) return;
+    char line[512];
+    va_list args;
+    va_start(args, format);
+    int length = vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    /* Best effort: a diagnostic line never stops the supervisor. */
+    if (length > 0 && write(exec_output[1], line, (size_t)length < sizeof(line) ? (size_t)length : sizeof(line) - 1) < 0) {}
+}
+/* Relay what the exec child wrote, line by line; at end of file, the rest. */
+static void exec_relay(void) {
+    char bytes[4096];
+    for (;;) {
+        ssize_t n = read(exec_read, bytes, sizeof(bytes));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) return; /* EAGAIN: more later. */
+        for (ssize_t i = 0; i < n; i++) {
+            if (bytes[i] != '\n') exec_line[exec_used++] = bytes[i];
+            if (bytes[i] == '\n' || exec_used == sizeof(exec_line)) {
+                exec_note("seedbox exec %u| %.*s\n", exec_id, (int)exec_used, exec_line);
+                exec_used = 0;
+            }
+        }
+        if (!n) {
+            if (exec_used) exec_note("seedbox exec %u| %.*s\n", exec_id, (int)exec_used, exec_line);
+            exec_used = 0;
+            close(exec_read);
+            exec_read = -1;
+            return;
+        }
+    }
+}
+/* Run `argv` in the application's environment, under the translator,
+ * bracketed by `seedbox exec ID: start` and `exited` lines. */
+static int run_exec(char **argv, uint32_t id) {
+    if (exec_child > 0 || exec_read >= 0 || exec_output[0] < 0) { errno = EBUSY; return -1; }
+    char *path = argv[0];
+    static char resolved[PATH_MAX];
+    if (!strchr(path, '/')) {
+        const char *search = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+        for (char **entry = environment; entry && *entry; ++entry)
+            if (!strncmp(*entry, "PATH=", 5)) search = *entry + 5;
+        path = NULL;
+        while (*search && !path) {
+            size_t length = strcspn(search, ":");
+            if (snprintf(resolved, sizeof(resolved), "%.*s/%s", (int)length, search, argv[0]) < (int)sizeof(resolved)
+                && !access(resolved, X_OK)) path = resolved;
+            search += length + (search[length] == ':');
+        }
+        if (!path) { exec_note("seedbox exec %u: %s: not found\n", id, argv[0]); errno = ENOENT; return -1; }
+    }
+    int relay[2];
+    if (pipe2(relay, O_CLOEXEC)) return -1;
+    exec_id = id;
+    exec_note("seedbox exec %u: start %s\n", id, path);
+    pid_t pid = fork();
+    if (pid < 0) { close(relay[0]); close(relay[1]); return -1; }
+    if (!pid) {
+        diagnostic_fd = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3);
+        if (diagnostic_fd < 0) diagnostic_fd = STDERR_FILENO;
+        if (setpgid(0, 0)) die("exec process group");
+        if (watching && sigprocmask(SIG_SETMASK, &wait_mask, NULL)) die("exec signal mask");
+        if (management >= 0) close(management);
+        for (int stream = 1; stream <= 2; ++stream)
+            if (dup2(relay[1], stream) < 0) die("exec output");
+        int input = open("/dev/null", O_RDONLY);
+        if (input < 0 || dup2(input, STDIN_FILENO) < 0) die("exec stdin");
+        if (input > 2) close(input);
+        if (chdir(working_dir)) die("exec working directory");
+        application_limits();
+        credentials();
+        environ = environment;
+        argv[0] = path;
+        char **instrumented = instrumented_arguments(argv);
+        execv(instrumented[0], instrumented);
+        die("exec");
+    }
+    close(relay[1]);
+    if (fcntl(relay[0], F_SETFL, O_NONBLOCK)) die("exec relay");
+    exec_read = relay[0];
+    exec_child = pid;
+    return 0;
+}
 static pid_t start(void) {
     for (char **entry = environment; entry && *entry; ++entry) {
         if (!strcmp(*entry, "SEEDBOX_COVERAGE=1")) coverage_enabled = 1;
@@ -763,50 +903,16 @@ static pid_t start(void) {
         environ = environment;
         arguments = seedbox_script_arguments(arguments);
         if (!arguments) die("resolve application interpreter");
-        size_t count = 0;
-        while (arguments[count]) ++count;
-        /* Translator arguments, the application's own, and execv's NULL. */
-        enum { PREFIX_MAX = 15 };
-        char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
-        if (!instrumented) die("instrumentation arguments");
-        size_t prefix = 0;
-        instrumented[prefix++] = "/seedbox/progress/bin64/drrun";
-        instrumented[prefix++] = "-opt_speed";
-        instrumented[prefix++] = "-disable_traces";
-#if defined(__aarch64__)
-        /* The patched ARM translator implements guest-epoch reservations and
-         * hides host-only exclusive-store retries from application execution. */
-        instrumented[prefix++] = "-ldstex2cas";
-        /* Detect rewritten code through the application's IC IVAU, rather
-         * than write protection and sandboxing; the latter exhausted memory
-         * in the observed Kafka startup. Clear CTR_EL0.DIC so applications
-         * cannot legally omit the IC IVAU that invalidates cached code. */
-        instrumented[prefix++] = "-no_hw_cache_consistency";
-        instrumented[prefix++] = "-fake_ctr_dic";
-#endif
-        instrumented[prefix++] = "-c";
-        instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
-        char progress_budget[11], progress_points[11];
-        snprintf(progress_budget, sizeof(progress_budget), "%u", instructions_per_progress_call);
-        snprintf(progress_points, sizeof(progress_points), "%u", progress_points_per_block);
-        instrumented[prefix++] = "--instructions-per-progress-call";
-        instrumented[prefix++] = progress_budget;
-        instrumented[prefix++] = "--progress-points-per-block";
-        instrumented[prefix++] = progress_points;
-        if (coverage_enabled) {
-            instrumented[prefix++] = "--coverage-dir";
-            instrumented[prefix++] = COVERAGE_DIR;
-        }
-        instrumented[prefix++] = "--";
-        if (prefix > PREFIX_MAX) die("instrumentation prefix");
-        for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
-        instrumented[prefix + count] = NULL;
+        char **instrumented = instrumented_arguments(arguments);
         execv(instrumented[0], instrumented);
         die("exec application");
     }
     close(launch_error[1]);
+    /* Keep the write ends (close-on-exec) for `exec` children, so their
+     * output joins the application's streams. */
     for (unsigned stream = 0; stream < 2; ++stream) {
-        close(application_outputs[stream].write_fd);
+        if (exec_output[stream] >= 0) close(exec_output[stream]);
+        exec_output[stream] = application_outputs[stream].write_fd;
         application_outputs[stream].write_fd = -1;
     }
     char error; ssize_t received;
@@ -875,7 +981,11 @@ static int stop(pid_t *child) {
     if (errno != ECHILD) return -1;
     drain_output();
     if (property_listener >= 0) property_drain();
-    for (unsigned stream = 0; stream < 2; ++stream) application_output_close(&application_outputs[stream]);
+    for (unsigned stream = 0; stream < 2; ++stream) {
+        application_output_close(&application_outputs[stream]);
+        if (exec_output[stream] >= 0) close(exec_output[stream]);
+        exec_output[stream] = -1;
+    }
     return 0;
 }
 /* Test builds replace the privileged clock adjustment. */
@@ -947,6 +1057,11 @@ static void control(char *command, pid_t *child) {
         return;
     }
     char *action; uint32_t id; int64_t step;
+    char *exec_argv[65];
+    switch (control_exec(command, &id, exec_argv, 65)) {
+    case 1: acknowledge("exec", id, run_exec(exec_argv, id) == 0); return;
+    case -1: errno = EINVAL; die("invalid exec command");
+    }
     if (control_parse(command, &action, &id, &step)) { errno = EINVAL; die("invalid management command"); }
     int success = 0;
     if (!strcmp(action, "clock_step")) success = step_wall_clock(step) == 0;
@@ -984,7 +1099,7 @@ static void relay_management(pid_t *child) {
  * idle disconnect releases the current session; a partial or outstanding RPC
  * still fails closed. The listener stays open for a later connection. */
 static void service_channels(pid_t *child, int timeout) {
-    struct pollfd pfds[7 + PROPERTY_SESSIONS] = {
+    struct pollfd pfds[8 + PROPERTY_SESSIONS] = {
         {.fd = management, .events = POLLIN},
         {.fd = control_client < 0 ? control_listener : -1, .events = POLLIN},
         {.fd = control_client, .events = POLLIN},
@@ -996,8 +1111,9 @@ static void service_channels(pid_t *child, int timeout) {
     for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
         pfds[7 + i] = (struct pollfd){.fd = property_listener >= 0 ? property_clients[i].fd : -1, .events = POLLIN};
     }
+    pfds[7 + PROPERTY_SESSIONS] = (struct pollfd){.fd = exec_read, .events = POLLIN};
     struct timespec limit = {.tv_sec = timeout / 1000, .tv_nsec = timeout % 1000 * 1000000L};
-    int ready = ppoll(pfds, 7 + PROPERTY_SESSIONS, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
+    int ready = ppoll(pfds, 8 + PROPERTY_SESSIONS, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
     if (ready < 0) { if (errno != EINTR) die("poll management"); return; }
     if (!ready) return;
     if (pfds[1].revents & (POLLERR|POLLHUP|POLLNVAL)) { errno = EIO; die("control listener poll"); }
@@ -1017,6 +1133,7 @@ static void service_channels(pid_t *child, int timeout) {
         if (pfds[7 + i].revents & POLLNVAL) { errno = EIO; die("SDK client poll"); }
         if (pfds[7 + i].revents & (POLLIN|POLLHUP|POLLERR)) property_read(&property_clients[i]);
     }
+    if (pfds[7 + PROPERTY_SESSIONS].revents & (POLLIN|POLLHUP|POLLERR)) exec_relay();
     if (pfds[0].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("management port poll"); }
     if (pfds[0].revents & (POLLIN|POLLHUP)) relay_management(child);
 }
@@ -1025,6 +1142,12 @@ static void supervise(pid_t *child) {
         int status;
         pid_t done;
         while ((done = waitpid(-1, &status, WNOHANG)) > 0) {
+            if (done == exec_child) {
+                exec_child = -1;
+                if (exec_read >= 0) exec_relay();
+                if (WIFEXITED(status)) exec_note("seedbox exec %u: exited %d\n", exec_id, WEXITSTATUS(status));
+                else exec_note("seedbox exec %u: killed by signal %d\n", exec_id, WTERMSIG(status));
+            }
             if (done == *child) {
                 drain_output();
                 kernel_log_read();

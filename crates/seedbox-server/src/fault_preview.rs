@@ -137,6 +137,19 @@ pub(crate) fn preview(
             "Send SIGSTOP to the application process group; the guest kernel continues running."
                 .into()
         }
+        Action::Exec { argv, .. } => {
+            result.preconditions.push(
+                "The application must be running, not stopped or paused; its machine must be up."
+                    .into(),
+            );
+            result.limitations.push(
+                "The command must exist in the machine's image; it runs beside the application, under the same translator, and its output joins the machine's logs.".into(),
+            );
+            format!(
+                "Run `{}` in the machine's application environment.",
+                argv.join(" ")
+            )
+        }
         Action::ResumeProcess { .. } => {
             result
                 .preconditions

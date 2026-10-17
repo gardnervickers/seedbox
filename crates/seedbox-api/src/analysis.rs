@@ -84,3 +84,16 @@ pub struct Analysis {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+/// Rerun a completed simulation from a fresh start with one command run in a
+/// machine at a moment: the run is the source's up to then, so the command
+/// observes the state the source had.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecRequest {
+    pub request_id: String,
+    pub machine: String,
+    pub at_ns: u64,
+    pub argv: Vec<String>,
+    pub options: ExecutionOptions,
+}
