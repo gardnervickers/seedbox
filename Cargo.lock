@@ -1003,15 +1003,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iced-x86"
-version = "1.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c447cff8c7f384a7d4f741cfcff32f75f3ad02b406432e8d6c878d56b1edf6b"
-dependencies = [
- "lazy_static",
-]
-
-[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1216,9 +1207,7 @@ version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11cf0ca75d59e9d298647c59cf6c5286fa048120caa77972a7a504a0824d234f"
 dependencies = [
- "serde",
  "vmm-sys-util",
- "zerocopy",
 ]
 
 [[package]]
@@ -1232,24 +1221,6 @@ dependencies = [
  "libc",
  "vmm-sys-util",
 ]
-
-[[package]]
-name = "kvm-ioctls"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06ac372c120eb893b086d1a12027669cf2b478d1f71204021ffa7adf57948d63"
-dependencies = [
- "bitflags 2.13.2",
- "kvm-bindings",
- "libc",
- "vmm-sys-util",
-]
-
-[[package]]
-name = "lazy_static"
-version = "1.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libbz2-rs-sys"
@@ -1869,7 +1840,6 @@ dependencies = [
  "libc",
  "seedbox-api",
  "seedbox-application",
- "seedbox-arm64",
  "seedbox-cli",
  "seedbox-client",
  "seedbox-engine-core",
@@ -1879,7 +1849,6 @@ dependencies = [
  "seedbox-spec",
  "seedbox-test",
  "seedbox-test-time",
- "seedbox-vmm",
  "serde_json",
  "serde_yaml_ng",
  "tar",
@@ -1910,7 +1879,6 @@ dependencies = [
  "hex",
  "libc",
  "ocirender",
- "seedbox-arm64",
  "seedbox-artifacts",
  "seedbox-control",
  "seedbox-driver",
@@ -1922,7 +1890,6 @@ dependencies = [
  "seedbox-spec",
  "seedbox-test",
  "seedbox-test-time",
- "seedbox-vmm",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -1934,56 +1901,6 @@ dependencies = [
  "tokio-util",
  "walkdir",
  "xattr",
-]
-
-[[package]]
-name = "seedbox-arm64"
-version = "0.1.0"
-dependencies = [
- "cc",
- "clap",
- "hex",
- "kvm-bindings",
- "kvm-ioctls 0.24.0",
- "libc",
- "seedbox-arm64-control",
- "seedbox-arm64-engine-core",
- "seedbox-exec",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "seedbox-arm64-control"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "seedbox-arm64-engine-core"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rayon",
- "seedbox-arm64-control",
- "seedbox-arm64-protocol",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "seedbox-arm64-protocol"
-version = "0.1.0"
-dependencies = [
- "libc",
- "seedbox-arm64-control",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2132,7 +2049,7 @@ dependencies = [
  "cc",
  "hex",
  "kvm-bindings",
- "kvm-ioctls 0.24.0",
+ "kvm-ioctls",
  "libc",
  "seedbox-exec",
  "seedbox-machine",
@@ -2239,55 +2156,6 @@ dependencies = [
  "serde_yaml_ng",
  "tempfile",
  "tokio",
-]
-
-[[package]]
-name = "seedbox-vmm"
-version = "0.1.0"
-dependencies = [
- "clap",
- "hex",
- "iced-x86",
- "kvm-bindings",
- "kvm-ioctls 0.25.0",
- "libc",
- "seedbox-vmm-control",
- "seedbox-vmm-engine-core",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "seedbox-vmm-control"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "seedbox-vmm-engine-core"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rayon",
- "seedbox-vmm-control",
- "seedbox-vmm-protocol",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "seedbox-vmm-protocol"
-version = "0.1.0"
-dependencies = [
- "libc",
- "seedbox-vmm-control",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -3214,26 +3082,6 @@ dependencies = [
  "quote",
  "syn 3.0.6",
  "synstructure",
-]
-
-[[package]]
-name = "zerocopy"
-version = "0.8.59"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
-dependencies = [
- "zerocopy-derive",
-]
-
-[[package]]
-name = "zerocopy-derive"
-version = "0.8.59"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]

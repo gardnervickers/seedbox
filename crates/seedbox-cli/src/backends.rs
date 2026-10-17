@@ -137,8 +137,8 @@ impl PreparationBackend for Preparer {
     }
 }
 
-/// Complete builds keep the kernel beside the executable. Explicit asset
-/// directories retain the architecture subdirectory layout.
+/// Complete Driver-package lookup beside the executable. Explicit asset
+/// directories retain the host-architecture subdirectory layout.
 pub fn asset_directory() -> std::path::PathBuf {
     assets_beside(
         std::env::var_os("SEEDBOX_ASSET_DIR"),
@@ -206,7 +206,7 @@ pub fn doctor_kernel(
     scratch: &Path,
 ) -> Result<(
     std::path::PathBuf,
-    Option<seedbox_application::runtime_assets::Inputs>,
+    seedbox_application::runtime_assets::Inputs,
 )> {
     let architecture = seedbox_application::driver_world::platform::Host::current()
         .guest(seedbox_application::driver_world::DriverBackend::Pv)
@@ -219,7 +219,7 @@ pub fn doctor_kernel(
         seedbox_application::runtime_assets::Backend::Pv,
         architecture,
     )?;
-    Ok((inputs.guest_assets.join("kernel"), Some(inputs)))
+    Ok((inputs.guest_assets.join("kernel"), inputs))
 }
 
 pub fn preparation_progress(message: &str) {

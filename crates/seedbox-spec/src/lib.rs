@@ -43,19 +43,11 @@ pub struct Simulation {
 pub struct MachineOptions {
     /// Guest RAM per service, in MiB.
     pub memory_mb: u32,
-    /// Arm clockevents through the time page (ABI 4, aimed at PV; Linux KVM only).
-    pub page_timer: bool,
-    /// Defer virtio-net TX kicks to deterministic polls (Linux KVM only).
-    pub deferred_tx: bool,
 }
 
 impl Default for MachineOptions {
     fn default() -> Self {
-        Self {
-            memory_mb: 1024,
-            page_timer: false,
-            deferred_tx: false,
-        }
+        Self { memory_mb: 1024 }
     }
 }
 
@@ -182,10 +174,6 @@ mod tests {
     fn machine_defaults_remain_ordinary_configuration() {
         assert!(MachineOptions::default().is_default());
         assert!(DiskOptions::default().is_default());
-        assert!(!MachineOptions {
-            memory_mb: 512,
-            ..Default::default()
-        }
-        .is_default());
+        assert!(!MachineOptions { memory_mb: 512 }.is_default());
     }
 }

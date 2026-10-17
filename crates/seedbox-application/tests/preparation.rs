@@ -1,56 +1,98 @@
 //! Native preparation retains immutable inputs and honors cancellation.
 use seedbox_application::{
     config,
-    execution::{
-        Backend, CancellationToken, ExecutionProfile, PreparationBackend, SemanticParameters,
-        WitnessMode,
-    },
+    execution::{CancellationToken, WitnessMode},
     oci::{ImageTransport, ImportedImage, RootFilesystem},
     preparation::{OciPreparer, PreparationContext},
     store::{ContentDigest, ContentStore},
     Error,
 };
 use std::{collections::BTreeMap, fs, path::Path};
-fn fixture(root: &Path) -> (OciPreparer, config::Simulation, ContentStore) {
-    let kernel = root.join("kernel");
-    let engine = root.join("engine");
-    let helper = root.join("helper");
-    fs::write(&kernel, b"kernel").unwrap();
-    fs::write(&engine, b"engine").unwrap();
-    let mut header = [0u8; 20];
-    header[..6].copy_from_slice(b"\x7fELF\x02\x01");
-    header[18] = 62;
-    fs::write(&helper, header).unwrap();
-    let progress = root.join("progress.tar");
-    let mut archive = tar::Builder::new(fs::File::create(&progress).unwrap());
-    for name in [
-        "bin64/drrun",
-        "libseedbox_progress.so",
-        "lib64/release/libdynamorio.so",
-        "ext/lib64/release/libdrmgr.so",
-        "ext/lib64/release/libdrreg.so",
-    ] {
-        let mut entry = tar::Header::new_gnu();
-        entry.set_mode(0o755);
-        entry.set_size(header.len() as u64);
-        entry.set_cksum();
-        archive.append_data(&mut entry, name, &header[..]).unwrap();
+struct FixturePreparer {
+    inner: OciPreparer,
+    runtime: seedbox_application::runtime_assets::Inputs,
+}
+impl std::ops::Deref for FixturePreparer {
+    type Target = OciPreparer;
+    fn deref(&self) -> &OciPreparer {
+        &self.inner
     }
-    archive.finish().unwrap();
+}
+impl std::ops::DerefMut for FixturePreparer {
+    fn deref_mut(&mut self) -> &mut OciPreparer {
+        &mut self.inner
+    }
+}
+impl FixturePreparer {
+    fn prepare_with_transport(
+        &self,
+        simulation: &config::Simulation,
+        store: &ContentStore,
+        context: &PreparationContext,
+        transport: &dyn ImageTransport,
+    ) -> seedbox_application::Result<seedbox_application::execution::PreparedInputs> {
+        let mut inputs = self.inner.prepare_driver_with_transport(
+            simulation,
+            store,
+            context,
+            transport,
+            &self.runtime,
+        )?;
+        seedbox_application::driver_world::retain_oci_prepared(
+            &mut inputs,
+            simulation,
+            &self.runtime,
+            store,
+            context,
+        )?;
+        Ok(inputs)
+    }
+    fn prepare_cancellable(
+        &self,
+        simulation: &config::Simulation,
+        store: &ContentStore,
+        context: &PreparationContext,
+    ) -> seedbox_application::Result<seedbox_application::execution::PreparedInputs> {
+        self.prepare_with_transport(
+            simulation,
+            store,
+            context,
+            &seedbox_application::container_images::ContainerTransport {
+                docker: self.docker.clone(),
+                cancellation: context.cancellation.clone(),
+                progress: |_| {},
+                export_cache: None,
+            },
+        )
+    }
+    fn prepare(
+        &self,
+        simulation: &config::Simulation,
+        store: &ContentStore,
+    ) -> seedbox_application::Result<seedbox_application::execution::PreparedInputs> {
+        let temporary = tempfile::tempdir()?;
+        let context =
+            PreparationContext::new(temporary.path().join("prepare"), Default::default())?;
+        self.prepare_cancellable(simulation, store, &context)
+    }
+}
+fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
+    use seedbox_application::{driver_world::DriverExecutor, execution::ExecutionBackend};
+    let (_, runtime, _) = sdk(root, seedbox_application::runtime_assets::Backend::Pv);
+    let kernel = root.join("kernel");
+    fs::copy(runtime.guest_assets.join("kernel"), &kernel).unwrap();
+    let engine = std::env::current_exe().unwrap();
     let store = ContentStore::new(root.join("store"));
-    let profile = ExecutionProfile {
-        backend: Backend::Other("test-only".into()),
-        engine: ContentDigest::of(b"engine"),
-        witness_mode: WitnessMode::Exits,
-        semantic_parameters: SemanticParameters::new(1024),
-    };
-    let preparer = OciPreparer {
+    let simulation = config::parse_for_architecture("name: preparation-test\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 10\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &root.join("compose.yaml"), &BTreeMap::new(), if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 }).unwrap();
+    let executor =
+        DriverExecutor::for_preparation(&engine, &store, &simulation, WitnessMode::Exits).unwrap();
+    let inner = OciPreparer {
         kernel,
         engine,
-        init: helper,
-        progress,
+        init: runtime.guest_assets.join("init"),
+        progress: runtime.guest_assets.join("progress.tar"),
         mke2fs: None,
-        profile,
+        profile: executor.profile(),
         docker: bollard::Docker::connect_with_http(
             "http://127.0.0.1:9",
             10,
@@ -58,8 +100,7 @@ fn fixture(root: &Path) -> (OciPreparer, config::Simulation, ContentStore) {
         )
         .unwrap(),
     };
-    let simulation=config::parse("name: preparation-test\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 10\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n",&root.join("compose.yaml"),&BTreeMap::new()).unwrap();
-    (preparer, simulation, store)
+    (FixturePreparer { inner, runtime }, simulation, store)
 }
 
 #[test]
@@ -79,7 +120,6 @@ fn cancelled_preparation_never_imports_images() {
 fn invalid_profile_fails_before_image_import() {
     let root = tempfile::tempdir().unwrap();
     let (mut preparer, simulation, store) = fixture(root.path());
-    preparer.profile.backend = Backend::Kvm;
     preparer.profile.semantic_parameters.memory_mb = 32;
     assert!(preparer
         .prepare(&simulation, &store)
@@ -126,11 +166,12 @@ fn preparation_retains_kernel_before_transport_changes_source() {
     let (preparer, simulation, store) = fixture(root.path());
     let context =
         PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
+    let original_kernel = fs::read(&preparer.kernel).unwrap();
     let inputs = preparer
         .prepare_with_transport(&simulation, &store, &context, &Transport(&preparer.kernel))
         .unwrap();
     assert_eq!(fs::read(&preparer.kernel).unwrap(), b"changed");
-    assert_eq!(store.read(&inputs.kernel).unwrap(), b"kernel");
+    assert_eq!(store.read(&inputs.kernel).unwrap(), original_kernel);
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(context.directory.join("setup.json")).unwrap()).unwrap();
     assert_eq!(
@@ -214,19 +255,6 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
     let retained: seedbox_application::execution::PreparedInputs =
         serde_json::from_slice(&json).unwrap();
     assert_eq!(retained, prepared);
-    let mut historical = serde_json::to_value(&prepared).unwrap();
-    historical
-        .as_object_mut()
-        .unwrap()
-        .remove("wall_clock_epoch");
-    let historical: seedbox_application::execution::PreparedInputs =
-        serde_json::from_value(historical).unwrap();
-    assert_eq!(historical.wall_clock_epoch, None);
-    assert!(!serde_json::to_value(historical)
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .contains_key("wall_clock_epoch"));
     for (requested, budget) in [None, Some(86400), Some(1_800_000_000), Some(u32::MAX)]
         .into_iter()
         .zip([10_000, 1, 17, u32::MAX])
@@ -256,26 +284,44 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
         assert_eq!(first, second);
         for digest in first.guests.values() {
             let archive = store.read(digest).unwrap();
-            let start = archive
-                .windows(10)
-                .position(|bytes| bytes == b"SBXLAUNCH5")
-                .unwrap();
-            let mut cursor = start + 10;
-            for _ in 0..5 {
-                let size =
-                    u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()) as usize;
-                cursor += 4 + size;
-            }
-            cursor += 4; // max_map_count
+            let clock = archive
+                .windows(8)
+                .position(|bytes| bytes == b"SBXCLK1\0")
+                .unwrap()
+                + 8;
             assert_eq!(
-                u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()),
+                u32::from_le_bytes(archive[clock..clock + 4].try_into().unwrap()),
                 epoch
             );
-            cursor += 4;
-            assert_eq!(
-                u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()),
-                budget
-            );
+            let start = archive
+                .windows(8)
+                .position(|bytes| bytes == b"SBXAPP2\0")
+                .unwrap()
+                + 8;
+            let mut cursor = start;
+            let read = |cursor: &mut usize| {
+                let count =
+                    u32::from_le_bytes(archive[*cursor..*cursor + 4].try_into().unwrap()) as usize;
+                *cursor += 4;
+                (0..count)
+                    .map(|_| {
+                        let len =
+                            u32::from_le_bytes(archive[*cursor..*cursor + 4].try_into().unwrap())
+                                as usize;
+                        *cursor += 4;
+                        let value = archive[*cursor..*cursor + len].to_vec();
+                        *cursor += len;
+                        value
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let _argv = read(&mut cursor);
+            let prefix = read(&mut cursor);
+            let position = prefix
+                .iter()
+                .position(|value| value == b"--blocks-per-progress-call")
+                .unwrap();
+            assert_eq!(prefix[position + 1], budget.to_string().as_bytes());
         }
     }
 }
@@ -373,85 +419,7 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
         target: "/data".into(),
     });
     preparer.mke2fs = Some(preparer.init.clone());
-    let package = root.path().join("package.tar.gz");
-    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
-        fs::File::create(&package).unwrap(),
-        flate2::Compression::fast(),
-    ));
-    let mut append = |name: &str, bytes: &[u8]| {
-        let mut header = tar::Header::new_gnu();
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        header.set_mode(if name.contains("/bin/") || name.contains("/libexec/") {
-            0o755
-        } else {
-            0o644
-        });
-        header.set_size(bytes.len() as u64);
-        header.set_cksum();
-        tar.append_data(&mut header, name, bytes).unwrap();
-    };
-    append("host-system", b"x86_64-linux");
-    let mut kernel = seedbox_machine::test_support::assets::bzimage_header();
-    kernel[0x22c..0x230].copy_from_slice(&0x7fffffffu32.to_le_bytes());
-    append("pv/x86_64/kernel", &kernel);
-    let elf = seedbox_machine::test_support::assets::image(62);
-    append("pv/x86_64/init", &elf);
-    append("pv/x86_64/mke2fs", &elf);
-    append("pv/x86_64/command-line", b"rdinit=/init");
-    append("tcg/x86_64/kernel", &kernel);
-    append("tcg/x86_64/init", &elf);
-    append("tcg/x86_64/mke2fs", &elf);
-    append("tcg/x86_64/command-line", b"rdinit=/init");
-    append("tcg/x86_64/firmware", &vec![3; 64 * 1024]);
-    append(
-        "host/x86_64-linux/bin/qemu-system-x86_64",
-        b"#!/bin/sh\nexit 0\n",
-    );
-    append("host/x86_64-linux/libexec/qemu-system-x86_64", &elf);
-    append("host/x86_64-linux/lib/loader", b"cold library");
-    append("host/x86_64-linux/share/qemu/qboot.rom", b"cold firmware");
-    let mut progress = tar::Builder::new(Vec::new());
-    for name in [
-        "bin64/drrun",
-        "libseedbox_progress.so",
-        "lib64/release/libdynamorio.so",
-        "lib64/release/libdrpreload.so",
-        "ext/lib64/release/libdrmgr.so",
-        "ext/lib64/release/libdrreg.so",
-        "lib/ld-linux-x86-64.so.2",
-        "lib/libc.so.6",
-        "lib/libm.so.6",
-        "lib/libdl.so.2",
-        "lib/libpthread.so.0",
-        "lib/librt.so.1",
-        "DynamoRIO-LICENSE.txt",
-        "DynamoRIO-ACKNOWLEDGEMENTS.txt",
-        "glibc-COPYING.LIB",
-    ] {
-        let bytes = if name.ends_with(".txt") || name.ends_with(".LIB") {
-            b"cold license".as_slice()
-        } else {
-            elf.as_slice()
-        };
-        let mut header = tar::Header::new_gnu();
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        header.set_mode(0o755);
-        header.set_size(bytes.len() as u64);
-        header.set_cksum();
-        progress
-            .append_data(&mut header, format!("seedbox/progress/{name}"), bytes)
-            .unwrap();
-    }
-    append("pv/x86_64/progress.tar", &progress.into_inner().unwrap());
-    tar.into_inner().unwrap().finish().unwrap();
-    let runtime = runtime_assets::Runtime::from_archive(&package, root.path()).unwrap();
-    let selected = runtime
-        .select(backend, seedbox_spec::definition::Architecture::X86_64)
-        .unwrap();
+    let (runtime, selected, package) = sdk(root.path(), backend);
     preparer.kernel = selected.guest_assets.join("kernel");
     preparer.init = selected.guest_assets.join("init");
     preparer.progress = selected.guest_assets.join("progress.tar");
@@ -595,4 +563,143 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
     for digest in inputs.digests() {
         store.verify(digest).unwrap();
     }
+}
+
+fn sdk(
+    root: &Path,
+    backend: seedbox_application::runtime_assets::Backend,
+) -> (
+    seedbox_application::runtime_assets::Runtime,
+    seedbox_application::runtime_assets::Inputs,
+    std::path::PathBuf,
+) {
+    use seedbox_application::runtime_assets;
+    let package = root.join("package.tar.gz");
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        fs::File::create(&package).unwrap(),
+        flate2::Compression::fast(),
+    ));
+    let mut append = |name: &str, bytes: &[u8]| {
+        let mut header = tar::Header::new_gnu();
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_mode(if name.contains("/bin/") || name.contains("/libexec/") {
+            0o755
+        } else {
+            0o644
+        });
+        header.set_size(bytes.len() as u64);
+        header.set_cksum();
+        tar.append_data(&mut header, name, bytes).unwrap();
+    };
+    let system = format!(
+        "{}-{}",
+        std::env::consts::ARCH,
+        if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            "linux"
+        }
+    );
+    append("host-system", system.as_bytes());
+    let mut kernel = seedbox_machine::test_support::assets::bzimage_header();
+    kernel[0x22c..0x230].copy_from_slice(&0x7fffffffu32.to_le_bytes());
+    let mut arm_kernel = vec![0; 65536];
+    arm_kernel[8..16].copy_from_slice(&0x80000_u64.to_le_bytes());
+    arm_kernel[16..24].copy_from_slice(&65536_u64.to_le_bytes());
+    arm_kernel[56..60].copy_from_slice(b"ARM\x64");
+    let arm_elf = seedbox_machine::test_support::assets::image(183);
+    append("pv/aarch64/kernel", &arm_kernel);
+    append("pv/aarch64/init", &arm_elf);
+    append("pv/aarch64/mke2fs", &arm_elf);
+    append("pv/aarch64/command-line", b"rdinit=/init");
+    append("pv/x86_64/kernel", &kernel);
+    let elf = seedbox_machine::test_support::assets::image(62);
+    append("pv/x86_64/init", &elf);
+    append("pv/x86_64/mke2fs", &elf);
+    append("pv/x86_64/command-line", b"rdinit=/init");
+    append("tcg/x86_64/kernel", &kernel);
+    append("tcg/x86_64/init", &elf);
+    append("tcg/x86_64/mke2fs", &elf);
+    append("tcg/x86_64/command-line", b"rdinit=/init");
+    append("tcg/x86_64/firmware", &vec![3; 64 * 1024]);
+    append(
+        "host/x86_64-linux/bin/qemu-system-x86_64",
+        b"#!/bin/sh\nexit 0\n",
+    );
+    append("host/x86_64-linux/libexec/qemu-system-x86_64", &elf);
+    append("host/x86_64-linux/lib/loader", b"cold library");
+    append("host/x86_64-linux/share/qemu/qboot.rom", b"cold firmware");
+    let mut progress = tar::Builder::new(Vec::new());
+    for name in [
+        "bin64/drrun",
+        "libseedbox_progress.so",
+        "lib64/release/libdynamorio.so",
+        "lib64/release/libdrpreload.so",
+        "ext/lib64/release/libdrmgr.so",
+        "ext/lib64/release/libdrreg.so",
+        "lib/ld-linux-x86-64.so.2",
+        "lib/libc.so.6",
+        "lib/libm.so.6",
+        "lib/libdl.so.2",
+        "lib/libpthread.so.0",
+        "lib/librt.so.1",
+        "DynamoRIO-LICENSE.txt",
+        "DynamoRIO-ACKNOWLEDGEMENTS.txt",
+        "glibc-COPYING.LIB",
+    ] {
+        let bytes = if name.ends_with(".txt") || name.ends_with(".LIB") {
+            b"cold license".as_slice()
+        } else {
+            elf.as_slice()
+        };
+        let mut header = tar::Header::new_gnu();
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_mode(0o755);
+        header.set_size(bytes.len() as u64);
+        header.set_cksum();
+        progress
+            .append_data(&mut header, format!("seedbox/progress/{name}"), bytes)
+            .unwrap();
+    }
+    let progress = progress.into_inner().unwrap();
+    append("pv/x86_64/progress.tar", &progress);
+    let mut arm_progress = Vec::new();
+    let mut builder = tar::Builder::new(&mut arm_progress);
+    for entry in tar::Archive::new(progress.as_slice()).entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let name = entry.path().unwrap().into_owned();
+        let bytes = if name.to_string_lossy().ends_with(".txt")
+            || name.to_string_lossy().ends_with(".LIB")
+        {
+            b"cold license".as_slice()
+        } else {
+            arm_elf.as_slice()
+        };
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o755);
+        header.set_size(bytes.len() as u64);
+        header.set_cksum();
+        builder.append_data(&mut header, name, bytes).unwrap();
+        std::io::copy(&mut entry, &mut std::io::sink()).unwrap();
+    }
+    builder.finish().unwrap();
+    drop(builder);
+    append("pv/aarch64/progress.tar", &arm_progress);
+    tar.into_inner().unwrap().finish().unwrap();
+    let runtime = runtime_assets::Runtime::from_archive(&package, root).unwrap();
+    let selected = runtime
+        .select(
+            backend,
+            if backend == runtime_assets::Backend::Pv && cfg!(target_arch = "aarch64") {
+                seedbox_spec::definition::Architecture::Aarch64
+            } else {
+                seedbox_spec::definition::Architecture::X86_64
+            },
+        )
+        .unwrap();
+    (runtime, selected, package)
 }

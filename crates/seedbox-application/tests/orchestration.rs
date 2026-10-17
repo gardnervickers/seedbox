@@ -312,9 +312,38 @@ mod page_evidence_tests {
         f.backend.report.full_state = Some(BTreeMap::from([("workload".into(), digest)]));
         f.backend.report.witness =
             Some(serde_json::from_value(raw["world_witness"].clone()).unwrap());
-        f.backend
-            .extra_logs
-            .insert("vmm.json".into(), serde_json::to_vec(raw).unwrap());
+        // Portable synthetic stopped captures in the current retained format.
+        let mut regions = Vec::new();
+        regions.extend(0_u64.to_le_bytes());
+        regions.extend((512_u64 * 1024 * 1024).to_le_bytes());
+        let parts = BTreeMap::from([
+            (
+                "ram".into(),
+                serde_json::from_value(raw["machines"][0]["state_digest_parts"]["ram"].clone())
+                    .unwrap(),
+            ),
+            ("regs".into(), ContentDigest::of(b"registers")),
+            ("ram_regions".into(), ContentDigest::of(&regions)),
+        ]);
+        let capture = seedbox_application::evidence::StateCapture {
+            boot: 0,
+            disposition: seedbox_application::evidence::StateDisposition::Exited { code: 0 },
+            digest: f.backend.report.full_state.as_ref().unwrap()["workload"].clone(),
+            parts,
+            regions: vec![seedbox_application::evidence::RamRegion {
+                base: 0,
+                length: 512 * 1024 * 1024,
+            }],
+            page_log: "machines/workload.pages".into(),
+        };
+        let state = seedbox_application::evidence::StateReport {
+            version: 1,
+            machines: BTreeMap::from([("workload".into(), capture)]),
+        };
+        f.backend.extra_logs.insert(
+            seedbox_application::evidence::STATE_REPORT.into(),
+            serde_json::to_vec(&state).unwrap(),
+        );
         f.backend
             .extra_logs
             .insert("machines/workload.pages".into(), pages);
@@ -572,7 +601,7 @@ fn corruption_missing_artifacts_and_profile_drift_prevent_execution() {
 
     let mut fixture = Fixture::new();
     let first = fixture.run();
-    fixture.backend.profile.semantic_parameters.page_timer = true;
+    fixture.backend.profile.semantic_parameters.torn_writes = true;
     assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
     assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 1);
 }
@@ -757,11 +786,7 @@ fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witne
         .put(b"new engine")
         .unwrap();
     fixture.backend.profile.engine = engine.clone();
-    fixture.backend.profile.semantic_parameters.engine =
-        Some(seedbox_application::engine::kvm_descriptor(
-            seedbox_application::engine::ExecutableKind::InternalWorker,
-            "0.2.0-replacement".into(),
-        ));
+
     assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
     let options = ReplayOptions {
         allow_engine_change: true,
@@ -1251,51 +1276,6 @@ fn rejected_preflight_never_prepares_and_post_preparation_drift_never_executes()
             assert_eq!(inspect(&run.directory).unwrap(), run.record);
         }
     }
-}
-
-#[test]
-fn actual_vmm_admission_rejects_an_invalid_retained_profile_before_execution() {
-    let mut fixture = Fixture::new();
-    // The test backend records memory the VMM cannot admit.
-    fixture.backend.profile.semantic_parameters.memory_mb = 32;
-    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
-    let original = fixture.run();
-    let manifest = fs::read(original.directory.join("manifest.json")).unwrap();
-    let engine = fixture.directory.path().join("retained-engine");
-    fs::write(&engine, b"fixture engine").unwrap();
-    let store = ContentStore::new(fixture.directory.path().join("store"));
-    let executor =
-        seedbox_application::vmm::VmmExecutor::new(&engine, &store, 512, WitnessMode::Exits)
-            .unwrap();
-    for allow_engine_change in [false, true] {
-        let rejected = fixture
-            .orchestrator
-            .replay_with_options(
-                &original.directory,
-                &executor,
-                ReplayOptions {
-                    allow_engine_change,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(rejected.record.outcome, Outcome::Error);
-        assert_eq!(
-            rejected.record.replay.unwrap().status,
-            ReplayStatus::NotComparable
-        );
-        let e = rejected.record.error.unwrap();
-        assert!(
-            e.contains("admitted profile requires memory_mb in 64..65536"),
-            "{e}"
-        );
-        assert!(!rejected.directory.join("output").exists());
-        assert_eq!(
-            fs::read(original.directory.join("manifest.json")).unwrap(),
-            manifest
-        );
-    }
-    assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -2086,179 +2066,6 @@ fn checkpoint_identity_replays_retained_semantics() {
     fixture.preparer.inputs.profile = fixture.backend.profile.clone();
     let other = fixture.run();
     assert_ne!(other.record.run_id, branch.record.run_id);
-}
-
-#[test]
-fn kvm_executor_profile_records_only_its_settings_and_replays() {
-    use seedbox_application::vmm::VmmExecutor;
-    let mut f = Fixture::new();
-    let store = ContentStore::new(f.directory.path().join("store"));
-    let engine = f.directory.path().join("engine");
-    fs::write(&engine, b"fixture engine").unwrap();
-    let executor = VmmExecutor::new(&engine, &store, 1024, WitnessMode::Exits).unwrap();
-    assert_eq!(
-        executor.profile().semantic_parameters,
-        SemanticParameters::new(1024)
-    );
-    f.backend.profile = executor.profile();
-    f.preparer.inputs.profile = executor.profile();
-    let before = f.run();
-    let json = serde_json::to_value(&before.record.identity.inputs.profile).unwrap();
-    assert!(json["semantic_parameters"].get("timebase").is_none());
-    assert!(json["semantic_parameters"].get("clock").is_none());
-    let replay = f
-        .orchestrator
-        .replay(&before.directory, &f.backend, &CancellationToken::default())
-        .unwrap();
-    assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
-    assert_eq!(replay.record.run_id, before.record.run_id);
-}
-
-#[test]
-fn replay_refuses_settings_drift_before_execution() {
-    let page_timer = |p: &mut SemanticParameters| p.page_timer = true;
-    let torn = |p: &mut SemanticParameters| p.torn_writes = true;
-    let none = |_: &mut SemanticParameters| {};
-    type Edit<'a> = &'a dyn Fn(&mut SemanticParameters);
-    let cases: [(Edit, Edit, &str); 2] = [
-        (
-            &page_timer,
-            &none,
-            "executor page_timer does not match the recorded run",
-        ),
-        (
-            &none,
-            &torn,
-            "executor torn_writes does not match the recorded run",
-        ),
-    ];
-    for (recorded, requested, expected) in cases {
-        let mut f = Fixture::new();
-        f.backend.profile.backend = execution::Backend::Kvm;
-        recorded(&mut f.backend.profile.semantic_parameters);
-        f.preparer.inputs.profile = f.backend.profile.clone();
-        let run = f.run();
-        f.backend.profile.semantic_parameters = SemanticParameters::new(512);
-        requested(&mut f.backend.profile.semantic_parameters);
-        for allow_engine_change in [false, true] {
-            let error = f
-                .orchestrator
-                .replay_with_options(
-                    &run.directory,
-                    &f.backend,
-                    ReplayOptions {
-                        allow_engine_change,
-                        ..Default::default()
-                    },
-                )
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(expected), "{error}");
-            assert_eq!(f.backend.calls.load(Ordering::SeqCst), 1);
-            assert_eq!(
-                fs::read_dir(f.directory.path().join("runs"))
-                    .unwrap()
-                    .count(),
-                1
-            );
-        }
-    }
-}
-
-#[test]
-fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
-    use seedbox_application::{engine_adapter::recorded_page_timer, vmm::VmmExecutor};
-    let mut f = Fixture::new();
-    let store = ContentStore::new(f.directory.path().join("store"));
-    let engine = f.directory.path().join("engine");
-    fs::write(&engine, b"fixture engine").unwrap();
-    let executor = VmmExecutor::new(&engine, &store, 1024, WitnessMode::Exits).unwrap();
-    f.backend.profile = executor.profile();
-    f.preparer.inputs.profile = executor.profile();
-    let before = f.run();
-    for off in [
-        executor.clone().with_page_timer(false),
-        executor
-            .clone()
-            .with_page_timer(true)
-            .with_page_timer(false),
-    ] {
-        f.backend.profile = off.profile();
-        f.preparer.inputs.profile = off.profile();
-        let run = f.run();
-        assert_eq!(run.record.run_id, before.record.run_id);
-        assert_eq!(
-            serde_json::to_vec(&run.record.identity).unwrap(),
-            serde_json::to_vec(&before.record.identity).unwrap()
-        );
-        assert!(!recorded_page_timer(&off.profile()));
-    }
-    let on = executor.with_page_timer(true);
-    f.backend.profile = on.profile();
-    f.preparer.inputs.profile = on.profile();
-    let run = f.run();
-    assert_ne!(run.record.run_id, before.record.run_id);
-    assert!(
-        run.record
-            .identity
-            .inputs
-            .profile
-            .semantic_parameters
-            .page_timer
-    );
-    assert!(recorded_page_timer(
-        &inspect(&run.directory).unwrap().identity.inputs.profile
-    ));
-    assert_eq!(
-        f.replay(&run).record.replay.unwrap().status,
-        ReplayStatus::Match
-    );
-}
-
-#[test]
-fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
-    use seedbox_application::vmm::VmmExecutor;
-    let mut f = Fixture::new();
-    let store = ContentStore::new(f.directory.path().join("store"));
-    let engine = f.directory.path().join("engine");
-    fs::write(&engine, b"fixture engine").unwrap();
-    let off = VmmExecutor::new(&engine, &store, 1024, WitnessMode::Exits).unwrap();
-    assert_eq!(off.profile(), off.clone().with_deferred_tx(false).profile());
-    let on = off.clone().with_deferred_tx(true);
-    assert!(on.profile().semantic_parameters.deferred_tx);
-    assert_eq!(on.clone().with_deferred_tx(false).profile(), off.profile());
-    let mut ids = Vec::new();
-    for recorded in [off.clone(), on.clone()] {
-        f.backend.profile = recorded.profile();
-        f.preparer.inputs.profile = recorded.profile();
-        let run = f.run();
-        let replay = f
-            .orchestrator
-            .replay(&run.directory, &f.backend, &CancellationToken::default())
-            .unwrap();
-        assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
-        assert_eq!(replay.record.run_id, run.record.run_id);
-        ids.push(run.record.run_id);
-        let enabled =
-            seedbox_application::engine_adapter::recorded_deferred_tx(&recorded.profile()).unwrap();
-        f.backend.profile = off.clone().with_deferred_tx(!enabled).profile();
-        for allow_engine_change in [false, true] {
-            let error = f
-                .orchestrator
-                .replay_with_options(
-                    &run.directory,
-                    &f.backend,
-                    ReplayOptions {
-                        allow_engine_change,
-                        ..Default::default()
-                    },
-                )
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("--deferred-tx"));
-        }
-    }
-    assert_ne!(ids[0], ids[1]);
 }
 
 #[test]

@@ -257,7 +257,6 @@ impl Definition {
             machine: crate::MachineOptions {
                 memory_mb: u32::try_from(self.oracle.memory_bytes / (1024 * 1024))
                     .unwrap_or(u32::MAX),
-                ..Default::default()
             },
             disk: self.simulator.disk.clone(),
             simulator: crate::project::SimulatorDefaults {

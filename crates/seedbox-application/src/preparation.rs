@@ -4,8 +4,8 @@
 use crate::limits::read_bounded;
 use crate::{
     config::Simulation,
-    execution::{Backend, ExecutionProfile, PreparationBackend, PreparedInputs},
-    guest::{build_initramfs_with, launch_recipe_with_progress, minimum_memory_mb},
+    execution::{ExecutionProfile, PreparedInputs},
+    guest::minimum_memory_mb,
     store::ContentStore,
     Error, Result,
 };
@@ -29,72 +29,7 @@ pub struct OciPreparer {
 
 pub use crate::preparation_command::{PreparationContext, PreparationStage};
 
-impl PreparationBackend for OciPreparer {
-    fn validate_runtime_inputs(&self) -> Result<()> {
-        crate::guest::validate_progress(
-            &self.progress,
-            crate::guest::Architecture::from_profile(&self.profile)?,
-        )?;
-        if self.profile.backend == Backend::Kvm {
-            crate::admission::validate_profile(&self.profile)?;
-            if crate::admission::file_digest(&self.engine)? != self.profile.engine {
-                return Err(Error::Integrity(
-                    "VMM changed after profile construction".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
-    fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs> {
-        self.validate_runtime_inputs()?;
-        self.prepare_inner(
-            simulation,
-            store,
-            None,
-            &crate::container_images::ContainerTransport {
-                docker: self.docker.clone(),
-                cancellation: Default::default(),
-                progress: |_| {},
-                export_cache: Some(self.profile.engine.clone()),
-            },
-            None,
-        )
-    }
-    fn prepare_cancellable(
-        &self,
-        simulation: &Simulation,
-        store: &ContentStore,
-        context: &PreparationContext,
-    ) -> Result<PreparedInputs> {
-        context.check()?;
-        self.validate_runtime_inputs()?;
-        self.prepare_inner(
-            simulation,
-            store,
-            Some(context),
-            &crate::container_images::ContainerTransport {
-                docker: self.docker.clone(),
-                cancellation: context.cancellation.clone(),
-                progress: |_| {},
-                export_cache: Some(self.profile.engine.clone()),
-            },
-            None,
-        )
-    }
-}
 impl OciPreparer {
-    /// Use an explicit image transport while sharing launch, retention and
-    /// boot-archive construction with native Linux preparation.
-    pub fn prepare_with_transport(
-        &self,
-        simulation: &Simulation,
-        store: &ContentStore,
-        context: &PreparationContext,
-        transport: &dyn crate::oci::ImageTransport,
-    ) -> Result<PreparedInputs> {
-        self.validate_runtime_inputs()?;
-        self.prepare_inner(simulation, store, Some(context), transport, None)
-    }
     /// Share normal image resolution/retention while the selected native SDK
     /// alone packages Driver boot bytes. Runtime formats are not interchangeable.
     pub fn prepare_driver_with_transport(
@@ -105,16 +40,17 @@ impl OciPreparer {
         transport: &dyn crate::oci::ImageTransport,
         runtime: &crate::runtime_assets::Inputs,
     ) -> Result<PreparedInputs> {
+        context.check()?;
         crate::driver_world::validate_oci_runtime(self, runtime)?;
-        self.prepare_inner(simulation, store, Some(context), transport, Some(runtime))
+        self.prepare_inner(simulation, store, context, transport, runtime)
     }
     fn prepare_inner(
         &self,
         simulation: &Simulation,
         store: &ContentStore,
-        context: Option<&PreparationContext>,
+        context: &PreparationContext,
         transport: &dyn crate::oci::ImageTransport,
-        driver_runtime: Option<&crate::runtime_assets::Inputs>,
+        driver_runtime: &crate::runtime_assets::Inputs,
     ) -> Result<PreparedInputs> {
         let architecture = crate::guest::Architecture::from_profile(&self.profile)?;
         for (name, service) in &simulation.services {
@@ -126,13 +62,10 @@ impl OciPreparer {
                 )));
             }
         }
-        if let Some(context) = context {
-            context.check()?;
-        }
+
+        context.check()?;
+
         let kernel = store.put_file(&self.kernel)?;
-        if self.profile.backend == Backend::Kvm {
-            crate::admission::validate_profile(&self.profile)?;
-        }
         let engine = store.put_file(&self.engine)?;
         if engine != self.profile.engine {
             return Err(Error::Integrity(
@@ -150,10 +83,10 @@ impl OciPreparer {
         }
         let volumes = simulation.services.values().any(|s| !s.volumes.is_empty());
         let mut auxiliary = BTreeMap::from([("guest-init".into(), store.put_file(&self.init)?)]);
-        if let Some(runtime) = driver_runtime.filter(|runtime| runtime.qemu.is_some()) {
+        if driver_runtime.qemu.is_some() {
             auxiliary.insert(
                 "guest-firmware".into(),
-                store.put_file(&runtime.guest_assets.join("firmware"))?,
+                store.put_file(&driver_runtime.guest_assets.join("firmware"))?,
             );
         } else {
             auxiliary.insert("guest-progress".into(), store.put_file(&self.progress)?);
@@ -161,8 +94,7 @@ impl OciPreparer {
         if volumes {
             let mke2fs = self.mke2fs.as_ref().ok_or_else(|| {
                 Error::Setup(
-                    "named volumes need a static mke2fs to format the guest disk; enter \
-                     `nix develop`, or pass --mke2fs or set SEEDBOX_MKE2FS"
+                    "named volumes need the formatter from a complete Driver runtime package; rebuild the SDK"
                         .into(),
                 )
             })?;
@@ -180,9 +112,9 @@ impl OciPreparer {
             auxiliary.insert(format!("config/{name}"), store.put(&data)?);
             configs.insert(name, data);
         }
-        if let Some(context) = context {
-            context.setup_inputs(&auxiliary, &engine, &kernel)?;
-        }
+
+        context.setup_inputs(&auxiliary, &engine, &kernel)?;
+
         let addresses: BTreeMap<_, _> = simulation
             .services
             .keys()
@@ -194,34 +126,16 @@ impl OciPreparer {
             hosts.push_str(&format!("{address} {name}\n"));
         }
         let temporary = tempfile::tempdir()?;
-        let init = store.materialize(&auxiliary["guest-init"], &temporary.path().join("init"))?;
-        architecture.validate_elf(&init)?;
-        let progress = auxiliary
-            .get("guest-progress")
-            .map(|digest| store.materialize(digest, &temporary.path().join("progress.tar")))
-            .transpose()?;
-        if driver_runtime.is_none() {
-            let progress = progress.as_deref().ok_or_else(|| {
-                Error::Integrity("legacy preparation is missing its progress archive".into())
-            })?;
-            crate::guest::validate_progress(progress, architecture)?;
-        }
-        let mke2fs = auxiliary
-            .get("guest-mke2fs")
-            .map(|digest| store.materialize(digest, &temporary.path().join("mke2fs")))
-            .transpose()?;
         let mut images = BTreeMap::new();
         let mut guests = BTreeMap::new();
         let mut provenance = BTreeMap::new();
         let mut imported_sources = BTreeMap::new();
         let mut launches = Vec::new();
         for (name, service) in &simulation.services {
-            if let Some(context) = context {
-                context.progress(name, PreparationStage::Image);
-            }
-            if let Some(context) = context {
-                context.check()?;
-            }
+            context.progress(name, PreparationStage::Image);
+
+            context.check()?;
+
             let mounts = service
                 .configs
                 .iter()
@@ -242,14 +156,14 @@ impl OciPreparer {
                     service,
                     &temporary.path().join(name),
                     store,
-                    context.map(|c| (c, name.as_str())),
+                    Some((context, name.as_str())),
                     architecture,
                 )
             })?
             .for_service(service, store)?;
-            if let Some(context) = context {
-                context.check()?;
-            }
+
+            context.check()?;
+
             launches.push((name, service, mounts, imported));
         }
         // The guest clock starts at the Compose file's x-seedbox.wall_clock_epoch,
@@ -274,78 +188,40 @@ impl OciPreparer {
                 })?
             }
         };
-        let driver_factory = driver_runtime
-            .map(|runtime| {
-                crate::driver_world::preparation::OciBootFactory::new(
-                    &self.engine,
-                    runtime,
-                    wall_clock_epoch,
-                    simulation.simulator.blocks_per_progress_call,
-                )
-            })
-            .transpose()?;
-        for (name, service, mounts, imported) in launches {
-            if let Some(context) = context {
-                context.progress(name, PreparationStage::Guest);
-                context.check()?;
-            }
+        let driver_factory = crate::driver_world::preparation::OciBootFactory::new(
+            &self.engine,
+            driver_runtime,
+            wall_clock_epoch,
+            simulation.simulator.blocks_per_progress_call,
+        )?;
+        for (name, _service, mounts, imported) in launches {
+            context.progress(name, PreparationStage::Guest);
+            context.check()?;
+
             let archive = temporary.path().join(format!("{name}.cpio"));
-            if let Some(factory) = &driver_factory {
-                let boot = factory.boot(
-                    crate::driver_world::preparation::OciBoot {
-                        name,
-                        image: &imported,
-                        simulation,
-                        configs: &mounts,
-                        hosts: &hosts,
-                    },
-                    store,
-                )?;
-                auxiliary.insert(
-                    format!("{}{name}", crate::driver_world::preparation::FILESYSTEM),
-                    boot.filesystem,
-                );
-                fs::write(&archive, boot.bytes)?;
-            } else {
-                let recipe = launch_recipe_with_progress(
-                    &imported.image.launch,
-                    &format!("{}/24", addresses[name]),
-                    &hosts,
+            let boot = driver_factory.boot(
+                crate::driver_world::preparation::OciBoot {
                     name,
-                    &mounts,
-                    wall_clock_epoch,
-                    simulation.simulator.blocks_per_progress_call,
-                )?;
-                let mke2fs = mke2fs.as_deref().filter(|_| !service.volumes.is_empty());
-                match &imported.rootfs {
-                    crate::oci::RootFilesystem::Directory(root) => build_initramfs_with(
-                        root,
-                        &init,
-                        mke2fs,
-                        progress.as_deref(),
-                        &recipe,
-                        &archive,
-                    )?,
-                    crate::oci::RootFilesystem::Archive(root) => {
-                        crate::guest::build_initramfs_from_tar(
-                            root,
-                            &init,
-                            mke2fs,
-                            progress.as_deref(),
-                            &recipe,
-                            &archive,
-                        )?
-                    }
-                }
-            }
+                    image: &imported,
+                    simulation,
+                    configs: &mounts,
+                    hosts: &hosts,
+                },
+                store,
+            )?;
+            auxiliary.insert(
+                format!("{}{name}", crate::driver_world::preparation::FILESYSTEM),
+                boot.filesystem,
+            );
+            fs::write(&archive, boot.bytes)?;
             let memory_mb = self.profile.semantic_parameters.memory_mb;
             let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
             if memory_mb < minimum {
                 return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase x-seedbox.machine.memory_mb (application memory may require more)")));
             }
-            if let Some(context) = context {
-                context.check()?;
-            }
+
+            context.check()?;
+
             guests.insert(name.clone(), store.put_file(&archive)?);
             images.insert(name.clone(), imported.image);
             auxiliary.extend(
@@ -360,9 +236,8 @@ impl OciPreparer {
                     .into_iter()
                     .map(|(key, value)| (format!("image/{name}/{key}"), value)),
             );
-            if let Some(context) = context {
-                context.progress(name, PreparationStage::Ready);
-            }
+
+            context.progress(name, PreparationStage::Ready);
         }
         Ok(PreparedInputs {
             wall_clock_epoch: Some(wall_clock_epoch),

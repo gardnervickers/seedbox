@@ -23,7 +23,7 @@ fn observed() -> CoreObservation {
 }
 fn profile() -> ExecutionProfile {
     ExecutionProfile {
-        backend: Backend::Kvm,
+        backend: Backend::Other("fixture".into()),
         engine: ContentDigest::of(b"any engine"),
         witness_mode: WitnessMode::Exits,
         semantic_parameters: SemanticParameters::new(512),

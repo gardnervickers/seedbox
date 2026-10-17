@@ -485,7 +485,7 @@ fn tcg_refusal() -> Error {
     ))
 }
 
-/// Apple Silicon Mac runs the built-in HVF engine; every other host runs KVM.
+/// Guest-ISA discovery only; execution always uses Driver.
 const MAC: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
 #[derive(Args)]
@@ -668,7 +668,6 @@ impl RuntimeInputs {
         cancellation: &CancellationToken,
         scratch: &Path,
     ) -> Result<(Preparer, Executor)> {
-        validate_machine(simulation)?;
         let engine = defaults::engine()?;
         if !self.use_driver() {
             return Err(tcg_refusal());
@@ -680,17 +679,6 @@ impl RuntimeInputs {
         };
         self.driver_backends(store, simulation, cancellation, scratch, &engine, witness)
     }
-}
-
-/// Reject world machine options the selected platform cannot execute, before any state.
-fn validate_machine(simulation: &config::Simulation) -> Result<()> {
-    if MAC && (simulation.machine.page_timer || simulation.machine.deferred_tx) {
-        return Err(Error::Setup(
-            "x-seedbox.machine page_timer and deferred_tx require Linux KVM; remove them on Mac"
-                .into(),
-        ));
-    }
-    Ok(())
 }
 
 /// Run the public command line using process arguments, environment and stdio.
@@ -1014,7 +1002,6 @@ fn prepare(
         )));
     }
     let simulation = compose.load()?;
-    validate_machine(&simulation)?;
     let (store, _) = state.open()?;
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;

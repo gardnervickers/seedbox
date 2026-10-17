@@ -42,8 +42,7 @@ fn backend_authority_rejects_both_conflicting_constructor_arguments() {
         matching.semantic_parameters.engine = Some(DriverExecutor::descriptor(backend, "x86_64"));
         DriverExecutor::new(matching.clone(), backend, 1).unwrap();
         let mut legacy = matching.clone();
-        legacy.semantic_parameters.engine.as_mut().unwrap().kind =
-            crate::engine::ExecutableKind::InternalWorker;
+        legacy.semantic_parameters.engine = None;
         let error = DriverExecutor::new(legacy, opposite, 1)
             .err()
             .unwrap()
@@ -152,29 +151,11 @@ fn controller_scope_follows_driver_host_for_pv_and_tcg() {
     tcg.preflight(None).unwrap();
     tcg.admit_execution(false).unwrap();
 }
-#[test]
-fn legacy_only_toggles_on_new_contract_are_named_actionable_errors_not_backend_fallbacks() {
-    for field in ["page_timer", "deferred_tx"] {
-        let mut profile = profile();
-        if field == "page_timer" {
-            profile.semantic_parameters.page_timer = true
-        } else {
-            profile.semantic_parameters.deferred_tx = true
-        }
-        let error = DriverExecutor::new(profile, DriverBackend::Tcg, 1)
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(error.contains(&format!("semantic_parameters.{field}")));
-        assert!(error.contains(&format!("set {field} to false")));
-        assert!(error.contains("original retained legacy simulation"));
-    }
-}
+
 #[test]
 fn driver_constructor_validates_contract_and_worker_range_without_running_tools() {
     let mut legacy = profile();
-    legacy.semantic_parameters.engine.as_mut().unwrap().kind =
-        crate::engine::ExecutableKind::InternalWorker;
+    legacy.semantic_parameters.engine = None;
     assert!(DriverExecutor::new(legacy, DriverBackend::Tcg, 1)
         .err()
         .unwrap()
@@ -218,4 +199,33 @@ fn non_oracle_legacy_controller_refuses_before_retaining_engine_or_preparing_ima
         "{error}"
     );
     assert!(!store_root.exists());
+}
+
+#[test]
+fn retained_profile_drift_is_refused_before_reading_runtime_or_launching_workers() {
+    let executor = DriverExecutor::new(profile(), DriverBackend::Tcg, 1).unwrap();
+    for change in [0, 1] {
+        let mut recorded = profile();
+        if change == 0 {
+            recorded.semantic_parameters.memory_mb += 64;
+        } else {
+            recorded.semantic_parameters.torn_writes = true;
+        }
+        let digest = crate::store::ContentDigest::of(b"unread fixture");
+        let inputs = PreparedInputs {
+            wall_clock_epoch: None,
+            kernel: digest,
+            images: Default::default(),
+            placement: Default::default(),
+            guests: Default::default(),
+            profile: recorded,
+            auxiliary: Default::default(),
+            provenance: Default::default(),
+        };
+        let error = executor.validate_retained(&inputs).unwrap_err().to_string();
+        assert!(
+            error.contains("retained Driver profile differs from executor"),
+            "{error}"
+        );
+    }
 }

@@ -100,8 +100,6 @@ impl DriverExecutor {
             ));
         }
         let mut semantic = crate::execution::SemanticParameters::new(memory_mb);
-        semantic.page_timer = simulation.machine.page_timer;
-        semantic.deferred_tx = simulation.machine.deferred_tx;
         semantic.torn_writes = simulation.disk.torn_writes;
         // The host decides the guest ISA: x86-64 on Linux KVM and for TCG,
         // aarch64 for PV on macOS HVF. Unsupported hosts are refused below.

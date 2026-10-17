@@ -3,103 +3,18 @@
 //! backend arguments, admission and report validation.
 
 use crate::{
-    engine::ExecutableKind,
-    execution::{CancellationToken, ExecutionReport, ExecutionRequest, StopReason, WitnessMode},
+    execution::{CancellationToken, ExecutionReport, ExecutionRequest, StopReason},
     host_control::Endpoint,
     Error, Result,
 };
-use seedbox_engine_core::launch::{Performance, WorkerRequest};
 use std::{
-    collections::BTreeMap,
     fs,
     io::{Read, Seek, SeekFrom},
-    os::fd::AsRawFd,
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::PathBuf,
     process::{Child, Command},
-    time::{Duration, Instant},
+    time::Duration,
 };
-
-/// Probe only explicit replacements. Normal retained replay stays lookup-only.
-pub(crate) fn replacement_version(
-    engine: &std::path::Path,
-    supplied_path: &std::path::Path,
-) -> Result<Option<String>> {
-    replacement_version_with_timeout(engine, supplied_path, Duration::from_secs(2))
-}
-
-fn replacement_version_with_timeout(
-    engine: &std::path::Path,
-    supplied_path: &std::path::Path,
-    timeout: Duration,
-) -> Result<Option<String>> {
-    use std::process::Stdio;
-    let failure = |detail: &str| {
-        Error::Setup(format!(
-            "--vmm {}: {detail}; use a Seedbox CLI or standalone VMM executable",
-            supplied_path.display()
-        ))
-    };
-    let mut command = Command::new(engine);
-    command
-        .arg("--version")
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
-    let child = crate::exec_files::spawn(&mut command).map_err(|e| failure(&e.to_string()))?;
-    let mut process = OwnedProcess(Some(child));
-    let mut stdout = process
-        .0
-        .as_mut()
-        .and_then(|child| child.stdout.take())
-        .ok_or_else(|| failure("missing version output"))?;
-    let fd = stdout.as_raw_fd();
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(failure(&std::io::Error::last_os_error().to_string()));
-    }
-    let start = Instant::now();
-    let mut bytes = Vec::new();
-    let mut finished: Option<bool> = None;
-    loop {
-        let mut buffer = [0; 1024];
-        loop {
-            match stdout.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if bytes.len() + n > 4096 {
-                        return Err(failure("version output exceeds 4096 bytes"));
-                    }
-                    bytes.extend_from_slice(&buffer[..n]);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(failure(&e.to_string())),
-            }
-        }
-        if let Some(success) = finished {
-            process.stop()?;
-            if !success {
-                return Ok(None);
-            }
-            let version = std::str::from_utf8(&bytes)
-                .ok()
-                .and_then(|s| s.trim().strip_prefix("seedbox "))
-                .filter(|s| !s.is_empty() && !s.contains(char::is_whitespace));
-            return Ok(version.map(str::to_owned));
-        }
-        // Drain once more after exit to include the last bytes in the pipe.
-        finished = process.exited()?;
-        if finished.is_none() {
-            if start.elapsed() >= timeout {
-                return Err(failure("version probe timed out"));
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-}
 
 pub(crate) fn incomplete(reason: StopReason) -> ExecutionReport {
     ExecutionReport {
@@ -112,26 +27,6 @@ pub(crate) fn incomplete(reason: StopReason) -> ExecutionReport {
         faults: Vec::new(),
         detail: None,
     }
-}
-
-/// The x86 worker's performance settings from a run's recorded performance
-/// parameters (`SEEDBOX_WATCHDOG_MS`); absent ones take defaults.
-pub(crate) fn launch_performance(parameters: &BTreeMap<String, String>) -> Result<Performance> {
-    let mut performance = Performance::default();
-    for (key, value) in parameters {
-        let invalid = || Error::Integrity(format!("invalid performance parameter {key}={value}"));
-        match key.as_str() {
-            "SEEDBOX_WATCHDOG_MS" => {
-                performance.watchdog_ms = value
-                    .parse()
-                    .ok()
-                    .filter(|ms| *ms != 0)
-                    .ok_or_else(invalid)?
-            }
-            _ => return Err(invalid()),
-        }
-    }
-    Ok(performance)
 }
 
 pub(crate) struct WorkerLaunch {
@@ -147,132 +42,6 @@ pub(crate) struct WorkerLaunch {
 pub(crate) const WORKER_REQUEST_FILE: &str = "worker-request.json";
 
 impl WorkerLaunch {
-    pub(crate) fn prepare(request: &ExecutionRequest<'_>) -> Result<Self> {
-        if crate::engine::recorded_launch(&request.prepared.profile)? == ExecutableKind::DriverWorld
-        {
-            return Self::prepare_driver(request);
-        }
-        let engine = request
-            .artifacts
-            .get(&request.prepared.profile.engine)
-            .ok_or_else(|| Error::Integrity("missing retained engine executable".into()))?;
-        // A shared exploration copy is already 0500; chmod would change its
-        // ctime and make the store replace it for every attempt.
-        if fs::metadata(engine)?.permissions().mode() & 0o7777 != 0o500 {
-            fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
-        }
-        let world = request.output.join("world.json");
-        fs::write(
-            &world,
-            serde_json::to_vec_pretty(&crate::engine_adapter::world(request)?)?,
-        )?;
-        let report = request.output.join("vmm.json");
-        let endpoint = Endpoint::new(request.output)?;
-        let kind = crate::engine::recorded_launch(&request.prepared.profile)?;
-        let observations = request.observations.filter(|_| {
-            request
-                .prepared
-                .profile
-                .semantic_parameters
-                .engine
-                .as_ref()
-                .is_some_and(|e| e.live_observations)
-        });
-        let mut command = crate::engine_adapter::engine_command(engine, &request.prepared.profile)?;
-        if request
-            .prepared
-            .profile
-            .semantic_parameters
-            .engine
-            .as_ref()
-            .is_some_and(|e| e.owner_pipe)
-        {
-            command
-                .arg("--owner-pipe")
-                .stdin(std::process::Stdio::piped());
-        }
-        let spawn_fix = match kind {
-            ExecutableKind::Standalone => "check the retained executable and host setup",
-            ExecutableKind::InternalWorker => "use the retained CLI executable for this host",
-            ExecutableKind::ArmWorld => "use the retained signed CLI",
-            ExecutableKind::DriverWorld => "use the retained Driver worker CLI",
-        };
-        let streams = request
-            .prepared
-            .guests
-            .len()
-            .checked_mul(2)
-            .filter(|count| *count != 0)
-            .ok_or_else(|| Error::Integrity("execution requires prepared machines".into()))?;
-        let out = request.output.join(crate::execution::MACHINE_OUTPUT_DIR);
-        let console_limit = 1024 * 1024 * 1024 / streams;
-        let digest = request.prepared.profile.witness_mode == WitnessMode::FullState;
-        if kind == ExecutableKind::ArmWorld {
-            if request.start_paused {
-                command.arg("--start-paused");
-            }
-            if let Some(path) = request.resume_checkpoint {
-                command.arg("--resume-checkpoint").arg(path);
-            }
-            if let Some(history) = request.replay_interventions {
-                let path = request.output.join("replay-interventions.json");
-                fs::write(&path, history.encode().map_err(Error::Integrity)?)?;
-                command.arg("--interventions").arg(path);
-            }
-            if let Some(path) = observations {
-                command.arg("--observations").arg(path);
-            }
-            // The ARM world keeps its own flag contract.
-            command
-                .arg("--config")
-                .arg(&world)
-                .arg("--seed")
-                .arg(request.seed.to_string())
-                .arg("--out")
-                .arg(&out)
-                .arg("--host-control")
-                .arg(endpoint.socket())
-                .arg("--console-limit")
-                .arg(console_limit.to_string());
-            if digest {
-                command.arg("--digest");
-            }
-        } else {
-            let mut worker = WorkerRequest::new(world, request.seed, out);
-            worker.observations = observations.map(std::path::Path::to_owned);
-            worker.interventions = request.replay_interventions.cloned();
-            worker.resume_checkpoint = request.resume_checkpoint.map(std::path::Path::to_owned);
-            worker.digest = digest;
-            worker.start_paused = request.start_paused;
-            worker.host_control = Some(endpoint.socket());
-            worker.console_limit = Some(console_limit);
-            // Bound observation metadata to at most 40 MiB across all streams.
-            worker.log_chunk_limit = Some((1_048_576 / streams).min(65_536));
-            worker.stream_console = true;
-            worker.features = crate::engine_adapter::recorded_features(&request.prepared.profile)?;
-            worker.performance = launch_performance(request.performance_parameters)?;
-            let path = request.output.join(WORKER_REQUEST_FILE);
-            fs::write(&path, serde_json::to_vec_pretty(&worker)?)?;
-            command.arg("--request").arg(path);
-        }
-        command
-            .env_clear()
-            .stdout(fs::File::create(&report)?)
-            .stderr(fs::File::create(request.output.join("vmm.stderr"))?)
-            .process_group(0);
-        Ok(Self {
-            command,
-            engine: engine.clone(),
-            report,
-            endpoint,
-            spawn_fix,
-            native_scratch: None,
-        })
-    }
-
-    fn prepare_driver(request: &ExecutionRequest<'_>) -> Result<Self> {
-        Self::prepare_driver_impl(request, None)
-    }
     pub(crate) fn prepare_driver_with_runtime(
         request: &ExecutionRequest<'_>,
         runtime: Option<&crate::driver_world::binding::Binding>,
@@ -295,7 +64,8 @@ impl WorkerLaunch {
         let path = request.output.join(WORKER_REQUEST_FILE);
         fs::write(&path, serde_json::to_vec_pretty(&worker)?)?;
         let report = request.output.join("vmm.json");
-        let mut command = crate::engine_adapter::engine_command(engine, &request.prepared.profile)?;
+        let mut command = Command::new(engine);
+        command.args(["__engine", crate::engine::DRIVER_WORLD_V1]);
         command
             .arg("--owner-pipe")
             .arg("--request")
@@ -345,11 +115,8 @@ impl WorkerLaunch {
             .filter(|arg| *arg != "--owner-pipe")
             .map(std::ffi::OsStr::to_owned)
             .collect();
-        // A standalone historical VMM does not parse the CLI's private prefix;
-        // it still retains the inherited descriptor throughout its process life.
-        if arguments.first().is_some_and(|arg| arg == "__engine") {
-            arguments.insert(0, seedbox_machine::process_lease::ENTRY.into());
-        }
+        // Every Driver launch retains the inherited lease through its monitor.
+        arguments.insert(0, seedbox_machine::process_lease::ENTRY.into());
         let environment: Vec<_> = self
             .command
             .get_envs()
@@ -397,6 +164,7 @@ impl WorkerLaunch {
     /// the explicit monitor boundary. The Driver adapter uses spawn_with_monitor.
     /// The caller must acquire any host lease before spawning. The returned
     /// worker stops and reaps its group before the caller releases its host guard.
+    #[cfg(test)]
     pub(crate) fn spawn_worker(mut self) -> Result<RunningWorker> {
         if self.native_scratch.is_some() {
             return Err(Error::Setup(
@@ -719,269 +487,6 @@ mod tests {
             assert_eq!(result.workload_exit.unwrap().code, code);
             assert_eq!(result.reason, StopReason::Error);
             assert!(result.detail.unwrap().contains("engine cleanup"));
-        }
-    }
-
-    #[test]
-    fn replacement_probe_bounds_output_and_cleans_up_timeout() {
-        if !crate::test_process::isolated(concat!(
-            module_path!(),
-            "::replacement_probe_bounds_output_and_cleans_up_timeout"
-        )) {
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let engine = directory.path().join("engine");
-        let probe = |body: &str, timeout| {
-            {
-                // Rewritten and then executed: no fork may hold a writable copy.
-                let _writing = crate::exec_files::writing();
-                fs::write(&engine, format!("#!/bin/sh\n{body}\n")).unwrap();
-                fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
-            }
-            replacement_version_with_timeout(&engine, &engine, timeout)
-        };
-        assert_eq!(
-            probe(
-                "printf 'seedbox 0.2.0-dev+replacement\\n'",
-                Duration::from_secs(2)
-            )
-            .unwrap()
-            .as_deref(),
-            Some("0.2.0-dev+replacement")
-        );
-        assert_eq!(probe("exit 2", Duration::from_secs(2)).unwrap(), None);
-        assert_eq!(
-            probe("printf 'another program\\n'", Duration::from_secs(2)).unwrap(),
-            None
-        );
-        assert!(probe(
-            "i=0; while [ $i -lt 5000 ]; do printf x; i=$((i+1)); done",
-            Duration::from_secs(2)
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("4096"));
-        let pid_file = directory.path().join("pid");
-        let body = format!("echo $$ > '{}'; while :; do :; done", pid_file.display());
-        assert!(probe(&body, Duration::from_millis(100))
-            .unwrap_err()
-            .to_string()
-            .contains("timed out"));
-        let pid: i32 = fs::read_to_string(pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
-    }
-
-    #[test]
-    fn prepared_launch_uses_recorded_dispatch_and_retention_limits() {
-        use crate::{
-            config::{Check, Limits, Network, Schedule},
-            execution::{Backend, ExecutionProfile, PreparedInputs, SemanticParameters},
-            store::ContentDigest,
-        };
-        use std::collections::BTreeMap;
-        let internal =
-            crate::engine::kvm_descriptor(ExecutableKind::InternalWorker, "0.1.0-dev.1".into());
-        for kind in [
-            ExecutableKind::Standalone,
-            ExecutableKind::InternalWorker,
-            ExecutableKind::ArmWorld,
-        ] {
-            let directory = tempfile::tempdir().unwrap();
-            let engine = directory.path().join("retained-engine");
-            fs::write(&engine, b"never execute this fixture").unwrap();
-            let hash = ContentDigest::of(b"retained input");
-            let mut semantic_parameters = SemanticParameters::new(512);
-            semantic_parameters.engine = match kind {
-                ExecutableKind::Standalone => None,
-                ExecutableKind::InternalWorker => Some(internal.clone()),
-                ExecutableKind::ArmWorld => Some(crate::engine::arm_descriptor()),
-                ExecutableKind::DriverWorld => {
-                    let mut descriptor = internal.clone();
-                    descriptor.kind = ExecutableKind::DriverWorld;
-                    Some(descriptor)
-                }
-            };
-            let prepared = PreparedInputs {
-                wall_clock_epoch: None,
-                kernel: hash.clone(),
-                images: BTreeMap::new(),
-                placement: BTreeMap::from([
-                    ("client".into(), "client".into()),
-                    ("server".into(), "server".into()),
-                ]),
-                guests: BTreeMap::from([
-                    ("client".into(), hash.clone()),
-                    ("server".into(), hash.clone()),
-                ]),
-                profile: ExecutionProfile {
-                    backend: if kind == ExecutableKind::ArmWorld {
-                        Backend::Hvf
-                    } else {
-                        Backend::Kvm
-                    },
-                    engine: hash.clone(),
-                    witness_mode: WitnessMode::FullState,
-                    semantic_parameters,
-                },
-                auxiliary: BTreeMap::new(),
-                provenance: BTreeMap::new(),
-            };
-            let artifacts = BTreeMap::from([(hash, engine.clone())]);
-            let history: seedbox_engine_protocol::intervention::History =
-                serde_json::from_value(serde_json::json!({
-                    "version": 1,
-                    "entries": [{
-                        "requestId": "cut",
-                        "position": {"boundaryIndex": 2, "completedRounds": 1, "simulatedTimeNs": 100},
-                        "plan": {"id": 1, "at_ns": 100, "deadline_ns": 100,
-                            "action": "partition", "handle": "network",
-                            "left": ["client"], "right": ["server"]}
-                    }]
-                })).unwrap();
-            let checkpoint = directory.path().join("checkpoint.json");
-            let request = ExecutionRequest {
-                program: &[],
-                intervention_history: None,
-                start_paused: true,
-                resume_checkpoint: Some(checkpoint.as_path()),
-                replay_interventions: Some(&history),
-                observations: None,
-                seed: 1009,
-                limits: &Limits {
-                    simulated_time_ns: 1_000_000_000,
-                    wall_time_ns: 5_000_000_000,
-                },
-                network: &Network {
-                    links: vec![],
-                    name: "private".into(),
-                    latency_ns: 100_000,
-                    jitter_ns: 20_000,
-                    bandwidth_bps: None,
-                    queue_bound_ns: None,
-                },
-                schedule: &Schedule {
-                    timer_jitter_ns: 50_000,
-                    stop_tolerance_ns: 40_000,
-                },
-                control: None,
-                check: &Check {
-                    service: "client".into(),
-                    exit_code: 0,
-                },
-                prepared: &prepared,
-                artifacts: &artifacts,
-                output: directory.path(),
-                cancellation: &CancellationToken::default(),
-                performance_parameters: &BTreeMap::from([(
-                    "SEEDBOX_WATCHDOG_MS".into(),
-                    "50".into(),
-                )]),
-            };
-            let original = serde_json::to_vec(&prepared.profile).unwrap();
-            let launch = WorkerLaunch::prepare(&request).unwrap();
-            let args: Vec<_> = launch
-                .command
-                .get_args()
-                .map(|v| v.to_str().unwrap())
-                .collect();
-            assert_eq!(launch.command.get_program(), engine.as_os_str());
-            let dispatch: &[&str] = match kind {
-                ExecutableKind::Standalone => &[],
-                ExecutableKind::InternalWorker => &["__engine", crate::engine::INTERNAL_WORKER_V1],
-                ExecutableKind::DriverWorld => &["__engine", crate::engine::DRIVER_WORLD_V1],
-                ExecutableKind::ArmWorld => {
-                    &["__engine", crate::engine::ARM_WORLD_V1, "--owner-pipe"]
-                }
-            };
-            assert_eq!(&args[..dispatch.len()], dispatch);
-            let out = directory.path().join(crate::execution::MACHINE_OUTPUT_DIR);
-            if kind == ExecutableKind::ArmWorld {
-                let world = directory.path().join("world.json");
-                let socket = launch.endpoint.socket();
-                let interventions = directory.path().join("replay-interventions.json");
-                assert_eq!(
-                    seedbox_engine_protocol::intervention::History::decode(
-                        &fs::read(&interventions).unwrap()
-                    )
-                    .unwrap(),
-                    history
-                );
-                let expected = [
-                    "--start-paused",
-                    "--resume-checkpoint",
-                    checkpoint.to_str().unwrap(),
-                    "--interventions",
-                    interventions.to_str().unwrap(),
-                    "--config",
-                    world.to_str().unwrap(),
-                    "--seed",
-                    "1009",
-                    "--out",
-                    out.to_str().unwrap(),
-                    "--host-control",
-                    socket.to_str().unwrap(),
-                    "--console-limit",
-                    "268435456",
-                    "--digest",
-                ];
-                assert_eq!(&args[dispatch.len()..], expected);
-            } else {
-                let path = directory.path().join(WORKER_REQUEST_FILE);
-                assert_eq!(
-                    &args[dispatch.len()..],
-                    ["--request", path.to_str().unwrap()]
-                );
-                let worker: WorkerRequest =
-                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                let mut expected =
-                    WorkerRequest::new(directory.path().join("world.json"), 1009, out);
-                expected.start_paused = true;
-                expected.interventions = Some(history);
-                expected.resume_checkpoint = Some(checkpoint.clone());
-                expected.digest = true;
-                expected.host_control = Some(launch.endpoint.socket());
-                expected.console_limit = Some(268435456);
-                expected.log_chunk_limit = Some(65536);
-                expected.stream_console = true;
-                expected.performance.watchdog_ms = 50;
-                assert_eq!(worker, expected);
-            }
-            assert_eq!(serde_json::to_vec(&prepared.profile).unwrap(), original);
-            drop(launch);
-            assert!(!directory.path().join("host-control").exists());
-        }
-    }
-
-    #[test]
-    fn recorded_performance_parameters_decode_strictly() {
-        let decode = |pairs: &[(&str, &str)]| {
-            launch_performance(
-                &pairs
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-            )
-        };
-        assert_eq!(decode(&[]).unwrap(), Performance::default());
-        assert_eq!(
-            decode(&[("SEEDBOX_WATCHDOG_MS", "50")]).unwrap(),
-            Performance { watchdog_ms: 50 }
-        );
-        for bad in [
-            ("SEEDBOX_WATCHDOG_MS", "0"),
-            ("SEEDBOX_WATCHDOG_MS", "fast"),
-            ("SEEDBOX_MARGIN", "64"),
-        ] {
-            assert!(decode(&[bad]).is_err(), "{bad:?}");
         }
     }
 

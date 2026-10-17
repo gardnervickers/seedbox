@@ -3,8 +3,7 @@ use crate::{store::ContentDigest, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Retained report beside the native page-hash files. Its presence supplies
-/// physical addressing; it never changes the interpretation of legacy reports.
+/// Retained stopped report beside native page-hash files, including physical addressing.
 pub const STATE_REPORT: &str = "driver-state.json";
 
 /// Actual mapped RAM, excluding guest physical address holes.
@@ -28,7 +27,7 @@ pub enum StateDisposition {
 /// The backend defines its combined-part encoding and computes every part from
 /// real stopped state. `ram_regions` is SHA-256 of consecutive little-endian
 /// `(base, length)` u64 pairs; both that part and `ram` enter the combined digest.
-/// Page files contain one legacy eight-byte hash per mapped 4096-byte chunk,
+/// Page files contain one eight-byte hash per mapped 4096-byte chunk,
 /// concatenated by region; a region's final partial chunk is not padded.
 // TODO: Re-evaluate: retained readers cannot depend on native Machine types;
 // this data-only boundary preserves physical addressing and boot disposition.

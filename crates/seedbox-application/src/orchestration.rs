@@ -195,9 +195,7 @@ impl Orchestrator {
         options: ReplayOptions,
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
-        // Refuse settings drift before creating an attempt or executing anything.
         let requested = executor.profile();
-        drift(&baseline.identity.inputs.profile, &requested)?;
         let mut identity = baseline.identity.clone();
         if options.allow_engine_change {
             identity.inputs.profile.engine = requested.engine;
@@ -613,35 +611,6 @@ fn retain_logs(
         }
     }
     Ok(())
-}
-
-/// Refuse, before any attempt exists, a KVM executor whose result-changing
-/// settings differ from the recorded run, naming a TX-mode difference first,
-/// then the first other one. The executable descriptor may differ; it only
-/// selects argv.
-fn drift(recorded: &ExecutionProfile, requested: &ExecutionProfile) -> Result<()> {
-    if recorded.backend != Backend::Kvm {
-        return Ok(());
-    }
-    let (was, now) = (
-        &recorded.semantic_parameters,
-        &requested.semantic_parameters,
-    );
-    let differences = was.differences(now);
-    let first = if differences.contains(&"deferred_tx") {
-        "deferred_tx"
-    } else {
-        let Some(&first) = differences.first() else {
-            return Ok(());
-        };
-        first
-    };
-    Err(Error::Integrity(match first {
-        "deferred_tx" => "executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into(),
-        setting => format!(
-            "executor {setting} does not match the recorded run; use an executor with the recorded settings"
-        ),
-    }))
 }
 
 // Keep the fallible elapsed read lazy: an explicit error or cancellation must

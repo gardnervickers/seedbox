@@ -23,11 +23,7 @@ pub struct ExecutionProfile {
 impl ExecutionProfile {
     /// One checked CPU authority for retained Driver selection and display.
     pub fn driver_backend(&self) -> Result<Option<seedbox_spec::project::CpuBackend>, String> {
-        let backend = match &self.backend {
-            Backend::Kvm => "seedbox-kvm",
-            Backend::Hvf => "seedbox-hvf",
-            Backend::Other(name) => name.as_str(),
-        };
+        let Backend::Other(backend) = &self.backend;
         let engine = self.semantic_parameters.engine.as_ref();
         seedbox_spec::project::CpuBackend::from_driver_metadata(
             backend,
@@ -40,12 +36,6 @@ impl ExecutionProfile {
 /// The execution backend that records and replays a run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Backend {
-    /// Linux KVM engine (`seedbox-vmm`).
-    #[serde(rename = "seedbox-kvm")]
-    Kvm,
-    /// Apple Hypervisor.framework ARM world (`seedbox-arm64`).
-    #[serde(rename = "seedbox-hvf")]
-    Hvf,
     /// Another `ExecutionBackend` implementation, such as a test double.
     #[serde(untagged)]
     Other(String),
@@ -60,19 +50,12 @@ pub struct SemanticParameters {
     pub control_channel: ControlChannel,
     /// Guest RAM of every machine.
     pub memory_mb: u32,
-    /// Guest timer deadlines are read from the shared time page.
-    pub page_timer: bool,
-    /// Virtio-net TX kicks are deferred to deterministic polls.
-    pub deferred_tx: bool,
     /// Seeded survival of the latest unflushed 512-byte sectors on crash.
     pub torn_writes: bool,
     /// Runtime checkpoint and the branch seed after it.
     pub checkpoint: Option<Checkpoint>,
-    /// Launch contract of the retained executable. `None` is a standalone
-    /// engine that takes the plain argv contract.
+    /// Driver executable descriptor. Non-executing test backends may omit it.
     pub engine: Option<EngineDescriptor>,
-    /// Inputs of the HVF backend only.
-    pub hvf: Option<HvfParameters>,
 }
 
 impl SemanticParameters {
@@ -82,20 +65,15 @@ impl SemanticParameters {
             guest_abi: GuestAbi::OciInitV1,
             control_channel: ControlChannel::VirtioConsoleV1,
             memory_mb,
-            page_timer: false,
-            deferred_tx: false,
             torn_writes: false,
             checkpoint: None,
             engine: None,
-            hvf: None,
         }
     }
 
     /// The executable contract that launches the retained engine.
-    pub fn launch(&self) -> ExecutableKind {
-        self.engine
-            .as_ref()
-            .map_or(ExecutableKind::Standalone, |engine| engine.kind)
+    pub fn launch(&self) -> Option<ExecutableKind> {
+        self.engine.as_ref().map(|engine| engine.kind)
     }
 
     /// Names of the settings that differ, ignoring the executable descriptor,
@@ -105,22 +83,16 @@ impl SemanticParameters {
             guest_abi,
             control_channel,
             memory_mb,
-            page_timer,
-            deferred_tx,
             torn_writes,
             checkpoint,
             engine: _,
-            hvf,
         } = self;
         [
             (guest_abi != &other.guest_abi, "guest_abi"),
             (control_channel != &other.control_channel, "control_channel"),
             (memory_mb != &other.memory_mb, "memory_mb"),
-            (page_timer != &other.page_timer, "page_timer"),
-            (deferred_tx != &other.deferred_tx, "deferred_tx"),
             (torn_writes != &other.torn_writes, "torn_writes"),
             (checkpoint != &other.checkpoint, "checkpoint"),
-            (hvf != &other.hvf, "hvf"),
         ]
         .into_iter()
         .filter_map(|(differs, name)| differs.then_some(name))
@@ -180,23 +152,6 @@ pub struct EngineDescriptor {
     pub guest_arch: String,
     pub engine_backend: String,
     pub engine_timebase: String,
-}
-
-/// HVF world inputs: boot, entropy and device policies, the host it was
-/// admitted on, the guest kernel and the launch skew cap.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HvfParameters {
-    pub boot_policy: String,
-    pub entropy_policy: String,
-    pub device_policy: String,
-    pub host_release: String,
-    /// Digest of the sampled CPU feature registers.
-    pub cpu_features: String,
-    pub guest_kernel: ContentDigest,
-    /// Largest seeded offset of each machine's initial launch, before it is
-    /// clipped to the network lookahead.
-    pub launch_max_skew_ns: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,7 +267,7 @@ pub struct ExecutionReport {
     /// Runtime-only accounting; never part of serialized result comparisons.
     #[serde(skip)]
     pub host_wait_ns: u64,
-    /// Final scheduler position (furthest machine clock for legacy reports).
+    /// Final canonical simulation time.
     /// Absent when execution produced no report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simulated_time_ns: Option<u64>,

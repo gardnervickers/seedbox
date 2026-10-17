@@ -14,11 +14,7 @@ seedbox-engine-protocol.workspace = true
 serde_json.workspace = true
 libc.workspace = true
 
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-seedbox-vmm = { path = "../seedbox-vmm" }
 
-[target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))'.dependencies]
-seedbox-arm64 = { path = "../seedbox-arm64" }
 
 [dev-dependencies]
 seedbox-test.workspace = true

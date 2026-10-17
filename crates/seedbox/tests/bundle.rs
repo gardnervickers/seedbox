@@ -840,7 +840,7 @@ fn timed_indexes_and_explicit_omissions_round_trip_without_original_output() {
 #[test]
 fn kvm_profile_round_trips_with_identity_and_report_then_replays() {
     let mut f = Fixture::new();
-    f.backend.profile.backend = execution::Backend::Kvm;
+    f.backend.profile.backend = execution::Backend::Other("fixture".into());
     f.preparer.inputs.profile = f.backend.profile.clone();
     let run = f.run();
     let archive = export(&f, &run);
