@@ -15,6 +15,10 @@ pub use cancellation::pv_fault_cancel;
 mod lifecycle;
 pub use lifecycle::{pv_lifecycle_replay, LifecyclePair};
 
+#[path = "native_fault_disk.rs"]
+mod disk_faults;
+pub use disk_faults::pv_disk_crash_reboot_replay;
+
 const SEED: u64 = 123;
 const TARGET: &str = "target";
 const HANDLE: &str = "public-throttle";

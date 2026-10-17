@@ -58,7 +58,10 @@ impl LifecyclePair {
 
 // Preserve each real boot incarnation. The ordinary CPU helper intentionally
 // rejects rebooted logs and therefore cannot be used for this crash scenario.
-async fn target_log(session: &NativeSession, id: &seedbox_api::SimulationId) -> (String, Vec<u32>) {
+pub(super) async fn target_log(
+    session: &NativeSession,
+    id: &seedbox_api::SimulationId,
+) -> (String, Vec<u32>) {
     let mut logs = session.client.logs_with(id, TARGET, false).await.unwrap();
     let mut bytes = Vec::new();
     let mut boots = Vec::new();
