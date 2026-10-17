@@ -39,6 +39,8 @@ enum Command {
     Mysql(systems::mysql::Args),
     /// Run the MariaDB Galera Cluster list-append oracle (guest).
     Galera(systems::galera::Args),
+    /// Run the RustFS object-store oracle (guest).
+    Rustfs(systems::rustfs::Args),
     /// Run the TigerBeetle oracle (guest).
     Tigerbeetle(systems::tigerbeetle::Args),
     /// Run a TigerBeetle replica's node agent (guest).
@@ -143,6 +145,7 @@ fn check_of(command: &Command) -> Option<&'static str> {
         Command::Kafka(_) => "kafka: the queue's checks hold",
         Command::Mysql(_) => "mysql: transactions meet their isolation level",
         Command::Galera(_) => "galera: transactions meet their isolation level",
+        Command::Rustfs(_) => "rustfs: acknowledged objects survive intact",
         Command::Tigerbeetle(_) => "tigerbeetle: the ledger's checks hold",
         _ => return None,
     })
@@ -163,6 +166,7 @@ fn main() -> ExitCode {
         Command::Kafka(args) => systems::kafka::run(args),
         Command::Mysql(args) => systems::mysql::run(args),
         Command::Galera(args) => systems::galera::run(args),
+        Command::Rustfs(args) => systems::rustfs::run(args),
         Command::Tigerbeetle(args) => systems::tigerbeetle::run(args),
         Command::TbNode(args) => systems::tigerbeetle_node::run(args),
         Command::TbWorker(args) => systems::tigerbeetle::worker(args),

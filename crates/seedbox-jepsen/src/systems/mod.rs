@@ -9,6 +9,7 @@ pub mod nats;
 pub mod nats_proto;
 pub mod pg_proto;
 pub mod postgres;
+pub mod rustfs;
 pub mod tb_client;
 pub mod tigerbeetle;
 pub mod tigerbeetle_node;

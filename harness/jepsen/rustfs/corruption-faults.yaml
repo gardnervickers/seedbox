@@ -1,0 +1,25 @@
+# generic-faults.yaml plus silent corruption of n1's data reads and writes
+# (never the filesystem's metadata). RustFS erasure-codes each object across
+# the four drives with a bitrot checksum per shard, so corruption on one drive
+# must not lose an acknowledged object or return other bytes for it.
+start: 20s
+end: 80s
+interval: 3s
+faults:
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 6s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 6s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 5s}
+  - kind: disk_error
+    weight: 3
+    op: any
+    ppm: 20000
+    effect: corrupt
+    scope: data
+    duration: {min: 2s, max: 8s}
+    targets: [n1]
