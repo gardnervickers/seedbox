@@ -3,6 +3,7 @@ use super::{
     options::Options,
     supervisor::{self, OwnedGroup, Trace},
 };
+use seedbox_test_time::HangGuard;
 use std::{
     ffi::OsString,
     fs::{self, File},
@@ -56,15 +57,14 @@ fn groups_gone(trace: &[Trace]) {
     }
 }
 fn wait_until(mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !predicate() {
-        assert!(
-            Instant::now() < deadline,
-            "fixture readiness deadline expired"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    HangGuard::new("positive fixture readiness", Duration::from_secs(60))
+        .wait_for(|| predicate().then_some(()))
+        .expect("fixture readiness infrastructure hang");
 }
+
+// No autonomous worker deadline may race the parent's readiness/signal.
+const BLOCK_UNTIL_SIGNAL: &str =
+    "mkfifo \"${out}.blocked\"\nprintf ready > \"${out}.ready\"\nexec cat \"${out}.blocked\"";
 
 struct Disposable(Child);
 impl Drop for Disposable {
@@ -114,19 +114,15 @@ fn case(name: &str) {
         });
         assert_eq!(unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) }, 0);
     }
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{name}: subprocess timeout\n{}\n{}",
-            fs::read_to_string(&stdout).unwrap(),
-            fs::read_to_string(&stderr).unwrap()
-        );
-        thread::sleep(Duration::from_millis(10));
-    };
+    let status = HangGuard::new("supervisor subprocess must exit", Duration::from_secs(60))
+        .wait_for(|| child.0.try_wait().unwrap())
+        .unwrap_or_else(|error| {
+            panic!(
+                "{name}: subprocess infrastructure hang: {error}\n{}\n{}",
+                fs::read_to_string(&stdout).unwrap(),
+                fs::read_to_string(&stderr).unwrap()
+            )
+        });
     assert!(
         status.success(),
         "{name}: {status}\n{}\n{}",
@@ -299,16 +295,18 @@ fn supervisor_case() {
         }
         "timeout" | "interrupt" | "grace" | "signaled" => {
             let body = match name.as_str() {
-                "grace" => "trap '' TERM\nprintf ready > \"${out}.ready\"\nexec sleep 60",
-                "signaled" => "kill -TERM $$",
-                _ => "printf ready > \"${out}.ready\"\nexec sleep 60",
+                "grace" => format!("trap '' TERM\n{BLOCK_UNTIL_SIGNAL}"),
+                "interrupt" => BLOCK_UNTIL_SIGNAL.into(),
+                "signaled" => "kill -TERM $$".into(),
+                _ => "printf ready > \"${out}.ready\"\nexec sleep 60".into(),
             };
-            worker(&root, body);
+            worker(&root, &body);
             let seeds: &[i32] = if name == "interrupt" { &[0, 1] } else { &[0] };
-            // The grace worker is stopped by the supervisor's interruption,
-            // which the parent sends after the worker's readiness; its run
-            // timeout is only a hang guard.
-            let timeout = if name == "grace" { 60.0 } else { 0.08 };
+            // Only the timeout subject may expire. All other cases must stop
+            // through their selected signal, independently of scheduling delay.
+            // f64::MAX is valid and exceeds every representable elapsed Duration;
+            // the parent's HangGuard alone bounds an unresponsive test fixture.
+            let timeout = if name == "timeout" { 0.08 } else { f64::MAX };
             let result = supervisor::run_batch(options(&root, seeds, timeout)).unwrap();
             let interrupted = matches!(name.as_str(), "interrupt" | "grace");
             assert_eq!(result, if interrupted { 143 } else { 0 });
@@ -481,14 +479,17 @@ fn supervisor_case() {
             let interrupted = name == "interrupt-status-error";
             worker(
                 &root,
-                if interrupted {
-                    "if [ \"$4\" = 0 ]; then mkdir \"${out}.status\"; fi\nprintf ready > \"${out}.ready\"\nexec sleep 60"
+                &if interrupted {
+                    format!(
+                        "if [ \"$4\" = 0 ]; then mkdir \"${{out}}.status\"; fi\n{BLOCK_UNTIL_SIGNAL}"
+                    )
                 } else {
                     "if [ \"$4\" = 0 ]; then mkdir \"${out}.status\"; exit 0; fi\nexec sleep 60"
+                        .into()
                 },
             );
             assert_eq!(
-                supervisor::run_batch(options(&root, &[0, 1], 1.0)).unwrap(),
+                supervisor::run_batch(options(&root, &[0, 1], f64::MAX)).unwrap(),
                 if interrupted { 143 } else { 1 }
             );
             assert!(suffix(&output(&root, 0, 0), ".status").is_dir());

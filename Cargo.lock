@@ -2203,6 +2203,7 @@ dependencies = [
  "seedbox-machine",
  "seedbox-machine-pv",
  "seedbox-machine-tcg",
+ "seedbox-test-time",
  "serde",
  "serde_json",
  "sha2",
