@@ -33,6 +33,8 @@ mod control;
 mod controller;
 pub use controller::ControllerSetup;
 mod event;
+mod observation;
+pub use observation::{Committed, CommittedChange, FlushResults};
 mod input;
 mod network;
 #[cfg(test)]
@@ -249,11 +251,24 @@ struct ExecutionState<M> {
 
 /// Already-committed descriptions owned by one observer session. These are
 /// distinct from Entry::staged, whose accepted outputs still drive execution.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct ObservationState {
     staged_events: Vec<Staged>,
     published: Vec<Event>,
     next_sequence: u64,
+    capacity: usize,
+    omitted: u64,
+}
+impl Default for ObservationState {
+    fn default() -> Self {
+        Self {
+            staged_events: Vec::new(),
+            published: Vec::new(),
+            next_sequence: 0,
+            capacity: usize::MAX,
+            omitted: 0,
+        }
+    }
 }
 
 /// Owns simulation scheduling and shared time.
@@ -326,6 +341,7 @@ pub struct Driver<M: Machine> {
     execution: ExecutionState<M>,
     playback: Playback,
     observations: ObservationState,
+    committed: Vec<Committed>,
     factory: MachineFactory<M>,
 }
 
@@ -552,6 +568,7 @@ where
                 network,
             },
             observations: ObservationState::default(),
+            committed: Vec::new(),
             playback: Playback::default(),
             factory: Box::new(factory),
         };
@@ -583,7 +600,48 @@ where
     /// Works after failure/stop/completion, does no machine work, and never
     /// changes authoritative counters or dense event/witness sequencing.
     pub fn drain_frames(&mut self) -> FrameFacts {
-        self.execution.network.drain_frames()
+        let mut batch = self.drain_observations();
+        let frames = std::mem::take(&mut batch.frames);
+        self.restore_other_observations(batch);
+        frames
+    }
+
+    /// Bound retained Event copies; zero disables copies, never committed changes.
+    /// Shrink and overflow count actual omissions returned by the unified drain.
+    // TODO: Re-evaluate: host retention must be changeable without changing causal
+    // bookkeeping; constructor-only configuration cannot rebind restored viewers.
+    pub fn set_event_capacity(&mut self, capacity: usize) {
+        self.observations.capacity = capacity;
+        let removed = self.observations.published.len().saturating_sub(capacity);
+        self.observations.published.truncate(capacity);
+        self.observations.omitted = self.observations.omitted.saturating_add(removed as u64);
+    }
+
+    /// Transfer committed bookkeeping and optional descriptions exactly once.
+    /// Changes are never capacity-limited. Retained events and frames may have
+    /// explicit gaps; this never executes work or drains future scheduled inputs.
+    // TODO: Re-evaluate: one handoff prevents service input/status continuation
+    // from depending on optional Event retention or a second publication path.
+    pub fn drain_observations(&mut self) -> FlushResults {
+        FlushResults {
+            position: self.position(),
+            changes: std::mem::take(&mut self.committed),
+            events: std::mem::take(&mut self.observations.published),
+            frames: self.execution.network.drain_frames(),
+            omitted_events: std::mem::take(&mut self.observations.omitted),
+            next_event_sequence: self.observations.next_sequence,
+        }
+    }
+
+    // Legacy selective drains delegate to the same handoff and leave the other
+    // streams untouched. The service uses only drain_observations.
+    fn restore_other_observations(&mut self, batch: FlushResults) {
+        self.committed = batch.changes;
+        self.observations.published = batch.events;
+        self.observations.omitted = batch.omitted_events;
+        self.execution
+            .network
+            .restore_frame_observations(batch.frames);
     }
 
     /// Read cumulative per-pair decisions and confirmed receive offers without
@@ -603,9 +661,10 @@ where
     /// This works in every state, including after a failed `step`, a
     /// permanent stop and oracle completion, and never runs simulation work.
     /// Each event is returned exactly once. The driver keeps no history of
-    /// drained events: the host owns retained history. Undrained events are
-    /// retained without bound, so hosts should drain after every `step` and
-    /// barrier callback.
+    /// drained events: the host owns retained history. Default retention is
+    /// unbounded; hosts should drain after every `step` and barrier callback.
+    /// Use `drain_observations` for required changes and explicit loss watermarks
+    /// when `set_event_capacity` limits optional copies.
     ///
     /// # Order
     ///
@@ -651,7 +710,10 @@ where
     /// and the `upto` bounds passed to `step`). Worker count and playback rate
     /// never change it.
     pub fn drain_events(&mut self) -> Vec<Event> {
-        std::mem::take(&mut self.observations.published)
+        let mut batch = self.drain_observations();
+        let events = std::mem::take(&mut batch.events);
+        self.restore_other_observations(batch);
+        events
     }
 
     fn stage_notices(&mut self) {
@@ -760,13 +822,28 @@ where
                     }
                 },
             };
-            self.observations.published.push(Event {
-                sequence: self.observations.next_sequence,
-                position,
-                at,
-                kind,
-            });
-            self.observations.next_sequence += 1;
+            if let Some(change) = CommittedChange::from_event(&kind) {
+                self.committed.push(Committed {
+                    position,
+                    at,
+                    change,
+                });
+            }
+            // Observer exhaustion can lose descriptions, never poison execution.
+            let sequence = self.observations.next_sequence;
+            if let Some(next) = sequence.checked_add(1) {
+                self.observations.next_sequence = next;
+                if self.observations.published.len() < self.observations.capacity {
+                    self.observations.published.push(Event {
+                        sequence,
+                        position,
+                        at,
+                        kind,
+                    });
+                    continue;
+                }
+            }
+            self.observations.omitted = self.observations.omitted.saturating_add(1);
         }
         result
     }

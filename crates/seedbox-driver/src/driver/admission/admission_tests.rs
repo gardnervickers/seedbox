@@ -47,11 +47,12 @@ fn throttle() -> Action {
 /// Honest internal fingerprint: no capture/validation is claimed for poisoned or
 /// intermediate synthetic states. Encode every deterministic Driver field plus
 /// failed and native mock state; compare Playback itself too (including anchor).
-fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
+fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback, Vec<Committed>) {
     let Driver {
         execution,
         playback,
         observations,
+        committed,
         workers: _,
         factory: _,
     } = d;
@@ -79,6 +80,8 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         staged_events,
         published,
         next_sequence,
+        capacity: _,
+        omitted: _,
     } = observations;
     let SimulationRng::Seeded(rng) = rng else {
         panic!("owned RNG required by probe")
@@ -126,7 +129,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         .put(&mut e)
         .unwrap();
     }
-    (e.output, playback.clone())
+    (e.output, playback.clone(), committed.clone())
 }
 fn bytes(d: &mut Driver<Mock>) -> (Vec<u8>, Store) {
     artifact(d.checkpoint().unwrap())

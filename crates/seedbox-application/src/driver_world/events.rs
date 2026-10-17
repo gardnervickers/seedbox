@@ -8,7 +8,7 @@ use seedbox_driver::driver::{
 };
 use seedbox_engine_protocol::{
     application_log,
-    driver_world::{AppliedFault, State},
+    driver_world::State,
     observation::{self, Kind, MachineTransition},
     report::RowStatus,
 };
@@ -142,6 +142,30 @@ impl Publisher {
         }
         Ok(())
     }
+    pub(super) fn event_gap(&mut self, state: &mut State, omitted: u64, next: u64) -> Result<()> {
+        if omitted != 0 && self.socket.is_some() {
+            self.sequence = self
+                .sequence
+                .checked_add(omitted)
+                .ok_or_else(|| invalid("Driver event observation sequence exhausted"))?;
+            state.world.publication.observation_records = state
+                .world
+                .publication
+                .observation_records
+                .checked_add(omitted)
+                .ok_or_else(|| invalid("Driver event observation count exhausted"))?;
+            self.emit(
+                state,
+                "",
+                0,
+                state.world.position.simulated_time_ns,
+                Kind::Frames { frames: vec![] },
+            )?;
+        }
+        state.world.publication.next_driver_sequence = next;
+        Ok(())
+    }
+
     pub(super) fn close(&mut self, state: &mut State) -> Result<()> {
         self.emit(
             state,
@@ -185,7 +209,6 @@ impl Publisher {
                 let machine = name(names, output.machine)?;
                 match &output.payload {
                     Response::Ready => {
-                        state.world.readiness.observe(machine);
                         self.emit(state, machine, output.boot, at, Kind::MachineReady)?;
                     }
                     Response::ApplicationOutput { stream, bytes } => {
@@ -263,7 +286,6 @@ impl Publisher {
                 record,
                 status,
                 outcome_at,
-                detail,
                 ..
             } => {
                 let row = match status {
@@ -271,16 +293,6 @@ impl Publisher {
                     SettlementStatus::Unavailable => RowStatus::Unavailable,
                     SettlementStatus::Rejected | SettlementStatus::Failed => RowStatus::Failed,
                 };
-                if *status == SettlementStatus::Applied {
-                    let (machine, _) = target_machine(names, &record.target)?;
-                    state.world.publication.applied_faults.push(AppliedFault {
-                        requested_at_ns: record.requested_at.as_nanos(),
-                        applied_at_ns: outcome_at.unwrap_or(event.at).as_nanos(),
-                        service: machine.unwrap_or("").into(),
-                        action: action_name(record.action)?.into(),
-                        detail: detail.clone(),
-                    });
-                }
                 self.fault(
                     state,
                     names,
@@ -362,7 +374,7 @@ fn name(names: &BTreeMap<MachineId, String>, machine: MachineId) -> Result<&str>
         .map(String::as_str)
         .ok_or_else(|| invalid("Driver publication has no retained machine name"))
 }
-fn target_machine<'a>(
+pub(super) fn target_machine<'a>(
     names: &'a BTreeMap<MachineId, String>,
     target: &FaultTarget,
 ) -> Result<(Option<&'a str>, u64)> {

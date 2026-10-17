@@ -457,6 +457,7 @@ where
             },
             workers,
             observations: checkpoint.observations.clone(),
+            committed: Vec::new(),
             playback: checkpoint.playback.checkpoint(),
             factory: Box::new(factory),
         })

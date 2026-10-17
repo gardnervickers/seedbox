@@ -763,6 +763,7 @@ impl Wire for ObservationState {
             staged_events: Wire::get(d)?,
             published: Wire::get(d)?,
             next_sequence: Wire::get(d)?,
+            ..ObservationState::default()
         })
     }
 }

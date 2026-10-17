@@ -301,6 +301,12 @@ impl Network {
         }
     }
 
+    pub(crate) fn restore_frame_observations(&mut self, frames: FrameFacts) {
+        debug_assert!(self.frames.is_empty() && self.omitted == 0);
+        self.frames = frames.facts.into();
+        self.omitted = frames.omitted;
+    }
+
     pub(crate) fn drain_frames(&mut self) -> FrameFacts {
         FrameFacts {
             facts: self.frames.drain(..).collect(),

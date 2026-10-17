@@ -13,18 +13,17 @@ use crate::{
     Error, Result,
 };
 use seedbox_driver::driver::{
-    self, Driver, DueOutcome, EventKind, FaultOrigin, FaultRecord, InputKey, PreparedInput,
-    PreparedOutcome, StepOutcome,
+    self, Driver, DueOutcome, FaultOrigin, FaultRecord, InputKey, PreparedInput, PreparedOutcome,
+    StepOutcome,
 };
 use seedbox_engine_protocol::{
     driver_world::{Inventory, State},
     host_control::{self as host, Command, ControlError, Reply, Request},
     intervention::Intervention,
 };
-use seedbox_machine::{
-    machine::{ExitReason, Machine, Timestamp},
-    pv::Response,
-};
+use seedbox_machine::machine::{ExitReason, Machine, Timestamp};
+#[cfg(test)]
+use seedbox_machine::pv::Response;
 use std::{
     collections::{BTreeMap, VecDeque},
     fs::File,
@@ -113,39 +112,75 @@ where
         }
         let result = (|| {
             let mut facts = Facts::default();
-            for event in self.driver.drain_events() {
-                if let EventKind::MachineAdded { machine, .. } = &event.kind {
-                    let name = self
-                        .constructed
-                        .lock()
-                        .map_err(|_| fail("Driver construction ledger poisoned"))?
-                        .pop_front()
-                        .ok_or_else(|| fail("Driver machine-added event has no factory result"))?;
-                    if self.names.insert(*machine, name.clone()).is_some() {
-                        return Err(fail("Driver machine identity published twice"));
+            let batch = self.driver.drain_observations();
+            for committed in &batch.changes {
+                match &committed.change {
+                    driver::CommittedChange::MachineAdded { machine, .. } => {
+                        let name = self
+                            .constructed
+                            .lock()
+                            .map_err(|_| fail("Driver construction ledger poisoned"))?
+                            .pop_front()
+                            .ok_or_else(|| {
+                                fail("Driver committed machine has no factory result")
+                            })?;
+                        if self.names.insert(*machine, name.clone()).is_some() {
+                            return Err(fail("Driver machine identity committed twice"));
+                        }
+                        self.state.world.machine_names.push(name);
                     }
-                    self.state.world.machine_names.push(name);
-                }
-                match &event.kind {
-                    EventKind::FaultAdmitted(record) => facts.admissions.push(record.clone()),
-                    EventKind::InputRejected { key, rejection } => facts
+                    driver::CommittedChange::Ready { machine, .. } => {
+                        let name = self
+                            .names
+                            .get(machine)
+                            .ok_or_else(|| fail("Driver ready fact has no machine binding"))?;
+                        self.state.world.readiness.observe(name);
+                    }
+                    driver::CommittedChange::FaultAdmitted(record) => {
+                        facts.admissions.push(record.clone())
+                    }
+                    driver::CommittedChange::InputRejected { key, rejection } => facts
                         .rejections
                         .push((key.clone(), rejection.detail.clone())),
-                    EventKind::Output(driver::MachineResponse {
-                        machine,
-                        payload: Response::ApplicationOutcome { code },
-                        ..
-                    }) if self.names.get(machine) == self.state.world.machine_names.first() => {
+                    driver::CommittedChange::ApplicationOutcome { machine, code, .. }
+                        if self.names.get(machine) == self.state.world.machine_names.first() =>
+                    {
                         self.state.world.publication.oracle_exit = Some(*code);
+                    }
+                    driver::CommittedChange::FaultSettled {
+                        record,
+                        status,
+                        outcome_at,
+                        detail,
+                        ..
+                    } if *status == driver::SettlementStatus::Applied => {
+                        let (machine, _) =
+                            super::events::target_machine(&self.names, &record.target)?;
+                        self.state.world.publication.applied_faults.push(
+                            seedbox_engine_protocol::driver_world::AppliedFault {
+                                requested_at_ns: record.requested_at.as_nanos(),
+                                applied_at_ns: outcome_at.unwrap_or(committed.at).as_nanos(),
+                                service: machine.unwrap_or("").into(),
+                                action: super::events::action_name(record.action)?.into(),
+                                detail: detail.clone(),
+                            },
+                        );
                     }
                     _ => {}
                 }
-                self.state.world.position = position(event.position);
+            }
+            for event in batch.events {
                 self.publisher
                     .publish(&mut self.state, &self.names, event)?;
             }
+            self.state.world.position = position(batch.position);
+            self.publisher.event_gap(
+                &mut self.state,
+                batch.omitted_events,
+                batch.next_event_sequence,
+            )?;
             self.publisher
-                .frames(&mut self.state, &self.names, self.driver.drain_frames())?;
+                .frames(&mut self.state, &self.names, batch.frames)?;
             Ok(facts)
         })();
         if result.is_err() {

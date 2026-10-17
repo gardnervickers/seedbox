@@ -54,6 +54,8 @@ where
             staged_events,
             published: _,
             next_sequence,
+            capacity: _,
+            omitted: _,
         } = &self.driver.observations;
         let playback = &self.driver.playback;
         let SimulationRng::Seeded(rng) = rng else {
