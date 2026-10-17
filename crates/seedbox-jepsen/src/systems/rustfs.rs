@@ -75,8 +75,8 @@ pub struct Args {
     /// Seconds the servers stay down after a coordinated power failure.
     #[arg(long, default_value_t = 2.0)]
     pub crash_all_down: f64,
-    /// After each coordinated reboot, cut one random server off from the
-    /// others for this many seconds while they start up; 0 never does.
+    /// 0.05-0.4 s after each coordinated reboot, cut one random server off
+    /// from the others for this many seconds while they start up; 0 never does.
     #[arg(long, default_value_t = 0.0)]
     pub startup_partition: f64,
     /// Seconds to wait after the writes before the read-back.
@@ -660,7 +660,9 @@ fn crash_all_repeatedly(args: Args) {
                 kit::evidence("nemesis-failed", json!({"error": error.0}));
             }
             if args.startup_partition > 0.0 {
-                crate::nemesis::Pace::wait(&mut pace, &mut ctl, rng.uniform(0.0, 3.0));
+                // A healthy restart finishes its storage setup within about
+                // 0.05 s and its bucket metadata migration about 0.35 s in.
+                crate::nemesis::Pace::wait(&mut pace, &mut ctl, rng.uniform(0.05, 0.4));
                 let (left, right) = crate::nemesis::isolate(rng.choice(&nodes), &nodes);
                 match crate::nemesis::cut(&mut ctl, &left, &right, json!({"startup": true})) {
                     Ok(cut) => {

@@ -1257,7 +1257,7 @@ fn rustfs() -> Vec<Scenario> {
          &["--crash-all-every", "20"]),
         ("rustfs-crash-all-large", "rustfs-crash-all with 1 MiB objects, which RustFS erasure-codes into separate\npart files rather than keeping inline in its metadata.",
          &["--crash-all-every", "20", "--size", "1048576", "--clients", "2"]),
-        ("rustfs-startup-partition", "rustfs-crash-all, and 0-3 s after each coordinated reboot one random server is cut off\nfrom the others for 10 s while they start. Startup's bucket metadata migration takes\na quorum read lock, and 1.0.2 exits (Lock acquisition timeout ... resync.bin) when\nthat lock times out instead of retrying; a server that never answers again fails the run.",
+        ("rustfs-startup-partition", "rustfs-crash-all, and 0.05-0.4 s after each coordinated reboot one random server is cut\noff from the others for 10 s, between its storage setup and its bucket metadata\nmigration. The migration takes quorum locks and reads remote drives, and 1.0.2 exits\n(Lock acquisition timeout, or plain timeout) when one times out instead of retrying;\na server that never answers again fails the run.",
          &["--crash-all-every", "20", "--startup-partition", "10"]),
     ];
     specs
