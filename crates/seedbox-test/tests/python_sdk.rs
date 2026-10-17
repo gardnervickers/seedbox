@@ -479,34 +479,33 @@ fn graceful_reconnect_starts_new_ids_and_preserves_explicit_handles() {
     use std::{
         io::{Read, Write},
         os::unix::net::{UnixListener, UnixStream},
-        time::Instant,
     };
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("control.sock");
     let listener = UnixListener::bind(&path).unwrap();
     listener.set_nonblocking(true).unwrap();
     let mut sdk = Sdk::new();
-    let deadline = sdk.deadline;
+    let guard = sdk.guard.clone();
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
         for result in [json!({"handle":"retained-p1"}), json!({})] {
-            let (mut channel, _) = loop {
-                match listener.accept() {
-                    Ok(channel) => break channel,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "Unix peer accept deadline");
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
+            let (mut channel, _) = guard
+                .wait_for(|| match listener.accept() {
+                    Ok(channel) => Some(channel),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
                     Err(e) => panic!("Unix peer accept: {e}"),
-                }
-            };
-            fn remaining(deadline: Instant) -> std::time::Duration {
-                deadline
-                    .checked_duration_since(Instant::now())
-                    .expect("Unix peer five-second deadline")
-            }
-            fn read_byte(channel: &mut UnixStream, deadline: Instant) -> Option<u8> {
-                channel.set_read_timeout(Some(remaining(deadline))).unwrap();
+                })
+                .expect("Unix peer accept deadline");
+            fn read_byte(
+                channel: &mut UnixStream,
+                guard: &seedbox_test_time::HangGuard,
+            ) -> Option<u8> {
+                // test-time: allow(hang-guard) -- Bound an actual request byte or EOF, not a timed absence used as ordering evidence.
+                channel
+                    .set_read_timeout(Some(
+                        guard.remaining().expect("Unix peer five-second deadline"),
+                    ))
+                    .unwrap();
                 let mut byte = [0];
                 match channel.read(&mut byte).unwrap() {
                     0 => None,
@@ -516,7 +515,7 @@ fn graceful_reconnect_starts_new_ids_and_preserves_explicit_handles() {
             }
             let mut bytes = Vec::new();
             loop {
-                let byte = read_byte(&mut channel, deadline).expect("request before EOF");
+                let byte = read_byte(&mut channel, &guard).expect("request before EOF");
                 if byte == b'\n' {
                     break;
                 }
@@ -524,12 +523,15 @@ fn graceful_reconnect_starts_new_ids_and_preserves_explicit_handles() {
                 assert!(bytes.len() <= 16384, "bounded Unix request");
             }
             requests.push(serde_json::from_slice::<Value>(&bytes).unwrap());
+            // test-time: allow(hang-guard) -- Bound the explicit SDK reply write under the same case deadline across reconnects.
             channel
-                .set_write_timeout(Some(remaining(deadline)))
+                .set_write_timeout(Some(
+                    guard.remaining().expect("Unix peer five-second deadline"),
+                ))
                 .unwrap();
             channel.write_all(&reply(1, result, json!({}))).unwrap();
             assert_eq!(
-                read_byte(&mut channel, deadline),
+                read_byte(&mut channel, &guard),
                 None,
                 "SDK close produces EOF"
             );

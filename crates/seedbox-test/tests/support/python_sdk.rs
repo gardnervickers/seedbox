@@ -1,12 +1,13 @@
 //! Private, bounded process/pipe boundary for the Python SDK contract target.
 //! The checker command runner cannot be reused here: it owns process-global
 //! signals and whole-command capture, not an interactive anonymous-pipe peer.
+use seedbox_test_time::HangGuard;
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
     os::{fd::AsRawFd, unix::process::CommandExt},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const LIMIT: usize = 256 * 1024;
@@ -18,8 +19,8 @@ pub struct Sdk {
     input: ChildStdin,
     output: ChildStdout,
     pending: Vec<u8>,
-    pub deadline: Instant,
-    injected_now: Option<Instant>,
+    pub guard: HangGuard,
+    injected_remaining: Option<Duration>,
 }
 impl Sdk {
     pub fn new() -> Self {
@@ -44,8 +45,8 @@ impl Sdk {
             input,
             output,
             pending: Vec::new(),
-            deadline: Instant::now() + DEADLINE,
-            injected_now: None,
+            guard: HangGuard::new("Python SDK adapter case I/O", DEADLINE),
+            injected_remaining: None,
         };
         for fd in [sdk.input.as_raw_fd(), sdk.output.as_raw_fd()] {
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -64,8 +65,9 @@ impl Sdk {
     fn ready(&self, fd: i32, events: i16) {
         loop {
             let remaining = self
-                .deadline
-                .checked_duration_since(self.injected_now.unwrap_or_else(Instant::now))
+                .injected_remaining
+                .or_else(|| self.guard.remaining().ok())
+                .filter(|remaining| !remaining.is_zero())
                 .expect("SDK child exceeded five-second case deadline");
             let mut poll = libc::pollfd {
                 fd,
@@ -73,6 +75,7 @@ impl Sdk {
                 revents: 0,
             };
             let rc = unsafe {
+                // test-time: allow(hang-guard) -- Bound actual pipe readiness with the shared case guard; silence never satisfies a call.
                 libc::poll(
                     &mut poll,
                     1,
@@ -224,7 +227,9 @@ fn blocked_real_sdk_call_has_deadline_and_child_is_reaped_on_unwind() {
     let (peer, _) = listener.accept().expect("real SDK connected");
     // A real request receipt, not silence or a sleep, establishes SDK progress.
     // The socket timeout is only a hang guard if that progress never happens.
-    peer.set_read_timeout(Some(DEADLINE)).unwrap();
+    // test-time: allow(hang-guard) -- Bound receipt of the actual SDK request before deliberately exhausting its I/O budget.
+    peer.set_read_timeout(Some(sdk.guard.remaining().unwrap()))
+        .unwrap();
     sdk.send_command(json!({"action":"call","op":"stop","args":["server"],"kwargs":{}}));
     let mut reader = std::io::BufReader::new(peer.take(16_385));
     let mut frame = Vec::new();
@@ -234,11 +239,10 @@ fn blocked_real_sdk_call_has_deadline_and_child_is_reaped_on_unwind() {
         serde_json::from_slice::<Value>(&frame).unwrap(),
         json!({"version":1,"id":1,"op":"stop","target":{"service":"server"}})
     );
-    // Keep the peer open without replying. Inject an expired clock only AFTER
-    // its request arrived: the same observation deadline branch must reject
-    // this pending call regardless of host scheduling speed.
-    let expired_at = sdk.deadline + Duration::from_nanos(1);
-    sdk.injected_now = Some(expired_at);
+    // Keep the peer open without replying. Inject an exhausted remaining budget
+    // only AFTER its request arrived: the same observation deadline branch must
+    // reject this pending call regardless of host scheduling speed.
+    sdk.injected_remaining = Some(Duration::ZERO);
     let pid = sdk.child.id() as i32;
     let failure = std::panic::catch_unwind(move || {
         sdk.observation();
