@@ -54,8 +54,11 @@ fn observe(args: &[&str], imported: bool) -> Output {
                 revents: 0,
             };
             let remaining = i32::try_from(guard.remaining().unwrap().as_millis()).unwrap();
-            // test-time: allow(hang-guard) -- Bound positive arrival of the next fixture HTTP request, never infer simulated behavior from absence.
-            assert_eq!(unsafe { libc::poll(&mut fd, 1, remaining) }, 1);
+            let ready = unsafe {
+                // test-time: allow(hang-guard) -- Bound positive arrival of the next fixture HTTP request, never infer simulated behavior from absence.
+                libc::poll(&mut fd, 1, remaining)
+            };
+            assert_eq!(ready, 1);
             let (mut socket, _) = listener.accept().unwrap();
             // test-time: allow(hang-guard) -- Bound reading the positive HTTP header from the CLI.
             socket
