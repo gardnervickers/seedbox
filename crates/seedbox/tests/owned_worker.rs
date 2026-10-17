@@ -18,7 +18,7 @@ use std::{
         process::{CommandExt, ExitStatusExt},
     },
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 struct Cleanup(Child);
@@ -170,27 +170,23 @@ fn monitor_join_removes_parent_owned_native_scratch_after_exit_failure_cancel_an
         .unwrap();
         // Same monitor-owned guard used by the Driver launch, not child Drop.
         process.retain_until_join(scratch);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !ready.exists() {
-            assert!(
-                Instant::now() < deadline,
-                "fixture never reached scratch creation"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        HangGuard::new(
+            "owned scratch fixture publishes its ready marker",
+            Duration::from_secs(5),
+        )
+        .wait_for(|| ready.exists().then_some(()))
+        .expect("fixture never reached scratch creation");
         if mode == "cancel" || mode == "drop" {
             assert!(scratch_path.join("seedbox-pv-fixture/initrd").exists());
         }
         if mode == "drop" {
             drop(process); // Ownership transfers to the existing background join.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while scratch_path.exists() {
-                assert!(
-                    Instant::now() < deadline,
-                    "async monitor join retained scratch"
-                );
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            HangGuard::new(
+                "background monitor removes previously observed owned scratch",
+                Duration::from_secs(5),
+            )
+            .wait_for(|| (!scratch_path.exists()).then_some(()))
+            .expect("async monitor join retained scratch");
         } else {
             if mode == "cancel" {
                 process.cancel();
