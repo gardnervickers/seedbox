@@ -1247,14 +1247,16 @@ fn tigerbeetle() -> Vec<Scenario> {
 const RUSTFS_102: &str = "docker.io/rustfs/rustfs:1.0.2@sha256:7e948dad4748bda48f8985fda7195f8cf2e4259427011f6120acc2c9acf51587";
 
 fn rustfs() -> Vec<Scenario> {
-    // (name, comment)
-    let specs: [(&str, &str); 2] = [
-        ("rustfs-healthy", "Baseline: four RustFS 1.0.2 servers, one erasure-coded drive each, keep every\nacknowledged object intact with no faults."),
-        ("rustfs-current-generic", "The current release (1.0.2), looking for unknown bugs: S3 PUTs of unique objects\nfor 75 s with reads of acknowledged objects, then a read-back of every acknowledged\nobject. Run it with `--fault-profile harness/jepsen/rustfs/generic-faults.yaml`\n(power loss, process pauses, partitions) or `corruption-faults.yaml` (bit flips in\none server's object data)."),
+    // (name, comment, oracle arguments)
+    let specs: [(&str, &str, &[&str]); 3] = [
+        ("rustfs-healthy", "Baseline: four RustFS 1.0.2 servers, one erasure-coded drive each, keep every\nacknowledged object intact with no faults.", &[]),
+        ("rustfs-current-generic", "The current release (1.0.2), looking for unknown bugs: S3 PUTs of unique objects\nfor 75 s with reads of acknowledged objects, then a read-back of every acknowledged\nobject. Run it with `--fault-profile harness/jepsen/rustfs/generic-faults.yaml`\n(power loss, process pauses, partitions) or `corruption-faults.yaml` (bit flips in\none server's object data).", &[]),
+        ("rustfs-register-generic", "The current release (1.0.2) with six overwritten keys: PUT, DELETE and GET from\nclients on every node for 75 s, then a read of each key; every key's history must\nbe linearizable (S3's strong read-after-write and list consistency). Run it with\n`--fault-profile harness/jepsen/rustfs/generic-faults.yaml` or `corruption-faults.yaml`.",
+         &["--workload", "register", "--size", "4096"]),
     ];
     specs
         .iter()
-        .map(|(name, comment)| {
+        .map(|(name, comment, arguments)| {
             let machines = nodes("n", 4)
                 .into_iter()
                 .map(|node| {
@@ -1275,7 +1277,7 @@ fn rustfs() -> Vec<Scenario> {
                 comment: comment.to_string(),
                 generated: "RustFS 1.0.2, four servers with one drive each".into(),
                 machines,
-                oracle: Machine::program(&strings(&["rustfs"])),
+                oracle: Machine::program(&strings(&[&["rustfs"], *arguments].concat())),
                 latency: "1ms".into(),
             }
         })

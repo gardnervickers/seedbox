@@ -6,9 +6,16 @@
 //! read-after-write); a read-back that cannot reach the cluster is
 //! inconclusive. Contents derive from the key, so no copy is kept.
 //!
+//! `--workload register` instead treats a few keys as registers: PUT writes
+//! a unique value, DELETE writes "absent", GET reads, from clients spread over
+//! the nodes, and every key ends with a read once faults stop. Each key's
+//! history must be linearizable ([`RegisterOf`]); a PUT or DELETE without a
+//! 2xx reply may or may not have taken effect.
+//!
 //! Requests are signed with AWS Signature Version 4 (path-style, region
 //! `us-east-1`, payload hashed) over the kit's HTTP/1.1 client.
-use crate::kit::{self, http, Result};
+use crate::checker::models::{verdict_word, RegisterOf, RegisterOp, RegisterRet, STEP_BUDGET};
+use crate::kit::{self, http, Result, Rng};
 use hmac::{Hmac, Mac};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -19,8 +26,21 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Workload {
+    /// Unique objects, each checked for survival and contents.
+    Objects,
+    /// A few overwritten keys, each checked for linearizability.
+    Register,
+}
+
 #[derive(clap::Args, Debug, Clone)]
 pub struct Args {
+    #[arg(long, value_enum, default_value_t = Workload::Objects)]
+    pub workload: Workload,
+    /// Register workload: the number of keys.
+    #[arg(long, default_value_t = 6)]
+    pub keys: usize,
     /// The RustFS servers, in order.
     #[arg(long, value_delimiter = ',', default_value = "n1,n2,n3,n4")]
     pub nodes: Vec<String>,
@@ -172,6 +192,201 @@ fn amz_date(seconds: u64) -> (String, String) {
     (date, stamp)
 }
 
+/// A register value as stored: `v{value}` and padding to `size` bytes. Zero
+/// is "absent" (a deleted or never-written key).
+fn register_body(value: u32, size: usize) -> Vec<u8> {
+    let mut body = format!("v{value}\n").into_bytes();
+    body.resize(size.max(body.len()), b'.');
+    body
+}
+
+/// The value a register body holds; `None` for bytes no client wrote.
+fn register_value(body: &[u8], size: usize) -> Option<u32> {
+    let text = std::str::from_utf8(body).ok()?;
+    let value: u32 = text.strip_prefix('v')?.split_once('\n')?.0.parse().ok()?;
+    (register_body(value, size) == body).then_some(value)
+}
+
+type KeyHistory = wgl::History<RegisterOp<u32>, RegisterRet<u32>>;
+
+/// One register operation on `key` through `node`, recorded in `history`.
+/// Returns a description of bytes no client wrote, if a read saw some.
+fn register_op(
+    s3: &S3,
+    args: &Args,
+    path: &str,
+    node: &str,
+    op: RegisterOp<u32>,
+    history: &Mutex<KeyHistory>,
+) -> Option<String> {
+    let id = history.lock().unwrap().invoke(op.clone());
+    let (method, body) = match op {
+        RegisterOp::Read => ("GET", Vec::new()),
+        RegisterOp::Write(0) => ("DELETE", Vec::new()),
+        RegisterOp::Write(value) => ("PUT", register_body(value, args.size)),
+        RegisterOp::Cas(..) => unreachable!("S3 has no compare-and-set here"),
+    };
+    let reply = s3.request(node, method, path, &body);
+    let mut history = history.lock().unwrap();
+    match (method, reply) {
+        ("GET", Reply::Status(200, data)) => match register_value(&data, args.size) {
+            Some(value) => history.complete(id, RegisterRet::Value(Some(value))),
+            None => {
+                // Not linearizable with any write; the checker flags it too.
+                history.complete(id, RegisterRet::Value(Some(u32::MAX)));
+                return Some(format!(
+                    "{node} returned {} bytes no client wrote: {:?}",
+                    data.len(),
+                    String::from_utf8_lossy(&data[..data.len().min(32)])
+                ));
+            }
+        },
+        ("GET", Reply::Status(404, _)) => history.complete(id, RegisterRet::Value(Some(0))),
+        // A failed read has no effect.
+        ("GET", _) => history.fail(id),
+        ("PUT" | "DELETE", Reply::Status(200 | 204, _)) => history.complete(id, RegisterRet::Wrote),
+        // Anything else may or may not have taken effect: leave it pending.
+        _ => {}
+    }
+    None
+}
+
+fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
+    let keys: Vec<String> = (0..args.keys).map(|k| format!("{bucket}/r{k}")).collect();
+    let histories: Arc<Vec<Mutex<KeyHistory>>> =
+        Arc::new(keys.iter().map(|_| Mutex::new(KeyHistory::new())).collect());
+    let unwritten = Arc::new(Mutex::new(Vec::<String>::new()));
+    // Every register starts absent: write that before the clients start, so
+    // the model's initial state (no value) is never observed.
+    for history in histories.iter() {
+        let mut history = history.lock().unwrap();
+        let id = history.invoke(RegisterOp::Write(0));
+        history.complete(id, RegisterRet::Wrote);
+    }
+    let seed = kit::rng::entropy_seed();
+    kit::evidence(
+        "start",
+        json!({"workload": "register", "keys": args.keys, "rng_seed": seed}),
+    );
+    let start = Instant::now();
+    let workers: Vec<_> = (0..args.clients)
+        .map(|client| {
+            let (s3, args, keys, histories, unwritten) = (
+                s3.clone(),
+                args.clone(),
+                keys.clone(),
+                histories.clone(),
+                unwritten.clone(),
+            );
+            std::thread::spawn(move || {
+                let mut rng = Rng::stream(seed, client as u64);
+                let mut next = 1u32;
+                while start.elapsed() < Duration::from_secs(args.duration) {
+                    let k = rng.below(keys.len() as u64) as usize;
+                    let node = rng.choice(&args.nodes).clone();
+                    let op = match rng.weighted(&[5.0, 4.0, 1.0]) {
+                        0 => RegisterOp::Read,
+                        1 => {
+                            // Unique per client: client in the low bits.
+                            let value = next * args.clients as u32 + client as u32 + 1;
+                            next += 1;
+                            RegisterOp::Write(value)
+                        }
+                        _ => RegisterOp::Write(0),
+                    };
+                    if let Some(bad) = register_op(&s3, &args, &keys[k], &node, op, &histories[k]) {
+                        unwritten
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}: {bad}", keys[k]));
+                    }
+                    std::thread::sleep(Duration::from_millis(args.think_ms));
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        let _ = worker.join();
+    }
+    kit::pause(args.quiet as f64);
+    // A final read of every key, retried on other nodes until one answers.
+    for (k, key) in keys.iter().enumerate() {
+        'key: for attempt in 0..3u64 {
+            for node in &args.nodes {
+                if let Some(bad) =
+                    register_op(&s3, args, key, node, RegisterOp::Read, &histories[k])
+                {
+                    unwritten
+                        .lock()
+                        .unwrap()
+                        .push(format!("{key} (final): {bad}"));
+                }
+                let answered = matches!(
+                    histories[k]
+                        .lock()
+                        .unwrap()
+                        .operations()
+                        .last()
+                        .map(|o| &o.outcome),
+                    Some(wgl::OpOutcome::Completed { .. })
+                );
+                if answered {
+                    break 'key;
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1 + attempt));
+        }
+    }
+    let mut violations = Vec::new();
+    let mut exhausted = Vec::new();
+    let mut counts = json!({});
+    for (key, history) in keys.iter().zip(histories.iter()) {
+        let history = history.lock().unwrap();
+        let operations = history.operations();
+        let pending = operations
+            .iter()
+            .filter(|o| matches!(o.outcome, wgl::OpOutcome::Pending))
+            .count();
+        let verdict = wgl::check_history(&RegisterOf::<u32>::default(), operations, STEP_BUDGET);
+        counts[key] =
+            json!({"ops": operations.len(), "pending": pending, "verdict": verdict_word(&verdict)});
+        match verdict {
+            wgl::Verdict::Linearizable => {}
+            wgl::Verdict::NotLinearizable(e) => {
+                let blocked = e.blocked_on.map(|i| {
+                    let o = &operations[i];
+                    format!("{:?} -> {:?}", o.op, o.outcome)
+                });
+                kit::evidence(
+                    "nonlinearizable",
+                    json!({"key": key, "blocked_on": blocked, "linearized": e.longest_prefix.len()}),
+                );
+                violations.push(key.clone());
+            }
+            wgl::Verdict::BudgetExhausted(_) => exhausted.push(key.clone()),
+        }
+    }
+    let unwritten = unwritten.lock().unwrap().clone();
+    kit::evidence(
+        "details",
+        json!({"keys": counts, "unwritten": unwritten.iter().take(10).collect::<Vec<_>>()}),
+    );
+    let summary = format!(
+        "{} of {} keys not linearizable, {} undecided; {} reads of bytes no client wrote",
+        violations.len(),
+        keys.len(),
+        exhausted.len(),
+        unwritten.len()
+    );
+    if !violations.is_empty() || !unwritten.is_empty() {
+        kit::verdict(kit::VIOLATION, &summary)
+    } else if !exhausted.is_empty() {
+        kit::verdict(kit::INCONCLUSIVE, &summary)
+    } else {
+        kit::verdict(kit::OK, &summary)
+    }
+}
+
 /// The `<Code>` of an S3 error document, or `-`.
 fn s3_code(body: &[u8]) -> String {
     let text = String::from_utf8_lossy(body);
@@ -233,13 +448,22 @@ pub fn run(args: Args) -> u8 {
             _ => std::thread::sleep(Duration::from_millis(500)),
         }
     }
-    seedbox_sdk::setup_complete(json!({"nodes": args.nodes}));
+    seedbox_sdk::setup_complete(
+        json!({"nodes": args.nodes, "workload": format!("{:?}", args.workload)}),
+    );
+    match args.workload {
+        Workload::Objects => objects(s3, &args, &bucket),
+        Workload::Register => register(s3, &args, &bucket),
+    }
+}
+
+fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     let tally = Arc::new(Mutex::new(Tally::default()));
     let start = Instant::now();
     let workers: Vec<_> = (0..args.clients)
         .map(|client| {
             let (s3, tally, args, bucket) =
-                (s3.clone(), tally.clone(), args.clone(), bucket.clone());
+                (s3.clone(), tally.clone(), args.clone(), bucket.to_owned());
             std::thread::spawn(move || {
                 let mut mine: Vec<String> = Vec::new();
                 let mut i = 0usize;
@@ -385,6 +609,15 @@ mod tests {
             hex(&key),
             "dbb893acc010964918f1fd433add87c70e8b0db6be30c1fbeafefa5ec6ba8378"
         );
+    }
+
+    #[test]
+    fn register_bodies_round_trip_and_reject_other_bytes() {
+        assert_eq!(register_value(&register_body(42, 64), 64), Some(42));
+        assert_eq!(register_value(&register_body(42, 64), 32), None);
+        let mut body = register_body(42, 64);
+        body[40] = b'x';
+        assert_eq!(register_value(&body, 64), None);
     }
 
     #[test]
