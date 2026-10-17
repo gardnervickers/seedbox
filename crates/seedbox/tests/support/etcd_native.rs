@@ -1,7 +1,7 @@
 //! Fast preparation smoke through the normal CLI/service, not bd-207 acceptance.
 //! Canonical acceptance must run examples/etcd unchanged. No BackendProvider,
-//! prepared guest manifest, substituted oracle or image. TCG stays unscheduled
-//! until its real user route lands.
+//! prepared guest manifest, substituted oracle or image. Both PV and TCG use
+//! the same flow, with TCG explicitly selected through the public CLI.
 use super::etcd_project::*;
 use seedbox_api::{InputSource, Simulation, SimulationComparison};
 use seedbox_test_time::HangGuard;

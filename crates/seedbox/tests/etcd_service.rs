@@ -128,9 +128,10 @@ fn backend_parameter_is_explicit_and_rejects_legacy_or_wrong_backend() {
     let path = std::path::Path::new("project.yaml");
     let pv_args = submit_arguments(path, BASELINE_SEED, Backend::Pv).unwrap();
     assert!(!pv_args.iter().any(|arg| arg == "--backend"));
-    assert!(submit_arguments(path, BASELINE_SEED, Backend::Tcg)
-        .unwrap_err()
-        .contains("unavailable"));
+    let tcg_args = submit_arguments(path, BASELINE_SEED, Backend::Tcg).unwrap();
+    let mut expected_tcg = pv_args.clone();
+    expected_tcg.extend([std::ffi::OsString::from("--backend"), "tcg".into()]);
+    assert_eq!(tcg_args, expected_tcg);
     for backend in [Backend::Pv, Backend::Tcg] {
         let valid = serde_json::json!({"backend": backend.profile(), "driver_world": {}});
         assert!(require_backend(&valid, backend).is_ok());

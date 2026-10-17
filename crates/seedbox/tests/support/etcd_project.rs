@@ -35,25 +35,25 @@ pub const EXTRA_SEEDS: [u64; 2] = [124, 125];
 pub const WRITES_PER_WORKER: usize = 4;
 pub const CONCURRENCY: usize = 1;
 
-/// PV uses the existing default. TCG has no normal user route yet, so it must
-/// not produce a command that silently runs PV or assumes a future flag.
+/// PV uses the existing default; TCG selects the public software backend.
 /// Seed is explicit, and pause permits inspecting retained inputs before release.
 pub fn submit_arguments(
     project: &Path,
     seed: u64,
     backend: Backend,
 ) -> Result<Vec<std::ffi::OsString>, String> {
-    if backend == Backend::Tcg {
-        return Err("normal TCG CLI selection is unavailable; scheduling waits on bd-e9e".into());
-    }
-    Ok(vec![
+    let mut arguments = vec![
         "run".into(),
         project.as_os_str().to_owned(),
         "--seed".into(),
         seed.to_string().into(),
         "--paused".into(),
         "--detach".into(),
-    ])
+    ];
+    if backend == Backend::Tcg {
+        arguments.extend(["--backend".into(), "tcg".into()]);
+    }
+    Ok(arguments)
 }
 
 pub fn example_directory() -> PathBuf {

@@ -39,11 +39,11 @@ Linux x86-64; parent preflight and native admission share its host scope.
 
 The [native preparation-smoke target](../crates/seedbox/tests/etcd_service_native.rs)
 uses the normal CLI/service with one backend parameter. Cargo feature discovery
-includes its PV case in the OCI-requiring `linux-apps` suite. That suite supplies
-`SEEDBOX_TEST_CLI` and a caller-owned `SEEDBOX_TEST_REPORT_DIR`; the existing raw
-machine suites acquire no new OCI or CLI requirement. TCG is compiled but not
-scheduled until a real normal user route is implemented; no future flag or PV
-fallback is assumed. Portable checks compile native cases without executing them.
+includes both PV and TCG cases in the OCI-requiring `linux-apps` suite. PV uses
+the fresh-run default; TCG submits with `--backend tcg`, and replay retains that
+selection. The suite supplies `SEEDBOX_TEST_CLI` and a caller-owned
+`SEEDBOX_TEST_REPORT_DIR`; the existing raw machine suites acquire no new OCI or
+CLI requirement. Portable checks compile native cases without executing them.
 
 This prep/fast test derives a bounded variant: four writes from one writer with
 a 180-second guest-time write deadline. It is **not canonical acceptance**.

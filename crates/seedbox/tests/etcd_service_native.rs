@@ -14,11 +14,8 @@ fn pv_etcd_preparation_smoke_through_normal_cli_service() {
     etcd_native::run(Backend::Pv);
 }
 
-// Compile the common backend-parameterized path, but do not schedule TCG while
-// no approved/implemented normal user route exists. No imaginary flag or PV
-// fallback is used. Activation belongs to bd-e9e/bd-207.
+// Exercise the same preparation smoke through the real software backend.
 #[test]
-#[ignore = "normal TCG selection/preparation pending bd-e9e; not scheduled by linux-apps"]
 fn tcg_etcd_preparation_smoke_through_normal_cli_service() {
     etcd_native::run(Backend::Tcg);
 }
