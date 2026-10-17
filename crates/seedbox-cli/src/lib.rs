@@ -15,7 +15,7 @@ use backends::{Executor, Preparer};
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 use seedbox_application::vmm::VmmExecutor;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, FromArgMatches, Parser, Subcommand, ValueEnum};
 use seedbox_application::{
     bundle, config, diff,
     execution::{CancellationToken, ExecutionBackend, PreparationBackend, WitnessMode},
@@ -617,6 +617,10 @@ struct RuntimeInputs {
     /// Static Linux mke2fs for named volumes [default: embedded guest helper].
     #[arg(long, env = "SEEDBOX_MKE2FS")]
     mke2fs: Option<PathBuf>,
+    // Transient CLI intent only, never retained simulation metadata. The dev
+    // shell supplies the formatter for builds; that is not an executor choice.
+    #[arg(skip)]
+    mke2fs_from_environment: bool,
     /// Also record and compare every machine's RAM and registers (also retains per-page hashes).
     #[arg(long)]
     full_state: bool,
@@ -630,16 +634,15 @@ impl RuntimeInputs {
         Ok(())
     }
 
-    // Explicit legacy assets keep their existing formats and launch contract.
-    // Only the ordinary complete-build Linux PV default changes selection.
-    fn use_driver(&self, explicit_asset_directory: bool) -> bool {
+    // Explicit legacy flags keep their existing formats and launch contract.
+    // Inherited build helpers and SDK relocation do not choose an executor.
+    fn use_driver(&self) -> bool {
         cfg!(all(target_os = "linux", target_arch = "x86_64"))
             && self.kvm.vmm.is_none()
             && self.kvm.kernel.is_none()
             && self.runtime_assets.is_none()
             && self.guest_init.is_none()
-            && self.mke2fs.is_none()
-            && !explicit_asset_directory
+            && (self.mke2fs.is_none() || self.mke2fs_from_environment)
     }
 
     fn driver_backends(
@@ -698,12 +701,16 @@ impl RuntimeInputs {
         validate_machine(simulation)?;
         let machine = &simulation.machine;
         let engine = defaults::engine(self.kvm.vmm.clone())?;
+        let use_driver = self.use_driver();
         for (flag, path) in [
             ("--kernel", &self.kvm.kernel),
             ("--runtime-assets", &self.runtime_assets),
             ("--guest-init", &self.guest_init),
             ("--mke2fs", &self.mke2fs),
         ] {
+            if use_driver && self.mke2fs_from_environment && flag == "--mke2fs" {
+                continue;
+            }
             if let Some(path) = path {
                 defaults::existing(flag, path.clone())?;
             }
@@ -713,7 +720,6 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
-        let use_driver = self.use_driver(std::env::var_os("SEEDBOX_ASSET_DIR").is_some());
         if simulation.simulator.backend == seedbox_spec::project::CpuBackend::Tcg && !use_driver {
             return Err(Error::Setup("--backend tcg requires Linux x86-64 and the normal Driver runtime; remove legacy VMM, bootstrap and asset-directory overrides".into()));
         }
@@ -816,7 +822,12 @@ pub fn main() -> ExitCode {
     if !explicit_command {
         arguments.insert(1, "run".into());
     }
-    match run(Cli::parse_from(arguments)) {
+    let matches = root.get_matches_from(arguments);
+    let cli = match Cli::from_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
+    match run(cli) {
         Ok(code) => ExitCode::from(code),
         // The reader stopped early, as `seedbox events ID | head` does; the
         // output it took was complete, so there is nothing to report.
@@ -827,6 +838,22 @@ pub fn main() -> ExitCode {
             eprintln!("error: {error}");
             ExitCode::from(2)
         }
+    }
+}
+
+impl Cli {
+    fn from_matches(matches: &clap::ArgMatches) -> std::result::Result<Self, clap::Error> {
+        let mut cli = Self::from_arg_matches(matches)?;
+        if let Some((_, arguments)) = matches.subcommand() {
+            match &mut cli.command {
+                Command::Serve { inputs, .. } | Command::Prepare { inputs, .. } => {
+                    inputs.mke2fs_from_environment = arguments.value_source("mke2fs")
+                        == Some(clap::parser::ValueSource::EnvVariable);
+                }
+                _ => {}
+            }
+        }
+        Ok(cli)
     }
 }
 

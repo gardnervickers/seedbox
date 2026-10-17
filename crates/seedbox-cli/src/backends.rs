@@ -436,15 +436,15 @@ mod tests {
                 runtime_assets: None,
                 guest_init: None,
                 mke2fs: None,
+                mke2fs_from_environment: false,
                 full_state: false,
             }
         }
         let supported = cfg!(all(target_os = "linux", target_arch = "x86_64"));
-        assert_eq!(defaults().use_driver(false), supported);
-        assert!(!defaults().use_driver(true));
+        assert_eq!(defaults().use_driver(), supported);
         let mut full = defaults();
         full.full_state = true;
-        assert_eq!(full.use_driver(false), supported);
+        assert_eq!(full.use_driver(), supported);
         for option in 0..5 {
             let mut inputs = defaults();
             let destination = match option {
@@ -455,7 +455,46 @@ mod tests {
                 _ => &mut inputs.mke2fs,
             };
             *destination = Some("/explicit-legacy-input".into());
-            assert!(!inputs.use_driver(false));
+            assert!(!inputs.use_driver());
+        }
+        let mut inherited = defaults();
+        inherited.mke2fs = Some("/build-only/formatter".into());
+        inherited.mke2fs_from_environment = true;
+        assert_eq!(inherited.use_driver(), supported);
+        // An explicit flag with the exact same value remains an explicit
+        // legacy choice; selection cannot infer intent from path equality.
+        inherited.mke2fs_from_environment = false;
+        assert!(!inherited.use_driver());
+    }
+
+    #[test]
+    fn cli_tracks_formatter_argument_origin_without_changing_environment() {
+        use clap::CommandFactory;
+        // Exercise clap's real environment/CLI source precedence without any
+        // process-global environment mutation. PATH is already required by Cargo.
+        let value = std::env::var_os("PATH").expect("test process PATH");
+        for command in ["serve", "prepare"] {
+            let parser = || {
+                crate::Cli::command()
+                    .mut_subcommand(command, |sub| sub.mut_arg("mke2fs", |arg| arg.env("PATH")))
+            };
+            let mut arguments = vec![std::ffi::OsString::from("seedbox"), command.into()];
+            if command == "prepare" {
+                arguments.extend(["--output".into(), "/not-created-by-argument-parsing".into()]);
+            }
+            let inherited = parser().try_get_matches_from(arguments.clone()).unwrap();
+            arguments.extend(["--mke2fs".into(), value.clone()]);
+            let explicit = parser().try_get_matches_from(arguments).unwrap();
+            for (matches, from_environment) in [(inherited, true), (explicit, false)] {
+                let parsed = crate::Cli::from_matches(&matches).unwrap();
+                let inputs = match parsed.command {
+                    crate::Command::Serve { inputs, .. }
+                    | crate::Command::Prepare { inputs, .. } => inputs,
+                    _ => unreachable!("selected command"),
+                };
+                assert_eq!(inputs.mke2fs, Some(value.clone().into()));
+                assert_eq!(inputs.mke2fs_from_environment, from_environment);
+            }
         }
     }
 

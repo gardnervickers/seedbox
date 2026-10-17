@@ -19,9 +19,14 @@ struct Service {
     binary: PathBuf,
     docker: std::ffi::OsString,
     backend: &'static str,
+    inherit_environment: bool,
+    asset_directory: Option<PathBuf>,
 }
 impl Service {
     fn new(backend: &'static str) -> Self {
+        Self::start(backend, false, false)
+    }
+    fn start(backend: &'static str, inherit_environment: bool, relocate_sdk: bool) -> Self {
         let root = tempfile::Builder::new()
             .prefix("efd-")
             .tempdir_in("/tmp")
@@ -35,12 +40,26 @@ impl Service {
             .expect("normal cargo xtask build-assets and cargo build --release first");
         let docker = std::env::var_os("DOCKER_HOST")
             .unwrap_or_else(|| "unix:///run/podman/podman.sock".into());
+        let asset_directory = relocate_sdk.then(|| {
+            let directory = root.path().join("relocated-sdk");
+            let architecture = directory.join(std::env::consts::ARCH);
+            fs::create_dir_all(&architecture).unwrap();
+            fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../build/assets/driver-runtime.tar.gz"),
+                architecture.join("driver-runtime.tar.gz"),
+            )
+            .unwrap();
+            directory
+        });
         let mut this = Self {
             root: Some(root),
             child: None,
             binary,
             docker,
             backend,
+            inherit_environment,
+            asset_directory,
         };
         let log = fs::File::create(this.path().join("server.log")).unwrap();
         let child = this
@@ -72,14 +91,20 @@ impl Service {
     }
     fn command(&self) -> Command {
         let mut command = Command::new(&self.binary);
+        if !self.inherit_environment {
+            command
+                .env_clear()
+                .env("DOCKER_HOST", &self.docker)
+                .env("PATH", "");
+        }
+        if let Some(directory) = &self.asset_directory {
+            command.env("SEEDBOX_ASSET_DIR", directory);
+        }
         command
-            .env_clear()
             .env("HOME", self.path())
             .env("TMPDIR", self.path())
             .env("XDG_CACHE_HOME", self.path().join("cache"))
             .env("SEEDBOX_STATE", self.path().join("state"))
-            .env("DOCKER_HOST", &self.docker)
-            .env("PATH", "")
             .current_dir(self.path());
         command
     }
@@ -305,8 +330,27 @@ fn normal_driver_existing_example_run_and_replay_match() {
 fn normal_driver_tcg_existing_example_run_and_replay_match() {
     existing_example("tcg");
 }
+#[test]
+fn ordinary_nix_environment_selects_driver() {
+    inherited_shell_example(false);
+}
+#[test]
+fn ordinary_nix_environment_with_relocated_sdk_selects_driver() {
+    inherited_shell_example(true);
+}
+fn inherited_shell_example(relocate_sdk: bool) {
+    let formatter = std::env::var_os("SEEDBOX_MKE2FS")
+        .expect("this proof must run in the ordinary project nix develop shell");
+    eprintln!(
+        "ordinary nix shell keeps SEEDBOX_MKE2FS={} and inherited PATH/runtime environment",
+        PathBuf::from(formatter).display()
+    );
+    existing_example_service(Service::start("pv", true, relocate_sdk));
+}
 fn existing_example(backend: &'static str) {
-    let service = Service::new(backend);
+    existing_example_service(Service::new(backend));
+}
+fn existing_example_service(service: Service) {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/redis")
         .canonicalize()
