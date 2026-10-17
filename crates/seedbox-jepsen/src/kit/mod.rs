@@ -4,7 +4,9 @@
 //!
 //! An oracle prints one `EVIDENCE {json}` line per observation, `H {json}`
 //! history lines, and finally exactly one `VERDICT ...` line; its exit status
-//! is [`OK`], [`VIOLATION`] or [`INCONCLUSIVE`].
+//! is [`OK`], [`VIOLATION`] or [`INCONCLUSIVE`]. Under Seedbox its declared
+//! check ([`declare_check`]) is also a guest `always` property: passed on OK,
+//! violated on a violation, and left unevaluated when inconclusive.
 pub mod base64;
 pub mod http;
 pub mod rng;
@@ -136,7 +138,29 @@ pub fn verdict(code: u8, text: &str) -> u8 {
         _ => "inconclusive",
     };
     emit(&format!("VERDICT {word}: {text}"));
+    if let Some(check) = CHECK.get() {
+        if code == OK || code == VIOLATION {
+            seedbox_sdk::always(check, code == OK, serde_json::json!({ "verdict": text }));
+        }
+        let _ = seedbox_sdk::flush();
+    }
     code
+}
+
+/// Running in a Seedbox guest, whose supervisor serves the property socket.
+pub fn under_seedbox() -> bool {
+    std::path::Path::new(seedbox_sdk::SOCKET).exists()
+}
+
+/// The property an oracle's verdict evaluates, once declared.
+static CHECK: OnceLock<String> = OnceLock::new();
+
+/// Declare the oracle's check as a guest `always` property; [`verdict`]
+/// evaluates it.
+pub fn declare_check(name: &str) {
+    if CHECK.set(name.to_owned()).is_ok() {
+        seedbox_sdk::declare(name, seedbox_sdk::Kind::Always);
+    }
 }
 
 /// Lines of a saved oracle log (or a split `seedbox logs` file) that carry

@@ -134,8 +134,27 @@ enum System {
     Galera,
 }
 
+/// The guest property each oracle's verdict evaluates.
+fn check_of(command: &Command) -> Option<&'static str> {
+    Some(match command {
+        Command::Nats(_) => "nats: acknowledged messages survive",
+        Command::Etcd(_) => "etcd: lock-protected updates are not lost",
+        Command::Postgres(_) => "postgres: transactions meet their isolation level",
+        Command::Kafka(_) => "kafka: the queue's checks hold",
+        Command::Mysql(_) => "mysql: transactions meet their isolation level",
+        Command::Galera(_) => "galera: transactions meet their isolation level",
+        Command::Tigerbeetle(_) => "tigerbeetle: the ledger's checks hold",
+        _ => return None,
+    })
+}
+
 fn main() -> ExitCode {
-    let code = match Cli::parse().command {
+    let command = Cli::parse().command;
+    let oracle = check_of(&command);
+    if let Some(check) = oracle {
+        kit::declare_check(check);
+    }
+    let code = match command {
         Command::Nats(args) => systems::nats::run(args),
         Command::Etcd(args) => systems::etcd::run(args),
         Command::EtcdClient(args) => systems::etcd_client::run(args),
@@ -209,6 +228,13 @@ fn main() -> ExitCode {
             markdown,
         ),
         Command::Campaign(args) => campaign::run(args),
+    };
+    // Under Seedbox an inconclusive oracle leaves its property unevaluated
+    // rather than failing: it is not a finding.
+    let code = if oracle.is_some() && code == kit::INCONCLUSIVE && kit::under_seedbox() {
+        kit::OK
+    } else {
+        code
     };
     ExitCode::from(code)
 }

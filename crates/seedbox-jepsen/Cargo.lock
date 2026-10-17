@@ -741,9 +741,18 @@ dependencies = [
  "libc",
  "mysql",
  "seedbox-control-client",
+ "seedbox-sdk",
  "serde",
  "serde_json",
  "wgl",
+]
+
+[[package]]
+name = "seedbox-sdk"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
 ]
 
 [[package]]

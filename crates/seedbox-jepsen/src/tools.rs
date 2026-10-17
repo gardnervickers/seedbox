@@ -79,6 +79,7 @@ pub fn build_oracle(root: &Path, arch: &str, engine: Option<&str>) -> Result<Pat
             "crates/seedbox-control-client/src",
         ),
         ("crates/seedbox-control/src", "crates/seedbox-control/src"),
+        ("crates/seedbox-sdk/src", "crates/seedbox-sdk/src"),
     ] {
         copy_tree(&root.join(from), &context.join(to))?;
     }
@@ -87,6 +88,7 @@ pub fn build_oracle(root: &Path, arch: &str, engine: Option<&str>) -> Result<Pat
         "crates/seedbox-jepsen/Cargo.lock",
         "crates/seedbox-control-client/Cargo.toml",
         "crates/seedbox-control/Cargo.toml",
+        "crates/seedbox-sdk/Cargo.toml",
         "crates/seedbox-engine-core/build.rs",
         "crates/seedbox-jepsen/oracle.Dockerfile",
         "crates/seedbox-jepsen/build.rs",
@@ -103,7 +105,7 @@ pub fn build_oracle(root: &Path, arch: &str, engine: Option<&str>) -> Result<Pat
         .filter(|line| !line.starts_with("default-members"))
         .map(|line| {
             if line.starts_with("members") {
-                "members = [\"crates/seedbox-control\", \"crates/seedbox-control-client\"]\n"
+                "members = [\"crates/seedbox-control\", \"crates/seedbox-control-client\", \"crates/seedbox-sdk\"]\n"
                     .to_string()
             } else {
                 format!("{line}\n")
