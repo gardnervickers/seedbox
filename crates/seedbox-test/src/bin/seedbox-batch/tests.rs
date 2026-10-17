@@ -10,8 +10,7 @@ use std::{
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 fn options(root: &Path, seeds: &[i32], timeout: f64) -> Options {
@@ -73,10 +72,10 @@ impl Drop for Disposable {
             unsafe {
                 libc::kill(self.0.id() as i32, libc::SIGTERM);
             }
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while self.0.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(10));
-            }
+            // This is only an unwind cleanup grace period. Expiry still falls
+            // through to forced kill/reap; it never supplies an application result.
+            let _ = HangGuard::new("disposable supervisor TERM cleanup", Duration::from_secs(5))
+                .wait_for(|| self.0.try_wait().ok().flatten());
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
