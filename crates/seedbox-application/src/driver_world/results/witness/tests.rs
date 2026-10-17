@@ -233,4 +233,5 @@ fn none_backend_errors_and_bad_identity_fail_without_ram_or_policy_only_success(
     assert!(collect(&mut driver, &names, &policy, None).is_err());
 }
 
+mod network_checkpoint_tests;
 mod service_policy_tests;

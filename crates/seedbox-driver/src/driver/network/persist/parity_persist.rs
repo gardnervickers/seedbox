@@ -1,4 +1,4 @@
-//! Version 2 closed network policy/observation and canonical tracker records.
+//! Closed network authority and canonical tracker records; no frame observations.
 use super::*;
 use crate::persistence::{require, CodecError, Decoder, Encoder, Result, Wire};
 use seedbox_engine_core::connections::{
@@ -80,16 +80,6 @@ wire_struct!(Layer {
     queue,
     counts,
     burst
-});
-wire_enum!(FrameFate;units{0=>Scheduled,1=>PartitionDropped,2=>LossDropped,3=>QueueDropped,4=>ReceiverDropped}tuples{}records{});
-wire_struct!(FrameFact {
-    position,
-    from,
-    to,
-    sent,
-    due,
-    bytes,
-    fate
 });
 impl Wire for SessionState {
     fn put<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {

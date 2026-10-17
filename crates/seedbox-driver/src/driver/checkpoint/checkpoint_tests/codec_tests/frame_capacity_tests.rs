@@ -16,6 +16,56 @@ fn tight_roundtrip(driver: &mut Driver<Mock>) -> Checkpoint<Saved> {
 }
 
 #[test]
+fn pending_network_authority_bytes_exclude_frame_capacity_facts_and_omission_cursor() {
+    let mut expected = None;
+    for workers in [1, 4] {
+        for capacity in [0, 1, usize::MAX] {
+            let mut source = net(
+                vec![
+                    spec(
+                        0,
+                        true,
+                        vec![
+                            (1, frame(mac(1), 7)),
+                            (2, frame(mac(1), 8)),
+                            (3, frame(mac(1), 9)),
+                        ],
+                    ),
+                    spec(1, true, vec![]),
+                ],
+                setup(capacity),
+                workers,
+            );
+            advance(&mut source, 3);
+            let (bytes, store) = artifact(source.checkpoint().unwrap());
+            if let Some(expected) = &expected {
+                assert_eq!(&bytes, expected);
+            } else {
+                expected = Some(bytes.clone());
+            }
+            let retained = source.drain_frames();
+            let kept = capacity.min(3);
+            assert_eq!(retained.facts.len(), kept);
+            assert_eq!(
+                retained.omitted,
+                if capacity == 0 { 0 } else { (3 - kept) as u64 }
+            );
+            assert_eq!(artifact(source.checkpoint().unwrap()).0, bytes);
+            let checkpoint = decode(&bytes, &store);
+            advance(&mut source, 80);
+            let finished = states(&source);
+            for restored_workers in [1, 4] {
+                let mut branch = restore(&checkpoint, restored_workers);
+                assert_eq!(branch.drain_frames(), FrameFacts::default());
+                assert_eq!(artifact(branch.checkpoint().unwrap()).0, bytes);
+                advance(&mut branch, 80);
+                assert_eq!(states(&branch), finished);
+            }
+        }
+    }
+}
+
+#[test]
 fn unused_frame_capacity_larger_than_capture_roundtrips_with_tight_limits() {
     for capacity in [1024, usize::MAX] {
         let mut driver = build(vec![spec(0, true, vec![])], vec![], true);
