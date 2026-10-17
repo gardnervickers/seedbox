@@ -196,6 +196,128 @@ impl HostService {
     }
 }
 
+#[test]
+fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable() {
+    use seedbox_application::orchestration::{LogPolicy, Outcome, RunIdentity, RunRecord};
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("execution");
+    let store = ContentStore::new(directory.path().join("store"));
+    store.put(b"catalogue-only-binary").unwrap();
+    let manager = Arc::new(Manager::new(Catalogue::in_memory()));
+    let service = ExecutionService::new(
+        manager.clone(),
+        root.clone(),
+        store.clone(),
+        Arc::new(FixtureProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            entered: Arc::new(Notify::new()),
+            behavior: Behavior::MissingWitness,
+        }),
+    )
+    .unwrap();
+    let mut retained = Vec::new();
+    for (name, engine, policy) in [
+        ("old", b"old-engine".as_slice(), b"old-policy".as_slice()),
+        ("new", b"new-engine".as_slice(), b"new-policy".as_slice()),
+    ] {
+        let mut request = support::resolved_request(name);
+        let seedbox_api::InputSource::Resolved { definition } = &mut request.spec.inputs else {
+            panic!("expected complete retained inputs");
+        };
+        definition.runtime.engine = format!("sha256:{}", store.put(engine).unwrap().hex())
+            .try_into()
+            .unwrap();
+        let prepared = seedbox_application::definition::prepared(definition, &store).unwrap();
+        let identity = RunIdentity {
+            version: seedbox_artifacts::record::FORMAT_VERSION,
+            seed: 123,
+            configuration: request.spec.configuration.clone(),
+            inputs: prepared.clone(),
+            program: Vec::new(),
+            interventions: None,
+        };
+        let record = RunRecord {
+            run_id: ContentDigest::of(&serde_json::to_vec(&identity).unwrap()),
+            attempt: name.into(),
+            identity,
+            performance_parameters: Default::default(),
+            allow_engine_change: false,
+            log_policy: LogPolicy::default(),
+            omitted_logs: Default::default(),
+            outcome: Outcome::Pass,
+            report: Some(ExecutionReport {
+                reason: StopReason::Completed,
+                workload_exit: Some(WorkloadExit {
+                    service: "oracle".into(),
+                    code: 0,
+                }),
+                detail: None,
+                witness: Some(ContentDigest::of(policy)),
+                full_state: None,
+                faults: Vec::new(),
+                host_wait_ns: 0,
+                simulated_time_ns: None,
+            }),
+            error: None,
+            logs: Default::default(),
+            replay_of: None,
+            replay: None,
+        };
+        let attempt = root.join(name);
+        std::fs::create_dir(&attempt).unwrap();
+        seedbox_artifacts::record::write_record(&attempt, &record).unwrap();
+        let (resource, _) = manager.submit(request).unwrap();
+        let id = resource.metadata.id;
+        std::fs::write(
+            root.join("inputs").join(format!("{id}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "prepared": prepared, "interventions": null, "attempt": attempt,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        manager
+            .update(&id, |resource| {
+                resource.status.phase = Phase::Completed;
+                resource.status.oracle_exit_code = Some(0);
+                resource.status.termination = Some(ExecutionTermination::OracleExited);
+            })
+            .unwrap();
+        retained.push((id, seedbox_artifacts::record::inspect(&attempt).unwrap()));
+    }
+    let [(old_id, old), (new_id, new)] = retained.as_slice() else {
+        unreachable!();
+    };
+    assert_ne!(
+        old.identity.inputs.profile.engine,
+        new.identity.inputs.profile.engine
+    );
+    assert_eq!(
+        old.identity.inputs.profile.semantic_parameters,
+        new.identity.inputs.profile.semantic_parameters
+    );
+    // The digest-only comparator would call this MISMATCH, not missing evidence.
+    // The real service must establish input compatibility before reporting it.
+    let evidence = seedbox_artifacts::record::compare(old, new);
+    assert_eq!(
+        evidence.status,
+        seedbox_artifacts::record::ReplayStatus::Mismatch
+    );
+    assert_eq!(evidence.witness_matches, Some(false));
+    assert_eq!(
+        service.compare(old_id, old_id).unwrap().status,
+        ComparisonStatus::Match
+    );
+    let comparison = service.compare(old_id, new_id).unwrap();
+    assert_eq!(comparison.status, ComparisonStatus::NotComparable);
+    assert_eq!(comparison.witness_matches, Some(false));
+    assert_eq!(
+        service.compare(new_id, old_id).unwrap().status,
+        ComparisonStatus::NotComparable
+    );
+}
+
 #[tokio::test]
 async fn public_dispatch_retains_oracle_and_missing_witness_errors_without_comparability() {
     tokio::time::timeout(Duration::from_secs(5), async {
