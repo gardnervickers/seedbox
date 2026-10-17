@@ -145,6 +145,7 @@ pub fn validate_observation(o: &CoreObservation) -> Result<()> {
 }
 
 // Retain the bounded host observation before reporting a capability refusal.
+#[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
 pub(crate) fn collect_admitted(
     observations: &mut Vec<CoreObservation>,
     observe: impl FnOnce() -> Result<CoreObservation>,
@@ -159,6 +160,7 @@ pub(crate) fn collect_admitted(
 mod linux;
 
 /// Observe KVM capabilities without modifying inherited CPU affinity.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 pub(crate) fn observe() -> Result<CoreObservation> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
