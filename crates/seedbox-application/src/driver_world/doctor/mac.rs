@@ -56,9 +56,9 @@ impl Probe {
 }
 impl Drop for Probe {
     fn drop(&mut self) {
-        if let Err(error) = self.close() {
-            eprintln!("HVF readiness cleanup: {error}");
-        }
+        // The explicit close reports cleanup failures to the caller. Retry on
+        // unwind/failed close without printing from the library boundary.
+        let _ = self.close();
     }
 }
 // Hypervisor.framework permits one VM in this process. The ordinary Driver

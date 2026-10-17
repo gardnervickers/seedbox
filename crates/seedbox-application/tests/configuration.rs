@@ -55,13 +55,7 @@ fn machine_and_disk_options_default_to_the_former_flag_defaults() {
         "  version: 1\n  machine: {memory_mb: 2048}\n  disk: {torn_writes: true}",
     );
     let sim = parse(&yaml).unwrap();
-    assert_eq!(
-        sim.machine,
-        config::MachineOptions {
-            memory_mb: 2048,
-            ..config::MachineOptions::default()
-        }
-    );
+    assert_eq!(sim.machine, config::MachineOptions { memory_mb: 2048 });
     assert!(sim.disk.torn_writes);
     for (from, to, path) in [
         (
