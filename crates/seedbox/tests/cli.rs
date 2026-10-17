@@ -176,7 +176,14 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
 #[test]
 fn internal_dispatch_rejects_missing_and_unknown_contracts_before_cli_state_setup() {
     let directory = tempfile::tempdir().unwrap();
-    for args in [&["__engine"][..], &["__engine", "unknown-contract"]] {
+    for args in [
+        &["__engine"][..],
+        &["__engine", "unknown-contract"],
+        &["__engine", "seedbox-internal-worker-v1"],
+        &["__engine", "arm64-world-v1"],
+        &["__engine", "arm64-fixture-v1"],
+        &["__engine", "arm64-machine-v2"],
+    ] {
         let output = seedbox(args, directory.path());
         assert_eq!(
             output.status.code(),
@@ -196,7 +203,7 @@ fn internal_dispatch_rejects_missing_and_unknown_contracts_before_cli_state_setu
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn internal_worker_requires_a_request_without_state_or_external_tools() {
+fn driver_worker_requires_a_request_without_state_or_external_tools() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let tools = root.join("tools");
@@ -215,7 +222,7 @@ fn internal_worker_requires_a_request_without_state_or_external_tools() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
-        .args(["__engine", "seedbox-internal-worker-v1"])
+        .args(["__engine", "driver-world-v1"])
         .current_dir(root)
         .env_clear()
         .env("HOME", root)
@@ -225,40 +232,15 @@ fn internal_worker_requires_a_request_without_state_or_external_tools() {
         .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
         .guarded_output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(output.stdout.is_empty());
     assert!(
-        stderr(&output).contains("internal world worker requires --request PATH"),
+        stderr(&output).contains("driver-world-v1 needs exactly --request PATH"),
         "{}",
         stderr(&output)
     );
     assert!(!marker.exists(), "worker invoked external cargo");
     assert!(!root.join(".seedbox").exists());
-}
-
-#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
-#[test]
-fn arm_fixture_contract_uses_the_shared_fixture_argument_parser() {
-    let directory = tempfile::tempdir().unwrap();
-    let output = seedbox(
-        &[
-            "__engine",
-            "arm64-fixture-v1",
-            "run",
-            "--kernel",
-            "kernel",
-            "--initrd",
-            "initrd",
-            "--seed",
-            "not-a-seed",
-        ],
-        directory.path(),
-    );
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(output.stdout.is_empty());
-    assert!(stderr(&output).contains("--seed"), "{}", stderr(&output));
-    assert!(!stderr(&output).contains("requires Linux arm64"));
-    assert!(!directory.path().join(".seedbox").exists());
 }
 
 #[test]
@@ -699,7 +681,7 @@ fn old_records_stay_inspectable_and_transferable() {
         wall_clock_epoch: None,
         kernel: object.clone(),
         profile: ExecutionProfile {
-            backend: Backend::Kvm,
+            backend: Backend::Other("fixture".into()),
             engine: object.clone(),
             witness_mode: WitnessMode::Exits,
             semantic_parameters: SemanticParameters::new(512),
@@ -997,8 +979,9 @@ mod diff_tests {
         fs::write(root.join("b/output/machines/server.pages"), b"broken").unwrap();
         for (error, update_digest, remove_memory) in [
             ("diff b/output/machines/server.pages: evidence checksum mismatch", false, false),
-            ("diff b/output/machines/server.pages: page hash length must be 1048576 bytes for recorded RAM", true, false),
-            ("diff b: page hashes require recorded memory_mb", true, true),
+            ("diff b/output/machines/server.pages: page hash length must be 1048576 bytes for recorded mapped RAM", true, false),
+            // Current captures use mapped regions, not a flat profile-memory guess.
+            ("diff b/output/machines/server.pages: page hash length must be 1048576 bytes for recorded mapped RAM", true, true),
         ] {
             if update_digest {
                 right.logs.insert("machines/server.pages".into(), sb::store::ContentDigest::of(b"broken"));
@@ -1058,7 +1041,7 @@ mod diff_tests {
                     assert_eq!(first["machine"], "server");
                     assert_eq!(first["source"], "terminal");
                     assert!(first["record"].is_null());
-                    assert_eq!(first["a"]["time_ns"], 100);
+                    assert!(first["a"]["time_ns"].is_null());
                     assert_eq!(
                         first["a"]["value"]["state_digest_parts"]["disk"],
                         a["machines"][1]["state_digest_parts"]["disk"]
@@ -1091,52 +1074,117 @@ mod diff_tests {
         }
     }
 
+    // These are malformed CURRENT stopped captures, not a legacy report decoder.
+    fn write_state(path: &Path, record: &mut sb::record::RunRecord, value: &serde_json::Value) {
+        let bytes = serde_json::to_vec(value).unwrap();
+        fs::write(path.join("output").join(sb::evidence::STATE_REPORT), &bytes).unwrap();
+        record.logs.insert(
+            sb::evidence::STATE_REPORT.into(),
+            sb::store::ContentDigest::of(&bytes),
+        );
+        write_fixture(path, record, None, None);
+    }
+
     #[test]
     fn diff_current_digest_fields_remain_strict_and_manifest_bound() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        for pointer in [
-            "/world_witness",
-            "/machines/1/witness",
-            "/machines/1/state_digest",
-            "/machines/1/state_digest_parts/regs",
-            "/machines/1/state_digest_parts/xsave",
-            "/machines/1/state_digest_parts/xcrs",
-            "/machines/1/state_digest_parts/msrs",
-            "/machines/1/state_digest_parts/time_page",
-            "/machines/1/state_digest_parts/pending_io",
-            "/machines/1/state_digest_parts/ram",
-            "/machines/1/state_digest_parts/disk",
-            "/machines/1/state_digest_parts/devices",
+        let path = root.join("a");
+        for part in [
+            "digest",
+            "parts/regs",
+            "parts/xsave",
+            "parts/xcrs",
+            "parts/msrs",
+            "parts/time_page",
+            "parts/pending_io",
+            "parts/ram",
+            "parts/disk",
+            "parts/events",
         ] {
             for invalid in ["ABCDEF".repeat(11), "not a digest".into(), "A".repeat(64)] {
-                let mut raw = current_report(true);
-                raw["machines"][1]["state_digest_parts"]["devices"] =
-                    serde_json::to_value(sb::store::ContentDigest::of(b"devices")).unwrap();
-                *raw.pointer_mut(pointer).unwrap() = invalid.into();
-                write_fixture(&root.join("a"), &mut fixture(), Some(&raw), None);
+                let mut record = fixture();
+                write_fixture(&path, &mut record, Some(&current_report(true)), None);
+                let mut state: serde_json::Value = serde_json::from_slice(
+                    &fs::read(path.join("output").join(sb::evidence::STATE_REPORT)).unwrap(),
+                )
+                .unwrap();
+                *state
+                    .pointer_mut(&format!("/machines/server/{part}"))
+                    .unwrap() = invalid.into();
+                write_state(&path, &mut record, &state);
                 let output = seedbox(&["diff", "a", "a", "--json"], root);
-                assert_eq!(output.status.code(), Some(2), "{pointer}");
+                assert_eq!(output.status.code(), Some(2), "{part}");
                 assert!(output.stdout.is_empty());
-                assert!(stderr(&output).starts_with("error: diff a/output/vmm.json: "));
+                assert!(stderr(&output).starts_with("error: diff a/output/driver-state.json: "));
                 assert!(stderr(&output).contains("expected a lowercase SHA-256 digest"));
             }
         }
         let mut record = fixture();
-        record.report.as_mut().unwrap().full_state = Some(std::collections::BTreeMap::from([(
-            "server".into(),
-            sb::store::ContentDigest::of(b"wrong"),
-        )]));
-        write_fixture(
-            &root.join("a"),
-            &mut record,
-            Some(&current_report(true)),
-            None,
-        );
+        write_fixture(&path, &mut record, Some(&current_report(true)), None);
+        record
+            .report
+            .as_mut()
+            .unwrap()
+            .full_state
+            .as_mut()
+            .unwrap()
+            .insert("server".into(), sb::store::ContentDigest::of(b"wrong"));
+        write_fixture(&path, &mut record, None, None);
         let output = seedbox(&["diff", "a", "a"], root);
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
-        assert_eq!(stderr(&output), "error: diff a: machine state digest disagrees with manifest; use an intact retained run directory (import bundles first)\n");
+        assert_eq!(stderr(&output), "error: diff a/output/driver-state.json: stopped-state inventory/digests disagree with manifest; use an intact retained run directory (import bundles first)\n");
+    }
+
+    #[test]
+    fn diff_rejects_invalid_retained_reports_and_traces() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("a");
+        for (pointer, value, message) in [
+            (
+                "/version",
+                serde_json::json!(2),
+                "invalid stopped-state report version or empty machine inventory",
+            ),
+            (
+                "/machines/workload/page_log",
+                serde_json::json!("../escape"),
+                "invalid stopped-state page log path",
+            ),
+            (
+                "/machines/workload/page_log",
+                serde_json::json!("machines/server.pages"),
+                "duplicate stopped-state page log path",
+            ),
+        ] {
+            let mut record = fixture();
+            write_fixture(&path, &mut record, Some(&current_report(true)), None);
+            let mut state: serde_json::Value = serde_json::from_slice(
+                &fs::read(path.join("output").join(sb::evidence::STATE_REPORT)).unwrap(),
+            )
+            .unwrap();
+            *state.pointer_mut(pointer).unwrap() = value;
+            write_state(&path, &mut record, &state);
+            let output = seedbox(&["diff", "a", "a"], root);
+            assert_eq!(output.status.code(), Some(2));
+            assert_eq!(stderr(&output), format!("error: diff a/output/driver-state.json: input integrity: {message}; use an intact retained run directory (import bundles first)\n"));
+        }
+        let mut record = fixture();
+        fs::write(path.join("output").join(sb::evidence::STATE_REPORT), b"bad").unwrap();
+        record.logs.insert(
+            sb::evidence::STATE_REPORT.into(),
+            sb::store::ContentDigest::of(b"bad"),
+        );
+        write_fixture(&path, &mut record, None, None);
+        let output = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: diff a/output/driver-state.json: expected value at line 1 column 1; use an intact retained run directory (import bundles first)\n");
+        write_fixture(&path, &mut fixture(), None, Some(b"bad\n"));
+        let output = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: diff a: machines/workload.trace compared with a: input integrity: invalid trace record: expected kind time_ns extra(hex) rip(hex); use an intact retained run directory (import bundles first)\n");
     }
 
     #[test]
@@ -1147,8 +1195,7 @@ mod diff_tests {
         let mut record = fixture();
         record.outcome = sb::orchestration::Outcome::Error;
         record.report = None;
-        let error =
-            sb::Error::Execution(sb::engine_adapter::VMM_FAILURE_MESSAGE.into()).to_string();
+        let error = sb::Error::Execution(sb::execution::VMM_FAILURE_MESSAGE.into()).to_string();
         record.error = Some(error.clone());
         write_fixture(&run, &mut record, None, None);
         let manifest = fs::read(run.join("manifest.json")).unwrap();
@@ -1267,17 +1314,22 @@ mod diff_tests {
     fn diff_rejects_corrupt_and_missing_declared_evidence_with_context() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_fixture(&root.join("a"), &mut fixture(), Some(&raw_report()), None);
-        fs::write(root.join("a/output/vmm.json"), "corrupt").unwrap();
+        write_fixture(
+            &root.join("a"),
+            &mut fixture(),
+            Some(&current_report(true)),
+            None,
+        );
+        fs::write(root.join("a/output/driver-state.json"), "corrupt").unwrap();
         let output = seedbox(&["diff", "a", "a", "--json"], root);
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
-        assert_eq!(stderr(&output), "error: diff a/output/vmm.json: evidence checksum mismatch; use an intact retained run directory (import bundles first)\n");
-        fs::remove_file(root.join("a/output/vmm.json")).unwrap();
-        let cause = fs::symlink_metadata(root.join("a/output/vmm.json")).unwrap_err();
+        assert_eq!(stderr(&output), "error: diff a/output/driver-state.json: evidence checksum mismatch; use an intact retained run directory (import bundles first)\n");
+        fs::remove_file(root.join("a/output/driver-state.json")).unwrap();
+        let cause = fs::symlink_metadata(root.join("a/output/driver-state.json")).unwrap_err();
         let output = seedbox(&["diff", "a", "a"], root);
         assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), format!("error: diff a/output/vmm.json: {cause}; use an intact retained run directory (import bundles first)\n"));
+        assert_eq!(stderr(&output), format!("error: diff a/output/driver-state.json: {cause}; use an intact retained run directory (import bundles first)\n"));
     }
 
     #[test]
@@ -1317,56 +1369,24 @@ mod diff_tests {
         );
         assert!(result["first_record"].is_null());
     }
-    #[test]
-    fn diff_rejects_invalid_retained_reports_and_traces() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let mut wrong_version = raw_report();
-        wrong_version["report_version"] = 2.into();
-        let mut duplicate = raw_report();
-        let machine = duplicate["machines"][0].clone();
-        duplicate["machines"].as_array_mut().unwrap().push(machine);
-        let mut wrong_world = raw_report();
-        wrong_world["world_witness"] =
-            serde_json::to_value(sb::store::ContentDigest::of(b"wrong")).unwrap();
-        for (raw, message) in [
-            (wrong_version, "unsupported VMM report version"),
-            (duplicate, "duplicate machine name"),
-            (wrong_world, "world witness disagrees with manifest"),
-        ] {
-            write_fixture(&root.join("a"), &mut fixture(), Some(&raw), None);
-            let output = seedbox(&["diff", "a", "a"], root);
-            assert_eq!(output.status.code(), Some(2));
-            assert_eq!(stderr(&output), format!("error: diff a/output/vmm.json: {message}; use an intact retained run directory (import bundles first)\n"));
-        }
-        let mut record = fixture();
-        let path = root.join("a/output/vmm.json");
-        fs::write(&path, b"bad").unwrap();
-        record
-            .logs
-            .insert("vmm.json".into(), sb::store::ContentDigest::of(b"bad"));
-        write_fixture(&root.join("a"), &mut record, None, None);
-        let output = seedbox(&["diff", "a", "a"], root);
-        assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), "error: diff a/output/vmm.json: expected value at line 1 column 1; use an intact retained run directory (import bundles first)\n");
-        write_fixture(&root.join("a"), &mut fixture(), None, Some(b"bad\n"));
-        let output = seedbox(&["diff", "a", "a"], root);
-        assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), "error: diff a: machines/workload.trace compared with a: input integrity: invalid trace record: expected kind time_ns extra(hex) rip(hex); use an intact retained run directory (import bundles first)\n");
-    }
 
     #[cfg(unix)]
     #[test]
     fn diff_rejects_symlinked_evidence_and_unsafe_names() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_fixture(&root.join("a"), &mut fixture(), Some(&raw_report()), None);
-        let path = root.join("a/output/vmm.json");
+        write_fixture(
+            &root.join("a"),
+            &mut fixture(),
+            Some(&current_report(true)),
+            None,
+        );
+        let path = root.join("a/output/driver-state.json");
         fs::rename(&path, root.join("raw.json")).unwrap();
         std::os::unix::fs::symlink(root.join("raw.json"), &path).unwrap();
         let output = seedbox(&["diff", "a", "a"], root);
         assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), "error: diff a/output/vmm.json: evidence must be a regular file under real directories; use an intact retained run directory (import bundles first)\n");
+        assert_eq!(stderr(&output), "error: diff a/output/driver-state.json: evidence must be a regular file under real directories; use an intact retained run directory (import bundles first)\n");
         let mut record = fixture();
         record.identity.inputs.guests.insert(
             "../../escape".into(),
@@ -1392,7 +1412,7 @@ mod diff_tests {
         write_fixture(
             &root.join("original"),
             &mut record,
-            Some(&raw_report()),
+            Some(&current_report(true)),
             Some(b"I 1 2 3\n"),
         );
         store
@@ -1426,7 +1446,9 @@ mod diff_tests {
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["status"], "MATCH");
-        assert_eq!(result["machines"][0]["witness"]["matches"], true);
+        assert_eq!(result["world_witness"]["matches"], true);
+        assert_eq!(result["machines"][0]["full_state"]["matches"], true);
+        assert!(result["machines"][0]["witness"]["matches"].is_null());
     }
 }
 
@@ -1840,10 +1862,10 @@ mod record_fixture {
 }
 
 /// A retained KVM run.
-fn kvm_record(directory: &Path) {
+fn current_record(directory: &Path) {
     use seedbox_application::{execution::Backend, store::ContentDigest};
     let mut record = record_fixture::record();
-    record.identity.inputs.profile.backend = Backend::Kvm;
+    record.identity.inputs.profile.backend = Backend::Other("fixture".into());
     record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
     let checksum = ContentDigest::of(&serde_json::to_vec(&record).unwrap());
     fs::write(
@@ -1856,7 +1878,7 @@ fn kvm_record(directory: &Path) {
 #[test]
 fn inspect_prints_no_timebase_and_json_preserves_library_fields() {
     let directory = tempfile::tempdir().unwrap();
-    kvm_record(directory.path());
+    current_record(directory.path());
     let output = seedbox(&["inspect", "."], directory.path());
     assert!(output.status.success(), "{}", stderr(&output));
     let text = String::from_utf8_lossy(&output.stdout);
@@ -1901,9 +1923,9 @@ fn internal_runtime_modes_are_not_authoring_options() {
 }
 
 #[test]
-fn inspect_rejects_an_unknown_recorded_deferred_tx_mode() {
+fn inspect_rejects_an_unknown_semantic_parameter() {
     let directory = tempfile::tempdir().unwrap();
-    kvm_record(directory.path());
+    current_record(directory.path());
     let path = directory.path().join("manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -1913,7 +1935,7 @@ fn inspect_rejects_an_unknown_recorded_deferred_tx_mode() {
     let output = seedbox(&["inspect", "."], directory.path());
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr(&output).contains("invalid type: string \"future\", expected a boolean"),
+        stderr(&output).contains("unknown field `deferred_tx`"),
         "{}",
         stderr(&output)
     );

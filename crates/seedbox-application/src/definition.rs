@@ -77,14 +77,9 @@ pub fn resolve(
         .remove(oracle_name)
         .ok_or_else(|| Error::Integrity("prepared inputs omit oracle".into()))?;
     Ok(Definition {
-        // The retained engine descriptor names the guest ISA of Driver
-        // profiles (aarch64 on HVF hosts); legacy profiles keep their backend.
-        architecture: match inputs.profile.backend {
-            crate::execution::Backend::Hvf => Architecture::Aarch64,
-            _ => match crate::guest::Architecture::from_profile(&inputs.profile)? {
-                crate::guest::Architecture::Amd64 => Architecture::X86_64,
-                crate::guest::Architecture::Arm64 => Architecture::Aarch64,
-            },
+        architecture: match crate::guest::Architecture::from_profile(&inputs.profile)? {
+            crate::guest::Architecture::Amd64 => Architecture::X86_64,
+            crate::guest::Architecture::Arm64 => Architecture::Aarch64,
         },
         seed,
         clock: Clock {
@@ -141,26 +136,22 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
             "torn_writes".into(),
             definition.simulator.disk.torn_writes.into(),
         );
-        if let Some(hvf) = parameters.get_mut("hvf").and_then(|v| v.as_object_mut()) {
-            hvf.insert(
-                "guest_kernel".into(),
-                serde_json::to_value(digest(&definition.runtime.kernel)?)?,
-            );
-        }
     }
     let mut profile: ExecutionProfile =
         serde_json::from_value(serde_json::Value::Object(settings.clone()))?;
-    match (&profile.backend, definition.architecture) {
-        (crate::execution::Backend::Hvf, Architecture::X86_64)
-        | (crate::execution::Backend::Kvm, Architecture::Aarch64) => {
+    if profile.semantic_parameters.launch() == Some(crate::engine::ExecutableKind::DriverWorld) {
+        let descriptor = profile
+            .semantic_parameters
+            .engine
+            .as_ref()
+            .ok_or_else(|| Error::Integrity("Driver execution descriptor missing".into()))?;
+        if descriptor.guest_arch
+            != crate::driver_world::platform::architecture_name(definition.architecture)
+        {
             return Err(Error::Setup(
-                "architecture differs from runtime execution backend".into(),
-            ))
+                "architecture differs from runtime execution guest ISA".into(),
+            ));
         }
-        _ => {}
-    }
-
-    if profile.semantic_parameters.launch() == crate::engine::ExecutableKind::DriverWorld {
         if let Start::Checkpoint { manifest, .. } = &definition.start {
             crate::driver_world::preflight::restore_manifest(
                 manifest,
@@ -206,13 +197,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
                 ));
             }
         }
-        let boot = if matches!(profile.backend, crate::execution::Backend::Other(_))
-            || profile.semantic_parameters.launch() == crate::engine::ExecutableKind::DriverWorld
-        {
-            digest(&machine.boot_archive)?
-        } else {
-            resolved_boot(definition, name, machine, store)?
-        };
+        let boot = digest(&machine.boot_archive)?;
         images.insert(
             name.into(),
             PreparedImage {
@@ -240,7 +225,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
         placement.insert(name.into(), name.into());
     }
     if driver_closure.is_some()
-        && profile.semantic_parameters.launch() != crate::engine::ExecutableKind::DriverWorld
+        && profile.semantic_parameters.launch() != Some(crate::engine::ExecutableKind::DriverWorld)
     {
         return Err(Error::Integrity(
             "Driver input closure has a different executable contract".into(),
@@ -437,167 +422,6 @@ pub fn materialize_start(
     Ok(Some(path))
 }
 
-/// Rebuild the launch record from inline fields, preserving prepared filesystem bytes.
-/// This makes edits to process, clock and progress budget effective without an image engine.
-fn resolved_boot(
-    definition: &Definition,
-    name: &str,
-    machine: &Machine,
-    store: &ContentStore,
-) -> Result<ContentDigest> {
-    use std::io::{Read, Seek, Write};
-    let mut names: Vec<_> = definition
-        .machines
-        .keys()
-        .map(String::as_str)
-        .chain(std::iter::once(definition.oracle_name()))
-        .collect();
-    names.sort_unstable();
-    let mut hosts = String::from("127.0.0.1 localhost\n::1 localhost\n");
-    for (index, name) in names.iter().enumerate() {
-        hosts.push_str(&format!("10.0.0.{} {name}\n", index + 1));
-    }
-    let index = names
-        .iter()
-        .position(|n| *n == name)
-        .ok_or_else(|| Error::Integrity("missing machine address".into()))?;
-    let launch = Launch {
-        argv: machine.process.argv.clone(),
-        environment: machine.process.environment.clone(),
-        working_dir: machine.process.working_directory.clone(),
-        user: machine.process.user.clone(),
-        volumes: machine.anonymous_volumes.clone(),
-        disk_volumes: machine
-            .volumes
-            .iter()
-            .map(|(n, v)| seedbox_spec::VolumeMount {
-                source: n.clone(),
-                target: v.target.clone(),
-            })
-            .collect(),
-    };
-    let mut recipe = crate::guest::launch_recipe_with_progress(
-        &launch,
-        &format!("10.0.0.{}/24", index + 1),
-        &hosts,
-        name,
-        &BTreeMap::new(),
-        definition.clock.epoch_seconds,
-        definition.simulator.blocks_per_progress_call,
-    )?;
-    let mut input = tempfile::tempfile()?;
-    store.copy_to(&digest(&machine.boot_archive)?, &mut input)?;
-    input.rewind()?;
-    let mut output = tempfile::tempfile()?;
-    let mut found = false;
-    loop {
-        let mut header = [0u8; 110];
-        input.read_exact(&mut header)?;
-        if &header[..6] != b"070701" {
-            return Err(Error::Integrity(
-                "bootArchive must be an uncompressed newc archive".into(),
-            ));
-        }
-        let number = |bytes: &[u8]| -> Result<usize> {
-            usize::from_str_radix(
-                std::str::from_utf8(bytes)
-                    .map_err(|_| Error::Integrity("invalid boot archive header".into()))?,
-                16,
-            )
-            .map_err(|_| Error::Integrity("invalid boot archive size".into()))
-        };
-        let size = number(&header[54..62])?;
-        let length = number(&header[94..102])?;
-        if length == 0 || length > 4096 {
-            return Err(Error::Integrity("invalid boot archive path length".into()));
-        }
-        let mut path = vec![0; length];
-        input.read_exact(&mut path)?;
-        let name_pad = (4 - (110 + length) % 4) % 4;
-        let mut padding = [0u8; 3];
-        input.read_exact(&mut padding[..name_pad])?;
-        if path == b"seedbox/launch.bin\0" {
-            if size > 16 * 1024 * 1024 {
-                return Err(Error::Integrity("launch record exceeds 16 MiB".into()));
-            }
-            let mut old = vec![0; size];
-            input.read_exact(&mut old)?;
-            let tail = launch_configs(&old)?;
-            recipe.truncate(recipe.len() - 4);
-            recipe.extend_from_slice(tail);
-            header[54..62].copy_from_slice(format!("{:08x}", recipe.len()).as_bytes());
-            output.write_all(&header)?;
-            output.write_all(&path)?;
-            output.write_all(&padding[..name_pad])?;
-            output.write_all(&recipe)?;
-            output.write_all(&[0; 3][..(4 - recipe.len() % 4) % 4])?;
-            found = true;
-        } else {
-            output.write_all(&header)?;
-            output.write_all(&path)?;
-            output.write_all(&padding[..name_pad])?;
-            let copied = std::io::copy(&mut (&mut input).take(size as u64), &mut output)?;
-            if copied != size as u64 {
-                return Err(Error::Integrity("truncated boot archive".into()));
-            }
-            output.write_all(&[0; 3][..(4 - size % 4) % 4])?;
-        }
-        input.read_exact(&mut padding[..(4 - size % 4) % 4])?;
-        if path == b"TRAILER!!!\0" {
-            break;
-        }
-    }
-    if !found {
-        return Err(Error::Integrity(
-            "bootArchive omits seedbox/launch.bin".into(),
-        ));
-    }
-    // newc permits final zero padding; retaining it preserves byte identity for unchanged recipes.
-    std::io::copy(&mut input, &mut output)?;
-    output.rewind()?;
-    store.put_reader(output)
-}
-fn launch_configs(bytes: &[u8]) -> Result<&[u8]> {
-    let fail = || Error::Integrity("invalid retained launch record".into());
-    if !bytes.starts_with(crate::guest::LAUNCH_MAGIC) {
-        return Err(fail());
-    }
-    let mut cursor = crate::guest::LAUNCH_MAGIC.len();
-    fn number(bytes: &[u8], cursor: &mut usize) -> Option<usize> {
-        let n = u32::from_le_bytes(bytes.get(*cursor..*cursor + 4)?.try_into().ok()?) as usize;
-        *cursor += 4;
-        Some(n)
-    }
-    for _ in 0..5 {
-        let n = number(bytes, &mut cursor).ok_or_else(fail)?;
-        cursor = cursor
-            .checked_add(n)
-            .filter(|n| *n <= bytes.len())
-            .ok_or_else(fail)?;
-    }
-    cursor = cursor
-        .checked_add(12)
-        .filter(|n| *n <= bytes.len())
-        .ok_or_else(fail)?;
-    for _ in 0..4 {
-        let count = number(bytes, &mut cursor).ok_or_else(fail)?;
-        if count > 65536 {
-            return Err(fail());
-        }
-        for _ in 0..count {
-            let n = number(bytes, &mut cursor).ok_or_else(fail)?;
-            cursor = cursor
-                .checked_add(n)
-                .filter(|n| *n <= bytes.len())
-                .ok_or_else(fail)?;
-        }
-    }
-    bytes
-        .get(cursor..)
-        .filter(|tail| tail.len() >= 4)
-        .ok_or_else(fail)
-}
-
 /// Inline settings omit values already defined by canonical binary or machine fields.
 /// Inline the retained launch profile and Driver's explicit binary input closure.
 /// Host paths and source provenance are never retained as factory authority.
@@ -625,9 +449,6 @@ pub fn execution_settings(profile: &ExecutionProfile) -> Result<serde_json::Valu
     {
         parameters.remove("memory_mb");
         parameters.remove("torn_writes");
-        if let Some(hvf) = parameters.get_mut("hvf").and_then(|v| v.as_object_mut()) {
-            hvf.remove("guest_kernel");
-        }
     }
     Ok(value)
 }
@@ -638,57 +459,38 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, ContentStore, Definition, ContentDigest) {
         let temporary = tempfile::tempdir().unwrap();
         let store = ContentStore::new(temporary.path().join("store"));
-        let root = temporary.path().join("rootfs");
-        std::fs::create_dir_all(root.join("bin")).unwrap();
-        std::fs::write(root.join("bin/test"), b"application").unwrap();
-        let init = temporary.path().join("init");
-        std::fs::write(&init, b"init binary").unwrap();
-        let launch = Launch {
-            argv: vec!["/bin/test".into()],
-            environment: BTreeMap::from([("MODE".into(), "original".into())]),
-            working_dir: "/".into(),
-            user: "0:0".into(),
-            volumes: vec!["/tmp/data".into()],
-            disk_volumes: Vec::new(),
-        };
-        let configs = BTreeMap::from([("/etc/test.conf".into(), b"preserve me".to_vec())]);
-        let recipe = crate::guest::launch_recipe(
-            &launch,
-            "10.0.0.1/24",
-            "127.0.0.1 localhost\n::1 localhost\n10.0.0.1 oracle\n",
-            "oracle",
-            &configs,
-            86400,
-        )
-        .unwrap();
-        let archive = temporary.path().join("boot.cpio");
-        crate::guest::build_initramfs(&root, &init, &recipe, &archive).unwrap();
-        let boot = store.put_file(&archive).unwrap();
-        let kernel = store.put(b"kernel").unwrap();
-        let engine = store.put(b"engine").unwrap();
+        let boot = store
+            .put(b"opaque already-prepared unit-fixture boot bytes")
+            .unwrap();
         let profile = ExecutionProfile {
-            backend: crate::execution::Backend::Hvf,
-            engine,
+            backend: crate::execution::Backend::Other("fixture".into()),
+            engine: store.put(b"engine").unwrap(),
             witness_mode: crate::execution::WitnessMode::Exits,
             semantic_parameters: crate::execution::SemanticParameters::new(1024),
         };
-        let configuration = crate::config::parse_for_architecture(
+        let configuration = crate::config::parse(
             "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
             std::path::Path::new("/project/compose.yaml"),
             &Default::default(),
-            crate::guest::Architecture::Arm64,
         )
         .unwrap();
         let inputs = PreparedInputs {
             wall_clock_epoch: Some(86400),
-            kernel,
+            kernel: store.put(b"kernel").unwrap(),
             images: BTreeMap::from([(
                 "oracle".into(),
                 PreparedImage {
                     manifest: boot.clone(),
                     config: boot.clone(),
-                    layers: Vec::new(),
-                    launch,
+                    layers: vec![],
+                    launch: Launch {
+                        argv: vec!["/bin/test".into()],
+                        environment: BTreeMap::from([("MODE".into(), "original".into())]),
+                        working_dir: "/".into(),
+                        user: "0:0".into(),
+                        volumes: vec!["/tmp/data".into()],
+                        disk_volumes: vec![],
+                    },
                 },
             )]),
             placement: BTreeMap::from([("oracle".into(), "oracle".into())]),
@@ -697,9 +499,10 @@ mod tests {
             auxiliary: BTreeMap::new(),
             provenance: BTreeMap::new(),
         };
-        let definition = resolve(&configuration, &inputs, 1, Vec::new()).unwrap();
+        let definition = resolve(&configuration, &inputs, 1, vec![]).unwrap();
         (temporary, store, definition, boot)
     }
+
     #[test]
     fn backend_authority_rejects_before_resolved_asset_materialization() {
         for (top, actual) in [("driver-pv", "driver-tcg"), ("driver-tcg", "driver-pv")] {
@@ -785,31 +588,6 @@ mod tests {
             .is_file());
     }
 
-    #[test]
-    fn resolved_launch_is_identical_until_inline_fields_change() {
-        let (_temporary, store, mut definition, original) = fixture();
-        let prepared_inputs = prepared(&definition, &store).unwrap();
-        assert_eq!(prepared_inputs.guests["oracle"], original);
-        assert_eq!(
-            prepared_inputs.images["oracle"].launch.volumes,
-            vec!["/tmp/data"]
-        );
-        definition.oracle.process.argv.push("--changed".into());
-        definition.clock.epoch_seconds += 1;
-        definition.simulator.blocks_per_progress_call = std::num::NonZeroU32::new(5000).unwrap();
-        let changed = prepared(&definition, &store).unwrap();
-        assert_ne!(changed.guests["oracle"], original);
-        assert_eq!(
-            prepared(&definition, &store).unwrap().guests,
-            changed.guests
-        );
-        let bytes = store.read(&changed.guests["oracle"]).unwrap();
-        assert!(bytes
-            .windows(b"preserve me".len())
-            .any(|v| v == b"preserve me"));
-        assert!(bytes.windows(b"--changed".len()).any(|v| v == b"--changed"));
-        store.verify(&original).unwrap();
-    }
     #[test]
     fn checkpoint_binary_closure_survives_source_deletion_and_preserves_guest_paths() {
         let (temporary, store, mut definition, _) = fixture();
@@ -909,6 +687,11 @@ mod tests {
         crate::driver_world::retain_prepared(&mut inputs, &prepared_world, &store).unwrap();
         definition.runtime.execution = execution_settings_with_inputs(&inputs).unwrap();
         definition.oracle.boot_archive = asset(&rootfs);
+        assert!(prepared(&definition, &store)
+            .unwrap_err()
+            .to_string()
+            .contains("architecture differs"));
+        definition.architecture = Architecture::Aarch64;
         let roundtrip = prepared(&definition, &store).unwrap();
         assert_eq!(roundtrip.auxiliary, inputs.auxiliary);
         assert_eq!(roundtrip.guests["oracle"], rootfs);
@@ -976,7 +759,9 @@ mod tests {
             cancellation: &cancellation,
             performance_parameters: &performance,
         };
-        let launch = crate::worker_process::WorkerLaunch::prepare(&request).unwrap();
+        let launch =
+            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None)
+                .unwrap();
         let args: Vec<_> = launch
             .command
             .get_args()
@@ -1149,7 +934,9 @@ mod tests {
             output: &output,
             ..request
         };
-        let launch = crate::worker_process::WorkerLaunch::prepare(&boot_request).unwrap();
+        let launch =
+            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&boot_request, None)
+                .unwrap();
         let worker: wire::Request =
             serde_json::from_slice(&std::fs::read(output.join("worker-request.json")).unwrap())
                 .unwrap();
@@ -1252,7 +1039,11 @@ mod tests {
                 control: simulation.control.as_ref(),
                 ..request
             };
-            let launch = crate::worker_process::WorkerLaunch::prepare(&tcg_request).unwrap();
+            let launch = crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(
+                &tcg_request,
+                None,
+            )
+            .unwrap();
             let worker: wire::Request =
                 serde_json::from_slice(&std::fs::read(output.join("worker-request.json")).unwrap())
                     .unwrap();

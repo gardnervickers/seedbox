@@ -7,121 +7,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 include!("support/diff_fixture.rs");
 
-fn arm_fixture() -> sb::record::RunRecord {
-    let mut record = fixture();
-    record.identity.inputs.profile.backend = sb::execution::Backend::Hvf;
-    let parameters = &mut record.identity.inputs.profile.semantic_parameters;
-    parameters.engine = Some(sb::engine::arm_descriptor());
-    record
-}
-
-fn arm_report() -> Value {
-    let mut report = raw_report();
-    report["report_version"] = 2.into();
-    report["timebase"] = sb::engine::ARM_REPORT_TIMEBASE.into();
-    report
-}
-
-fn arm_report_error(record: &mut sb::record::RunRecord, report: &Value) -> String {
-    let dir = tempfile::tempdir().unwrap();
-    write_fixture(&dir.path().join("arm"), record, Some(report), None);
-    diff(&dir.path().join("arm"), &dir.path().join("arm"))
-        .unwrap_err()
-        .to_string()
-}
-
 #[test]
-fn native_hvf_reports_require_the_arm_descriptor_and_matching_header() {
-    let dir = tempfile::tempdir().unwrap();
-    let report = arm_report();
-    write_fixture(
-        &dir.path().join("a"),
-        &mut arm_fixture(),
-        Some(&report),
-        None,
-    );
-    write_fixture(
-        &dir.path().join("b"),
-        &mut arm_fixture(),
-        Some(&report),
-        None,
-    );
-    assert_eq!(
-        diff(&dir.path().join("a"), &dir.path().join("b"))
-            .unwrap()
-            .status,
-        Status::Match
-    );
-
-    let mut record = arm_fixture();
-    record.identity.inputs.profile.backend = sb::execution::Backend::Kvm;
-    let error = arm_report_error(&mut record, &report);
-    assert!(
-        error.contains("HVF backend and ARM executable descriptor disagree"),
-        "{error}"
-    );
-
-    let mut record = arm_fixture();
-    record.identity.inputs.profile.semantic_parameters =
-        sb::execution::SemanticParameters::new(512);
-    let error = arm_report_error(&mut record, &report);
-    assert!(
-        error.contains("HVF backend and ARM executable descriptor disagree"),
-        "{error}"
-    );
-
-    // Descriptive clock capability metadata does not gate report decoding.
-    let mut descriptive = arm_fixture();
-    if let Some(engine) = &mut descriptive
-        .identity
-        .inputs
-        .profile
-        .semantic_parameters
-        .engine
-    {
-        engine.engine_timebase = "future-capabilities".into();
-    }
-    write_fixture(
-        &dir.path().join("descriptive"),
-        &mut descriptive,
-        Some(&report),
-        None,
-    );
-    assert_eq!(
-        diff(
-            &dir.path().join("descriptive"),
-            &dir.path().join("descriptive")
-        )
-        .unwrap()
-        .status,
-        Status::Match
-    );
-
-    let mut wrong_version = report.clone();
-    wrong_version["report_version"] = 1.into();
-    let error = arm_report_error(&mut arm_fixture(), &wrong_version);
-    assert!(error.contains("unsupported VMM report version"), "{error}");
-
-    let mut wrong_timebase = report.clone();
-    wrong_timebase["timebase"] = "pv".into();
-    let error = arm_report_error(&mut arm_fixture(), &wrong_timebase);
-    assert!(
-        error.contains("HVF report timebase disagrees with executable profile"),
-        "{error}"
-    );
-
-    let mut wrong_seed = report.clone();
-    wrong_seed["seed"] = 1.into();
-    let error = arm_report_error(&mut arm_fixture(), &wrong_seed);
-    assert!(
-        error.contains("VMM report seed disagrees with manifest"),
-        "{error}"
-    );
-}
-
-#[test]
-fn ram_pages_are_read_where_the_vmm_writes_them() {
-    // vmm.rs passes --out output/machines, so NAME.pages sits beside NAME.trace.
+fn ram_pages_are_read_from_the_current_capture_page_path() {
+    // Current state captures name their retained page files explicitly.
     let (a, b) = ram_pair();
     let dir = tempfile::tempdir().unwrap();
     for (name, raw, pfns) in [("a", &a, vec![]), ("b", &b, vec![3usize])] {
@@ -257,14 +145,14 @@ fn current_reports_without_full_state_preserve_witnesses() {
     assert_eq!(result.world_witness.matches, Some(true));
     assert!(result.first_record.is_none());
     for machine in result.machines {
-        assert_eq!(machine.witness.matches, Some(true));
+        assert_eq!(machine.witness.matches, None);
         assert_eq!(machine.full_state.matches, None);
         assert!(machine.differences.is_empty());
     }
 }
 
 #[test]
-fn current_parts_report_ram_and_text_events_with_trace_precedence() {
+fn current_parts_report_ram_and_event_digests_with_trace_precedence() {
     for part in ["ram", "events"] {
         let a = current_report(true);
         let mut b = a.clone();
@@ -279,7 +167,17 @@ fn current_parts_report_ram_and_text_events_with_trace_precedence() {
         assert_eq!(first.source, "terminal");
         assert_eq!(
             first.a.unwrap().value["state_digest_parts"][part],
-            a["machines"][0]["state_digest_parts"][part]
+            if part == "events" {
+                serde_json::to_value(ContentDigest::of(
+                    a["machines"][0]["state_digest_parts"][part]
+                        .as_str()
+                        .unwrap()
+                        .as_bytes(),
+                ))
+                .unwrap()
+            } else {
+                a["machines"][0]["state_digest_parts"][part].clone()
+            }
         );
         assert!(result.machines[1]
             .differences
@@ -338,37 +236,33 @@ fn world_difference_does_not_invent_a_machine_or_time() {
     write_fixture(&dir.path().join("b"), &mut b, Some(&raw), None);
     let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
     assert_eq!(result.world_witness.matches, Some(false));
-    assert!(result
-        .machines
-        .iter()
-        .all(|m| m.witness.matches == Some(true)));
+    assert!(result.machines.iter().all(|m| m.witness.matches.is_none()));
     assert!(result.first_record.is_none());
 }
 
 #[test]
-fn machine_hash_and_full_state_differences_have_no_claimed_exit_time() {
-    let a = raw_report();
+fn full_state_digest_differences_do_not_claim_an_exit_time() {
+    let a = current_report(true);
     let mut b = a.clone();
-    b["machines"][0]["witness"] = serde_json::to_value(ContentDigest::of(b"changed")).unwrap();
-    b["machines"][0]["state_digest"] = serde_json::to_value(ContentDigest::of(b"ram")).unwrap();
+    b["machines"][0]["state_digest"] = serde_json::to_value(ContentDigest::of(b"changed")).unwrap();
     let (_, result) = pair(&a, &b);
     assert_eq!(result.status, Status::Different);
-    assert_eq!(result.machines[0].witness.matches, Some(false));
+    assert_eq!(result.machines[1].witness.matches, None);
+    assert_eq!(result.machines[1].full_state.matches, Some(false));
     assert!(result.first_record.is_none());
 }
 
 #[test]
-fn terminal_difference_reports_machine_time_and_kind() {
-    let a = raw_report();
+fn stopped_disposition_difference_does_not_fabricate_legacy_exit_times() {
+    let a = current_report(true);
     let mut b = a.clone();
     b["machines"][0]["guest_exit_code"] = 1.into();
-    b["machines"][0]["time_ns"] = 105.into();
     let (_, result) = pair(&a, &b);
     let first = result.first_record.unwrap();
     assert_eq!(first.machine, "workload");
     assert_eq!(first.source, "terminal");
-    assert_eq!(first.a.unwrap().time_ns, Some(100));
-    assert_eq!(first.b.unwrap().time_ns, Some(105));
+    assert_eq!(first.a.unwrap().time_ns, None);
+    assert_eq!(first.b.unwrap().time_ns, None);
 }
 
 #[test]
@@ -405,31 +299,6 @@ fn identity_lists_semantics_and_ignores_attempt_and_performance() {
             "/inputs/profile/semantic_parameters/memory_mb",
             "/seed"
         ]
-    );
-}
-
-#[test]
-fn diff_uses_retained_report_to_decode_legacy_samples() {
-    let dir = tempfile::tempdir().unwrap();
-    let bytes: Vec<u8> = [0u64, 17, 1, 7]
-        .into_iter()
-        .flat_map(u64::to_le_bytes)
-        .collect();
-    let mut report = raw_report();
-    report["timebase"] = "pv".into();
-    for side in ["a", "b"] {
-        write_fixture_logs(
-            &dir.path().join(side),
-            &mut fixture(),
-            Some(&report),
-            &[("machines/workload.witness-log", Some(&bytes))],
-        );
-    }
-    assert_eq!(
-        diff(&dir.path().join("a"), &dir.path().join("b"))
-            .unwrap()
-            .status,
-        Status::Match
     );
 }
 
@@ -480,9 +349,13 @@ fn absent_and_omitted_evidence_stays_explicit_and_is_not_read() {
     record.outcome = sb::record::Outcome::Incomplete;
     record
         .omitted_logs
-        .insert("vmm.json".into(), "over quota".into());
+        .insert(sb::evidence::STATE_REPORT.into(), "over quota".into());
     write_fixture(dir.path(), &mut record, None, None);
-    std::fs::write(dir.path().join("output/vmm.json"), "not retained").unwrap();
+    std::fs::write(
+        dir.path().join("output").join(sb::evidence::STATE_REPORT),
+        "not retained",
+    )
+    .unwrap();
     let result = diff(dir.path(), dir.path()).unwrap();
     assert_eq!(result.world_witness.matches, None);
     assert!(result.first_record.is_none());

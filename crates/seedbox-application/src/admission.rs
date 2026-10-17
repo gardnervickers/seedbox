@@ -155,36 +155,6 @@ pub(crate) fn collect_admitted(
     admission
 }
 
-// Publication never replaces an established refusal, especially cleanup
-// uncertainty. Keep both bounded internal diagnostics; no application bytes are
-// parsed or included here.
-pub(crate) fn finish_admission(
-    admission: Result<()>,
-    publish: impl FnOnce(&Result<()>) -> Result<()>,
-) -> Result<()> {
-    let publication = publish(&admission);
-    match (admission, publication) {
-        (Ok(()), publication) => publication,
-        (Err(refusal), Ok(())) => Err(refusal),
-        (Err(refusal), Err(publication)) => {
-            fn bounded(error: &Error) -> String {
-                let text = error.to_string();
-                let mut chars = text.chars();
-                let mut prefix: String = chars.by_ref().take(4096).collect();
-                if chars.next().is_some() {
-                    prefix.push_str(" [truncated]");
-                }
-                prefix
-            }
-            Err(Error::Execution(format!(
-                "host admission refused: {}; additionally, evidence publication failed: {}",
-                bounded(&refusal),
-                bounded(&publication)
-            )))
-        }
-    }
-}
-
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod linux;
 
@@ -273,27 +243,7 @@ mod tests {
         .is_err());
         assert!(observations.is_empty());
     }
-    #[test]
-    fn publication_failure_preserves_capability_refusal() {
-        let mut observation = static_observation();
-        observation.sync_regs = 0;
-        let error = finish_admission(validate_observation(&observation), |established| {
-            assert!(established.is_err());
-            Err(Error::Setup("evidence ENOSPC".into()))
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("KVM sync-register capability"));
-        assert!(error.contains("evidence ENOSPC"));
-        assert!(finish_admission(Ok(()), |_| Err(Error::Setup("evidence ENOSPC".into()))).is_err());
-        let bounded = finish_admission(Err(Error::Execution("r".repeat(10000))), |_| {
-            Err(Error::Execution("p".repeat(10000)))
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(bounded.len() < 8400);
-        assert!(bounded.contains("[truncated]"));
-    }
+
     #[test]
     fn preflight_refusal_is_before_application_preparation_or_execution() {
         use crate::{

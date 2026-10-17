@@ -3,8 +3,7 @@
 pub use crate::comparison::*;
 use crate::{
     evidence::{
-        page_hash_log, RamRegion, ReportMachines, StateDigestParts, StateDisposition, StateReport,
-        STATE_REPORT,
+        page_hash_log, RamRegion, StateDigestParts, StateDisposition, StateReport, STATE_REPORT,
     },
     limits::{exceeds, read_bounded},
     record::{self as orchestration, RunRecord},
@@ -12,9 +11,8 @@ use crate::{
     store::ContentDigest,
     Error, Result,
 };
-use seedbox_engine_protocol::report::{MachineOutcome, MachineState, PendingIo};
 use seedbox_engine_protocol::trace::{InvalidTraceRecord, TraceRecord};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -94,11 +92,9 @@ pub struct DiffReport {
     pub limitations: Vec<String>,
 }
 
-// Select semantic machine fields explicitly: scheduling/performance statistics and
-// host timings in vmm.json are deliberately excluded.
+// Only stopped semantic captures participate; host performance is not evidence.
 #[derive(Clone, Debug, Default, Serialize)]
 struct Machine {
-    witness: Option<ContentDigest>,
     state_digest: Option<ContentDigest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     regions: Option<Vec<RamRegion>>,
@@ -111,12 +107,6 @@ struct Machine {
 /// A machine's end state, which a terminal record compares.
 #[derive(Clone, Debug, Default, Serialize)]
 struct Terminal {
-    state: Option<MachineState>,
-    time_ns: Option<u64>,
-    guest_exit_code: Option<u8>,
-    guest_init_error: Option<u8>,
-    infrastructure_error: Option<bool>,
-    pending_io: Option<PendingIo>,
     state_digest_parts: Option<StateDigestParts>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state_boot: Option<u64>,
@@ -126,60 +116,16 @@ struct Terminal {
 
 impl Terminal {
     fn is_empty(&self) -> bool {
-        self.state.is_none()
-            && self.time_ns.is_none()
-            && self.guest_exit_code.is_none()
-            && self.guest_init_error.is_none()
-            && self.infrastructure_error.is_none()
-            && self.pending_io.is_none()
-            && self.state_digest_parts.is_none()
+        self.state_digest_parts.is_none()
             && self.state_boot.is_none()
             && self.state_disposition.is_none()
     }
 }
 
-impl TryFrom<MachineOutcome> for Machine {
-    type Error = Error;
-
-    fn try_from(report: MachineOutcome) -> Result<Self> {
-        Ok(Self {
-            witness: Some(ContentDigest::try_from(report.witness)?),
-            regions: None,
-            page_log: None,
-            state_digest: report
-                .state_digest
-                .map(ContentDigest::try_from)
-                .transpose()?,
-            end: Terminal {
-                state: Some(report.state),
-                time_ns: Some(report.time_ns),
-                guest_exit_code: report.guest_exit_code,
-                guest_init_error: report.guest_init_error,
-                infrastructure_error: Some(report.infrastructure_error),
-                pending_io: report.pending_io,
-                state_digest_parts: report
-                    .state_digest_parts
-                    .map(StateDigestParts::try_from)
-                    .transpose()?,
-                state_boot: None,
-                state_disposition: None,
-            },
-        })
-    }
-}
 struct Evidence {
     record: RunRecord,
     machines: BTreeMap<String, Machine>,
     world: Option<ContentDigest>,
-    legacy_samples: bool,
-}
-
-#[derive(Deserialize)]
-struct ReportHeader {
-    report_version: u32,
-    #[serde(default)]
-    timebase: Option<String>,
-    seed: u64,
 }
 
 fn bad(path: &Path, error: impl std::fmt::Display) -> Error {
@@ -197,62 +143,16 @@ fn log(directory: &Path, record: &RunRecord, name: &str) -> Result<Option<File>>
 fn load(directory: &Path) -> Result<Evidence> {
     let record =
         orchestration::inspect(directory).map_err(|e| bad(&directory.join("manifest.json"), e))?;
-    let mut world = record.report.as_ref().and_then(|r| r.witness.clone());
-    let mut machines = BTreeMap::new();
-    // Counter-era x86 engines wrote 32-byte witness samples with a branch count.
-    let profile = &record.identity.inputs.profile;
-    let mut legacy_samples = profile.backend == crate::execution::Backend::Kvm
-        && profile
-            .semantic_parameters
-            .engine
-            .as_ref()
-            .is_some_and(|engine| engine.engine_timebase == "counter-pv-v1");
-    let driver = profile
-        .semantic_parameters
-        .engine
-        .as_ref()
-        .is_some_and(|engine| engine.kind == crate::engine::ExecutableKind::DriverWorld);
-    if let Some(file) = log(directory, &record, "vmm.json")?.filter(|_| !driver) {
-        let path = directory.join("output/vmm.json");
-        let bytes = read_bounded(file, REPORT_LIMIT, "report").map_err(|e| bad(&path, e))?;
-        let profile = &record.identity.inputs.profile;
-        let executable = crate::engine::recorded_launch(profile).map_err(|e| bad(&path, e))?;
-        let arm_world = executable == crate::engine::ExecutableKind::ArmWorld;
-        if (profile.backend == crate::execution::Backend::Hvf) != arm_world {
-            return Err(bad(
-                &path,
-                "HVF backend and ARM executable descriptor disagree",
-            ));
-        }
-        let header: ReportHeader = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
-        if header.report_version != if arm_world { 2 } else { 1 } {
-            return Err(bad(&path, "unsupported VMM report version"));
-        }
-        legacy_samples |= !arm_world && header.timebase.is_some();
-        if arm_world {
-            if header.timebase.as_deref() != Some(crate::engine::ARM_REPORT_TIMEBASE) {
-                return Err(bad(
-                    &path,
-                    "HVF report timebase disagrees with executable profile",
-                ));
-            }
-            if header.seed != record.identity.seed {
-                return Err(bad(&path, "VMM report seed disagrees with manifest"));
-            }
-        }
-        let raw: ReportMachines = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
-        if world.as_ref().is_some_and(|w| w != &raw.world_witness) {
-            return Err(bad(&path, "world witness disagrees with manifest"));
-        }
-        world = Some(raw.world_witness);
-        for entry in raw.machines {
-            let name = entry.name.clone();
-            let machine = Machine::try_from(entry).map_err(|e| bad(&path, e))?;
-            if machines.insert(name, machine).is_some() {
-                return Err(bad(&path, "duplicate machine name"));
-            }
-        }
-    }
+    let world = record.report.as_ref().and_then(|r| r.witness.clone());
+    // Machine identity is retained even when full-state capture was not requested.
+    // Trace/witness-log discovery must not depend on a stopped-state report.
+    let mut machines: BTreeMap<_, _> = record
+        .identity
+        .inputs
+        .guests
+        .keys()
+        .map(|name| (name.clone(), Machine::default()))
+        .collect();
     if let Some(file) = log(directory, &record, STATE_REPORT)? {
         let path = directory.join("output").join(STATE_REPORT);
         let bytes = read_bounded(file, REPORT_LIMIT, "stopped-state report")
@@ -315,7 +215,7 @@ fn load(directory: &Path) -> Result<Evidence> {
             machine.end.state_digest_parts = Some(parts);
         }
     }
-    // Full state remains available in the manifest even when vmm.json was omitted.
+    // Full state remains available in the manifest when detailed captures were omitted.
     if let Some(states) = record.report.as_ref().and_then(|r| r.full_state.as_ref()) {
         for (name, digest) in states {
             let machine = machines
@@ -334,7 +234,6 @@ fn load(directory: &Path) -> Result<Evidence> {
         record,
         machines,
         world,
-        legacy_samples,
     })
 }
 
@@ -370,7 +269,8 @@ fn terminal(machine: &Machine) -> Option<Record> {
         return None;
     }
     Some(Record {
-        time_ns: machine.end.time_ns,
+        // A stopped capture does not claim a per-machine terminal timestamp.
+        time_ns: None,
         kind: "terminal".into(),
         value: serde_json::to_value(&machine.end).ok()?,
     })
@@ -477,10 +377,8 @@ fn compare(a: &Evidence, b: &Evidence) -> Result<DiffReport> {
         let x = a.machines.get(name);
         let y = b.machines.get(name);
         let differences = compare_values(&x, &y)?;
-        let witness = Witness::new(
-            x.and_then(|m| m.witness.clone()),
-            y.and_then(|m| m.witness.clone()),
-        );
+        // Driver publishes a world witness, not per-machine exit witnesses.
+        let witness = Witness::new(None, None);
         let full_state = Witness::new(
             x.and_then(|m| m.state_digest.clone()),
             y.and_then(|m| m.state_digest.clone()),
@@ -519,12 +417,18 @@ fn compare(a: &Evidence, b: &Evidence) -> Result<DiffReport> {
         &serde_json::json!({"outcome": b.record.outcome, "report": b.record.report, "error": b.record.error}),
     )?;
     let evidence_differences = compare_values(
-        &serde_json::json!({"omitted_logs": a.record.omitted_logs, "vmm_report_retained": a.record.logs.contains_key("vmm.json")}),
-        &serde_json::json!({"omitted_logs": b.record.omitted_logs, "vmm_report_retained": b.record.logs.contains_key("vmm.json")}),
+        &serde_json::json!({"omitted_logs": a.record.omitted_logs, "state_report_retained": a.record.logs.contains_key(STATE_REPORT)}),
+        &serde_json::json!({"omitted_logs": b.record.omitted_logs, "state_report_retained": b.record.logs.contains_key(STATE_REPORT)}),
     )?;
     for (side, evidence) in [("a", a), ("b", b)] {
-        if !evidence.record.logs.contains_key("vmm.json") {
-            limitations.push(format!("{side}: vmm.json not retained"));
+        if evidence
+            .record
+            .report
+            .as_ref()
+            .is_some_and(|report| report.full_state.is_some())
+            && !evidence.record.logs.contains_key(STATE_REPORT)
+        {
+            limitations.push(format!("{side}: {STATE_REPORT} not retained"));
         }
         for (name, reason) in &evidence.record.omitted_logs {
             limitations.push(format!("{side}: omitted {name}: {reason}"));
@@ -563,9 +467,9 @@ pub(crate) fn witness_log(machine: &str) -> String {
 /// Engine witness-log entry: little-endian u64 time_ns, records, witness prefix.
 const SAMPLE_BYTES: usize = 24;
 
-fn next_sample(reader: &mut impl Read, legacy: bool) -> std::io::Result<Option<WitnessSample>> {
-    let mut buffer = [0; 32];
-    let entry = &mut buffer[..if legacy { 32 } else { SAMPLE_BYTES }];
+fn next_sample(reader: &mut impl Read) -> std::io::Result<Option<WitnessSample>> {
+    let mut buffer = [0; SAMPLE_BYTES];
+    let entry = &mut buffer[..];
     let mut filled = 0;
     while filled < entry.len() {
         match reader.read(&mut entry[filled..])? {
@@ -585,28 +489,22 @@ fn next_sample(reader: &mut impl Read, legacy: bool) -> std::io::Result<Option<W
     let field = |i: usize| u64::from_le_bytes(entry[i * 8..i * 8 + 8].try_into().unwrap());
     Ok(Some(WitnessSample {
         time_ns: field(0),
-        records: field(if legacy { 2 } else { 1 }),
-        witness: format!("{:016x}", field(if legacy { 3 } else { 2 })),
+        records: field(1),
+        witness: format!("{:016x}", field(2)),
     }))
 }
 
 /// Compare two witness logs in lockstep. Logs are fully read so a corrupt
 /// tail is reported even after the first difference.
-fn compare_logs(
-    machine: &str,
-    a: impl Read,
-    b: impl Read,
-    legacy_a: bool,
-    legacy_b: bool,
-) -> Result<Option<Divergence>> {
+fn compare_logs(machine: &str, a: impl Read, b: impl Read) -> Result<Option<Divergence>> {
     let mut a = BufReader::new(a);
     let mut b = BufReader::new(b);
     let mut last = None;
     let mut first = None;
     let mut sample = 0;
     loop {
-        let x = next_sample(&mut a, legacy_a)?;
-        let y = next_sample(&mut b, legacy_b)?;
+        let x = next_sample(&mut a)?;
+        let y = next_sample(&mut b)?;
         if x.is_none() && y.is_none() {
             return Ok(first);
         }
@@ -651,9 +549,8 @@ fn divergence(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<L
         let name = witness_log(machine);
         match (log(a, &left.record, &name)?, log(b, &right.record, &name)?) {
             (Some(x), Some(y)) => {
-                if let Some(d) =
-                    compare_logs(machine, x, y, left.legacy_samples, right.legacy_samples)
-                        .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?
+                if let Some(d) = compare_logs(machine, x, y)
+                    .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?
                 {
                     found.push(d);
                 }
@@ -949,65 +846,20 @@ mod tests {
     fn witness_logs_report_first_differing_sample_and_validate_remainder() {
         let a = witness_log_bytes(&[[0, 1, 7], [1_000_050, 9, 8], [2_000_000, 20, 9]]);
         let b = witness_log_bytes(&[[0, 1, 7], [1_000_050, 9, 8], [2_000_000, 20, 10]]);
-        assert!(compare_logs("m", &a[..], &a[..], false, false)
-            .unwrap()
-            .is_none());
-        let d = compare_logs("m", &a[..], &b[..], false, false)
-            .unwrap()
-            .unwrap();
+        assert!(compare_logs("m", &a[..], &a[..]).unwrap().is_none());
+        let d = compare_logs("m", &a[..], &b[..]).unwrap().unwrap();
         assert_eq!(d.sample, 3);
         assert_eq!(d.last_match, Some(sample(1_000_050, 9, 8)));
         assert_eq!(d.a, Some(sample(2_000_000, 20, 9)));
         assert_eq!(d.b.unwrap().witness, "000000000000000a");
         // A log that ends early differs at its end; a first sample can differ.
-        let d = compare_logs("m", &a[..], &b[..48], false, false)
-            .unwrap()
-            .unwrap();
+        let d = compare_logs("m", &a[..], &b[..48]).unwrap().unwrap();
         assert_eq!((d.sample, d.b), (3, None));
-        let d = compare_logs("m", &b[24..], &a[..], false, false)
-            .unwrap()
-            .unwrap();
+        let d = compare_logs("m", &b[24..], &a[..]).unwrap().unwrap();
         assert_eq!((d.sample, d.last_match), (1, None));
         // A torn entry is an error even after the first difference.
-        assert!(compare_logs("m", &a[..], &b[..71], false, false).is_err());
-        assert!(compare_logs("m", &b[..], &a[..71], false, false).is_err());
-    }
-
-    #[test]
-    fn legacy_witness_samples_and_traces_remain_readable() {
-        // Three old samples total 96 bytes, also a multiple of the new size:
-        // byte length alone cannot select the encoding.
-        let legacy: Vec<u8> = [[0u64, 0, 1, 7], [1_000_000, 2, 9, 8], [2_000_000, 3, 20, 9]]
-            .into_iter()
-            .flatten()
-            .flat_map(u64::to_le_bytes)
-            .collect();
-        let current = witness_log_bytes(&[[0, 1, 7], [1_000_000, 9, 8], [2_000_000, 20, 9]]);
-        assert!(compare_logs("m", &legacy[..], &current[..], true, false)
-            .unwrap()
-            .is_none());
-        assert!(compare_logs("m", &legacy[..95], &current[..], true, false).is_err());
-        assert!(trace_diff("m", &b"I 99 2 3 4\n"[..], &b"I 2 3 4\n"[..])
-            .unwrap()
-            .is_none());
-        assert!(trace_diff("m", &b"I bad 2 3 4\n"[..], &b"I 2 3 4\n"[..]).is_err());
-    }
-
-    #[test]
-    fn arm_descriptive_metadata_cannot_select_legacy_x86_samples() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut record = fixture();
-        record.identity.inputs.profile.backend = sb::execution::Backend::Hvf;
-        record.identity.inputs.profile.semantic_parameters.engine =
-            Some(sb::engine::arm_descriptor());
-        if let Some(engine) = &mut record.identity.inputs.profile.semantic_parameters.engine {
-            engine.engine_timebase = "counter-pv-v1".into();
-        }
-        let mut report = raw_report();
-        report["report_version"] = 2.into();
-        report["timebase"] = "arm64-pv-world-v1".into();
-        write_fixture(dir.path(), &mut record, Some(&report), None);
-        assert!(!load(dir.path()).unwrap().legacy_samples);
+        assert!(compare_logs("m", &a[..], &b[..71]).is_err());
+        assert!(compare_logs("m", &b[..], &a[..71]).is_err());
     }
 
     #[test]

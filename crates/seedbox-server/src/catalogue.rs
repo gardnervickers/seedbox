@@ -401,11 +401,10 @@ impl Catalogue {
                     ));
                 }
 
-                if config.machine.page_timer
-                    || config.machine.deferred_tx
-                    || config.schedule.stop_tolerance_ns != 0
-                {
-                    return Err(Error::Invalid("new simulations use default page timer, deferred TX and stop tolerance settings".into()));
+                if config.schedule.stop_tolerance_ns != 0 {
+                    return Err(Error::Invalid(
+                        "new simulations use default stop tolerance settings".into(),
+                    ));
                 }
                 None
             }

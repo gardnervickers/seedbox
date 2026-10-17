@@ -273,6 +273,7 @@ pub fn validate_oci_runtime(
     preparer: &crate::preparation::OciPreparer,
     runtime: &Inputs,
 ) -> Result<()> {
+    crate::admission::validate_profile(&preparer.profile)?;
     for (path, name) in [(&preparer.kernel, "kernel"), (&preparer.init, "init")] {
         if fs::read(path)? != fs::read(runtime.guest_assets.join(name))? {
             return Err(Error::Integrity(

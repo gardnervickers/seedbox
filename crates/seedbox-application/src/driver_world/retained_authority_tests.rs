@@ -186,7 +186,7 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
         // Generic WorkerLaunch used to pass backend=None and bypass comparison.
         // There is now NO optional CPU argument; both launch routes use profile.
         mismatch(
-            crate::worker_process::WorkerLaunch::prepare(&request)
+            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None)
                 .err()
                 .unwrap(),
         );

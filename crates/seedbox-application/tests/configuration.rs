@@ -46,7 +46,6 @@ fn machine_and_disk_options_default_to_the_former_flag_defaults() {
     let sim = parse(BASE).unwrap();
     assert_eq!(sim.machine, config::MachineOptions::default());
     assert_eq!(sim.machine.memory_mb, 1024);
-    assert!(!sim.machine.page_timer && !sim.machine.deferred_tx);
     assert!(!sim.disk.torn_writes);
     // Worlds without the options keep their resolved JSON unchanged.
     let json = serde_json::to_value(&sim).unwrap();

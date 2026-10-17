@@ -17,7 +17,7 @@ pub(super) const MANIFEST: &str = "driver-world/manifest";
 pub(super) fn validate_contract(
     profile: &crate::execution::ExecutionProfile,
 ) -> Result<super::DriverBackend> {
-    if profile.semantic_parameters.launch() != crate::engine::ExecutableKind::DriverWorld {
+    if profile.semantic_parameters.launch() != Some(crate::engine::ExecutableKind::DriverWorld) {
         return Err(bad(
             "Driver execution requires its recorded driver-world-v1 contract",
         ));
@@ -27,14 +27,6 @@ pub(super) fn validate_contract(
         Some(seedbox_spec::project::CpuBackend::Tcg) => super::DriverBackend::Tcg,
         None => return Err(bad("Driver execution requires a recorded CPU backend")),
     };
-    for (field, enabled) in [
-        ("page_timer", profile.semantic_parameters.page_timer),
-        ("deferred_tx", profile.semantic_parameters.deferred_tx),
-    ] {
-        if enabled {
-            return Err(Error::Setup(format!("runtime.execution.semantic_parameters.{field}: not applicable to driver-world-v1; set {field} to false for a new Driver simulation, or replay the original retained legacy simulation")));
-        }
-    }
     Ok(backend)
 }
 
@@ -132,7 +124,7 @@ impl Closure {
     pub(crate) fn from_inputs(inputs: &PreparedInputs) -> Result<Option<Self>> {
         let Some(manifest) = inputs.auxiliary.get(MANIFEST) else {
             if inputs.profile.semantic_parameters.launch()
-                == crate::engine::ExecutableKind::DriverWorld
+                == Some(crate::engine::ExecutableKind::DriverWorld)
             {
                 return Err(bad("prepared Driver world manifest is missing"));
             }

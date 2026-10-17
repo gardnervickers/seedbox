@@ -39,7 +39,6 @@ impl BackendProvider for NativeBackends {
         store: &ContentStore,
         cancellation: &CancellationToken,
     ) -> Result<Backends> {
-        super::validate_machine(configuration)?;
         let (preparation, execution) =
             self.inputs
                 .backends(store, configuration, cancellation, &self.session_root)?;
@@ -114,7 +113,7 @@ impl BackendProvider for NativeBackends {
         )?
         .with_runtime(selected)?
         .with_launch_context(self.environment.clone(), Some(self.session_lease.clone()));
-        return Ok(Box::new(executor));
+        Ok(Box::new(executor))
     }
 }
 

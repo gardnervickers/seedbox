@@ -13,7 +13,7 @@ use std::{
 };
 
 /// Guest ISA comes from the retained execution profile, never host tools or an
-/// inherited image-platform setting. Historical profiles retain amd64.
+/// inherited image-platform setting. Descriptorless non-native helpers use amd64.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Architecture {
     Amd64,
@@ -23,7 +23,7 @@ impl Architecture {
     pub fn from_profile(profile: &crate::execution::ExecutionProfile) -> Result<Self> {
         let engine = profile.semantic_parameters.engine.as_ref();
         match engine.map(|engine| engine.guest_arch.as_str()) {
-            None if profile.backend != crate::execution::Backend::Hvf => Ok(Self::Amd64),
+            None => Ok(Self::Amd64),
             Some("x86_64") => Ok(Self::Amd64),
             Some("aarch64") => Ok(Self::Arm64),
             value => Err(Error::Integrity(format!(
@@ -185,11 +185,6 @@ fn list(output: &mut Vec<u8>, items: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Check the private runtime before importing application images. Only regular,
-/// relative files are accepted; extraction never follows archive links.
-pub(crate) fn validate_progress(path: &Path, architecture: Architecture) -> Result<()> {
-    check_progress(path, Some(architecture))
-}
 fn check_progress(path: &Path, architecture: Option<Architecture>) -> Result<()> {
     let bad = || {
         Error::Setup(format!(
