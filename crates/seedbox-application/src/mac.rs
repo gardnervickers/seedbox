@@ -269,19 +269,22 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
         .ok_or_else(|| Error::Integrity("missing retained kernel".into()))?;
     let kernel = fs::read(kernel_path)?;
     // A reseed input moves later draws to the branch's streams: timers of
-    // every incarnation, and boot entropy of incarnations a later crash made.
-    let reseed: Option<(u64, u64, String)> = serde_json::from_value::<
+    // every incarnation (the last reseed's), and boot entropy of incarnations
+    // a later crash made (the latest reseed at or before that crash: a branch
+    // of a branch has several).
+    let reseeds: Vec<(u64, u64, String)> = serde_json::from_value::<
         Vec<seedbox_engine_protocol::input_program::BranchReceipt>,
     >(report["input_branches"].clone())
     .unwrap_or_default()
     .into_iter()
-    .rev()
-    .find_map(|receipt| match receipt.action {
+    .filter_map(|receipt| match receipt.action {
         seedbox_engine_protocol::input_program::BranchAction::Reseed { seed, identity } => {
             Some((receipt.at_ns, seed, identity))
         }
         _ => None,
-    });
+    })
+    .collect();
+    let reseed = reseeds.last().cloned();
     let mut remaining: std::collections::BTreeSet<_> =
         request.prepared.guests.keys().map(String::as_str).collect();
     for row in report["machines"]
@@ -318,22 +321,19 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
         } else {
             format!("reboot-entropy/{name}/{incarnation}")
         };
-        let booted_after_reseed = incarnation > 0
-            && reseed.as_ref().is_some_and(|(at, _, _)| {
-                row["crashed_incarnations"]
-                    .as_array()
-                    .and_then(|crashes| crashes.last())
-                    .and_then(|crash| crash["crashed_at_ns"].as_u64())
-                    .is_some_and(|crashed| crashed >= *at)
-            });
-        let seed = match &reseed {
-            Some((_, seed, identity)) if booted_after_reseed => {
-                seedbox_arm64::application::world::entropy_seed(
-                    *seed,
-                    &format!("checkpoint/{identity}/{domain}"),
-                )
-            }
-            _ => seedbox_arm64::application::world::entropy_seed(request.seed, &domain),
+        let crashed_at = row["crashed_incarnations"]
+            .as_array()
+            .and_then(|crashes| crashes.last())
+            .and_then(|crash| crash["crashed_at_ns"].as_u64());
+        let boot_reseed = crashed_at
+            .filter(|_| incarnation > 0)
+            .and_then(|crashed| reseeds.iter().rev().find(|(at, _, _)| crashed >= *at));
+        let seed = match boot_reseed {
+            Some((_, seed, identity)) => seedbox_arm64::application::world::entropy_seed(
+                *seed,
+                &format!("checkpoint/{identity}/{domain}"),
+            ),
+            None => seedbox_arm64::application::world::entropy_seed(request.seed, &domain),
         };
         let mut cmdline = seedbox_arm64::boot::DEFAULT_COMMAND_LINE.to_owned();
         if request.control.is_some_and(|control| {
@@ -408,23 +408,42 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
                 ))
             }
         }
-        if evidence.format != 1
-            || evidence.kernel_sha256 != request.prepared.kernel.hex()
-            || evidence.initrd_sha256 != initrd_digest.hex()
-            || evidence.boot
-                != seedbox_arm64::application::BootIdentity::from_spec(spec)
-                    .map_err(Error::Integrity)?
-            || evidence.timer_policy != Some(timer_policy)
-            || row["time_ns"].as_u64() != Some(evidence.time_ns)
-            || row["witness"].as_str() != Some(&evidence.witness)
-            || row["state_digest"] != serde_json::to_value(&evidence.state_digest)?
-            || row["state_digest_parts"] != serde_json::to_value(&evidence.state_digest_parts)?
-            || (evidence.control_channel.is_some()
-                && row["control_channel"] != serde_json::to_value(&evidence.control_channel)?)
-        {
-            return Err(Error::Integrity(
-                "HVF application boot/state evidence mismatch".into(),
-            ));
+        let boot =
+            seedbox_arm64::application::BootIdentity::from_spec(spec).map_err(Error::Integrity)?;
+        let mismatch = [
+            ("format", evidence.format != 1),
+            (
+                "kernel",
+                evidence.kernel_sha256 != request.prepared.kernel.hex(),
+            ),
+            ("initrd", evidence.initrd_sha256 != initrd_digest.hex()),
+            ("boot", evidence.boot != boot),
+            ("timer policy", evidence.timer_policy != Some(timer_policy)),
+            ("time", row["time_ns"].as_u64() != Some(evidence.time_ns)),
+            (
+                "witness",
+                row["witness"].as_str() != Some(&evidence.witness),
+            ),
+            (
+                "state digest",
+                row["state_digest"] != serde_json::to_value(&evidence.state_digest)?,
+            ),
+            (
+                "state digest parts",
+                row["state_digest_parts"] != serde_json::to_value(&evidence.state_digest_parts)?,
+            ),
+            (
+                "control channel",
+                evidence.control_channel.is_some()
+                    && row["control_channel"] != serde_json::to_value(&evidence.control_channel)?,
+            ),
+        ]
+        .into_iter()
+        .find(|(_, differs)| *differs);
+        if let Some((field, _)) = mismatch {
+            return Err(Error::Integrity(format!(
+                "HVF application boot/state evidence mismatch: {name} {field}"
+            )));
         }
     }
     if !remaining.is_empty() {
