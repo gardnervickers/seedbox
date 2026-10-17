@@ -51,7 +51,8 @@ fn disk_request(session: &NativeSession) -> SubmitRequest {
         panic!("resolved disk request")
     };
     let mut definition = definition.as_ref().clone();
-    definition.machines.get_mut(TARGET).unwrap().process.argv = vec!["/disk".into(), "ext4".into()];
+    definition.machines.get_mut(TARGET).unwrap().process.argv =
+        vec!["/disk".into(), "volume-crash".into(), "/data".into()];
     request.spec = SimulationSpec::resolved(definition).unwrap();
     request.options.start_paused = true;
     request
@@ -86,7 +87,7 @@ pub async fn pv_disk_crash_reboot_replay() {
         session.worker(&source).await;
         session.control(&source, "disk-initial-pause", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
         let (before, boots) = until_disk(session, &source, "DISK dirty 1\n").await;
-        assert!(before.contains("DISK ext4 boot=0 synced=- dirty=-\n"), "{before}");
+        assert!(before.contains("DISK volume-crash boot=0 synced=- dirty=-\n"), "{before}");
         assert!(before.contains("DISK synced 1\n"), "fsync must complete before crash: {before}");
         assert_eq!(boots.len(), 1);
         let launched = session.launch_request(&source);
@@ -101,7 +102,7 @@ pub async fn pv_disk_crash_reboot_replay() {
         let (recovered, recovered_boots) = until_disk(session, &source, "DISK dirty 2\n").await;
         // These are reads by a NEW kernel/app after volatile memory was lost:
         // the flushed count/synced bytes survive, the dirty-only file does not.
-        assert!(recovered.contains("DISK ext4 boot=1 synced=1 dirty=-\n"), "durability or volatile rollback violated: {recovered}");
+        assert!(recovered.contains("DISK volume-crash boot=1 synced=1 dirty=-\n"), "durability or volatile rollback violated: {recovered}");
         assert!(recovered.contains("DISK synced 2\n"));
         assert_eq!(recovered_boots, vec![boots[0], boots[0].checked_add(1).unwrap()]);
         session.control(&source, "disk-finish", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;

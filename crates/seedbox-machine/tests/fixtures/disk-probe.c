@@ -153,6 +153,32 @@ static void fsync_path(const char *path, int flags) {
     int fd = open(path, flags | O_CLOEXEC);
     if (fd < 0 || fsync(fd) || close(fd)) fail(path);
 }
+/* Normal SDK applications see the named-volume path, not the supervisor's
+ * raw /dev/vda. Leave a flushed generation and a dirty-only file for a public
+ * crash/reboot; the next boot reports what actually survived on the device. */
+static int volume_crash(const char *dir) {
+    char path[512], count_text[32], synced[32], dirty[32];
+    snprintf(path, sizeof(path), "%s/count", dir);
+    slurp(path, count_text, sizeof(count_text));
+    snprintf(path, sizeof(path), "%s/synced", dir);
+    slurp(path, synced, sizeof(synced));
+    snprintf(path, sizeof(path), "%s/dirty", dir);
+    slurp(path, dirty, sizeof(dirty));
+    unsigned long long count = strcmp(count_text, "-") ? strtoull(count_text, NULL, 10) : 0;
+    printf("DISK volume-crash boot=%llu synced=%s dirty=%s\n", count, synced, dirty);
+    fflush(stdout);
+    unsigned long long next = count + 1;
+    snprintf(path, sizeof(path), "%s/count", dir);
+    put(path, next, 1);
+    snprintf(path, sizeof(path), "%s/synced", dir);
+    put(path, next, 1);
+    fsync_path(dir, O_RDONLY | O_DIRECTORY);
+    marker("DISK synced %llu\n", next);
+    snprintf(path, sizeof(path), "%s/dirty", dir);
+    put(path, next, 0);
+    marker("DISK dirty %llu\n", next);
+    wait_forever();
+}
 static int volume(const char *dir, int rounds) {
     char path[512], count_text[32];
     snprintf(path, sizeof(path), "%s/count", dir);
@@ -200,5 +226,6 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "raw")) return raw(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "ext4")) return ext4();
     if (argc == 4 && !strcmp(argv[1], "volume")) return volume(argv[2], atoi(argv[3]));
+    if (argc == 3 && !strcmp(argv[1], "volume-crash")) return volume_crash(argv[2]);
     return 64;
 }
