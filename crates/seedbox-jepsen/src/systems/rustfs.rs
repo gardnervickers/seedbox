@@ -75,6 +75,10 @@ pub struct Args {
     /// Seconds the servers stay down after a coordinated power failure.
     #[arg(long, default_value_t = 2.0)]
     pub crash_all_down: f64,
+    /// After each coordinated reboot, cut one random server off from the
+    /// others for this many seconds while they start up; 0 never does.
+    #[arg(long, default_value_t = 0.0)]
+    pub startup_partition: f64,
     /// Seconds to wait after the writes before the read-back.
     #[arg(long, default_value_t = 20)]
     pub quiet: u64,
@@ -622,7 +626,8 @@ pub fn run(args: Args) -> u8 {
 
 /// Power-fail every server together about every `--crash-all-every` seconds
 /// (half to one and a half times it, from the seeded RNG) until the writes
-/// end, rebooting them all after `--crash-all-down` seconds.
+/// end, rebooting them all after `--crash-all-down` seconds (and, with
+/// `--startup-partition`, isolating one of them while they start).
 fn crash_all_repeatedly(args: Args) {
     let mut ctl = match kit::connect_world(None) {
         Ok(ctl) => ctl,
@@ -639,7 +644,8 @@ fn crash_all_repeatedly(args: Args) {
         let mut rng = Rng::new(kit::rng::entropy_seed());
         loop {
             let gap = rng.uniform(0.5, 1.5) * args.crash_all_every;
-            if start.elapsed().as_secs_f64() + gap + args.crash_all_down > end {
+            let tail = args.crash_all_down + args.startup_partition + 3.0;
+            if start.elapsed().as_secs_f64() + gap + tail > end {
                 return;
             }
             crate::nemesis::Pace::wait(&mut pace, &mut ctl, gap);
@@ -652,6 +658,19 @@ fn crash_all_repeatedly(args: Args) {
             );
             if let Err(error) = crashed {
                 kit::evidence("nemesis-failed", json!({"error": error.0}));
+            }
+            if args.startup_partition > 0.0 {
+                crate::nemesis::Pace::wait(&mut pace, &mut ctl, rng.uniform(0.0, 3.0));
+                let (left, right) = crate::nemesis::isolate(rng.choice(&nodes), &nodes);
+                match crate::nemesis::cut(&mut ctl, &left, &right, json!({"startup": true})) {
+                    Ok(cut) => {
+                        crate::nemesis::Pace::wait(&mut pace, &mut ctl, args.startup_partition);
+                        if let Err(error) = crate::nemesis::heal(&mut ctl, &cut) {
+                            kit::evidence("nemesis-failed", json!({"error": error.0}));
+                        }
+                    }
+                    Err(error) => kit::evidence("nemesis-failed", json!({"error": error.0})),
+                }
             }
         }
     });

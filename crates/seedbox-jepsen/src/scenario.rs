@@ -1248,7 +1248,7 @@ const RUSTFS_102: &str = "docker.io/rustfs/rustfs:1.0.2@sha256:7e948dad4748bda48
 
 fn rustfs() -> Vec<Scenario> {
     // (name, comment, oracle arguments)
-    let specs: [(&str, &str, &[&str]); 5] = [
+    let specs: [(&str, &str, &[&str]); 6] = [
         ("rustfs-healthy", "Baseline: four RustFS 1.0.2 servers, one erasure-coded drive each, keep every\nacknowledged object intact with no faults.", &[]),
         ("rustfs-current-generic", "The current release (1.0.2), looking for unknown bugs: S3 PUTs of unique objects\nfor 75 s with reads of acknowledged objects, then a read-back of every acknowledged\nobject. Run it with `--fault-profile harness/jepsen/rustfs/generic-faults.yaml`\n(power loss, process pauses, partitions) or `corruption-faults.yaml` (bit flips in\none server's object data).", &[]),
         ("rustfs-register-generic", "The current release (1.0.2) with six overwritten keys: PUT, DELETE and GET from\nclients on every node for 75 s, then a read of each key; every key's history must\nbe linearizable (S3's strong read-after-write and list consistency). Run it with\n`--fault-profile harness/jepsen/rustfs/generic-faults.yaml` or `corruption-faults.yaml`.",
@@ -1257,6 +1257,8 @@ fn rustfs() -> Vec<Scenario> {
          &["--crash-all-every", "20"]),
         ("rustfs-crash-all-large", "rustfs-crash-all with 1 MiB objects, which RustFS erasure-codes into separate\npart files rather than keeping inline in its metadata.",
          &["--crash-all-every", "20", "--size", "1048576", "--clients", "2"]),
+        ("rustfs-startup-partition", "rustfs-crash-all, and 0-3 s after each coordinated reboot one random server is cut off\nfrom the others for 10 s while they start. Startup's bucket metadata migration takes\na quorum read lock, and 1.0.2 exits (Lock acquisition timeout ... resync.bin) when\nthat lock times out instead of retrying; a server that never answers again fails the run.",
+         &["--crash-all-every", "20", "--startup-partition", "10"]),
     ];
     specs
         .iter()
