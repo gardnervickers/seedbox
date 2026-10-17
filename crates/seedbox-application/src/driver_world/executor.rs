@@ -66,6 +66,10 @@ impl DriverExecutor {
                 message: "controller must also be the check service".into(),
             });
         }
+        let backend = match simulation.simulator.backend {
+            seedbox_spec::project::CpuBackend::Pv => DriverBackend::Pv,
+            seedbox_spec::project::CpuBackend::Tcg => DriverBackend::Tcg,
+        };
         let memory_mb = simulation.machine.memory_mb;
         if !(64..=65536).contains(&memory_mb) {
             return Err(Error::Execution(
@@ -76,15 +80,21 @@ impl DriverExecutor {
         semantic.page_timer = simulation.machine.page_timer;
         semantic.deferred_tx = simulation.machine.deferred_tx;
         semantic.torn_writes = simulation.disk.torn_writes;
-        semantic.engine = Some(Self::descriptor(DriverBackend::Pv, "x86_64"));
+        semantic.engine = Some(Self::descriptor(backend, "x86_64"));
         let executor = Self::new(
             ExecutionProfile {
-                backend: crate::execution::Backend::Other("driver-pv".into()),
+                backend: crate::execution::Backend::Other(
+                    match backend {
+                        DriverBackend::Pv => "driver-pv",
+                        DriverBackend::Tcg => "driver-tcg",
+                    }
+                    .into(),
+                ),
                 engine: store.put_file(engine)?,
                 witness_mode,
                 semantic_parameters: semantic,
             },
-            DriverBackend::Pv,
+            backend,
             1,
         )?;
         executor.admit_execution(simulation.control.is_some())?;

@@ -150,7 +150,14 @@ impl OciPreparer {
         }
         let volumes = simulation.services.values().any(|s| !s.volumes.is_empty());
         let mut auxiliary = BTreeMap::from([("guest-init".into(), store.put_file(&self.init)?)]);
-        auxiliary.insert("guest-progress".into(), store.put_file(&self.progress)?);
+        if let Some(runtime) = driver_runtime.filter(|runtime| runtime.qemu.is_some()) {
+            auxiliary.insert(
+                "guest-firmware".into(),
+                store.put_file(&runtime.guest_assets.join("firmware"))?,
+            );
+        } else {
+            auxiliary.insert("guest-progress".into(), store.put_file(&self.progress)?);
+        }
         if volumes {
             let mke2fs = self.mke2fs.as_ref().ok_or_else(|| {
                 Error::Setup(

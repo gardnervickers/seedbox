@@ -63,6 +63,16 @@ pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
 /// TCG controller continuation goes through the same binding and [`admit`].
 pub(super) fn admit_restore(inventory: &wire::Inventory) -> Result<(), String> {
     let policy = decode_optional(inventory.backend_policy())?;
+    // Fresh TCG controller execution does not establish controller checkpoint
+    // continuation. Preserve its previous effective refusal in the one shared
+    // restore policy, independently of the fresh-execution admission above.
+    if matches!(inventory, wire::Inventory::Tcg { .. })
+        && policy
+            .as_ref()
+            .is_some_and(|policy| policy.controller.is_some())
+    {
+        return Err("Driver TCG controller checkpoint continuation is incomplete".into());
+    }
     if matches!(inventory, wire::Inventory::Pv { .. })
         && policy
             .as_ref()

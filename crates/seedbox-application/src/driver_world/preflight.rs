@@ -87,6 +87,50 @@ pub(crate) mod tests {
         .unwrap()
     }
     #[test]
+    fn fresh_tcg_control_does_not_enable_unproven_controller_restore() {
+        for controller in [None, Some("oracle")] {
+            let mut checkpoint: wire::Checkpoint = serde_json::from_value(manifest(None)).unwrap();
+            let wire::Inventory::Pv {
+                executable,
+                kernel,
+                init,
+                command_line,
+                runtime,
+                formatter,
+                environments,
+                boot_archives,
+                epoch_seconds,
+                ..
+            } = checkpoint.inventory
+            else {
+                unreachable!()
+            };
+            checkpoint.inventory = wire::Inventory::Tcg {
+                policy: Some(wire::BackendPolicy {
+                    controller: controller.map(str::to_owned),
+                    ..Default::default()
+                }),
+                executable,
+                firmware: kernel.clone(),
+                kernel,
+                init,
+                command_line,
+                runtime,
+                formatter,
+                environments,
+                boot_archives,
+                epoch_seconds,
+            };
+            let value = serde_json::to_value(&checkpoint).unwrap();
+            assert_eq!(
+                crate::driver_world::policy::admit_restore(&checkpoint.inventory).is_ok(),
+                controller.is_none()
+            );
+            assert_eq!(restore_manifest(&value, None).is_ok(), controller.is_none());
+            assert!(restore_manifest(&value, Some("oracle")).is_err());
+        }
+    }
+    #[test]
     fn parent_restore_uses_native_policy_without_reading_any_body() {
         for selected in [
             None,

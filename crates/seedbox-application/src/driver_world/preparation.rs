@@ -78,9 +78,14 @@ pub(crate) struct BootArchive {
     pub bytes: Vec<u8>,
     pub filesystem: ContentDigest,
 }
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+enum BootFactory {
+    Pv(seedbox_machine_pv::machine::pv::Factory),
+    Tcg(seedbox_machine_tcg::machine::tcg::Factory),
+}
 pub(crate) struct OciBootFactory {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    factory: seedbox_machine_pv::machine::pv::Factory,
+    factory: BootFactory,
 }
 impl OciBootFactory {
     pub(crate) fn new(
@@ -91,14 +96,26 @@ impl OciBootFactory {
     ) -> Result<Self> {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         {
-            Ok(Self {
-                factory: seedbox_machine_pv::machine::pv::Factory::new(
-                    engine,
-                    &runtime.guest_assets,
-                    epoch,
-                )?
-                .with_blocks_per_progress_call(blocks),
-            })
+            let factory = if let Some(qemu) = &runtime.qemu {
+                BootFactory::Tcg(
+                    seedbox_machine_tcg::machine::tcg::Factory::new(
+                        qemu,
+                        &runtime.guest_assets,
+                        epoch,
+                    )
+                    .map_err(|error| Error::Setup(format!("TCG bootstrap: {error}")))?,
+                )
+            } else {
+                BootFactory::Pv(
+                    seedbox_machine_pv::machine::pv::Factory::new(
+                        engine,
+                        &runtime.guest_assets,
+                        epoch,
+                    )?
+                    .with_blocks_per_progress_call(blocks),
+                )
+            };
+            Ok(Self { factory })
         }
         #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
         {
@@ -205,9 +222,14 @@ impl OciBootFactory {
                 })
                 .collect();
             environment.configs = request.configs.clone();
-            let bytes = self
-                .factory
-                .boot_archive_configured(&definition, &environment)?;
+            let bytes = match &self.factory {
+                BootFactory::Pv(factory) => {
+                    factory.boot_archive_configured(&definition, &environment)?
+                }
+                BootFactory::Tcg(factory) => factory
+                    .boot_archive_configured(&definition, &environment)
+                    .map_err(|error| Error::Execution(format!("TCG boot preparation: {error}")))?,
+            };
             Ok(BootArchive {
                 bytes,
                 filesystem: retained_filesystem,
@@ -233,16 +255,35 @@ pub fn validate_oci_runtime(
     preparer: &crate::preparation::OciPreparer,
     runtime: &Inputs,
 ) -> Result<()> {
-    for (path, name) in [
-        (&preparer.kernel, "kernel"),
-        (&preparer.init, "init"),
-        (&preparer.progress, "progress.tar"),
-    ] {
+    for (path, name) in [(&preparer.kernel, "kernel"), (&preparer.init, "init")] {
         if fs::read(path)? != fs::read(runtime.guest_assets.join(name))? {
             return Err(Error::Integrity(
                 "Driver OCI bootstrap differs from its selected runtime".into(),
             ));
         }
+    }
+    if runtime.qemu.is_none()
+        && fs::read(&preparer.progress)? != fs::read(runtime.guest_assets.join("progress.tar"))?
+    {
+        return Err(Error::Integrity(
+            "Driver PV progress differs from its selected runtime".into(),
+        ));
+    }
+    let expected = if runtime.qemu.is_some() {
+        "driver-tcg"
+    } else {
+        "driver-pv"
+    };
+    if preparer
+        .profile
+        .semantic_parameters
+        .engine
+        .as_ref()
+        .is_none_or(|engine| engine.engine_backend != expected)
+    {
+        return Err(Error::Integrity(
+            "Driver OCI backend differs from its selected runtime".into(),
+        ));
     }
     OciBootFactory::new(
         &preparer.engine,
@@ -363,21 +404,39 @@ pub fn retain_oci_prepared(
     let oracle = machines
         .remove(&simulation.check.service)
         .ok_or_else(|| Error::Integrity("prepared oracle machine missing".into()))?;
-    let inventory = wire::Inventory::Pv {
-        policy: None,
-        executable: artifact(&engine)?,
-        kernel: artifact(&root.join("kernel"))?,
-        init: artifact(&root.join("init"))?,
-        command_line: artifact(&root.join("command-line"))?,
-        progress: artifact(&root.join("progress.tar"))?,
-        runtime: artifact(&runtime.archive())?,
-        formatter: Some(artifact(&root.join("mke2fs"))?),
-        environments,
-        boot_archives: boots,
-        blocks_per_progress_call: simulation.simulator.blocks_per_progress_call,
-        epoch_seconds: inputs
-            .wall_clock_epoch
-            .ok_or_else(|| Error::Integrity("prepared realtime epoch missing".into()))?,
+    let inventory = if let Some(qemu) = &runtime.qemu {
+        wire::Inventory::Tcg {
+            policy: None,
+            executable: artifact(qemu)?,
+            kernel: artifact(&root.join("kernel"))?,
+            init: artifact(&root.join("init"))?,
+            command_line: artifact(&root.join("command-line"))?,
+            firmware: artifact(&root.join("firmware"))?,
+            runtime: artifact(&runtime.archive())?,
+            formatter: Some(artifact(&root.join("mke2fs"))?),
+            environments,
+            boot_archives: boots,
+            epoch_seconds: inputs
+                .wall_clock_epoch
+                .ok_or_else(|| Error::Integrity("prepared realtime epoch missing".into()))?,
+        }
+    } else {
+        wire::Inventory::Pv {
+            policy: None,
+            executable: artifact(&engine)?,
+            kernel: artifact(&root.join("kernel"))?,
+            init: artifact(&root.join("init"))?,
+            command_line: artifact(&root.join("command-line"))?,
+            progress: artifact(&root.join("progress.tar"))?,
+            runtime: artifact(&runtime.archive())?,
+            formatter: Some(artifact(&root.join("mke2fs"))?),
+            environments,
+            boot_archives: boots,
+            blocks_per_progress_call: simulation.simulator.blocks_per_progress_call,
+            epoch_seconds: inputs
+                .wall_clock_epoch
+                .ok_or_else(|| Error::Integrity("prepared realtime epoch missing".into()))?,
+        }
     };
     let prepared = wire::Prepared {
         inventory,
