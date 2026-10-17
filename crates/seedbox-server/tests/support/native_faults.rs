@@ -14,6 +14,10 @@ pub use worker_failure::pv_fault_worker_failure;
 mod cancellation;
 pub use cancellation::pv_fault_cancel;
 
+#[path = "native_fault_lifecycle.rs"]
+mod lifecycle;
+pub use lifecycle::{pv_lifecycle_replay, LifecyclePair};
+
 const SEED: u64 = 123;
 const TARGET: &str = "target";
 const HANDLE: &str = "public-throttle";
