@@ -23,6 +23,7 @@ use seedbox_machine::{
     pv::{CommandResult, Response, SimulationControlId, Stream},
     rng::RngStream,
 };
+use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{
     fmt::Debug,
     fs,
@@ -49,15 +50,15 @@ fn input(name: &str) -> PathBuf {
         .into()
 }
 
-struct Session<M: Machine<Context = ()>> {
+struct Session<M: Machine<Context = ()>, T = Instant> {
     driver: Driver<M>,
     ids: Vec<MachineId>,
     events: Vec<MachineResponse>,
     /// Every drained event, including control facts.
     all: Vec<Event>,
-    started: Instant,
+    started: T,
 }
-impl<M> Session<M>
+impl<M, T> Session<M, T>
 where
     M: Machine<Context = ()> + Send + 'static,
     M::Error: Debug + Send + 'static,
@@ -78,29 +79,6 @@ where
             })
             .collect::<Vec<_>>();
         self.events.extend(responses);
-    }
-    fn pump_until(&mut self, predicate: impl Fn(&Self) -> bool) {
-        for _ in 0..20000 {
-            if predicate(self) {
-                return;
-            }
-            assert!(
-                self.started.elapsed() < Duration::from_secs(180),
-                "native Driver deadline: {:?}",
-                self.events
-            );
-            let upto = at(self.now().as_nanos() + QUANTUM);
-            self.driver.step(upto).unwrap();
-            self.drain();
-        }
-        panic!(
-            "native Driver failed to produce expected responses: {:?}",
-            self.all
-                .iter()
-                .filter(|event| !matches!(&event.kind, EventKind::Output(output)
-                    if matches!(output.payload, Response::BootConsole { .. })))
-                .collect::<Vec<_>>()
-        );
     }
     /// Final status of the fault admitted for host input `name`.
     fn settled(&self, name: &str) -> Option<SettlementStatus> {
@@ -195,6 +173,70 @@ where
                     .all(|&id| matches!(b.stopped(id).unwrap(), StopReason::Exited { .. })))
             })
             .unwrap()
+    }
+}
+// Keep unrelated legacy owners unchanged; only registered RPC/epoch callers
+// instantiate the same observation helpers with infrastructure-only timing.
+impl<M> Session<M>
+where
+    M: Machine<Context = ()> + Send + 'static,
+    M::Error: Debug + Send + 'static,
+{
+    fn pump_until(&mut self, predicate: impl Fn(&Self) -> bool) {
+        for _ in 0..20000 {
+            if predicate(self) {
+                return;
+            }
+            assert!(
+                self.started.elapsed() < Duration::from_secs(180),
+                "native Driver deadline: {:?}",
+                self.events
+            );
+            let upto = at(self.now().as_nanos() + QUANTUM);
+            self.driver.step(upto).unwrap();
+            self.drain();
+        }
+        panic!(
+            "native Driver failed to produce expected responses: {:?}",
+            self.all
+                .iter()
+                .filter(|event| !matches!(&event.kind, EventKind::Output(output)
+                    if matches!(output.payload, Response::BootConsole { .. })))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+impl<M> Session<M, HangGuard>
+where
+    M: Machine<Context = ()> + Send + 'static,
+    M::Error: Debug + Send + 'static,
+{
+    fn bounded_step(
+        &mut self,
+        progress: &mut GuestProgress,
+        last: &mut Option<StepOutcome>,
+    ) -> StepOutcome {
+        self.started.remaining().unwrap();
+        let now = self.now();
+        let upto = at(progress
+            .next(
+                Duration::from_nanos(now.as_nanos()),
+                Duration::from_nanos(QUANTUM),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error}: phase={}; last_stop={last:?}; events={:?}",
+                    progress.phase(),
+                    self.all
+                )
+            })
+            .as_nanos()
+            .try_into()
+            .unwrap());
+        let outcome = self.driver.step(upto).unwrap();
+        *last = Some(outcome.clone());
+        self.drain();
+        outcome
     }
 }
 /// Host inputs drive real guests through the same control policy as guest
@@ -396,10 +438,12 @@ where
                 .iter()
                 .all(|&id| s.output(id, 0, Stream::Stdout) == b"app\0out\napp\0out\n")
     });
-    assert!(session
-        .ids
-        .iter()
-        .all(|&id| (1..=4).all(|command| session.ack(id, 0, command))));
+    assert!(
+        session
+            .ids
+            .iter()
+            .all(|&id| (1..=4).all(|command| session.ack(id, 0, command)))
+    );
     session.apply(each("shutdown", &Action::Shutdown));
     for _ in 0..20000 {
         if session.all_exited() {
@@ -494,10 +538,12 @@ where
         );
         assert_eq!(session.output(id, 1, Stream::Stderr), b"\xff\0z");
     }
-    assert!(!session
-        .events
-        .iter()
-        .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. })));
+    assert!(
+        !session
+            .events
+            .iter()
+            .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. }))
+    );
     // Each application session emits its one control call; Restart starts a
     // second session in boot zero. Driver replies automatically.
     for &machine in &session.ids {
@@ -669,31 +715,46 @@ where
         ids: vec![peer],
         events: Vec::new(),
         all: Vec::new(),
-        // test-time: pending(bd-dd9, driver-guest-services-automatic-rpc-driver-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        started: Instant::now(),
+
+        started: HangGuard::new(
+            "automatic native RPC infrastructure",
+            Duration::from_secs(180),
+        ),
     };
-    session
-        .pump_until(|s| s.ready(peer, 0) && s.output(peer, 0, Stream::Stdout) == b"PEER_RUNNING\n");
+    // Peer role only prints then pauses. Allow 10 simulated seconds for
+    // kernel/init/Ready. At most Pause admission, Ready and output may yield
+    // a same-instant Driver boundary before the next positive step.
+    let mut progress =
+        GuestProgress::new("RPC peer boot", Duration::ZERO, Duration::from_secs(10), 3).unwrap();
+    let mut last = None;
+    while !(session.ready(peer, 0) && session.output(peer, 0, Stream::Stdout) == b"PEER_RUNNING\n")
+    {
+        session.bounded_step(&mut progress, &mut last);
+    }
     let now = session.now();
     session
         .driver
         .with_barrier(|b| b.schedule(now, auto_key(), Action::Resume(Target::Machine(oracle))))
         .unwrap();
+    // driver-simulation-control.c oracle: eight RPCs, no sleep/compute loop.
+    // Oracle was held unbooted: reserve 10s kernel/init plus 1s protocol work
+    // per RPC. The finite same-instant transitions are eight call admissions,
+    // eight replies, six fault settlements, two app acks and two Ready records.
+    let start = Duration::from_nanos(now.as_nanos());
+    let mut progress = GuestProgress::new(
+        "automatic RPC oracle boot/eight calls",
+        start,
+        start + Duration::from_secs(18),
+        26,
+    )
+    .unwrap();
     let mut outcomes = Vec::new();
     let mut saw_paused = false;
     let mut saw_resumed = false;
     let mut saw_stopped = false;
     let finished = loop {
-        // test-time: pending(bd-dd9, driver-guest-services-automatic-rpc-driver-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            session.started.elapsed() < Duration::from_secs(180),
-            "automatic native RPC timed out: {:?}",
-            session.events
-        );
-        let upto = at(session.now().as_nanos() + QUANTUM);
-        let outcome = session.driver.step(upto).unwrap();
+        let outcome = session.bounded_step(&mut progress, &mut last);
         outcomes.push(outcome.clone());
-        session.drain();
         let bytes = session.output(oracle, 0, Stream::Stdout);
         let output = std::str::from_utf8(&bytes).unwrap();
         if !saw_paused && output.contains("\nPAUSED\n") {
@@ -713,7 +774,6 @@ where
             break at;
         }
         assert!(matches!(outcome, StepOutcome::BarrierReached { .. }));
-        assert!(outcomes.len() < 20000);
     };
     assert!(saw_paused && saw_resumed && saw_stopped);
     assert_eq!(
@@ -909,8 +969,8 @@ fn spawn_scenario<M>(
     mut definition: machine_crate::definition::MachineDefinition,
     application: Vec<u8>,
     factory: impl FnMut(&machine_crate::definition::MachineDefinition) -> Result<M, M::Error>
-        + Send
-        + 'static,
+    + Send
+    + 'static,
 ) -> (Vec<StepOutcome>, Vec<seedbox_driver::driver::Event>)
 where
     M: Machine<Context = ()> + Send + 'static,
@@ -1107,19 +1167,26 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
         ids: vec![],
         events: vec![],
         all: vec![],
-        // test-time: pending(bd-dd9, driver-guest-services-boot-epoch-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        started: Instant::now(),
+
+        started: HangGuard::new("native boot-epoch infrastructure", Duration::from_secs(180)),
     };
+    // Epoch role makes nine clock reads, prints CLOCKS and exits: no sleeps
+    // or compute loop. 10s kernel/init allowance plus 1s probe/exit protocol.
+    // Ready, output and outcome are the only three same-instant transitions.
+    let mut progress = GuestProgress::new(
+        "boot epoch nine-read probe",
+        Duration::ZERO,
+        Duration::from_secs(11),
+        3,
+    )
+    .unwrap();
+    let mut last = None;
     loop {
-        let upto = at(session.now().as_nanos() + QUANTUM);
-        let result = session.driver.step(upto).unwrap();
-        session.drain();
+        let result = session.bounded_step(&mut progress, &mut last);
         if let StepOutcome::Finished { reason, .. } = result {
             assert_eq!(reason, ExitReason::ProgramExit { code: 0 });
             break;
         }
-        // test-time: pending(bd-dd9, driver-guest-services-boot-epoch-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(session.started.elapsed() < Duration::from_secs(180));
     }
     session.events
 }

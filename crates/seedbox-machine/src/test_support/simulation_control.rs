@@ -4,13 +4,14 @@ use crate::{
     pv::{self, SimulationControlId},
     rng::RngStream,
 };
+use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{
     collections::VecDeque,
     fmt::Debug,
     num::NonZeroU32,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub fn at(n: u64) -> Timestamp {
@@ -52,16 +53,24 @@ pub struct Session<M> {
     pub calls: Vec<Call>,
     boot: u64,
     exited: bool,
-    started: Instant,
+    guard: HangGuard,
+    progress: GuestProgress,
+    deadline: u64,
+    last_stop: Option<StopReason>,
 }
 impl<M: Machine<Context = ()>> Session<M>
 where
     M::Error: Debug,
 {
     pub fn new(machine: M) -> Self {
-        Self::continued(machine, 0, TestRng(7), 0)
+        // simulation-control.c has no sleeps or compute loops: six bounded
+        // request/reply exchanges, two app commands, and at most two reboots.
+        // Budget 10 simulated seconds per kernel/init boot (three boots), plus
+        // one second for each of the eight protocol transitions. No same-instant
+        // rounds: run commits its requested end, including Blocked stops.
+        Self::continued(machine, 0, TestRng(7), 0, 38_000_000_000)
     }
-    fn continued(machine: M, now: u64, rng: TestRng, boot: u64) -> Self {
+    fn continued(machine: M, now: u64, rng: TestRng, boot: u64, deadline: u64) -> Self {
         Self {
             machine,
             now: TestClock(AtomicU64::new(now)),
@@ -71,18 +80,24 @@ where
             calls: Vec::new(),
             boot,
             exited: false,
-            // test-time: pending(bd-dd9, simulation-control-session-continued-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-            started: Instant::now(),
+
+            guard: HangGuard::new(
+                "native simulation-control infrastructure",
+                Duration::from_secs(120),
+            ),
+            progress: GuestProgress::new(
+                "control fixture boot/exchanges/resets",
+                Duration::from_nanos(now),
+                Duration::from_nanos(deadline),
+                0,
+            )
+            .unwrap(),
+            deadline,
+            last_stop: None,
         }
     }
     pub fn run(&mut self, budget: u64) {
-        // test-time: pending(bd-dd9, simulation-control-session-run-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            self.started.elapsed() < Duration::from_secs(120),
-            "control native timeout; calls={:?}; stdout={:?}",
-            self.calls,
-            self.stdout()
-        );
+        self.guard.remaining().unwrap();
         assert!(
             !self.exited
                 || (budget == 0
@@ -94,7 +109,13 @@ where
             self.outputs
         );
         let start = at(self.now.now());
-        let end = at(start.as_nanos().checked_add(budget).unwrap());
+        // Keep zero-budget reply/reboot ownership checks separate from progress.
+        let end = if budget == 0 {
+            start
+        } else {
+            at(self.progress.next(Duration::from_nanos(start.as_nanos()), Duration::from_nanos(budget))
+                .unwrap_or_else(|error| panic!("{error}: phase={}; exited={}; last_stop={:?}; inbox={:?}; calls={:?}; outputs={:?}", self.progress.phase(), self.exited, self.last_stop, self.inbox, self.calls, self.outputs)).as_nanos().try_into().unwrap())
+        };
         let mut outputs = Vec::new();
         let stop = self
             .machine
@@ -115,13 +136,16 @@ where
                     self.outputs
                 )
             });
+        self.last_stop = Some(stop);
         let reached = match stop {
             StopReason::BoundaryReached => end,
             StopReason::Blocked { reached, .. } | StopReason::Exited { reached, .. } => reached,
         };
-        assert!(outputs
-            .iter()
-            .all(|output| output.at >= start && output.at <= reached));
+        assert!(
+            outputs
+                .iter()
+                .all(|output| output.at >= start && output.at <= reached)
+        );
         // Publication happens only after the synchronous machine has stopped.
         for output in &outputs {
             if let pv::Response::SimulationControl { id, payload } = &output.payload {
@@ -289,10 +313,12 @@ where
         b"FIRST\nSECOND\nCLOSED\nRECONNECTED\nRESTARTED\n"
     );
     assert_eq!(session.calls.len(), 6);
-    assert!(!session
-        .outputs
-        .iter()
-        .any(|output| matches!(output.payload, pv::Response::ApplicationOutcome { .. })));
+    assert!(
+        !session
+            .outputs
+            .iter()
+            .any(|output| matches!(output.payload, pv::Response::ApplicationOutcome { .. }))
+    );
 }
 
 pub fn late_reply_after_reset<M: Machine<Context = ()>>(machine: M)
@@ -375,12 +401,13 @@ where
     let now = original.now.now();
     let rng = original.rng.clone();
     let boot = original.boot;
+    let deadline = original.deadline;
     original.outputs.clear();
     original.calls.clear();
     let expected = finish(&mut original, first.id);
     drop(original);
     for _ in 0..2 {
-        let mut restored = Session::continued(restore(&snapshot), now, rng.clone(), boot);
+        let mut restored = Session::continued(restore(&snapshot), now, rng.clone(), boot, deadline);
         assert_eq!(
             finish(&mut restored, first.id),
             expected,

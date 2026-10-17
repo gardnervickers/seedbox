@@ -11,12 +11,13 @@ use seedbox_machine::{
     pv,
     rng::RngStream,
 };
+use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{
     fmt::Debug,
     fs,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 struct SimulationClock(AtomicU64);
@@ -50,7 +51,9 @@ struct Session<M> {
     inbox: std::collections::VecDeque<pv::Input>,
     events: Vec<pv::Output>,
     exited: bool,
-    started: Instant,
+    guard: HangGuard,
+    progress: GuestProgress,
+    last_stop: Option<StopReason>,
 }
 impl<M: Machine<Context = ()>> Session<M>
 where
@@ -64,24 +67,53 @@ where
             inbox: Default::default(),
             events: Vec::new(),
             exited: false,
-            // test-time: pending(bd-dd9, guest-services-session-new-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-            started: Instant::now(),
+
+            // guest_service_fixture.c: one kernel/init boot (10s allowance),
+            // six app commands plus Shutdown (1s protocol allowance each), and
+            // two completed Starts sleeping one guest second each. Shutdown's
+            // shorter path shares this finite whole-fixture horizon. No renewed
+            // per-poll budgets or same-instant rounds: pump commits requested upto.
+            guard: HangGuard::new(
+                "native guest-service infrastructure",
+                Duration::from_secs(120),
+            ),
+            progress: GuestProgress::new(
+                "guest-service boot/commands/sleeps/shutdown",
+                Duration::ZERO,
+                Duration::from_secs(19),
+                0,
+            )
+            .unwrap(),
+            last_stop: None,
         }
     }
     fn pump(&mut self) {
-        // test-time: pending(bd-dd9, guest-services-session-pump-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            self.started.elapsed() < Duration::from_secs(120),
-            "native service deadline: {:?}",
-            self.events
-        );
+        self.guard.remaining().unwrap();
         assert!(
             !self.exited,
             "guest exited before expected event: {:?}",
             self.events
         );
         let start = Timestamp::from_nanos(self.clock.now());
-        let upto = Timestamp::from_nanos(self.clock.now() + 5_000_000);
+        let upto = Timestamp::from_nanos(
+            self.progress
+                .next(
+                    Duration::from_nanos(self.clock.now()),
+                    Duration::from_millis(5),
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{error}: phase={}; last_stop={:?}; inbox={:?}; events={:?}",
+                        self.progress.phase(),
+                        self.last_stop,
+                        self.inbox,
+                        self.events
+                    )
+                })
+                .as_nanos()
+                .try_into()
+                .unwrap(),
+        );
         let mut staged = Vec::new();
         let result = self.machine.run(
             &mut RunContext {
@@ -111,6 +143,7 @@ where
                 String::from_utf8_lossy(&console)
             );
         });
+        self.last_stop = Some(reason);
         let reached = match reason {
             StopReason::BoundaryReached => upto,
             StopReason::Blocked { reached, .. } | StopReason::Exited { reached, .. } => reached,
@@ -198,10 +231,12 @@ where
     session.command(17, Pause, Completed);
     session.command(18, Resume, Completed);
     session.command(19, Stop, Completed);
-    assert!(!session
-        .events
-        .iter()
-        .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. })));
+    assert!(
+        !session
+            .events
+            .iter()
+            .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. }))
+    );
     session.command(20, Start, Completed);
     session.command(21, Start, Rejected);
     session.until(|payload| matches!(payload, Response::ApplicationOutcome { code: 23 }));
@@ -280,10 +315,12 @@ where
     while !session.exited {
         session.pump();
     }
-    assert!(!session
-        .events
-        .iter()
-        .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. })));
+    assert!(
+        !session
+            .events
+            .iter()
+            .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. }))
+    );
     session.inbox.push_back(pv::Input {
         at: Timestamp::from_nanos(session.clock.now()),
         payload: pv::Request::Shutdown,

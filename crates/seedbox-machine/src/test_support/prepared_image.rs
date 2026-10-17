@@ -7,12 +7,13 @@ use machine_crate::{
     pv::{ApplicationCommand, CommandResult, Inbox, Input, Outbox, Request, Response, Stream},
     rng::RngStream,
 };
+use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
     num::NonZeroU32,
     path::PathBuf,
-    time::{Duration, Instant},
+    time::Duration,
 };
 struct SimulationClock(std::sync::atomic::AtomicU64);
 impl SimulationClock {
@@ -169,16 +170,27 @@ where
     let mut rng = FixtureRng(7);
     let mut inbox = VecDeque::new();
     let mut events = Vec::new();
-    // test-time: pending(bd-dd9, prepared-image-check-denied-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = Instant::now();
+    let mut last_stop = None;
+
+    // guest_prepared_fixture.c performs metadata/credential/argv checks with no
+    // sleep or compute loop. Reserve 10 simulated seconds for kernel/init and
+    // one second per launch/authorization protocol phase (not host execution).
+    let guard = HangGuard::new(
+        "native prepared-image infrastructure",
+        Duration::from_secs(120),
+    );
+    let mut progress = GuestProgress::new(
+        "prepared launch",
+        Duration::ZERO,
+        Duration::from_secs(11),
+        0,
+    )
+    .unwrap();
     loop {
-        // test-time: pending(bd-dd9, prepared-image-check-denied-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            started.elapsed() < Duration::from_secs(120),
-            "denied launch timed out"
-        );
+        guard.remaining().unwrap();
         let now = Timestamp::from_nanos(clock.now());
-        let upto = Timestamp::from_nanos(clock.now() + 5_000_000);
+        let upto = Timestamp::from_nanos(progress.next(Duration::from_nanos(clock.now()), Duration::from_millis(5))
+            .unwrap_or_else(|error| panic!("{error}: phase={}; last_stop={last_stop:?}; inbox={inbox:?}; events={events:?}", progress.phase())).as_nanos().try_into().unwrap());
         let mut staged = Vec::new();
         let result = machine.run(
             &mut RunContext {
@@ -197,6 +209,7 @@ where
             assert!(error.ends_with(diagnostic), "{error}");
             break;
         }
+        last_stop = Some(result.unwrap());
         // Failed runs do not commit their staged outputs.
         events.extend(staged);
         clock.set(upto.as_nanos());
@@ -261,18 +274,29 @@ where
     let mut rng = FixtureRng(7);
     let mut inbox = VecDeque::new();
     let mut events = Vec::new();
-    // test-time: pending(bd-dd9, prepared-image-check-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = Instant::now();
+    let mut last_stop = None;
+
+    // guest_prepared_fixture.c performs metadata/credential/argv checks with no
+    // sleep or compute loop. Reserve 10 simulated seconds for kernel/init and
+    // one second per launch/authorization protocol phase (not host execution).
+    let guard = HangGuard::new(
+        "native prepared-image infrastructure",
+        Duration::from_secs(120),
+    );
+    let mut progress = GuestProgress::new(
+        "prepared launch",
+        Duration::ZERO,
+        Duration::from_secs(11),
+        0,
+    )
+    .unwrap();
     let id = NonZeroU32::new(87).unwrap();
     let mut runs = 0;
     loop {
-        // test-time: pending(bd-dd9, prepared-image-check-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            started.elapsed() < Duration::from_secs(120),
-            "native prepared fixture timed out: {events:?}"
-        );
+        guard.remaining().unwrap();
         let now = Timestamp::from_nanos(clock.now());
-        let upto = Timestamp::from_nanos(clock.now() + 5_000_000);
+        let upto = Timestamp::from_nanos(progress.next(Duration::from_nanos(clock.now()), Duration::from_millis(5))
+            .unwrap_or_else(|error| panic!("{error}: phase={}; last_stop={last_stop:?}; inbox={inbox:?}; events={events:?}", progress.phase())).as_nanos().try_into().unwrap());
         let stop = machine
             .run(
                 &mut RunContext {
@@ -286,6 +310,7 @@ where
                 upto,
             )
             .unwrap();
+        last_stop = Some(stop);
         assert!(
             !matches!(stop, StopReason::Exited { .. }),
             "application exit must preserve its guest: {events:?}"
@@ -314,6 +339,14 @@ where
             if runs == 2 {
                 break;
             }
+            // The second launch is a new semantic phase, not a renewed poll.
+            progress = GuestProgress::new(
+                "prepared restart",
+                Duration::from_nanos(clock.now()),
+                Duration::from_nanos(clock.now()) + Duration::from_secs(1),
+                0,
+            )
+            .unwrap();
             inbox.push_back(Input {
                 at: upto,
                 payload: Request::Application {
@@ -371,9 +404,19 @@ where
         at: Timestamp::from_nanos(clock.now()),
         payload: Request::Shutdown,
     });
+    // No application remains: one simulated second for supervisor shutdown.
+    let mut progress = GuestProgress::new(
+        "prepared shutdown",
+        Duration::from_nanos(clock.now()),
+        Duration::from_nanos(clock.now()) + Duration::from_secs(1),
+        0,
+    )
+    .unwrap();
     loop {
+        guard.remaining().unwrap();
         let now = Timestamp::from_nanos(clock.now());
-        let upto = Timestamp::from_nanos(clock.now() + 5_000_000);
+        let upto = Timestamp::from_nanos(progress.next(Duration::from_nanos(clock.now()), Duration::from_millis(5))
+            .unwrap_or_else(|error| panic!("{error}: phase={}; last_stop={last_stop:?}; inbox={inbox:?}; events={events:?}", progress.phase())).as_nanos().try_into().unwrap());
         let stop = machine
             .run(
                 &mut RunContext {
@@ -387,12 +430,11 @@ where
                 upto,
             )
             .unwrap();
+        last_stop = Some(stop);
         if let StopReason::Exited { reason, .. } = stop {
             assert_eq!(reason, ExitReason::Shutdown);
             break;
         }
         clock.set(upto.as_nanos());
-        // test-time: pending(bd-dd9, prepared-image-check-elapsed-2) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(started.elapsed() < Duration::from_secs(120));
     }
 }
