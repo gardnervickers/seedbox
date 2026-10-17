@@ -9,10 +9,12 @@
     reason = "test code: spawns here never race a Seedbox process writing an executable"
 )]
 
+use seedbox_test_time::HangGuard;
 use std::{
     ffi::CString,
     os::unix::{
         ffi::OsStrExt,
+        fs::OpenOptionsExt,
         process::{CommandExt, ExitStatusExt},
     },
     process::{Child, Command, Stdio},
@@ -85,24 +87,39 @@ fn eof_on_owner_pipe_stops_a_blocked_native_worker() {
             .spawn()
             .unwrap(),
     );
-    std::thread::sleep(Duration::from_millis(100));
-    assert!(
-        child.0.try_wait().unwrap().is_none(),
-        "worker should be blocked reading configuration"
-    );
-    drop(child.0.stdin.take());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            assert_eq!(status.signal(), Some(libc::SIGKILL));
-            break;
-        }
+    let config_writer = HangGuard::new(
+        "worker must enter configuration FIFO open before owner EOF",
+        Duration::from_secs(60),
+    )
+    .wait_for(|| {
         assert!(
-            Instant::now() < deadline,
-            "worker survived owner disappearance"
+            child.0.try_wait().unwrap().is_none(),
+            "worker exited before configuration rendezvous"
         );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+        // A nonblocking FIFO writer can open only after a real reader has
+        // entered open(). This is positive startup evidence, not timed absence.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+        {
+            Ok(writer) => Some(writer),
+            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => None,
+            Err(error) => panic!("configuration FIFO rendezvous: {error}"),
+        }
+    })
+    .expect("configuration rendezvous infrastructure hang");
+    // Keep the writer open without sending bytes: configuration cannot finish
+    // or reach EOF. Owner disappearance must stop this genuinely blocked worker.
+    drop(child.0.stdin.take());
+    let status = HangGuard::new(
+        "blocked worker must exit after owner EOF",
+        Duration::from_secs(60),
+    )
+    .wait_for(|| child.0.try_wait().unwrap())
+    .expect("owner EOF infrastructure hang");
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    drop(config_writer);
 }
 
 #[test]
