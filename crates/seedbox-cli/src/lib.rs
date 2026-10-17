@@ -135,7 +135,7 @@ enum Command {
         #[command(flatten)]
         inputs: RuntimeInputs,
     },
-    /// Prepare images and run a simulation (Linux KVM host; or Apple Silicon Mac).
+    /// Prepare images and run a simulation (PV: Linux KVM or Apple Silicon; TCG: Linux x86-64, no KVM).
     #[command(after_help = format!("{EXIT_CODES}\n\nPreparation has a 15-minute deadline, separate from the simulation execution budget.\n\n{VMM_FAILURE_HELP}"))]
     Run {
         #[command(flatten)]

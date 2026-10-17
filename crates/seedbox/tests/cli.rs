@@ -64,6 +64,9 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[path = "support/backend_authority.rs"]
+mod backend_authority;
+
 #[cfg(unix)]
 #[test]
 fn long_server_state_path_fails_before_creating_state() {
@@ -2344,6 +2347,15 @@ fn backend_flag_is_typed_and_only_on_the_four_execution_commands() {
         let help = seedbox(&[command, "--help"], root.path());
         assert!(help.status.success(), "{command}: {}", stderr(&help));
         let text = String::from_utf8_lossy(&help.stdout);
+        if command == "run" {
+            assert!(
+                text.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains("TCG: Linux x86-64, no KVM"),
+                "{text}"
+            );
+        }
         assert!(
             text.contains("--backend") && text.contains("pv") && text.contains("tcg"),
             "{command}: {text}"
