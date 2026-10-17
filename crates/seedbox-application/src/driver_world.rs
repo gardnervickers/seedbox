@@ -4,6 +4,8 @@
 //! service envelope retains already-published history and bootstrap authority,
 //! while the Driver owns all scheduling and simulation decisions.
 mod actions;
+mod doctor;
+pub use doctor::{doctor, DoctorReport};
 pub(crate) mod binding;
 mod boot;
 mod build;

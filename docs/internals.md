@@ -3,9 +3,9 @@
 These mechanisms depend on ordering or state that is easy to overlook.
 Each section links to the code that owns it.
 
-## Fresh Linux service preparation
+## Fresh service preparation
 
-On Linux x86-64, ordinary fresh preparation selects the Driver worker contract.
+On Linux x86-64 and Apple Silicon macOS, fresh preparation selects the Driver worker contract.
 The request selects PV by default or software TCG explicitly. OCI image import,
 caching, launch resolution, configuration files and epoch selection still belong
 to `OciPreparer`. Its Driver branch uses the selected SDK's configured boot
@@ -17,10 +17,9 @@ and later launch edits do not need the image engine or source project.
 See [preparation](../crates/seedbox-application/src/preparation.rs) and the
 [Driver retention bridge](../crates/seedbox-application/src/driver_world/preparation.rs).
 
-Explicit legacy executable or bootstrap overrides retain their existing formats
-and executor; the asset-directory override likewise keeps its legacy lookup.
-Other host platforms are unchanged. TCG selection refuses legacy runtime
-overrides rather than interpreting their bytes as a different format.
+Legacy executable and bootstrap overrides are removed. `SEEDBOX_ASSET_DIR`
+relocates the complete Driver package, using its host-architecture subdirectory;
+it never selects another execution path. Both PV and TCG use the selected SDK.
 The client carries CPU selection in the partial submission, not project YAML
 or process environment. The resolved runtime records the concrete backend.
 Replaying an existing run uses that recorded contract, not the current fresh-run

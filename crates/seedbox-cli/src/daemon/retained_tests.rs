@@ -1,6 +1,7 @@
 //! Cold retained-provider ownership, not native guest or executable proof.
 use super::*;
 use clap::Parser;
+use seedbox_application::execution::Backend;
 use seedbox_application::{
     driver_world::{self, DriverBackend, DriverExecutor},
     execution::{ExecutionProfile, SemanticParameters, WitnessMode},

@@ -7,7 +7,6 @@ use seedbox_application::{
     },
     preparation::{OciPreparer, PreparationContext},
     store::ContentStore,
-    vmm::VmmExecutor,
     Result,
 };
 use std::{
@@ -16,20 +15,10 @@ use std::{
     path::Path,
 };
 
-pub enum Executor {
-    Linux(Box<VmmExecutor>),
-    Driver(Box<seedbox_application::driver_world::DriverExecutor>),
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    Mac(Box<seedbox_application::mac::MacExecutor>),
-}
+pub struct Executor(pub Box<seedbox_application::driver_world::DriverExecutor>);
 impl Executor {
     fn backend(&self) -> &dyn ExecutionBackend {
-        match self {
-            Self::Linux(e) => e.as_ref(),
-            Self::Driver(e) => e.as_ref(),
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(e) => e.as_ref(),
-        }
+        self.0.as_ref()
     }
 }
 impl ExecutionBackend for Executor {
@@ -91,10 +80,8 @@ fn execution_backend_label(
 
 pub struct Preparer {
     pub inputs: OciPreparer,
-    // Package extraction must outlive preparation and retention of its bytes.
-    pub _helpers: Option<seedbox_application::guest_assets::Runtime>,
     pub cancellation: CancellationToken,
-    pub driver_inputs: Option<seedbox_application::runtime_assets::Inputs>,
+    pub driver_inputs: seedbox_application::runtime_assets::Inputs,
 }
 impl Deref for Preparer {
     type Target = OciPreparer;
@@ -109,12 +96,7 @@ impl DerefMut for Preparer {
 }
 impl PreparationBackend for Preparer {
     fn validate_runtime_inputs(&self) -> Result<()> {
-        match &self.driver_inputs {
-            Some(runtime) => {
-                seedbox_application::driver_world::validate_oci_runtime(&self.inputs, runtime)
-            }
-            None => self.inputs.validate_runtime_inputs(),
-        }
+        seedbox_application::driver_world::validate_oci_runtime(&self.inputs, &self.driver_inputs)
     }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs> {
         let directory = tempfile::tempdir()?;
@@ -137,23 +119,20 @@ impl PreparationBackend for Preparer {
             progress: preparation_progress,
             export_cache: Some(self.inputs.profile.engine.clone()),
         };
-        let mut prepared = match &self.driver_inputs {
-            Some(runtime) => self
-                .inputs
-                .prepare_driver_with_transport(simulation, store, context, &transport, runtime)?,
-            None => self
-                .inputs
-                .prepare_with_transport(simulation, store, context, &transport)?,
-        };
-        if let Some(runtime) = &self.driver_inputs {
-            seedbox_application::driver_world::retain_oci_prepared(
-                &mut prepared,
-                simulation,
-                runtime,
-                store,
-                context,
-            )?;
-        }
+        let mut prepared = self.inputs.prepare_driver_with_transport(
+            simulation,
+            store,
+            context,
+            &transport,
+            &self.driver_inputs,
+        )?;
+        seedbox_application::driver_world::retain_oci_prepared(
+            &mut prepared,
+            simulation,
+            &self.driver_inputs,
+            store,
+            context,
+        )?;
         Ok(prepared)
     }
 }
@@ -177,64 +156,6 @@ fn assets_beside(
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_default()
 }
-pub fn guest_assets(
-    explicit: Option<std::path::PathBuf>,
-) -> Result<seedbox_application::guest_assets::Runtime> {
-    match super::defaults::helper_archive(
-        explicit,
-        seedbox_application::guest_assets::EMBEDDED,
-        asset_directory().join("runtime.tar.gz"),
-    )? {
-        super::defaults::HelperArchive::Embedded(bytes) => {
-            seedbox_application::guest_assets::Runtime::from_bytes(bytes)
-        }
-        super::defaults::HelperArchive::File(path) => {
-            seedbox_application::guest_assets::Runtime::from_archive(&path).map_err(|error| seedbox_application::Error::Setup(format!("runtime assets {}: {error}; rebuild with `cargo xtask build-assets` or relocate a complete runtime package with SEEDBOX_ASSET_DIR", path.display())))
-        }
-    }
-}
-pub fn guest_kernel(explicit: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
-    if let Some(path) = explicit {
-        return super::defaults::existing("kernel", path);
-    }
-    if std::env::var_os("SEEDBOX_ASSET_DIR").is_none() {
-        if let Some(bytes) = seedbox_application::guest_assets::EMBEDDED_KERNEL {
-            let cache = std::env::var_os("XDG_CACHE_HOME")
-                .map(std::path::PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME")
-                        .map(|home| std::path::PathBuf::from(home).join(".cache"))
-                })
-                .ok_or_else(|| {
-                    seedbox_application::Error::Setup(
-                        "kernel cache unavailable; set XDG_CACHE_HOME or HOME".into(),
-                    )
-                })?;
-            return cached_kernel(bytes, &cache.join("seedbox/kernels"));
-        }
-    }
-    super::defaults::local_asset("kernel", asset_directory().join("kernel"))
-}
-
-fn cached_kernel(bytes: &[u8], root: &Path) -> Result<std::path::PathBuf> {
-    use std::io::Write;
-    let path = root.join(seedbox_application::store::ContentDigest::of(bytes).hex());
-    let extract = || -> std::io::Result<()> {
-        if std::fs::read(&path).is_ok_and(|cached| cached == bytes) {
-            return Ok(());
-        }
-        std::fs::create_dir_all(root)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(root)?;
-        temporary.write_all(bytes)?;
-        temporary.persist(&path).map_err(|error| error.error)?;
-        Ok(())
-    };
-    extract().map_err(|error| {
-        seedbox_application::Error::Setup(format!("kernel cache {}: {error}", root.display()))
-    })?;
-    Ok(path)
-}
-
 /// Resolve a complete Driver runtime package at the CLI boundary. Explicit
 /// archive wins, then SEEDBOX_ASSET_DIR, then embedded bytes, then the package
 /// beside the executable. The asset directory uses its host-architecture
@@ -280,29 +201,20 @@ fn resolve_driver_runtime(
 }
 
 /// Match the default service's Driver PV inputs. Keep their private extraction
-/// alive until the caller finishes probing. Explicit legacy overrides retain
-/// their existing lookup and error behavior.
+/// alive until the caller finishes probing. No legacy bootstrap lookup exists.
 pub fn doctor_kernel(
-    explicit: Option<std::path::PathBuf>,
-    internal: bool,
     scratch: &Path,
 ) -> Result<(
     std::path::PathBuf,
     Option<seedbox_application::runtime_assets::Inputs>,
 )> {
-    if explicit.is_some() || !internal {
-        return guest_kernel(explicit).map(|path| (path, None));
-    }
-    use seedbox_spec::definition::Architecture;
-    let architecture = match std::env::consts::ARCH {
-        "x86_64" => Architecture::X86_64,
-        "aarch64" => Architecture::Aarch64,
-        architecture => {
-            return Err(seedbox_application::Error::Setup(format!(
-                "Driver PV does not support {architecture} guests"
-            )))
-        }
-    };
+    let architecture = seedbox_application::driver_world::platform::Host::current()
+        .guest(seedbox_application::driver_world::DriverBackend::Pv)
+        .ok_or_else(|| {
+            seedbox_application::Error::Setup(
+                "Driver readiness requires Linux x86-64 or macOS aarch64".into(),
+            )
+        })?;
     let inputs = driver_runtime(None, scratch)?.select(
         seedbox_application::runtime_assets::Backend::Pv,
         architecture,
@@ -380,8 +292,9 @@ pub fn container_engine() -> Result<bollard::Docker> {
 
 #[cfg(test)]
 mod tests {
-    use super::{assets_beside, cached_kernel, execution_backend_label};
+    use super::{assets_beside, execution_backend_label};
     use seedbox_test::process::Guarded;
+    use std::path::Path;
 
     #[test]
     fn backend_progress_names_tcg_from_profile_not_host() {
@@ -441,22 +354,6 @@ mod tests {
             "--backend tcg requires Linux x86-64 or macOS on Apple Silicon, and the normal Driver runtime"
         );
     }
-
-    #[test]
-    fn embedded_kernel_cache_reuses_bytes_and_separates_versions() {
-        let directory = tempfile::tempdir().unwrap();
-        let first = cached_kernel(b"kernel one", directory.path()).unwrap();
-        assert_eq!(std::fs::read(&first).unwrap(), b"kernel one");
-        assert_eq!(
-            cached_kernel(b"kernel one", directory.path()).unwrap(),
-            first
-        );
-        let second = cached_kernel(b"kernel two", directory.path()).unwrap();
-        assert_ne!(first, second);
-        assert_eq!(std::fs::read(second).unwrap(), b"kernel two");
-    }
-
-    use std::path::Path;
 
     #[test]
     fn driver_package_resolution_prefers_explicit_then_embedded_then_local_archive() {
