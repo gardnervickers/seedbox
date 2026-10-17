@@ -1,6 +1,6 @@
 //! Native tests are selected by Cargo features and run by harness/check.sh.
 //! Tests without hardware features never open a hypervisor.
-#[cfg(any(feature = "hvf-tests", feature = "kvm-tests"))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "hvf-tests"))]
 use seedbox_arm64::backend::Backend;
 fn busy_wait_elapsed(console: &str) -> Option<u64> {
     console
@@ -26,7 +26,13 @@ fn busy_wait_requires_hrtimer_duration() {
     }
 }
 
-#[cfg(feature = "guest-tests")]
+#[cfg(all(
+    feature = "guest-tests",
+    any(
+        all(target_os = "macos", target_arch = "aarch64", feature = "hvf-tests"),
+        all(target_os = "linux", target_arch = "aarch64", feature = "kvm-tests")
+    )
+))]
 mod guest {
     use super::busy_wait_elapsed;
     use seedbox_arm64::{backend::Backend, machine::Machine, witness::Report};
@@ -184,7 +190,10 @@ mod guest {
 
 // Read-only inventory around the shared feature policy. Keep host model drift
 // visible when investigating matching exit traces with differing guest RAM.
-#[cfg(any(feature = "hvf-tests", feature = "kvm-tests"))]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64", feature = "hvf-tests"),
+    all(target_os = "linux", target_arch = "aarch64", feature = "kvm-tests")
+))]
 fn cpu_features<B: seedbox_arm64::backend::Backend>() {
     use seedbox_arm64::{backend::SysReg, machine::configure_cpu_features};
     let mut backend = B::create().unwrap();
