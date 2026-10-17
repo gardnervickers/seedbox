@@ -292,6 +292,9 @@ impl Qmp {
         stream
             .set_read_timeout(Some(Duration::from_secs(60)))
             .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(60)))
+            .unwrap();
         let mut qmp = Self {
             stream: BufReader::new(stream),
             stopped: false,

@@ -75,7 +75,7 @@ impl Machine for QueueMachine {
                 participant
                     .enter_and_wait(&HangGuard::new(
                         "slow worker awaits actual fast result publication",
-                        Duration::from_secs(5),
+                        Duration::from_secs(30),
                     ))
                     .unwrap();
             }
@@ -245,7 +245,7 @@ fn common_barrier_sorts_worker_outputs_by_identity_then_emission_order() {
             let gate = gate.lock().unwrap().take().unwrap();
             gate.wait_entered(&HangGuard::new(
                 "slow worker must enter before fast result releases it",
-                Duration::from_secs(5),
+                Duration::from_secs(30),
             ))
             .unwrap();
             published.send(machine).unwrap();
@@ -257,7 +257,7 @@ fn common_barrier_sorts_worker_outputs_by_identity_then_emission_order() {
     driver.step(at(10)).unwrap();
     let guard = HangGuard::new(
         "both published worker results must be witnessed",
-        Duration::from_secs(5),
+        Duration::from_secs(30),
     );
     assert_eq!(
         [

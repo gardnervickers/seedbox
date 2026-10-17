@@ -340,8 +340,9 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
         clock: &mut M::Clock,
         a: &sw::Assignment<Msg>,
     ) -> Result<sw::Report<Msg>, String> {
-        if !self.skew.is_zero() {
-            std::thread::sleep(self.skew);
+        // Finite scheduling opportunities perturb host completion order only.
+        for _ in 0..self.skew.as_micros() {
+            std::thread::yield_now();
         }
         let slice_end = a.slice_end();
         let mut outputs = Vec::new();

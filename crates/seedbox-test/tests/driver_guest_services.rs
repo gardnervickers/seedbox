@@ -45,15 +45,15 @@ fn input(name: &str) -> PathBuf {
         .into()
 }
 
-struct Session<M: Machine<Context = ()>, T = HangGuard> {
+struct Session<M: Machine<Context = ()>> {
     driver: Driver<M>,
     ids: Vec<MachineId>,
     events: Vec<MachineResponse>,
     /// Every drained event, including control facts.
     all: Vec<Event>,
-    started: T,
+    started: HangGuard,
 }
-impl<M, T> Session<M, T>
+impl<M> Session<M>
 where
     M: Machine<Context = ()> + Send + 'static,
     M::Error: Debug + Send + 'static,
@@ -199,7 +199,7 @@ where
         );
     }
 }
-impl<M> Session<M, HangGuard>
+impl<M> Session<M>
 where
     M: Machine<Context = ()> + Send + 'static,
     M::Error: Debug + Send + 'static,

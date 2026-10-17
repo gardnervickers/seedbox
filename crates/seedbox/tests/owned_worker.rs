@@ -137,7 +137,16 @@ fn monitor_join_removes_parent_owned_native_scratch_after_exit_failure_cancel_an
         let scratch_path = scratch.path().to_owned();
         let ready = root.join("ready");
         let report = root.join("report");
-        let script = "mkdir \"$1/seedbox-pv-fixture\"; printf kernel >\"$1/seedbox-pv-fixture/kernel\"; printf initrd >\"$1/seedbox-pv-fixture/initrd\"; printf ready >\"$3\"; case \"$2\" in cancel|drop) exec sleep 60;; *) exit \"$2\";; esac";
+        let pipe = root.join("worker-input");
+        let pipe_name = CString::new(pipe.as_os_str().as_bytes()).unwrap();
+        // SAFETY: pipe_name is a valid, NUL-terminated path in our tempdir.
+        assert_eq!(unsafe { libc::mkfifo(pipe_name.as_ptr(), 0o600) }, 0);
+        let held_input = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pipe)
+            .unwrap();
+        let script = "mkdir \"$1/seedbox-pv-fixture\"; printf kernel >\"$1/seedbox-pv-fixture/kernel\"; printf initrd >\"$1/seedbox-pv-fixture/initrd\"; printf ready >\"$3\"; case \"$2\" in cancel|drop) exec cat <\"$4\";; *) exit \"$2\";; esac";
         let arguments: Vec<OsString> = vec![
             "-c".into(),
             script.into(),
@@ -145,6 +154,7 @@ fn monitor_join_removes_parent_owned_native_scratch_after_exit_failure_cancel_an
             scratch_path.clone().into_os_string(),
             mode.into(),
             ready.clone().into_os_string(),
+            pipe.into_os_string(),
         ];
         let lease = root.join(EXECUTION_LEASE_FILE);
         let mut process = OwnedExecution::spawn(
@@ -186,6 +196,7 @@ fn monitor_join_removes_parent_owned_native_scratch_after_exit_failure_cancel_an
             assert!(process.finish().unwrap().cleanup_authorized());
             drop(process);
         }
+        drop(held_input);
         assert!(
             !scratch_path.exists(),
             "native scratch outlived joined group ({mode})"

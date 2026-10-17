@@ -261,6 +261,40 @@ impl Drop for Server {
         unsafe {
             libc::kill(self.0.id() as i32, libc::SIGTERM);
         }
+        let pid = self.0.id();
+        std::thread::scope(|scope| {
+            let (done, completed) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                // Observe exit without reaping: the PID stays owned until the
+                // main thread has decided whether it must send SIGKILL.
+                let result = loop {
+                    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+                    // SAFETY: info is writable and pid names our unreaped child.
+                    let rc = unsafe {
+                        libc::waitid(
+                            libc::P_PID,
+                            pid,
+                            info.as_mut_ptr(),
+                            libc::WEXITED | libc::WNOWAIT,
+                        )
+                    };
+                    if rc == 0 {
+                        break Ok(());
+                    }
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        break Err(error);
+                    }
+                };
+                let _ = done.send(result);
+            });
+            if !matches!(
+                completed.recv_timeout(std::time::Duration::from_secs(30)),
+                Ok(Ok(()))
+            ) {
+                let _ = self.0.kill();
+            }
+        });
         self.0.wait().expect("reap owned application server");
     }
 }

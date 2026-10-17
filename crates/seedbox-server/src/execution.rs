@@ -916,7 +916,9 @@ mod tests {
         };
         let first = client.submit(&request("first")).await.unwrap().metadata.id;
         let second = client.submit(&request("second")).await.unwrap().metadata.id;
-        provider.1.notified().await;
+        tokio::time::timeout(Duration::from_secs(60), provider.1.notified())
+            .await
+            .expect("first execution enters the provider");
         let capacity = client.capacity().await.unwrap();
         assert!(capacity.occupying.iter().any(|o| o.simulation == first));
         assert_eq!(capacity.slots, 1);
@@ -928,7 +930,9 @@ mod tests {
             seedbox_api::QueueReason::ResidentCapacity
         );
         client.stop(&first).await.unwrap();
-        provider.1.notified().await;
+        tokio::time::timeout(Duration::from_secs(60), provider.1.notified())
+            .await
+            .expect("second execution enters the provider");
         let capacity = client.capacity().await.unwrap();
         assert!(capacity.occupying.iter().any(|o| o.simulation == second));
         assert_eq!(capacity.occupying.len(), 1);
