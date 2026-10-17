@@ -16,7 +16,15 @@ fn main() {
         println!("cargo:rustc-cfg=seedbox_pv");
     }
     println!("cargo:rerun-if-changed=src/machine/pv/worker/hvf_vector.c");
+    // Off-Mac cross checks (`cargo check --target aarch64-apple-darwin`) have
+    // no Apple SDK; they type-check the Rust and never link, so the HVF vector
+    // object is only built on a macOS host.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
+        && !cfg!(target_os = "macos")
+    {
+        println!("cargo:warning=no Apple SDK on this host: skipping hvf_vector.c; the result cannot link");
+    } else if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
         && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
     {
         let output = std::process::Command::new("/usr/bin/xcrun")

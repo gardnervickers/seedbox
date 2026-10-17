@@ -49,6 +49,9 @@ fn events(record: &Path) -> Vec<Value> {
         .collect()
 }
 fn reaped(record: &Path) {
+    // Only Linux exposes reaping through /proc; macOS checks nothing here.
+    #[cfg(not(target_os = "linux"))]
+    let _ = record;
     #[cfg(target_os = "linux")]
     for event in events(record).iter().filter(|v| v["kind"] == "start") {
         assert!(
