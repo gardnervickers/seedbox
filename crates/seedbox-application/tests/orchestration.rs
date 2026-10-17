@@ -2263,6 +2263,9 @@ fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
 
 #[test]
 fn materialize_trusts_only_unchanged_objects_this_store_hashed() {
+    use std::os::unix::fs::MetadataExt;
+    use std::time::{Duration, UNIX_EPOCH};
+
     let directory = tempfile::tempdir().unwrap();
     let store = ContentStore::new(directory.path().join("store"));
     let digest = store.put(b"retained guest bytes").unwrap();
@@ -2272,10 +2275,32 @@ fn materialize_trusts_only_unchanged_objects_this_store_hashed() {
         .materialize(&digest, &directory.path().join("a"))
         .unwrap();
     assert_eq!(fs::read(copy).unwrap(), b"retained guest bytes");
-    // A same-length rewrite changes the object's ctime, so it is hashed again.
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    fs::write(&object, b"corrupted guest bytes").unwrap();
+    // Keep the inode and length: trust must be invalidated by changed metadata,
+    // not object replacement or a size mismatch. Explicitly choose a different
+    // mtime instead of assuming a rewrite advances ctime after a host delay.
+    let before = fs::metadata(&object).unwrap();
     fs::write(&object, b"retained guest byteX").unwrap();
+    let modified = if before.modified().unwrap() == UNIX_EPOCH {
+        UNIX_EPOCH + Duration::from_secs(86_400)
+    } else {
+        UNIX_EPOCH
+    };
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&object)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let after = fs::metadata(&object).unwrap();
+    assert_eq!(
+        (after.dev(), after.ino(), after.len()),
+        (before.dev(), before.ino(), before.len()),
+    );
+    assert_ne!(after.modified().unwrap(), before.modified().unwrap());
+    eprintln!(
+        "same-inode corruption precondition: length={} unchanged, explicitly chosen mtime changed",
+        after.len()
+    );
     let bad = directory.path().join("b");
     assert!(store.materialize(&digest, &bad).is_err());
     assert_eq!(fs::read_dir(bad).unwrap().count(), 0);
