@@ -253,6 +253,8 @@ pub fn partitions(
 }
 
 /// Power-fail every node at once, wait `down` seconds, then reboot them all.
+/// A refused crash (say, of a node another fault already has down) still
+/// waits and reboots every node this call crashed, then returns the error.
 pub fn crash_all(
     ctl: &mut Ctl,
     pace: &mut impl Pace,
@@ -260,9 +262,36 @@ pub fn crash_all(
     down: f64,
     extra: Value,
 ) -> Result<()> {
-    step_with(ctl, "crash", nodes, extra)?;
+    let mut crashed = Vec::new();
+    let mut failure = None;
+    for node in nodes {
+        match ctl.crash(node) {
+            Ok(()) => crashed.push(*node),
+            Err(error) => {
+                failure = Some(crate::kit::Error(format!("crash {node}: {}", error.0)));
+                break;
+            }
+        }
+    }
+    let mut fields = extra.as_object().cloned().unwrap_or_default();
+    fields.insert("action".into(), "crash".into());
+    fields.insert("targets".into(), json!(crashed));
+    evidence("fault", Value::Object(fields));
+    if crashed.is_empty() {
+        return Err(failure.expect("no nodes crashed without an error"));
+    }
     pace.wait(ctl, down);
-    step(ctl, "reboot", nodes)
+    let mut rebooted = Vec::new();
+    for node in &crashed {
+        match ctl.reboot(node) {
+            Ok(()) => rebooted.push(*node),
+            Err(error) => {
+                failure.get_or_insert(crate::kit::Error(format!("reboot {node}: {}", error.0)));
+            }
+        }
+    }
+    evidence("fault", json!({"action": "reboot", "targets": rebooted}));
+    failure.map_or(Ok(()), Err)
 }
 
 /// Power-fail one node and reboot it after `down` seconds.

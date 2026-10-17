@@ -78,6 +78,10 @@ pub struct Args {
     /// Seconds to wait after the writes before the read-back.
     #[arg(long, default_value_t = 20)]
     pub quiet: u64,
+    /// Seconds after the quiet period that every server has to answer a
+    /// listing again; one that never does fails the run.
+    #[arg(long, default_value_t = 120)]
+    pub recover: u64,
 }
 
 /// What one S3 request came back with.
@@ -327,10 +331,11 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
         let _ = worker.join();
     }
     kit::pause(args.quiet as f64);
+    let (live, down) = recover(&s3, args, bucket);
     // A final read of every key, retried on other nodes until one answers.
     for (k, key) in keys.iter().enumerate() {
         'key: for attempt in 0..3u64 {
-            for node in &args.nodes {
+            for node in &live {
                 if let Some(bad) =
                     register_op(&s3, args, key, node, RegisterOp::Read, &histories[k])
                 {
@@ -404,18 +409,76 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
         json!({"keys": counts, "unwritten": unwritten.iter().take(10).collect::<Vec<_>>()}),
     );
     let summary = format!(
-        "{} of {} keys not linearizable, {} undecided; {} reads of bytes no client wrote",
+        "{} of {} keys not linearizable, {} undecided; {} reads of bytes no client wrote{}",
         violations.len(),
         keys.len(),
         exhausted.len(),
-        unwritten.len()
+        unwritten.len(),
+        unrecovered(&down)
     );
-    if !violations.is_empty() || !unwritten.is_empty() {
+    if !violations.is_empty() || !unwritten.is_empty() || !down.is_empty() {
         kit::verdict(kit::VIOLATION, &summary)
     } else if !exhausted.is_empty() {
         kit::verdict(kit::INCONCLUSIVE, &summary)
     } else {
         kit::verdict(kit::OK, &summary)
+    }
+}
+
+/// Wait up to `--recover` seconds for every server to answer a one-key
+/// listing, and split them into those that did and those that never did.
+fn recover(s3: &S3, args: &Args, bucket: &str) -> (Vec<String>, Vec<String>) {
+    let start = Instant::now();
+    let mut waiting = args.nodes.clone();
+    let mut last = BTreeMap::new();
+    while !waiting.is_empty() {
+        waiting.retain(|node| {
+            match s3.request(
+                node,
+                "GET",
+                &format!("{bucket}?list-type=2&max-keys=1"),
+                &[],
+            ) {
+                Reply::Status(200, _) => false,
+                Reply::Status(status, body) => {
+                    last.insert(node.clone(), format!("HTTP {status} {}", s3_code(&body)));
+                    true
+                }
+                Reply::Unreachable(error) => {
+                    last.insert(node.clone(), error);
+                    true
+                }
+            }
+        });
+        if waiting.is_empty() || start.elapsed() >= Duration::from_secs(args.recover) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    for node in &waiting {
+        kit::evidence(
+            "unrecovered",
+            json!({"node": node, "waited": start.elapsed().as_secs_f64(), "last": last.get(node)}),
+        );
+    }
+    let live = args
+        .nodes
+        .iter()
+        .filter(|n| !waiting.contains(n))
+        .cloned()
+        .collect();
+    (live, waiting)
+}
+
+/// The verdict suffix naming servers that never recovered.
+fn unrecovered(down: &[String]) -> String {
+    if down.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; {} never answered again after the faults ended",
+            down.join(", ")
+        )
     }
 }
 
@@ -589,7 +652,6 @@ fn crash_all_repeatedly(args: Args) {
             );
             if let Err(error) = crashed {
                 kit::evidence("nemesis-failed", json!({"error": error.0}));
-                return;
             }
         }
     });
@@ -608,7 +670,7 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
                 while start.elapsed() < Duration::from_secs(args.duration) {
                     i += 1;
                     let node = &args.nodes[(client + i) % args.nodes.len()];
-                    if i % 4 == 0 && !mine.is_empty() {
+                    if i.is_multiple_of(4) && !mine.is_empty() {
                         let key = &mine[(i / 4 * 7919) % mine.len()];
                         let reply = s3.request(node, "GET", &format!("{bucket}/{key}"), &[]);
                         let mut t = tally.lock().unwrap();
@@ -665,6 +727,7 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     };
     // The fault profile ends before the writes do; let reboots and healing finish.
     kit::pause(args.quiet as f64);
+    let (live, down) = recover(&s3, args, bucket);
     // Read back every acknowledged object, from the first node that answers.
     let mut missing = Vec::new();
     let mut corrupt = Vec::new();
@@ -673,7 +736,7 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
         let expected = contents(key, args.size);
         let mut outcome = None;
         for attempt in 0..3 {
-            for node in &args.nodes {
+            for node in &live {
                 match s3.request(node, "GET", &format!("{bucket}/{key}"), &[]) {
                     Reply::Status(200, data) => {
                         outcome = Some(data == expected);
@@ -705,7 +768,7 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     let mut unlisted = Vec::new();
     let mut phantom = Vec::new();
     let mut unlistable = 0;
-    for node in &args.nodes {
+    for node in &live {
         let mut listed = Err(String::new());
         for attempt in 0..3 {
             listed = list(&s3, node, bucket);
@@ -758,7 +821,7 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     );
     kit::evidence("details", json!(details));
     let summary = format!(
-        "{} acknowledged objects: {} missing, {} with other bytes, {} unreadable; {} of {} reads during the run stale; {} unlisted and {} phantom listings",
+        "{} acknowledged objects: {} missing, {} with other bytes, {} unreadable; {} of {} reads during the run stale; {} unlisted and {} phantom listings{}",
         acknowledged.len(),
         missing.len(),
         corrupt.len(),
@@ -766,9 +829,11 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
         stale.len(),
         reads,
         unlisted.len(),
-        phantom.len()
+        phantom.len(),
+        unrecovered(&down)
     );
     if !missing.is_empty()
+        || !down.is_empty()
         || !corrupt.is_empty()
         || !stale.is_empty()
         || !unlisted.is_empty()

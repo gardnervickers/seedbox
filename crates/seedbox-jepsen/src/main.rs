@@ -145,7 +145,7 @@ fn check_of(command: &Command) -> Option<&'static str> {
         Command::Kafka(_) => "kafka: the queue's checks hold",
         Command::Mysql(_) => "mysql: transactions meet their isolation level",
         Command::Galera(_) => "galera: transactions meet their isolation level",
-        Command::Rustfs(_) => "rustfs: acknowledged objects survive intact",
+        Command::Rustfs(_) => "rustfs: acknowledged objects survive and every server recovers",
         Command::Tigerbeetle(_) => "tigerbeetle: the ledger's checks hold",
         _ => return None,
     })
