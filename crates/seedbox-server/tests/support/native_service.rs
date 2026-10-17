@@ -92,7 +92,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 /// Simulated time by which an execution must finish, or, when it is cancelled,
@@ -788,7 +788,17 @@ impl NativeSession {
                 "its worker started",
             )
             .await;
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let session = self.session.path().to_owned();
+            let backend = self.backend;
+            ready("native worker scratch readiness", move || {
+                directories(&session).into_iter().find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(scratch_prefix(backend))
+                })
+            })
+            .await;
         }
     }
     async fn guest_start(&self, id: &seedbox_api::SimulationId) {
@@ -1064,11 +1074,8 @@ impl NativeSession {
         command: seedbox_api::ControlCommand,
     ) -> seedbox_api::ControlReceipt {
         use seedbox_api::{ControlRequest, ControlState};
-        let diagnostic = matches!(name, "verify-paused-restore" | "continue");
-        let began = Instant::now();
-        if diagnostic {
-            eprintln!("restore control phase: id={id} name={name} elapsed_ms=0 request_send command={command:?}");
-        }
+        let mut events = self.client.events(id).await.unwrap();
+        let mut progress = self.client.watch(id).await.unwrap();
         self.client
             .request_control(
                 id,
@@ -1079,25 +1086,8 @@ impl NativeSession {
             )
             .await
             .unwrap();
-        if diagnostic {
-            eprintln!(
-                "restore control phase: id={id} name={name} elapsed_ms={} request_accepted",
-                began.elapsed().as_millis()
-            );
-        }
-        let mut last_diagnostic = Instant::now();
         loop {
             let receipt = self.client.control_receipt(id, name).await.unwrap();
-            if diagnostic
-                && (receipt.state != ControlState::Accepted
-                    || last_diagnostic.elapsed() >= Duration::from_secs(2))
-            {
-                eprintln!(
-                    "restore control phase: id={id} name={name} elapsed_ms={} receipt={receipt:?}",
-                    began.elapsed().as_millis()
-                );
-                last_diagnostic = Instant::now();
-            }
             if receipt.state != ControlState::Accepted {
                 assert!(
                     matches!(
@@ -1121,7 +1111,12 @@ impl NativeSession {
                 &format!("its {name} control request was acknowledged"),
             )
             .await;
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            // Observe both acknowledgement and simulated progress: an accepted
+            // request cannot hide a guest running beyond its functional bound.
+            tokio::select! {
+                event = events.next() => { event.expect("control stream closed before acknowledgement").unwrap(); },
+                state = progress.next() => { state.expect("watch closed before acknowledgement").unwrap(); },
+            }
         }
     }
 }
@@ -1176,15 +1171,15 @@ impl NativeCase {
         }
         for session in &mut self.sessions {
             if let Some(mut server) = session.server.take() {
-                // The integrated wall limit is a hang guard, never a native
-                // progress verdict. Cleanup must run even after the case guard
-                // elapsed; reuse that guard solely to bound a broken join.
-                // test-time: allow(hang-guard) -- After cancelling every session, bound only a broken serve/blocking-worker join; expiration preserves uncertain inputs and fails infrastructure.
-                match tokio::time::timeout(HANG_GUARD, &mut server).await {
-                    Ok(Ok(Ok(()))) => {}
-                    Ok(Ok(Err(error))) => errors.push(format!("serve cleanup: {error}")),
-                    Ok(Err(error)) => errors.push(format!("serve join: {error}")),
-                    Err(_) => {
+                let result = tokio::select! {
+                    result = &mut server => Some(result),
+                    () = hang_deadline(HANG_GUARD) => None,
+                };
+                match result {
+                    Some(Ok(Ok(()))) => {}
+                    Some(Ok(Err(error))) => errors.push(format!("serve cleanup: {error}")),
+                    Some(Err(error)) => errors.push(format!("serve join: {error}")),
+                    None => {
                         server.abort();
                         let _ = server.await;
                         errors.push("cleanup join hang guard elapsed; inputs retained".into());
@@ -1215,6 +1210,66 @@ impl NativeCase {
         // self.barriers remain held until all directories have been removed.
     }
 }
+/// Adapt the synchronous infrastructure guard without a raw test timer. Dropping
+/// the future drops the sender, cancelling the blocking receive immediately.
+async fn hang_deadline(limit: Duration) {
+    let guard = seedbox_test_time::HangGuard::new("native service positive wait", limit);
+    let (cancel, receiver) = std::sync::mpsc::channel::<()>();
+    let expired = tokio::task::spawn_blocking(move || guard.recv(&receiver))
+        .await
+        .unwrap();
+    drop(cancel);
+    assert!(matches!(
+        expired,
+        Err(seedbox_test_time::WaitError::Hang { .. })
+    ));
+}
+
+/// Cancel readiness observation when its owning case future is dropped. This
+/// also keeps a failed case from leaving an infrastructure wait in the runtime.
+async fn ready<T: Send + 'static>(
+    reason: &'static str,
+    mut observe: impl FnMut() -> Option<T> + Send + 'static,
+) -> T {
+    let (owner, cancelled) = std::sync::mpsc::channel::<()>();
+    let result = tokio::task::spawn_blocking(move || {
+        seedbox_test_time::HangGuard::new(reason, HANG_GUARD)
+            .wait_for(|| {
+                if matches!(
+                    cancelled.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected)
+                ) {
+                    Some(None)
+                } else {
+                    observe().map(Some)
+                }
+            })
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    drop(owner);
+    result.expect("readiness owner cancelled")
+}
+
+/// Wait for an actual changed worker observation, not a host delay. The guard
+/// bounds only failure to publish a new state; callers retain their guest bounds
+/// and exact readiness predicates. HTTP sampling runs off the runtime thread.
+async fn playback_changed(
+    client: &Client,
+    id: &seedbox_api::SimulationId,
+    previous: seedbox_api::PlaybackStatus,
+) {
+    let client = client.clone();
+    let id = id.clone();
+    let runtime = tokio::runtime::Handle::current();
+    ready("worker playback readiness changed", move || {
+        let state = runtime.block_on(client.playback(&id)).unwrap().state;
+        (state != previous).then_some(())
+    })
+    .await;
+}
+
 async fn native_case<Body>(body: Body)
 where
     Body: for<'a> FnOnce(&'a mut NativeCase) -> BoxFuture<'a, ()>,
@@ -1226,8 +1281,7 @@ async fn native_case_with_guard<Body>(guard: Duration, body: Body)
 where
     Body: for<'a> FnOnce(&'a mut NativeCase) -> BoxFuture<'a, ()>,
 {
-    // test-time: allow(hang-guard) -- Preserve this case's existing host safety budget; simulated bounds and exact outcome assertions remain the functional oracles.
-    let deadline = tokio::time::sleep(guard);
+    let deadline = hang_deadline(guard);
     let owner = finish_before_rethrow(
         NativeCase::default(),
         body,
@@ -1387,28 +1441,17 @@ pub async fn pv_seed_report() {
 }
 pub async fn pv_checkpoint_continuation() {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
-    let began = Instant::now();
-    let phase = move |name: &str| {
-        eprintln!(
-            "checkpoint phase: elapsed_ms={} unix_ms={} {name}",
-            began.elapsed().as_millis(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        )
-    };
-    phase("case_begin");
+
     native_case(move |owner| Box::pin(async move {
         let session = owner.session(DriverBackend::Pv);
         // More than one virtual window of CPU work, still a finite stock fixture.
         let request = submission(DriverBackend::Pv, session.root.path(), &session.store, 2_000_000, 123);
-        phase("baseline_submit_begin");
+
         let baseline = session.submit(request.clone(), 1).await;
-        phase("baseline_submitted");
+
         session.worker(&baseline).await;
         let uninterrupted = session.complete(&baseline, false, 1, 123).await.unwrap();
-        phase("baseline_completed");
+
         let final_ns = session.client.describe(&baseline).await.unwrap().status.simulated_time_ns;
         let target_ns = final_ns.div_ceil(2);
         assert!(target_ns > 1_000_000 && target_ns < final_ns,
@@ -1435,7 +1478,7 @@ pub async fn pv_checkpoint_continuation() {
                 )
                 .await;
                 if !status.stepping && status.position.completed_rounds > before { break status; }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                playback_changed(&session.client, &source, status).await;
             };
             let bytes = session.output(&source).await;
             let started = bytes.windows(6).any(|part| part == b"START=");
@@ -1459,42 +1502,39 @@ pub async fn pv_checkpoint_continuation() {
         assert!(captured_rounds > 0 && captured_ns > 0);
         assert!(captured_ns >= target_ns && captured_ns < final_ns);
         eprintln!("C2 mid-workload capture: final_ns={final_ns} target_ns={target_ns} captured_ns={captured_ns} captured_rounds={captured_rounds} source_START_count=1 source_END_count=0");
-        phase("export_begin");
+
         let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
-        phase("export_done");
+
         let InputSource::Resolved { definition } = &exported.spec.inputs else { panic!("resolved export required") };
         let seedbox_spec::definition::Start::Checkpoint { assets, .. } = &definition.start else { panic!("checkpoint export required") };
         assert!(!assets.is_empty());
-        phase("source_stop_begin");
+
         session.client.stop(&source).await.unwrap();
         session.complete(&source, true, 1, 123).await;
-        phase("source_stopped_reaped");
+
         // Import must use the exported content closure, not the source paths.
-        phase("source_delete_begin");
+
         session.client.delete_checkpoint(&source, "saved").await.unwrap();
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
-        phase("source_deleted_import_begin");
-        let import_began = Instant::now();
+
         session.workers.store(4, Ordering::SeqCst);
         let restored = session.client.submit_definition(&serde_json::to_value(exported).unwrap(), true).await.unwrap().metadata.id;
         session.submitted += 1;
         assert_ne!(restored, source);
-        phase("import_submit_returned");
+
         session.worker(&restored).await;
-        phase("import_scratch_seen_not_yet_paused_ack");
+
         // C1: equal final evidence alone cannot distinguish restore from a
         // silent fresh start. Check the real launch and a fresh paused status.
         let launch = session.launch_request(&restored);
         let resume = launch.resume_checkpoint.as_ref().expect("restore launch must name its checkpoint");
         assert!(resume.is_file());
-        phase("paused_restore_control_begin");
+
         session.control(&restored, "verify-paused-restore", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
-        phase("paused_restore_control_ack");
-        eprintln!("import to paused ack: elapsed_ms={}", import_began.elapsed().as_millis());
-        phase("paused_restore_status_query_begin");
+
         let paused = session.client.playback(&restored).await.unwrap().state;
-        phase("paused_restore_status_query_returned");
+
         eprintln!("restore position BEFORE continue: {paused:?}");
         assert_eq!(paused.rate, PlaybackRate::Paused);
         assert!(!paused.stepping && !paused.terminal);
@@ -1502,15 +1542,14 @@ pub async fn pv_checkpoint_continuation() {
         assert_eq!(paused.position.completed_rounds, captured_rounds);
         assert_eq!(paused.position.simulated_time_ns, captured_ns);
         eprintln!("C1 restore verified BEFORE continue: resume={} captured_rounds={captured_rounds} restored_rounds={} captured_ns={captured_ns} restored_ns={}", resume.display(), paused.position.completed_rounds, paused.position.simulated_time_ns);
-        phase("continue_begin");
+
         session.control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
-        phase("continue_ack");
-        phase("post_continue_status_query_begin");
+
         let after_continue = session.client.playback(&restored).await.unwrap().state;
         eprintln!("restore position AFTER continue: {after_continue:?}");
-        phase("post_continue_status_query_returned");
+
         let continued = session.complete(&restored, false, 4, 123).await.unwrap();
-        phase("restored_completed");
+
         eprintln!("restore final simulated_time_ns={}", session.client.describe(&restored).await.unwrap().status.simulated_time_ns);
         let continued_output = session.output(&restored).await;
         assert!(!continued_output.windows(6).any(|part| part == b"START="),
@@ -1907,16 +1946,6 @@ fn marker_time((text, times): &(String, Vec<(usize, u64)>), marker: &str) -> u64
 /// reach the uninterrupted raw witness and output.
 pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
-    // test-time: allow(measurement) -- Phase elapsed time is printed for diagnosis only; capture and success use guest evidence.
-    let began = Instant::now();
-    let phase = move |name: &str| {
-        // test-time: allow(measurement) -- Report phase duration, never a functional deadline or ordering assertion.
-        eprintln!(
-            "in-flight checkpoint phase: backend={} elapsed_ms={} {name}",
-            label(backend),
-            began.elapsed().as_millis()
-        )
-    };
     native_case_with_guard(Duration::from_secs(600), move |owner| Box::pin(async move {
         let seed = 123;
         let session = owner.session(backend);
@@ -1950,7 +1979,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
         // No application observes the marker: output and end are unchanged.
         assert_eq!(expected[2], client_timed.0);
         assert_eq!(final_ns, plain_final_ns);
-        phase("baseline_completed");
+
         eprintln!("uninterrupted: final_ns={final_ns} witness={uninterrupted} stdout={expected:?}");
         // The uninterrupted world exchanged the whole stream inside the
         // oracle's sleep, which alone ended the run.
@@ -2008,7 +2037,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
         let oracle = world.machines.iter().find(|machine| machine.oracle).unwrap();
         assert_eq!(oracle.name, "oracle");
         assert_eq!(oracle.exit_code, None, "oracle sleep must be pending at capture");
-        phase("captured");
+
         let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
         let InputSource::Resolved { definition } = &exported.spec.inputs else {
             panic!("resolved export required")
@@ -2083,7 +2112,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
             session.client.describe(&restored).await.unwrap().status.simulated_time_ns,
             final_ns
         );
-        phase("restored_completed");
+
         // The stream carried on from the captured connection: only frames
         // routed after the capture, including more of its data, appear.
         let (frames, missing) = restored_frames.await.unwrap();
@@ -2356,8 +2385,7 @@ pub async fn native_forced_failure(backend: DriverBackend, timeout: bool) {
     let proof = Arc::new(Mutex::new(None));
     let body_proof = proof.clone();
     let (expire, expired) = tokio::sync::oneshot::channel();
-    // test-time: allow(hang-guard) -- Bound failure to reach the explicit START/paused-ack deadline signal; the injected oneshot, not host duration, selects the timeout regression.
-    let infrastructure_deadline = tokio::time::sleep(HANG_GUARD);
+    let infrastructure_deadline = hang_deadline(HANG_GUARD);
     let result = std::panic::AssertUnwindSafe(finish_before_rethrow(
         NativeCase::default(),
         move |owner| Box::pin(async move {

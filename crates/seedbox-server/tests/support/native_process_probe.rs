@@ -89,10 +89,7 @@ impl OwnedProcesses {
                 revents: 0,
             };
             let result = loop {
-                let result = unsafe {
-                    // test-time: allow(host-time-subject) -- The subject is real host-process exit: query owned pidfd readiness without waiting, only AFTER serve/blocking-worker joins; no elapsed wait or timed absence is an ordering oracle.
-                    libc::poll(&mut event, 1, 0)
-                };
+                let result = unsafe { libc::poll(&mut event, 1, 0) };
                 if result < 0
                     && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
                 {

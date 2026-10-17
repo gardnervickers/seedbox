@@ -53,23 +53,12 @@ async fn assert_unapplied(session: &NativeSession, id: &seedbox_api::SimulationI
 }
 
 pub async fn native_held_checkpoint(backend: DriverBackend) {
-    // test-time: allow(measurement) -- Anchor report-only held-phase elapsed diagnostics; fault identity, exact paused state and witness equality are the assertions, never host speed.
-    let began = Instant::now();
-    let phase = move |name: &str| {
-        // test-time: allow(measurement) -- Print phase timing only; elapsed_ms is never a deadline, simulated-time bound or ordering witness.
-        eprintln!(
-            "held phase backend={} elapsed_ms={} phase={name}",
-            label(backend),
-            began.elapsed().as_millis()
-        )
-    };
-    phase("begin");
     native_case(move |owner| Box::pin(async move {
         let session = owner.session(backend);
         let mut request = submission(backend, session.root.path(), &session.store, 2_000_000, 123);
         // Choose a live-workload fault point from this backend's actual Driver
         // readiness/end window, never an assumed architecture boot duration.
-        phase("calibration_prepared");
+
         let calibration = session.submit(request.clone(), 1).await;
         session.worker(&calibration).await;
         session.complete(&calibration, false, 1, 123).await;
@@ -87,39 +76,38 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         let at = ready + (finish - ready) / 2;
         assert!(at > ready && at < finish);
         eprintln!("held calibration backend={} ready_ns={ready} final_ns={finish} planned_fault_ns={at}", label(backend));
-        phase("calibration_completed");
+
         request.spec.program.push(ProgramInput {
             key: KEY.into(), at_ns: at, timeout_ns: 1_000_000_000,
             action: serde_json::to_value(seedbox_control::Action::Throttle {
                 handle: "held-scale".into(), machine: "oracle".into(), factor_permille: 2000,
             }).unwrap(),
         });
-        phase("fixture_prepared");
+
         let baseline = session.submit(request.clone(), 1).await;
-        phase("baseline_submitted");
+
         session.worker(&baseline).await;
         let uninterrupted = session.complete(&baseline, false, 1, 123).await.unwrap();
-        phase("baseline_completed");
+
         let baseline_events = fault_events(session, &baseline).await;
         assert_eq!(baseline_events.iter().filter(|(_, status)| *status == FaultStatus::Applied).count(), 1);
         let mut source_request = request;
         source_request.options.start_paused = true;
         let source = session.submit(source_request, 1).await;
-        phase("source_submitted");
+
         session.worker(&source).await;
-        phase("source_scratch_seen");
+
         session.control(&source, "paused-before-arm", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
-        phase("source_paused_ack");
+
         session.control(&source, "arm", ControlCommand::PauseBeforeNextFault { rate: PlaybackRate::Unlimited }).await;
-        phase("source_armed_ack");
+
         let mut previous = None;
         let held = loop {
             let state = session.client.playback(&source).await.unwrap().state;
             assert!(!state.terminal, "source finished before held fault");
             let mark = (state.position, state.rate, state.application_ready, state.stepping);
             if previous.as_ref() != Some(&mark) {
-                // test-time: allow(measurement) -- Emit elapsed diagnostics only when the observed state changes; event/state predicates, not elapsed time, establish the held boundary.
-                eprintln!("held wait elapsed_ms={} state={state:?}", began.elapsed().as_millis());
+                eprintln!("held wait state={state:?}");
                 previous = Some(mark);
             }
             check_bound(&session.client, &source, backend, state.position.simulated_time_ns, "its held fault stop").await;
@@ -132,10 +120,9 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
                     break state;
                 }
             }
-            // test-time: allow(hang-guard) -- Yield between positive held-state polls; check_bound supplies the independent simulated cap and the actual paused/requested event is the completion witness, not this 5ms delay.
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            playback_changed(&session.client, &source, state).await;
         };
-        phase("held_observed");
+
         assert!(held.position.completed_rounds > 0 && !held.stepping);
         let bytes = session.output(&source).await;
         assert_eq!(bytes.windows(6).filter(|part| *part == b"START=").count(), 1);
@@ -152,22 +139,22 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         };
         assert_eq!(position, held.position);
         assert_unapplied(session, &source).await;
-        phase("capture_ack");
+
         let exported = session.client.checkpoint_definition(&source, "held").await.unwrap();
-        phase("export_completed");
+
         session.client.stop(&source).await.unwrap();
         session.complete(&source, true, 1, 123).await;
         session.client.delete_checkpoint(&source, "held").await.unwrap();
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
-        phase("source_and_checkpoint_deleted");
+
         session.workers.store(4, Ordering::SeqCst);
         let restored = session.client.submit_definition(&serde_json::to_value(exported).unwrap(), true).await.unwrap().metadata.id;
         session.submitted += 1;
         assert_ne!(source, restored);
-        phase("import_submitted");
+
         session.worker(&restored).await;
-        phase("import_scratch_seen");
+
         let launch = session.launch_request(&restored);
         let resume = launch.resume_checkpoint.as_ref().expect("actual resume required");
         assert!(resume.is_file());
@@ -177,7 +164,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         assert_eq!(saved.state.world.input_program.admissions.len(), 1);
         assert_eq!(saved.state.world.input_program.admissions[0].plan.id, fault_id);
         session.control(&restored, "verify-paused-restore", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
-        phase("restored_paused_ack");
+
         let paused = session.client.playback(&restored).await.unwrap().state;
         assert_eq!(paused.position, position);
         assert_eq!(paused.rate, PlaybackRate::Paused);
@@ -186,7 +173,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         eprintln!("native held checkpoint: backend={} fault_id={fault_id} position={position:?} restored_paused=true applied_before_release=0", label(backend));
         session.control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
         let continued = session.complete(&restored, false, 4, 123).await.unwrap();
-        phase("restored_completed");
+
         let events = fault_events(session, &restored).await;
         let applied: Vec<_> = events.iter().filter(|(_, status)| *status == FaultStatus::Applied).map(|(id, _)| *id).collect();
         assert_eq!(applied, [fault_id], "held fault identity changed or applied twice");

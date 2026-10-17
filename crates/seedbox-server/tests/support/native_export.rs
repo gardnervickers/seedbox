@@ -87,13 +87,11 @@ pub async fn pv_large_export_under_load() {
             }
             count
         });
-        // test-time: allow(measurement) -- Anchor report-only export_elapsed_ms diagnostics; exact closure contents, byte counts and retained witnesses decide success.
-        let began = Instant::now();
+
         let exported = session.client.checkpoint_definition(&source, "saved").await;
         load.stop.store(true, Ordering::Release);
         let probes = probes.await.unwrap();
-        // test-time: allow(measurement) -- Elapsed time is printed only, never compared with a deadline or speed threshold.
-        let elapsed = began.elapsed();
+
         let cpu_work = load.work.load(Ordering::Acquire);
         drop(load);
         let exported = exported.unwrap();
@@ -115,7 +113,7 @@ pub async fn pv_large_export_under_load() {
             session.store.copy_to(&digest, &mut std::io::sink()).unwrap();
         }
         assert!(bytes >= 500_000_000, "native closure only {bytes} bytes");
-        eprintln!("large public-client PV export: machines=3 native_snapshot_bytes={machine_bytes} unique_closure_bytes={bytes} export_elapsed_ms={} cpu_load_threads=2 cpu_iterations={cpu_work} concurrent_api_probes={probes}; elapsed is diagnostic only", elapsed.as_millis());
+        eprintln!("large public-client PV export: machines=3 native_snapshot_bytes={machine_bytes} unique_closure_bytes={bytes} cpu_load_threads=2 cpu_iterations={cpu_work} concurrent_api_probes={probes}");
         session.client.stop(&source).await.unwrap();
         session.complete(&source, true, 1, 123).await;
         session.client.delete_checkpoint(&source, "saved").await.unwrap();

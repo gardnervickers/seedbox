@@ -186,8 +186,7 @@ pub async fn disk_checkpoint_continuation(backend: DriverBackend) {
                     if !status.stepping && status.position.completed_rounds > rounds {
                         break;
                     }
-                    // test-time: allow(hang-guard) -- Yield between positive step-completion polls; check_bound supplies the simulated cap and the committed round count, not this delay, completes the step.
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    playback_changed(&session.client, &source, status).await;
                 }
                 let output = text(&session.output(&source).await);
                 assert!(
