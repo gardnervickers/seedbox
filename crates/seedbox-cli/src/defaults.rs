@@ -62,37 +62,6 @@ pub fn existing(what: &str, path: PathBuf) -> Result<PathBuf> {
     }
 }
 
-/// The caller decodes the selected archive; selection itself has no build or
-/// environment dependency, so bundled and unbundled cases can always be tested.
-// TODO: Re-evaluate: keep pure lookup here rather than making missing-input
-// coverage depend on whether the CLI build embedded its runtime helpers.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum HelperArchive<'a> {
-    Embedded(&'a [u8]),
-    File(PathBuf),
-}
-pub(super) fn helper_archive<'a>(
-    explicit: Option<PathBuf>,
-    embedded: Option<&'a [u8]>,
-    beside: PathBuf,
-) -> Result<HelperArchive<'a>> {
-    if let Some(path) = explicit {
-        return local_asset("runtime assets", path).map(HelperArchive::File);
-    }
-    if let Some(bytes) = embedded {
-        return Ok(HelperArchive::Embedded(bytes));
-    }
-    local_asset("runtime assets", beside).map(HelperArchive::File)
-}
-
-pub(super) fn local_asset(flag: &str, path: PathBuf) -> Result<PathBuf> {
-    if path.is_file() {
-        Ok(path)
-    } else {
-        Err(Error::Setup(format!("{flag} {}: not found; from the Seedbox checkout run `cargo xtask build-assets` and `cargo build --release`", path.display())))
-    }
-}
-
 fn missing(what: &str, searched: &[PathBuf], fix: &str) -> Error {
     let searched: Vec<_> = searched
         .iter()
@@ -144,40 +113,5 @@ mod tests {
     #[test]
     fn engine_defaults_to_current_executable() {
         assert_eq!(engine().unwrap(), env::current_exe().unwrap());
-    }
-    #[test]
-    fn helper_archive_resolution_covers_bundled_and_unbundled_without_build_state() {
-        let directory = tempfile::tempdir().unwrap();
-        let missing = directory.path().join("missing/runtime.tar.gz");
-        let expected = format!("runtime assets {}: not found; from the Seedbox checkout run `cargo xtask build-assets` and `cargo build --release`", missing.display());
-        assert_eq!(
-            helper_archive(None, None, missing.clone())
-                .unwrap_err()
-                .to_string(),
-            expected
-        );
-        let bytes = b"embedded lookup sentinel";
-        assert_eq!(
-            helper_archive(None, Some(bytes), missing.clone()).unwrap(),
-            HelperArchive::Embedded(bytes)
-        );
-        let file = directory.path().join("runtime.tar.gz");
-        std::fs::write(&file, b"local lookup sentinel").unwrap();
-        assert_eq!(
-            helper_archive(None, None, file.clone()).unwrap(),
-            HelperArchive::File(file.clone())
-        );
-        for embedded in [None, Some(bytes.as_slice())] {
-            assert_eq!(
-                helper_archive(Some(file.clone()), embedded, missing.clone()).unwrap(),
-                HelperArchive::File(file.clone())
-            );
-            assert_eq!(
-                helper_archive(Some(missing.clone()), embedded, file.clone())
-                    .unwrap_err()
-                    .to_string(),
-                expected
-            );
-        }
     }
 }

@@ -3,9 +3,8 @@
 use super::{backends::Executor, RuntimeInputs, Signals};
 use seedbox_application::{
     config::Simulation,
-    execution::{Backend, CancellationToken, ExecutionBackend, PreparedInputs},
+    execution::{CancellationToken, ExecutionBackend, PreparedInputs},
     store::ContentStore,
-    vmm::VmmExecutor,
     Error, Result,
 };
 use seedbox_server::{
@@ -44,15 +43,10 @@ impl BackendProvider for NativeBackends {
         let (preparation, execution) =
             self.inputs
                 .backends(store, configuration, cancellation, &self.session_root)?;
-        let execution = match execution {
-            Executor::Driver(executor) => {
-                Executor::Driver(Box::new((*executor).with_launch_context(
-                    self.environment.clone(),
-                    Some(self.session_lease.clone()),
-                )))
-            }
-            other => other,
-        };
+        let execution = Executor(Box::new(
+            (*execution.0)
+                .with_launch_context(self.environment.clone(), Some(self.session_lease.clone())),
+        ));
         Ok(Backends {
             preparation: Box::new(preparation),
             execution: Box::new(execution),
@@ -65,94 +59,62 @@ impl BackendProvider for NativeBackends {
         store: &ContentStore,
     ) -> Result<Box<dyn ExecutionBackend>> {
         let driver_backend = inputs.profile.driver_backend().map_err(Error::Setup)?;
-        if seedbox_application::engine::recorded_launch(&inputs.profile)?
-            == seedbox_application::engine::ExecutableKind::DriverWorld
+        let descriptor = inputs
+            .profile
+            .semantic_parameters
+            .engine
+            .as_ref()
+            .ok_or_else(|| {
+                Error::Integrity("Driver contract has no executable descriptor".into())
+            })?;
+        let backend = match driver_backend
+            .ok_or_else(|| Error::Setup("Driver contract has no validated CPU backend".into()))?
         {
-            let descriptor = inputs
-                .profile
-                .semantic_parameters
-                .engine
-                .as_ref()
-                .ok_or_else(|| {
-                    Error::Integrity("Driver contract has no executable descriptor".into())
-                })?;
-            let backend = match driver_backend.ok_or_else(|| {
-                Error::Setup("Driver contract has no validated CPU backend".into())
-            })? {
-                seedbox_spec::project::CpuBackend::Pv => {
-                    seedbox_application::driver_world::DriverBackend::Pv
-                }
-                seedbox_spec::project::CpuBackend::Tcg => {
-                    seedbox_application::driver_world::DriverBackend::Tcg
-                }
-            };
-            let digest = seedbox_application::driver_world::runtime_digest(inputs, store)?;
-            let mut archive =
-                tempfile::NamedTempFile::new_in(&self.session_root).map_err(|error| {
-                    Error::Setup(format!(
-                        "retained Driver runtime scratch {}: {error}",
-                        self.session_root.display()
-                    ))
-                })?;
-            store.copy_to(&digest, archive.as_file_mut())?;
-            let runtime = super::backends::driver_runtime(
-                Some(archive.path().to_path_buf()),
-                &self.session_root,
-            )?;
-            let runtime_backend = match backend {
-                seedbox_application::driver_world::DriverBackend::Pv => {
-                    seedbox_application::runtime_assets::Backend::Pv
-                }
-                seedbox_application::driver_world::DriverBackend::Tcg => {
-                    seedbox_application::runtime_assets::Backend::Tcg
-                }
-            };
-            let architecture = match descriptor.guest_arch.as_str() {
-                "x86_64" => seedbox_spec::definition::Architecture::X86_64,
-                "aarch64" => seedbox_spec::definition::Architecture::Aarch64,
-                value => {
-                    return Err(Error::Setup(format!(
-                        "retained Driver guest architecture {value:?} is not supported"
-                    )))
-                }
-            };
-            let selected = runtime.select(runtime_backend, architecture)?;
-            let executor = seedbox_application::driver_world::DriverExecutor::new(
-                inputs.profile.clone(),
-                backend,
-                1,
-            )?
-            .with_runtime(selected)?
-            .with_launch_context(self.environment.clone(), Some(self.session_lease.clone()));
-            return Ok(Box::new(executor));
-        }
-        let scratch = tempfile::tempdir()?;
-        let engine = store.materialize_executable(&inputs.profile.engine, scratch.path())?;
-        let executor = if inputs.profile.backend == Backend::Hvf {
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            {
-                Executor::Mac(Box::new(
-                    seedbox_application::mac::MacExecutor::from_retained(
-                        &engine,
-                        store,
-                        inputs.profile.clone(),
-                    )?,
-                ))
+            seedbox_spec::project::CpuBackend::Pv => {
+                seedbox_application::driver_world::DriverBackend::Pv
             }
-            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-            {
-                return Err(Error::Setup(
-                    "retained HVF inputs require an Apple Silicon Mac".into(),
-                ));
+            seedbox_spec::project::CpuBackend::Tcg => {
+                seedbox_application::driver_world::DriverBackend::Tcg
             }
-        } else {
-            Executor::Linux(Box::new(VmmExecutor::from_retained(
-                &engine,
-                store,
-                inputs.profile.clone(),
-            )?))
         };
-        Ok(Box::new(executor))
+        let digest = seedbox_application::driver_world::runtime_digest(inputs, store)?;
+        let mut archive = tempfile::NamedTempFile::new_in(&self.session_root).map_err(|error| {
+            Error::Setup(format!(
+                "retained Driver runtime scratch {}: {error}",
+                self.session_root.display()
+            ))
+        })?;
+        store.copy_to(&digest, archive.as_file_mut())?;
+        let runtime = super::backends::driver_runtime(
+            Some(archive.path().to_path_buf()),
+            &self.session_root,
+        )?;
+        let runtime_backend = match backend {
+            seedbox_application::driver_world::DriverBackend::Pv => {
+                seedbox_application::runtime_assets::Backend::Pv
+            }
+            seedbox_application::driver_world::DriverBackend::Tcg => {
+                seedbox_application::runtime_assets::Backend::Tcg
+            }
+        };
+        let architecture = match descriptor.guest_arch.as_str() {
+            "x86_64" => seedbox_spec::definition::Architecture::X86_64,
+            "aarch64" => seedbox_spec::definition::Architecture::Aarch64,
+            value => {
+                return Err(Error::Setup(format!(
+                    "retained Driver guest architecture {value:?} is not supported"
+                )))
+            }
+        };
+        let selected = runtime.select(runtime_backend, architecture)?;
+        let executor = seedbox_application::driver_world::DriverExecutor::new(
+            inputs.profile.clone(),
+            backend,
+            1,
+        )?
+        .with_runtime(selected)?
+        .with_launch_context(self.environment.clone(), Some(self.session_lease.clone()));
+        return Ok(Box::new(executor));
     }
 }
 

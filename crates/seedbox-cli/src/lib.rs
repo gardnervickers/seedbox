@@ -12,8 +12,6 @@ mod playback_args;
 mod signals;
 mod simulations;
 use backends::{Executor, Preparer};
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-use seedbox_application::vmm::VmmExecutor;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox_application::{
@@ -655,11 +653,10 @@ impl RuntimeInputs {
         Ok((
             Preparer {
                 inputs,
-                _helpers: None,
                 cancellation: cancellation.clone(),
-                driver_inputs: Some(selected.clone()),
+                driver_inputs: selected.clone(),
             },
-            Executor::Driver(Box::new(executor.with_runtime(selected)?)),
+            Executor(Box::new(executor.with_runtime(selected)?)),
         ))
     }
 
@@ -672,78 +669,16 @@ impl RuntimeInputs {
         scratch: &Path,
     ) -> Result<(Preparer, Executor)> {
         validate_machine(simulation)?;
-        let machine = &simulation.machine;
         let engine = defaults::engine()?;
-        let use_driver = self.use_driver();
+        if !self.use_driver() {
+            return Err(tcg_refusal());
+        }
         let witness = if self.full_state {
             WitnessMode::FullState
         } else {
             WitnessMode::Exits
         };
-        if simulation.simulator.backend == seedbox_spec::project::CpuBackend::Tcg && !use_driver {
-            return Err(tcg_refusal());
-        }
-        if use_driver {
-            return self.driver_backends(
-                store,
-                simulation,
-                cancellation,
-                scratch,
-                &engine,
-                witness,
-            );
-        }
-        let kernel = backends::guest_kernel(None)?;
-        let runtime = Some(backends::guest_assets(None)?);
-        let resolve = |name| {
-            runtime
-                .as_ref()
-                .map(|assets| assets.input(name))
-                .ok_or_else(|| {
-                    Error::Setup(format!(
-                        "{name}: missing guest helper; run `cargo xtask build-assets`"
-                    ))
-                })
-        };
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        let executor = {
-            Executor::Mac(Box::new(seedbox_application::mac::MacExecutor::new(
-                &engine,
-                &kernel,
-                store,
-                machine.memory_mb,
-                witness,
-                simulation.disk.torn_writes,
-            )?))
-        };
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        let executor = {
-            let executor = VmmExecutor::new_internal(&engine, store, machine.memory_mb, witness)?;
-            Executor::Linux(Box::new(
-                executor
-                    .with_torn_writes(simulation.disk.torn_writes)
-                    .with_page_timer(machine.page_timer)
-                    .with_deferred_tx(machine.deferred_tx),
-            ))
-        };
-        let inputs = OciPreparer {
-            docker: backends::container_engine()?,
-            kernel,
-            engine,
-            init: resolve("compose-init")?,
-            progress: resolve("progress.tar")?,
-            mke2fs: Some(resolve("mke2fs")?),
-            profile: executor.profile(),
-        };
-        Ok((
-            Preparer {
-                inputs,
-                _helpers: runtime,
-                cancellation: cancellation.clone(),
-                driver_inputs: None,
-            },
-            executor,
-        ))
+        self.driver_backends(store, simulation, cancellation, scratch, &engine, witness)
     }
 }
 
@@ -1044,45 +979,22 @@ fn validate(compose: &ComposeArg, json: bool) -> Result<u8> {
     Ok(0)
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn doctor(json: bool) -> Result<u8> {
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
     let engine = defaults::engine()?;
     let scratch = tempfile::tempdir()
         .map_err(|error| Error::Setup(format!("doctor runtime scratch: {error}")))?;
-    let (kernel, _driver_runtime) = backends::doctor_kernel(None, true, scratch.path())?;
+    let (kernel, _runtime) = backends::doctor_kernel(scratch.path())?;
     if cancellation.is_cancelled() {
         return Err(Error::Setup("doctor cancelled".into()));
     }
-    let report = seedbox_application::mac::MacExecutor::doctor(&engine, &kernel)?;
+    let report = seedbox_application::driver_world::doctor(&engine, &kernel)?;
     if json {
         output::json(&report)?;
     } else {
         output::status("VALID", "compatible execution profile");
         output::field("simulator", &report.simulator_version);
-        output::field("engine", report.engine.hex());
-        output::field("kernel", report.kernel.hex());
-    }
-    Ok(0)
-}
-
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-fn doctor(json: bool) -> Result<u8> {
-    let cancellation = CancellationToken::default();
-    let _signals = Signals::register(&cancellation)?;
-    let engine = defaults::engine()?;
-    let scratch = tempfile::tempdir()
-        .map_err(|error| Error::Setup(format!("doctor runtime scratch: {error}")))?;
-    let (kernel, _driver_runtime) = backends::doctor_kernel(None, true, scratch.path())?;
-    let report = VmmExecutor::doctor_internal(&engine, &kernel)?;
-    if json {
-        output::json(&report)?;
-    } else {
-        output::status("VALID", "compatible execution profile");
-        if let Some(version) = &report.simulator_version {
-            output::field("simulator", version);
-        }
         output::field("engine", report.engine.hex());
         output::field("kernel", report.kernel.hex());
     }
