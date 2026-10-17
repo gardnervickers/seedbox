@@ -109,34 +109,32 @@ fn explicit_asset_directory_overrides_bundled_driver_without_build_tools() {
         .join("driver-runtime.tar.gz");
     assert_eq!(stderr(&output), format!("error: driver runtime {}: {}; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display(), std::io::Error::from_raw_os_error(2)));
     assert!(output.stdout.is_empty());
-    // The asset directory locates the selected backend's package; it does not
-    // select legacy mode. Explicit kernel/VMM paths still take precedence.
-    for (flag, variable, path) in [
-        ("--kernel", "SEEDBOX_KERNEL", "missing-kernel"),
-        ("--vmm", "SEEDBOX_VMM", "missing-vmm"),
+    // Relocation still wins; retired runtime environment variables are ignored.
+    let expected = stderr(&output);
+    for variable in [
+        "SEEDBOX_KERNEL",
+        "SEEDBOX_VMM",
+        "SEEDBOX_RUNTIME_ASSETS",
+        "SEEDBOX_GUEST_INIT",
+        "SEEDBOX_MKE2FS",
     ] {
-        for from_environment in [false, true] {
-            let mut command = Command::new(&binary);
-            command
-                .arg("doctor")
-                .current_dir(&root)
-                .env_clear()
-                .env("HOME", &root)
-                .env("SEEDBOX_ASSET_DIR", &root)
-                .env("PATH", "");
-            if from_environment {
-                command.env(variable, path);
-            } else {
-                command.args([flag, path]);
-            }
-            let output = command.guarded_output().unwrap();
-            assert_eq!(output.status.code(), Some(2));
-            assert_eq!(
-                stderr(&output),
-                format!("error: {flag} {path}: not found\n")
-            );
-            assert!(output.stdout.is_empty());
-        }
+        let output = Command::new(&binary)
+            .arg("doctor")
+            .current_dir(&root)
+            .env_clear()
+            .env("HOME", &root)
+            .env("SEEDBOX_ASSET_DIR", &root)
+            .env("PATH", "")
+            .env(variable, "missing-retired-input")
+            .guarded_output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            stderr(&output),
+            expected,
+            "{variable} must not affect runtime lookup"
+        );
+        assert!(output.stdout.is_empty());
     }
     assert!(!root.join(".seedbox").exists());
     assert!(!root.join(".local/state/seedbox").exists());
@@ -488,95 +486,46 @@ fn execution_commands_keep_performance_settings_on_the_server() {
     }
 }
 
-/// A project plus empty stand-ins for every runtime input but BusyBox.
-#[cfg(target_os = "linux")]
-fn runtime_project() -> (tempfile::TempDir, Vec<String>) {
+#[test]
+fn legacy_runtime_flags_are_usage_errors_before_any_state_or_preparation() {
     let directory = tempfile::tempdir().unwrap();
-    assert!(
-        seedbox(&["init", "demo", "--template", "redis"], directory.path())
-            .status
-            .success()
-    );
-    let mut args = vec![
-        "prepare".to_owned(),
-        "demo".to_owned(),
-        "--output".to_owned(),
-        "prepared.json".to_owned(),
-    ];
-    for flag in ["kernel", "vmm", "guest-init"] {
-        let path = directory.path().join(flag);
-        fs::write(&path, b"").unwrap();
-        args.extend([format!("--{flag}"), path.to_str().unwrap().to_owned()]);
+    let root = directory.path();
+    fs::write(root.join("existing-input"), b"not a runtime override").unwrap();
+    for command in [
+        "serve", "prepare", "doctor", "run", "explore", "replay", "rerun",
+    ] {
+        let help = seedbox(&["help", command], root);
+        assert!(help.status.success());
+        let help = String::from_utf8_lossy(&help.stdout);
+        for (flag, variable) in [
+            ("--vmm", "SEEDBOX_VMM"),
+            ("--kernel", "SEEDBOX_KERNEL"),
+            ("--runtime-assets", "SEEDBOX_RUNTIME_ASSETS"),
+            ("--guest-init", "SEEDBOX_GUEST_INIT"),
+            ("--mke2fs", "SEEDBOX_MKE2FS"),
+        ] {
+            assert!(!help.contains(flag), "{command}: {help}");
+            assert!(!help.contains(variable), "{command}: {help}");
+            for path in ["existing-input", "missing-input"] {
+                let mut args = vec![command];
+                if command == "prepare" {
+                    args.extend(["--output", "prepared.json"]);
+                }
+                args.extend([flag, path]);
+                let output = seedbox(&args, root);
+                assert_eq!(output.status.code(), Some(2), "{command} {flag}");
+                assert!(output.stdout.is_empty());
+                assert!(
+                    stderr(&output).contains(&format!("unexpected argument '{flag}'")),
+                    "{}",
+                    stderr(&output)
+                );
+            }
+        }
     }
-    (directory, args)
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn run_without_a_kernel_lists_where_it_looked() {
-    let (directory, mut args) = runtime_project();
-    let kernel = args.iter().position(|arg| arg == "--kernel").unwrap();
-    args.drain(kernel..kernel + 2);
-    let args: Vec<_> = args.iter().map(String::as_str).collect();
-    let output = seedbox(&args, directory.path());
-    assert_eq!(output.status.code(), Some(2));
-    let kernel = directory
-        .path()
-        .join("assets")
-        .join(std::env::consts::ARCH)
-        .join("kernel");
-    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass --kernel PATH\n", kernel.display()));
-    assert!(!directory.path().join(".seedbox/runs").exists());
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn explicit_inputs_must_exist() {
-    let (directory, mut args) = runtime_project();
-    let vmm = args.iter().position(|arg| arg == "--vmm").unwrap();
-    args[vmm + 1] = "/nonexistent/seedbox-vmm".into();
-    let args: Vec<_> = args.iter().map(String::as_str).collect();
-    let output = seedbox(&args, directory.path());
-    assert_eq!(
-        stderr(&output),
-        "error: --vmm /nonexistent/seedbox-vmm: not found\n"
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn explicit_missing_helpers_never_fall_back_to_embedded_assets() {
-    let (directory, mut args) = runtime_project();
-    let archive = directory
-        .path()
-        .join("assets")
-        .join(std::env::consts::ARCH)
-        .join("runtime.tar.gz");
-    // Explicit selection must not fall back to embedded helpers. This setup
-    // error is exercised in every build; defaults.rs separately always tests
-    // the implicit bundled and unbundled lookup branches.
-    args.extend(["--runtime-assets".into(), archive.to_str().unwrap().into()]);
-    let args: Vec<_> = args.iter().map(String::as_str).collect();
-    let output = seedbox(&args, directory.path());
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        stderr(&output),
-        format!("error: --runtime-assets {}: not found\n", archive.display())
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn an_explicit_mke2fs_must_exist() {
-    let (directory, mut args) = runtime_project();
-    args.extend(["--mke2fs".into(), "/nonexistent/mke2fs".into()]);
-    let args: Vec<_> = args.iter().map(String::as_str).collect();
-    let output = seedbox(&args, directory.path());
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        stderr(&output),
-        "error: --mke2fs /nonexistent/mke2fs: not found\n"
-    );
+    assert!(!root.join("prepared.json").exists());
+    assert!(!root.join(".local/state/seedbox").exists());
+    assert!(!root.join(".seedbox").exists());
 }
 
 #[test]
@@ -844,10 +793,12 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("Linux KVM host"));
-    for flag in ["--kernel", "--vmm", "--json"] {
-        assert!(text.contains(flag), "{text}");
-    }
+    assert!(text.contains("--json"), "{text}");
     for flag in [
+        "--kernel",
+        "--vmm",
+        "--runtime-assets",
+        "--mke2fs",
         "--cpu",
         "--state",
         "--builder",
@@ -861,22 +812,6 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     let invalid_timebase = seedbox(&["doctor", "--timebase", "invalid"], root);
     assert_eq!(invalid_timebase.status.code(), Some(2));
     assert!(stderr(&invalid_timebase).contains("--timebase"));
-    for json in [false, true] {
-        let mut args = vec!["doctor", "--vmm", "missing"];
-        if json {
-            args.push("--json");
-        }
-        let output = seedbox(&args, root);
-        assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), "error: --vmm missing: not found\n");
-        assert!(output.stdout.is_empty());
-    }
-    fs::write(root.join("engine"), b"unsupported engine").unwrap();
-    let missing_kernel = seedbox(&["doctor", "--vmm", "engine", "--kernel", "missing"], root);
-    assert_eq!(
-        stderr(&missing_kernel),
-        "error: --kernel missing: not found\n"
-    );
     assert!(!root.join(".seedbox").exists());
 }
 
@@ -905,7 +840,7 @@ fn doctor_reports_missing_driver_inputs_without_downloads() {
 }
 
 #[test]
-fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_environment() {
+fn doctor_ignored_legacy_environment_executes_no_tools_and_creates_no_state() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let tools = root.join("tools");
@@ -926,7 +861,7 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
     }
     for json in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
-        command.args(["doctor", "--kernel", "kernel"]);
+        command.arg("doctor");
         if json {
             command.arg("--json");
         }
@@ -938,10 +873,21 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
             .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
             .env("CARGO", tools.join("cargo"))
             .env("SEEDBOX_STATE", root.join("unwanted-state"))
+            .env("SEEDBOX_ASSET_DIR", root)
+            .envs([
+                ("SEEDBOX_VMM", "missing-vmm"),
+                ("SEEDBOX_KERNEL", "missing-kernel"),
+                ("SEEDBOX_RUNTIME_ASSETS", "missing-archive"),
+                ("SEEDBOX_GUEST_INIT", "missing-init"),
+                ("SEEDBOX_MKE2FS", "missing-formatter"),
+            ])
             .guarded_output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-        assert_eq!(stderr(&output), "error: --kernel kernel: not found\n");
+        let archive = root
+            .join(std::env::consts::ARCH)
+            .join("driver-runtime.tar.gz");
+        assert_eq!(stderr(&output), format!("error: driver runtime {}: {}; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display(), std::io::Error::from_raw_os_error(2)));
         assert!(output.stdout.is_empty());
         assert!(
             !marker.exists(),
@@ -951,16 +897,11 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
         assert!(!root.join(".seedbox").exists());
         assert!(!root.join("output").exists());
     }
-    let output = seedbox(&["doctor", "--vmm", "engine", "--kernel", "kernel"], root);
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), "error: --vmm engine: not found\n");
-    assert!(!marker.exists());
-    assert!(output.stdout.is_empty());
 }
 
 #[cfg(not(target_os = "linux"))]
 #[test]
-fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
+fn doctor_removed_override_is_rejected_before_host_admission() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("engine"), b"dev engine").unwrap();
     fs::write(dir.path().join("kernel"), b"dev kernel").unwrap();
@@ -971,16 +912,7 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
         }
         let output = seedbox(&args, dir.path());
         assert_eq!(output.status.code(), Some(2));
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        assert_eq!(
-            stderr(&output),
-            "error: host admission requires Linux x86_64 KVM; use an admitted host\n"
-        );
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        assert_eq!(
-            stderr(&output),
-            "error: --vmm requires Linux KVM; use the built-in Mac engine\n"
-        );
+        assert!(stderr(&output).contains("unexpected argument '--vmm'"));
         assert!(output.stdout.is_empty());
         assert!(!dir.path().join(".seedbox").exists());
     }
@@ -1985,36 +1917,13 @@ fn inspect_rejects_an_unknown_recorded_deferred_tx_mode() {
     );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn runtime_assets_override_is_documented_and_missing_paths_fail_before_preparation() {
+fn retired_environment_does_not_override_the_driver_package_during_preparation() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     assert!(seedbox(&["init", "demo"], root).status.success());
     let project = root.join("demo");
-    {
-        let command = "prepare";
-        let help = seedbox(&["help", command], root);
-        assert!(help.status.success());
-        let help = String::from_utf8_lossy(&help.stdout);
-        assert!(help.contains("--runtime-assets"), "{help}");
-        assert!(help.contains("SEEDBOX_RUNTIME_ASSETS"), "{help}");
-        assert!(
-            help.contains("embedded kernel, otherwise beside the executable"),
-            "{help}"
-        );
-        let mut args = vec![command, "--runtime-assets", "missing.tar.gz"];
-        if command == "prepare" {
-            args.extend(["--output", "prepared.json"]);
-        }
-        let output = seedbox(&args, &project);
-        assert_eq!(output.status.code(), Some(2));
-        assert!(output.stdout.is_empty());
-        assert_eq!(
-            stderr(&output),
-            "error: --runtime-assets missing.tar.gz: not found\n"
-        );
-        assert!(!project.join(".seedbox/runs").exists());
-    }
     let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
         .args(["prepare", "--output", "prepared.json"])
         .current_dir(&project)
@@ -2022,49 +1931,41 @@ fn runtime_assets_override_is_documented_and_missing_paths_fail_before_preparati
         .env("HOME", root)
         .env("SEEDBOX_ASSET_DIR", root)
         .env("PATH", "")
-        .env("SEEDBOX_RUNTIME_ASSETS", "env-missing.tar.gz")
+        .envs([
+            ("SEEDBOX_VMM", "missing-vmm"),
+            ("SEEDBOX_KERNEL", "missing-kernel"),
+            ("SEEDBOX_RUNTIME_ASSETS", "missing-archive"),
+            ("SEEDBOX_GUEST_INIT", "missing-init"),
+            ("SEEDBOX_MKE2FS", "missing-formatter"),
+        ])
         .guarded_output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        stderr(&output),
-        "error: --runtime-assets env-missing.tar.gz: not found\n"
-    );
-    for command in ["doctor", "replay"] {
-        let help = seedbox(&["help", command], root);
-        assert!(help.status.success());
-        assert!(!String::from_utf8_lossy(&help.stdout).contains("--runtime-assets"));
-    }
+    assert!(output.stdout.is_empty());
+    let archive = root
+        .join(std::env::consts::ARCH)
+        .join("driver-runtime.tar.gz");
+    assert_eq!(stderr(&output), format!("error: driver runtime {}: {}; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display(), std::io::Error::from_raw_os_error(2)));
+    assert!(!project.join("prepared.json").exists());
+    assert!(!project.join(".seedbox/runs").exists());
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn invalid_local_runtime_archive_has_path_context_without_downloads_or_tools() {
+fn invalid_relocated_driver_package_is_rejected_without_downloads_or_tools() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     assert!(seedbox(&["init", "demo"], root).status.success());
     let project = root.join("demo");
-    fs::write(project.join("invalid.tar.gz"), b"not an archive").unwrap();
-    fs::write(project.join("kernel"), b"kernel").unwrap();
-    let output = seedbox(
-        &[
-            "prepare",
-            "--output",
-            "prepared.json",
-            "--kernel",
-            "kernel",
-            "--runtime-assets",
-            "invalid.tar.gz",
-        ],
-        &project,
-    );
+    let assets = project.join("assets").join(std::env::consts::ARCH);
+    fs::create_dir_all(&assets).unwrap();
+    fs::write(assets.join("driver-runtime.tar.gz"), b"not an archive").unwrap();
+    let output = seedbox(&["prepare", "--output", "prepared.json"], &project);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    let error = stderr(&output);
-    assert!(
-        error.starts_with("error: runtime assets invalid.tar.gz:"),
-        "{error}"
-    );
-    assert!(!error.contains("downloading"), "{error}");
+    assert!(stderr(&output).contains("gzip"), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("downloading"));
+    assert!(!project.join("prepared.json").exists());
     assert!(!project.join(".seedbox/runs").exists());
 }
 

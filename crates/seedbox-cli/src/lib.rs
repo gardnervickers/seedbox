@@ -15,7 +15,7 @@ use backends::{Executor, Preparer};
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 use seedbox_application::vmm::VmmExecutor;
 
-use clap::{Args, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox_application::{
     bundle, config, diff,
     execution::{CancellationToken, ExecutionBackend, PreparationBackend, WitnessMode},
@@ -114,14 +114,12 @@ enum Command {
     },
     /// Check execution-profile compatibility without images or guests (Linux KVM host; or Apple Silicon Mac).
     #[command(
-        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run `cargo xtask build-assets` or pass --kernel."
+        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run `cargo xtask build-assets` then `cargo build --release`."
     )]
     Doctor {
         /// Print the admitted observations as JSON.
         #[arg(long)]
         json: bool,
-        #[command(flatten)]
-        inputs: KvmInputs,
     },
     /// Resolve images and build guest artifacts, without running.
     Prepare {
@@ -482,7 +480,7 @@ impl From<TemplateArg> for Template {
 /// same mapping that selects Driver guests.
 fn tcg_refusal() -> Error {
     Error::Setup(format!(
-        "--backend tcg requires {}, and the normal Driver runtime; remove legacy VMM, bootstrap and asset-directory overrides",
+        "--backend tcg requires {}, and the normal Driver runtime",
         seedbox_application::driver_world::platform::hosts_for(
             seedbox_application::driver_world::DriverBackend::Tcg
         )
@@ -491,7 +489,6 @@ fn tcg_refusal() -> Error {
 
 /// Apple Silicon Mac runs the built-in HVF engine; every other host runs KVM.
 const MAC: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
-const VMM_REQUIRES_KVM: &str = "--vmm requires Linux KVM; use the built-in Mac engine";
 
 #[derive(Args)]
 struct ComposeArg {
@@ -605,56 +602,16 @@ impl StateArg {
 
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
-struct KvmInputs {
-    /// Guest kernel Image on Mac, or bzImage on Linux [default: embedded kernel, otherwise beside the executable].
-    #[arg(long, env = "SEEDBOX_KERNEL")]
-    kernel: Option<PathBuf>,
-    /// Override with a legacy standalone VMM [default: the engine built into seedbox].
-    #[arg(long, env = "SEEDBOX_VMM")]
-    vmm: Option<PathBuf>,
-}
-
-#[derive(Args)]
-#[command(next_help_heading = "Runtime inputs")]
 struct RuntimeInputs {
-    #[command(flatten)]
-    kvm: KvmInputs,
-    /// Guest helper archive override [default: embedded by the complete build].
-    #[arg(long, env = "SEEDBOX_RUNTIME_ASSETS")]
-    runtime_assets: Option<PathBuf>,
-    /// Static guest supervisor [default: embedded guest helper].
-    #[arg(long, env = "SEEDBOX_GUEST_INIT")]
-    guest_init: Option<PathBuf>,
-    /// Static Linux mke2fs for named volumes [default: embedded guest helper].
-    #[arg(long, env = "SEEDBOX_MKE2FS")]
-    mke2fs: Option<PathBuf>,
-    // Transient CLI intent only, never retained simulation metadata. The dev
-    // shell supplies the formatter for builds; that is not an executor choice.
-    #[arg(skip)]
-    mke2fs_from_environment: bool,
     /// Also record and compare every machine's RAM and registers (also retains per-page hashes).
     #[arg(long)]
     full_state: bool,
 }
 
 impl RuntimeInputs {
-    fn validate_platform(&self) -> Result<()> {
-        if MAC && self.kvm.vmm.is_some() {
-            return Err(Error::Setup(VMM_REQUIRES_KVM.into()));
-        }
-        Ok(())
-    }
-
-    // Explicit legacy flags keep their existing formats and launch contract.
-    // Inherited build helpers and SDK relocation do not choose an executor.
-    // Only Driver hosts (Linux x86-64 or macOS aarch64) select it by default.
+    // Only Driver hosts (Linux x86-64 or macOS aarch64) select it.
     fn use_driver(&self) -> bool {
         seedbox_application::driver_world::platform::Host::current().runs_driver()
-            && self.kvm.vmm.is_none()
-            && self.kvm.kernel.is_none()
-            && self.runtime_assets.is_none()
-            && self.guest_init.is_none()
-            && (self.mke2fs.is_none() || self.mke2fs_from_environment)
     }
 
     fn driver_backends(
@@ -714,24 +671,10 @@ impl RuntimeInputs {
         cancellation: &CancellationToken,
         scratch: &Path,
     ) -> Result<(Preparer, Executor)> {
-        self.validate_platform()?;
         validate_machine(simulation)?;
         let machine = &simulation.machine;
-        let engine = defaults::engine(self.kvm.vmm.clone())?;
+        let engine = defaults::engine()?;
         let use_driver = self.use_driver();
-        for (flag, path) in [
-            ("--kernel", &self.kvm.kernel),
-            ("--runtime-assets", &self.runtime_assets),
-            ("--guest-init", &self.guest_init),
-            ("--mke2fs", &self.mke2fs),
-        ] {
-            if use_driver && self.mke2fs_from_environment && flag == "--mke2fs" {
-                continue;
-            }
-            if let Some(path) = path {
-                defaults::existing(flag, path.clone())?;
-            }
-        }
         let witness = if self.full_state {
             WitnessMode::FullState
         } else {
@@ -750,18 +693,17 @@ impl RuntimeInputs {
                 witness,
             );
         }
-        let kernel = backends::guest_kernel(self.kvm.kernel.clone())?;
-        let runtime = Some(backends::guest_assets(self.runtime_assets.clone())?);
-        let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
-            Some(path) => defaults::existing(flag, path.clone()),
-            None => runtime
+        let kernel = backends::guest_kernel(None)?;
+        let runtime = Some(backends::guest_assets(None)?);
+        let resolve = |name| {
+            runtime
                 .as_ref()
                 .map(|assets| assets.input(name))
                 .ok_or_else(|| {
                     Error::Setup(format!(
-                        "{flag}: missing guest helper; run `cargo xtask build-assets`"
+                        "{name}: missing guest helper; run `cargo xtask build-assets`"
                     ))
-                }),
+                })
         };
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         let executor = {
@@ -776,12 +718,7 @@ impl RuntimeInputs {
         };
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         let executor = {
-            let executor = if self.kvm.vmm.is_some() {
-                VmmExecutor::new(&engine, store, machine.memory_mb, witness)?
-                    .with_detected_contract(store, &engine)?
-            } else {
-                VmmExecutor::new_internal(&engine, store, machine.memory_mb, witness)?
-            };
+            let executor = VmmExecutor::new_internal(&engine, store, machine.memory_mb, witness)?;
             Executor::Linux(Box::new(
                 executor
                     .with_torn_writes(simulation.disk.torn_writes)
@@ -793,9 +730,9 @@ impl RuntimeInputs {
             docker: backends::container_engine()?,
             kernel,
             engine,
-            init: resolve("--guest-init", &self.guest_init, "compose-init")?,
-            progress: resolve("--runtime-assets", &None, "progress.tar")?,
-            mke2fs: Some(resolve("--mke2fs", &self.mke2fs, "mke2fs")?),
+            init: resolve("compose-init")?,
+            progress: resolve("progress.tar")?,
+            mke2fs: Some(resolve("mke2fs")?),
             profile: executor.profile(),
         };
         Ok((
@@ -839,12 +776,7 @@ pub fn main() -> ExitCode {
     if !explicit_command {
         arguments.insert(1, "run".into());
     }
-    let matches = root.get_matches_from(arguments);
-    let cli = match Cli::from_matches(&matches) {
-        Ok(cli) => cli,
-        Err(error) => error.exit(),
-    };
-    match run(cli) {
+    match run(Cli::parse_from(arguments)) {
         Ok(code) => ExitCode::from(code),
         // The reader stopped early, as `seedbox events ID | head` does; the
         // output it took was complete, so there is nothing to report.
@@ -855,22 +787,6 @@ pub fn main() -> ExitCode {
             eprintln!("error: {error}");
             ExitCode::from(2)
         }
-    }
-}
-
-impl Cli {
-    fn from_matches(matches: &clap::ArgMatches) -> std::result::Result<Self, clap::Error> {
-        let mut cli = Self::from_arg_matches(matches)?;
-        if let Some((_, arguments)) = matches.subcommand() {
-            match &mut cli.command {
-                Command::Serve { inputs, .. } | Command::Prepare { inputs, .. } => {
-                    inputs.mke2fs_from_environment = arguments.value_source("mke2fs")
-                        == Some(clap::parser::ValueSource::EnvVariable);
-                }
-                _ => {}
-            }
-        }
-        Ok(cli)
     }
 }
 
@@ -920,7 +836,7 @@ fn run(cli: Cli) -> Result<u8> {
             template,
         } => init(&directory, template),
         Command::Validate { compose, json } => validate(&compose, json),
-        Command::Doctor { inputs, json } => doctor(inputs, json),
+        Command::Doctor { json } => doctor(json),
         Command::Prepare {
             compose,
             output,
@@ -1129,20 +1045,13 @@ fn validate(compose: &ComposeArg, json: bool) -> Result<u8> {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
+fn doctor(json: bool) -> Result<u8> {
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
-    if let Some(path) = inputs.vmm {
-        defaults::existing("--vmm", path)?;
-        if let Some(kernel) = inputs.kernel {
-            defaults::existing("--kernel", kernel)?;
-        }
-        return Err(Error::Setup(VMM_REQUIRES_KVM.into()));
-    }
-    let engine = defaults::engine(None)?;
+    let engine = defaults::engine()?;
     let scratch = tempfile::tempdir()
         .map_err(|error| Error::Setup(format!("doctor runtime scratch: {error}")))?;
-    let (kernel, _driver_runtime) = backends::doctor_kernel(inputs.kernel, true, scratch.path())?;
+    let (kernel, _driver_runtime) = backends::doctor_kernel(None, true, scratch.path())?;
     if cancellation.is_cancelled() {
         return Err(Error::Setup("doctor cancelled".into()));
     }
@@ -1159,20 +1068,14 @@ fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
+fn doctor(json: bool) -> Result<u8> {
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
-    let internal = inputs.vmm.is_none();
-    let engine = defaults::engine(inputs.vmm)?;
+    let engine = defaults::engine()?;
     let scratch = tempfile::tempdir()
         .map_err(|error| Error::Setup(format!("doctor runtime scratch: {error}")))?;
-    let (kernel, _driver_runtime) =
-        backends::doctor_kernel(inputs.kernel, internal, scratch.path())?;
-    let report = if internal {
-        VmmExecutor::doctor_internal(&engine, &kernel)?
-    } else {
-        VmmExecutor::doctor(&engine, &kernel)?
-    };
+    let (kernel, _driver_runtime) = backends::doctor_kernel(None, true, scratch.path())?;
+    let report = VmmExecutor::doctor_internal(&engine, &kernel)?;
     if json {
         output::json(&report)?;
     } else {
@@ -1192,7 +1095,6 @@ fn prepare(
     state: &StateArg,
     inputs: &RuntimeInputs,
 ) -> Result<u8> {
-    inputs.validate_platform()?;
     if output.exists() {
         return Err(Error::Setup(format!(
             "--output {}: already exists",

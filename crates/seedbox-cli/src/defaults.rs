@@ -28,15 +28,11 @@ pub fn compose_file(path: &Path) -> Result<PathBuf> {
         })
 }
 
-/// The VMM is linked into this executable. An explicit path selects the legacy
-/// standalone worker contract for development and historical runs.
-pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return existing("--vmm", path);
-    }
+/// The worker is linked into this executable; runtime commands never build it.
+pub fn engine() -> Result<PathBuf> {
     env::current_exe().map_err(|error| {
         Error::Setup(format!(
-            "cannot locate the built-in VMM executable: {error}; reinstall seedbox or pass --vmm"
+            "cannot locate the built-in worker executable: {error}; reinstall seedbox"
         ))
     })
 }
@@ -81,19 +77,19 @@ pub(super) fn helper_archive<'a>(
     beside: PathBuf,
 ) -> Result<HelperArchive<'a>> {
     if let Some(path) = explicit {
-        return local_asset("--runtime-assets", path).map(HelperArchive::File);
+        return local_asset("runtime assets", path).map(HelperArchive::File);
     }
     if let Some(bytes) = embedded {
         return Ok(HelperArchive::Embedded(bytes));
     }
-    local_asset("--runtime-assets", beside).map(HelperArchive::File)
+    local_asset("runtime assets", beside).map(HelperArchive::File)
 }
 
 pub(super) fn local_asset(flag: &str, path: PathBuf) -> Result<PathBuf> {
     if path.is_file() {
         Ok(path)
     } else {
-        Err(Error::Setup(format!("{flag} {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass {flag} PATH", path.display())))
+        Err(Error::Setup(format!("{flag} {}: not found; from the Seedbox checkout run `cargo xtask build-assets` and `cargo build --release`", path.display())))
     }
 }
 
@@ -134,23 +130,26 @@ mod tests {
     #[test]
     fn explicit_inputs_are_checked_without_search() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        assert_eq!(engine(Some(file.path().into())).unwrap(), file.path());
         assert_eq!(
-            existing("--kernel", "/nonexistent/kernel".into())
+            existing("project file", file.path().into()).unwrap(),
+            file.path()
+        );
+        assert_eq!(
+            existing("project file", "/nonexistent/seedbox.yaml".into())
                 .unwrap_err()
                 .to_string(),
-            "--kernel /nonexistent/kernel: not found"
+            "project file /nonexistent/seedbox.yaml: not found"
         );
     }
     #[test]
     fn engine_defaults_to_current_executable() {
-        assert_eq!(engine(None).unwrap(), env::current_exe().unwrap());
+        assert_eq!(engine().unwrap(), env::current_exe().unwrap());
     }
     #[test]
     fn helper_archive_resolution_covers_bundled_and_unbundled_without_build_state() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("missing/runtime.tar.gz");
-        let expected = format!("--runtime-assets {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass --runtime-assets PATH", missing.display());
+        let expected = format!("runtime assets {}: not found; from the Seedbox checkout run `cargo xtask build-assets` and `cargo build --release`", missing.display());
         assert_eq!(
             helper_archive(None, None, missing.clone())
                 .unwrap_err()

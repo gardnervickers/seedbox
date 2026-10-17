@@ -189,13 +189,13 @@ pub fn guest_assets(
             seedbox_application::guest_assets::Runtime::from_bytes(bytes)
         }
         super::defaults::HelperArchive::File(path) => {
-            seedbox_application::guest_assets::Runtime::from_archive(&path).map_err(|error| seedbox_application::Error::Setup(format!("runtime assets {}: {error}; rebuild with `cargo xtask build-assets` or select a valid --runtime-assets archive", path.display())))
+            seedbox_application::guest_assets::Runtime::from_archive(&path).map_err(|error| seedbox_application::Error::Setup(format!("runtime assets {}: {error}; rebuild with `cargo xtask build-assets` or relocate a complete runtime package with SEEDBOX_ASSET_DIR", path.display())))
         }
     }
 }
 pub fn guest_kernel(explicit: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
     if let Some(path) = explicit {
-        return super::defaults::existing("--kernel", path);
+        return super::defaults::existing("kernel", path);
     }
     if std::env::var_os("SEEDBOX_ASSET_DIR").is_none() {
         if let Some(bytes) = seedbox_application::guest_assets::EMBEDDED_KERNEL {
@@ -213,7 +213,7 @@ pub fn guest_kernel(explicit: Option<std::path::PathBuf>) -> Result<std::path::P
             return cached_kernel(bytes, &cache.join("seedbox/kernels"));
         }
     }
-    super::defaults::local_asset("--kernel", asset_directory().join("kernel"))
+    super::defaults::local_asset("kernel", asset_directory().join("kernel"))
 }
 
 fn cached_kernel(bytes: &[u8], root: &Path) -> Result<std::path::PathBuf> {
@@ -426,75 +426,10 @@ mod tests {
     }
 
     #[test]
-    fn default_driver_selection_preserves_explicit_legacy_inputs() {
-        fn defaults() -> crate::RuntimeInputs {
-            crate::RuntimeInputs {
-                kvm: crate::KvmInputs {
-                    kernel: None,
-                    vmm: None,
-                },
-                runtime_assets: None,
-                guest_init: None,
-                mke2fs: None,
-                mke2fs_from_environment: false,
-                full_state: false,
-            }
-        }
+    fn default_driver_selection_depends_only_on_the_supported_platform() {
         let supported = seedbox_application::driver_world::platform::Host::current().runs_driver();
-        assert_eq!(defaults().use_driver(), supported);
-        let mut full = defaults();
-        full.full_state = true;
-        assert_eq!(full.use_driver(), supported);
-        for option in 0..5 {
-            let mut inputs = defaults();
-            let destination = match option {
-                0 => &mut inputs.kvm.vmm,
-                1 => &mut inputs.kvm.kernel,
-                2 => &mut inputs.runtime_assets,
-                3 => &mut inputs.guest_init,
-                _ => &mut inputs.mke2fs,
-            };
-            *destination = Some("/explicit-legacy-input".into());
-            assert!(!inputs.use_driver());
-        }
-        let mut inherited = defaults();
-        inherited.mke2fs = Some("/build-only/formatter".into());
-        inherited.mke2fs_from_environment = true;
-        assert_eq!(inherited.use_driver(), supported);
-        // An explicit flag with the exact same value remains an explicit
-        // legacy choice; selection cannot infer intent from path equality.
-        inherited.mke2fs_from_environment = false;
-        assert!(!inherited.use_driver());
-    }
-
-    #[test]
-    fn cli_tracks_formatter_argument_origin_without_changing_environment() {
-        use clap::CommandFactory;
-        // Exercise clap's real environment/CLI source precedence without any
-        // process-global environment mutation. PATH is already required by Cargo.
-        let value = std::env::var_os("PATH").expect("test process PATH");
-        for command in ["serve", "prepare"] {
-            let parser = || {
-                crate::Cli::command()
-                    .mut_subcommand(command, |sub| sub.mut_arg("mke2fs", |arg| arg.env("PATH")))
-            };
-            let mut arguments = vec![std::ffi::OsString::from("seedbox"), command.into()];
-            if command == "prepare" {
-                arguments.extend(["--output".into(), "/not-created-by-argument-parsing".into()]);
-            }
-            let inherited = parser().try_get_matches_from(arguments.clone()).unwrap();
-            arguments.extend(["--mke2fs".into(), value.clone()]);
-            let explicit = parser().try_get_matches_from(arguments).unwrap();
-            for (matches, from_environment) in [(inherited, true), (explicit, false)] {
-                let parsed = crate::Cli::from_matches(&matches).unwrap();
-                let inputs = match parsed.command {
-                    crate::Command::Serve { inputs, .. }
-                    | crate::Command::Prepare { inputs, .. } => inputs,
-                    _ => unreachable!("selected command"),
-                };
-                assert_eq!(inputs.mke2fs, Some(value.clone().into()));
-                assert_eq!(inputs.mke2fs_from_environment, from_environment);
-            }
+        for full_state in [false, true] {
+            assert_eq!(crate::RuntimeInputs { full_state }.use_driver(), supported);
         }
     }
 
@@ -503,7 +438,7 @@ mod tests {
         // Reached only where Host::guest(Tcg) is None (see platform tests).
         assert_eq!(
             crate::tcg_refusal().to_string(),
-            "--backend tcg requires Linux x86-64 or macOS on Apple Silicon, and the normal Driver runtime; remove legacy VMM, bootstrap and asset-directory overrides"
+            "--backend tcg requires Linux x86-64 or macOS on Apple Silicon, and the normal Driver runtime"
         );
     }
 

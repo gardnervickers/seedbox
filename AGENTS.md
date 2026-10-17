@@ -322,6 +322,13 @@ deliberately change one.
   memory, full-state, faults, schedule) with an environment variable; it would
   change a run's identity without appearing on the command line.
 
+The legacy runtime override flags `--vmm`, `--kernel`, `--runtime-assets`,
+`--guest-init` and `--mke2fs` are removed. The CLI does not read their corresponding
+`SEEDBOX_*` variables; supplying a removed flag is a clap usage error (exit 2).
+Do not restore those bindings to select an executor. Build scripts retain the
+environment names they need as build inputs. `SEEDBOX_ASSET_DIR` remains the
+complete Driver-package relocation, with a host-architecture subdirectory.
+
 ### Defaults for a new input
 
 1. Declare it as `Option<PathBuf>` with `env = "SEEDBOX_<NAME>"` in the
@@ -388,7 +395,7 @@ deliberately change one.
 - Use `Error::Setup` for a problem the user can fix (a missing file, a missing
   tool, the wrong host, a permission). It prints without a category prefix.
   Its message starts lowercase, names the path, flag or value involved, and
-  says how to fix it: `--kernel /x/bzImage: not found`, or `guest assets missing;
+  says how to fix it: `project file /x/seedbox.yaml: not found`, or `guest assets missing;
   run cargo xtask build-assets`.
 - Never let a bare `io::Error` from a user-supplied path or a spawned program
   reach the user. Check the path first (`existing`), or add context as
@@ -414,8 +421,9 @@ deliberately change one.
 kernel/VMM/runtime inputs. By default it selects the native Driver PV package,
 validates its inputs, and probes with its guest kernel. `SEEDBOX_ASSET_DIR`
 relocates the selected backend's package; it does not select legacy mode.
-Explicit kernel/VMM overrides keep legacy lookup behavior; host-kernel bytes are not checked. VMM resolution is lookup-only and must never invoke a
-compiler or launch the worker. Success reports
+There are no kernel/VMM override flags or runtime environment bindings. Runtime
+resolution is lookup-only and must never invoke a compiler or launch the worker.
+Success reports
 only the exact cleaned-up probe observations; the library does
 not read arguments/environment or print. It creates no state/run and never prepares
 images or executes guests. Compatibility readiness is not replay qualification.
@@ -427,9 +435,11 @@ images or executes guests. Compatibility readiness is not replay qualification.
   gates; #142 and #143 removed the engine, kernel, CPU and host-policy pins.
   When a test depends on such a check, change or drop the test. Text elsewhere
   about qualification or re-pinning is historical.
-- Old runs replay on the engine executable retained in the run directory. To
-  compare across engine changes, make a fresh run and check its witness against
-  the old run's.
+- Current Driver runs replay using their retained runtime inputs. Backwards
+  compatibility with legacy execution profiles and contracts is not required;
+  do not add migration, compatibility shims or a second executor for old runs.
+  Legacy runs may fail with ordinary errors. To compare across engine changes,
+  make a fresh run and check its witness against the old run's.
 - There is one engine mode: PV time with automatic application progress
   from binary instrumentation (`docs/internals.md`). Do not require
   application-specific flags or environment overrides to make replay succeed.

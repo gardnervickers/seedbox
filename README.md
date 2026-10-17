@@ -29,6 +29,13 @@ the local runtime inputs and host access before any application images are prepa
 Running Seedbox does not invoke Nix or a compiler. Docker or Podman prepares
 application images.
 
+Runtime inputs come from the complete build. The old `--vmm`, `--kernel`,
+`--runtime-assets`, `--guest-init`, and `--mke2fs` overrides are no longer
+accepted; their `SEEDBOX_*` environment variables are not read by the CLI.
+Build tools may still use those environment names. To relocate a complete Driver
+package, set `SEEDBOX_ASSET_DIR` to the directory containing its host-architecture
+subdirectory (for example, `x86_64/driver-runtime.tar.gz`).
+
 If no server is running, the CLI asks before starting a persistent local one.
 For scripts, start `seedbox serve` explicitly. `seedbox shutdown` stops the server
 and its simulations.
