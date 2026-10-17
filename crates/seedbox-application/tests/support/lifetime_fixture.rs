@@ -12,14 +12,17 @@ use std::{
 };
 
 fn wait(path: &Path) -> io::Result<()> {
+    // test-time: allow(hang-guard) -- This feature-gated fixture binary bounds positive marker-file readiness without linking a production toolkit dependency.
     let start = Instant::now();
     while !path.exists() {
+        // test-time: allow(hang-guard) -- Preserve the fifteen-second infrastructure error while awaiting the actual marker file.
         if start.elapsed() > Duration::from_secs(15) {
             return Err(io::Error::other(format!(
                 "fixture timed out waiting for {}",
                 path.display()
             )));
         }
+        // test-time: allow(hang-guard) -- Pace only the positive marker-file poll; elapsed time never establishes readiness.
         std::thread::sleep(Duration::from_millis(5));
     }
     Ok(())

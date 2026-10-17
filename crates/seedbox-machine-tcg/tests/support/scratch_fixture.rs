@@ -93,7 +93,9 @@ fn run(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
     // These are the explicitly supplied child stdio descriptors, owned only by
     // this fixture. No unsafe descriptor manipulation exists in production.
     let mut socket = unsafe { UnixStream::from_raw_fd(0) };
+    // test-time: allow(hang-guard) -- Bound receipt of actual QMP commands in this host-only fixture binary; preserve the existing thirty-second I/O error.
     socket.set_read_timeout(Some(Duration::from_secs(30)))?;
+    // test-time: allow(hang-guard) -- Bound delivery of actual QMP replies in this host-only fixture binary, not simulated progress.
     socket.set_write_timeout(Some(Duration::from_secs(30)))?;
     if gdb {
         let stream = unsafe { UnixStream::from_raw_fd(1) };
@@ -124,7 +126,8 @@ fn run(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
             // QEMU keeps running when QMP disconnects. Require the parent's
             // explicit kill+wait instead of making EOF itself clean up for it.
             loop {
-                std::thread::park_timeout(Duration::from_secs(60));
+                // No timer supplies an outcome: only the owner's explicit kill ends this idle process.
+                std::thread::park();
             }
         }
         assert!(line.ends_with('\n'));
@@ -202,7 +205,8 @@ fn owner_probe(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
     fs::write(marker, b"cold scratch owner ready")?;
     loop {
         std::hint::black_box(&machine);
-        std::thread::park_timeout(std::time::Duration::from_secs(60));
+        // Retain the cold machine until external termination, without periodic timer wakeups.
+        std::thread::park();
     }
 }
 

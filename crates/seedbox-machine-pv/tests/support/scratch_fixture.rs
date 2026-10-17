@@ -174,7 +174,8 @@ fn owner_probe(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
     fs::write(marker, b"cold scratch owner ready")?;
     loop {
         std::hint::black_box(&machine);
-        std::thread::park_timeout(std::time::Duration::from_secs(60));
+        // Retain the cold machine until external termination, without periodic timer wakeups.
+        std::thread::park();
     }
 }
 
