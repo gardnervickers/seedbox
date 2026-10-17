@@ -477,10 +477,30 @@ impl RunningWorker<crate::process_lifetime::OwnedExecution> {
 }
 impl<P: ProcessLifetime> RunningWorker<P> {
     pub(crate) fn wait(
+        self,
+        cancellation: &CancellationToken,
+        wall_time_ns: u64,
+        parse_report: impl FnOnce(&[u8]) -> Result<ExecutionReport>,
+    ) -> Result<ExecutionReport> {
+        self.wait_with_sampling(
+            cancellation,
+            wall_time_ns,
+            parse_report,
+            |worker| Ok(worker.started.elapsed()?),
+            |worker| worker._endpoint.waited(),
+        )
+    }
+
+    // Private sampling keeps the real clock reads and their failure/cleanup
+    // order in production, while tests can advance elapsed and accounted wait
+    // independently without changing the public worker or clock contracts.
+    fn wait_with_sampling(
         mut self,
         cancellation: &CancellationToken,
         wall_time_ns: u64,
         parse_report: impl FnOnce(&[u8]) -> Result<ExecutionReport>,
+        mut elapsed: impl FnMut(&Self) -> Result<Duration>,
+        mut waited: impl FnMut(&Self) -> Result<Duration>,
     ) -> Result<ExecutionReport> {
         let completion = (|| loop {
             if let Some(success) = self.process.exited()? {
@@ -507,11 +527,7 @@ impl<P: ProcessLifetime> RunningWorker<P> {
             if cancellation.is_cancelled() {
                 return Ok(incomplete(StopReason::Cancelled));
             }
-            if self
-                .started
-                .elapsed()?
-                .saturating_sub(self._endpoint.waited()?)
-                >= Duration::from_nanos(wall_time_ns)
+            if elapsed(&self)?.saturating_sub(waited(&self)?) >= Duration::from_nanos(wall_time_ns)
             {
                 return Ok(incomplete(StopReason::WallTimeLimit));
             }
@@ -519,7 +535,7 @@ impl<P: ProcessLifetime> RunningWorker<P> {
         })();
         // Cleanup remains an execution error, but an already observed oracle
         // exit must survive it. Drop still retries cleanup before releasing ownership.
-        let completion = match self._endpoint.waited() {
+        let completion = match waited(&self) {
             Ok(waited) => completion.map(|mut report| {
                 report.host_wait_ns = waited.as_nanos().min(u128::from(u64::MAX)) as u64;
                 report
@@ -1104,32 +1120,58 @@ mod tests {
 
     #[test]
     fn intentional_waits_suspend_the_budget_but_not_cancellation() {
-        use seedbox_engine_protocol::host_clock::{Writer, FILE_NAME};
+        use seedbox_test_time::{handshake, ControlledClock, HangGuard};
         for cancel in [false, true] {
             let output = tempfile::tempdir().unwrap();
             let child = worker(output.path(), "exec sleep 60");
             let pid = child.process.0.as_ref().unwrap().id();
-            let mut clock =
-                Writer::open(&child._endpoint.socket().with_file_name(FILE_NAME)).unwrap();
-            clock.begin_wait().unwrap();
+            // Keep a real owned child and its cleanup assertions, but make the
+            // budget proof independent of host passage and scheduling.
+            let elapsed = ControlledClock::new(Duration::from_millis(200));
+            let accounted = ControlledClock::new(Duration::from_millis(200));
+            let (controller, entered) = handshake();
+            let guard = HangGuard::new(
+                "owned worker completes a paused-budget iteration and its final cleanup",
+                Duration::from_secs(5),
+            );
             let token = CancellationToken::default();
             std::thread::scope(|scope| {
                 let token_ref = &token;
+                let sampled_elapsed = elapsed.clone();
+                let sample_guard = guard.clone();
                 let waiting = scope.spawn(move || {
-                    child.wait(token_ref, 100_000_000, |_| {
-                        panic!("unfinished worker report must not be read")
-                    })
+                    let mut samples = 0;
+                    let mut entered = Some(entered);
+                    child.wait_with_sampling(
+                        token_ref,
+                        100_000_000,
+                        |_| panic!("unfinished worker report must not be read"),
+                        |_| {
+                            let _ = sample_guard.remaining().expect("worker budget loop hung");
+                            samples += 1;
+                            if samples == 2 {
+                                // Reaching the next sample proves the first
+                                // 200ms elapsed/200ms wait iteration continued.
+                                entered
+                                    .take()
+                                    .unwrap()
+                                    .enter_and_wait(&sample_guard)
+                                    .unwrap();
+                            }
+                            Ok(sampled_elapsed.now())
+                        },
+                        |_| Ok(accounted.now()),
+                    )
                 });
-                std::thread::sleep(Duration::from_millis(200));
-                assert!(
-                    !waiting.is_finished(),
-                    "intentional pause consumed the execution budget"
-                );
+                controller.wait_entered(&guard).unwrap();
                 if cancel {
                     token.cancel();
                 } else {
-                    clock.end_wait().unwrap();
+                    // Close the logical wait: one exact remaining budget now
+                    // elapses, while its accounted duration stays unchanged.
+                    elapsed.advance_by(Duration::from_millis(100)).unwrap();
                 }
+                controller.proceed().unwrap();
                 let report = waiting.join().unwrap().unwrap();
                 assert_eq!(
                     report.reason,
@@ -1139,7 +1181,7 @@ mod tests {
                         StopReason::WallTimeLimit
                     }
                 );
-                assert!(report.host_wait_ns >= 150_000_000);
+                assert_eq!(report.host_wait_ns, 200_000_000);
             });
             assert_reaped(pid, output.path());
         }

@@ -375,18 +375,9 @@ impl Orchestrator {
             // This additional guard prevents a late return from being a success.
             // Keep explicit backend/cleanup failures visible even when a
             // cancellation or deadline races with the completed report.
-            if report.reason != StopReason::Error {
-                if cancellation.is_cancelled() {
-                    report.reason = StopReason::Cancelled;
-                } else if start
-                    .elapsed()?
-                    .saturating_sub(std::time::Duration::from_nanos(report.host_wait_ns))
-                    .as_nanos()
-                    >= u128::from(limits.wall_time_ns)
-                {
-                    report.reason = StopReason::WallTimeLimit;
-                }
-            }
+            apply_final_deadline(&mut report, cancellation, limits.wall_time_ns, || {
+                Ok(start.elapsed()?)
+            })?;
             Ok(report)
         })();
         progress(RunProgress::Finalizing {
@@ -651,4 +642,100 @@ fn drift(recorded: &ExecutionProfile, requested: &ExecutionProfile) -> Result<()
             "executor {setting} does not match the recorded run; use an executor with the recorded settings"
         ),
     }))
+}
+
+// Keep the fallible elapsed read lazy: an explicit error or cancellation must
+// retain its existing precedence without consulting the clock at all.
+fn apply_final_deadline(
+    report: &mut ExecutionReport,
+    cancellation: &CancellationToken,
+    wall_time_ns: u64,
+    elapsed: impl FnOnce() -> Result<std::time::Duration>,
+) -> Result<()> {
+    if report.reason != StopReason::Error {
+        if cancellation.is_cancelled() {
+            report.reason = StopReason::Cancelled;
+        } else if elapsed()?
+            .saturating_sub(std::time::Duration::from_nanos(report.host_wait_ns))
+            .as_nanos()
+            >= u128::from(wall_time_ns)
+        {
+            report.reason = StopReason::WallTimeLimit;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seedbox_test_time::ControlledClock;
+    use std::time::Duration;
+
+    #[test]
+    fn final_deadline_excludes_accounted_wait_and_keeps_the_exact_boundary() {
+        let elapsed = ControlledClock::default();
+        elapsed.advance_by(Duration::from_millis(150)).unwrap();
+        for (waited_ms, expected) in [
+            (150, StopReason::Completed),
+            (51, StopReason::Completed),
+            (50, StopReason::WallTimeLimit),
+            (0, StopReason::WallTimeLimit),
+            (200, StopReason::Completed),
+        ] {
+            let waited = ControlledClock::new(Duration::from_millis(waited_ms));
+            let mut report = crate::worker_process::incomplete(StopReason::Completed);
+            report.host_wait_ns = waited.now().as_nanos().try_into().unwrap();
+            report.detail = Some("preserved backend report".into());
+            apply_final_deadline(
+                &mut report,
+                &CancellationToken::default(),
+                100_000_000,
+                || Ok(elapsed.now()),
+            )
+            .unwrap();
+            assert_eq!(report.reason, expected, "accounted wait: {waited_ms}ms");
+            assert_eq!(report.detail.as_deref(), Some("preserved backend report"));
+            assert_eq!(report.host_wait_ns, waited_ms * 1_000_000);
+        }
+    }
+
+    #[test]
+    fn final_deadline_preserves_error_and_cancellation_without_sampling_elapsed() {
+        for (reason, cancelled, expected) in [
+            (StopReason::Error, false, StopReason::Error),
+            (StopReason::Error, true, StopReason::Error),
+            (StopReason::Completed, true, StopReason::Cancelled),
+            (StopReason::WallTimeLimit, true, StopReason::Cancelled),
+        ] {
+            let cancellation = CancellationToken::default();
+            if cancelled {
+                cancellation.cancel();
+            }
+            let mut report = crate::worker_process::incomplete(reason);
+            report.detail = Some("preserved backend report".into());
+            report.host_wait_ns = 123;
+            apply_final_deadline(&mut report, &cancellation, 0, || {
+                panic!("error/cancellation must not sample the elapsed clock")
+            })
+            .unwrap();
+            assert_eq!(report.reason, expected);
+            assert_eq!(report.detail.as_deref(), Some("preserved backend report"));
+            assert_eq!(report.host_wait_ns, 123);
+        }
+    }
+
+    #[test]
+    fn final_deadline_propagates_elapsed_failure_without_rewriting_the_report() {
+        let mut report = crate::worker_process::incomplete(StopReason::Completed);
+        let error = apply_final_deadline(
+            &mut report,
+            &CancellationToken::default(),
+            100_000_000,
+            || Err(Error::Execution("elapsed sample failed".into())),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("elapsed sample failed"));
+        assert_eq!(report.reason, StopReason::Completed);
+    }
 }

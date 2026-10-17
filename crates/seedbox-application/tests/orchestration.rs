@@ -496,23 +496,21 @@ fn runtime_timeout_does_not_change_the_experiment_identity() {
 }
 
 #[test]
-fn final_deadline_guard_excludes_reported_playback_waits() {
+fn reported_playback_wait_is_internal_to_the_execution_report() {
     let fixture = Fixture::new();
     let executor = fixture.executing(|_| {
-        let start = std::time::Instant::now();
-        std::thread::sleep(std::time::Duration::from_millis(150));
         let mut report = fixture.backend.report.clone();
-        report.host_wait_ns = start.elapsed().as_nanos() as u64;
+        report.host_wait_ns = 150_000_000;
         Ok(report)
     });
     let run = fixture
         .orchestrator
         .run_prepared(
             &fixture.simulation,
-            RunOptions {
-                wall_time_ns: Some(100_000_000),
-                ..Default::default()
-            },
+            // Exact deadline exclusion is proved with injected time in the
+            // production-used private decision helper; this exercises retained
+            // outcome/JSON composition without a host-speed threshold.
+            RunOptions::default(),
             fixture.preparer.inputs.clone(),
             &executor,
         )
