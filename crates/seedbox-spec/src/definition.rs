@@ -260,6 +260,11 @@ impl Definition {
             },
             disk: self.simulator.disk.clone(),
             simulator: crate::project::SimulatorDefaults {
+                backend: if self.runtime.execution["backend"] == "driver-tcg" {
+                    crate::project::CpuBackend::Tcg
+                } else {
+                    crate::project::CpuBackend::Pv
+                },
                 blocks_per_progress_call: self.simulator.blocks_per_progress_call,
             },
         }

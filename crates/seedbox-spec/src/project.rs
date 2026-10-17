@@ -132,9 +132,26 @@ impl Default for NetworkDefaults {
     }
 }
 
+/// CPU selection supplied by the execution client, never a project/YAML knob.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuBackend {
+    #[default]
+    Pv,
+    Tcg,
+}
+impl CpuBackend {
+    pub fn is_pv(&self) -> bool {
+        *self == Self::Pv
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SimulatorDefaults {
+    // Transport submissions carry this explicitly; native authoring does not.
+    #[serde(skip)]
+    pub backend: CpuBackend,
     #[serde(default = "progress_budget")]
     pub blocks_per_progress_call: NonZeroU32,
 }
@@ -146,6 +163,7 @@ fn progress_budget() -> NonZeroU32 {
 impl Default for SimulatorDefaults {
     fn default() -> Self {
         Self {
+            backend: CpuBackend::Pv,
             blocks_per_progress_call: progress_budget(),
         }
     }
@@ -186,6 +204,7 @@ mod tests {
             "limits: {wallTime: 5m}",
             "seed: 1",
             "startPaused: true",
+            "simulator: {backend: tcg}",
             "network: {jitter: 1ms}",
         ] {
             let yaml = format!("name: test\noracle: {{image: oracle}}\n{extra}\n");

@@ -34,6 +34,8 @@ pub struct Submission {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Simulator {
+    #[serde(skip_serializing_if = "project::CpuBackend::is_pv")]
+    pub backend: project::CpuBackend,
     pub blocks_per_progress_call: std::num::NonZeroU32,
     /// Expose world controls to the oracle process.
     pub oracle_control: bool,
@@ -41,6 +43,7 @@ pub struct Simulator {
 impl Default for Simulator {
     fn default() -> Self {
         Self {
+            backend: project::CpuBackend::Pv,
             blocks_per_progress_call: project::SimulatorDefaults::default()
                 .blocks_per_progress_call,
             oracle_control: true,
@@ -258,6 +261,7 @@ impl Submission {
             configs,
             network,
             simulator: project::SimulatorDefaults {
+                backend: self.simulator.backend,
                 blocks_per_progress_call: self.simulator.blocks_per_progress_call,
             },
             schedule: Default::default(),
@@ -429,6 +433,7 @@ impl Submission {
                     .collect(),
             },
             simulator: Simulator {
+                backend: config.simulator.backend,
                 blocks_per_progress_call: config.simulator.blocks_per_progress_call,
                 oracle_control: config.control.is_some(),
             },
@@ -473,6 +478,28 @@ mod tests {
             "machines":{"app":{"image":"example/app:latest","entrypoint":[],"environment":{"REMOVE":null}}},
             "oracle":{"image":"example/oracle@sha256:abc"}
         })
+    }
+    #[test]
+    fn cpu_selection_round_trips_through_partial_submission_without_host_options() {
+        let mut value = partial();
+        value["simulator"] = serde_json::json!({"backend":"tcg"});
+        let spec: SimulationSpec = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            spec.configuration.simulator.backend,
+            project::CpuBackend::Tcg
+        );
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(wire["simulator"]["backend"], "tcg");
+        let again: SimulationSpec = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            again.configuration.simulator.backend,
+            project::CpuBackend::Tcg
+        );
+        let defaults: SimulationSpec = serde_json::from_value(partial()).unwrap();
+        assert_eq!(
+            defaults.configuration.simulator.backend,
+            project::CpuBackend::Pv
+        );
     }
     #[test]
     fn omitted_architecture_uses_server_and_partial_wire_has_no_project_wrapper() {
