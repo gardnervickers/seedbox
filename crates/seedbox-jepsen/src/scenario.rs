@@ -293,7 +293,7 @@ const ETCD_352: &str = "quay.io/coreos/etcd:v3.5.2@sha256:70fe70b6cdaea99fa9e99d
 
 fn etcd() -> Vec<Scenario> {
     // (name, comment, mode, guard, 3.5.2)
-    let specs: [(&str, &str, &str, &str, bool); 10] = [
+    let specs: [(&str, &str, &str, &str, bool); 12] = [
         ("etcd-healthy", "Baseline: the lock-set workload with no faults.", "none", "none", false),
         ("etcd-lock-pause-holder", "etcd locks do not give mutual exclusion: pause the lock holder's client process\n(a GC pause) for 3 s, longer than the 2 s lease TTL, after it has read the set.\nIts lease expires, another client takes the lock, and the paused client resumes\nand writes its stale set: acknowledged updates are lost.", "pause-holder", "none", false),
         ("etcd-11456-pause-waiter-member", "etcd#11456 through a process pause: when the holder has read the set, pause the\nmember of a client waiting for the lock for 3 s. The waiter's lease expires while\nits Lock RPC is pending there, and the RPC then succeeds without its key.", "pause-waiter-member", "none", false),
@@ -304,6 +304,10 @@ fn etcd() -> Vec<Scenario> {
         ("etcd-control-token-partition-waiter", "Negative control for etcd#11456: the partition-waiter schedule with fencing tokens.", "partition-waiter", "token", false),
         ("etcd-11456-control-v352-partition-waiter", "Negative control for etcd#11456: the partition-waiter schedule on etcd 3.5.2, whose\nLock RPC fails with a session-expired error instead of granting a deleted key.", "partition-waiter", "none", true),
         ("etcd-11456-control-v352-pause-waiter-member", "Negative control for etcd#11456: the pause-waiter-member schedule on etcd 3.5.2.", "pause-waiter-member", "none", true),
+        ("etcd-lock-generic", "The lock-set workload with no scripted nemesis, for generic faults: run it with
+`--fault-profile harness/jepsen/etcd/generic-faults.yaml`, so a seed or a campaign
+has to find a pause long enough to outlive a lease on its own.", "none", "none", false),
+        ("etcd-control-token-generic", "Negative control for etcd-lock-generic: fencing tokens under the same generic faults.", "none", "token", false),
     ];
     let members = nodes("n", 5);
     let cluster: Vec<String> = members

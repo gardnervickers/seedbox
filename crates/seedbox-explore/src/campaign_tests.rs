@@ -11,6 +11,7 @@ fn config() -> Config {
         anchors: vec![1_000, 2_000],
         mutations: Mutations {
             kinds: vec![MutationKind::Crash, MutationKind::Isolate],
+            durations: Vec::new(),
             targets: vec!["db".into()],
             machines: vec!["db".into(), "oracle".into()],
         },
@@ -351,6 +352,7 @@ fn slow_disk_and_preempt_mutations_respect_targets_and_heal() {
             },
             MutationKind::Preempt { ppm: 5_000 },
         ],
+        durations: vec![(2_000_000_000, 3_000_000_000), (500_000_000, 500_000_000)],
         targets: vec!["db".into(), "disk".into()],
         machines: vec!["db".into(), "disk".into(), "oracle".into()],
     };
@@ -380,6 +382,7 @@ fn slow_disk_and_preempt_mutations_respect_targets_and_heal() {
         match &m.kind {
             MutationKind::SlowDisk { .. } => {
                 slow += 1;
+                assert!((2_000_000_000..=3_000_000_000).contains(&m.duration_ns));
                 assert_eq!(m.target, "disk");
                 assert!((10_000_000..=20_000_000).contains(&m.latency_ns));
                 assert_eq!(start["then"]["action"], "disk_latency");
@@ -387,6 +390,7 @@ fn slow_disk_and_preempt_mutations_respect_targets_and_heal() {
             }
             MutationKind::Preempt { ppm } => {
                 preempt += 1;
+                assert_eq!(m.duration_ns, 500_000_000);
                 assert_eq!(start["then"]["action"], "preempt");
                 assert_eq!(start["then"]["ppm"], *ppm);
             }

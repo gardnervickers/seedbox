@@ -1299,22 +1299,36 @@ fn mutations(
         return plan::Mutations::default();
     };
     let mut kinds = Vec::new();
+    let mut durations = Vec::new();
+    let range = |r: &seedbox_spec::fault_profile::DurationRange| (r.min.0, r.max.0);
     for fault in &profile.faults {
-        let kind = match fault {
-            FaultKind::Crash { .. } => plan::MutationKind::Crash,
-            FaultKind::Partition { .. } => plan::MutationKind::Isolate,
-            FaultKind::Pause { .. } => plan::MutationKind::Pause,
+        let (kind, duration) = match fault {
+            FaultKind::Crash { downtime, .. } => (plan::MutationKind::Crash, range(downtime)),
+            FaultKind::Partition { duration, .. } => (plan::MutationKind::Isolate, range(duration)),
+            FaultKind::Pause { duration, .. } => (plan::MutationKind::Pause, range(duration)),
+            FaultKind::PauseProcess { duration, .. } => {
+                (plan::MutationKind::PauseProcess, range(duration))
+            }
             FaultKind::DiskLatency {
-                latency, targets, ..
-            } => plan::MutationKind::SlowDisk {
-                latency_ns: (latency.min.0, latency.max.0),
-                targets: targets.clone(),
-            },
-            FaultKind::Preempt { ppm, .. } => plan::MutationKind::Preempt { ppm: *ppm },
+                duration,
+                latency,
+                targets,
+                ..
+            } => (
+                plan::MutationKind::SlowDisk {
+                    latency_ns: (latency.min.0, latency.max.0),
+                    targets: targets.clone(),
+                },
+                range(duration),
+            ),
+            FaultKind::Preempt { duration, ppm, .. } => {
+                (plan::MutationKind::Preempt { ppm: *ppm }, range(duration))
+            }
             _ => continue,
         };
         if !kinds.contains(&kind) {
             kinds.push(kind);
+            durations.push(duration);
         }
     }
     let mut all: Vec<String> = machines.to_vec();
@@ -1328,6 +1342,7 @@ fn mutations(
     };
     plan::Mutations {
         kinds,
+        durations,
         targets,
         machines: all,
     }

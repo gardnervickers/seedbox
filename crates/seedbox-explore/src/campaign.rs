@@ -50,6 +50,9 @@ pub struct Config {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mutations {
     pub kinds: Vec<MutationKind>,
+    /// Each kind's duration range in nanoseconds, from its profile entry;
+    /// absent, a fixed set of durations.
+    pub durations: Vec<(u64, u64)>,
     pub targets: Vec<String>,
     /// Every machine, for isolating a target from the rest.
     pub machines: Vec<String>,
@@ -63,6 +66,9 @@ pub enum MutationKind {
     Isolate,
     /// Pause the target's whole machine for the duration.
     Pause,
+    /// Stop the target's application process (SIGSTOP), as a long garbage
+    /// collection would, then continue it after the duration.
+    PauseProcess,
     /// Slow the target's disk by a latency drawn from this range, in
     /// nanoseconds, for the duration; only `targets` when it names any.
     SlowDisk {
@@ -81,6 +87,7 @@ impl MutationKind {
             Self::Crash => "crash",
             Self::Isolate => "isolate",
             Self::Pause => "pause",
+            Self::PauseProcess => "pause process of",
             Self::SlowDisk { .. } => "slow disk of",
             Self::Preempt { .. } => "preempt",
         }
@@ -549,8 +556,8 @@ impl Planner {
             && self.rng.chance(600)
         {
             let (when, _) = later[self.rng.below(later.len() as u64) as usize].clone();
-            let kind =
-                mutations.kinds[self.rng.below(mutations.kinds.len() as u64) as usize].clone();
+            let index = self.rng.below(mutations.kinds.len() as u64) as usize;
+            let kind = mutations.kinds[index].clone();
             // A slow disk only targets machines its profile entry names.
             let targets = match &kind {
                 MutationKind::SlowDisk { targets, .. } if !targets.is_empty() => targets,
@@ -577,7 +584,10 @@ impl Planner {
                 nth: if self.rng.chance(250) { 2 } else { 1 },
                 delay_ns: DELAYS_NS[self.rng.below(DELAYS_NS.len() as u64) as usize],
                 kind,
-                duration_ns: DURATIONS_NS[self.rng.below(DURATIONS_NS.len() as u64) as usize],
+                duration_ns: match mutations.durations.get(index) {
+                    Some(&(min, max)) => min + self.rng.below(max.saturating_sub(min) + 1),
+                    None => DURATIONS_NS[self.rng.below(DURATIONS_NS.len() as u64) as usize],
+                },
                 latency_ns,
                 others: mutations
                     .machines
@@ -718,6 +728,14 @@ fn mutation_inputs(
                 machine: m.target.clone(),
             },
             Action::Resume {
+                machine: m.target.clone(),
+            },
+        ),
+        MutationKind::PauseProcess => (
+            Action::PauseProcess {
+                machine: m.target.clone(),
+            },
+            Action::ResumeProcess {
                 machine: m.target.clone(),
             },
         ),

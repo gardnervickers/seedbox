@@ -1,0 +1,14 @@
+# Generic faults for the etcd lock-set workload, with nothing aimed at a lock
+# holder: process pauses (a GC pause, a stalled member) of clients and members,
+# and partitions. The lock bug needs a client paused while it holds the lock for
+# longer than the 2 s lease TTL; most pauses here are shorter or land elsewhere.
+start: 5s
+end: 110s
+interval: 8s
+faults:
+  - kind: pause_process
+    weight: 3
+    duration: {min: 500ms, max: 3500ms}
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 4s}

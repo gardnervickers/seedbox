@@ -190,6 +190,20 @@ impl Client {
     }
 
     fn event(&self, fields: Value) -> Value {
+        // Each step of a locked update is a guest state too, so a campaign
+        // can tell where a client was and place a fault after it.
+        let phase = match fields["type"].as_str() {
+            Some("invoke") => Some("waiting"),
+            Some("acquired") => Some("holding"),
+            Some("read") => Some("read"),
+            Some("write") => Some("written"),
+            Some("releasing") => Some("released"),
+            Some("fail") => Some("failed"),
+            _ => None,
+        };
+        if let Some(phase) = phase {
+            seedbox_sdk::state("lock", phase);
+        }
         self.store(fields).unwrap_or(Value::Null)
     }
 
