@@ -499,6 +499,15 @@ mod tests {
     }
 
     #[test]
+    fn tcg_refusal_names_the_tcg_hosts_from_the_host_mapping() {
+        // Reached only where Host::guest(Tcg) is None (see platform tests).
+        assert_eq!(
+            crate::tcg_refusal().to_string(),
+            "--backend tcg requires Linux x86-64 or macOS on Apple Silicon, and the normal Driver runtime; remove legacy VMM, bootstrap and asset-directory overrides"
+        );
+    }
+
+    #[test]
     fn embedded_kernel_cache_reuses_bytes_and_separates_versions() {
         let directory = tempfile::tempdir().unwrap();
         let first = cached_kernel(b"kernel one", directory.path()).unwrap();

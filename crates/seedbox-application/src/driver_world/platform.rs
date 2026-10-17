@@ -11,6 +11,17 @@ pub struct Host {
     pub arch: &'static str,
 }
 
+/// Hosts with a Driver: (os, arch, native PV guest ISA, user-facing name).
+const DRIVER_HOSTS: [(&str, &str, Architecture, &str); 2] = [
+    ("linux", "x86_64", Architecture::X86_64, "Linux x86-64"),
+    (
+        "macos",
+        "aarch64",
+        Architecture::Aarch64,
+        "macOS on Apple Silicon",
+    ),
+];
+
 // TODO: Re-evaluate: PV needs a native hypervisor leaf (Linux KVM on x86-64,
 // macOS HVF on aarch64); TCG emulates an x86-64 guest with the packaged QEMU on
 // either host. Linux aarch64 PV stays out until its snapshot path is proven.
@@ -25,11 +36,10 @@ impl Host {
     /// The guest ISA `backend` executes on this host, or `None` when the host
     /// has no Driver implementation for it.
     pub fn guest(self, backend: DriverBackend) -> Option<Architecture> {
-        let pv = match (self.os, self.arch) {
-            ("linux", "x86_64") => Some(Architecture::X86_64),
-            ("macos", "aarch64") => Some(Architecture::Aarch64),
-            _ => None,
-        };
+        let pv = DRIVER_HOSTS
+            .iter()
+            .find(|(os, arch, ..)| (*os, *arch) == (self.os, self.arch))
+            .map(|(_, _, guest, _)| *guest);
         match backend {
             DriverBackend::Pv => pv,
             DriverBackend::Tcg => pv.map(|_| Architecture::X86_64),
@@ -53,6 +63,17 @@ impl Host {
     pub fn runs_driver(self) -> bool {
         self.guest(DriverBackend::Pv).is_some()
     }
+}
+
+/// The hosts that run `backend`, for user-facing refusals, e.g.
+/// "Linux x86-64 or macOS on Apple Silicon".
+pub fn hosts_for(backend: DriverBackend) -> String {
+    DRIVER_HOSTS
+        .iter()
+        .filter(|&&(os, arch, ..)| Host { os, arch }.guest(backend).is_some())
+        .map(|(.., name)| *name)
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 /// Retained-descriptor and log spelling of a guest ISA.
@@ -133,6 +154,12 @@ mod tests {
         ] {
             assert_eq!(host.project_architecture(CpuBackend::Pv), pv, "{host:?}");
             assert_eq!(host.project_architecture(CpuBackend::Tcg), tcg, "{host:?}");
+        }
+    }
+    #[test]
+    fn host_names_come_from_the_same_mapping() {
+        for backend in [DriverBackend::Pv, DriverBackend::Tcg] {
+            assert_eq!(hosts_for(backend), "Linux x86-64 or macOS on Apple Silicon");
         }
     }
     #[test]

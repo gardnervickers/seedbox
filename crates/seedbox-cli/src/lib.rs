@@ -478,6 +478,17 @@ impl From<TemplateArg> for Template {
     }
 }
 
+/// TCG runs only on the normal Driver runtime; the host list comes from the
+/// same mapping that selects Driver guests.
+fn tcg_refusal() -> Error {
+    Error::Setup(format!(
+        "--backend tcg requires {}, and the normal Driver runtime; remove legacy VMM, bootstrap and asset-directory overrides",
+        seedbox_application::driver_world::platform::hosts_for(
+            seedbox_application::driver_world::DriverBackend::Tcg
+        )
+    ))
+}
+
 /// Apple Silicon Mac runs the built-in HVF engine; every other host runs KVM.
 const MAC: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 const VMM_REQUIRES_KVM: &str = "--vmm requires Linux KVM; use the built-in Mac engine";
@@ -727,7 +738,7 @@ impl RuntimeInputs {
             WitnessMode::Exits
         };
         if simulation.simulator.backend == seedbox_spec::project::CpuBackend::Tcg && !use_driver {
-            return Err(Error::Setup("--backend tcg requires Linux x86-64 and the normal Driver runtime; remove legacy VMM, bootstrap and asset-directory overrides".into()));
+            return Err(tcg_refusal());
         }
         if use_driver {
             return self.driver_backends(
