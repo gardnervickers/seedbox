@@ -802,6 +802,16 @@ incarnation. The heal row records how many requests it matched and failed. A
 supervisor that cannot read, format or mount a failing retained disk exits 125,
 like a container runtime, rather than reporting an infrastructure failure.
 
+With `effect: corrupt` the fault selects reads and writes the same way (never
+flushes, which draw nothing) but completes them successfully with one sector,
+chosen from the request on the same stream, replaced by seeded bytes: a read
+returns the garbage and leaves the disk intact, a write stores it. The heal
+row's failed count is then the corrupted requests. The fault acts on the whole
+retained disk, which holds the ext4 filesystem under every volume, so it
+corrupts filesystem metadata and the journal as readily as application data;
+ext4 checksums its metadata, and a corrupted mount after a reboot fails as
+above. Runs without the field are unchanged.
+
 A `disk_latency` fault makes the block model complete requests later instead
 of at their notification. Each admitted request is consumed from the avail
 ring and queued with a due time: the guest time of the notification plus the

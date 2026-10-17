@@ -601,16 +601,21 @@ pub enum Action {
         machine: String,
         speed_hz: u64,
     },
-    /// Fail the machine's disk requests of kind `op` with an I/O error, each
-    /// with probability `ppm` per million drawn on a seeded stream, until the
-    /// handle is healed. A failed write changes nothing on disk and a failed
-    /// flush makes nothing durable.
+    /// Fail the machine's disk requests of kind `op`, each with probability
+    /// `ppm` per million drawn on a seeded stream, until the handle is
+    /// healed. With the `error` effect a failed request returns an I/O
+    /// error: a failed write changes nothing on disk and a failed flush makes
+    /// nothing durable. With `corrupt` it succeeds with one sector's bytes
+    /// replaced by seeded garbage: a read returns them (the disk keeps the
+    /// right data) and a write stores them. Flushes are never corrupted.
     DiskError {
         handle: String,
         machine: String,
         op: DiskOp,
         #[serde(default = "every_request")]
         ppm: u32,
+        #[serde(default, skip_serializing_if = "DiskEffect::is_error")]
+        effect: DiskEffect,
     },
     /// Complete the machine's disk requests late, until the handle is
     /// healed: each request of kind `op` takes `latency_ns` plus a seeded
@@ -750,6 +755,21 @@ pub enum DiskOp {
     Flush,
     /// Reads, writes and flushes.
     Any,
+}
+/// What a `disk_error` fault does to a request it selects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskEffect {
+    /// Fail it with an I/O error.
+    #[default]
+    Error,
+    /// Complete it with one sector of seeded garbage: silent corruption.
+    Corrupt,
+}
+impl DiskEffect {
+    pub fn is_error(&self) -> bool {
+        *self == Self::Error
+    }
 }
 /// Disk error probabilities, in parts per million: from rare to every request.
 pub const DISK_ERROR_PPM: std::ops::RangeInclusive<u32> = 1..=1_000_000;

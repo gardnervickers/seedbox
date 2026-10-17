@@ -1,0 +1,16 @@
+# Silently corrupt some of the store's writes, and crash it, while the oracle
+# writes. The store replays its log without checksums, so even the fixed
+# variant (fsync before acknowledging) recovers garbled records.
+start: 1s
+end: 18s
+interval: 2s
+faults:
+  - kind: disk_error
+    weight: 2
+    op: write
+    ppm: 20000
+    effect: corrupt
+    duration: {min: 1s, max: 4s}
+    targets: [kv]
+  - kind: crash
+    downtime: {min: 200ms, max: 1s}

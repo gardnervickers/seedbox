@@ -97,6 +97,23 @@ pub enum DiskOp {
     Any,
 }
 
+/// What a generated disk error does to a request it selects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskEffect {
+    /// Fail it with an I/O error.
+    #[default]
+    Error,
+    /// Complete it with one sector of seeded garbage.
+    Corrupt,
+}
+
+impl DiskEffect {
+    pub fn is_error(&self) -> bool {
+        *self == Self::Error
+    }
+}
+
 /// One kind of generated fault. Each fault with a duration is followed by
 /// its teardown: a heal, resume, reboot or restart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,8 +163,9 @@ pub enum FaultKind {
         downtime: DurationRange,
     },
     /// Fail one target's disk requests of kind `op`, each with probability
-    /// `ppm` per million, then heal. Only machines with a retained disk can
-    /// take it; `targets` narrows the profile's targets to those.
+    /// `ppm` per million, then heal; with `effect: corrupt`, complete them
+    /// with one sector of garbage instead. Only machines with a retained
+    /// disk can take it; `targets` narrows the profile's targets to those.
     DiskError {
         #[serde(default = "weight")]
         weight: u32,
@@ -155,6 +173,8 @@ pub enum FaultKind {
         op: DiskOp,
         #[serde(default = "every_request")]
         ppm: u32,
+        #[serde(default, skip_serializing_if = "DiskEffect::is_error")]
+        effect: DiskEffect,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<String>,
     },
@@ -229,10 +249,19 @@ impl FaultKind {
             Self::Crash { downtime, .. } | Self::Stop { downtime, .. } => {
                 downtime.validate("downtime")
             }
-            Self::DiskError { duration, ppm, .. } => {
+            Self::DiskError {
+                duration,
+                ppm,
+                op,
+                effect,
+                ..
+            } => {
                 duration.validate("duration")?;
                 if *ppm == 0 || *ppm > 1_000_000 {
                     return Err("fault profile disk_error ppm must be 1 to 1000000".into());
+                }
+                if *effect == DiskEffect::Corrupt && *op == DiskOp::Flush {
+                    return Err("fault profile disk_error cannot corrupt only flushes".into());
                 }
                 Ok(())
             }

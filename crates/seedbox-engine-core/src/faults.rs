@@ -192,6 +192,8 @@ pub enum Lifecycle {
         id: u32,
         op: seedbox_control::DiskOp,
         ppm: u32,
+        #[serde(default, skip_serializing_if = "seedbox_control::DiskEffect::is_error")]
+        effect: seedbox_control::DiskEffect,
     },
     /// End disk errors; their counts belong to the healing row.
     HealDiskErrors {
@@ -246,6 +248,9 @@ pub struct Faults {
     /// Active disk error handles: machine, fault ID, operation and ppm.
     #[serde(default)]
     disk_errors: BTreeMap<String, (usize, u32, seedbox_control::DiskOp, u32)>,
+    /// Effects of active disk error handles other than `error`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    disk_effects: BTreeMap<String, seedbox_control::DiskEffect>,
     /// Active disk latency handles: machine, fault ID, operation, latency and jitter.
     #[serde(default)]
     disk_latencies: BTreeMap<String, (usize, u32, seedbox_control::DiskOp, u64, u64)>,
@@ -304,6 +309,7 @@ impl Faults {
             clocks: BTreeMap::new(),
             throttles: BTreeMap::new(),
             disk_errors: BTreeMap::new(),
+            disk_effects: BTreeMap::new(),
             disk_latencies: BTreeMap::new(),
             preempts: BTreeMap::new(),
             cuts: BTreeMap::new(),
@@ -418,9 +424,21 @@ impl Faults {
                         return Err("invalid throttle handle/speed".into());
                     }
                 }
-                if let Action::DiskError { handle, ppm, .. } = &plan.action {
+                if let Action::DiskError {
+                    handle,
+                    ppm,
+                    op,
+                    effect,
+                    ..
+                } = &plan.action
+                {
                     if handle.is_empty() || !seedbox_control::DISK_ERROR_PPM.contains(ppm) {
                         return Err("invalid disk_error handle/ppm".into());
+                    }
+                    if *effect == seedbox_control::DiskEffect::Corrupt
+                        && *op == seedbox_control::DiskOp::Flush
+                    {
+                        return Err("a corrupt disk_error cannot select only flushes".into());
                     }
                 }
                 target = Some(self.machine_index(machine, "unknown fault machine")?);
@@ -659,9 +677,14 @@ impl Faults {
     /// them. A rebooted incarnation takes them on again.
     pub fn disk_errors(&self, m: usize) -> Option<Lifecycle> {
         self.disk_errors
-            .values()
-            .find(|(machine, ..)| *machine == m)
-            .map(|&(_, id, op, ppm)| Lifecycle::DiskErrors { id, op, ppm })
+            .iter()
+            .find(|(_, (machine, ..))| *machine == m)
+            .map(|(handle, &(_, id, op, ppm))| Lifecycle::DiskErrors {
+                id,
+                op,
+                ppm,
+                effect: self.disk_effects.get(handle).copied().unwrap_or_default(),
+            })
     }
     /// Machine `m`'s active disk latency, if any, as the lifecycle that
     /// starts it. A rebooted incarnation takes it on again.
@@ -1132,8 +1155,12 @@ impl Faults {
                 handle, speed_hz, ..
             } => self.apply_throttle(i, now, handle, speed_hz),
             Action::DiskError {
-                handle, op, ppm, ..
-            } => self.apply_disk_error(i, now, handle, op, ppm),
+                handle,
+                op,
+                ppm,
+                effect,
+                ..
+            } => self.apply_disk_error(i, now, handle, op, ppm, effect),
             Action::DiskLatency {
                 handle,
                 op,
@@ -1350,6 +1377,7 @@ impl Faults {
         handle: String,
         op: seedbox_control::DiskOp,
         ppm: u32,
+        effect: seedbox_control::DiskEffect,
     ) {
         let m = self.entries[i].target.expect("a disk error has a target");
         if self.active_handles().contains(&handle) {
@@ -1360,17 +1388,32 @@ impl Faults {
         }
         let id = self.entries[i].plan.id;
         self.disk_errors.insert(handle.clone(), (m, id, op, ppm));
+        if !effect.is_error() {
+            self.disk_effects.insert(handle.clone(), effect);
+        }
         let op_name = serde_json::to_value(op).expect("a disk op is a JSON string");
+        let effect_note = if effect.is_error() {
+            String::new()
+        } else {
+            "; effect=corrupt".into()
+        };
         self.applied(
             i,
             now,
             format!(
-                "handle={handle}; op={}; ppm={ppm}",
+                "handle={handle}; op={}; ppm={ppm}{effect_note}",
                 op_name.as_str().unwrap_or("?")
             ),
         );
-        self.lifecycle
-            .push((m, Lifecycle::DiskErrors { id, op, ppm }));
+        self.lifecycle.push((
+            m,
+            Lifecycle::DiskErrors {
+                id,
+                op,
+                ppm,
+                effect,
+            },
+        ));
     }
     fn apply_disk_latency(
         &mut self,
@@ -1434,6 +1477,7 @@ impl Faults {
             return;
         }
         if let Some((m, ..)) = self.disk_errors.remove(&handle) {
+            self.disk_effects.remove(&handle);
             self.applied(i, now, format!("handle={handle}; disk errors ended"));
             self.lifecycle
                 .push((m, Lifecycle::HealDiskErrors { row: i as u32 }));

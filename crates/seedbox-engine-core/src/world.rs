@@ -1836,10 +1836,16 @@ pub(crate) fn apply_disk_fault<M: WorldMachine>(
     op: faults::Lifecycle,
 ) -> Result<(), String> {
     match op {
-        faults::Lifecycle::DiskErrors { id, op, ppm } => {
+        faults::Lifecycle::DiskErrors {
+            id,
+            op,
+            ppm,
+            effect,
+        } => {
             let domain = format!("disk-error/{}/{}/{id}", machine.name, machine.incarnation());
             let rng = crate::rng::Rng::branch(run_seed, branch_identity, &domain);
-            let errors = crate::virtio_block::InjectedErrors::new(op, ppm, rng)?;
+            let errors =
+                crate::virtio_block::InjectedErrors::new(op, ppm, rng)?.with_effect(effect);
             machine.disk_errors(Some(errors)).map(drop)
         }
         faults::Lifecycle::HealDiskErrors { row } => {

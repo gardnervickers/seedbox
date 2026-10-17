@@ -176,9 +176,12 @@ pub struct InjectedErrors {
     ppm: u32,
     rng: crate::rng::Rng,
     counts: ErrorCounts,
+    #[serde(default, skip_serializing_if = "seedbox_control::DiskEffect::is_error")]
+    effect: seedbox_control::DiskEffect,
 }
 
-/// Requests a `disk_error` fault matched, and how many of them it failed.
+/// Requests a `disk_error` fault matched, and how many of them it failed
+/// (or, with the `corrupt` effect, corrupted).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ErrorCounts {
@@ -193,6 +196,7 @@ impl std::fmt::Debug for InjectedErrors {
             .field("ppm", &self.ppm)
             .field("draws", &self.rng.counter())
             .field("counts", &self.counts)
+            .field("effect", &self.effect)
             .finish()
     }
 }
@@ -207,11 +211,19 @@ impl InjectedErrors {
             ppm,
             rng,
             counts: ErrorCounts::default(),
+            effect: seedbox_control::DiskEffect::Error,
         })
     }
+    pub fn with_effect(mut self, effect: seedbox_control::DiskEffect) -> Self {
+        self.effect = effect;
+        self
+    }
     /// Draw for one request; only matching requests consume the stream.
+    /// Corruption never selects a flush.
     fn fails(&mut self, kind: u32) -> bool {
-        if !disk_op_matches(self.op, kind) {
+        if !disk_op_matches(self.op, kind)
+            || (self.effect == seedbox_control::DiskEffect::Corrupt && kind == T_FLUSH)
+        {
             return false;
         }
         self.counts.matched += 1;
@@ -219,6 +231,17 @@ impl InjectedErrors {
             || self.rng.below(1_000_000) < u64::from(self.ppm);
         self.counts.failed += u64::from(fail);
         fail
+    }
+    /// Replace one seeded sector of `data` with seeded bytes.
+    fn corrupt(&mut self, data: &mut [u8]) {
+        let sectors = (data.len() / SECTOR) as u64;
+        if sectors == 0 {
+            return;
+        }
+        let at = self.rng.below(sectors) as usize * SECTOR;
+        for chunk in data[at..at + SECTOR].chunks_mut(8) {
+            chunk.copy_from_slice(&self.rng.next().to_le_bytes()[..chunk.len()]);
+        }
     }
 }
 
@@ -537,16 +560,34 @@ impl Block {
         out: &mut Notified,
     ) {
         let mut data = Vec::new();
-        // An injected error fails a valid request before any disk effect.
-        let injected = self
+        // An injected error fails a valid request before any disk effect;
+        // injected corruption garbles the data the request moves instead.
+        let selected = self
             .errors
             .as_mut()
             .is_some_and(|errors| errors.fails(request.kind));
+        let corrupt = selected
+            && self
+                .errors
+                .as_ref()
+                .is_some_and(|e| e.effect == seedbox_control::DiskEffect::Corrupt);
+        let injected = selected && !corrupt;
+        let mut request = request;
+        if corrupt && request.kind == T_OUT {
+            if let Some(errors) = self.errors.as_mut() {
+                errors.corrupt(&mut request.input);
+            }
+        }
         let status = match request.kind {
             T_IN | T_OUT | T_FLUSH if injected => S_IOERR,
             T_IN => {
                 data = vec![0; request.room];
                 if self.disk.read(request.sector, &mut data).is_ok() {
+                    if corrupt {
+                        if let Some(errors) = self.errors.as_mut() {
+                            errors.corrupt(&mut data);
+                        }
+                    }
                     if self.policy == Policy::Block {
                         self.stats.reads += 1;
                         self.stats.sectors_read += (request.room / SECTOR) as u64;

@@ -200,6 +200,7 @@ fn disk_errors_target_their_narrowed_machines_one_at_a_time() {
         duration: range(1000, 3000),
         op: SpecDiskOp::Flush,
         ppm: 500_000,
+        effect: Default::default(),
         targets: vec!["n2".into()],
     }]);
     p.interval = Duration(500_000_000);

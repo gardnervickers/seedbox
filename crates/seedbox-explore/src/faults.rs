@@ -230,7 +230,11 @@ pub fn generate(
                 rng.within(downtime),
             ),
             FaultKind::DiskError {
-                duration, op, ppm, ..
+                duration,
+                op,
+                ppm,
+                effect,
+                ..
             } => (
                 Action::DiskError {
                     handle: handle.clone(),
@@ -242,6 +246,14 @@ pub fn generate(
                         SpecDiskOp::Any => DiskOp::Any,
                     },
                     ppm: *ppm,
+                    effect: match effect {
+                        seedbox_spec::fault_profile::DiskEffect::Error => {
+                            seedbox_control::DiskEffect::Error
+                        }
+                        seedbox_spec::fault_profile::DiskEffect::Corrupt => {
+                            seedbox_control::DiskEffect::Corrupt
+                        }
+                    },
                 },
                 Action::Heal {
                     handle: handle.clone(),

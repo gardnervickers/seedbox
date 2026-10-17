@@ -396,6 +396,68 @@ fn injected_errors_fail_matching_requests_without_disk_effects() {
     }
 }
 #[test]
+fn injected_corruption_garbles_one_sector_and_reports_success() {
+    use seedbox_control::{DiskEffect, DiskOp};
+    let corrupt = |op| {
+        InjectedErrors::new(op, 1_000_000, crate::rng::Rng::new(1, "test"))
+            .unwrap()
+            .with_effect(DiskEffect::Corrupt)
+    };
+    let differing = |data: &[u8], fill: u8| {
+        data.chunks(512)
+            .map(|sector| sector.iter().any(|b| *b != fill))
+            .collect::<Vec<_>>()
+    };
+    let mut g = Guest::new(Policy::Block);
+    g.request(1, 0, &[7; 1024], false);
+    g.notify().unwrap();
+    // A corrupted write succeeds and stores one garbled sector of the two.
+    g.b.set_errors(Some(corrupt(DiskOp::Write)));
+    let (_, write) = g.request(1, 2, &[9; 1024], false);
+    g.notify().unwrap();
+    assert_eq!(g.m[write], 0);
+    let mut stored = vec![0; 1024];
+    g.b.disk().read(2, &mut stored).unwrap();
+    assert_eq!(
+        differing(&stored, 9).iter().filter(|d| **d).count(),
+        1,
+        "{stored:?}"
+    );
+    assert_eq!(
+        g.b.set_errors(None),
+        Some(ErrorCounts {
+            matched: 1,
+            failed: 1
+        })
+    );
+    // A corrupted read returns one garbled sector and leaves the disk right.
+    let before = g.b.disk().digest();
+    g.b.set_errors(Some(corrupt(DiskOp::Any)));
+    let (data, read) = g.request(0, 0, &[0; 1024], true);
+    g.notify().unwrap();
+    assert_eq!(g.m[read], 0);
+    assert_eq!(
+        differing(&g.m[data..data + 1024], 7)
+            .iter()
+            .filter(|d| **d)
+            .count(),
+        1
+    );
+    assert_eq!(g.b.disk().digest(), before);
+    // Flushes are never selected: they succeed and draw nothing.
+    let (_, flush) = g.request(4, 0, &[], false);
+    g.notify().unwrap();
+    assert_eq!(g.m[flush], 0);
+    assert_eq!(g.b.disk().volatile_sectors(), 0);
+    assert_eq!(
+        g.b.set_errors(None),
+        Some(ErrorCounts {
+            matched: 1,
+            failed: 1
+        })
+    );
+}
+#[test]
 fn partial_injected_errors_are_seeded_and_survive_snapshots() {
     use seedbox_control::DiskOp;
     let run = |snapshot_after: Option<usize>| {

@@ -191,7 +191,9 @@ pub(crate) fn preview(
                 None => format!("Change clock rate by a seeded amount within ±{} ppb. The draw occurs only during execution; heal restores the nominal rate.", max_rate_ppb.unwrap_or(0)),
             }
         }
-        Action::DiskError { op, ppm, .. } => {
+        Action::DiskError {
+            op, ppm, effect, ..
+        } => {
             result.preconditions.push(
                 "The machine must be up, have a retained disk and no active disk errors.".into(),
             );
@@ -204,9 +206,14 @@ pub(crate) fn preview(
                 seedbox_control::DiskOp::Flush => "flushes",
                 seedbox_control::DiskOp::Any => "reads, writes and flushes",
             };
-            format!(
-                "Fail the machine's disk {op} with an I/O error, {ppm} per million, until healed."
-            )
+            match effect {
+                seedbox_control::DiskEffect::Error => format!(
+                    "Fail the machine's disk {op} with an I/O error, {ppm} per million, until healed."
+                ),
+                seedbox_control::DiskEffect::Corrupt => format!(
+                    "Silently corrupt one sector of the machine's disk {op}, {ppm} per million, until healed: a read returns seeded garbage, a write stores it, and flushes are untouched."
+                ),
+            }
         }
         Action::DiskLatency {
             op,
