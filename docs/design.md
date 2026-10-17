@@ -18,7 +18,37 @@ logic belongs in the oracle. The oracle can use the guest control API; the TUI
 can inject faults through the server API.
 
 The authoring schema is defined in [seedbox-spec](../crates/seedbox-spec/src/project.rs).
-The [Python control client](../python/seedbox/) provides the guest API.
+The guest control API has a [Python client](../python/seedbox/) and a
+[Rust client](../crates/seedbox-control-client/).
+
+Guest programs, the oracle included, can also declare and evaluate properties
+through the [property SDK](../crates/seedbox-sdk/). The engine reduces their
+records into a property assessment reported beside the oracle verdict, never
+in place of it: passed, violated, unmet and incomplete stay distinct, and lost
+or malformed evidence never yields a pass. Seedbox adds default properties of
+its own, such as unexpected process deaths and out-of-memory kills.
+
+## Generated faults and exploration
+
+A fault profile is a request option. A seeded sampler turns it into ordinary
+keyed fault overrides in the resolved definition, so a generated schedule is
+retained like an authored one and replay never samples it again. The oracle
+can declare quiet periods that suppress generated starts while their heals,
+resumes and reboots still run.
+
+Branching builds on the same inputs. Anchors mark times where a run may be
+captured and continued with a new seed; structured choices let a guest ask the
+engine to pick among alternatives; typed triggers apply a fault when an SDK
+event, lifecycle transition, connection frame or block request matches. Cold
+execution and continuation from a capture must agree.
+
+A campaign is a server-run search over such runs. The planner in
+[seedbox-explore](../crates/seedbox-explore/) is passive: it plans generations
+from a campaign seed and folds member feedback in ordinal order, so worker
+count and completion order never change a plan. Findings export to bundles
+that replay in a fresh server. Shrinking, counterfactual analysis and commands
+in recorded runs work on derived simulations and leave the original intact.
+[Internals](internals.md) describes each mechanism.
 
 ## Clients and server
 
@@ -106,6 +136,11 @@ may differ. Logs and events are observations, not instructions to inject again.
 | `seedbox-engine-protocol` | Private worker transport and evidence formats |
 | `seedbox-engine-core` | Shared scheduling, faults, devices, deterministic policies |
 | `seedbox-vmm`, `seedbox-arm64` | Native machine execution |
+| `seedbox-control`, `seedbox-control-client` | Guest control schema and Rust client |
+| `seedbox-sdk` | Guest property SDK |
+| `seedbox-explore` | Fault sampling, campaign planning, shrinking and counterfactual policy |
+| `seedbox-check` | History checkers for guest oracles |
+| `seedbox-bench` | Search-strategy comparison on evaluation workloads |
 
 The application library does not depend on the server or CLI. The engine core
 has no hypervisor dependency. Backend adapters perform architecture-specific
