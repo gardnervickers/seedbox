@@ -31,6 +31,7 @@ unsafe extern "C" {
     fn hv_vcpu_create(cpu: *mut u64, exit: *mut *const HvExit, config: *mut c_void) -> i32;
     fn hv_vcpu_destroy(cpu: u64) -> i32;
     fn hv_vcpu_run(cpu: u64) -> i32;
+    fn hv_vcpus_exit(cpus: *const u64, count: u32) -> i32;
     fn hv_vcpu_get_reg(cpu: u64, reg: u32, value: *mut u64) -> i32;
     fn hv_vcpu_set_reg(cpu: u64, reg: u32, value: u64) -> i32;
     fn hv_vcpu_get_sys_reg(cpu: u64, reg: u16, value: *mut u64) -> i32;
@@ -134,8 +135,59 @@ struct Pending {
     sign_extend: bool,
     wide: bool,
 }
+/// How long one entry may run without an exit before the stall watch forces
+/// it out to report where the guest is; each further report of the same
+/// stall waits twice as long.
+#[cfg(not(test))]
+const STALL_REPORT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const STALL_REPORT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Shared with the stall watch thread. A forced exit lands as an Interrupted
+/// stop, which changes no guest, clock, IRQ, budget or witness state.
+struct StallWatch {
+    base: std::time::Instant,
+    /// Nanoseconds since `base` (plus one) at the current entry; 0 outside.
+    entered: std::sync::atomic::AtomicU64,
+    /// Guest exits so far: a natural exit ends a stall.
+    exits: std::sync::atomic::AtomicU64,
+    /// Nanoseconds the forced entry had run, until taken; 0 when none.
+    fired: std::sync::atomic::AtomicU64,
+    alive: std::sync::atomic::AtomicBool,
+}
+
+impl StallWatch {
+    fn now(&self) -> u64 {
+        self.base.elapsed().as_nanos() as u64 + 1
+    }
+    fn watch(&self, cpu: u64) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut threshold = STALL_REPORT;
+        let mut exits = self.exits.load(SeqCst);
+        while self.alive.load(SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let seen = self.exits.load(SeqCst);
+            if seen != exits {
+                exits = seen;
+                threshold = STALL_REPORT;
+            }
+            let entered = self.entered.load(SeqCst);
+            if entered == 0 {
+                continue;
+            }
+            let ran = self.now().saturating_sub(entered);
+            if ran >= threshold.as_nanos() as u64 {
+                self.fired.store(ran, SeqCst);
+                unsafe { hv_vcpus_exit(&cpu, 1) };
+                threshold = threshold.saturating_mul(2);
+            }
+        }
+    }
+}
+
 pub struct Hvf {
     cpu: Option<u64>,
+    watch: Option<std::sync::Arc<StallWatch>>,
     exit: *const HvExit,
     gic: Gic,
     mappings: BTreeMap<u32, (u64, Rc<Memory>)>,
@@ -168,6 +220,7 @@ impl Backend for Hvf {
             };
             Ok(Self {
                 cpu: None,
+                watch: None,
                 exit: std::ptr::null(),
                 gic,
                 mappings: BTreeMap::new(),
@@ -211,6 +264,19 @@ impl Backend for Hvf {
             )?;
         }
         self.cpu = Some(cpu);
+        let watch = std::sync::Arc::new(StallWatch {
+            base: std::time::Instant::now(),
+            entered: Default::default(),
+            exits: Default::default(),
+            fired: Default::default(),
+            alive: std::sync::atomic::AtomicBool::new(true),
+        });
+        let watcher = watch.clone();
+        std::thread::Builder::new()
+            .name("seedbox-stall-watch".into())
+            .spawn(move || watcher.watch(cpu))
+            .map_err(|e| format!("spawn stall watch: {e}"))?;
+        self.watch = Some(watch);
         self.set_sys_reg(SysReg::MPIDR, 0x8000_0000)?;
         unsafe {
             let get_base: unsafe extern "C" fn(u64, *mut u64) -> i32 =
@@ -293,10 +359,22 @@ impl Backend for Hvf {
             return Err("run before completing held HVF exit".into());
         }
         self.entered = true;
-        unsafe {
-            check("hv_vcpu_run", hv_vcpu_run(self.cpu()?))?;
+        let cpu = self.cpu()?;
+        use std::sync::atomic::Ordering::SeqCst;
+        if let Some(watch) = &self.watch {
+            watch.entered.store(watch.now(), SeqCst);
         }
+        let status = unsafe { hv_vcpu_run(cpu) };
+        if let Some(watch) = &self.watch {
+            watch.entered.store(0, SeqCst);
+        }
+        check("hv_vcpu_run", status)?;
         let raw = unsafe { *self.exit };
+        if raw.reason != 0 {
+            if let Some(watch) = &self.watch {
+                watch.exits.fetch_add(1, SeqCst);
+            }
+        }
         if raw.reason == 0 {
             // No architectural instruction is held. In particular a queued
             // cancel may return without entering at all; never complete PC+4.
@@ -367,6 +445,13 @@ impl Backend for Hvf {
             wide,
         });
         Ok(Stop { pc, exit }.into())
+    }
+    fn take_stall(&mut self) -> Option<std::time::Duration> {
+        let watch = self.watch.as_ref()?;
+        match watch.fired.swap(0, std::sync::atomic::Ordering::SeqCst) {
+            0 => None,
+            ran => Some(std::time::Duration::from_nanos(ran)),
+        }
     }
     fn complete(&mut self, read: Option<u64>) -> Result<()> {
         let p = self.pending.take().ok_or("no HVF exit to complete")?;
@@ -577,6 +662,11 @@ impl Backend for Hvf {
 }
 impl Drop for Hvf {
     fn drop(&mut self) {
+        if let Some(watch) = self.watch.take() {
+            watch
+                .alive
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         unsafe {
             if let Some(cpu) = self.cpu.take() {
                 let rc = hv_vcpu_destroy(cpu);
@@ -602,6 +692,31 @@ mod tests {
         assert_eq!(std::mem::size_of::<Exception>(), 24);
     }
     // The platform runner signs discovered HVF test executables before running.
+    #[test]
+    #[cfg(feature = "hvf-tests")]
+    fn the_stall_watch_reports_a_guest_spin_and_resumes_it_in_place() {
+        let mut backend = Hvf::create().unwrap();
+        let memory = Rc::new(Memory::new(crate::PAGE_SIZE).unwrap());
+        // `b .` with interrupts masked: a guest that never exits.
+        unsafe {
+            memory.write(0, &0x1400_0000u32.to_le_bytes()).unwrap();
+        }
+        backend.map_memory(0, crate::RAM_BASE, memory).unwrap();
+        backend.create_vcpu().unwrap();
+        backend.set_reg(CoreReg::Pstate, 0x3c5).unwrap();
+        backend.set_reg(CoreReg::Pc, crate::RAM_BASE).unwrap();
+        assert_eq!(backend.take_stall(), None);
+        for round in 1..=2u32 {
+            let started = std::time::Instant::now();
+            assert!(matches!(backend.run().unwrap(), RunStop::Interrupted));
+            let ran = backend.take_stall().expect("the watch forced this exit");
+            // Each further report of the same stall waits twice as long.
+            let wanted = STALL_REPORT * (1 << (round - 1));
+            assert!(ran >= wanted && started.elapsed() >= wanted, "{ran:?}");
+            assert_eq!(backend.take_stall(), None);
+            assert_eq!(backend.get_reg(CoreReg::Pc).unwrap(), crate::RAM_BASE);
+        }
+    }
     #[test]
     #[cfg(feature = "hvf-tests")]
     fn canceled_entry_holds_no_instruction_and_preserves_pc() {

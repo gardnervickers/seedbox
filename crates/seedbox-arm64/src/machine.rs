@@ -766,8 +766,14 @@ impl<B: Backend> Machine<B> {
                 // Host stops create no Pending operation. Re-enter through
                 // before_run so cancellation/liveness remains observable, but
                 // do not read/publish PV time, deliver IRQs, complete an exit,
-                // spend a semantic budget or append a witness record.
-                backend::RunStop::Interrupted => continue,
+                // spend a semantic budget or append a witness record. A
+                // stall watch interruption only reports where the guest is.
+                backend::RunStop::Interrupted => {
+                    if let Some(ran) = self.backend.take_stall() {
+                        self.report_stall(ran);
+                    }
+                    continue;
+                }
             };
             self.raw_exits += 1;
             if self.backend.get_sys_reg(SysReg::CNTV_CTL)? & 1 != 0 {
@@ -1120,6 +1126,31 @@ impl<B: Backend> Machine<B> {
             self.backend.set_sys_reg(SysReg::TPIDRRO_EL0, epoch)?;
         }
         Ok(())
+    }
+    /// Report, on stderr, where a guest is after it ran an entry for `ran`
+    /// of host time without an exit. Diagnostic only: reads registers of
+    /// the stopped vCPU and changes nothing.
+    fn report_stall(&self, ran: std::time::Duration) {
+        let b = &self.backend;
+        let core = |reg| b.get_reg(reg).map_or("?".into(), |v| format!("{v:#x}"));
+        let sys = |reg| b.get_sys_reg(reg).map_or("?".into(), |v| format!("{v:#x}"));
+        let (el, daif) = match b.get_reg(CoreReg::Pstate) {
+            Ok(pstate) => (
+                ((pstate >> 2) & 3).to_string(),
+                format!("{:#x}", (pstate >> 6) & 0xf),
+            ),
+            Err(_) => ("?".into(), "?".into()),
+        };
+        eprintln!(
+            "seedbox stall: guest ran {:.1}s of host time without an exit at simulated {}ns: pc={} el={el} daif={daif} lr={} sp_el1={} sp_el0={} elr_el1={}",
+            ran.as_secs_f64(),
+            self.clock.now(),
+            core(CoreReg::Pc),
+            core(CoreReg::X(30)),
+            core(CoreReg::Sp),
+            sys(SysReg::SP_EL0),
+            sys(SysReg::ELR_EL1),
+        );
     }
     fn publish(&mut self) -> Result<()> {
         let last = unsafe { self.page.word(8)? };

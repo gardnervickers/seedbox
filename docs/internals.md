@@ -264,6 +264,17 @@ transaction: it must not adopt guest time, publish a new plan, draw timer
 randomness, deliver a guest interrupt, or advance the ARM reservation epoch
 described below.
 
+On HVF a stall watch thread per machine worker forces an exit
+(`hv_vcpus_exit`) once one entry has run 10 s of host time without a guest
+exit, then waits twice as long before each further report of the same
+stall; any guest exit resets it. The forced exit is an ordinary host
+interruption (`RunStop::Interrupted`). The machine reads the stopped vCPU's
+PC, exception level, DAIF mask, LR, stack pointers and ELR_EL1, prints one
+`seedbox stall:` line on the worker's stderr (retained as `vmm.stderr`), and
+re-enters. A guest spinning without exits, such as a raw loop outside progress
+instrumentation or one with interrupts masked, otherwise hangs a run with no
+evidence of where.
+
 The same distinction applies to backend maintenance exits, such as the ARM
 debug-register unlock bypass. An exit visible to the hypervisor is not
 automatically an event that belongs in the simulated world.

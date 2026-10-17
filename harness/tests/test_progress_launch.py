@@ -63,7 +63,8 @@ class ProgressBudgetTests(unittest.TestCase):
 #include <stdio.h>
 int main(int argc, char **argv) {
     uint32_t budget = 0, points = 0;
-    if (!seedbox_progress_arguments(argc, (const char **)argv, &budget, &points)) return 2;
+    const char *coverage = 0;
+    if (!seedbox_progress_arguments(argc, (const char **)argv, &budget, &points, &coverage)) return 2;
     printf("%u %u\n", budget, points);
     return 0;
 }

@@ -43,7 +43,7 @@ pub(crate) const MACHINE_WORKERS_PARAMETER: &str = "SEEDBOX_MACHINE_WORKERS";
 /// None of them changes results (docs/internals.md#parallel-scheduling).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LaunchPerformance {
-    /// x86 worker settings; the ARM world has no watchdog.
+    /// x86 worker settings; the ARM stall watch has a fixed interval.
     pub(crate) performance: Performance,
     /// Machine threads; unset, every machine runs on the coordinating thread.
     pub(crate) machine_workers: usize,
