@@ -397,6 +397,7 @@ pub(super) fn stop(id: &str) -> Result<u8> {
 pub(super) fn shrink(
     id: &SimulationId,
     max_probes: u32,
+    seeds: u32,
     property: Option<String>,
     options: seedbox_api::ExecutionOptions,
     detach: bool,
@@ -407,6 +408,7 @@ pub(super) fn shrink(
         request_id: Client::request_id().map_err(client_error)?,
         max_probes,
         property,
+        seeds,
         options,
     };
     runtime()?.block_on(async {
@@ -443,6 +445,10 @@ pub(super) fn shrink(
                     .as_ref()
                     .map(|e| format!(" ({e})"))
                     .unwrap_or_default();
+                let edit = match last.variant {
+                    Some(variant) => format!("{edit}, under derived seed {variant}"),
+                    None => edit,
+                };
                 eprintln!(
                     "probe {done}: {} inputs{edit}, {}",
                     last.inputs,

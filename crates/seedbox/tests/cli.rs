@@ -1498,6 +1498,8 @@ fn campaign_shrink_and_findings_bounds_are_usage_errors_before_any_server() {
             "--max-probes",
         ),
         (vec!["shrink", "not-an-id"], "ID"),
+        (vec!["shrink", "k7m2p9qx", "--seeds", "0"], "--seeds"),
+        (vec!["shrink", "k7m2p9qx", "--seeds", "9"], "--seeds"),
         (
             vec!["get", "findings", "campaign-1", "--limit", "101"],
             "--limit",

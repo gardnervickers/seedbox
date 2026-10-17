@@ -309,14 +309,30 @@ pub struct ShrinkRequest {
     /// absent and the source failed its oracle, else its first violation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub property: Option<String>,
+    /// Seeds a probe may fail under: the source's own, then derived ones,
+    /// which vary timing but no input. One keeps the exact timing.
+    #[serde(default = "one_seed")]
+    pub seeds: u32,
     pub options: ExecutionOptions,
 }
+
+fn one_seed() -> u32 {
+    1
+}
+
+/// The most seeds one shrink probe may try.
+pub const MAX_SHRINK_SEEDS: u32 = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ShrinkProbe {
+    /// The run that decided it: the one that reproduced, or the source seed's.
     pub simulation: SimulationId,
     pub inputs: u32,
+    /// Which seed reproduced it, when not the source's (1 is the first
+    /// derived seed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<u32>,
     /// A simplification probe's edit of the kept inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit: Option<String>,

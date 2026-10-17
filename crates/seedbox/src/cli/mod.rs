@@ -333,6 +333,9 @@ enum Command {
         /// Simulations the shrink may run.
         #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..=1024))]
         max_probes: u32,
+        /// Seeds each probe may fail under, run at once: the source's, then derived ones that vary timing but no input. 1 keeps the exact timing.
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=8))]
+        seeds: u32,
         /// Property whose violation must persist [default: the oracle failure, otherwise the first violation].
         #[arg(long)]
         property: Option<String>,
@@ -973,6 +976,7 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Shrink {
             id,
             max_probes,
+            seeds,
             property,
             detach,
             json,
@@ -980,6 +984,7 @@ fn run(cli: Cli) -> Result<u8> {
         } => campaigns::shrink(
             &id,
             max_probes,
+            seeds,
             property,
             seedbox_api::ExecutionOptions {
                 capture_anchors: Vec::new(),

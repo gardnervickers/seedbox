@@ -169,8 +169,35 @@ struct ShrinkJob {
     floor_ns: u64,
     from_checkpoint: bool,
     probes: Vec<(ShrinkProbe, Vec<String>)>,
-    running: Option<SimulationId>,
+    /// The current probe's runs, by seed variant (0 is the source's seed).
+    running: Vec<SimulationId>,
     error: Option<String>,
+}
+
+/// A probe's outcome from its runs by seed variant (`None` while running,
+/// else whether it failed the same way): the lowest variant that reproduced,
+/// once every lower one completed without reproducing, or no reproduction
+/// once all completed. `None` while undecided.
+fn probe_decision(outcomes: &[Option<bool>]) -> Option<(bool, usize)> {
+    for (variant, outcome) in outcomes.iter().enumerate() {
+        match outcome {
+            None => return None,
+            Some(true) => return Some((true, variant)),
+            Some(false) => {}
+        }
+    }
+    Some((false, 0))
+}
+
+/// Seed `variant` of a probe: the source's for 0, otherwise a derived one.
+fn probe_seed(base: u64, variant: u32) -> u64 {
+    if variant == 0 {
+        return base;
+    }
+    let mut z = base ^ u64::from(variant).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -446,6 +473,12 @@ impl ExecutionService {
                 shrink::MAX_PROBES
             )));
         }
+        if request.seeds == 0 || request.seeds > seedbox_api::MAX_SHRINK_SEEDS {
+            return Err(invalid(format!(
+                "seeds must be 1 to {}",
+                seedbox_api::MAX_SHRINK_SEEDS
+            )));
+        }
         let resource = self.portable_simulation(source)?;
         if resource.status.phase != Phase::Completed {
             return Err(invalid("shrink a completed simulation"));
@@ -515,7 +548,7 @@ impl ExecutionService {
             fallback,
             from_checkpoint: false,
             probes: Vec::new(),
-            running: None,
+            running: Vec::new(),
             error: None,
         };
         let view = shrink_view(&id, &job);
@@ -1147,16 +1180,35 @@ impl ExecutionService {
         job: &mut ShrinkJob,
         queued: &mut Vec<SimulationId>,
     ) -> Result<(), Error> {
-        if let Some(running) = job.running.clone() {
-            let resource = self.manager.describe(&running)?;
-            if resource.status.phase != Phase::Completed {
-                return Ok(());
+        if !job.running.is_empty() {
+            // The lowest variant that fails the same way decides, once every
+            // lower one has completed without doing so; completion order
+            // never changes the outcome.
+            let mut outcomes = Vec::new();
+            for simulation in &job.running {
+                let status = self.manager.describe(simulation)?.status;
+                outcomes.push(
+                    (status.phase == Phase::Completed).then(|| job.identity.matches(&status)),
+                );
             }
-            let reproduced = job.identity.matches(&resource.status);
+            let Some((reproduced, variant)) = probe_decision(&outcomes) else {
+                return Ok(());
+            };
+            let simulation = job.running[variant].clone();
+            for other in &job.running {
+                if *other != simulation {
+                    let status = self.manager.describe(other)?.status;
+                    if status.phase != Phase::Completed && !status.stop_requested {
+                        self.manager.stop(other)?;
+                    }
+                }
+            }
             if let Some((probe, _)) = job.probes.last_mut() {
                 probe.reproduced = Some(reproduced);
+                probe.simulation = simulation;
+                probe.variant = (variant > 0).then_some(variant as u32);
             }
-            job.running = None;
+            job.running.clear();
             match &mut job.simplifier {
                 Some(simplifier) => simplifier.report(reproduced).map_err(invalid)?,
                 None => job.shrinker.report(reproduced).map_err(invalid)?,
@@ -1221,37 +1273,62 @@ impl ExecutionService {
             }
         };
         let keep: Vec<String> = program.iter().map(|i| i.key.clone()).collect();
-        let mut spec = job.spec.clone();
-        spec.program = program;
-        let mut metadata = seedbox_spec::definition::Metadata {
-            name: format!("{}-shrink", job.source),
-            ..Default::default()
+        // A checkpoint start keeps its own state: only the source seed applies.
+        let fresh = matches!(
+            &job.spec.inputs,
+            InputSource::Resolved { definition }
+                if definition.start == seedbox_spec::definition::Start::Fresh
+        );
+        let base = job.spec.seed.unwrap_or_default();
+        let variants = if fresh && job.spec.seed.is_some() {
+            job.request.seeds.max(1)
+        } else {
+            1
         };
-        metadata.annotations.insert("shrink".into(), id.into());
-        metadata
-            .annotations
-            .insert("derived-from".into(), job.source.to_string());
-        let request = SubmitRequest {
-            options: job.request.options.clone(),
-            metadata,
-            request_id: format!("{id}-{}", job.probes.len()),
-            spec,
-            fault_profile: None,
-        };
-        let (resource, _) = self.manager.submit(request)?;
+        let mut runs = Vec::new();
+        for variant in 0..variants {
+            let mut spec = job.spec.clone();
+            spec.program = program.clone();
+            if variant > 0 {
+                spec.seed = Some(probe_seed(base, variant));
+            }
+            let mut metadata = seedbox_spec::definition::Metadata {
+                name: format!("{}-shrink", job.source),
+                ..Default::default()
+            };
+            metadata.annotations.insert("shrink".into(), id.into());
+            metadata
+                .annotations
+                .insert("derived-from".into(), job.source.to_string());
+            if variant > 0 {
+                metadata
+                    .annotations
+                    .insert("shrink-seed-variant".into(), variant.to_string());
+            }
+            let request = SubmitRequest {
+                options: job.request.options.clone(),
+                metadata,
+                request_id: format!("{id}-{}-{variant}", job.probes.len()),
+                spec,
+                fault_profile: None,
+            };
+            let (resource, _) = self.manager.submit(request)?;
+            if resource.status.phase == Phase::Queued {
+                queued.push(resource.metadata.id.clone());
+            }
+            runs.push(resource.metadata.id);
+        }
         job.probes.push((
             ShrinkProbe {
-                simulation: resource.metadata.id.clone(),
+                simulation: runs[0].clone(),
                 inputs: keep.len() as u32,
+                variant: None,
                 edit,
                 reproduced: None,
             },
             keep,
         ));
-        job.running = Some(resource.metadata.id.clone());
-        if resource.status.phase == Phase::Queued {
-            queued.push(resource.metadata.id);
-        }
+        job.running = runs;
         Ok(())
     }
 }
@@ -1795,6 +1872,24 @@ fn read_index(dir: &Path) -> Result<BTreeSet<String>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lowest_reproducing_seed_decides_a_probe() {
+        assert_eq!(
+            probe_decision(&[Some(false), Some(true), None]),
+            Some((true, 1))
+        );
+        // A lower variant still running decides first, whatever finished.
+        assert_eq!(probe_decision(&[None, Some(true)]), None);
+        assert_eq!(
+            probe_decision(&[Some(false), Some(false)]),
+            Some((false, 0))
+        );
+        assert_eq!(probe_decision(&[Some(true), None]), Some((true, 0)));
+        assert_eq!(probe_seed(42, 0), 42);
+        assert_ne!(probe_seed(42, 1), probe_seed(42, 2));
+        assert_ne!(probe_seed(42, 1), 42);
+    }
 
     #[test]
     fn an_oracle_shrink_keeps_its_exit_code_and_violations() {

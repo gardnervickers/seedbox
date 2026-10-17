@@ -600,7 +600,14 @@ failure, then every probe reruns the whole simulation and its oracle and
 counts as reproducing only when it fails the same way: the target property is
 violated again or, for an oracle failure, the oracle exits with the same code
 and every property the source violated is violated again, so a probe cannot
-drift into an unrelated failure. The result is "1-minimal under these transformations" only when
+drift into an unrelated failure. A probe may run under several seeds at once
+(`--seeds`, three by default): the source's own, then derived ones that change
+timing (guest entropy, jitter) but no input. It reproduces at the lowest seed
+that fails the same way, decided only once every lower seed has completed, so
+completion order never matters, and the other runs are then stopped. A
+failure that hangs on exact timing can then lose inputs that only shaped that
+timing; a checkpoint start keeps its state, so it uses only the source seed.
+The reproduction names the run, and so the seed, that reproduced. The result is "1-minimal under these transformations" only when
 ddmin finished at single-atom granularity; otherwise it is "reduced".
 With probes left, a greedy simplification pass then edits the kept inputs one
 at a time and keeps an edit only when the failure persists: a fault's teardown

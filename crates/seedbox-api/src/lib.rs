@@ -51,7 +51,7 @@ pub use campaign::{
     AppliedFault, Campaign, CampaignAssessment, CampaignCompletion, CampaignMember, CampaignPhase,
     CampaignPlan, CampaignProperty, CampaignRequest, CampaignSummary, Encounter, EncounterPage,
     ExportState, Finding, FindingLabel, FindingQuery, MemberPlan, Moment, Shrink, ShrinkOutcome,
-    ShrinkProbe, ShrinkRequest, MAX_PAGE,
+    ShrinkProbe, ShrinkRequest, MAX_PAGE, MAX_SHRINK_SEEDS,
 };
 
 mod world;
