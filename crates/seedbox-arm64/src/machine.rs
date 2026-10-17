@@ -1,3 +1,10 @@
+#[cfg(all(
+    test,
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "hvf-tests"
+))]
+mod hvf_tests;
 mod snapshot;
 pub use snapshot::Snapshot;
 
@@ -28,6 +35,8 @@ const ENTROPY_OFFSET: usize = 88;
 /// calls, and the stream they are drawn from (kernel-arm64/seedbox.c).
 const PREEMPT_PPM_OFFSET: usize = 120;
 const PREEMPT_SEED_OFFSET: usize = 128;
+/// Raw exits a fixture may take before it must have powered off.
+const FIXTURE_EXIT_BUDGET: u64 = 5_000_000;
 
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -216,13 +225,14 @@ impl<B: Backend> Machine<B> {
     }
     /// Advance a stopped machine to a finite world boundary. The horizon is
     /// published before entry, including boot/handshake reconciliation. A timer
-    /// beyond the boundary remains armed. The raw-exit budget spans all slices.
+    /// beyond the boundary remains armed. World runs have no exit budget: the
+    /// boundary ends each slice and a request's wall-time limit ends the run.
     pub fn run_until(&mut self, horizon: u64, before_run: impl FnMut()) -> Result<MachineStop> {
         if self.powered_off {
             return Ok(MachineStop::PoweredOff);
         }
         self.clock.set_horizon(Some(horizon))?;
-        self.advance(before_run, false)
+        self.advance(before_run, false, u64::MAX)
     }
 
     /// Slack permits an earlier stop; this cooperative backend uses the exact limit.
@@ -236,7 +246,7 @@ impl<B: Backend> Machine<B> {
             return Err("machine holds a block request until its crash".into());
         }
         self.clock.set_horizon(Some(hard_limit))?;
-        self.advance(|| {}, observe_console)
+        self.advance(|| {}, observe_console, u64::MAX)
     }
     /// The trigger whose block request hold suspended this machine.
     pub fn held(&self) -> Option<u32> {
@@ -685,7 +695,7 @@ impl<B: Backend> Machine<B> {
         }
         let start = Instant::now();
         self.clock.set_horizon(None)?;
-        if self.advance(before_run, false)? != MachineStop::PoweredOff {
+        if self.advance(before_run, false, FIXTURE_EXIT_BUDGET)? != MachineStop::PoweredOff {
             return Err("fixture stopped before power-off".into());
         }
         let console = String::from_utf8_lossy(&self.uart.console).into_owned();
@@ -729,6 +739,7 @@ impl<B: Backend> Machine<B> {
         &mut self,
         mut before_run: impl FnMut(),
         observe_console: bool,
+        exit_budget: u64,
     ) -> Result<MachineStop> {
         let console_start = self.uart.console.len();
         if self.powered_off {
@@ -748,7 +759,7 @@ impl<B: Backend> Machine<B> {
                 time_ns: self.clock.now(),
             });
         }
-        while self.raw_exits < 5_000_000 {
+        while self.raw_exits < exit_budget {
             before_run();
             let stop = match self.backend.run()? {
                 backend::RunStop::Guest(stop) => stop,
@@ -970,7 +981,9 @@ impl<B: Backend> Machine<B> {
                 });
             }
         }
-        Err("exit budget exhausted (5,000,000); no successful power-off".into())
+        Err(format!(
+            "exit budget exhausted ({exit_budget}); no successful power-off"
+        ))
     }
 
     fn application_mmio(
@@ -1365,6 +1378,132 @@ mod spi_regression {
         assert!(fresh().restore_checkpoint(checkpoint.as_slice()).is_err());
     }
 
+    /// NEXT-100 case 9: one-component mutations of a stopped application
+    /// machine against each retained comparison field. The application witness
+    /// and the full-state digest are different projections: the witness covers
+    /// the exit trace, the console stream, the clock and the disk; the full
+    /// state covers RAM, CPU, devices (with the disk), UART registers and the
+    /// interrupt and clock state. The matrix states what each mutation must
+    /// change and what it must leave alone.
+    #[test]
+    fn each_component_mutation_changes_exactly_its_comparison_fields() {
+        use std::collections::BTreeMap;
+        let fresh = || {
+            let mut m = machine();
+            let mut disk = crate::disk::Disk::new(None, Some(16)).unwrap();
+            disk.write(1, &[3; 512]).unwrap();
+            disk.flush();
+            disk.write(2, &[5; 512]).unwrap();
+            m.application.as_mut().unwrap().block = Some(application::virtio::Virtio::block(disk));
+            m.uart.console.extend_from_slice(b"ready\n");
+            m.trace.push(crate::witness::Record {
+                kind: 1,
+                time: 10,
+                pc: 0x1000,
+                addr: 0x900_0000,
+                data: 1,
+                len: 4,
+                write: true,
+            });
+            unsafe {
+                m.ram.write(0x2000, b"guest data").unwrap();
+            }
+            m
+        };
+        /// Change only the disk: a fresh block device over the edited disk has
+        /// the same transport state as the fixture's.
+        fn edit_disk(m: &mut Machine<Fake>, edit: impl FnOnce(&mut crate::disk::Disk)) {
+            let devices = m.application.as_mut().unwrap();
+            let mut disk = devices.block.as_ref().unwrap().disk().unwrap().clone();
+            edit(&mut disk);
+            devices.block = Some(application::virtio::Virtio::block(disk));
+        }
+        let fields = |m: &Machine<Fake>| -> BTreeMap<&'static str, String> {
+            let evidence = m.application_evidence(true).unwrap();
+            let parts = evidence.state_digest_parts.unwrap();
+            let disk = m
+                .application
+                .as_ref()
+                .unwrap()
+                .block
+                .as_ref()
+                .unwrap()
+                .disk()
+                .unwrap();
+            BTreeMap::from([
+                ("witness", evidence.witness),
+                ("full_state", evidence.state_digest.unwrap()),
+                ("trace", evidence.trace_hash),
+                ("console", evidence.console_hash),
+                ("disk", evidence.disk_digest.unwrap()),
+                // What survives a crash under the default drop-volatile policy.
+                ("disk_stable", disk.crashed().0.digest()),
+                ("ram", parts["ram"].clone()),
+                ("cpu", parts["cpu"].clone()),
+                ("devices", parts["devices"].clone()),
+                ("uart", parts["uart"].clone()),
+                ("clock", parts["clock"].clone()),
+            ])
+        };
+        let original = fields(&fresh());
+        assert_eq!(fields(&fresh()), original, "evidence is not reproducible");
+        type Mutation = fn(&mut Machine<Fake>);
+        let matrix: [(&str, Mutation, &[&str]); 7] = [
+            (
+                "console byte",
+                |m| m.uart.console[0] ^= 1,
+                &["witness", "console"],
+            ),
+            (
+                "exit record",
+                |m| m.trace.last_mut().unwrap().data ^= 1,
+                &["witness", "trace"],
+            ),
+            (
+                "timer delivery",
+                |m| m.inject_spi(TIMER_SPI, true).unwrap(),
+                &["full_state", "clock"],
+            ),
+            (
+                "volatile sector",
+                |m| edit_disk(m, |d| d.write(2, &[6; 512]).unwrap()),
+                &["witness", "full_state", "disk", "devices"],
+            ),
+            (
+                "stable sector",
+                |m| {
+                    edit_disk(m, |d| {
+                        d.write(1, &[4; 512]).unwrap();
+                        d.flush();
+                    })
+                },
+                &["witness", "full_state", "disk", "disk_stable", "devices"],
+            ),
+            (
+                "guest RAM byte",
+                |m| unsafe { m.ram.write(0x2000, b"G").unwrap() },
+                &["full_state", "ram"],
+            ),
+            (
+                "CPU register",
+                |m| m.backend.set_reg(CoreReg::X(3), 7).unwrap(),
+                &["full_state", "cpu"],
+            ),
+        ];
+        for (name, mutate, expected) in matrix {
+            let mut m = fresh();
+            mutate(&mut m);
+            let changed: Vec<&str> = fields(&m)
+                .into_iter()
+                .filter(|(field, value)| original[field] != *value)
+                .map(|(field, _)| field)
+                .collect();
+            let mut expected = expected.to_vec();
+            expected.sort_unstable();
+            assert_eq!(changed, expected, "{name}");
+        }
+    }
+
     #[test]
     fn throttle_changes_only_future_syscall_cost_and_survives_publication() {
         let mut m = machine();
@@ -1390,13 +1529,13 @@ mod spi_regression {
             .unwrap()
     }
     #[test]
-    fn host_interruptions_do_not_exhaust_last_semantic_exit() {
+    fn world_runs_continue_past_fixture_exit_budget() {
         let mut m = machine();
         m.ready = true;
         m.backend.set_reg(CoreReg::Pstate, 0).unwrap();
         // Simulate an epoch already advanced by the guest kernel.
         unsafe { m.page.set_word(EXCLUSIVE_EPOCH_OFFSET, 41).unwrap() };
-        m.raw_exits = 4_999_999;
+        m.raw_exits = FIXTURE_EXIT_BUDGET;
         m.backend.stops.extend([
             RunStop::Interrupted,
             RunStop::Interrupted,
@@ -1412,7 +1551,8 @@ mod spi_regression {
             MachineStop::Horizon { time_ns: 10 }
         );
         assert_eq!(entries, 3);
-        assert_eq!(m.raw_exits, 5_000_000);
+        // Host interruptions are not raw exits.
+        assert_eq!(m.raw_exits, FIXTURE_EXIT_BUDGET + 1);
         assert_eq!(m.trace.len(), 1);
         assert!(m.backend.injected.is_empty());
         assert_eq!(unsafe { m.page.word(EXCLUSIVE_EPOCH_OFFSET).unwrap() }, 42);

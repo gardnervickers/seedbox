@@ -55,16 +55,23 @@ pub(crate) fn project(
             fault_id: Some(entry.plan.id),
         });
     }
+    // Oracle actions: world faults carry the admitted action (not a plan) and
+    // the time it took effect. Interactive admissions are listed above.
     for fault in world.faults.iter().filter(|f| f.input_key.is_none()) {
-        if let Some(plan) = fault
-            .plan
-            .as_ref()
-            .and_then(|v| serde_json::from_value::<seedbox_control::Plan>(v.clone()).ok())
-        {
+        if entries.iter().any(|e| e.fault_id == Some(fault.id)) {
+            continue;
+        }
+        if let (Some(action), Some(at_ns)) = (
+            fault
+                .plan
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<seedbox_control::Action>(v.clone()).ok()),
+            fault.applied_time_ns,
+        ) {
             entries.push(TimelineEntry {
                 id: format!("oracle:{}", fault.id),
-                at_ns: plan.at_ns,
-                action: serde_json::to_value(plan.action).expect("actions serialize"),
+                at_ns,
+                action: serde_json::to_value(action).expect("actions serialize"),
                 origin: TimelineOrigin::Recorded,
                 position: None,
                 fault_id: Some(fault.id),
@@ -156,4 +163,97 @@ pub(crate) fn merge_external(
     }
     result.sort_by_key(|p| p.at_ns);
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seedbox_api::{FaultState, FaultStatus, Metadata, SimulationSpec};
+
+    #[test]
+    fn oracle_actions_appear_as_recorded_entries_once() {
+        let configuration = seedbox_application::config::parse(
+            "name: timeline\nservices:\n  n1:\n    image: example/n1\n  oracle:\n    image: example/oracle\n",
+            std::path::Path::new("/project/compose.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let mut resource = Simulation::queued(
+            Metadata {
+                name: String::new(),
+                labels: Default::default(),
+                annotations: Default::default(),
+                id: "abcdefgh".parse().unwrap(),
+                revision: 1,
+                created_at_unix_ms: 0,
+                deletion_requested_at_unix_ms: None,
+                parent: None,
+                checkpoint: None,
+            },
+            SimulationSpec {
+                start_paused: false,
+                seed: Some(1),
+                inputs: seedbox_api::InputSource::Project,
+                configuration: configuration.clone(),
+                program: Vec::new(),
+            },
+        );
+        resource.spec.program.push(ProgramInput {
+            key: "cut".into(),
+            at_ns: 5,
+            action: serde_json::json!({"action": "partition", "handle": "cut", "left": ["n1"], "right": ["oracle"]}),
+            timeout_ns: 10,
+        });
+        let mut world =
+            crate::world::Tracker::new("abcdefgh".parse().unwrap(), &configuration).snapshot();
+        let fault = |id, input_key: Option<&str>, at, plan: serde_json::Value| FaultState {
+            id,
+            input_key: input_key.map(str::to_owned),
+            action: plan["action"].as_str().unwrap().into(),
+            machine: None,
+            status: FaultStatus::Applied,
+            applied_time_ns: Some(at),
+            plan: Some(plan),
+            active: false,
+            counts: None,
+        };
+        world.faults = vec![
+            fault(
+                1,
+                Some("cut"),
+                5,
+                serde_json::json!({"action": "partition", "handle": "cut", "left": ["n1"], "right": ["oracle"]}),
+            ),
+            fault(
+                2,
+                None,
+                7,
+                serde_json::json!({"action": "partition", "handle": "p1", "left": ["n1"], "right": ["oracle"]}),
+            ),
+            fault(
+                3,
+                None,
+                9,
+                serde_json::json!({"action": "heal", "handle": "p1"}),
+            ),
+        ];
+        let timeline = project(&resource, &History::default(), &world);
+        let entries: Vec<_> = timeline
+            .entries
+            .iter()
+            .map(|e| (e.id.as_str(), e.at_ns, e.origin, e.fault_id))
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                ("program:cut", 5, TimelineOrigin::Program, Some(1)),
+                ("oracle:2", 7, TimelineOrigin::Recorded, Some(2)),
+                ("oracle:3", 9, TimelineOrigin::Recorded, Some(3)),
+            ]
+        );
+        assert_eq!(
+            timeline.entries[2].action,
+            serde_json::json!({"action": "heal", "handle": "p1"})
+        );
+    }
 }

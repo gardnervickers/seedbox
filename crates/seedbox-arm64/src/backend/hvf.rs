@@ -145,6 +145,11 @@ pub struct Hvf {
     _thread: PhantomData<Rc<()>>,
 }
 impl Hvf {
+    /// The vCPU handle, for tests that force host-only interruptions.
+    #[cfg(all(test, feature = "hvf-tests"))]
+    pub(crate) fn test_vcpu(&self) -> Result<u64> {
+        self.cpu()
+    }
     fn cpu(&self) -> Result<u64> {
         self.cpu.ok_or("HVF vCPU has not been created".into())
     }

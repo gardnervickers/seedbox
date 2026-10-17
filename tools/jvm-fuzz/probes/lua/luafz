@@ -1,0 +1,3 @@
+#!/bin/sh
+# LuaJIT probes (luafz.lua) on the image's LuaJIT.
+exec /fuzz/luajit/luajit /fuzz/lua/luafz.lua "$@"

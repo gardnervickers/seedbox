@@ -1,0 +1,107 @@
+# Translator reproducers
+
+Small C programs for bugs first seen as JVM probe failures. They need no Seedbox
+or JVM: run them under the progress translator (`drrun` with the guest's flags,
+optionally without the client) in a Linux/AArch64 container on one CPU. Natively
+they always print `OK`.
+
+| Program | What it checks | Before the fix |
+| --- | --- | --- |
+| `spawnjit SPAWNS 1 spawn` (or `vfork`) | `posix_spawn`/`vfork` while another thread writes and runs code | hangs: the stop-all-threads flush waits for the vfork parent, which cannot take the suspend signal until its child execs |
+| `spawnjit 200 4 fork 4 20` | `fork` while a writer patches code that executor threads run | 83–158 of 200 forks return `0x1200011`, the clone flags, without a child |
+| `sigext ROUNDS` | process-directed signals from a child while code is patched | passes; the JVM form (`Signals` probe) lost them, see below |
+| `regcheck ROUNDS [SPINS [x28]]` | x0–x26 and q0–q31 across progress checkpoints and x28-based accesses | passes |
+| `srsample SAMPLES` | HotSpot-style suspend/resume sampling (JFR's protocol) against fixed registers | passes |
+| `sigregs WORKERS SIGNALS [SPINS [x28\|ibl]]` | x0–x26 and q0–q31 across `tgkill` signals whose handler posts a semaphore | `ibl` (a `blr`/`ret` loop, no client) hung in about one run in five |
+| `spawnjit 60 1 fork 1 0` | `fork` while one thread rewrites and runs its code | the fork never ran: the writer's back-to-back flushes won every race for the stop-all lock |
+| `mjit THREADS ITERS` | each thread rewrites `movz; ret` slots in its own page, flushes and calls | passes; with per-page flush tracking, a flush abandoned when another thread's flush redirected its thread left stale code |
+| `map_noreplace` | `MAP_FIXED_NOREPLACE` over an existing mapping | `EPERM` instead of `EEXIST` |
+| `sigframe_unwind` | `_Unwind_Backtrace` from a SIGSEGV handler | stopped after the handler: its return address was DR's own sigreturn stub |
+| `safespot_storm [SECONDS]` | writers rewrite and flush `movz; ret` slots that executor threads call under a SIGUSR1 every 20 µs, while a mapper maps, runs and unmaps RWX pages | most 10 s runs crashed with a branch to `0xffffffffffffffff`: an indirect branch lookup racing a removal from the shared table read the deleted entry's tag (-1). As PID 1 the crash hung instead, because the kernel dropped the translator's kill of itself |
+
+Bugs found by the NEXT-100 probes (`C.*`, `cfzsync`, `cfzproc`, JVM and other runtimes), all
+fixed on the fork's master:
+
+| Program | What it checks | Before the fix |
+| --- | --- | --- |
+| `sigsys_call_addr` | SIGSYS `si_call_addr` from seccomp | a code-cache address |
+| `tempmask_pending MODE` | `rt_sigpending`; ppoll, pselect6, epoll_pwait(2) and sigsuspend temporary masks | pending set empty; `epoll_pwait2` ignores its mask; signal delivered with EINTR although an fd is ready or the arguments are invalid |
+| `sigtimedwait_queued MODE`, `sigtimedwait before\|flush N` | `rt_sigtimedwait` for a pending or arriving signal | misses an already pending signal; returns EINTR during another thread's flush, then the signal kills the process |
+| `pending_overflow N` | N signals pending on one thread | crash at 9 or more; same-number realtime signals delivered in reverse order |
+| `pending_fork_signalfd MODE N` | pending signals seen by a later `signalfd` and a fork child | `signalfd` reads none; the child receives the parent's |
+| `suspend_signal_sharing SIG N [flush]` | queued SIGILL/SIGSTKFLT/SIGUSR2 while code is flushed | hangs with the client; SIGILL loses `si_pid`/`si_value`; SIGUSR2 handled more often than sent |
+| `stopcont_signals MODE N ...` | process-directed signals with blocking threads and SIGSTOP/SIGCONT | handled once per unblocked thread; EINTR in threads that block it |
+| `flush_eintr CALL N` | waits while another thread flushes code | spurious EINTR (thousands for `nanosleep`) |
+| `vfork_exit vfork\|clone\|spawn` | a vfork child that exits without exec, `posix_spawn` of a missing program | the parent crashes |
+| `clone_mask thread\|vm` | blocked mask inherited by raw `clone` children | not blocked |
+| `vfork_flush N 0 PERIOD [spin]` | a vfork child running before exec during flushes | hangs |
+| `jitspin W S MS` | flushes while threads call into the flushed code | 2 flushes in 3 s instead of thousands |
+| `pid1_raise_dfl` | PID 1 raising a signal with the default action | spins at 100% CPU |
+| `RedefineWrongMethod.java` | class redefinition with a thread parked in the class | JVM crash in `vframeStream` from `handle_wrong_method` |
+| `sigaltstack_onstack` | `sigaltstack` from a handler running on the alternate stack | `SS_ONSTACK` never reported |
+| `exec_sigign` | ignored dispositions across `execve` | ignored signals become default |
+| `unaligned_ldxr` | `ldxr` across 16 bytes or into a `PROT_NONE` page | faults at the `stxr`, or as `SEGV_ACCERR` at the page |
+| `stxr_flush_dup flush` | `ldxr`/`stxr` increments while another thread flushes code | increments applied twice |
+| `timer_signal_loss thread N` | process-directed timer signals with a `SIGEV_THREAD` helper exiting | signals dropped by the exiting thread |
+| `failed_clone_vm MODE [fork\|flush\|thread]` | a rejected `CLONE_VM` clone or `clone3` (e.g. `pthread_create` hitting a pids limit) | the next fork, flush or exit spins forever |
+| `mapfixed_stale file\|revert\|remap` | `MAP_FIXED` replacing executable memory with other contents | the old code keeps running |
+| `sigchld_flags ign\|nocldwait\|nocldstop` | `SIGCHLD` auto-reaping and `SA_NOCLDSTOP` | children become zombies; the handler runs on stops |
+| `close_range_all range\|cloexec` | `close_range(N, ~0U)` as `closefrom` and Python's `close_fds` use it | hangs |
+| `rlimit_nofile` | `RLIMIT_NOFILE` enforcement and inheritance across exec | not enforced; the exec'd image sees the translator's limit |
+| `clear_sighand_child exit` | a `CLONE_CLEAR_SIGHAND` fork child of a multithreaded parent | debug builds assert |
+| `timer_sigwait timer\|kill thread\|self\|handler` | a process-directed signal for a thread in `sigwaitinfo`, or the one thread that unblocks it, while the main thread blocks in `pselect6` | never delivered (`timer self` and `kill handler` pass; `kill self`, with the signal already pending, waits forever); also with `drrun` and no client. A thread-directed `SIGEV_THREAD_ID` timer works |
+| `go_exec_flaky.sh` | runs `Go.exec` repeatedly | about 3% of runs lose a signal, crash a child or hang |
+
+`spawn_as_fork.c` is an `LD_PRELOAD` experiment that turns `vfork` and simple
+`posix_spawn` into `fork`; it separated the two spawn bugs.
+
+The fixes are commits on the master branch of the ARM DynamoRIO fork, the
+`dynamorio-arm` flake input ([`nix/dynamorio.nix`](../../../nix/dynamorio.nix));
+they are named here by their former patch names:
+
+- `vfork-synch`: synch-all counts a thread waiting in a vfork-style
+  clone as stopped; after the clone returns the thread waits for the synch.
+- `fork-synch`: a thread in `fork` pre-syscall handling waits as
+  "no transfer", so another thread's flush resumes it in place instead of
+  redirecting it past the syscall.
+- `vfork-handlers`: a vfork child's copied handlers no longer make
+  later signals to initializing threads fatal ("multiple native handlers").
+- `suspend-pending`: signals that arrive while a thread is
+  suspended are requeued to it. The JVM's primordial thread, blocked in
+  `pthread_join`, received `kill -HUP <jvm>` that way and never ran the handler;
+  `sigext` keeps its main thread busy and so does not hit this path.
+- `safe-spot-signals`: a signal that interrupts an application
+  thread waiting at a synch-safe spot in DR (for another thread's flush, a
+  contended lock or a fork) is delayed instead of handled at once. Handling it
+  left the wait without its epilogue, so the thread stayed marked safe and later
+  synch-alls redirected it from a stale context while it ran in the code cache.
+  JFR execution sampling (HotSpot's SIGUSR2) and the `SignalBomb` and
+  `InterruptedSyscalls` probes crashed C2 code with corrupted registers and
+  untranslated cache PCs; the debug build failed the dispatch-entry check.
+  The plain C reproducers do not reach it: they make few flushes.
+- `progress.c`: the charge restores its scratch register before the application
+  instruction. Excluding `java.util.TreeMap.rotate*` from C2 avoided the heap
+  corruption; C2's code for it deoptimizes through an implicit null check whose
+  handler saves a register that straight-line liveness considers dead.
+
+- `ibl-hit-signals`: a signal on the indirect-branch lookup's hit
+  path, after the app's x2 is restored, now finds the target fragment through the
+  hashtable entry, so a thread looping through indirect branches still exits to
+  receive it (`sigregs ... ibl`).
+- Emulation gaps found by the `C.*` probes (`probes/c/cfz.c`):
+  `sigaltstack-autodisarm` (handlers ran with the alternate stack
+  still armed), `signalfd-value` (`ssi_int`/`ssi_ptr` were zero),
+  `fork-pending-signals` (a signal sent to a fork child before
+  its translator initialized was dropped, so `kill` right after `fork` or through
+  a pidfd did nothing) and `clone-clear-sighand` (`clone3`'s
+  `CLONE_CLEAR_SIGHAND` left the parent's handlers in the child).
+- `icache-batch`, `synch-fairness`: JIT flushes
+  join a thread's consecutive `IC IVAU` lines and run at its next `DSB`, waiting
+  for other flushes without being redirected; a thread starting a stop-all lets
+  waiting ones go first (`spawnjit 60 1 fork 1 0`).
+- `clone-record`: a new AArch64 thread found its clone record by
+  reading unused stack and could read a stale record (the `Signals` probe hung).
+- `sigsuspend-pending`: upstream PR #7958; `sigsuspend` hung for a
+  signal it unblocked that was already pending (`C.sigsuspend`).
+- `mmap-noreplace` (`map_noreplace`) and
+  `vdso-sigreturn` (`sigframe_unwind`).

@@ -1,0 +1,27 @@
+# The Galera settings every node shares (PLAN.md). Per node and per scenario the
+# command line adds --wsrep-node-address, --wsrep-node-name and
+# --innodb-flush-log-at-trx-commit.
+[mariadbd]
+datadir = /var/lib/mysql/data
+bind-address = 0.0.0.0
+innodb_buffer_pool_size = 128M
+max_connections = 64
+performance_schema = OFF
+# Liveness only: a lock wait fails (a definite abort) before the client's 10 s timeout.
+innodb_lock_wait_timeout = 5
+# A small initial data directory: rsync SST copies all of it to each joiner, and
+# simulated transfers cost wall time (the defaults make it 146 MB, mostly redo log).
+innodb_log_file_size = 16M
+innodb_undo_tablespaces = 0
+
+[galera]
+wsrep_on = ON
+wsrep_provider = /usr/lib/galera/libgalera_smm.so
+wsrep_cluster_name = jepsen
+wsrep_cluster_address = gcomm://n1,n2,n3
+wsrep_sst_method = rsync
+# The write-set cache lives in the data directory; 64 MB covers a run's IST.
+wsrep_provider_options = "gcache.size=64M"
+binlog_format = ROW
+default_storage_engine = InnoDB
+innodb_autoinc_lock_mode = 2

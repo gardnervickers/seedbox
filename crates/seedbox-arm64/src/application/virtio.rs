@@ -437,6 +437,89 @@ mod tests {
         assert_eq!(&m[DATA + NET_HEADER..DATA + NET_HEADER + 5], b"frame");
         assert_eq!(u32_at(&m, USED + 8), 17);
     }
+    /// NEXT-100 case 84 on the ARM adapter: a Status reset after a partial
+    /// receive drops the asserted SPI level and the backlogged frame, and the
+    /// retained projection equals a device that only saw the fresh rings.
+    #[test]
+    fn reset_after_partial_receive_leaves_no_stale_frame_or_interrupt() {
+        // (queue size, desc, avail, used, buffers) as RAM offsets.
+        const OLD: (u32, usize, usize, usize, usize) = (2, 0x100, 0x200, 0x300, 0x400);
+        const NEW: (u32, usize, usize, usize, usize) = (4, 0x800, 0x900, 0xa00, 0xc00);
+        fn negotiate(device: &mut Virtio, m: &mut [u8], rx: (u32, usize, usize, usize, usize)) {
+            for (offset, value) in [(0x70, 1), (0x70, 3), (0x24, 1), (0x20, 1), (0x70, 0xb)] {
+                device.write(m, offset, 4, value, 0).unwrap();
+            }
+            for (queue, (num, desc, avail, used, _)) in [(0, rx), (1, (2, 0xe00, 0xe40, 0xe80, 0))]
+            {
+                for (offset, value) in [
+                    (0x30, queue),
+                    (0x38, num),
+                    (0x80, RAM_BASE as u32 + desc as u32),
+                    (0x90, RAM_BASE as u32 + avail as u32),
+                    (0xa0, RAM_BASE as u32 + used as u32),
+                    (0x44, 1),
+                ] {
+                    device.write(m, offset, 4, value as u64, 0).unwrap();
+                }
+            }
+            device.write(m, 0x70, 4, 0xf, 0).unwrap();
+        }
+        fn post(
+            m: &mut [u8],
+            (num, desc, avail, _, buffers): (u32, usize, usize, usize, usize),
+            slot: u16,
+        ) {
+            let at = desc + 16 * slot as usize;
+            wr64(m, at, RAM_BASE + (buffers + 128 * slot as usize) as u64);
+            wr32(m, at + 8, 128);
+            wr16(m, at + 12, 2);
+            let idx = u16_at(m, avail + 2);
+            wr16(m, avail + 4 + 2 * (idx as usize % num as usize), slot);
+            wr16(m, avail + 2, idx + 1);
+        }
+        let mut m = vec![0; 0x1000];
+        let mut device = Virtio::net([2, 0, 0, 0, 0, 1]);
+        negotiate(&mut device, &mut m, OLD);
+        post(&mut m, OLD, 0);
+        assert!(device.receive(&mut m, b"first").unwrap());
+        assert_eq!(&m[OLD.4 + NET_HEADER..OLD.4 + NET_HEADER + 5], b"first");
+        assert!(device.receive(&mut m, b"second").unwrap(), "backlogged");
+        assert!(device.irq(), "interrupt left asserted");
+
+        assert!(device.write(&mut m, 0x70, 4, 0, 0).unwrap().is_empty());
+        assert!(!device.irq(), "reset drops the SPI level");
+        let at_reset = m.clone();
+        negotiate(&mut device, &mut m, NEW);
+        post(&mut m, NEW, 0);
+        post(&mut m, NEW, 1);
+        assert!(device.write(&mut m, 0x50, 4, 0, 0).unwrap().is_empty());
+        assert!(!device.irq(), "stale frame raised an interrupt");
+        assert_eq!(u16_at(&m, NEW.3 + 2), 0, "stale frame completed");
+        assert!(device.receive(&mut m, b"third").unwrap());
+        assert!(device.irq());
+        assert_eq!(&m[NEW.4 + NET_HEADER..NEW.4 + NET_HEADER + 5], b"third");
+        assert_eq!(u32_at(&m, NEW.3 + 4), 0);
+        assert_eq!(u32_at(&m, NEW.3 + 8), (NET_HEADER + 5) as u32);
+        assert_eq!(&m[OLD.1..OLD.4 + 256], &at_reset[OLD.1..OLD.4 + 256]);
+        assert!(!m.windows(6).any(|w| w == b"second"));
+
+        let mut fresh_m = at_reset;
+        let mut fresh = Virtio::net([2, 0, 0, 0, 0, 1]);
+        negotiate(&mut fresh, &mut fresh_m, NEW);
+        post(&mut fresh_m, NEW, 0);
+        post(&mut fresh_m, NEW, 1);
+        fresh.write(&mut fresh_m, 0x50, 4, 0, 0).unwrap();
+        fresh.receive(&mut fresh_m, b"third").unwrap();
+        assert_eq!(fresh_m, m);
+        assert_eq!(
+            fresh.state_digest().unwrap(),
+            device.state_digest().unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&fresh.snapshot()).unwrap(),
+            serde_json::to_string(&device.snapshot()).unwrap()
+        );
+    }
     #[test]
     fn dma_cannot_access_mmio_or_follow_cycles_and_failure_does_not_write_ram() {
         for address in [crate::TIME_ADDR, RAM_BASE - 1, RAM_BASE + 0x3fff, u64::MAX] {

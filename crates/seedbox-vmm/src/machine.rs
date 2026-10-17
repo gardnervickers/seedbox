@@ -17,6 +17,8 @@ use std::os::fd::AsRawFd;
 use std::time::Instant;
 
 mod checkpoint;
+#[cfg(test)]
+mod device_checkpoint_tests;
 pub mod pv;
 mod pv_plan;
 pub use checkpoint::MachineSnapshot;

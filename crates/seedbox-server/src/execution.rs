@@ -3,6 +3,7 @@
 
 mod bundles;
 mod campaigns;
+pub(crate) mod content;
 mod diagnostics;
 
 use crate::{catalogue, manager::Manager};
@@ -24,7 +25,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
     time::Duration,
 };
@@ -83,6 +84,11 @@ pub struct ExecutionService {
     backends: Arc<dyn BackendProvider>,
     preparation_limit: Duration,
     evidence: Mutex<()>,
+    /// Read while creating owned content a resource will reference; written by
+    /// reclamation (`content.rs`).
+    references: RwLock<()>,
+    /// Captured state of exported checkpoints, by source and checkpoint.
+    exports: Mutex<BTreeMap<SimulationId, BTreeMap<String, BTreeSet<ContentDigest>>>>,
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
     jobs: Mutex<campaigns::Jobs>,
     findings_root: Option<PathBuf>,
@@ -106,6 +112,8 @@ impl ExecutionService {
             evidence: Mutex::new(()),
             jobs: Mutex::default(),
             findings_root: None,
+            references: RwLock::new(()),
+            exports: Mutex::default(),
             admission: Mutex::new((0, BTreeMap::new())),
         })
     }
@@ -121,7 +129,8 @@ impl ExecutionService {
     }
 
     /// Foreground cascading deletion: stop the frozen ownership tree, wait for
-    /// execution cleanup, then remove dependents before their parents.
+    /// execution cleanup, then remove dependents before their parents, and
+    /// finally the owned content no remaining resource references.
     pub fn delete(&self, id: &SimulationId) -> Result<(), Error> {
         let _evidence = self
             .evidence
@@ -160,7 +169,9 @@ impl ExecutionService {
                 result => result?,
             }
             self.manager.delete(&id)?;
+            self.forget_exports(&id, None)?;
         }
+        self.reclaim_unreferenced()?;
         Ok(())
     }
 
@@ -172,7 +183,9 @@ impl ExecutionService {
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?;
         self.manager.delete_checkpoint(id, name)?;
+        self.forget_exports(id, Some(name))?;
         if self.manager.read(|catalogue| catalogue.is_imported(id))? {
+            self.reclaim_unreferenced()?;
             return Ok(());
         }
         let inputs: RetainedInputs = serde_json::from_reader(fs::File::open(
@@ -187,7 +200,9 @@ impl ExecutionService {
                 e.kind(),
                 format!("checkpoint {name} cleanup: {e}"),
             ))
-        })
+        })?;
+        self.reclaim_unreferenced()?;
+        Ok(())
     }
 
     /// Snapshot the atomically published semantic journal using owned paths.
@@ -324,8 +339,14 @@ impl ExecutionService {
                 timeout_ns: input.timeout_ns,
             })
             .collect();
+        let references = self
+            .references
+            .read()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
         definition.start =
             seedbox_application::definition::capture_start(&path, &attempt, &self.store)?;
+        self.record_export(id, name, &definition.start)?;
+        drop(references);
         let frozen = seedbox_artifacts::interventions::read(
             &attempt.join(format!("checkpoint-{name}-interventions.json")),
         )?;
@@ -766,6 +787,11 @@ impl ExecutionService {
         } else {
             seedbox_application::definition::resolve(&spec.configuration, &inputs, seed, overrides)?
         };
+        // Owned boot archives made here are unreferenced until the resolved
+        // definition and retained inputs below name them.
+        let references = self.references.read().map_err(|_| {
+            seedbox_application::Error::Execution("content reference lock failed".into())
+        })?;
         // The first run and every resubmission use the same resolved private representation.
         // Source paths, image transport manifests and human metadata never enter experiment identity.
         let inputs = seedbox_application::definition::prepared(&definition, &self.store)?;
@@ -810,6 +836,7 @@ impl ExecutionService {
                 s.status.engine = engine;
             })
             .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
+        drop(references);
         let observations = crate::observations::Receiver::start(self.manager.clone(), id.clone())?;
         let mut orchestrator = Orchestrator::new(self.store.clone(), directory.join("attempts"));
         if let Some(checkpoint) = checkpoint {

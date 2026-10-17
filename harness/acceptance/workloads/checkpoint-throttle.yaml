@@ -1,0 +1,28 @@
+name: checkpoint-throttle
+machines:
+  worker:
+    cpu:
+      speed: 2GHz
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/throttle_charge.py"
+    - worker
+    files:
+    - source: "../driver/throttle_charge.py"
+      target: "/scenario/throttle_charge.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/throttle_charge.py"
+  - scenario
+  files:
+  - source: "../driver/throttle_charge.py"
+    target: "/scenario/throttle_charge.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

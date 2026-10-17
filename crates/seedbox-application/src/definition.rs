@@ -508,7 +508,8 @@ fn resolved_boot(
     // newc permits final zero padding; retaining it preserves byte identity for unchanged recipes.
     std::io::copy(&mut input, &mut output)?;
     output.rewind()?;
-    store.put_reader(output)
+    // An edited launch record makes a new archive that only its resources use.
+    store.put_reader_owned(output)
 }
 fn launch_configs(bytes: &[u8]) -> Result<&[u8]> {
     let fail = || Error::Integrity("invalid retained launch record".into());

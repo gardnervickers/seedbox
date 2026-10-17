@@ -28,7 +28,7 @@ pub struct ContainerTransport {
 
 /// Keys cached image exports. Change it whenever export or layer merging
 /// changes the bytes produced for the same image.
-const EXPORT_FORMAT: &str = "image-export-v2";
+const EXPORT_FORMAT: &str = "image-export-v3";
 fn setup(error: impl std::fmt::Display) -> Error {
     Error::Setup(format!("container image preparation: {error}"))
 }
@@ -450,6 +450,11 @@ pub(crate) fn export_header<R: std::io::Read>(
                     }
                 }
                 "path" | "linkpath" | "size" | "atime" | "ctime" | "uname" | "gname" => (),
+                // Overlay filesystems record their own bookkeeping (origin, redirect,
+                // opaque directories) in these xattrs, and rootless engines export
+                // them. They describe the build host's layer storage, not the image.
+                _ if field.starts_with("SCHILY.xattr.user.overlay.")
+                    || field.starts_with("SCHILY.xattr.trusted.overlay.") => {}
                 _ => {
                     return Err(setup(format!(
                         "exported filesystem {}: unsupported extended metadata {field}",
@@ -463,9 +468,34 @@ pub(crate) fn export_header<R: std::io::Read>(
 }
 
 #[cfg(test)]
+mod layer_merge_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{BufRead, Read, Write};
+    #[test]
+    fn overlay_bookkeeping_xattrs_are_ignored() {
+        for key in [
+            "SCHILY.xattr.user.overlay.origin",
+            "SCHILY.xattr.trusted.overlay.opaque",
+        ] {
+            let mut tar = tar::Builder::new(Vec::new());
+            tar.append_pax_extensions([(key, &b"y"[..])]).unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o755);
+            header.set_size(0);
+            tar.append_data(&mut header, "bin/app", std::io::empty())
+                .unwrap();
+            let bytes = tar.into_inner().unwrap();
+            let mut archive = tar::Archive::new(bytes.as_slice());
+            let mut entry = archive.entries().unwrap().next().unwrap().unwrap();
+            assert!(
+                export_header(&mut entry, Path::new("bin/app")).is_ok(),
+                "{key}"
+            );
+        }
+    }
     #[test]
     fn unsupported_xattr_names_the_image_path_and_key() {
         let mut tar = tar::Builder::new(Vec::new());

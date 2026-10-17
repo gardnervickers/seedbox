@@ -1,0 +1,31 @@
+name: two-crash
+machines:
+  store:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/two_crash.py"
+    - store
+    files:
+    - source: "../driver/two_crash.py"
+      target: "/scenario/two_crash.py"
+    volumes:
+      data:
+        target: "/data"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/two_crash.py"
+  - oracle
+  - "--policy"
+  - drop
+  files:
+  - source: "../driver/two_crash.py"
+    target: "/scenario/two_crash.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

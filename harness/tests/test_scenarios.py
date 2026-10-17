@@ -18,6 +18,7 @@ def driver(name):
 
 
 race = driver('race')
+kafka_broker = driver('kafka_broker')
 
 
 class ScenarioTests(unittest.TestCase):
@@ -29,6 +30,16 @@ class ScenarioTests(unittest.TestCase):
                 if succeeds: race.main()
                 else:
                     with self.assertRaises(RuntimeError): race.main()
+
+
+    def test_kafka_log_check_requires_each_acknowledged_record_once_in_order(self):
+        values = [kafka_broker.value(seq) for seq in range(4)]
+        log = [(offset, 'k', value) for offset, value in enumerate(values)]
+        kafka_broker.exactly(log, values, 'topic')
+        for broken in (log[:-1], log + [(4, 'k', values[0])], [log[1], log[0]] + log[2:],
+                       [(offset + 1, key, value) for offset, key, value in log]):
+            with self.assertRaises(kafka_broker.Failed):
+                kafka_broker.exactly(broken, values, 'topic')
 
 
 if __name__ == '__main__':

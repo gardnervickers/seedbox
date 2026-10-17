@@ -638,6 +638,128 @@ mod tests {
         });
     }
 
+    /// NEXT-100 case 97, engine arm: a requested checkpoint whose capture
+    /// fails is never acknowledged. Publication failing before, during or after
+    /// writing, and the second machine of a two-machine world failing its
+    /// snapshot, all leave the request pending and nothing held; a retried
+    /// status still reports Requested. A run that then ends refuses the
+    /// checkpoint as completed instead of fabricating it.
+    #[test]
+    fn failed_capture_is_never_acknowledged_and_completion_fabricates_nothing() {
+        use std::{io::Write, time::Duration};
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("control");
+        let mut control = HostControl::bind(&endpoint).unwrap();
+        control.enable_checkpoints();
+        let boundary = Boundary::default();
+        let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
+        client.connect(&endpoint).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let request = Request {
+            id: 1,
+            command: Command::Checkpoint {
+                request_id: "saved".into(),
+            },
+        };
+        client.send(&serde_json::to_vec(&request).unwrap()).unwrap();
+        let mut faults = crate::faults::Faults::new(vec![], vec!["a".into(), "b".into()]).unwrap();
+        let mut admission =
+            Admission::new(&mut faults, boundary, &|_| Ok(())).with_checkpoint_support(true);
+        control
+            .boundary_with_admission(boundary, &mut admission)
+            .unwrap();
+        assert!(admission.checkpoint_requested());
+        let mut buffer = [0; MAX_DATAGRAM];
+        let len = client.recv(&mut buffer).unwrap();
+        let accepted: Reply = serde_json::from_slice(&buffer[..len]).unwrap();
+        assert_eq!(
+            accepted.checkpoint.unwrap().state,
+            CheckpointState::Requested
+        );
+
+        let mut world = crate::world_mock::world(&["a", "b"]);
+        let replay = crate::intervention::Replay::new(Default::default()).unwrap();
+        let mut owner = crate::checkpoint::LiveCheckpoints::default();
+        let still_requested = |control: &mut HostControl, id| {
+            let retry = control.request(
+                Request {
+                    id,
+                    command: request.command.clone(),
+                },
+                boundary,
+            );
+            assert_eq!(retry.error, None);
+            assert_eq!(retry.checkpoint.unwrap().state, CheckpointState::Requested);
+            assert!(control.pending_checkpoint().is_some());
+        };
+        let target = directory.path().join("checkpoint-saved.json");
+        type Publish<'a> = Box<dyn Fn(&str) -> Result<(), String> + 'a>;
+        let attempts: [(&str, Publish); 3] = [
+            (
+                "before writing",
+                Box::new(|_| Err("no space before writing".into())),
+            ),
+            (
+                "while writing",
+                Box::new(|id: &str| {
+                    let mut file = std::fs::File::create(&target).unwrap();
+                    file.write_all(id.as_bytes()).unwrap();
+                    Err("short write".into())
+                }),
+            ),
+            (
+                "after writing",
+                Box::new(|id: &str| {
+                    std::fs::write(&target, id).unwrap();
+                    Err("rename failed after writing".into())
+                }),
+            ),
+        ];
+        for (index, (stage, publish)) in attempts.iter().enumerate() {
+            let error = owner
+                .capture_pending_with(&mut world, &replay, &mut control, |id, _| publish(id))
+                .unwrap_err();
+            assert!(!error.is_empty(), "{stage}");
+            assert!(owner.get("saved").is_none(), "{stage}: held after failure");
+            still_requested(&mut control, 10 + index as u64);
+        }
+        // The second machine's snapshot fails after the first one's succeeded.
+        world.factory.lock().unwrap().push("fail/snapshot/b".into());
+        let mut published = false;
+        let error = owner
+            .capture_pending_with(&mut world, &replay, &mut control, |_, _| {
+                published = true;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(error, "b snapshot failed");
+        assert!(!published, "a partial world was published");
+        assert!(owner.get("saved").is_none());
+        still_requested(&mut control, 20);
+
+        // The run ends with the request still pending: no capture, no
+        // checkpoint, and later requests are refused as completed.
+        let terminal = Boundary {
+            terminal: true,
+            ..boundary
+        };
+        let late = control.request(
+            Request {
+                id: 30,
+                command: request.command.clone(),
+            },
+            terminal,
+        );
+        assert_eq!(late.error, Some(ControlError::Completed));
+        assert!(late
+            .checkpoint
+            .is_none_or(|status| status.state == CheckpointState::Requested));
+        assert!(owner.get("saved").is_none());
+        assert!(control.checkpoint_captured("other").is_err());
+    }
+
     #[test]
     fn live_checkpoints_retain_within_a_byte_budget_and_release_frees_it() {
         let directory = tempfile::tempdir().unwrap();
