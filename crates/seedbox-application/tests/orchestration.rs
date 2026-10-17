@@ -1595,24 +1595,23 @@ impl ExecutionBackend for ControlledWorkers<'_> {
         self.ready
             .send((request.seed, request.output.parent().unwrap().to_owned()))
             .unwrap();
-        let command = self.controls[&request.seed]
-            .lock()
-            .unwrap()
-            .recv_timeout(WORKER_WAIT)
-            .expect("test control deadline");
+        let command = seedbox_test_time::HangGuard::new(
+            "controlled worker receives its explicit permit",
+            WORKER_WAIT,
+        )
+        .recv(&self.controls[&request.seed].lock().unwrap())
+        .expect("test control deadline");
         match command {
             WorkerControl::CleanupUnverified => {
                 return Err(Error::Execution("owned cleanup-unverified".into()))
             }
             WorkerControl::WaitForCancellation => {
-                let deadline = std::time::Instant::now() + WORKER_WAIT;
-                while !request.cancellation.is_cancelled() {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "owned cancellation was not forwarded"
-                    );
-                    std::thread::yield_now();
-                }
+                seedbox_test_time::HangGuard::new(
+                    "owned cancellation is forwarded to the worker",
+                    WORKER_WAIT,
+                )
+                .wait_for(|| request.cancellation.is_cancelled().then_some(()))
+                .expect("owned cancellation was not forwarded");
             }
             WorkerControl::BreakCheckpoint => {
                 let batch = batch_of(request.output.parent().unwrap());
@@ -1663,9 +1662,12 @@ fn controlled_workers(
 fn worker_ready(
     receiver: &std::sync::mpsc::Receiver<(u64, std::path::PathBuf)>,
 ) -> (u64, std::path::PathBuf) {
-    receiver
-        .recv_timeout(WORKER_WAIT)
-        .expect("worker did not start")
+    seedbox_test_time::HangGuard::new(
+        "controlled worker sends its actual start record",
+        WORKER_WAIT,
+    )
+    .recv(receiver)
+    .expect("worker did not start")
 }
 /// The exploration directory three levels above one of its run directories.
 fn batch_of(run: &std::path::Path) -> &std::path::Path {

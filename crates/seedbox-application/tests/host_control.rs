@@ -3,6 +3,7 @@
 use seedbox_engine_core::host_control as engine;
 
 use seedbox_engine_protocol::host_clock;
+use seedbox_test_time::HangGuard;
 use std::{fs, os::unix::net::UnixDatagram, sync::mpsc, time::Duration};
 
 /// Two wait-clock samples around an interval the test measures with the same
@@ -11,8 +12,11 @@ use std::{fs, os::unix::net::UnixDatagram, sync::mpsc, time::Duration};
 /// the first sample precedes the interval and the second follows it.
 fn bracket(clock: &host_clock::Reader) -> (Duration, Duration) {
     let first = clock.waited().unwrap();
+    // test-time: allow(host-time-subject) -- Sample the host-wait accounting clock itself to bracket its open/closed accounting transitions.
     let start = host_clock::Instant::now().unwrap();
+    // test-time: allow(host-time-subject) -- Obtain a strictly positive interval of the host clock under test, not an ordering delay.
     while start.elapsed().unwrap().is_zero() {}
+    // test-time: allow(host-time-subject) -- Compare accounted host wait with the same measured clock interval; no speed threshold is asserted.
     let interval = start.elapsed().unwrap();
     let second = clock.waited().unwrap();
     (second.checked_sub(first).unwrap(), interval)
@@ -32,9 +36,13 @@ fn pause_acknowledges_a_boundary_and_repeated_requests_preserve_the_gate() {
     let mut control = engine::HostControl::bind(&socket).unwrap();
     let client = UnixDatagram::bind(directory.path().join("client")).unwrap();
     client.connect(&socket).unwrap();
-    // Hang guard only: a correct run never waits this long.
+    let guard = HangGuard::new(
+        "host-control socket acknowledges actual commands",
+        Duration::from_secs(2),
+    );
+    // test-time: allow(hang-guard) -- Bound positive pause/resume/invalid replies; payloads and gate ownership prove ordering.
     client
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(guard.remaining().unwrap()))
         .unwrap();
     // Queue before entering the boundary, then prove no simulated work follows it.
     // Only the boundary loop answers, so each reply below proves the worker
@@ -135,10 +143,12 @@ fn typed_controls_resolve_a_timeout_before_admitting_a_step() {
         // first sleeps; it stays open until resumed. Wait for that transition
         // (the deadline is a hang guard), then prove the open wait accrues
         // host time across a further measured interval.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while bracket(&clock).0.is_zero() {
-            assert!(std::time::Instant::now() < deadline, "wait never opened");
-        }
+        HangGuard::new(
+            "host-control opens its accounted wait",
+            Duration::from_secs(2),
+        )
+        .wait_for(|| (!bracket(&clock).0.is_zero()).then_some(()))
+        .expect("wait never opened");
         let (grown, interval) = bracket(&clock);
         assert!(grown >= interval, "{grown:?} < {interval:?}");
         let step = client
@@ -147,7 +157,10 @@ fn typed_controls_resolve_a_timeout_before_admitting_a_step() {
         assert_eq!(step.error, None);
         assert!(step.stepping);
         // Hang guard only: the admitted step completes one round.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let guard = HangGuard::new(
+            "admitted host-control step completes one round",
+            Duration::from_secs(2),
+        );
         loop {
             let status = client
                 .execute(Command::Status, Duration::from_secs(2))
@@ -157,7 +170,8 @@ fn typed_controls_resolve_a_timeout_before_admitting_a_step() {
                 assert_eq!(status.rate, PlaybackRate::Paused);
                 break;
             }
-            assert!(std::time::Instant::now() < deadline);
+            // Client execution is a blocking adapter, so keep it outside a wait_for observer.
+            let _ = guard.remaining().expect("admitted step did not complete");
         }
         client
             .execute(
