@@ -159,7 +159,8 @@ impl DriverExecutor {
         self.runtime = Some(super::binding::Binding::new(inputs)?);
         Ok(self)
     }
-    // Parent and native admission share the Linux x86-64 controller scope.
+    // Parent and native admission share one controller scope: the Driver
+    // hosts of `platform::Host` (Linux x86-64, macOS aarch64).
     fn admit_execution(&self, controller: bool) -> Result<()> {
         super::policy::admit_execution(self.backend, controller).map_err(Error::Setup)
     }

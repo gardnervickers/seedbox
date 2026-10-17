@@ -79,7 +79,8 @@ pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
 }
 /// Keep PV controller continuation scoped independently of fresh admission.
 /// build::restore must bind the saved Driver controller and latency before any
-/// factory or native restoration; only Linux x86-64 continuation is exercised.
+/// factory or native restoration. Both Driver hosts are admitted; only Linux
+/// x86-64 continuation is exercised (macOS aarch64 is unverified, bd-877).
 /// TCG controller continuation goes through the same binding and [`admit`].
 pub(super) fn admit_restore(inventory: &wire::Inventory) -> Result<(), String> {
     let policy = decode_optional(inventory.backend_policy())?;

@@ -104,7 +104,7 @@ fn controller_must_be_the_dedicated_oracle_before_any_host_effects() {
     assert!(!output.exists());
 }
 #[test]
-fn tcg_controller_requests_are_admitted_only_on_linux_x86_64() {
+fn tcg_controller_requests_are_admitted_only_on_driver_hosts() {
     let root = tempfile::tempdir().unwrap();
     let tcg = inventory(Some(wire::BackendPolicy {
         controller: Some("oracle".into()),
