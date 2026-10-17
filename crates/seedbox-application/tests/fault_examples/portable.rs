@@ -4,6 +4,7 @@
     clippy::disallowed_methods,
     reason = "test code: spawns here never race a Seedbox process writing an executable"
 )]
+use seedbox_test_time::HangGuard;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -16,7 +17,7 @@ use std::{
         mpsc, Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const BATCH: usize = 32;
@@ -34,15 +35,19 @@ fn addresses() -> (String, String) {
     )
 }
 fn wire(address: &str, command: &str) -> String {
-    let start = Instant::now();
-    let mut socket = TcpStream::connect_timeout(&address.parse().unwrap(), CONTROL)
-        .unwrap_or_else(|e| panic!("connect {address} for {command}: {e}"));
+    let guard = HangGuard::new("actual control socket response", CONTROL);
+    // test-time: allow(hang-guard) -- Bound a positive local connection, not the guest's simulated I/O deadline.
+    let mut socket =
+        TcpStream::connect_timeout(&address.parse().unwrap(), guard.remaining().unwrap())
+            .unwrap_or_else(|e| panic!("connect {address} for {command}: {e}"));
+    // test-time: allow(hang-guard) -- Keep this positive request write inside the same infrastructure guard.
     socket
-        .set_write_timeout(Some(CONTROL.saturating_sub(start.elapsed())))
+        .set_write_timeout(Some(guard.remaining().unwrap()))
         .unwrap();
     writeln!(socket, "{command}").unwrap();
+    // test-time: allow(hang-guard) -- Bound the actual control reply; timeout is an infrastructure failure, never functional success.
     socket
-        .set_read_timeout(Some(CONTROL.saturating_sub(start.elapsed())))
+        .set_read_timeout(Some(guard.remaining().unwrap()))
         .unwrap();
     let mut bytes = Vec::new();
     BufReader::new(socket)
@@ -85,39 +90,43 @@ impl Program {
             child,
             log: log.to_owned(),
         };
-        let started = Instant::now();
+        let guard = HangGuard::new("Python service must accept a real connection", CONTROL);
         loop {
             assert!(
                 result.child.try_wait().unwrap().is_none(),
                 "{mode} exited during startup: {}",
                 fs::read_to_string(log).unwrap()
             );
-            if TcpStream::connect_timeout(&address.parse().unwrap(), Duration::from_millis(100))
-                .is_ok()
+            // test-time: allow(hang-guard) -- Only a successful real connection establishes readiness; attempts share the infrastructure guard.
+            if TcpStream::connect_timeout(
+                &address.parse().unwrap(),
+                guard.remaining().unwrap().min(Duration::from_millis(100)),
+            )
+            .is_ok()
             {
                 return result;
             }
-            assert!(
-                started.elapsed() < Duration::from_secs(3),
-                "{mode} readiness timeout: {}",
-                fs::read_to_string(log).unwrap()
-            );
-            thread::sleep(Duration::from_millis(5));
+            guard.remaining().unwrap_or_else(|error| {
+                panic!(
+                    "{mode} readiness infrastructure hang: {error}: {}",
+                    fs::read_to_string(log).unwrap()
+                )
+            });
+            thread::yield_now();
         }
     }
     fn stop(&mut self) {
         if self.child.try_wait().unwrap().is_none() {
             self.child.kill().unwrap();
         }
-        let started = Instant::now();
-        while self.child.try_wait().unwrap().is_none() {
-            assert!(
-                started.elapsed() < Duration::from_secs(3),
-                "child did not stop: {}",
-                self.log.display()
-            );
-            thread::sleep(Duration::from_millis(5));
-        }
+        HangGuard::new("owned Python service must exit after stop", CONTROL)
+            .wait_for(|| self.child.try_wait().unwrap())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "child exit infrastructure hang: {error}: {}",
+                    self.log.display()
+                )
+            });
     }
 }
 impl Drop for Program {
@@ -285,11 +294,13 @@ impl Adapter {
     fn observe(&mut self, request: Value, mut dispatch: impl FnMut(Value)) -> Value {
         writeln!(self.input, "{}", request).unwrap();
         self.input.flush().unwrap();
-        let started = Instant::now();
+        let guard = HangGuard::new(
+            "Python fixture must produce an actual response",
+            Duration::from_secs(15),
+        );
         loop {
-            let value = self
-                .output
-                .recv_timeout(Duration::from_secs(15).saturating_sub(started.elapsed()))
+            let value = guard
+                .recv(&self.output)
                 .unwrap_or_else(|e| {
                     panic!("Python fixture stalled/disconnected for {request}: {e}")
                 })
@@ -341,27 +352,24 @@ impl Peer {
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        listener.set_nonblocking(true).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = requests.clone();
         let done = Arc::new(AtomicBool::new(false));
         let stop = done.clone();
         let worker = thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
-                let mut channel = match listener.accept() {
-                    Ok((s, _)) => s,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                        continue;
-                    }
-                    Err(e) => panic!("TCP responder accept: {e}"),
-                };
-                channel.set_nonblocking(false).unwrap();
+                let (mut channel, _) = listener.accept().expect("TCP responder accept");
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let guard = HangGuard::new("actual TCP peer request and reply", CONTROL);
+                // test-time: allow(hang-guard) -- Bound an actual incoming request, never an absent request or the simulated subject.
                 channel
-                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .set_read_timeout(Some(guard.remaining().unwrap()))
                     .unwrap();
+                // test-time: allow(hang-guard) -- Bound the response write in the same request's infrastructure guard.
                 channel
-                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .set_write_timeout(Some(guard.remaining().unwrap()))
                     .unwrap();
                 let mut line = String::new();
                 BufReader::new(channel.try_clone().unwrap())
@@ -395,16 +403,20 @@ impl Peer {
     fn join(&mut self) {
         self.done.store(true, Ordering::SeqCst);
         if let Some(w) = self.worker.take() {
-            let started = Instant::now();
-            while !w.is_finished() {
-                if started.elapsed() >= Duration::from_secs(2) {
-                    if thread::panicking() {
-                        eprintln!("test responder did not stop");
-                        return;
-                    }
-                    panic!("test responder did not stop");
+            let guard = HangGuard::new("TCP responder must acknowledge explicit shutdown", CONTROL);
+            // Publish shutdown before waking blocking accept. A failed wake is
+            // harmless if the thread already exited; completion is checked below.
+            // test-time: allow(hang-guard) -- Explicit shutdown wake, followed by positive observation of actual thread completion.
+            let _wake = TcpStream::connect_timeout(
+                &self.address.parse().unwrap(),
+                guard.remaining().unwrap(),
+            );
+            if let Err(error) = guard.wait_for(|| w.is_finished().then_some(())) {
+                if thread::panicking() {
+                    eprintln!("test responder shutdown infrastructure hang: {error}");
+                    return;
                 }
-                thread::sleep(Duration::from_millis(5));
+                panic!("test responder shutdown infrastructure hang: {error}");
             }
             if let Err(e) = w.join() {
                 if thread::panicking() {
@@ -438,7 +450,9 @@ fn lost_reply() {
     let peer_store = store.clone();
     let (tx, rx) = mpsc::channel::<Value>();
     let peer = Peer::new(move |request, _, index| {
-        let event = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let event = HangGuard::new("Rust observer must supply the actual pending PUT", CONTROL)
+            .recv(&rx)
+            .unwrap();
         assert_eq!(event["command"], request);
         if index <= 2 {
             assert_eq!(event["state"]["sequence"], 0);
