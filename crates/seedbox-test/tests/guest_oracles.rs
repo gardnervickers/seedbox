@@ -36,7 +36,7 @@ fn exercise(request: Value) -> Value {
     let guard = HangGuard::new("guest oracle adapter process exit", Duration::from_secs(30));
     let status = guard
         .wait_for(|| child.0.try_wait().transpose())
-        .expect("guest oracle adapter exceeded five seconds")
+        .expect("guest oracle adapter exceeded 30 seconds")
         .unwrap();
     assert!(status.success(), "guest oracle adapter: {status}");
     let bytes = fs::read(output).unwrap();

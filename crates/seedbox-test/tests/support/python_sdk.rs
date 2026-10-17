@@ -68,7 +68,7 @@ impl Sdk {
                 .injected_remaining
                 .or_else(|| self.guard.remaining().ok())
                 .filter(|remaining| !remaining.is_zero())
-                .expect("SDK child exceeded five-second case deadline");
+                .expect("SDK child exceeded 30-second case deadline");
             let mut poll = libc::pollfd {
                 fd,
                 events,
@@ -254,10 +254,7 @@ fn blocked_real_sdk_call_has_deadline_and_child_is_reaped_on_unwind() {
         .downcast_ref::<String>()
         .map(String::as_str)
         .or_else(|| panic.downcast_ref::<&str>().copied());
-    assert_eq!(
-        message,
-        Some("SDK child exceeded five-second case deadline")
-    );
+    assert_eq!(message, Some("SDK child exceeded 30-second case deadline"));
     let mut status = 0;
     assert_eq!(
         unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
