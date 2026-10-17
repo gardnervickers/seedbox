@@ -832,8 +832,9 @@ enum TbRun {
     /// request). Development mode never upgrades itself.
     Development(&'static str),
     /// Production mode on the multiversion image
-    /// (`image/tigerbeetle-upgrade.Dockerfile`, every release under
-    /// `/opt/tigerbeetle`), starting on this release. The agent runs the
+    /// (`image/tigerbeetle-upgrade.Dockerfile` for 0.16 releases,
+    /// `image/tigerbeetle-upgrade-0.17.Dockerfile` for 0.17; every release
+    /// under `/opt/tigerbeetle`), starting on this release. The agent runs the
     /// binary from the data volume and `install` replaces it; the replica
     /// polls it and the cluster upgrades itself. Only the stable
     /// `--cache-grid` flag is lowered (to 128 MiB, about 2.2 GB in all):
@@ -885,7 +886,11 @@ fn tb_replica(run: TbRun, index: usize, replicas: usize, memory: u32, probe: boo
                 "2",
                 "--start-arg=--cache-grid=128MiB",
             ]));
-            "harness/jepsen/tigerbeetle/image/tigerbeetle-upgrade.Dockerfile".into()
+            if release.starts_with("0.17.") {
+                "harness/jepsen/tigerbeetle/image/tigerbeetle-upgrade-0.17.Dockerfile".into()
+            } else {
+                "harness/jepsen/tigerbeetle/image/tigerbeetle-upgrade.Dockerfile".into()
+            }
         }
     };
     if probe {
@@ -1167,7 +1172,14 @@ fn tigerbeetle() -> Vec<Scenario> {
             args: quick_upgrades(["0.16.30", "0.16.31", "0.16.32"]), probe: false },
         TbSpec { name: "tb-current-generic", comment: "The current release (0.17.9) under generic faults, looking for unknown bugs: steady\ntransfers from four clients for 60 s, checked for lost acknowledged transfers and\npanics. Run it with `--fault-profile harness/jepsen/tigerbeetle/generic-crash-faults.yaml`\nor `corruption-faults.yaml` (silent data corruption on one replica, which TigerBeetle\nrepairs from its peers).",
             run: Dev("0.17.9"), replicas: 3, memory: 3072, oracle_memory: 512,
-            args: with(&steady("60", &[]), &["--client", "0.17.9"]), probe: false },
+            args: with(&steady("60", &[]), &["--client", "0.17.6"]), probe: false },
+        TbSpec { name: "tb-current-upgrade-generic", comment: "The current release line in production mode, looking for unknown bugs: from 0.17.7,\ninstall 0.17.8 and then 0.17.9 on every replica at seeded offsets while four clients\ntransfer, so the cluster upgrades itself twice (each replica execs the new release from\na memfd). Run it with `--fault-profile harness/jepsen/tigerbeetle/generic-crash-faults.yaml`.",
+            run: Prod("0.17.7"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: {
+                let mut out = steady("60", &["+5-15:install:all:0.17.8", "+10-20:install:all:0.17.9"]);
+                out.extend(strings(&["--await-release", "0.17.9", "--client", "0.17.6"]));
+                out
+            }, probe: false },
         TbSpec { name: "tb-2758-quick-generic", comment: "tigerbeetle#2758 without a scripted nemesis: the quick installs of 0.16.27, 0.16.28\nand 0.16.29 with the later ones at seeded offsets. Run it with\n`--fault-profile harness/jepsen/tigerbeetle/generic-faults.yaml`.",
             run: Prod("0.16.26"), replicas: 3, memory: 3072, oracle_memory: 512,
             args: quick_upgrades_generic(["0.16.27", "0.16.28", "0.16.29"]), probe: false },

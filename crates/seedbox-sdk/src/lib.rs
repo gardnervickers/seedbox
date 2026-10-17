@@ -32,6 +32,22 @@ pub const MAX_RECORD_BYTES: usize = 4096;
 /// A choice offers at most this many alternatives.
 pub const MAX_CHOICE_ALTERNATIVES: usize = 256;
 const FLUSH: &[u8] = br#"{"flush":{}}"#;
+const SUMMARY: &[u8] = br#"{"summary":{}}"#;
+
+/// One property's evaluations so far.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PropertyCounts {
+    pub passes: u64,
+    pub failures: u64,
+}
+
+/// The run's properties as the engine has reduced them, from [`summary`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub properties: std::collections::BTreeMap<String, PropertyCounts>,
+    /// More properties exist than the reply lists.
+    pub truncated: bool,
+}
 
 /// How a property is judged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,18 +118,52 @@ impl Client {
         self.with_socket(|socket| socket.send(&bytes).map(drop))
     }
 
+    /// Wait until the engine has committed and reduced every earlier record
+    /// of this client's session: its reply crosses the same commit boundary.
     pub fn flush(&self) -> io::Result<()> {
         self.with_socket(|socket| {
             socket.send(FLUSH)?;
-            let mut reply = [0u8; 8];
-            match socket.recv(&mut reply)? {
-                2 if &reply[..2] == b"ok" => Ok(()),
-                _ => Err(io::Error::new(
+            let mut reply = [0u8; 256];
+            let size = socket.recv(&mut reply)?;
+            let reply: Value = serde_json::from_slice(&reply[..size]).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "unexpected flush reply")
+            })?;
+            match reply["flush"]["seq"].as_u64() {
+                Some(_) => Ok(()),
+                None => Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "unexpected flush reply",
                 )),
             }
         })
+    }
+
+    /// As [`Client::flush`], then the run's properties as the engine has
+    /// reduced them at that point: each one's passes and failures (at most
+    /// 32, by ID; `truncated` when there are more). Empty outside Seedbox.
+    pub fn summary(&self) -> io::Result<Summary> {
+        let mut summary = Summary::default();
+        self.with_socket(|socket| {
+            socket.send(SUMMARY)?;
+            let mut reply = vec![0u8; 32 * 1024];
+            let size = socket.recv(&mut reply)?;
+            let invalid = || io::Error::new(io::ErrorKind::InvalidData, "unexpected summary reply");
+            let reply: Value = serde_json::from_slice(&reply[..size]).map_err(|_| invalid())?;
+            let body = &reply["summary"];
+            body["seq"].as_u64().ok_or_else(invalid)?;
+            for (id, counts) in body["properties"].as_object().ok_or_else(invalid)? {
+                summary.properties.insert(
+                    id.clone(),
+                    PropertyCounts {
+                        passes: counts["passes"].as_u64().ok_or_else(invalid)?,
+                        failures: counts["failures"].as_u64().ok_or_else(invalid)?,
+                    },
+                );
+            }
+            summary.truncated = body["truncated"].as_bool().unwrap_or(false);
+            Ok(())
+        })?;
+        Ok(summary)
     }
 
     /// Ask the engine to choose one of `alternatives` at `site`, and wait
@@ -314,10 +364,17 @@ pub fn choose(site: &str, alternatives: &[&str]) -> usize {
         0
     })
 }
-/// Wait until every earlier record from this process reached the engine.
-/// Succeeds immediately outside Seedbox.
+/// Wait until the engine has committed and reduced every earlier record
+/// from this process. Succeeds immediately outside Seedbox.
 pub fn flush() -> io::Result<()> {
     CLIENT.flush()
+}
+
+/// Flush, then the run's properties as the engine has reduced them so far:
+/// a workload can finish once, for example, a property has been violated.
+/// Empty outside Seedbox.
+pub fn summary() -> io::Result<Summary> {
+    CLIENT.summary()
 }
 
 /// A recovery obligation, judged as an `always` property: `probe` must

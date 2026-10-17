@@ -132,8 +132,8 @@ int main(int argc, char **argv) {
         strcpy(sdk_address.sun_path, argv[2]);
         assert(!connect(sdk, (struct sockaddr *)&sdk_address, sizeof(sdk_address)));
         assert(send(sdk, "{\"a\":1}", 7, 0) == 7);
-        assert(send(sdk, property_flush, sizeof(property_flush) - 1, 0) == sizeof(property_flush) - 1);
-        char ok[4]; assert(recv(sdk, ok, sizeof(ok), 0) == 2 && !memcmp(ok, "ok", 2));
+        /* A flush is a record too; without an engine nobody answers it. */
+        assert(send(sdk, "{\"flush\":{}}", 12, 0) == 12);
         assert(send(sdk, "{\"b\":2}", 7, 0) == 7);
         if (!strcmp(argv[1], "property-signal")) raise(SIGTERM);
         _exit(5);
@@ -353,17 +353,23 @@ int main(int argc, char **argv) {
     int sdk = socket(AF_UNIX, SOCK_SEQPACKET, 0); assert(sdk >= 0);
     assert(!connect(sdk, (struct sockaddr *)&sdk_address, sizeof(sdk_address)));
     assert(send(sdk, "{}", 2, 0) == 2);
-    assert(send(sdk, property_flush, sizeof(property_flush) - 1, 0) == sizeof(property_flush) - 1);
+    assert(send(sdk, "{\"flush\":{}}", 12, 0) == 12);
     assert(send(sdk, large, sizeof(large), 0) == sizeof(large));
     service_channels(&child, 0);
     service_channels(&child, 0);
     n = read(sockets[1], buffer, sizeof(buffer)-1); assert(n > 0); buffer[n] = 0;
     char lost[256];
-    snprintf(lost, sizeof(lost), "SBX_PROP1 1 1 7b7d\nSBX_PROP1 0 1 ");
+    /* The flush is relayed in order (7b22666c757368223a7b7d7d = {"flush":{}}). */
+    snprintf(lost, sizeof(lost), "SBX_PROP1 1 1 7b7d\nSBX_PROP1 1 2 7b22666c757368223a7b7d7d\nSBX_PROP1 0 1 ");
     assert(!strncmp(buffer, lost, strlen(lost)));
     /* 7b226c6f7374223a = {"lost": */
     assert(strstr(buffer, "SBX_PROP1 0 1 7b226c6f7374223a") && buffer[n - 1] == '\n');
-    char ok[4]; assert(recv(sdk, ok, sizeof(ok), MSG_DONTWAIT) == 2 && !memcmp(ok, "ok", 2));
+    /* Only the engine answers a flush, over management. */
+    char none[8]; assert(recv(sdk, none, sizeof(none), MSG_DONTWAIT) < 0 && errno == EAGAIN);
+    char flush_reply[] = "SBX_SDK1 1 {\"flush\":{\"seq\":2}}";
+    control(flush_reply, &child);
+    char flushed[64]; n = recv(sdk, flushed, sizeof(flushed), MSG_DONTWAIT);
+    assert(n == 19 && !memcmp(flushed, "{\"flush\":{\"seq\":2}}", 19));
     /* The engine answers a session over management; other sessions get nothing. */
     char choice_reply[] = "SBX_SDK1 1 {\"choice\":{\"index\":1}}";
     control(choice_reply, &child);
@@ -403,11 +409,11 @@ int main(int argc, char **argv) {
         size_t got = 0;
         while ((n = read(records[1], buffer + got, sizeof(buffer) - got - 1)) > 0) got += (size_t)n;
         assert(n == 0); buffer[got] = 0; close(records[1]);
-        /* {"a":1}, {"b":2}, then {"exit":{"code":5}} or {"exit":{"signal":15}}. */
+        /* {"a":1}, {"flush":{}}, {"b":2}, then {"exit":{"code":5}} or {"exit":{"signal":15}}. */
         unsigned session = PROPERTY_SESSIONS + 1 + signalled;
         char expected[512];
-        snprintf(expected, sizeof(expected), "SBX_PROP1 %u 1 7b2261223a317d\nSBX_PROP1 %u 2 7b2262223a327d\nSBX_PROP1 0 3 %s\n",
-                 session, session, signalled ? "7b2265786974223a7b227369676e616c223a31357d7d" : "7b2265786974223a7b22636f6465223a357d7d");
+        snprintf(expected, sizeof(expected), "SBX_PROP1 %u 1 7b2261223a317d\nSBX_PROP1 %u 2 7b22666c757368223a7b7d7d\nSBX_PROP1 %u 3 7b2262223a327d\nSBX_PROP1 0 3 %s\n",
+                 session, session, session, signalled ? "7b2265786974223a7b227369676e616c223a31357d7d" : "7b2265786974223a7b22636f6465223a357d7d");
         assert(!strcmp(buffer, expected));
         /* The forked supervisor's session counter is its own. */
         property_session_id++;
@@ -473,12 +479,12 @@ int main(int argc, char **argv) {
     assert(n == -1 && errno == EAGAIN); buffer[reported] = 0;
     assert(!strcmp(buffer, "SBX_OOM1 42 9 8 2 1 6d656d686f67\nSBX_OOM1 -\n"));
     assert(oom_kills_counted == 5);
-    report_oom_kills();
+    kernel_log_read();
     assert(read(reports[1], buffer, sizeof(buffer)) == -1 && errno == EAGAIN);
     /* Without a counter, each record is still reported. */
     assert(!unlink(test_vmstat)); oom_kills_counted = oom_kill_count(); assert(oom_kills_counted == -1);
     assert(send(records[1], killed, strlen(killed), 0) == (ssize_t)strlen(killed));
-    report_oom_kills();
+    kernel_log_read();
     n = read(reports[1], buffer, sizeof(buffer) - 1); assert(n > 0); buffer[n] = 0;
     assert(!strcmp(buffer, "SBX_OOM1 42 9 8 2 1 6d656d686f67\n"));
     close(records[0]); close(records[1]); close(reports[0]); close(reports[1]);

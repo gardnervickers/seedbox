@@ -1078,9 +1078,11 @@ impl<M: WorldMachine> Coord<'_, M> {
         }
         properties.sort();
         for (at, m, j, incarnation, line) in properties {
-            if let Some((session, site, alternatives)) =
-                line.as_deref().and_then(crate::properties::choice)
+            let request = line.as_deref().and_then(crate::properties::request);
+            if let Some((session, _, crate::properties::Request::Choice { site, alternatives })) =
+                &request
             {
+                let (session, site, alternatives) = (*session, site.clone(), alternatives.clone());
                 let request = crate::choices::Request {
                     machine: &self.names[m],
                     incarnation,
@@ -1114,6 +1116,21 @@ impl<M: WorldMachine> Coord<'_, M> {
                 }
             }
             crate::properties::commit(self.properties, &self.names[m], incarnation, at, line);
+            // Every earlier record of the session committed before this one,
+            // so the reply confirms them; it travels like a choice's.
+            let reply = match request {
+                Some((session, seq, crate::properties::Request::Flush)) => {
+                    Some(seedbox_engine_protocol::choice::flush_line(session, seq))
+                }
+                Some((session, seq, crate::properties::Request::Summary)) => Some(
+                    seedbox_engine_protocol::choice::summary_line(session, seq, self.properties),
+                ),
+                _ => None,
+            };
+            if let Some(reply) = reply {
+                let reply_at = at.checked_add(self.lookahead).ok_or("SDK reply overflow")?;
+                self.choice_replies.push((reply_at, m, reply));
+            }
         }
         console.sort();
         for (at, m, _, byte) in console {

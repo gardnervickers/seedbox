@@ -99,6 +99,7 @@ fn absent_socket_makes_every_call_a_no_op() {
     let client = Client::new(directory.path().join("missing.sock"));
     client.assert("p", Kind::Always, false, Value::Null);
     client.flush().unwrap();
+    assert_eq!(client.summary().unwrap(), Summary::default());
 }
 
 #[test]
@@ -134,12 +135,35 @@ fn records_and_flush_round_trip_over_seqpacket() {
             ..
         }
     ));
+    // The engine, through the supervisor, confirms the session's records.
     let replier = std::thread::spawn(move || {
         let n = server.recv(&mut buffer).unwrap();
         assert_eq!(&buffer[..n], FLUSH);
-        server.send(b"ok").unwrap();
+        server.send(br#"{"flush":{"seq":3}}"#).unwrap();
+        let n = server.recv(&mut buffer).unwrap();
+        assert_eq!(&buffer[..n], SUMMARY);
+        server
+            .send(br#"{"summary":{"seq":4,"properties":{"p":{"passes":1,"failures":0}},"truncated":false}}"#)
+            .unwrap();
+        server
     });
     client.flush().unwrap();
+    let summary = client.summary().unwrap();
+    assert_eq!(
+        summary.properties["p"],
+        PropertyCounts {
+            passes: 1,
+            failures: 0
+        }
+    );
+    let server = replier.join().unwrap();
+    // A reply that is not the engine's is an error, not a silent success.
+    let replier = std::thread::spawn(move || {
+        let mut buffer = [0u8; 64];
+        server.recv(&mut buffer).unwrap();
+        server.send(b"ok").unwrap();
+    });
+    assert!(client.flush().is_err());
     replier.join().unwrap();
 }
 

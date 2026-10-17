@@ -1,6 +1,6 @@
 //! TigerBeetle's C client (`tb_client`, release 0.16.11, and on Linux also
-//! 0.16.17 for the eviction control and 0.17.9, the current release) from
-//! Rust.
+//! 0.16.17 for the eviction control and 0.17.6, the oldest client of the
+//! current releases, which every 0.17.6 and later server accepts) from Rust.
 //!
 //! 0.17 changed the C API: an opaque 32-byte client handle the caller owns,
 //! a smaller packet, renumbered operations and packet statuses, and one
@@ -175,9 +175,10 @@ pub enum Release {
     /// (tigerbeetle#2484, fixed in 0.16.13). Linux builds only.
     #[value(name = "0.16.17")]
     V0_16_17,
-    /// 0.17.9, for 0.17 servers. Linux builds only.
-    #[value(name = "0.17.9")]
-    V0_17_9,
+    /// 0.17.6, for 0.17.6 and later servers (an older server evicts a newer
+    /// client, so the oldest client spans upgrades). Linux builds only.
+    #[value(name = "0.17.6")]
+    V0_17_6,
 }
 
 impl Release {
@@ -185,7 +186,7 @@ impl Release {
         match self {
             Self::V0_16_11 => "0.16.11",
             Self::V0_16_17 => "0.16.17",
-            Self::V0_17_9 => "0.17.9",
+            Self::V0_17_6 => "0.17.6",
         }
     }
 
@@ -201,12 +202,12 @@ impl Release {
             (Self::V0_16_17, 3) => "client_shutdown",
             (Self::V0_16_17, 4) => "invalid_operation",
             (Self::V0_16_17, 5) => "invalid_data_size",
-            (Self::V0_17_9, 2) => "client_evicted",
-            (Self::V0_17_9, 3) => "client_release_too_low",
-            (Self::V0_17_9, 4) => "client_release_too_high",
-            (Self::V0_17_9, 5) => "client_shutdown",
-            (Self::V0_17_9, 6) => "invalid_operation",
-            (Self::V0_17_9, 7) => "invalid_data_size",
+            (Self::V0_17_6, 2) => "client_evicted",
+            (Self::V0_17_6, 3) => "client_release_too_low",
+            (Self::V0_17_6, 4) => "client_release_too_high",
+            (Self::V0_17_6, 5) => "client_shutdown",
+            (Self::V0_17_6, 6) => "invalid_operation",
+            (Self::V0_17_6, 7) => "invalid_data_size",
             _ => "unknown",
         }
     }
@@ -324,13 +325,13 @@ mod ffi17 {
     }
 }
 
-/// 0.17.9's client, exports renamed (see `tools::tb_client_lib`).
-#[cfg(tb_client_0_17_9)]
-mod ffi179 {
+/// 0.17.6's client, exports renamed (see `tools::tb_client_lib`).
+#[cfg(tb_client_0_17_6)]
+mod ffi176 {
     use super::Packet17;
-    #[link(name = "tb_client_0_17_9", kind = "static")]
+    #[link(name = "tb_client_0_17_6", kind = "static")]
     extern "C" {
-        pub fn tb179_client_init(
+        pub fn tb176_client_init(
             client_out: *mut [u64; 4],
             cluster_id: *const u8,
             address_ptr: *const u8,
@@ -338,12 +339,12 @@ mod ffi179 {
             completion_ctx: usize,
             completion: extern "C" fn(usize, *mut Packet17, u64, *const u8, u32),
         ) -> i32;
-        pub fn tb179_client_submit(client: *mut [u64; 4], packet: *mut Packet17) -> i32;
+        pub fn tb176_client_submit(client: *mut [u64; 4], packet: *mut Packet17) -> i32;
     }
 }
 
-#[cfg_attr(not(tb_client_0_17_9), allow(dead_code))]
-extern "C" fn on_completion179(
+#[cfg_attr(not(tb_client_0_17_6), allow(dead_code))]
+extern "C" fn on_completion176(
     _ctx: usize,
     packet: *mut Packet17,
     _timestamp: u64,
@@ -412,25 +413,25 @@ fn init_status(status: i32) -> &'static str {
 impl Client {
     /// Start a client for `cluster` at `addresses` (`ip:port,...`, replica order).
     pub fn connect(release: Release, cluster: u128, addresses: &str) -> Result<Self, String> {
-        if release == Release::V0_17_9 {
-            #[cfg(tb_client_0_17_9)]
+        if release == Release::V0_17_6 {
+            #[cfg(tb_client_0_17_6)]
             {
                 let mut handle = Box::new([0u64; 4]);
                 let id = cluster.to_le_bytes();
                 // SAFETY: the id and address bytes outlive the call; the
                 // boxed handle stays put for the client's life.
                 let status = unsafe {
-                    ffi179::tb179_client_init(
+                    ffi176::tb176_client_init(
                         &mut *handle,
                         id.as_ptr(),
                         addresses.as_ptr(),
                         addresses.len() as u32,
                         0,
-                        on_completion179,
+                        on_completion176,
                     )
                 };
                 if status != 0 {
-                    return Err(format!("tb_client_init 0.17.9: {}", init_status(status)));
+                    return Err(format!("tb_client_init 0.17.6: {}", init_status(status)));
                 }
                 return Ok(Self {
                     raw: 0,
@@ -438,8 +439,8 @@ impl Client {
                     release,
                 });
             }
-            #[cfg(not(tb_client_0_17_9))]
-            return Err("this build has no 0.17.9 TigerBeetle client library".into());
+            #[cfg(not(tb_client_0_17_6))]
+            return Err("this build has no 0.17.6 TigerBeetle client library".into());
         }
         if release == Release::V0_16_17 {
             #[cfg(tb_client_0_16_17)]
@@ -521,22 +522,22 @@ impl Client {
             });
             pending.packet.data = pending.data.as_mut_ptr() as *mut c_void;
             let pending = Box::into_raw(pending);
-            // SAFETY: the Box stays alive until on_completion179 reclaims
+            // SAFETY: the Box stays alive until on_completion176 reclaims
             // it; the handle is boxed and outlives the client's requests.
             unsafe {
                 (*pending).packet.user_data = pending as *mut c_void;
-                #[cfg(tb_client_0_17_9)]
+                #[cfg(tb_client_0_17_6)]
                 {
                     let handle = &**handle as *const [u64; 4] as *mut [u64; 4];
-                    if ffi179::tb179_client_submit(handle, &mut (*pending).packet) != 0 {
+                    if ffi176::tb176_client_submit(handle, &mut (*pending).packet) != 0 {
                         let pending = Box::from_raw(pending);
                         let _ = pending.done.send((u8::MAX, Vec::new()));
                     }
                 }
-                #[cfg(not(tb_client_0_17_9))]
+                #[cfg(not(tb_client_0_17_6))]
                 {
                     let _ = handle;
-                    on_completion179(0, &mut (*pending).packet, 0, std::ptr::null(), 0);
+                    on_completion176(0, &mut (*pending).packet, 0, std::ptr::null(), 0);
                 }
             }
             return completion;

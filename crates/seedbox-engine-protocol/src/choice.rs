@@ -39,6 +39,38 @@ pub struct ChoiceEvidence {
 }
 
 /// The reply line for a choice: the session it goes to and what it says.
+/// The reply to a session's flush: the frame sequence it confirms.
+pub fn flush_line(session: u32, seq: u64) -> Vec<u8> {
+    let body = serde_json::json!({"flush": {"seq": seq}});
+    format!("{REPLY_PREFIX}{session} {body}\n").into_bytes()
+}
+
+/// The most properties a summary reply lists, by ID order: with IDs of at
+/// most 256 bytes the line stays inside the supervisor's 16 KiB frame.
+pub const MAX_SUMMARY_PROPERTIES: usize = 32;
+
+/// The reply to a session's summary query: the sequence it confirms and the
+/// passes and failures of each property so far (`truncated` when more exist).
+pub fn summary_line(session: u32, seq: u64, ledger: &crate::property::Ledger) -> Vec<u8> {
+    let properties: serde_json::Map<String, serde_json::Value> = ledger
+        .properties
+        .iter()
+        .take(MAX_SUMMARY_PROPERTIES)
+        .map(|(id, p)| {
+            (
+                id.clone(),
+                serde_json::json!({"passes": p.passes, "failures": p.failures}),
+            )
+        })
+        .collect();
+    let body = serde_json::json!({"summary": {
+        "seq": seq,
+        "properties": properties,
+        "truncated": ledger.properties.len() > MAX_SUMMARY_PROPERTIES,
+    }});
+    format!("{REPLY_PREFIX}{session} {body}\n").into_bytes()
+}
+
 pub fn reply_line(session: u32, site: &str, occurrence: u64, index: usize) -> Vec<u8> {
     let body =
         serde_json::json!({"choice": {"site": site, "occurrence": occurrence, "index": index}});

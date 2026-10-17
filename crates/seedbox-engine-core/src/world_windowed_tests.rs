@@ -3614,3 +3614,49 @@ fn chained_slices_leave_the_fault_and_control_world_unchanged() {
         }
     }
 }
+
+#[test]
+fn flush_and_summary_replies_follow_the_sessions_committed_records() {
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(Vec::new(), u64::MAX, 0).unwrap();
+    let sdk = |seq: u64, record: Value| {
+        let hex: String = serde_json::to_vec(&record)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("SBX_PROP1 1 {seq} {hex}").into_bytes()
+    };
+    let mut step = Step::new(10, Stop::Control);
+    step.properties = vec![
+        sdk(
+            1,
+            json!({"assert":{"id":"p","kind":"always","condition":true}}),
+        ),
+        sdk(2, json!({"flush":{}})),
+    ];
+    w.machines[0].steps.push_back(step);
+    let mut step = Step::new(40, Stop::Control);
+    step.properties = vec![sdk(3, json!({"summary":{}}))];
+    w.machines[0].steps.push_back(step);
+    run_with(&mut w, 100, None, 0, Duration::from_micros(3)).unwrap();
+    let replies: Vec<String> = machine_trace(&w, "a")
+        .into_iter()
+        .filter(|line| line.contains("control/"))
+        .collect();
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    // One lookahead after each request, like a choice's reply.
+    assert!(replies[0].starts_with("a:control/SBX_SDK1 1 {\"flush\":{\"seq\":2}}"));
+    assert!(replies[0].ends_with(":20"), "{}", replies[0]);
+    assert!(replies[1].contains("\"summary\""), "{}", replies[1]);
+    assert!(
+        replies[1].contains("\"p\":{\"failures\":0,\"passes\":1}"),
+        "{}",
+        replies[1]
+    );
+    assert!(replies[1].ends_with(":50"), "{}", replies[1]);
+    // Neither request is a property evaluation or an evidence error.
+    assert_eq!(w.properties.records, 3);
+    assert!(w.properties.errors.is_empty(), "{:?}", w.properties.errors);
+}

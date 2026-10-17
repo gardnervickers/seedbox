@@ -722,10 +722,16 @@ every process a core-dumping signal kills and never SIGKILL or SIGTERM, so
 injected stops and machine crashes are not evidence. The reducer turns these
 into `seedbox.no_out_of_memory_kills` and `seedbox.no_crashing_processes`.
 
-A flush reply means the supervisor has written every earlier record from that
-connection to the management port. Records sent before the main process exits
-are relayed before its exit record, but descendants still writing are not
-waited for, and a machine crash discards what has not crossed the port.
+`flush` and `summary` are records too, relayed in order. When the engine
+commits one it has committed and reduced every earlier record of that session,
+so it replies one lookahead later on the session's reply path, like a choice:
+`{"flush":{"seq":N}}`, or `{"summary":...}` with each property's passes and
+failures at that point (at most 32, by ID, with `truncated`). A workload can
+therefore finish once, say, a property has been violated, and a final flush
+means its verdict reached the ledger. Records sent before the main process
+exits are relayed before its exit record, but descendants still writing are
+not waited for, and a machine crash discards what has not crossed the port,
+including an unanswered request.
 
 Code: [reducer](../crates/seedbox-engine-protocol/src/property.rs),
 [commit](../crates/seedbox-engine-core/src/properties.rs),

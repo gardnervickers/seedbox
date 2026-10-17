@@ -16,9 +16,6 @@ enum {
     /* Prefix, two decimal fields, separators, hex payload and newline. */
     PROPERTY_FRAME_BYTES = 64 + 2 * PROPERTY_RECORD_BYTES,
 };
-/* A message that is exactly this asks for a reply once every earlier message
- * from the same connection has been relayed. */
-static const char property_flush[] = "{\"flush\":{}}";
 
 /* Returns the frame length, or zero if the record is empty or too large. */
 static size_t property_frame(char frame[PROPERTY_FRAME_BYTES], uint32_t session, uint64_t seq,

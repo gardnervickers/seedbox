@@ -32,6 +32,33 @@ pub fn observed(machine: &str, line: &[u8]) -> Option<crate::triggers::Observed>
     crate::triggers::Observed::from_record(machine, &Record::parse(&frame.payload).ok()?)
 }
 
+/// A committed request on a session's reply path.
+pub enum Request {
+    Choice {
+        site: String,
+        alternatives: Vec<String>,
+    },
+    Flush,
+    Summary,
+}
+
+/// A committed SDK request: its session, frame sequence and kind. The
+/// supervisor's own session makes none.
+pub fn request(line: &[u8]) -> Option<(u32, u64, Request)> {
+    use seedbox_engine_protocol::property::{Record, SUPERVISOR_SESSION};
+    let frame = decode(line).ok()??;
+    if frame.session == SUPERVISOR_SESSION {
+        return None;
+    }
+    let request = match Record::parse(&frame.payload).ok()? {
+        Record::Choice { site, alternatives } => Request::Choice { site, alternatives },
+        Record::Flush {} => Request::Flush,
+        Record::Summary {} => Request::Summary,
+        _ => return None,
+    };
+    Some((frame.session, frame.seq, request))
+}
+
 /// A committed choice request: its session, site and alternatives. Records
 /// the ledger refuses (bad alternatives, the supervisor's session) are none.
 pub fn choice(line: &[u8]) -> Option<(u32, String, Vec<String>)> {

@@ -155,9 +155,9 @@ pub fn build_oracle(root: &Path, arch: &str, engine: Option<&str>) -> Result<Pat
 ///   on eviction (tigerbeetle#2484), as `libtb_client_0_16_17.a` with its five
 ///   exported functions renamed `tb17_client_*`, so both link into one Linux
 ///   binary (everything else in the ELF archives is weak);
-/// * 0.17.9 (`h1:` not recorded; module zip SHA-256 below), the current
-///   release's client, as `libtb_client_0_17_9.a` with its exports renamed
-///   `tb179_client_*`. From 0.17 the module keeps each platform's library at
+/// * 0.17.6 (module zip SHA-256 below), the oldest client of the current
+///   releases, which 0.17.6 and later servers accept, as
+///   `libtb_client_0_17_6.a` with its exports renamed `tb176_client_*`. From 0.17 the module keeps each platform's library at
 ///   `native/libtb_client_TRIPLE.a`.
 const TB_GO_RELEASES: [(&str, &str, &str); 3] = [
     (
@@ -171,9 +171,9 @@ const TB_GO_RELEASES: [(&str, &str, &str); 3] = [
         "tb17",
     ),
     (
-        "0.17.9",
-        "7b5407d83177eb7bc46173afcf899b0aeb364b839b51c6c6c059c94f7a1608fa",
-        "tb179",
+        "0.17.6",
+        "7da99aefe2dce47b50e460502abcdbc06b149239dc738c63e1338de5a8f2fbaf",
+        "tb176",
     ),
 ];
 /// Every `tb_client_*` export of the releases above (0.17 adds the last two).

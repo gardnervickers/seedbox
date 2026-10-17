@@ -155,6 +155,11 @@ pub enum Record {
         site: String,
         alternatives: Vec<String>,
     },
+    /// Ask the engine to confirm, on the session's reply path, that it has
+    /// committed and reduced every earlier record of this session.
+    Flush {},
+    /// As `Flush`, with a summary of the run's properties so far.
+    Summary {},
     /// A named piece of the workload's state took a value, such as a
     /// replica's role or a recovery phase. Values are short, bounded labels.
     State { name: String, value: String },
@@ -529,7 +534,7 @@ impl Ledger {
                 }
             }
             // The engine selects and records choices; the ledger keeps none.
-            Record::Choice { .. } => {}
+            Record::Choice { .. } | Record::Flush {} | Record::Summary {} => {}
             Record::State { name, value } => {
                 let key = format!("{machine}/{name}");
                 if !self.state_values.contains_key(&key) && self.state_values.len() >= MAX_STATES {

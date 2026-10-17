@@ -566,12 +566,8 @@ static void property_read(struct property_client *client) {
         }
         if (received < 0) die("read SDK socket");
         if ((size_t)received > PROPERTY_RECORD_BYTES) { property_lost("SDK record too large"); continue; }
-        if ((size_t)received == sizeof(property_flush) - 1 && !memcmp(record, property_flush, sizeof(property_flush) - 1)) {
-            /* A departed client cannot receive its reply; that is its loss. */
-            ssize_t sent;
-            do { sent = send(client->fd, "ok", 2, MSG_DONTWAIT|MSG_NOSIGNAL); } while (sent < 0 && errno == EINTR);
-            continue;
-        }
+        /* Flush and summary requests are records too: the engine answers
+         * them on the session's reply path once it has committed them. */
         property_relay(client->session, ++client->seq, record, (size_t)received);
     }
 }
