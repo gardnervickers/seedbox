@@ -53,11 +53,22 @@ impl Publisher {
                 "observation publication received unconsumed required changes",
             ));
         }
+        let mut omitted = batch.omitted_events;
         for event in batch.events {
+            let next = state.world.publication.session.next_driver_sequence;
+            if event.sequence > next {
+                // Resizing without draining can retain events after a gap, not
+                // just a dense prefix. Account for each interior omission once.
+                let gap = event.sequence - next;
+                omitted = omitted
+                    .checked_sub(gap)
+                    .ok_or_else(|| invalid("Driver event sequence gap exceeds omitted count"))?;
+                self.event_gap(state, gap, event.sequence)?;
+            }
             self.publish(state, names, event)?;
         }
         state.world.position = super::worker::position(batch.position);
-        self.event_gap(state, batch.omitted_events, batch.next_event_sequence)?;
+        self.event_gap(state, omitted, batch.next_event_sequence)?;
         self.frames(state, names, batch.frames)
     }
     fn emit(

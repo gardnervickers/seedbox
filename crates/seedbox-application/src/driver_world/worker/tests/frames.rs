@@ -106,6 +106,86 @@ fn routed_frame_fates_and_overflow_map_to_observations_not_witness() {
     );
 }
 
+#[test]
+fn mixed_event_resize_publishes_interior_and_trailing_omissions() {
+    for workers in [1, 4] {
+        for observed in [false, true] {
+            let (root, mut worker, runs) = worker(workers);
+            let socket_path = root.path().join("events.sock");
+            let socket = UnixDatagram::bind(&socket_path).unwrap();
+            observation::configure_socket(&socket).unwrap();
+            socket.set_nonblocking(true).unwrap();
+            worker.publisher =
+                Publisher::connect(observed.then_some(socket_path.as_path())).unwrap();
+            let before = worker.state.world.publication.session.clone();
+            let original_names = worker.state.world.machine_names.len();
+
+            // With no drain, retain N, omit N+1, grow and retain N+2,
+            // omit N+3, grow and retain N+4, then omit the trailing N+5.
+            for index in 0..6 {
+                if index % 2 == 0 {
+                    worker.driver.set_event_capacity(index / 2 + 1);
+                }
+                let name = format!("added-{index}");
+                worker.constructed.lock().unwrap().push_back(name.clone());
+                worker
+                    .driver
+                    .with_barrier(|barrier| {
+                        barrier.add(|| {
+                            Ok(Mock {
+                                data: Data {
+                                    name,
+                                    at: 0,
+                                    first: true,
+                                    dead: false,
+                                    crashes: 0,
+                                    random: [0; 8],
+                                },
+                                runs: runs.clone(),
+                            })
+                        })
+                    })
+                    .unwrap();
+            }
+            worker.flush().unwrap();
+            let publication = &worker.state.world.publication.session;
+            assert_eq!(
+                publication.next_driver_sequence,
+                before.next_driver_sequence + 6
+            );
+            assert_eq!(publication.witness_records, before.witness_records + 3);
+            assert_eq!(
+                publication.observation_records,
+                before.observation_records + if observed { 6 } else { 0 }
+            );
+            // Required bookkeeping includes all six additions, even those whose
+            // optional event copies were omitted between capacity increases.
+            assert_eq!(
+                worker.state.world.machine_names[original_names..],
+                (0..6)
+                    .map(|index| format!("added-{index}"))
+                    .collect::<Vec<_>>()
+            );
+            let after = publication.clone();
+            worker.flush().unwrap();
+            assert_eq!(worker.state.world.publication.session, after);
+            if observed {
+                // Each missing event reserves one slot and emits one watermark;
+                // interior omissions must not be counted again at the tail.
+                for sequence in [2, 4, 6] {
+                    let watermark = receive(&socket);
+                    assert_eq!(watermark.sequence, sequence);
+                    assert_eq!(watermark.kind, Kind::Frames { frames: vec![] });
+                }
+                worker.publisher.close(&mut worker.state).unwrap();
+                let closed = receive(&socket);
+                assert_eq!(closed.sequence, 7);
+                assert_eq!(closed.kind, Kind::Closed);
+            }
+        }
+    }
+}
+
 struct FrameMock(Mock);
 impl Machine for FrameMock {
     type Context = ();
