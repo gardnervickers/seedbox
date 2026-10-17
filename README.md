@@ -96,7 +96,12 @@ seedbox export <sim-id> -o saved.seedbox.tar
 seedbox import saved.seedbox.tar          # Fresh completed resource; no execution.
 seedbox describe simulation <sim-id> > simulation.yaml
 seedbox run simulation.yaml              # Submit the saved definition.
+seedbox exec <sim-id> n1 --at 30s -- cat /data/state   # Run a command at a moment of a run.
 ```
+
+`exec` reruns the simulation from its start, which reproduces it exactly up to
+`--at`, then runs the command in that machine beside the application and prints
+its output; the command must exist in the machine's image.
 
 An omitted seed is chosen randomly. `rerun` repeats the oracle test; `replay`
 also compares retained results and reports `MATCH`, `MISMATCH`, or
@@ -125,7 +130,22 @@ seedbox get campaign <campaign-id>        # Members, assessment and findings.
 seedbox get findings <campaign-id> --preceded-by crash --within 2s
 seedbox shrink <sim-id>                   # Fewest external inputs that still fail.
 seedbox explain <sim-id>                  # Faults, lifecycle, choices and properties in order.
+seedbox analyze <sim-id> --faults         # What the failure depends on.
 ```
+
+A fault profile generates faults at seeded times between its `start` and
+`end`: `crash` (power loss, then reboot), `pause` (the whole machine), `stop`,
+`pause_process`, `partition`, `shape` (latency and loss), `clock_skew`,
+`disk_error` (an I/O error, or with `effect: corrupt` silent corruption;
+`scope: data` spares the filesystem's own metadata), `disk_latency` and
+`preempt` (extra thread switches). [evals](evals) has small workloads with planted bugs and the profiles
+that find them; `harness/jepsen` has Jepsen-style scenarios for real systems.
+
+`shrink` removes inputs while the failure persists, under several derived seeds
+at once (`--seeds`); `--from-checkpoint` shrinks a campaign branch from its
+branch point. When a failure needs many faults together, `analyze` asks
+instead how often it recurs if the randomness after a time varies, or if one
+fault is removed, with a confidence interval for each.
 
 A campaign starts as a seed sweep of roots that declare candidate anchors
 (`--anchor`). Each later generation mostly branches from members that showed
@@ -140,6 +160,15 @@ reproduces it; `--baseline DIR` labels
 findings new or observed again against an earlier campaign's directory, and
 the exit status follows the campaign's assessment, for CI. Anchor captures hold
 every machine's memory; members outside the corpus (`--corpus`) release theirs.
+`SEEDBOX_COVERAGE=1` in a machine's environment also guides by edge coverage
+(which branches its code took, and roughly how often); it changes timing, so a
+seed reproduces only with the same setting. The TUI's **4 campaigns** tab lists
+campaigns and their members.
+
+`seedbox serve --machine-workers N` runs a simulation's machines on several
+host threads, and `--lazy-restore` (Apple Silicon) restores a branch's
+checkpoint by mapping its memory instead of copying it; neither changes
+results.
 
 [Design](docs/design.md) explains the architecture and principles.
 [Technical details](docs/internals.md) covers determinism, fault ordering,

@@ -218,7 +218,8 @@ fn strings(items: &[&str]) -> Vec<String> {
 
 // ------------------------------------------------------------ NATS
 
-const NATS: [(&str, &str); 3] = [
+const NATS: [(&str, &str); 4] = [
+    ("2.15.1", "docker.io/library/nats:2.15.1@sha256:76e4b7a718f0b9e1a07442fe62b12973678a93c1ec2d494355f470dd59402490"),
     ("2.12.1", "docker.io/library/nats:2.12.1@sha256:2b8b92b0bb66fa75439511310efaa28e0da2a0c2e47b626027530aa8e60fbc3b"),
     ("2.10.22", "docker.io/library/nats:2.10.22@sha256:d15749dc10d8e67b55f496551ca3794b2f131556342b313eb3e6115ec75f6fb3"),
     ("2.10.23", "docker.io/library/nats:2.10.23@sha256:9df6b07d695b48b409669347f43c78b1a8fe7b5ae7ec465a661922de9b2048f1"),
@@ -235,7 +236,9 @@ fn lookup(table: &[(&str, &'static str)], key: &str) -> &'static str {
 #[allow(clippy::type_complexity)]
 fn nats() -> Vec<Scenario> {
     // (name, comment, version, config, oracle arguments, server memory)
-    let specs: [(&str, &str, &str, &str, &[&str], u32); 10] = [
+    let specs: [(&str, &str, &str, &str, &[&str], u32); 11] = [
+        ("nats-current-generic", "The current release (2.15.1) with `sync_interval: always`, looking for unknown bugs: the\nqueue workload with no scripted nemesis for 60 s, checked for lost and divergent\nacknowledged messages. Run it with `--fault-profile harness/jepsen/nats/generic-faults.yaml`\n(power loss, process pauses, partitions). The default lazy fsync loses acknowledged\nmessages by design (nats-server#7564), so this uses `always`.",
+         "2.15.1", "always", &["--mode", "none", "--warmup", "10", "--hold", "60", "--after", "15"], 1024),
         ("nats-healthy", "Baseline: the NATS JetStream queue workload with no faults keeps every\nacknowledged message on every server.",
          "2.12.1", "default", &["--mode", "none", "--warmup", "20", "--hold", "0", "--after", "0"], 512),
         ("nats-7564-coordinated-crash", "nats-server#7564: the default lazy fsync acknowledges writes it has not synced;\ncrash every machine together and acknowledged messages are lost.",
