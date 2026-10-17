@@ -139,6 +139,8 @@ enum Command {
     #[command(after_help = format!("{EXIT_CODES}\n\nPreparation has a 15-minute deadline, separate from the simulation execution budget.\n\n{VMM_FAILURE_HELP}"))]
     Run {
         #[command(flatten)]
+        backend: BackendArgs,
+        #[command(flatten)]
         compose: ComposeArg,
         /// Simulation seed [default: project seed, otherwise allocated once by the server].
         #[arg(long)]
@@ -167,6 +169,8 @@ enum Command {
     },
     /// Rerun a simulation using its retained inputs and original seed.
     Rerun {
+        #[command(flatten)]
+        backend: BackendArgs,
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
         /// Return after submission.
@@ -254,6 +258,8 @@ enum Command {
     #[command(after_help = EXIT_CODES)]
     Explore {
         #[command(flatten)]
+        backend: BackendArgs,
+        #[command(flatten)]
         compose: ComposeArg,
         /// First simulation seed [default: project seed, otherwise allocated by the server].
         #[arg(long)]
@@ -276,6 +282,8 @@ enum Command {
     /// Rerun a simulation through the server and compare its retained results.
     #[command(after_help = EXIT_CODES)]
     Replay {
+        #[command(flatten)]
+        backend: BackendArgs,
         /// Completed simulation ID.
         id: seedbox_api::SimulationId,
         /// Print the comparison as JSON.
@@ -493,6 +501,35 @@ impl ComposeArg {
     }
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BackendArg {
+    /// Use native hardware-accelerated execution.
+    Pv,
+    /// Emulate the x86-64 CPU in software without KVM.
+    Tcg,
+}
+#[derive(Args)]
+struct BackendArgs {
+    /// CPU backend [default: pv for projects, recorded backend for retained inputs].
+    #[arg(long, value_enum)]
+    backend: Option<BackendArg>,
+}
+struct BackendSelection {
+    backend: Option<seedbox_spec::project::CpuBackend>,
+    wall_time: Option<u64>,
+}
+impl BackendArgs {
+    fn selection(self, execution: ExecutionArgs) -> BackendSelection {
+        BackendSelection {
+            backend: self.backend.map(|backend| match backend {
+                BackendArg::Pv => seedbox_spec::project::CpuBackend::Pv,
+                BackendArg::Tcg => seedbox_spec::project::CpuBackend::Tcg,
+            }),
+            wall_time: execution.wall_time,
+        }
+    }
+}
+
 #[derive(Args)]
 struct ExecutionArgs {
     /// Stop after this much active host time, excluding explicit pauses [default: unlimited].
@@ -619,7 +656,14 @@ impl RuntimeInputs {
         )?;
         let runtime = backends::driver_runtime(None, scratch)?;
         let selected = runtime.select(
-            seedbox_application::runtime_assets::Backend::Pv,
+            match simulation.simulator.backend {
+                seedbox_spec::project::CpuBackend::Pv => {
+                    seedbox_application::runtime_assets::Backend::Pv
+                }
+                seedbox_spec::project::CpuBackend::Tcg => {
+                    seedbox_application::runtime_assets::Backend::Tcg
+                }
+            },
             seedbox_spec::definition::Architecture::X86_64,
         )?;
         let inputs = OciPreparer {
@@ -669,7 +713,11 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
-        if self.use_driver(std::env::var_os("SEEDBOX_ASSET_DIR").is_some()) {
+        let use_driver = self.use_driver(std::env::var_os("SEEDBOX_ASSET_DIR").is_some());
+        if simulation.simulator.backend == seedbox_spec::project::CpuBackend::Tcg && !use_driver {
+            return Err(Error::Setup("--backend tcg requires Linux x86-64 and the normal Driver runtime; remove legacy VMM, bootstrap and asset-directory overrides".into()));
+        }
+        if use_driver {
             return self.driver_backends(
                 store,
                 simulation,
@@ -836,13 +884,21 @@ fn run(cli: Cli) -> Result<u8> {
             inputs,
         } => prepare(&compose, &output, &state, &inputs),
         Command::Run {
+            backend,
             compose,
             seed,
             paused,
             detach,
             json,
             execution,
-        } => simulations::run(&compose, seed, paused, detach, json, execution.wall_time),
+        } => simulations::run(
+            &compose,
+            seed,
+            paused,
+            detach,
+            json,
+            backend.selection(execution),
+        ),
         Command::Branch {
             id,
             checkpoint,
@@ -851,11 +907,12 @@ fn run(cli: Cli) -> Result<u8> {
             execution,
         } => simulations::branch(&id, checkpoint, detach, json, execution.wall_time),
         Command::Rerun {
+            backend,
             id,
             detach,
             json,
             execution,
-        } => simulations::rerun(&id, detach, json, execution.wall_time),
+        } => simulations::rerun(&id, detach, json, backend.selection(execution)),
         Command::Compare {
             baseline,
             simulation,
@@ -905,6 +962,7 @@ fn run(cli: Cli) -> Result<u8> {
             json,
         } => simulations::playback(&id, request_id.as_deref(), json),
         Command::Explore {
+            backend,
             compose,
             seed,
             count,
@@ -919,7 +977,7 @@ fn run(cli: Cli) -> Result<u8> {
             paused,
             detach,
             json,
-            execution.wall_time,
+            backend.selection(execution),
         ),
         Command::Delete {
             resource: DeleteArg::Simulation { id },
@@ -928,10 +986,11 @@ fn run(cli: Cli) -> Result<u8> {
             resource: DeleteArg::Checkpoint { id, name },
         } => simulations::delete_checkpoint(&id, &name),
         Command::Replay {
+            backend,
             id,
             json,
             execution,
-        } => simulations::replay(&id, json, execution.wall_time),
+        } => simulations::replay(&id, json, backend.selection(execution)),
         Command::Export {
             run,
             output,

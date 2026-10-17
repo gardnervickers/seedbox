@@ -160,15 +160,46 @@ fn load_spec(
     Ok((spec, metadata))
 }
 
+fn select_backend(
+    spec: &mut SimulationSpec,
+    requested: Option<seedbox_spec::project::CpuBackend>,
+) -> Result<()> {
+    use seedbox_spec::project::CpuBackend;
+    let recorded = match &spec.inputs {
+        InputSource::Resolved { definition } => {
+            Some(if definition.runtime.execution["backend"] == "driver-tcg" {
+                CpuBackend::Tcg
+            } else {
+                CpuBackend::Pv
+            })
+        }
+        _ => None,
+    };
+    match (recorded, requested) {
+        (Some(recorded), Some(requested)) if recorded != requested => {
+            let name = |backend| match backend {
+                CpuBackend::Pv => "pv",
+                CpuBackend::Tcg => "tcg",
+            };
+            return Err(Error::Setup(format!("--backend {} differs from retained backend {}; run the original project with --backend {} instead", name(requested), name(recorded), name(requested))));
+        }
+        _ => (),
+    }
+    spec.configuration.simulator.backend = recorded.or(requested).unwrap_or_default();
+    Ok(())
+}
+
 pub(super) fn run(
     compose: &ComposeArg,
     seed: Option<u64>,
     paused: bool,
     detach: bool,
     json: bool,
-    wall_time_ns: Option<u64>,
+    selection: super::BackendSelection,
 ) -> Result<u8> {
-    let (spec, metadata) = load_spec(compose, seed)?;
+    let wall_time_ns = selection.wall_time;
+    let (mut spec, metadata) = load_spec(compose, seed)?;
+    select_backend(&mut spec, selection.backend)?;
     submit(
         spec,
         seedbox_api::ExecutionOptions {
@@ -188,9 +219,11 @@ pub(super) fn explore(
     paused: bool,
     detach: bool,
     json: bool,
-    wall_time_ns: Option<u64>,
+    selection: super::BackendSelection,
 ) -> Result<u8> {
-    let (spec, metadata) = load_spec(compose, seed)?;
+    let wall_time_ns = selection.wall_time;
+    let (mut spec, metadata) = load_spec(compose, seed)?;
+    select_backend(&mut spec, selection.backend)?;
     if spec
         .seed
         .or(spec.configuration.seed)
@@ -352,9 +385,14 @@ fn report_comparison(comparison: &seedbox_api::SimulationComparison, json: bool)
     })
 }
 
-pub(super) fn replay(id: &SimulationId, json: bool, wall_time_ns: Option<u64>) -> Result<u8> {
+pub(super) fn replay(
+    id: &SimulationId,
+    json: bool,
+    selection: super::BackendSelection,
+) -> Result<u8> {
+    let wall_time_ns = selection.wall_time;
     let client = daemon::connect(None)?;
-    let resource = runtime()?
+    let mut resource = runtime()?
         .block_on(client.describe(id))
         .map_err(client_error)?;
     if !matches!(resource.spec.inputs, InputSource::Resolved { .. }) {
@@ -363,6 +401,7 @@ pub(super) fn replay(id: &SimulationId, json: bool, wall_time_ns: Option<u64>) -
         )));
     }
     let metadata = resource_metadata(&resource);
+    select_backend(&mut resource.spec, selection.backend)?;
     submit_with_comparison(
         resource.spec,
         seedbox_api::ExecutionOptions {
@@ -380,10 +419,11 @@ pub(super) fn rerun(
     id: &SimulationId,
     detach: bool,
     json: bool,
-    wall_time_ns: Option<u64>,
+    selection: super::BackendSelection,
 ) -> Result<u8> {
+    let wall_time_ns = selection.wall_time;
     let client = daemon::connect(None)?;
-    let resource = runtime()?
+    let mut resource = runtime()?
         .block_on(client.describe(id))
         .map_err(client_error)?;
     if !matches!(resource.spec.inputs, InputSource::Resolved { .. }) {
@@ -392,6 +432,7 @@ pub(super) fn rerun(
         )));
     }
     let metadata = resource_metadata(&resource);
+    select_backend(&mut resource.spec, selection.backend)?;
     submit(
         resource.spec,
         seedbox_api::ExecutionOptions {
@@ -896,6 +937,71 @@ pub(super) fn client_error(error: seedbox_client::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_selection_defaults_projects_but_preserves_retained_tcg() {
+        use seedbox_spec::{definition as d, project::CpuBackend};
+        let mut spec: SimulationSpec =
+            serde_json::from_value(serde_json::json!({"oracle":{"image":"example/oracle"}}))
+                .unwrap();
+        select_backend(&mut spec, None).unwrap();
+        assert_eq!(spec.configuration.simulator.backend, CpuBackend::Pv);
+        select_backend(&mut spec, Some(CpuBackend::Tcg)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&spec).unwrap()["simulator"]["backend"],
+            "tcg"
+        );
+        // DTO-only fixture: no execution, guest or fabricated native report.
+        let asset = d::Asset(format!("sha256:{}", "0".repeat(64)));
+        let definition = d::Definition {
+            architecture: d::Architecture::X86_64,
+            seed: 7,
+            clock: d::Clock {
+                epoch_seconds: 86400,
+            },
+            runtime: d::Runtime {
+                kernel: asset.clone(),
+                engine: asset.clone(),
+                execution: serde_json::json!({"backend":"driver-tcg"}),
+            },
+            machines: Default::default(),
+            oracle: d::Machine {
+                image: None,
+                name: Some("oracle".into()),
+                boot_archive: asset,
+                memory_bytes: 1024 * 1024 * 1024,
+                process: d::Process {
+                    argv: vec!["/app".into()],
+                    environment: Default::default(),
+                    working_directory: "/".into(),
+                    user: "".into(),
+                },
+                volumes: Default::default(),
+                anonymous_volumes: vec![],
+            },
+            network: spec.configuration.network.clone(),
+            simulator: d::Simulator {
+                blocks_per_progress_call: spec.configuration.simulator.blocks_per_progress_call,
+                schedule: Default::default(),
+                disk: Default::default(),
+                oracle_control: true,
+            },
+            start: d::Start::Fresh,
+            overrides: vec![],
+        };
+        let mut retained = SimulationSpec::resolved(definition);
+        select_backend(&mut retained, None).unwrap();
+        assert_eq!(retained.configuration.simulator.backend, CpuBackend::Tcg);
+        select_backend(&mut retained, Some(CpuBackend::Tcg)).unwrap();
+        let error = select_backend(&mut retained, Some(CpuBackend::Pv))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("differs from retained backend tcg"),
+            "{error}"
+        );
+        assert_eq!(retained.configuration.simulator.backend, CpuBackend::Tcg);
+    }
 
     #[test]
     fn native_acceptance_projects_round_trip_through_submission_json() {

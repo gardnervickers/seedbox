@@ -5,10 +5,13 @@ Each section links to the code that owns it.
 
 ## Fresh Linux service preparation
 
-On Linux x86-64, ordinary fresh PV preparation selects the Driver worker contract.
-OCI image import, caching, launch resolution, configuration files and epoch
-selection still belong to `OciPreparer`. Its Driver branch uses the PV SDK's
-configured boot builder, not the legacy init/progress archive format. It retains
+On Linux x86-64, ordinary fresh preparation selects the Driver worker contract.
+The request selects PV by default or software TCG explicitly. OCI image import,
+caching, launch resolution, configuration files and epoch selection still belong
+to `OciPreparer`. Its Driver branch uses the selected SDK's configured boot
+builder, not the legacy init/progress archive format. The transport's `rootfs/`
+tar prefix is removed before SDK assembly supplies it once; hard-link targets
+are rebased too, while symlinks and filesystem metadata are preserved. It retains
 both the complete boot bytes and the original application filesystem, so replay
 and later launch edits do not need the image engine or source project.
 See [preparation](../crates/seedbox-application/src/preparation.rs) and the
@@ -16,8 +19,12 @@ See [preparation](../crates/seedbox-application/src/preparation.rs) and the
 
 Explicit legacy executable or bootstrap overrides retain their existing formats
 and executor; the asset-directory override likewise keeps its legacy lookup.
-Other host platforms are unchanged. Replaying an existing run uses its recorded
-contract, not the current fresh-run selection. Control sockets are packaged only
+Other host platforms are unchanged. TCG selection refuses legacy runtime
+overrides rather than interpreting their bytes as a different format.
+The client carries CPU selection in the partial submission, not project YAML
+or process environment. The resolved runtime records the concrete backend.
+Replaying an existing run uses that recorded contract, not the current fresh-run
+selection; a conflicting explicit selection is refused. Control sockets are packaged only
 for the configured controller, whose service must also be the oracle/check service.
 
 Resume admission reads bounded checkpoint metadata before copying start assets
@@ -25,6 +32,8 @@ or execution inputs. Parent and native restore use the same `admit_restore`
 policy, including the requested controller when a resolved definition is edited;
 there is no separate parent copy of host/controller eligibility rules.
 Native body and saved-authority validation still precede native restoration.
+Fresh TCG controller support does not establish controller checkpoint continuation;
+that path retains its independent refusal in the same restore policy.
 
 ## Etcd preparation smoke and canonical acceptance
 
@@ -77,7 +86,8 @@ idle CPU with no pending timer stops them first.
 
 The example is intended to run two applications with seeded sleeps from one
 through four seconds, plus an oracle that ends the run. Application outcomes are distinct
-from kernel shutdown. It is separate from the production `seedbox run` backends.
+from kernel shutdown. It is a direct-SDK example; production service preparation
+uses the same TCG factory through its retained Driver contract.
 
 The driver repeatedly calls `Machine::run`. A private QMP command limits QEMU's
 icount steps, not hardware retirement. An ordinary instruction costs one step;

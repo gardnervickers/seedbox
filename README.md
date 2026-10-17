@@ -11,7 +11,8 @@ simulation and compare its results.
 
 ## Try it
 
-Use an Apple Silicon Mac or Linux x86-64 host with access to `/dev/kvm`.
+Use an Apple Silicon Mac or Linux x86-64 host. The default PV backend needs
+`/dev/kvm` on Linux; software TCG on Linux x86-64 does not.
 Install Nix and start Docker or Podman. Macs also need Apple's Command Line Tools.
 
 ```sh
@@ -75,7 +76,15 @@ seedbox run simulation.yaml              # Submit the saved definition.
 
 An omitted seed is chosen randomly. `rerun` repeats the oracle test; `replay`
 also compares retained results and reports `MATCH`, `MISMATCH`, or
-`NOT_COMPARABLE`. Use `seedbox help` or `seedbox help COMMAND` for options.
+`NOT_COMPARABLE`.
+
+`run` and `explore` use `--backend pv` by default. On Linux x86-64, select the
+software CPU with `seedbox run examples/etcd --backend tcg`; it is slower but
+does not require KVM. The run records its backend. `rerun`, `replay`, and saved
+resolved definitions keep that recorded backend when the flag is omitted;
+a conflicting explicit `--backend` is rejected. To choose a different backend,
+run the original project again. There is no backend environment variable or
+`seedbox.yaml` setting. Use `seedbox help` or `seedbox help COMMAND` for options.
 
 Simulation IDs, observations, and bounded log buffers last for one server
 session. Binary assets survive restarts in the server's cache. Saved YAML needs
