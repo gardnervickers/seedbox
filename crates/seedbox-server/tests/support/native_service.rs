@@ -31,6 +31,13 @@ mod clock_faults;
 pub use clock_faults::{pv_clock_drift_heal_replay, pv_clock_skew_heal_replay};
 #[cfg(feature = "tcg-tests")]
 pub use clock_faults::{tcg_clock_drift_heal_replay, tcg_clock_skew_heal_replay};
+#[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
+#[path = "native_fault_network.rs"]
+mod network_faults;
+#[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
+pub use network_faults::{
+    network_drop_connection_replay, network_partition_heal_replay, network_shape_heal_replay,
+};
 #[cfg(feature = "kvm-tests")]
 #[path = "native_faults.rs"]
 mod faults;

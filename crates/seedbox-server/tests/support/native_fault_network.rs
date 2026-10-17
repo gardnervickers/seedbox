@@ -37,7 +37,7 @@ fn with_inputs(
                 timeout_ns: seedbox_spec::definition::default_timeout_ns(),
             });
     }
-    request.spec = SimulationSpec::resolved(definition);
+    request.spec = SimulationSpec::resolved(definition).unwrap();
     assert_eq!(request.spec.program.len(), inputs.len());
     request
 }
