@@ -1,5 +1,5 @@
-# The buggy variant with block coverage on the servers: campaigns can
-# guide by new code reached as well as by property outcomes.
+# The buggy variant with edge coverage on the server: campaigns can guide by
+# new edges and hit counts as well as by property outcomes.
 name: kvlog-eval-coverage
 machines:
   kv:

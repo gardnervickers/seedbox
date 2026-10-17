@@ -489,4 +489,45 @@ int main(int argc, char **argv) {
     assert(!strcmp(buffer, "SBX_OOM1 42 9 8 2 1 6d656d686f67\n"));
     close(records[0]); close(records[1]); close(reports[0]); close(reports[1]);
     kernel_log = -1;
+    /* Coverage counts become (edge, bucket) features; only changed 1 KiB
+     * slices are relayed, each with its offset. */
+    int frames[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, frames));
+    assert(!fcntl(frames[1], F_SETFL, O_NONBLOCK));
+    management = frames[0];
+    directories(COVERAGE_DIR, 0755);
+    unsigned char counts[COVERAGE_EDGES] = {0};
+    counts[0] = 1; counts[5] = 3; counts[COVERAGE_EDGES - 1] = 200;
+    int file = open(COVERAGE_DIR "/1", O_WRONLY|O_CREAT|O_TRUNC, 0644); assert(file >= 0);
+    assert(write(file, counts, sizeof(counts)) == (ssize_t)sizeof(counts)); close(file);
+    coverage_enabled = 1;
+    coverage_relay();
+    static char relayed[4 * (128 + 4 * COVERAGE_SLICE)];
+    size_t got = 0;
+    while ((n = read(frames[1], relayed + got, sizeof(relayed) - got - 1)) > 0) got += (size_t)n;
+    relayed[got] = 0;
+    /* Two slices: offset 0 (edges 0 and 5) and the last (edge 8191). */
+    unsigned lines = 0;
+    for (char *p = relayed; *p; ++p) lines += *p == '\n';
+    assert(lines == 2);
+    /* "offset":0, and "offset":3072, as hex in the frames. */
+    assert(strstr(relayed, "226f6666736574223a302c"));
+    assert(strstr(relayed, "226f6666736574223a333037322c"));
+    /* Edge 0 at bucket 0 and edge 5 at bucket 1 (2-3): bits 0 and 21. */
+    assert(coverage_features[0] == 0x01 && coverage_features[2] == 0x20);
+    /* Edge 8191 at bucket 3 (16 or more): the map's last bit. */
+    assert(coverage_features[COVERAGE_FEATURE_BYTES - 1] == 0x80);
+    coverage_relay();
+    assert(read(frames[1], relayed, sizeof(relayed)) == -1 && errno == EAGAIN);
+    counts[0] = 2;
+    file = open(COVERAGE_DIR "/1", O_WRONLY|O_TRUNC); assert(file >= 0);
+    assert(write(file, counts, sizeof(counts)) == (ssize_t)sizeof(counts)); close(file);
+    coverage_relay();
+    got = 0;
+    while ((n = read(frames[1], relayed + got, sizeof(relayed) - got - 1)) > 0) got += (size_t)n;
+    relayed[got] = 0;
+    lines = 0;
+    for (char *p = relayed; *p; ++p) lines += *p == '\n';
+    assert(lines == 1 && strstr(relayed, "226f6666736574223a302c"));
+    assert(coverage_features[0] == 0x03);
+    close(frames[0]); close(frames[1]);
 }

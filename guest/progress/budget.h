@@ -7,12 +7,15 @@
 #define SEEDBOX_PROGRESS_MARK 0x5eedb0c5u
 #define SEEDBOX_PROGRESS_INSTRUCTIONS "--instructions-per-progress-call"
 #define SEEDBOX_PROGRESS_POINTS "--progress-points-per-block"
-/* Optional: record module-relative block coverage into files in this
- * directory. A resolved input (the machine's SEEDBOX_COVERAGE=1); it costs
- * guest file writes, so runs replay only within the same setting. */
+/* Optional: record edge coverage into files in this directory. A resolved
+ * input (the machine's SEEDBOX_COVERAGE=1); its instrumentation and file
+ * writes change timing, so runs replay only within the same setting. */
 #define SEEDBOX_PROGRESS_COVERAGE "--coverage-dir"
-/* Coverage map size: one bit per hashed block, in bytes. */
-#define SEEDBOX_COVERAGE_BYTES 1024
+/* Coverage counters per process file: one byte (wrapping) per hashed edge
+ * (previous block, block), a power of two. The supervisor's buckets turn
+ * each count into one of SEEDBOX_COVERAGE_BUCKETS features. */
+#define SEEDBOX_COVERAGE_EDGES 8192
+#define SEEDBOX_COVERAGE_BUCKETS 4
 /* Parse `option value` when `option` is exactly `expected` and `value` is a
  * decimal u32 above zero, with no sign, spaces or other characters. */
 static int seedbox_progress_option(const char *expected, const char *option,

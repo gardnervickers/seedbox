@@ -629,18 +629,24 @@ static void property_exit(int status) {
     else snprintf(record, sizeof(record), "{\"exit\":{\"signal\":%d}}", WTERMSIG(status));
     supervisor_record(record);
 }
-/* Block coverage, when the application's environment asks for it: the
- * translator writes one map per process, and the supervisor relays the OR of
- * every map whenever it changes, checked about once a second of guest time.
- * The size matches SEEDBOX_COVERAGE_BYTES in progress/budget.h. */
-enum { COVERAGE_BYTES = 1024 };
+/* Edge coverage, when the application's environment asks for it: the
+ * translator writes one counter file per process (progress/budget.h). Each
+ * edge's count falls in a bucket (1, 2-3, 4-15, 16 or more), and each
+ * (edge, bucket) is one feature bit; the supervisor keeps the union of every
+ * feature seen and relays each changed 1 KiB slice of it with its offset,
+ * checked about once a second of guest time. */
+enum { COVERAGE_EDGES = 8192, COVERAGE_BUCKETS = 4,
+       COVERAGE_FEATURE_BYTES = COVERAGE_EDGES * COVERAGE_BUCKETS / 8, COVERAGE_SLICE = 1024 };
 #define COVERAGE_DIR "/run/seedbox/coverage"
 static int coverage_enabled;
-static unsigned char coverage_sent[COVERAGE_BYTES];
+static unsigned char coverage_features[COVERAGE_FEATURE_BYTES];
+static unsigned char coverage_sent[COVERAGE_FEATURE_BYTES];
 static struct timespec coverage_checked;
+static int coverage_bucket(unsigned char count) {
+    return !count ? -1 : count == 1 ? 0 : count < 4 ? 1 : count < 16 ? 2 : 3;
+}
 static void coverage_relay(void) {
     if (!coverage_enabled) return;
-    unsigned char map[COVERAGE_BYTES] = {0};
     DIR *dir = opendir(COVERAGE_DIR);
     if (!dir) return;
     struct dirent *entry;
@@ -648,20 +654,28 @@ static void coverage_relay(void) {
         if (entry->d_name[0] == '.') continue;
         int fd = openat(dirfd(dir), entry->d_name, O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
         if (fd < 0) continue;
-        unsigned char bytes[COVERAGE_BYTES];
-        ssize_t n = read(fd, bytes, sizeof(bytes));
+        unsigned char counts[COVERAGE_EDGES];
+        ssize_t n = read(fd, counts, sizeof(counts));
         close(fd);
-        for (ssize_t i = 0; i < n; ++i) map[i] |= bytes[i];
+        for (ssize_t edge = 0; edge < n; ++edge) {
+            int bucket = coverage_bucket(counts[edge]);
+            if (bucket < 0) continue;
+            unsigned bit = (unsigned)edge * COVERAGE_BUCKETS + (unsigned)bucket;
+            coverage_features[bit / 8] |= (unsigned char)(1u << (bit % 8));
+        }
     }
     closedir(dir);
-    if (!memcmp(map, coverage_sent, sizeof(map))) return;
-    memcpy(coverage_sent, map, sizeof(map));
-    char record[64 + 2 * COVERAGE_BYTES];
-    int used = snprintf(record, sizeof(record), "{\"coverage\":{\"map\":\"");
-    for (unsigned i = 0; i < COVERAGE_BYTES; ++i) used += snprintf(record + used, sizeof(record) - used, "%02x", map[i]);
-    used += snprintf(record + used, sizeof(record) - used, "\"}}");
-    if (used <= 0 || (size_t)used >= sizeof(record)) { errno = E2BIG; die("coverage record"); }
-    supervisor_record(record);
+    for (unsigned offset = 0; offset < COVERAGE_FEATURE_BYTES; offset += COVERAGE_SLICE) {
+        if (!memcmp(coverage_features + offset, coverage_sent + offset, COVERAGE_SLICE)) continue;
+        memcpy(coverage_sent + offset, coverage_features + offset, COVERAGE_SLICE);
+        char record[96 + 2 * COVERAGE_SLICE];
+        int used = snprintf(record, sizeof(record), "{\"coverage\":{\"offset\":%u,\"map\":\"", offset);
+        for (unsigned i = 0; i < COVERAGE_SLICE; ++i)
+            used += snprintf(record + used, sizeof(record) - used, "%02x", coverage_features[offset + i]);
+        used += snprintf(record + used, sizeof(record) - used, "\"}}");
+        if (used <= 0 || (size_t)used >= sizeof(record)) { errno = E2BIG; die("coverage record"); }
+        supervisor_record(record);
+    }
 }
 /* Relay at most about once a second of guest time while the application runs. */
 static void coverage_tick(void) {

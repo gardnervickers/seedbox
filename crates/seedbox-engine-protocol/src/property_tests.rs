@@ -359,25 +359,60 @@ fn kernel_oom_and_crash_lines_violate_their_default_properties() {
 }
 
 #[test]
-fn coverage_maps_union_per_machine_and_only_from_the_supervisor() {
+fn coverage_slices_union_per_machine_and_only_from_the_supervisor() {
     let map = |set: &[usize]| {
         let mut bytes = vec![0u8; COVERAGE_BYTES];
         for &bit in set {
             bytes[bit / 8] |= 1 << (bit % 8);
         }
-        hex(&bytes)
+        bytes
+    };
+    let slice = |set: &[usize], offset: usize| {
+        let bytes = map(set);
+        json!({"coverage": {"offset": offset, "map": hex(&bytes[offset..offset + COVERAGE_SLICE])}})
     };
     let mut ledger = Ledger::default();
-    let coverage = |m: String| json!({"coverage": {"map": m}});
-    ledger.apply(&frame(0, 1, coverage(map(&[3]))), "n1", 0, 10);
-    ledger.apply(&frame(0, 2, coverage(map(&[9]))), "n1", 0, 20);
-    assert_eq!(ledger.coverage["n1"], map(&[3, 9]));
+    ledger.apply(&frame(0, 1, slice(&[3], 0)), "n1", 0, 10);
+    ledger.apply(&frame(0, 2, slice(&[9], 0)), "n1", 0, 20);
+    // A later slice ORs at its offset and leaves the others alone.
+    let far = 3 * COVERAGE_SLICE * 8 + 5;
+    ledger.apply(&frame(0, 3, slice(&[far], 3 * COVERAGE_SLICE)), "n1", 0, 25);
+    assert_eq!(ledger.coverage["n1"], hex(&map(&[3, 9, far])));
     assert_eq!(ledger.error_count, 0);
-    // An application cannot claim coverage, and a malformed map is an error.
-    ledger.apply(&frame(1, 1, coverage(map(&[1]))), "n1", 0, 30);
-    ledger.apply(&frame(0, 3, coverage("zz".into())), "n1", 0, 40);
-    assert_eq!(ledger.error_count, 2);
-    assert_eq!(ledger.coverage["n1"], map(&[3, 9]));
+    // An application cannot claim coverage; a malformed map, a misaligned or
+    // out-of-range offset, or a whole map are errors.
+    ledger.apply(&frame(1, 1, slice(&[1], 0)), "n1", 0, 30);
+    ledger.apply(
+        &frame(0, 4, json!({"coverage": {"map": "zz"}})),
+        "n1",
+        0,
+        40,
+    );
+    let short = hex(&vec![0u8; COVERAGE_SLICE]);
+    ledger.apply(
+        &frame(0, 5, json!({"coverage": {"offset": 7, "map": short}})),
+        "n1",
+        0,
+        41,
+    );
+    ledger.apply(
+        &frame(
+            0,
+            6,
+            json!({"coverage": {"offset": COVERAGE_BYTES, "map": short}}),
+        ),
+        "n1",
+        0,
+        42,
+    );
+    ledger.apply(
+        &frame(0, 7, json!({"coverage": {"map": hex(&map(&[1]))}})),
+        "n1",
+        0,
+        43,
+    );
+    assert_eq!(ledger.error_count, 5);
+    assert_eq!(ledger.coverage["n1"], hex(&map(&[3, 9, far])));
 }
 
 #[test]

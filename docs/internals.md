@@ -583,20 +583,27 @@ the bundle carries no checkpoint; otherwise the representative is, marked
 campaigns. Code: [planner](../crates/seedbox-explore/src/campaign.rs),
 [server](../crates/seedbox-server/src/execution/campaigns.rs).
 
-## Block coverage (experimental)
+## Edge coverage (experimental)
 
 A machine whose process environment has `SEEDBOX_COVERAGE=1` runs the
-progress client with `--coverage-dir`: when the translator first builds a
-block it sets one bit, hashed from the module's name and the block's offset in
-it, in an 8192-bit map, and every 32 new bits it overwrites the process's map
-file. Building blocks is not guest execution, so the bits change no code that
-runs, but the file writes and the supervisor's checks once a second of guest
-time do change timing; runs replay only with the same setting, which is part
-of the resolved definition. The supervisor relays the OR of every process's
-map as a `coverage` record when it changes and at the main process's exit.
-The ledger keeps each machine's union, and the campaign planner treats each
-set bit as a feature. Code: [client](../guest/progress/progress.c),
-[supervisor](../guest/compose-init.c).
+progress client with `--coverage-dir`. On AArch64 every block's entry adds one
+to a wrapping byte counter for the edge (previous block, block), AFL's
+scheme: the counter index is the previous block's ID shifted right by one,
+XORed with the block's ID, and the previous ID lives in a TLS slot beside the
+progress budget. A block's ID hashes its module's name and offset (or, for
+code in no module, its address) into 8192 slots. The instrumentation uses no
+flag-setting instructions and restores its two scratch registers before the
+application instruction, like the progress charge. At every progress call
+and at exit the process's counter file is overwritten. Elsewhere (x86) a
+block's first translation sets its own counter to one. The supervisor turns
+each count into one of four hit-count buckets (1, 2-3, 4-15, 16 or more), so
+every (edge, bucket) is a feature bit in a 4 KiB map; it keeps the union over
+the run and relays each changed 1 KiB slice with its offset about once a
+second of guest time and at the main process's exit. The ledger ORs slices
+into each machine's map, and the campaign planner treats each set bit as a
+feature. The instrumentation and file writes change timing, so runs replay
+only with the same setting, which is part of the resolved definition. Code:
+[client](../guest/progress/progress.c), [supervisor](../guest/compose-init.c).
 
 ## Shrinking
 

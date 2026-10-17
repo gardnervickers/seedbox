@@ -25,8 +25,11 @@ pub const MAX_ERRORS: usize = 16;
 pub const MAX_STATES: usize = 1024;
 /// A state name or value holds 1..=this many bytes.
 pub const MAX_STATE_BYTES: usize = 64;
-/// A coverage map's size in bytes: one bit per hashed block.
-pub const COVERAGE_BYTES: usize = 1024;
+/// A machine's coverage features in bytes: one bit per (hashed edge, hit-count
+/// bucket), 8192 edges of 4 buckets.
+pub const COVERAGE_BYTES: usize = 4096;
+/// The bytes one coverage record carries, at an offset that is a multiple.
+pub const COVERAGE_SLICE: usize = 1024;
 
 /// Lowercase hex as bytes; None for anything else.
 pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
@@ -179,9 +182,13 @@ pub enum Record {
     Lost { reason: String, count: u64 },
     /// Supervisor only: a kernel log line about an OOM kill or a crash.
     Kernel { message: String },
-    /// Supervisor only: the OR of the machine's block coverage maps, as hex,
-    /// when the application's environment enables coverage.
-    Coverage { map: String },
+    /// Supervisor only: one slice of the machine's coverage features, as hex,
+    /// at a byte offset, when the application's environment enables coverage.
+    Coverage {
+        #[serde(default)]
+        offset: usize,
+        map: String,
+    },
 }
 
 impl Record {
@@ -551,19 +558,26 @@ impl Ledger {
                     self.first_position(StateKind::Transition, transition, &origin);
                 }
             }
-            Record::Coverage { map } => {
-                let bytes = (map.len() == 2 * COVERAGE_BYTES)
-                    .then(|| decode_hex(&map))
-                    .flatten();
+            Record::Coverage { offset, map } => {
+                let valid = map.len() == 2 * COVERAGE_SLICE
+                    && offset % COVERAGE_SLICE == 0
+                    && offset < COVERAGE_BYTES;
+                let bytes = valid.then(|| decode_hex(&map)).flatten();
                 let Some(bytes) = bytes else {
                     return self.error("invalid coverage map", Some(&origin));
                 };
-                let union = self
+                let mut merged = self
                     .coverage
                     .get(machine)
                     .and_then(|old| decode_hex(old))
+                    .filter(|old| old.len() == COVERAGE_BYTES)
                     .unwrap_or_else(|| vec![0; COVERAGE_BYTES]);
-                let merged: Vec<u8> = union.iter().zip(&bytes).map(|(a, b)| a | b).collect();
+                for (target, byte) in merged[offset..offset + COVERAGE_SLICE]
+                    .iter_mut()
+                    .zip(&bytes)
+                {
+                    *target |= byte;
+                }
                 self.coverage.insert(
                     machine.into(),
                     merged.iter().map(|b| format!("{b:02x}")).collect(),
