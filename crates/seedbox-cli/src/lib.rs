@@ -1037,10 +1037,9 @@ fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
         return Err(Error::Setup(VMM_REQUIRES_KVM.into()));
     }
     let engine = defaults::engine(None)?;
-    let kernel = match inputs.kernel {
-        Some(path) => defaults::existing("--kernel", path)?,
-        None => backends::guest_kernel(None)?,
-    };
+    let scratch = tempfile::tempdir()
+        .map_err(|error| Error::Setup(format!("doctor runtime scratch: {error}")))?;
+    let (kernel, _driver_runtime) = backends::doctor_kernel(inputs.kernel, true, scratch.path())?;
     if cancellation.is_cancelled() {
         return Err(Error::Setup("doctor cancelled".into()));
     }
@@ -1062,7 +1061,10 @@ fn doctor(inputs: KvmInputs, json: bool) -> Result<u8> {
     let _signals = Signals::register(&cancellation)?;
     let internal = inputs.vmm.is_none();
     let engine = defaults::engine(inputs.vmm)?;
-    let kernel = backends::guest_kernel(inputs.kernel)?;
+    let scratch = tempfile::tempdir()
+        .map_err(|error| Error::Setup(format!("doctor runtime scratch: {error}")))?;
+    let (kernel, _driver_runtime) =
+        backends::doctor_kernel(inputs.kernel, internal, scratch.path())?;
     let report = if internal {
         VmmExecutor::doctor_internal(&engine, &kernel)?
     } else {

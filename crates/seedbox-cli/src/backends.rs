@@ -265,6 +265,37 @@ fn resolve_driver_runtime(
     }
 }
 
+/// Match the default service's Driver PV inputs. Keep their private extraction
+/// alive until the caller finishes probing. Explicit legacy overrides retain
+/// their existing lookup and error behavior.
+pub fn doctor_kernel(
+    explicit: Option<std::path::PathBuf>,
+    internal: bool,
+    scratch: &Path,
+) -> Result<(
+    std::path::PathBuf,
+    Option<seedbox_application::runtime_assets::Inputs>,
+)> {
+    if explicit.is_some() || !internal {
+        return guest_kernel(explicit).map(|path| (path, None));
+    }
+    use seedbox_spec::definition::Architecture;
+    let architecture = match std::env::consts::ARCH {
+        "x86_64" => Architecture::X86_64,
+        "aarch64" => Architecture::Aarch64,
+        architecture => {
+            return Err(seedbox_application::Error::Setup(format!(
+                "Driver PV does not support {architecture} guests"
+            )))
+        }
+    };
+    let inputs = driver_runtime(None, scratch)?.select(
+        seedbox_application::runtime_assets::Backend::Pv,
+        architecture,
+    )?;
+    Ok((inputs.guest_assets.join("kernel"), Some(inputs)))
+}
+
 pub fn preparation_progress(message: &str) {
     eprintln!("preparing: {message}");
 }

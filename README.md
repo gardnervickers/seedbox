@@ -18,12 +18,15 @@ Install Nix and start Docker or Podman. Macs also need Apple's Command Line Tool
 nix develop
 cargo xtask build-assets
 cargo build --release
+./target/release/seedbox doctor
 ./target/release/seedbox run examples/etcd --paused --detach
 ./target/release/seedbox tui <sim-id>
 ```
 
-The build embeds the guest kernel and helpers. Running Seedbox does not invoke
-Nix or a compiler. Docker or Podman prepares application images.
+The build embeds the Driver runtime, guest kernel, and helpers. `doctor` checks
+the local runtime inputs and host access before any application images are prepared.
+Running Seedbox does not invoke Nix or a compiler. Docker or Podman prepares
+application images.
 
 If no server is running, the CLI asks before starting a persistent local one.
 For scripts, start `seedbox serve` explicitly. `seedbox shutdown` stops the server

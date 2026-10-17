@@ -12,23 +12,35 @@ pub fn check_kvm_access() -> Result<()> {
     crate::host::check_kvm_access()
 }
 
-/// Bound input hashing before any OCI preparation or host state changes.
+/// Bound guest/runtime asset hashing before OCI preparation or host state changes.
 const RUNTIME_INPUT_LIMIT: u64 = 256 * 1024 * 1024;
 
 pub fn file_digest(path: &Path) -> Result<ContentDigest> {
+    digest(path, Some(RUNTIME_INPUT_LIMIT))
+}
+
+/// The retained engine is the complete CLI, including embedded assets and debug
+/// information. Execution streams it into the content store without the guest
+/// asset size cap; readiness must accept the same bytes, with bounded memory.
+pub(crate) fn engine_digest(path: &Path) -> Result<ContentDigest> {
+    digest(path, None)
+}
+
+fn digest(path: &Path, limit: Option<u64>) -> Result<ContentDigest> {
     use sha2::{Digest, Sha256};
     let input = || format!("runtime input {}", path.display());
-    let too_large = || {
-        Error::Setup(format!(
-            "{}: exceeds {}",
-            input(),
-            Size(RUNTIME_INPUT_LIMIT)
-        ))
+    let check_size = |size| {
+        if let Some(limit) = limit.filter(|limit| size > *limit) {
+            return Err(Error::Setup(format!(
+                "{}: exceeds {}",
+                input(),
+                Size(limit)
+            )));
+        }
+        Ok(())
     };
     let mut file = std::fs::File::open(path).context(Error::Setup, input())?;
-    if file.metadata().context(Error::Setup, input())?.len() > RUNTIME_INPUT_LIMIT {
-        return Err(too_large());
-    }
+    check_size(file.metadata().context(Error::Setup, input())?.len())?;
     crate::store::file_digest_with(&mut file, |file| {
         let mut hash = Sha256::new();
         let mut data = [0; 65536];
@@ -38,10 +50,8 @@ pub fn file_digest(path: &Path) -> Result<ContentDigest> {
             if n == 0 {
                 break;
             }
-            total += n;
-            if total as u64 > RUNTIME_INPUT_LIMIT {
-                return Err(too_large());
-            }
+            total += n as u64;
+            check_size(total)?;
             hash.update(&data[..n]);
         }
         Ok(ContentDigest::finish(hash))
@@ -196,6 +206,35 @@ pub(crate) fn observe() -> Result<CoreObservation> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn complete_engine_can_exceed_guest_asset_limit_without_truncation() {
+        use sha2::{Digest, Sha256};
+        use std::io::{Seek, SeekFrom, Write};
+
+        // A normal release CLI includes embedded assets and debug information.
+        // Keep this fixture sparse, but hash its entire tail beyond the asset cap.
+        let mut engine = tempfile::NamedTempFile::new().unwrap();
+        engine.as_file_mut().set_len(RUNTIME_INPUT_LIMIT).unwrap();
+        engine.seek(SeekFrom::End(0)).unwrap();
+        engine.write_all(b"x").unwrap();
+        let mut expected = Sha256::new();
+        let zeros = [0; 65536];
+        for _ in 0..RUNTIME_INPUT_LIMIT / zeros.len() as u64 {
+            expected.update(zeros);
+        }
+        expected.update(b"x");
+        assert_eq!(
+            engine_digest(engine.path()).unwrap(),
+            ContentDigest::finish(expected)
+        );
+        // A cached engine hash must not bypass the unchanged guest-asset bound.
+        assert!(file_digest(engine.path())
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds 256 MiB"));
+    }
+
     fn static_observation() -> CoreObservation {
         let p = required_policy();
         CoreObservation {

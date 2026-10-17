@@ -847,9 +847,8 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     assert!(!root.join(".seedbox").exists());
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
-fn doctor_reports_missing_temporary_assets_without_downloads() {
+fn doctor_reports_missing_driver_inputs_without_downloads() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
@@ -862,10 +861,14 @@ fn doctor_reports_missing_temporary_assets_without_downloads() {
         .env("GH_TOKEN", "invalid\ncredential")
         .output()
         .unwrap();
-    let kernel = root.join("aarch64/kernel");
+    let archive = root
+        .join(std::env::consts::ARCH)
+        .join("driver-runtime.tar.gz");
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass --kernel PATH\n", kernel.display()));
+    assert_eq!(stderr(&output), format!("error: driver runtime {}: {}; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display(), std::io::Error::from_raw_os_error(2)));
+    assert!(output.stdout.is_empty());
     assert!(!root.join(".seedbox").exists());
+    assert!(!root.join(".local/state/seedbox").exists());
 }
 
 #[test]

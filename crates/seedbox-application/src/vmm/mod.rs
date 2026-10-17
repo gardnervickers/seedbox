@@ -153,7 +153,7 @@ impl VmmExecutor {
     /// Host observations are the same bounded probe used by execution preflight.
     pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
         let executor = Self::from_engine_digest(
-            crate::admission::file_digest(engine)?,
+            crate::admission::engine_digest(engine)?,
             1024,
             WitnessMode::Exits,
         )?;
@@ -164,7 +164,7 @@ impl VmmExecutor {
     pub fn doctor_internal(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
         let descriptor = crate::engine::internal_descriptor()?;
         let mut executor = Self::from_engine_digest(
-            crate::admission::file_digest(engine)?,
+            crate::admission::engine_digest(engine)?,
             1024,
             WitnessMode::Exits,
         )?;

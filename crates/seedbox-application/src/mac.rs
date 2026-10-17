@@ -133,7 +133,7 @@ impl MacExecutor {
     pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
         validate_kernel(kernel, 3072)?;
         Ok(DoctorReport {
-            engine: crate::admission::file_digest(engine)?,
+            engine: crate::admission::engine_digest(engine)?,
             kernel: crate::admission::file_digest(kernel)?,
             simulator_version: crate::engine::SIMULATOR_VERSION.into(),
             observations: observe()?,
