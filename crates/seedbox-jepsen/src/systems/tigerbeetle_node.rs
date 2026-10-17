@@ -175,13 +175,20 @@ fn pass_through(pipe: impl Read + Send + 'static, output: Arc<Mutex<Output>>, st
             let _ = std::io::stderr().write_all(&bytes);
             let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
             let mut out = output.lock().unwrap();
+            // Release, role and upgrades are guest state too, so a campaign
+            // can place faults relative to them.
             if let Some(at) = line.find("(main): release=") {
                 let release = line[at + "(main): release=".len()..].trim();
+                seedbox_sdk::state("release", release);
                 out.release = Some(release.to_string());
             }
             if let Some((view, role)) = normal_view(&line) {
+                seedbox_sdk::state("role", &role);
                 out.view = Some(view);
                 out.role = Some(role);
+            }
+            if line.contains("upgrading from") {
+                seedbox_sdk::event("upgrading", serde_json::Value::Null);
             }
             if line.contains("panic") {
                 out.panics += 1;

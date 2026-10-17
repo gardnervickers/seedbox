@@ -1,0 +1,18 @@
+# Generic faults for the TigerBeetle rolling-upgrade workload, aimed at nothing
+# in particular: replica process pauses, isolations and power losses while the
+# cluster upgrades. #2763 needs a view change led by a replica still on the old
+# release after another has upgraded; most faults here land elsewhere or let the
+# lagging replica catch up first.
+start: 4s
+end: 40s
+interval: 3s
+faults:
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 6s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 6s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 3s}

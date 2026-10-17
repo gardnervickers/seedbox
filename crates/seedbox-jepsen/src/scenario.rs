@@ -1094,6 +1094,16 @@ fn tigerbeetle() -> Vec<Scenario> {
         out.extend(strings(&["--await-release", to]));
         out
     };
+    // The same rolling install with no scripted pauses: faults come from a
+    // profile or a campaign (harness/jepsen/tigerbeetle/generic-faults.yaml).
+    let rolling_generic = |to: &str| {
+        let s1 = format!("5:install:n1:{to}");
+        let s2 = format!("6:install:n2:{to}");
+        let s3 = format!("7:install:n3:{to}");
+        let mut out = steady("40", &[&s1, &s2, &s3, "7:await:all:upgrading from"]);
+        out.extend(strings(&["--await-release", to]));
+        out
+    };
     let specs = vec![
         TbSpec { name: "tb-smoke", comment: "Smoke test: a healthy 3-replica TigerBeetle 0.16.11 cluster, a short mixed\nworkload, and an O_DIRECT/io_uring probe on n1's data volume.",
             run: Dev("0.16.11"), replicas: 3, memory: 3072, oracle_memory: 512,
@@ -1146,6 +1156,12 @@ fn tigerbeetle() -> Vec<Scenario> {
         TbSpec { name: "tb-2763-rolling-upgrade-fixed", comment: "Negative control for tb-2763-rolling-upgrade: the same schedule from 0.16.29 to\n0.16.30, after the fix.",
             run: Prod("0.16.29"), replicas: 3, memory: 3072, oracle_memory: 512,
             args: rolling("0.16.30"), probe: false },
+        TbSpec { name: "tb-2763-rolling-generic", comment: "tigerbeetle#2763 without a scripted nemesis: the rolling install from 0.16.26 to\n0.16.27 alone. Run it with `--fault-profile harness/jepsen/tigerbeetle/generic-faults.yaml`;\na seed or a campaign must itself cause a view change led by a replica still on 0.16.26.",
+            run: Prod("0.16.26"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: rolling_generic("0.16.27"), probe: false },
+        TbSpec { name: "tb-2763-rolling-generic-fixed", comment: "Negative control for tb-2763-rolling-generic: 0.16.29 to 0.16.30, after the fix,\nunder the same generic faults.",
+            run: Prod("0.16.29"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: rolling_generic("0.16.30"), probe: false },
     ];
     specs
         .into_iter()
